@@ -72,7 +72,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-001 | Make `agencity` the default product entrypoint | Done | — |
 | FU-002 | Add workspace discovery and human session resume/selection | Done | FU-001 |
 | FU-003 | Add explicit provider and model onboarding | Done | FU-001, FU-002 |
-| FU-004 | Implement the autonomous typed TypeScript agent-run loop | In progress | FU-003, FU-011, FU-013 |
+| FU-004 | Implement the autonomous typed TypeScript agent-run loop | Done | FU-003, FU-011, FU-013 |
 | FU-005 | Turn the TUI into the complete protocol-backed product client | Proposed | FU-001, FU-002, FU-004, FU-012, FU-015 |
 | FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | Proposed | FU-004, FU-005, FU-015 |
 | FU-007 | Provide a real installation and executable workflow | Done | FU-001 |
@@ -80,7 +80,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-009 | Add product-level end-to-end acceptance coverage | Proposed | FU-001–FU-008, FU-011–FU-019 |
 | FU-010 | Add repository-level purpose and implementation guidance | Done | — |
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
-| FU-012 | Expose durable family messaging and retained subagent follow-up to the model | In progress | FU-004 |
+| FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Done | FU-004 |
 | FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
 | FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | In progress | FU-004 |
 | FU-015 | Keep detached sessions executing in a background service | In progress | FU-001, FU-004 |
@@ -262,7 +262,7 @@ Interactive startup discovers usable providers, makes model choice explicit, and
 
 ## FU-004 — Implement the autonomous typed TypeScript agent-run loop
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -313,6 +313,14 @@ The agent-facing TypeScript SDK should expose the parent PRD's intended general 
 - Unknown non-idempotent effects block blind continuation.
 - A run whose goal defines required completion gates does not report success while a required gate fails or its result is stale (FU-014 defines the gate contract).
 - Model action, context, cell, tool, subagent, and final response provenance is queryable from retained records.
+
+
+### Completion evidence
+
+- Commits: `e1a6e0a`, `89f7cbf`, `4a82122`, `a22becf`, and the FU-014 integration commit `bbeddb1`.
+- Implementation: strict `agencity.agent-action` v1 parsing; canonical run/action events and projection; deterministic step/context/call/effect/action/cell IDs; autonomous TypeScript continuation; exact-once observation ledger; pause, cancel, budget, gate, unknown, recovery, CLI/protocol/TUI routes; representative coding e2e.
+- Verification: full suite after hardening passed 519 tests with 2 external skips; focused action/run suites passed 16/16. Independent adversarial review found a committed-but-unapplied action crash hole; the fix now reconciles the retained action before admitting another model step, with four explicit crash-boundary tests. Final re-review passed.
+- Remaining limitations: permission decisions are retained run input but broader permission policy UI remains FU-005/FU-006 work; managed detached ownership is FU-015.
 
 ---
 
@@ -612,7 +620,7 @@ TypeScript cells provide explicit, bounded notebook semantics. A model can assig
 
 ## FU-012 — Expose durable family messaging and retained subagent follow-up to the model
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -658,6 +666,14 @@ The TypeScript SDK gives every session a durable family roster and plain-text me
 - Google's A2A protocol or arbitrary third-party agent interoperability.
 - Direct cross-family communication, global broadcast, or unauthenticated remote delivery.
 - Embedding an agent's full context in every message.
+
+
+### Completion evidence
+
+- Commits: `4a82122`, `a22becf`, and Supervisor integration in `bbeddb1`.
+- Implementation: `sdk.agents` spawn/list/send/messages/acknowledge/cancel/followUp; derived sender identity; nuclear-family authorization and human-name resolution; bounded durable receipts, context delivery, busy steering, retained same-child follow-up, automatic replies, cancellation/recovery, protocol/TUI surfaces, and migration 009.
+- Verification: final suite passed 452 tests with 2 external skips before FU-014; family suite 14/14, agent-run suite 16/16, Slice 2 45/45. Independent review found legacy non-nuclear retained rows poisoning list and an admission-to-run crash gap; legacy rows now have rendering-only compatibility and `spawnRunnable` commits `AgentRunRequested` atomically with admission. Final adversarial re-review passed.
+- Remaining limitation: rejected unauthorized sends return typed errors without retaining the rejected payload, avoiding durable storage of untrusted message content.
 
 ---
 
