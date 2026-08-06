@@ -16,7 +16,7 @@ export class TerminalUI {
         if (!line) continue;
         if (line === "/quit" || line === "/exit") break;
         if (line === "/help") {
-          output.write("/history /budget /snapshot /tree /tasks /goals /heartbeats /memory [query] /skills /refine <json> /rollback <proposal> <reason> /skill-test <entry> [version] /skill <entry> <json-input> /sync /sync-status /conflicts /resolve-conflict <id> <json> /cancel-task <id> [reason] /complete-goal <id> /cell <ts> /branch <cursor> [name] /resume [branch] /compact /quit\n");
+          output.write("/history /budget /snapshot /tree /tasks /goals /heartbeats /memory [query] /skills /refine <json> /rollback <proposal> <reason> /skill-test <entry> [version] /skill <entry> <json-input> /sync /sync-status /conflicts /resolve-conflict <id> <json> /cancel-task <id> [reason] /complete-goal <id> /stop /cell <ts> /branch <cursor> [name] /resume [branch] /compact /quit\n");
           continue;
         }
         if (line === "/history") { for (const event of await this.supervisor.projections.history(sessionId, branch)) output.write(`${event.cursor} ${event.type} ${JSON.stringify(event.payload)}\n`); continue; }
@@ -38,30 +38,37 @@ export class TerminalUI {
         if (line.startsWith("/skill ")) { const match=line.match(/^\/skill\s+(\S+)\s+([\s\S]+)$/); if(match) output.write(`${JSON.stringify(await this.supervisor.skills.invoke(sessionId,branch,match[1]!,JSON.parse(match[2]!)),null,2)}\n`); continue; }
         if (line.startsWith("/cancel-task ")) { const [, taskId, ...reason] = line.split(/\s+/); if (taskId) output.write(`${JSON.stringify(await this.supervisor.agents.cancel(sessionId, branch, taskId, reason.join(" ") || undefined), null, 2)}\n`); continue; }
         if (line.startsWith("/complete-goal ")) { const goalId = line.slice(15).trim(); if (goalId) output.write(`${JSON.stringify(await this.supervisor.goals.requestCompletion(sessionId, branch, goalId), null, 2)}\n`); continue; }
+        if (line === "/stop") {
+          const snapshot = await this.supervisor.projections.getSnapshot(sessionId, branch);
+          const active = Object.values(snapshot.state.agentRuns).find(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
+          if (!active) output.write("No active agent run.\n");
+          else output.write(`${JSON.stringify(await this.supervisor.runs.cancel(sessionId, branch, active.id, "User requested /stop"), null, 2)}\n`);
+          continue;
+        }
         if (line.startsWith("/cell ")) { const result = await this.supervisor.executeCell(sessionId, branch, line.slice(6)); output.write(`${JSON.stringify(result, null, 2)}\n`); continue; }
         if (line.startsWith("/branch ")) { const [, cursor, ...name] = line.split(/\s+/); if (!cursor) continue; branch = await this.supervisor.fork(sessionId, branch, cursor, name.join(" ") || undefined); output.write(`switched to branch ${branch}\n`); continue; }
         if (line === "/resume" || line.startsWith("/resume ")) { const requested=line.slice(7).trim()||branch;try{const resumed=await this.supervisor.resume(sessionId,requested);branch=requested;output.write(`resumed ${sessionId}/${branch} at ${resumed.cursor}\n`);}catch{output.write(`branch not found: ${requested}\n`);}continue; }
         if (line === "/compact") { output.write(`${JSON.stringify(await this.supervisor.compact(sessionId,branch),null,2)}\n`);continue; }
-        await this.supervisor.appendMessage(sessionId, branch, "user", line);
-        let progressText = "";
-        const unsubscribe = this.supervisor.outbox.onProgress((progress) => {
-          if (progress.sessionId !== sessionId || progress.branchId !== branch || progress.kind !== "model-output-delta" ||
-              !progress.value || typeof progress.value !== "object" || Array.isArray(progress.value) ||
-              typeof progress.value.text !== "string") return;
-          progressText += progress.value.text;
-          output.write(progress.value.text);
-        });
-        try {
-          const result = await this.supervisor.modelLoop.turn(sessionId, branch);
-          if (result.outcome === "succeeded" && result.message !== undefined) {
-            if (!progressText) output.write(`${result.message}\n`);
-            else if (result.message.startsWith(progressText)) output.write(`${result.message.slice(progressText.length)}\n`);
-            else output.write(`\n${result.message}\n`);
-          } else {
-            if (progressText) output.write("\n[partial model output was not committed]\n");
-            output.write(`[${result.outcome}] ${result.error ?? ""}\n`);
-          }
-        } finally { unsubscribe(); }
+        const snapshot = await this.supervisor.projections.getSnapshot(sessionId, branch);
+        const active = Object.values(snapshot.state.agentRuns).find(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
+        let result;
+        if (active?.status === "waiting_for_user") {
+          const request = Object.values(active.inputRequests).find(item => item.response === undefined);
+          if (!request) throw new Error("Waiting agent run has no pending input request");
+          const approved = request.kind === "permission" ? /^(y|yes|approve|approved)$/i.test(line) : undefined;
+          result = await this.supervisor.runs.respond(sessionId, branch, active.id, request.id, {
+            response: line,
+            ...(approved === undefined ? {} : { approved }),
+          });
+        } else if (active) {
+          output.write(`Run ${active.id} is already ${active.status}; use /stop or wait for its durable boundary.\n`);
+          continue;
+        } else {
+          result = await this.supervisor.runs.start(sessionId, branch, line);
+        }
+        if (result.status === "succeeded") output.write(`${result.final ?? ""}\n`);
+        else if (result.status === "waiting_for_user") output.write(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}\n`);
+        else output.write(`[${result.status}] ${result.reason ?? ""}\n`);
       }
     } finally { rl.close(); }
   }

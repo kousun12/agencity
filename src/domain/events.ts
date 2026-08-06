@@ -69,7 +69,7 @@ export interface EventPayloads {
   ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue };
   ModelCallRequested: { callId: string; contextId: string; effectId: string; provider: string; model: string };
   ModelOutputChunk: { callId: string; sequence: number; text: string };
-  ModelCallCompleted: { callId: string; responseMessageId: string; finishReason: string; usage: Usage };
+  ModelCallCompleted: { callId: string; responseMessageId?: string; finishReason: string; usage: Usage };
   ModelCallTerminated: { callId: string; outcome: Exclude<EffectOutcome, "succeeded">; error?: string };
   BudgetDebited: { callId: string; tokens: number; costUsd: number; turns: number; wallTimeMs: number };
   BudgetExceeded: { dimension: "tokens" | "cost" | "turns" | "wallTime"; limit: number; spent: number };
@@ -178,7 +178,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional() }),
   ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, provider: id, model: id }),
   ModelOutputChunk: z.object({ callId: id, sequence: z.number().int().nonnegative(), text: z.string() }),
-  ModelCallCompleted: z.object({ callId: id, responseMessageId: id, finishReason: z.string(), usage: usageSchema }),
+  ModelCallCompleted: z.object({ callId: id, responseMessageId: id.optional(), finishReason: z.string(), usage: usageSchema }),
   ModelCallTerminated: z.object({ callId: id, outcome: z.enum(["failed", "cancelled", "unknown"]), error: z.string().optional() }),
   BudgetDebited: z.object({ callId: id, tokens: nonnegative, costUsd: nonnegative, turns: nonnegative, wallTimeMs: nonnegative }),
   BudgetExceeded: z.object({ dimension: z.enum(["tokens", "cost", "turns", "wallTime"]), limit: nonnegative, spent: nonnegative }),

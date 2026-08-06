@@ -143,8 +143,11 @@ export class ModelLoop {
     for (const branch of await this.storage.listBranches()) {
       const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
       const state = projectEvents(events);
+      const agentRunCallIds = new Set(
+        Object.values(state.agentRuns).flatMap((run) => run.steps.map((step) => step.callId)),
+      );
       for (const call of Object.values(state.modelCalls)) {
-        if (call.status !== "requested") continue;
+        if (call.status !== "requested" || agentRunCallIds.has(call.id)) continue;
         const effect = state.effects[call.effectId];
         if (!effect || effect.status === "requested" || effect.status === "started") continue;
         if (effect.status === "succeeded") {

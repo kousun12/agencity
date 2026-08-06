@@ -102,15 +102,15 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const availability = modelAvailability(supervisor, summary.model);
     printStartup(workspace, summary, availability.usable, availability.remediation);
     if (task) {
-      await supervisor.appendMessage(selection.sessionId, selection.branchId, "user", task);
       if (!availability.usable) {
         const reason = availability.remediation ?? `provider ${summary.model.provider} is unavailable`;
         if (parsed.command === "run") throw new ValidationError(`Run blocked: ${reason}`);
         console.error(`Run blocked: ${reason}`);
       } else {
-        const result = await supervisor.modelLoop.turn(selection.sessionId, selection.branchId);
-        if (result.outcome === "succeeded") console.log(result.message ?? "");
-        else console.error(`Run ${result.outcome}: ${result.error ?? "model call did not complete"}`);
+        const result = await supervisor.runs.start(selection.sessionId, selection.branchId, task);
+        if (result.status === "succeeded") console.log(result.final ?? "");
+        else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
+        else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
       }
     }
     if (parsed.command === "run") return;
@@ -337,7 +337,7 @@ Product commands:
   agencity sessions               List named workspace sessions and branches
   agencity sessions --select NAME Persist an explicit recent selection
   agencity sessions --session ID --name NAME [--branch ID]
-  agencity run TASK               Commit one recoverable model turn and exit
+  agencity run TASK               Run the typed autonomous TypeScript loop and exit
   agencity doctor [--json]        Check runtime, providers, recovery, and sync
   agencity config [--json]        Inspect non-secret preferences/references
   agencity config set-model PROVIDER/MODEL

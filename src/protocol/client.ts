@@ -6,6 +6,7 @@ import type {
   SpawnAgentInput, StartRecursiveModelInput, SubagentHandle, CreateMemoryInput,
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
+  StartAgentRunInput, AgentRunResult, AgentRunUserResponse,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, SyncConflictRecord, TaskRecord } from "../storage/index.ts";
@@ -22,6 +23,12 @@ export class AgentClient {
   createSession(workspaceId: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/sessions", { workspaceId }); }
   snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
   message(sessionId: string, branchId: string, content: string): Promise<AgentEvent> { return this.#post(`/sessions/${sessionId}/messages?branch=${branchId}`, { content }); }
+  startRun(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs?branch=${branchId}`, typeof input === "string" ? { task: input } : input); }
+  run(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#json(`/sessions/${sessionId}/runs/${runId}?branch=${branchId}`); }
+  resumeRun(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/resume?branch=${branchId}`); }
+  respondToRun(sessionId: string, branchId: string, runId: string, requestId: string, input: AgentRunUserResponse | string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/input/${requestId}?branch=${branchId}`, typeof input === "string" ? { response: input } : input); }
+  cancelRun(sessionId: string, branchId: string, runId: string, reason?: string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }
+  /** Retained diagnostic one-turn chat. Product tasks use startRun. */
   turn(sessionId: string, branchId: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/turns?branch=${branchId}`); }
   cell(sessionId: string, branchId: string, code: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/cells?branch=${branchId}`, { code }); }
   history(sessionId: string, branchId: string): Promise<AgentEvent[]> { return this.#json(`/sessions/${sessionId}/history?branch=${branchId}`); }

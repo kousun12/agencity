@@ -131,7 +131,8 @@ export class GoalService {
         if (resumedGoals.has(candidate.id)) continue;
         resumedGoals.add(candidate.id);
         const goal = await this.#recursive.getGoal(candidate.id);
-        if (goal?.status === "active") { await this.runContinuation(goal.sessionId, goal.branchId, goal.goalId, { maxTurns: goal.maxTurns ?? 1 }); recovered++; }
+        const ownedByAgentRun = Object.values(projected.agentRuns).some((run) => run.goalId === candidate.id && !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
+        if (goal?.status === "active" && !ownedByAgentRun) { await this.runContinuation(goal.sessionId, goal.branchId, goal.goalId, { maxTurns: goal.maxTurns ?? 1 }); recovered++; }
       }
     }
     return recovered;

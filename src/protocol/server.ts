@@ -58,6 +58,14 @@ export class ProtocolServer {
         if (request.method === "GET" && parts[2] === "history" && branchId) return Response.json(await this.supervisor.projections.history(sessionId, branchId));
         if (request.method === "GET" && parts[2] === "stream" && branchId) return this.#stream(sessionId, branchId, url.searchParams.get("after") ?? "0", request.signal);
         if (request.method === "POST" && parts[2] === "messages" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.appendMessage(sessionId, branchId, "user", String(body.content ?? ""))); }
+        if (parts[2] === "runs" && branchId) {
+          if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.runs.start(sessionId, branchId, await jsonBody(request) as any));
+          if (request.method === "GET" && parts[3] && parts.length === 4) return Response.json(await this.supervisor.runs.get(sessionId, branchId, parts[3]));
+          if (request.method === "POST" && parts[3] && parts[4] === "input" && parts[5]) return Response.json(await this.supervisor.runs.respond(sessionId, branchId, parts[3], parts[5], await jsonBody(request) as any));
+          if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.runs.cancel(sessionId, branchId, parts[3], typeof body.reason === "string" ? body.reason : undefined)); }
+          if (request.method === "POST" && parts[3] && parts[4] === "resume") return Response.json(await this.supervisor.runs.advance(sessionId, branchId, parts[3]));
+        }
+        // Retained diagnostic chat route; product tasks use /runs.
         if (request.method === "POST" && parts[2] === "turns" && branchId) return Response.json(await this.supervisor.modelLoop.turn(sessionId, branchId));
         if (request.method === "POST" && parts[2] === "cells" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.executeCell(sessionId, branchId, String(body.code ?? ""))); }
         if (request.method === "POST" && parts[2] === "branches" && branchId) { const body = await jsonBody(request); return Response.json({ branchId: await this.supervisor.fork(sessionId, branchId, String(body.cursor), typeof body.name === "string" ? body.name : undefined) }); }

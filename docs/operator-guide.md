@@ -67,11 +67,11 @@ Run `agencity --help` (or `bun run dev -- --help`) for the built-in help. With n
 
 ```sh
 agencity                              # discover workspace, create/resume, open TUI
-agencity "inspect this repository"   # commit one model turn, then open TUI
+agencity "inspect this repository"   # run typed autonomous actions, then open TUI
 agencity new [TASK]
 agencity resume [NAME|ID]
 agencity sessions [--json]
-agencity run TASK                     # commit one model turn and exit
+agencity run TASK                     # run typed autonomous actions and exit
 agencity doctor [--json]
 agencity config
 ```
@@ -113,13 +113,19 @@ agencity create --workspace <WORKSPACE_ID>
 
 This legacy diagnostic command still creates `{ provider: "echo", model: "echo-1" }` for compatibility. It is not the product onboarding path; use `--demo` through `new`, `run`, or the default route when fixture behavior is intended.
 
-### Message plus one model turn
+### Autonomous product run and diagnostic turn
+
+`agencity [TASK]` and `agencity run TASK` commit one user task plus an `AgentRunRequested` event, then advance strict `agencity.agent-action` version-1 steps until a terminal or durable user-input boundary. A model may return a final response, TypeScript cell, clarification/permission request, blocked outcome, or failure. File, shell, SQL, model, subagent, skill, memory, and artifact operations are SDK calls inside TypeScript; they are not parallel provider tools. Malformed, fenced, suffixed, unsupported-version, or unknown-field responses are rejected and never executed.
+
+Raw provider action JSON remains queryable in model/action events for attribution. It is not an assistant conversation message. Only a validated `final` appends the user-visible assistant message. A clarification or permission request is a typed waiting state; plain TUI input answers it, and `/stop` records cancellation intent.
+
+The retained low-level text-chat diagnostic remains available:
 
 ```sh
 bun run src/cli.ts chat --session <SESSION_ID> --branch <BRANCH_ID> "message text"
 ```
 
-The user message is committed before the context and model request. A response is printed only after its effect outcome and model completion events commit.
+That advanced command commits the user message before a single context/model request. Its response is printed only after the effect outcome and model completion events commit.
 
 ### Console cell
 
@@ -172,7 +178,7 @@ The normal TUI path is simply `agencity` or `agencity [TASK]`; the product boots
 agencity tui --session <SESSION_ID> --branch <BRANCH_ID>
 ```
 
-Plain text is committed as a user message and followed by one model turn. Commands:
+Plain text starts a typed autonomous run, or answers the pending clarification/permission request for the active run. Commands:
 
 | Command | Behavior |
 |---|---|
@@ -191,6 +197,7 @@ Plain text is committed as a user message and followed by one model turn. Comman
 | `/skill <entry> <json-input>` | Invoke the active exact skill version through the outbox. |
 | `/cancel-task <id> [reason]` | Cascade cancellation through a task's descendants. |
 | `/complete-goal <id>` | Run current-version completion gates for a goal. |
+| `/stop` | Commit cancellation intent for the active agent run and reconcile its current boundary. |
 | `/cell <typescript>` | Execute one disposable-console cell and print its result. |
 | `/branch <cursor> [name]` | Fork at a historical cursor and switch this TUI to the child. |
 | `/resume [branch]` | Rebuild and reattach to a retained durable branch without taking execution ownership. |
@@ -201,7 +208,7 @@ Plain text is committed as a user message and followed by one model turn. Comman
 | `/help` | Print command help. |
 | `/quit`, `/exit` | Close the TUI. |
 
-The TUI is a basic in-process client of the same supervisor services; it never owns or closes session lifecycle. It supports resume and source-preserving compaction. For a provider that truthfully advertises streaming, it renders process-local model deltas before completion and reconciles them with the full terminal response. A failed/cancelled stream is labeled partial and never presented as a committed assistant message. For Echo or another non-streaming provider, the startup header says live output is unavailable and the TUI prints only the committed response. The TUI does not yet use the HTTP/SSE transport or expose unknown-effect reconciliation; those limitations are visible rather than implied capabilities.
+The TUI is a basic in-process client of the same supervisor services; it never owns or closes session lifecycle. It supports resume and source-preserving compaction. Provider streaming remains available as bounded cursorless protocol progress, but the TUI deliberately does not render raw autonomous action JSON as conversation text; it prints only a validated final or a typed waiting/terminal state. Echo and other non-streaming providers report that live output is unavailable. The TUI does not yet use the HTTP/SSE transport or expose unknown-effect reconciliation; those limitations are visible rather than implied capabilities.
 
 ## Providers
 

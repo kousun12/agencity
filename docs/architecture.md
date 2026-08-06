@@ -84,6 +84,14 @@ Documents are imported as metadata plus ordered, digested `DocumentChunkAdded` r
 
 Goals own typed completion gates which execute through the existing request-before-effect outbox. Completion pins a workspace-relevant branch cursor, rejects stale or unknown evidence, and re-evaluates gates after continuation changes. Startup reconciles incomplete gates, re-checks each persisted workspace pin, and resumes active goals. Heartbeats project interval, next due time, monotonic ticks, and pause/cancel state; an aligned tick and wake message commit atomically. Startup fires due active schedules and a live database-polling scheduler continues firing future due rows until `Supervisor.close()`. No JavaScript timer or queue object is durable identity.
 
+## Autonomous typed runs
+
+`AgentRunService` is the ordinary product path. It commits the user task and stable request identity, freezes an attributable context and not-previously-delivered observation ledger for each step, executes the model through the outbox, strictly parses one `agencity.agent-action` version-1 object, and applies only the admitted typed action. The one executable action is a TypeScript cell; every file, shell, SQL, model/subagent, skill, memory, state, and artifact mechanism stays inside the console SDK. Clarification, permission, blocked, failed, cancelled, budget-exceeded, unknown, and final are supervisor run-control states rather than provider tools.
+
+Run, step, context, call, effect, action, cell, and user-input IDs are stable across recovery. Committed cell/effect/input observations enter exactly one dependent step with their event IDs. A pending unclaimed model effect drains once; a retained succeeded outcome finalizes without a second provider call; a lost started non-idempotent effect becomes unknown. Started cells are abandoned rather than replayed. Budget admission uses the existing `>=` limits, and a generated final may be accepted at the exact turn boundary while a new effectful cell is not.
+
+Provider action JSON is retained in model/action events for attribution but is not a conversation message. Agent-run recovery is excluded from the diagnostic text-turn finalizer, preventing raw action JSON from being published after a crash. Only a strict validated final appends the assistant message linked by the terminal run event.
+
 ## Artifact storage
 
 `ArtifactReference` is `{ artifactId, digest, mediaType, size }`; local IDs are `sha256:<digest>`. Identity does not encode a local path. The contract supports:

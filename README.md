@@ -49,7 +49,7 @@ agencity config
 
 A workspace-scoped recent branch and non-secret model preference live in the separate profile store. If selection is ambiguous the interactive command asks instead of choosing by row order; scripts receive a typed nonzero error and can use `sessions --select NAME`. A retained branch never changes model silently, and remains inspectable when its provider is unavailable.
 
-The startup header identifies the workspace, named session/branch, model, run state, and trusted-local authority; Echo is rendered as `[DEMO FIXTURE]`. The current run still performs one durable text model turn at a time; the typed autonomous model-to-TypeScript action loop remains incomplete.
+The startup header identifies the workspace, named session/branch, model, run state, and trusted-local authority; Echo is rendered as `[DEMO FIXTURE]`. Product tasks now use the strict `agencity.agent-action` version-1 loop: each model step chooses a typed final, TypeScript cell, clarification/permission request, blocked outcome, or failure. Cells use the injected SDK for all SQL, file, shell, model, subagent, memory, skill, and artifact work. Raw action JSON is retained as attributable internal history, never appended as an assistant conversation message; only a validated `final` becomes the user-visible assistant message.
 
 Command-like task text is deterministic. Multi-word text such as `agencity create a parser` is treated as a task, while exact product commands such as `run`, `new`, and `resume` keep their command meaning. Quote the whole first argument or place `--` before the task to force an ambiguous spelling: `agencity -- run the benchmark`. ID-bearing `chat` and `cell` invocations remain advanced commands.
 
@@ -73,7 +73,7 @@ bun run src/cli.ts serve --port 3131
 curl http://127.0.0.1:3131/health
 ```
 
-The protocol supports session creation, user messages, model turns, console cells, forks, snapshots, history, resumable server-sent events, scoped memory, refinement/approval/rollback, exact-version skill execution, and specification-pinned subagents. A consumer loads a snapshot, remembers its cursor, then connects to the stream with `?after=<cursor>` and deduplicates by event ID. Notifications are at-least-once hints over the durable database stream. See [Protocol and console SDK](./docs/protocol.md).
+The protocol supports autonomous run start/inspect/resume/respond/cancel, session creation, diagnostic one-turn chat, console cells, forks, snapshots, history, resumable server-sent events, scoped memory, refinement/approval/rollback, exact-version skill execution, and specification-pinned subagents. A consumer loads a snapshot, remembers its cursor, then connects to the stream with `?after=<cursor>` and deduplicates by event ID. Notifications are at-least-once hints over the durable database stream. See [Protocol and console SDK](./docs/protocol.md).
 
 ## TypeScript API
 
@@ -95,14 +95,18 @@ const supervisor = await Supervisor.open({
 });
 
 const session = await supervisor.createSession({ workspaceId: "demo" });
-await supervisor.appendMessage(session.sessionId, session.branchId, "user", "Hello");
+const run = await supervisor.runs.start(session.sessionId, session.branchId, {
+  task: "Inspect this workspace and report the result",
+  requestKey: "example-run-1",
+});
+console.log(run);
 await supervisor.memory.create(session.sessionId, session.branchId, {
   text: "This workspace verifies releases with bun run verify",
   scope: "workspace",
   tags: ["release"],
 });
 console.log(await supervisor.memory.search(session.sessionId, session.branchId, "release verify"));
-console.log(await supervisor.modelLoop.turn(session.sessionId, session.branchId));
+// modelLoop.turn remains an advanced one-turn text diagnostic; product tasks use runs.
 await supervisor.close();
 ```
 

@@ -41,8 +41,10 @@ async function usingRuntime() {
       model: { provider: "echo", model: "echo-1" },
       budget: { tokenLimit: 10_000, turnLimit: 20 },
     });
-    await supervisor.appendMessage(sessionId, branchId, "user", "Hello");
-    console.log(await supervisor.modelLoop.turn(sessionId, branchId));
+    console.log(await supervisor.runs.start(sessionId, branchId, {
+      task: "Inspect the workspace and report the result",
+      requestKey: "api-example-run",
+    }));
   } finally {
     await supervisor.close();
   }
@@ -59,8 +61,14 @@ async function usingRuntime() {
 - `appendMessage`: scrubs content and appends a new message event.
 - `fork`: validates the parent lineage cursor, then appends `BranchCreated` on a new branch.
 - `executeCell`: serializes cells per branch, stages state/artifact references, and atomically commits them with `CellCommitted` after successful execution.
-- `modelLoop.turn`: materializes attributable context, requests a model effect, records response/usage, and updates status.
-- `modelLoop.run`: performs a caller-bounded number of turns. `goals.runContinuation` and startup goal recovery compose it into the durable Slice 2 autonomous loop.
+- `runs.start`: commits the task and stable run request, then advances the strict version-1 typed-action loop through durable model, context, cell, observation, input, budget, and terminal boundaries. An exact `requestKey` retry returns the same run; changed durable meaning conflicts.
+- `runs.get` / `runs.advance`: inspect or resume a retained run without inventing new action identity.
+- `runs.respond`: records a clarification/permission response once; exact retries return current state and changed retries conflict. Permission responses require an explicit boolean decision.
+- `runs.cancel`: commits cancellation intent before aborting the run's admitted model effect. `unknown`, `cancelled`, `budget_exceeded`, `blocked`, and `failed` remain distinct.
+- `modelLoop.turn`: retained advanced diagnostic that materializes attributable context, requests one text model effect, records its assistant response/usage, and updates status.
+- `modelLoop.run`: retained bounded diagnostic continuation used by legacy goal paths; product tasks use `runs`.
+
+Agent actions are one strict JSON object with `protocol: "agencity.agent-action"` and `version: 1`. The only executable variant is `typescript`; shell, file, SQL, models/subagents, skills, memory, and artifacts are injected SDK operations inside the cell. Raw action JSON is retained in `ModelOutputChunk` and `AgentRunActionCommitted`/`Rejected`, but agent-run model calls do not append it to `messages`. Only a validated `final` action appends an assistant conversation message.
 
 ## Storage contract
 

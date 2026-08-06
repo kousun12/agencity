@@ -1,7 +1,11 @@
+import { mkdir } from "node:fs/promises";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  AGENT_ACTION_PROTOCOL,
+  AGENT_ACTION_VERSION,
   Supervisor,
   projectEvents,
+  type AgentAction,
   type JsonValue,
   type ModelConfiguration,
   type ModelProvider,
@@ -13,40 +17,123 @@ import {
   type TempRuntime,
 } from "../helpers.ts";
 
-class PlanningProvider implements ModelProvider {
+const typedAction = <T extends Omit<AgentAction, "protocol" | "version">>(value: T): AgentAction => ({
+  protocol: AGENT_ACTION_PROTOCOL,
+  version: AGENT_ACTION_VERSION,
+  ...value,
+} as unknown as AgentAction);
+
+class CodingProvider implements ModelProvider {
   readonly name = "coding-planner";
+  readonly contexts: JsonValue[] = [];
   calls = 0;
+  constructor(readonly script: readonly AgentAction[]) {}
   async complete(
     context: JsonValue,
     configuration: ModelConfiguration,
     signal: AbortSignal,
   ): Promise<ModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-    this.calls++;
     expect(configuration.model).toBe("deterministic-plan-v1");
     expect(JSON.stringify(context)).toContain("slugify");
+    this.contexts.push(context);
+    const selected = this.script[this.calls++];
+    if (!selected) throw new Error("coding fixture exhausted");
+    const text = JSON.stringify(selected);
     return {
-      text: "Plan: checkpoint the task, reproduce the failing test, edit with a digest precondition, and run the gate.",
+      text,
       finishReason: "stop",
-      usage: { inputTokens: 12, outputTokens: 18, costUsd: 0 },
+      usage: { inputTokens: 12, outputTokens: Math.ceil(text.length / 4), costUsd: 0 },
     };
   }
 }
 
-const STUB = `export function slugify(_input: string): string {\n  return "";\n}\n`;
-const IMPLEMENTATION = `export function slugify(input: string): string {\n  return input\n    .trim()\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, "-")\n    .replace(/^-+|-+$/g, "");\n}\n`;
-const SPEC = `import { expect, test } from "bun:test";\nimport { slugify } from "../src/slug.ts";\n\ntest("slugifies representative titles", () => {\n  expect(slugify("  Durable Agent: Hello, World!  ")).toBe("durable-agent-hello-world");\n  expect(slugify("already---spaced")).toBe("already-spaced");\n  expect(slugify("***")).toBe("");\n});\n`;
+const STUB = `export function slugify(_input: string): string {
+  return "";
+}
+`;
+const IMPLEMENTATION = `export function slugify(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+`;
+const SPEC = `import { expect, test } from "bun:test";
+import { slugify } from "../src/slug.ts";
+
+test("slugifies representative titles", () => {
+  expect(slugify("  Durable Agent: Hello, World!  ")).toBe("durable-agent-hello-world");
+  expect(slugify("already---spaced")).toBe("already-spaced");
+  expect(slugify("***")).toBe("");
+});
+`;
 
 const temps: TempRuntime[] = [];
 afterEach(async () => {
   await Promise.all(temps.splice(0).map(removeTempRuntime));
 });
 
-describe("representative recoverable coding task", () => {
-  test("plans, reproduces, fixes, and verifies code with a fresh worker after every committed cell", async () => {
+function observations(context: JsonValue): Array<{ eventId: string; type: string }> {
+  if (!context || typeof context !== "object" || Array.isArray(context) ||
+      !context.run || typeof context.run !== "object" || Array.isArray(context.run) ||
+      !Array.isArray(context.run.observations)) return [];
+  return context.run.observations as Array<{ eventId: string; type: string }>;
+}
+
+describe("representative autonomous coding task", () => {
+  test("inspects, reproduces, fixes, verifies, and reports through typed actions with a fresh worker per cell", async () => {
     const temp = await makeTempRuntime("agencity-coding-task-");
     temps.push(temp);
-    const provider = new PlanningProvider();
+    await mkdir(`${temp.workspaceRoot}/src`, { recursive: true });
+    await mkdir(`${temp.workspaceRoot}/test`, { recursive: true });
+    await Bun.write(`${temp.workspaceRoot}/src/slug.ts`, STUB);
+    await Bun.write(`${temp.workspaceRoot}/test/slug.test.ts`, SPEC);
+
+    const provider = new CodingProvider([
+      typedAction({ type: "typescript", code: `
+        const source = await tools.readFile("src/slug.ts");
+        const baseline = await tools.request(
+          "shell",
+          "run",
+          { command: "bun test ./test/slug.test.ts" },
+          { idempotencyKey: "coding-task:baseline-test", idempotent: true },
+        );
+        if (baseline.outcome !== "failed") throw new Error("expected the baseline test to fail");
+        await state.set("baselineEvidence", {
+          outcome: baseline.outcome,
+          error: baseline.error ?? null,
+          output: baseline.output ?? null,
+          sourceSha256: source.sha256,
+        });
+        (globalThis as any).__codingHeap = "not durable";
+        return { pid: process.pid, baseline, sourceSha256: source.sha256 };
+      ` }),
+      typedAction({ type: "typescript", code: `
+        const current = await tools.readFile("src/slug.ts");
+        const write = await tools.writeFile("src/slug.ts", ${JSON.stringify(IMPLEMENTATION)}, current.sha256);
+        await state.set("codingTask", {
+          requirement: "implement slugify",
+          gate: "bun test ./test/slug.test.ts",
+          phase: "implemented",
+          sourceSha256: write.sha256,
+        });
+        return { pid: process.pid, heap: (globalThis as any).__codingHeap ?? null, write };
+      ` }),
+      typedAction({ type: "typescript", code: `
+        const gate = await tools.shell("bun test ./test/slug.test.ts");
+        await state.set("completion", {
+          status: "complete",
+          gate: "bun test ./test/slug.test.ts",
+          exitCode: gate.exitCode,
+          stdout: gate.stdout,
+          stderr: gate.stderr,
+        });
+        return { pid: process.pid, gate };
+      ` }),
+      typedAction({ type: "final", content: "Implemented slugify and verified all representative tests pass." }),
+    ]);
     const supervisor = await Supervisor.open({
       databaseUrl: temp.databaseUrl,
       artifactDirectory: temp.artifactDirectory,
@@ -58,113 +145,49 @@ describe("representative recoverable coding task", () => {
     const { sessionId, branchId } = await supervisor.createSession({
       workspaceId: "coding-workspace",
       model: { provider: provider.name, model: "deterministic-plan-v1", temperature: 0 },
-      budget: { tokenLimit: 1_000, turnLimit: 5 },
-    });
-    await supervisor.appendMessage(
-      sessionId,
-      branchId,
-      "user",
-      "Implement slugify in src/slug.ts and make test/slug.test.ts pass. Preserve durable evidence.",
-    );
-    expect(await supervisor.modelLoop.turn(sessionId, branchId)).toEqual({
-      outcome: "succeeded",
-      message: "Plan: checkpoint the task, reproduce the failing test, edit with a digest precondition, and run the gate.",
+      budget: { tokenLimit: 10_000, turnLimit: 8 },
     });
 
-    const workerPids: number[] = [];
-    const assertRebuildStable = async (): Promise<void> => {
-      const projected = projectEvents(await supervisor.storage.loadEvents(sessionId, { branchId }));
-      expect(await supervisor.projections.rebuild(sessionId, branchId)).toEqual(projected);
-      expect((await supervisor.projections.getSnapshot(sessionId, branchId)).state).toEqual(projected);
-    };
-
-    const initialized = await supervisor.executeCell(sessionId, branchId, `
-      await tools.writeFile("src/slug.ts", ${JSON.stringify(STUB)});
-      await tools.writeFile("test/slug.test.ts", ${JSON.stringify(SPEC)});
-      await state.set("codingTask", {
-        requirement: "implement slugify",
-        gate: "bun test ./test/slug.test.ts",
-        phase: "initialized"
-      });
-      (globalThis as any).__codingHeap = "not durable";
-      return { pid: process.pid };
-    `);
-    workerPids.push((initialized.result as { pid: number }).pid);
-    await assertRebuildStable();
-
-    const reproduced = await supervisor.executeCell(sessionId, branchId, `
-      const task = await state.get("codingTask");
-      const baseline = await tools.request(
-        "shell",
-        "run",
-        { command: "bun test ./test/slug.test.ts" },
-        { idempotencyKey: "coding-task:baseline-test", idempotent: true },
-      );
-      if (baseline.outcome !== "failed") throw new Error("expected the baseline test to fail");
-      await state.set("baselineEvidence", {
-        outcome: baseline.outcome,
-        error: baseline.error ?? null,
-        output: baseline.output ?? null,
-      });
-      return {
-        pid: process.pid,
-        heap: (globalThis as any).__codingHeap ?? null,
-        task,
-        baseline,
-      };
-    `);
-    const reproducedResult = reproduced.result as Record<string, any>;
-    workerPids.push(reproducedResult.pid);
-    expect(reproducedResult.heap).toBeNull();
-    expect(reproducedResult.baseline).toMatchObject({ outcome: "failed" });
-    expect(JSON.stringify(reproducedResult.baseline)).toContain("expected");
-    await assertRebuildStable();
-
-    const edited = await supervisor.executeCell(sessionId, branchId, `
-      const current = await tools.readFile("src/slug.ts");
-      if (typeof current.sha256 !== "string") throw new Error("missing source digest");
-      const write = await tools.writeFile("src/slug.ts", ${JSON.stringify(IMPLEMENTATION)}, current.sha256);
-      await state.set("codingTask", {
-        requirement: "implement slugify",
-        gate: "bun test ./test/slug.test.ts",
-        phase: "implemented",
-        sourceSha256: write.sha256,
-      });
-      return { pid: process.pid, write };
-    `);
-    workerPids.push((edited.result as { pid: number }).pid);
+    const result = await supervisor.runs.start(sessionId, branchId, {
+      task: "Implement slugify in src/slug.ts and make test/slug.test.ts pass. Preserve durable evidence.",
+      requestKey: "coding-task-run",
+    });
+    expect(result).toMatchObject({
+      status: "succeeded",
+      steps: 4,
+      final: "Implemented slugify and verified all representative tests pass.",
+    });
+    expect(provider.calls).toBe(4);
     expect(await Bun.file(`${temp.workspaceRoot}/src/slug.ts`).text()).toBe(IMPLEMENTATION);
-    await assertRebuildStable();
-
-    const verified = await supervisor.executeCell(sessionId, branchId, `
-      const gate = await tools.shell("bun test ./test/slug.test.ts");
-      await state.set("completion", {
-        status: "complete",
-        gate: "bun test ./test/slug.test.ts",
-        exitCode: gate.exitCode,
-        stdout: gate.stdout,
-        stderr: gate.stderr,
-      });
-      return { pid: process.pid, gate };
-    `);
-    const verifiedResult = verified.result as Record<string, any>;
-    workerPids.push(verifiedResult.pid);
-    expect(verifiedResult.gate).toMatchObject({ exitCode: 0 });
-    expect(`${verifiedResult.gate.stdout}\n${verifiedResult.gate.stderr}`).toMatch(/1 pass/);
-    expect(new Set(workerPids).size).toBe(workerPids.length);
-    expect(workerPids.every((pid) => pid !== process.pid)).toBe(true);
-    await assertRebuildStable();
 
     const beforeRestart = projectEvents(await supervisor.storage.loadEvents(sessionId, { branchId }));
+    expect(beforeRestart.workingValues.baselineEvidence?.value.kind).toBe("json");
     expect(beforeRestart.workingValues.codingTask).toMatchObject({
-      version: 2,
+      version: 1,
       value: { kind: "json", value: { phase: "implemented" } },
     });
-    expect(beforeRestart.workingValues.baselineEvidence?.value.kind).toBe("json");
     expect(beforeRestart.workingValues.completion).toMatchObject({
       value: { kind: "json", value: { status: "complete", exitCode: 0 } },
     });
-    expect(Object.values(beforeRestart.cells).every((cell) => cell.status === "committed")).toBe(true);
+    const cells = Object.values(beforeRestart.cells);
+    expect(cells).toHaveLength(3);
+    expect(cells.every(cell => cell.status === "committed")).toBe(true);
+    const workerPids = cells.map(cell => (cell.result as { pid: number }).pid);
+    expect((cells[1]!.result as { heap: unknown }).heap).toBeNull();
+    expect(new Set(workerPids).size).toBe(workerPids.length);
+    expect(workerPids.every(pid => pid !== process.pid)).toBe(true);
+    expect(beforeRestart.messages.map(message => message.role)).toEqual(["user", "assistant"]);
+    expect(beforeRestart.messages.at(-1)?.content).toBe(result.final);
+
+    const observed = provider.contexts.flatMap(observations);
+    const committedCells = observed.filter(item => item.type === "CellCommitted");
+    expect(committedCells).toHaveLength(3);
+    expect(new Set(committedCells.map(item => item.eventId)).size).toBe(3);
+    for (const cell of cells) {
+      const dependentContexts = provider.contexts.filter(context => observations(context).some(item => item.eventId === cell.eventId));
+      expect(dependentContexts).toHaveLength(1);
+    }
+    expect(await supervisor.projections.rebuild(sessionId, branchId)).toEqual(beforeRestart);
     await supervisor.close();
 
     const restarted = await Supervisor.open({
@@ -175,10 +198,11 @@ describe("representative recoverable coding task", () => {
       modelProviders: [provider],
       recover: true,
     });
-    const afterRestart = await restarted.projections.rebuild(sessionId, branchId);
-    expect(afterRestart).toEqual(beforeRestart);
-    expect(provider.calls).toBe(1);
-    expect(await Bun.file(`${temp.workspaceRoot}/src/slug.ts`).text()).toBe(IMPLEMENTATION);
-    await restarted.close();
+    try {
+      expect(await restarted.projections.rebuild(sessionId, branchId)).toEqual(beforeRestart);
+      expect(await restarted.runs.get(sessionId, branchId, result.runId)).toEqual(result);
+      expect(provider.calls).toBe(4);
+      expect(await Bun.file(`${temp.workspaceRoot}/src/slug.ts`).text()).toBe(IMPLEMENTATION);
+    } finally { await restarted.close(); }
   }, 20_000);
 });

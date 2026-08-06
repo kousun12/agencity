@@ -24,7 +24,12 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 | `GET /sessions/:session/history?branch=:branch` | none | ordered `AgentEvent[]` including branch lineage |
 | `GET /sessions/:session/stream?branch=:branch&after=:cursor` | none | `text/event-stream` committed events plus cursorless ephemeral progress |
 | `POST /sessions/:session/messages?branch=:branch` | `{ content }` | committed user `AgentEvent` |
-| `POST /sessions/:session/turns?branch=:branch` | none | `{ outcome, message? or error? }` |
+| `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalId? }` | typed `AgentRunResult`; advances through terminal or waiting boundary |
+| `GET /sessions/:session/runs/:run?branch=:branch` | none | current durable `AgentRunResult` |
+| `POST /sessions/:session/runs/:run/resume?branch=:branch` | none | resumed `AgentRunResult` |
+| `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | `{ response, approved? }` | continued result; permission requires explicit boolean `approved` |
+| `POST /sessions/:session/runs/:run/cancel?branch=:branch` | `{ reason? }` | cancellation-reconciled result |
+| `POST /sessions/:session/turns?branch=:branch` | none | advanced diagnostic `{ outcome, message? or error? }` |
 | `POST /sessions/:session/cells?branch=:branch` | `{ code }` | `{ cellId, result, logs }` |
 | `POST /sessions/:session/branches?branch=:parent` | `{ cursor, name? }` | `{ branchId }` |
 | `GET/POST /sessions/:session/agents?branch=:branch` | none or `SpawnAgentInput` | child list or durable child handle |
@@ -69,7 +74,7 @@ A correct consumer:
 
 A committed SSE item uses the cursor as `id:` and the full event JSON as `data:`. Publication happens after commit. Commit callbacks only wake the server; catch-up reads from storage, so a crash between commit and notification does not lose state. Delivery should be treated as at least once. Causally inherited branch events and branch-local events use database cursor order.
 
-Streaming model output uses a distinct `event: progress` frame whose JSON data is an `EffectProgressNotification`. It deliberately has no `id:` or durable cursor. It is delivered only to currently attached clients, is not replayed during catch-up, and may be bounded or dropped. A client displays `model-output-delta` text provisionally; only the later committed assistant message is authoritative. On failure, cancellation, unknown recovery, or disconnect, the client discards the partial text. A non-streaming provider emits no progress and the client renders its committed message normally.
+Streaming model output uses a distinct `event: progress` frame whose JSON data is an `EffectProgressNotification`. It deliberately has no `id:` or durable cursor. It is delivered only to currently attached clients, is not replayed during catch-up, and may be bounded or dropped. For a diagnostic text turn, a client may display `model-output-delta` text provisionally and reconcile it with the committed assistant message. For an autonomous run, those deltas are raw action encoding and must not be rendered as ordinary assistant conversation; clients wait for typed action/run events and show only a validated `final` as assistant text. On failure, cancellation, unknown recovery, or disconnect, clients discard partial text. A non-streaming provider emits no progress.
 
 The endpoint does not emit the initial snapshot, heartbeat frames, or an explicit end marker. It also does not yet authenticate, authorize per workspace, negotiate schema versions, or expose a WebSocket transport.
 
@@ -80,12 +85,17 @@ import { AgentClient } from "@prime-agent/runtime/protocol";
 
 const client = new AgentClient("http://127.0.0.1:3131");
 const session = await client.createSession("demo");
-await client.message(session.sessionId, session.branchId, "hello");
-await client.turn(session.sessionId, session.branchId);
+const run = await client.startRun(session.sessionId, session.branchId, {
+  task: "inspect the workspace",
+  requestKey: "protocol-example-run",
+});
+if (run.status === "waiting_for_user" && run.pendingInput) {
+  await client.respondToRun(session.sessionId, session.branchId, run.runId, run.pendingInput.id, "continue");
+}
 const snapshot = await client.snapshot(session.sessionId, session.branchId);
 ```
 
-`AgentClient` wraps the JSON calls plus `modelProviders()` and `stream(sessionId, branchId, afterCursor, handlers, signal?)`. Its stream helper advances its local cursor only for committed `AgentEvent` items, ignores duplicate/older committed cursors, and delivers cursorless progress through a separate optional handler. Fork helpers are not yet provided. Returned Slice 2 values are plain durable JSON handles and may be stored and reused after reconnect.
+`AgentClient` wraps these JSON calls with `startRun`, `run`, `resumeRun`, `respondToRun`, and `cancelRun`, plus `modelProviders()` and `stream(sessionId, branchId, afterCursor, handlers, signal?)`. Its stream helper advances its local cursor only for committed `AgentEvent` items, ignores duplicate/older committed cursors, and delivers cursorless progress through a separate optional handler. Fork helpers are not yet provided. Returned run and Slice 2 values are plain durable JSON handles and may be stored and reused after reconnect.
 
 ## Console cell environment
 

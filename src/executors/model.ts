@@ -43,7 +43,13 @@ export class EchoModelProvider implements ModelProvider {
         if (last && typeof last === "object" && !Array.isArray(last) && typeof last.content === "string") text = `Echo: ${last.content}`;
       }
     }
-    const output = text || "Echo model completed.";
+    const runContext = context && typeof context === "object" && !Array.isArray(context) &&
+      context.run && typeof context.run === "object" && !Array.isArray(context.run) ? context.run : undefined;
+    const isAgentRun = runContext !== undefined;
+    const runTask = typeof runContext?.task === "string" ? runContext.task : undefined;
+    const output = isAgentRun
+      ? JSON.stringify({ protocol: AGENT_ACTION_PROTOCOL, version: AGENT_ACTION_VERSION, type: "final", content: runTask ? `Echo: ${runTask}` : "Echo model completed." } satisfies AgentAction)
+      : text || "Echo model completed.";
     return { text: output, finishReason: "stop", usage: { inputTokens: Math.ceil(JSON.stringify(context).length / 4), outputTokens: Math.ceil(output.length / 4), costUsd: 0 } };
   }
 }

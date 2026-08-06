@@ -53,6 +53,7 @@ import { MemoryService } from "./memory.ts";
 import { HarnessService } from "./harness.ts";
 import { SkillService } from "./skills.ts";
 import { SubagentSpecService } from "./specs.ts";
+import { AgentRunService } from "./agent-runs.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -250,6 +251,7 @@ export class Supervisor {
   readonly harness: HarnessService;
   readonly skills: SkillService;
   readonly specs: SubagentSpecService;
+  readonly runs: AgentRunService;
   /** Process-local executor/provider catalog; descriptors contain no credential material. */
   readonly modelExecutor: ModelExecutor;
   readonly restartConsoleAfterCell: boolean;
@@ -292,6 +294,7 @@ export class Supervisor {
     this.heartbeats = new HeartbeatService(storage, this.goals);
     this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox, artifacts, this.memory);
     this.restartConsoleAfterCell = restartConsoleAfterCell;
+    this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this));
   }
 
   static async open(options: SupervisorOptions): Promise<Supervisor> {
@@ -377,6 +380,7 @@ export class Supervisor {
       await supervisor.heartbeats.recoverDue();
       await supervisor.goals.recoverIncomplete();
       await supervisor.models.recoverIncomplete();
+      await supervisor.runs.recoverIncomplete();
     }
     supervisor.heartbeats.startScheduler(options.heartbeatPollIntervalMs ?? 100);
     return supervisor;

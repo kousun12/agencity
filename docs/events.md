@@ -75,7 +75,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `ContextMaterialized` | `{ contextId, records: ContextRecordReference[], contentHash: 64 lowercase hex, context: JsonValue }` | Records exact model context and provenance; also inserts immutable `context_records`. |
 | `ModelCallRequested` | `{ callId, contextId, effectId, provider, model }` | Links a logical model call to exact context and durable effect. |
 | `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends authoritative projected output text. The current runtime commits one sequence-0 chunk in the terminal success batch; live provider deltas are deliberately not this event. |
-| `ModelCallCompleted` | `{ callId, responseMessageId, finishReason: string, usage: Usage }` | Marks model call succeeded and links its assistant message/usage. |
+| `ModelCallCompleted` | `{ callId, responseMessageId?, finishReason: string, usage: Usage }` | Marks model call succeeded and records usage. `responseMessageId` is present for ordinary diagnostic text turns and absent when the output is an internal agent-action encoding. |
 | `ModelCallTerminated` | `{ callId, outcome: "failed" | "cancelled" | "unknown", error?: string }` | Visible non-success terminal state; no fabricated response. |
 | `BudgetDebited` | `{ callId, tokens, costUsd, turns, wallTimeMs }` (all nonnegative) | Adds usage to projected counters. |
 | `BudgetExceeded` | `{ dimension: "tokens" | "cost" | "turns" | "wallTime", limit: nonnegative, spent: nonnegative }` | Sets exceeded and idle; future turns reject. Boundary comparison is `>=`. |
@@ -91,6 +91,12 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `GoalGateAdded` / `GoalGateStatusChanged` | Typed executor request policy and pending/running/passed/failed/cancelled/unknown observation. | Gates are durable requests; required failures prevent completion. |
 | `HeartbeatCreated` / `HeartbeatTicked` / `HeartbeatStatusChanged` | Interval/due time/goal/payload, monotonic tick timing, and active/paused/cancelled state. | Projects a restart-safe schedule; ticking never depends on an in-memory timer identity. |
 | `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs, bounded materialized input plus identity provenance/hash, lifecycle status, distinct terminal outcome, and bounded result/artifact reference. | Projects immediately returned recursive model handles backed by normal child sessions; fresh workers resolve the same ID and recovery never turns unknown or budget exhaustion into ordinary failure/success. |
+| `AgentRunRequested` | `{ runId, task, requestKey, goalId? }` | Commits stable autonomous-run intent. One branch has at most one nonterminal run and an exact request-key retry cannot change durable meaning. |
+| `AgentRunStepStarted` | `{ runId, stepId, ordinal, contextId, callId, effectId, actionId, observationEventIds }` | Starts the next deterministic step and freezes the exact not-previously-delivered execution/input observation IDs for its dependent context. |
+| `AgentRunActionCommitted` / `AgentRunActionRejected` | Run/step/action/call identity plus raw authoritative response and either strict v1 parsed action or rejection reason. | Retains internal attributable model-action history. Raw action JSON never becomes an ordinary assistant message or executable code unless strict parsing admits the `typescript` variant. |
+| `AgentRunUserInputRequested` / `AgentRunUserInputReceived` | Stable request/action IDs, clarification/permission kind and question, optional permission, then response and explicit approval decision. | Projects a durable waiting boundary and exact-once response. |
+| `AgentRunCancellationRequested` | `{ runId, reason? }` | Records cancellation intent before effect abort/terminal cancellation; the first retained reason wins. |
+| `AgentRunStatusChanged` | `{ runId, status, reason?, finalMessageId? }` | Projects waiting or distinct succeeded/blocked/failed/cancelled/budget-exceeded/unknown terminal state. Only succeeded links the separately appended validated-final assistant message. |
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
 
@@ -132,6 +138,23 @@ A send and its recipient delivery commit in one batch. Acknowledgement appends o
 
 A normal turn appends status-running, `ContextMaterialized`, `ModelCallRequested`, and the model `EffectRequested` before provider execution. A streaming-capable provider may then publish bounded process-local `model-output-delta` progress, but that text is non-canonical and cannot enter messages, context, or dependent work. Success atomically appends the full authoritative output chunk, assistant message, model completion, budget debit, optional budget-exceeded, and status-idle. Non-success appends `ModelCallTerminated` and status-idle without any partial assistant output. Startup can finalize a call whose effect terminal event committed before the supervisor's model terminal batch.
 
+### Autonomous agent run
+
+```text
+AgentRunRequested -> AgentRunStepStarted -> ModelCallRequested/effect
+                                      -> AgentRunActionRejected -> failed
+                                      -> AgentRunActionCommitted(typescript) -> cell -> next step
+                                      -> AgentRunActionCommitted(clarification|permission) -> waiting_for_user
+                                      -> AgentRunUserInputReceived -> next step
+                                      -> AgentRunActionCommitted(final) -> assistant MessageAppended -> succeeded
+                                      -> blocked | failed
+AgentRunCancellationRequested -> cancelled
+budget boundary               -> budget_exceeded
+unknown effect                -> unknown
+```
+
+Every step context records its source events and an exact-once `run.observations` list. The model's authoritative JSON response is retained in `ModelOutputChunk` and the action event, while its `ModelCallCompleted` intentionally has no `responseMessageId`. This internal protocol encoding is not conversation. Only a strict validated final action appends an assistant `MessageAppended`; clarification and permission are typed waiting states. Recovery owns agent-run calls separately from diagnostic model-turn finalization, so a crash after the model effect commits cannot accidentally publish raw action JSON or call the provider again.
+
 ### Goal gate and heartbeat
 
 A completion request establishes one durable `requestId` plus its workspace ID/cursor pin. Each gate moves to `running` with its effect ID, then to `passed`, `failed`, `cancelled`, or `unknown`. A successful executor result is still changed to failed/stale if the workspace-relevant branch cursor moved during evaluation. Required non-passed gates lead to `GoalStatusChanged(blocked)`; only all current required passes permit `completed`.
@@ -144,7 +167,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. A future synchronization adapter must quarantine invalid remote rows rather than weaken local validation.
-- Snapshots include `reducerVersion: 2`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 3`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 
