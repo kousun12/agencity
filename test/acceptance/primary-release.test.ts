@@ -28,7 +28,7 @@ describe("FU-009 installed no-ID release transcript", () => {
         return { wrote: 41, verifiedFirstPass: check.exitCode === 0 };
       `),
       action("typescript", String.raw`
-        const recursive = await rlm.start({ task: "acceptance recursive review", idempotencyKey: "acceptance-recursive", run: false });
+        const recursive = await rlm.start({ task: "acceptance recursive review", input: { expected: 42 }, idempotencyKey: "acceptance-recursive" });
         await state.set("acceptance-recursive", { handleId: recursive.handleId });
         const child = await sdk.agents.spawn({ task: "acceptance child initial", name: "acceptance-child" });
         await state.set("acceptance-child", child);
@@ -38,6 +38,7 @@ describe("FU-009 installed no-ID release transcript", () => {
       action("typescript", String.raw`
         const savedRecursive = await state.get("acceptance-recursive");
         const recursive = await rlm.get(savedRecursive.value.handleId);
+        const recursiveResult = await recursive.result({ timeoutMs: 5000 });
         const savedChild = await state.get("acceptance-child");
         for (let attempt = 0; attempt < 100; attempt++) {
           const roster = await sdk.agents.list();
@@ -48,7 +49,7 @@ describe("FU-009 installed no-ID release transcript", () => {
         const followUp = await sdk.agents.followUp("acceptance-child", "acceptance child follow-up", { taskId: savedChild.value.taskId });
         await tools.writeFile("answer.txt", "42\n");
         const verification = await tools.shell("grep -q '^42$' answer.txt && printf verified");
-        return { recursive, followUp, verification };
+        return { recursiveResult, followUp, verification };
       `),
       action("final", "answer repaired to 42; recursive and retained child follow-up were exercised"),
     ]);
@@ -92,6 +93,7 @@ describe("FU-009 installed no-ID release transcript", () => {
     expect(history.code).toBe(0);
     expect(history.stdout).toContain("premature completion");
     expect(history.stdout).toContain("CLI completion verification");
+    expect(history.stdout).toContain("fixture recursive response");
 
     const branched = await world.command(["branch", "head", "acceptance-repair", "--json"], fixture.environment());
     expect(branched.code).toBe(0);
