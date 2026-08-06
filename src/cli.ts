@@ -149,7 +149,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
       if (parsed.command === "run") return;
     }
-    if (parsed.command === "attach" || interactive) await attachManagedClient(client, selection.sessionId, selection.branchId);
+    if (parsed.command === "attach" || interactive || !task) await attachManagedClient(client, selection.sessionId, selection.branchId);
   } finally {
     // Closing a client is detach-only. The resident service owns durable work.
     prompter.close();
@@ -224,7 +224,8 @@ async function managedSessions(client: AgentClient, parsed: ParsedCliArgs): Prom
   const select = parsed.values.get("select");
   if (select) {
     const selected = await client.productSelect(select, branchId);
-    printValue(selected, parsed.flags.has("json"));
+    if (parsed.flags.has("json")) printValue(selected, true);
+    else console.log(`Selected ${selected.sessionId}/${selected.branchId}`);
     return;
   }
   const rows = await client.productSessions() as ProductBranchSummary[];
@@ -329,7 +330,12 @@ async function waitForRun(client: AgentClient, sessionId: string, branchId: stri
 
 async function attachManagedClient(client: AgentClient, sessionId: string, branchId: string): Promise<void> {
   const snapshot = await client.snapshot(sessionId, branchId);
-  console.log(`Attached at cursor ${snapshot.cursor}. Ctrl-C detaches; it does not stop durable work.`);
+  console.log("Agencity trusted-local TUI (managed protocol client)");
+  console.log(`Attached at cursor ${snapshot.cursor}. Ctrl-C or /quit detaches; it does not stop durable work.`);
+  if (!(process.stdin.isTTY === true && process.stdout.isTTY === true)) {
+    await Bun.stdin.text();
+    return;
+  }
   const controller = new AbortController();
   const detach = (): void => controller.abort();
   process.once("SIGINT", detach);

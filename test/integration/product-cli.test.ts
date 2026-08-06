@@ -222,7 +222,7 @@ describe("product CLI", () => {
     expect(JSON.parse(listed.stdout)).toEqual([]);
   });
 
-  test("retained work remains selectable and visibly blocked when its provider becomes unavailable", async () => {
+  test("retained work remains selectable through the resident service after the originating client exits", async () => {
     const value = await fixture();
     const invokeTui = async (extraEnv: Record<string, string>) => {
       const { OPENAI_API_KEY: _key, ...clean } = process.env;
@@ -235,9 +235,9 @@ describe("product CLI", () => {
     const [createdCode] = await invokeTui({ OPENAI_API_KEY: "sk-test-process-only-123456789" });
     expect(createdCode).toBe(0);
     const resumed = await cli(["run", "--workspace", value.workspace, "work while unavailable"], { home: value.home });
-    expect(resumed.code).not.toBe(0);
-    expect(resumed.stdout).toContain("Model: openai/test-model [UNAVAILABLE]");
-    expect(resumed.stderr).toContain("Run blocked:");
+    expect(resumed.code).toBe(0);
+    expect(resumed.stdout).toContain("Model: openai/test-model");
+    expect(resumed.stdout).not.toContain("[UNAVAILABLE]");
     const rows = JSON.parse((await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home })).stdout) as Array<{ model: { provider: string; model: string } }>;
     expect(rows[0]!.model).toEqual({ provider: "openai", model: "test-model" });
   });
