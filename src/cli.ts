@@ -13,24 +13,53 @@ import {
   deriveDisplayName,
   modelAvailability,
   providerStatuses,
+  parseModel,
   resolveWorkspace,
   workspacePreferenceKey,
   type ProductBranchSummary,
   type ResolvedWorkspace,
+  ManagedWorkspaceService,
+  decodeManagedServiceConfiguration,
+  MANAGED_SERVICE_CONFIG_ENV,
+  connectManagedService,
+  observeManagedService,
+  type ManagedServiceConfiguration,
 } from "./product/index.ts";
-import { ProtocolServer } from "./protocol/index.ts";
-import { Supervisor } from "./runtime/index.ts";
+import { AgentClient, ProtocolServer } from "./protocol/index.ts";
+import { Supervisor, type AgentRunResult } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop"]);
 
 try {
-  await main(parseCliArgs(Bun.argv.slice(2)));
+  if (Bun.argv[2] === "__service-child") await runServiceChild();
+  else await main(parseCliArgs(Bun.argv.slice(2)));
 } catch (error) {
   const code = error instanceof AgentRuntimeError ? error.code : "CLI_ERROR";
   const message = scrubText(error instanceof Error ? error.message : String(error));
   console.error(`Agencity error [${code}]: ${message}`);
   process.exitCode = 1;
+}
+
+async function runServiceChild(): Promise<void> {
+  const encoded = process.env[MANAGED_SERVICE_CONFIG_ENV];
+  if (!encoded) throw new ValidationError("Managed service child configuration is missing");
+  delete process.env[MANAGED_SERVICE_CONFIG_ENV];
+  const configuration = decodeManagedServiceConfiguration(encoded);
+  const requestedRootIndex = Bun.argv.indexOf("--workspace");
+  if (requestedRootIndex >= 0 && resolve(Bun.argv[requestedRootIndex + 1] ?? "") !== resolve(configuration.workspace.root)) {
+    throw new ValidationError("Managed service child workspace does not match its configuration");
+  }
+  const service = await ManagedWorkspaceService.open(configuration, await applicationVersion());
+  let stopping = false;
+  const stop = (): void => {
+    if (stopping) return;
+    stopping = true;
+    void service.close().finally(() => process.exit(0));
+  };
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
+  await new Promise<void>(() => {});
 }
 
 async function main(parsed: ParsedCliArgs): Promise<void> {
@@ -48,8 +77,6 @@ async function main(parsed: ParsedCliArgs): Promise<void> {
 async function runProduct(parsed: ParsedCliArgs): Promise<void> {
   const option = (name: string): string | undefined => parsed.values.get(name);
   if (option("workspace") && option("workspace-root")) throw new ValidationError("Use either --workspace or --workspace-root, not both");
-  const goalMode = option("goal") ?? "auto";
-  if (!["auto", "current", "create"].includes(goalMode)) throw new ValidationError("--goal must be auto, current, or create");
   const workspaceOverride = option("workspace") ?? option("workspace-root");
   const configuredStateDirectory = option("state-dir");
   const configuredDatabase = option("db");
@@ -58,75 +85,275 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     ...(configuredStateDirectory === undefined ? {} : { stateDirectory: configuredStateDirectory }),
     ...(configuredDatabase === undefined ? {} : { legacyDatabasePath: configuredDatabase }),
   });
-  await mkdir(workspace.stateDirectory, { recursive: true });
-  const supervisor = await openSupervisor(parsed, workspace, false);
-  const catalog = new ProductCatalog(supervisor, workspace.workspaceId);
+  const configuration = managedConfiguration(parsed, workspace);
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
   const prompter = new ProductPrompter(interactive);
   try {
-    if (parsed.command === "doctor") { await doctor(supervisor, workspace, parsed.flags.has("json")); return; }
-    if (parsed.command === "config") { await config(supervisor, workspace, parsed, interactive, prompter); return; }
-    if (parsed.command === "sessions") { await sessions(catalog, parsed); return; }
+    if (parsed.command === "doctor") { await doctorObserver(configuration, parsed.flags.has("json")); return; }
+    if (parsed.command === "service") { await serviceCommand(configuration, parsed); return; }
+
+    const connection = await connectManagedService(configuration);
+    const client = connection.client;
+    if (parsed.command === "config") { await managedConfig(client, parsed); return; }
+    if (parsed.command === "sessions") { await managedSessions(client, parsed); return; }
+    if (parsed.command === "agents") { printValue(await client.serviceAgents(), parsed.flags.has("json")); return; }
+    if (parsed.command === "status") { await managedStatus(client, parsed); return; }
+    if (parsed.command === "send") { await managedSend(client, parsed); return; }
+    if (parsed.command === "stop") { await managedStop(client, parsed); return; }
 
     const task = taskFor(parsed);
-    const existing = await catalog.list();
+    const existing = await client.productSessions() as ProductBranchSummary[];
     const forceNew = parsed.command === "new" || parsed.flags.has("new");
     let selection: { sessionId: string; branchId: string };
     let summary: ProductBranchSummary;
     if (forceNew || existing.length === 0) {
-      const model = await chooseNewModel({
-        supervisor,
-        workspaceId: workspace.workspaceId,
-        ...(option("model") === undefined ? {} : { explicitModel: option("model")! }),
-        demo: parsed.flags.has("demo"),
-        interactive,
-        prompt: question => prompter.question(question),
-      });
-      const created = await supervisor.createSession({
-        workspaceId: workspace.workspaceId,
+      const model = await chooseManagedModel(client, parsed, interactive, prompter);
+      const created = await client.createSession(workspace.workspaceId, {
         model,
         sessionName: task ? deriveDisplayName(task) : `New session ${new Date().toISOString().slice(0, 10)}`,
         branchName: "main",
       });
       selection = created;
-      await catalog.remember(created);
-      summary = (await catalog.list()).find(candidate => candidate.sessionId === created.sessionId && candidate.branchId === created.branchId)!;
+      await client.productSelect(created.sessionId, created.branchId);
+      summary = (await client.productSessions() as ProductBranchSummary[]).find(candidate => candidate.sessionId === created.sessionId && candidate.branchId === created.branchId)!;
     } else {
-      if (parsed.flags.has("demo") || option("model")) {
-        throw new ValidationError("A resumed branch keeps its original model. Use `agencity new --model ...` or `agencity --new --demo`");
-      }
-      const target = parsed.command === "resume" ? parsed.positionals.join(" ").trim() || undefined : option("session");
-      selection = await selectExisting(catalog, existing, target, option("branch"), interactive, prompter);
-      summary = (await catalog.list()).find(candidate => candidate.sessionId === selection.sessionId && candidate.branchId === selection.branchId)!;
-      await supervisor.resume(selection.sessionId, selection.branchId);
+      if (parsed.flags.has("demo") || option("model")) throw new ValidationError("A resumed branch keeps its original model. Use `agencity new --model ...` or `agencity --new --demo`");
+      const target = parsed.command === "resume" || parsed.command === "attach"
+        ? parsed.positionals.join(" ").trim() || undefined
+        : option("session");
+      selection = await client.productSelect(target, option("branch"));
+      summary = (await client.productSessions() as ProductBranchSummary[]).find(candidate => candidate.sessionId === selection.sessionId && candidate.branchId === selection.branchId)!;
+      await client.resume(selection.sessionId, selection.branchId);
     }
 
-    const availability = modelAvailability(supervisor, summary.model);
-    printStartup(workspace, summary, availability.usable, availability.remediation);
+    const providers = await client.modelProviders();
+    const available = providers.some(provider => provider.name === summary.model.provider);
+    const remediation = available ? null : `Install or configure provider ${summary.model.provider}, then restart the managed service.`;
+    printStartup(workspace, summary, available, remediation);
     if (["goals", "heartbeats", "schedules"].includes(parsed.command)) {
-      await manageAutonomy(supervisor, selection.sessionId, selection.branchId, parsed);
+      await manageAutonomyClient(client, selection.sessionId, selection.branchId, parsed);
       return;
     }
     if (task) {
-      if (!availability.usable) {
-        const reason = availability.remediation ?? `provider ${summary.model.provider} is unavailable`;
-        if (parsed.command === "run") throw new ValidationError(`Run blocked: ${reason}`);
-        console.error(`Run blocked: ${reason}`);
-      } else {
-        const result = await supervisor.runs.start(selection.sessionId, selection.branchId, { task, goalMode: goalMode as "auto" | "current" | "create" });
-        if (result.status === "succeeded") console.log(result.final ?? "");
-        else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
-        else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
+      if (!available) throw new ValidationError(`Run blocked: ${remediation}`);
+      const goalMode = option("goal") ?? "auto";
+      if (!["auto", "current", "create"].includes(goalMode)) throw new ValidationError("--goal must be auto, current, or create");
+      const accepted = await client.startRun(selection.sessionId, selection.branchId, { task, goalMode: goalMode as "auto" | "current" | "create" }) as AgentRunResult & { accepted?: boolean };
+      if (parsed.flags.has("detach")) {
+        console.log(`Run accepted: ${accepted.runId} (detached; the managed service continues after client exit)`);
+        return;
       }
+      const result = await waitForRun(client, selection.sessionId, selection.branchId, accepted.runId);
+      if (result.status === "succeeded") console.log(result.final ?? "");
+      else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
+      else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
+      if (parsed.command === "run") return;
     }
-    if (parsed.command === "run") return;
-    prompter.close();
-    await new TerminalUI(supervisor).run(selection.sessionId, selection.branchId);
+    if (parsed.command === "attach" || interactive) await attachManagedClient(client, selection.sessionId, selection.branchId);
   } finally {
+    // Closing a client is detach-only. The resident service owns durable work.
     prompter.close();
-    await supervisor.close();
   }
 }
+
+function managedConfiguration(parsed: ParsedCliArgs, workspace: ResolvedWorkspace): ManagedServiceConfiguration {
+  const option = (name: string): string | undefined => parsed.values.get(name);
+  const syncUrl = option("sync-url") ?? process.env.TURSO_DATABASE_URL;
+  return {
+    workspace,
+    databasePath: resolve(option("db") ?? `${workspace.stateDirectory}/agent.db`),
+    artifactDirectory: resolve(option("artifacts") ?? `${workspace.stateDirectory}/artifacts`),
+    profileDatabasePath: option("profile") ? resolve(option("profile")!) : defaultProfilePath(),
+    restartConsoleAfterCell: parsed.flags.has("restart-console-after-cell"),
+    sync: {
+      ...(syncUrl ? { syncUrl } : {}),
+      ...(option("replica") ? { replicaPath: resolve(option("replica")!) } : {}),
+      ...(option("credential-ref") ? { credentialReference: option("credential-ref")! } : {}),
+      ...(option("sync-interval") ? { intervalMs: Number(option("sync-interval")) } : {}),
+    },
+  };
+}
+
+async function serviceCommand(configuration: ManagedServiceConfiguration, parsed: ParsedCliArgs): Promise<void> {
+  const action = parsed.positionals[0] ?? "status";
+  if (!["status", "shutdown"].includes(action)) throw new ValidationError("service action must be status or shutdown");
+  const observed = await observeManagedService(configuration);
+  if (observed.state !== "running" || !observed.manifest) {
+    const value = { lifecycle: observed.state === "stopped" ? "stopped" : "conflict", mode: "trusted-local", onDemand: true };
+    printValue(value, parsed.flags.has("json"));
+    if (action === "shutdown" && observed.state !== "stopped") throw new ValidationError("Service authority is conflicted; refusing unauthenticated shutdown");
+    return;
+  }
+  const client = new AgentClient(observed.manifest.url, observed.manifest.bearerToken);
+  printValue(action === "shutdown" ? await client.shutdownService() : await client.serviceStatus(), parsed.flags.has("json"));
+}
+
+async function doctorObserver(configuration: ManagedServiceConfiguration, json: boolean): Promise<void> {
+  const observed = await observeManagedService(configuration);
+  const providers = [
+    { provider: "echo", usable: true, demo: true },
+    { provider: "openai", usable: Boolean(process.env.OPENAI_API_KEY), demo: false },
+  ];
+  const report = {
+    application: await applicationVersion(),
+    bun: { version: Bun.version, required: ">=1.2.0", compatible: runtimeCompatible() },
+    mode: "trusted-local (not a hostile-code sandbox)",
+    observer: "read-only (no recovery, wake ticks, migrations, or canonical writes)",
+    workspace: { id: configuration.workspace.workspaceId, name: configuration.workspace.name, root: configuration.workspace.root, stateDirectory: configuration.workspace.stateDirectory },
+    service: { state: observed.state, onDemand: true, ...(observed.manifest ? { instanceId: observed.manifest.instanceId, url: observed.manifest.url } : {}) },
+    providers,
+  };
+  if (json) console.log(JSON.stringify(report, null, 2));
+  else console.log([
+    `Agencity ${report.application} · Bun ${report.bun.version} (${report.bun.compatible ? "compatible" : "unsupported"})`,
+    `Workspace: ${report.workspace.name} (${report.workspace.root})`,
+    `Mode: ${report.mode}`,
+    `Service: ${report.service.state} (started on demand; not an OS boot service)`,
+    `Observer: ${report.observer}`,
+  ].join("\n"));
+}
+
+async function managedSessions(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
+  const sessionId = parsed.values.get("session");
+  const branchId = parsed.values.get("branch");
+  const name = parsed.values.get("name");
+  if (name) {
+    if (!sessionId) throw new ValidationError("sessions --name requires --session; add --branch to rename only that branch");
+    await client.productRename(sessionId, branchId, name);
+  }
+  const select = parsed.values.get("select");
+  if (select) {
+    const selected = await client.productSelect(select, branchId);
+    printValue(selected, parsed.flags.has("json"));
+    return;
+  }
+  const rows = await client.productSessions() as ProductBranchSummary[];
+  if (parsed.flags.has("json")) console.log(JSON.stringify(rows, null, 2));
+  else console.log(rows.length ? formatSessions(rows) : "No sessions in this workspace.");
+}
+
+async function managedConfig(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
+  const action = parsed.positionals[0];
+  if (!action) { printValue(await client.productConfig(), parsed.flags.has("json")); return; }
+  if (action === "set-model") {
+    const value = parsed.positionals[1];
+    if (!value) throw new ValidationError("config set-model requires PROVIDER/MODEL");
+    parseModel(value);
+    printValue(await client.productSetModel(value), parsed.flags.has("json"));
+    return;
+  }
+  if (action === "clear-model") { printValue(await client.productSetModel(null), parsed.flags.has("json")); return; }
+  if (action === "credential-ref") {
+    const provider=parsed.positionals[1];const reference=parsed.positionals[2];const label=parsed.positionals.slice(3).join(" ");
+    if(!provider||!reference||!label)throw new ValidationError("config credential-ref requires PROVIDER REFERENCE LABEL");
+    if(containsCredentialMaterial(reference)||containsCredentialMaterial(label))throw new ValidationError("Credential references and labels must be non-secret opaque identifiers");
+    if(!/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(reference))throw new ValidationError("Credential references must be opaque handles such as env:OPENAI_API_KEY or keychain:item; raw values are rejected");
+    printValue(await client.productCredentialReference(provider,reference,label),parsed.flags.has("json"));return;
+  }
+  throw new ValidationError(`Unknown config action: ${action}`);
+}
+
+async function chooseManagedModel(client: AgentClient, parsed: ParsedCliArgs, interactive: boolean, prompter: ProductPrompter): Promise<ModelConfiguration> {
+  const explicit = parsed.values.get("model");
+  if (explicit && parsed.flags.has("demo")) throw new ValidationError("Use either --demo or --model, not both");
+  if (parsed.flags.has("demo")) return { provider: "echo", model: "echo-1" };
+  const providers = await client.modelProviders();
+  if (explicit) {
+    const model = parseModel(explicit);
+    if (model.provider === "echo") throw new ValidationError("Echo is a demo fixture; use --demo so demo behavior is explicit");
+    if (!providers.some(provider => provider.name === model.provider)) throw new ValidationError(`Model provider is unavailable: ${model.provider}`);
+    await client.productSetModel(explicit);
+    return model;
+  }
+  const configured = await client.productConfig();
+  if (configured.defaultModel) {
+    const model = parseModel(configured.defaultModel);
+    if (model.provider !== "echo" && providers.some(provider => provider.name === model.provider)) return model;
+  }
+  const real = providers.filter(provider => provider.name !== "echo");
+  for (const provider of real) {
+    const model = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`];
+    if (model?.trim()) {
+      await client.productSetModel(`${provider.name}/${model.trim()}`);
+      return { provider: provider.name, model: model.trim() };
+    }
+  }
+  if (!interactive) throw new ValidationError("No usable model is selected. Pass --model PROVIDER/MODEL after configuring a provider, or use --demo explicitly");
+  if (!real.length) {
+    const answer = (await prompter.question("No real provider is usable. Start the visibly labeled Echo demo fixture? [y/N] ")).trim().toLowerCase();
+    if (answer === "y" || answer === "yes") return { provider: "echo", model: "echo-1" };
+    throw new ValidationError("No usable provider. Set OPENAI_API_KEY or use --demo only for fixture behavior");
+  }
+  const modelId = (await prompter.question(`Model ID for ${real[0]!.displayName}: `)).trim();
+  if (!modelId) throw new ValidationError("Model ID is required");
+  await client.productSetModel(`${real[0]!.name}/${modelId}`);
+  return { provider: real[0]!.name, model: modelId };
+}
+
+async function managedStatus(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
+  const agents = await client.serviceAgents() as any[];
+  const target = parsed.positionals.join(" ").trim();
+  const value = target ? resolveAgentTarget(agents, target) : agents;
+  printValue(value, parsed.flags.has("json"));
+}
+
+async function managedSend(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
+  const [target, ...words] = parsed.positionals;
+  const content = words.join(" ").trim();
+  if (!target || !content) throw new ValidationError("send requires TARGET MESSAGE");
+  const selected = resolveAgentTarget(await client.serviceAgents() as any[], target);
+  const event = await client.message(selected.sessionId, selected.branchId, content);
+  printValue({ delivered: true, eventId: event.id, sessionId: selected.sessionId, branchId: selected.branchId }, parsed.flags.has("json"));
+}
+
+async function managedStop(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
+  const target = parsed.positionals.join(" ").trim();
+  if (!target) throw new ValidationError("stop requires TARGET");
+  const selected = resolveAgentTarget(await client.serviceAgents() as any[], target);
+  printValue(await client.stopSession(selected.sessionId, selected.branchId, "Stopped by user command"), parsed.flags.has("json"));
+}
+
+function resolveAgentTarget(rows: any[], target: string): any {
+  const matches = rows.filter(row => row.sessionId === target || row.branchId === target || row.name === target);
+  if (matches.length !== 1) throw new ValidationError(matches.length ? `Agent target is ambiguous: ${target}` : `Agent target not found: ${target}`);
+  return matches[0];
+}
+
+async function waitForRun(client: AgentClient, sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> {
+  while (true) {
+    const result = await client.run(sessionId, branchId, runId);
+    if (!["queued", "running"].includes(result.status)) return result;
+    await Bun.sleep(50);
+  }
+}
+
+async function attachManagedClient(client: AgentClient, sessionId: string, branchId: string): Promise<void> {
+  const snapshot = await client.snapshot(sessionId, branchId);
+  console.log(`Attached at cursor ${snapshot.cursor}. Ctrl-C detaches; it does not stop durable work.`);
+  const controller = new AbortController();
+  const detach = (): void => controller.abort();
+  process.once("SIGINT", detach);
+  try {
+    await client.stream(sessionId, branchId, snapshot.cursor, { onEvent: event => console.log(`[${event.type}] ${JSON.stringify(event.payload)}`) }, controller.signal);
+  } finally { process.off("SIGINT", detach); }
+}
+
+async function manageAutonomyClient(client: AgentClient, sessionId: string, branchId: string, parsed: ParsedCliArgs): Promise<void> {
+  const [action, ...rest] = parsed.positionals;
+  const print = (value: unknown): void => console.log(JSON.stringify(value, null, 2));
+  if (parsed.command === "goals") {
+    if (!action) { print(await client.goals(sessionId, branchId)); return; }
+    if (action === "create") { const description=rest.join(" ").trim(); if(!description) throw new ValidationError("goals create requires DESCRIPTION"); print(await client.createGoal(sessionId,branchId,description)); return; }
+    const current=await client.currentGoal(sessionId,branchId); if(!current) throw new ValidationError("No current goal");
+    if(action==="pause") print(await client.pauseGoal(sessionId,branchId,current.goalId)); else if(action==="resume") print(await client.resumeGoal(sessionId,branchId,current.goalId)); else if(action==="clear") print(await client.clearGoal(sessionId,branchId,current.goalId)); else if(action==="complete") print(await client.requestGoalCompletion(sessionId,branchId,current.goalId)); else throw new ValidationError("goals action must be create, pause, resume, clear, or complete"); return;
+  }
+  if(parsed.command==="heartbeats"){
+    const items=await client.heartbeats(sessionId,branchId); if(!action){print(items);return;} if(action==="create"){const intervalMs=Number(rest.shift());if(!Number.isSafeInteger(intervalMs)||intervalMs<1)throw new ValidationError("heartbeats create requires positive INTERVAL_MS");print(await client.createHeartbeat(sessionId,branchId,{intervalMs,...(rest.length?{prompt:rest.join(" ")}:{})}));return;} const item=items[Number(rest[0])-1];if(!item)throw new ValidationError("Heartbeat number not found");if(action==="pause")print(await client.pauseHeartbeat(item.heartbeatId));else if(action==="resume")print(await client.resumeHeartbeat(item.heartbeatId));else if(action==="clear")print(await client.cancelHeartbeat(item.heartbeatId));else throw new ValidationError("heartbeats action must be create, pause, resume, or clear");return;
+  }
+  const items=await client.schedules(sessionId,branchId);if(!action){print(items);return;}if(action==="once"){const at=rest.shift();const prompt=rest.join(" ").trim();if(!at||!prompt)throw new ValidationError("schedules once requires ISO_TIME PROMPT");print(await client.createSchedule(sessionId,branchId,{at,prompt}));return;}if(action==="every"){const intervalMs=Number(rest.shift());const prompt=rest.join(" ").trim();if(!Number.isSafeInteger(intervalMs)||intervalMs<1||!prompt)throw new ValidationError("schedules every requires INTERVAL_MS PROMPT");print(await client.createSchedule(sessionId,branchId,{intervalMs,prompt}));return;}const item=items[Number(rest[0])-1];if(!item)throw new ValidationError("Schedule number not found");if(action==="pause")print(await client.pauseSchedule(item.scheduleId));else if(action==="resume")print(await client.resumeSchedule(item.scheduleId));else if(action==="clear")print(await client.clearSchedule(item.scheduleId));else throw new ValidationError("schedules action must be once, every, pause, resume, or clear");
+}
+
+function printValue(value: unknown, json: boolean): void { console.log(json ? JSON.stringify(value, null, 2) : typeof value === "string" ? value : JSON.stringify(value, null, 2)); }
 
 async function manageAutonomy(supervisor: Supervisor, sessionId: string, branchId: string, parsed: ParsedCliArgs): Promise<void> {
   const [action, ...rest] = parsed.positionals;
@@ -331,7 +558,7 @@ async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspac
 }
 
 function taskFor(parsed: ParsedCliArgs): string | undefined {
-  if (["resume", "goals", "heartbeats", "schedules"].includes(parsed.command)) return undefined;
+  if (["resume", "attach", "goals", "heartbeats", "schedules"].includes(parsed.command)) return undefined;
   const task = parsed.positionals.join(" ").trim();
   if (parsed.command === "run" && !task) throw new ValidationError("run requires TASK");
   return task || undefined;
@@ -382,7 +609,15 @@ Product commands:
   agencity schedules [ACTION]     List/create or manage a numbered once/interval schedule
   agencity sessions --select NAME Persist an explicit recent selection
   agencity sessions --session ID --name NAME [--branch ID]
-  agencity run TASK               Run the typed autonomous TypeScript loop and exit
+  agencity run TASK               Run through the resident service and wait
+  agencity run --detach TASK      Return after durable acceptance; work continues
+  agencity agents                List resident root agents and worker state
+  agencity status [NAME|ID]       Inspect all or one managed agent
+  agencity attach [NAME|ID]       Attach through snapshot/cursor events; Ctrl-C detaches
+  agencity send NAME|ID MESSAGE   Commit user steering to a named session
+  agencity stop NAME|ID           Durably request run cancellation
+  agencity service status        Inspect the on-demand workspace service
+  agencity service shutdown      Gracefully drain; sessions remain durable
   --goal auto|current|create      Explicit goal selection (default: auto; never inferred from prose)
   agencity doctor [--json]        Check runtime, providers, recovery, and sync
   agencity config [--json]        Inspect non-secret preferences/references
@@ -393,7 +628,8 @@ Product options:
   --workspace PATH                Override discovered repository root
   --model PROVIDER/MODEL          Select a configured real provider for a new root
   --demo                          Explicitly use the Echo demo/test fixture
-  --state-dir PATH --profile PATH --new --json --version --help
+  --state-dir PATH --profile PATH --new --detach --json --version --help
+  The service starts on demand; it is not installed as an OS boot service.
 
 Advanced compatibility commands:
   create, chat, cell, snapshot, history, rebuild, branch, tui, serve

@@ -135,6 +135,13 @@ export class AgentRunService {
   }
 
   async start(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> {
+    const admitted = await this.admit(sessionId, branchId, input);
+    if (isTerminal(admitted.status) || admitted.status === "waiting_for_user") return admitted;
+    return this.advance(sessionId, branchId, admitted.runId);
+  }
+
+  /** Commits a queued run without advancing it; resident services own advancement. */
+  async admit(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> {
     if (typeof input !== "string" && (!input || typeof input !== "object" || Array.isArray(input))) {
       throw new ValidationError("Agent run input must be a task string or object");
     }
@@ -159,7 +166,7 @@ export class AgentRunService {
         if (existing.task !== task || existing.goalMode !== requestedGoalMode || existing.wakeId !== (normalized.wakeId ?? null) || (normalized.goalId !== undefined && existing.goalId !== normalized.goalId)) {
           throw new ValidationError("Agent run requestKey was reused with different durable meaning");
         }
-        return this.#advance(sessionId, branchId, existing.id);
+        return this.#result(state, existing);
       }
       const active = Object.values(state.agentRuns).find((run) => !isTerminal(run.status));
       if (active) throw new ValidationError(`Agent run ${active.id} is already ${active.status}`);
@@ -203,9 +210,8 @@ export class AgentRunService {
       await this.storage.appendEvents(atomic);
       state = await this.#state(sessionId, branchId);
       if (!state.agentRuns[runId]) throw new Error("Agent run request was not committed");
-      return this.#advance(sessionId, branchId, runId);
+      return this.#result(state, state.agentRuns[runId]!);
     });
-    await this.#notifyTerminal(result);
     return result;
   }
 

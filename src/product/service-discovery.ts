@@ -592,6 +592,31 @@ export async function cleanupStaleServiceManifest(input: CleanupStaleManifestInp
   });
 }
 
+/** Removes only the exact manifest still owned by a gracefully stopping service. */
+export async function unpublishServiceManifest(input: {
+  readonly workspaceRoot: string;
+  readonly workspaceId: string;
+  readonly manifest: ServiceManifestV1;
+  readonly lockWaitMs?: number;
+}): Promise<boolean> {
+  const observed = validateServiceManifest(input.manifest);
+  if (observed.workspaceId !== input.workspaceId) {
+    throw new ServiceDiscoveryError("WORKSPACE_MISMATCH", "Service manifest belongs to a different workspace");
+  }
+  const paths = serviceStatePaths(input.workspaceRoot);
+  await ensureSecureServiceDirectory(paths.workspaceRoot);
+  return withPublicationLock(paths.serviceDirectory, input.lockWaitMs, async () => {
+    const current = await readServiceManifest({ workspaceRoot: paths.workspaceRoot, workspaceId: input.workspaceId });
+    if (!current) return false;
+    if (!sameManifest(current, observed)) {
+      throw new ServiceDiscoveryError("STALE_MANIFEST_CHANGED", "Service manifest changed before graceful unpublish");
+    }
+    await unlink(paths.manifestPath);
+    await syncCheckedDirectory(paths.serviceDirectory, DIRECTORY_MODE);
+    return true;
+  });
+}
+
 /**
  * Pure spawn plan only. It contains no bearer token, shell string, or real
  * Supervisor lifecycle. The future service owner is responsible for spawning

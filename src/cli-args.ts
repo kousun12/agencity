@@ -1,12 +1,12 @@
 export const CLI_COMMANDS = [
-  "product", "help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config",
+  "product", "help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop",
   "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve",
   "sync", "sync-push", "sync-pull", "sync-checkpoint", "sync-stats", "sync-status", "conflicts", "delete-data",
 ] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
 const KNOWN_COMMANDS = new Set<string>(CLI_COMMANDS);
-const PRODUCT_ROUTE_COMMANDS = new Set<string>(["help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config"]);
+const PRODUCT_ROUTE_COMMANDS = new Set<string>(["help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop"]);
 const LEGACY_TEXT_COMMANDS = new Set<string>(["chat", "cell"]);
 const VALUE_OPTIONS = new Set([
   "state-dir", "db", "artifacts", "workspace-root", "workspace",
@@ -14,7 +14,7 @@ const VALUE_OPTIONS = new Set([
   "scope", "scope-id", "confirmation", "receipt-dir",
 ]);
 const BOOLEAN_OPTIONS = new Set([
-  "help", "version", "new", "demo", "json", "restart-console-after-cell", "exclusive-artifacts",
+  "help", "version", "new", "demo", "json", "detach", "restart-console-after-cell", "exclusive-artifacts",
 ]);
 
 export interface ParsedCliArgs {

@@ -1,10 +1,40 @@
+import { timingSafeEqual } from "node:crypto";
 import { AgentRuntimeError } from "../domain/index.ts";
+import type { AgentRunResult, StartAgentRunInput } from "../runtime/index.ts";
 import { scrubText } from "../security/scrub.ts";
 import type { Supervisor } from "../runtime/index.ts";
 
+export interface ProtocolServiceHooks {
+  readonly health: {
+    readonly workspaceId: string;
+    readonly instanceId: string;
+    readonly appVersion: string;
+    readonly protocolMin: number;
+    readonly protocolMax: number;
+    readonly configHash: string;
+  };
+  readonly status: () => Promise<unknown>;
+  readonly shutdown: () => Promise<unknown>;
+  readonly agents: () => Promise<unknown>;
+  readonly startRun: (sessionId: string, branchId: string, input: StartAgentRunInput) => Promise<unknown>;
+  readonly stop: (sessionId: string, branchId: string, reason?: string) => Promise<unknown>;
+  readonly productSessions?: () => Promise<unknown>;
+  readonly productSelect?: (target?: string, branchId?: string) => Promise<unknown>;
+  readonly productRename?: (sessionId: string, branchId: string | undefined, name: string) => Promise<unknown>;
+  readonly productConfig?: () => Promise<unknown>;
+  readonly productSetModel?: (model: string | null) => Promise<unknown>;
+  readonly productCredentialReference?: (provider: string, reference: string, label: string) => Promise<unknown>;
+}
+
+export interface ProtocolServerOptions {
+  /** Owner-only bearer read from discovery state; never accepted in a URL. */
+  readonly bearerToken?: string;
+  readonly service?: ProtocolServiceHooks;
+}
+
 export class ProtocolServer {
   #server: ReturnType<typeof Bun.serve> | null = null;
-  constructor(readonly supervisor: Supervisor) {}
+  constructor(readonly supervisor: Supervisor, readonly options: ProtocolServerOptions = {}) {}
 
   listen(port = 0, hostname = "127.0.0.1"): ReturnType<typeof Bun.serve> {
     if (this.#server) return this.#server;
@@ -16,7 +46,24 @@ export class ProtocolServer {
   async #fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url); const parts = url.pathname.split("/").filter(Boolean);
-      if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true, mode: "trusted-local" });
+      if (this.options.bearerToken && !authorized(request, this.options.bearerToken)) {
+        return Response.json({ error: { code: "UNAUTHORIZED", message: "Authenticated local service access is required" } }, { status: 401, headers: { "cache-control": "no-store" } });
+      }
+      if (request.method === "GET" && url.pathname === "/health") return Response.json({
+        ok: true, mode: "trusted-local", authenticated: Boolean(this.options.bearerToken),
+        ...(this.options.service?.health ?? {}),
+      }, { headers: { "cache-control": "no-store" } });
+      if (this.options.service) {
+        if (request.method === "GET" && url.pathname === "/service/status") return Response.json(await this.options.service.status());
+        if (request.method === "POST" && url.pathname === "/service/shutdown") return Response.json(await this.options.service.shutdown(), { status: 202 });
+        if (request.method === "GET" && url.pathname === "/service/agents") return Response.json(await this.options.service.agents());
+        if (request.method === "GET" && url.pathname === "/product/sessions" && this.options.service.productSessions) return Response.json(await this.options.service.productSessions());
+        if (request.method === "POST" && url.pathname === "/product/select" && this.options.service.productSelect) { const body=await jsonBody(request); return Response.json(await this.options.service.productSelect(typeof body.target === "string" ? body.target : undefined, typeof body.branchId === "string" ? body.branchId : undefined)); }
+        if (request.method === "POST" && url.pathname === "/product/rename" && this.options.service.productRename) { const body=await jsonBody(request); return Response.json(await this.options.service.productRename(String(body.sessionId ?? ""), typeof body.branchId === "string" ? body.branchId : undefined, String(body.name ?? ""))); }
+        if (request.method === "GET" && url.pathname === "/product/config" && this.options.service.productConfig) return Response.json(await this.options.service.productConfig());
+        if (request.method === "POST" && url.pathname === "/product/config/model" && this.options.service.productSetModel) { const body=await jsonBody(request); return Response.json(await this.options.service.productSetModel(body.model === null ? null : String(body.model ?? ""))); }
+        if (request.method === "POST" && url.pathname === "/product/config/credential-reference" && this.options.service.productCredentialReference) { const body=await jsonBody(request); return Response.json(await this.options.service.productCredentialReference(String(body.provider ?? ""), String(body.reference ?? ""), String(body.label ?? ""))); }
+      }
       if (request.method === "GET" && url.pathname === "/model-providers") return Response.json(this.supervisor.modelExecutor.providers());
       if (parts[0] === "sync") {
         if (request.method === "GET" && parts[1] === "status") return Response.json(await this.supervisor.sync.status());
@@ -35,7 +82,7 @@ export class ProtocolServer {
       }
       if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await request.json() as any;
-        return Response.json(await this.supervisor.createSession({ workspaceId: String(body.workspaceId ?? "default"), ...(body.model ? { model: body.model } : {}), ...(body.budget ? { budget: body.budget } : {}) }));
+        return Response.json(await this.supervisor.createSession({ workspaceId: String(body.workspaceId ?? "default"), ...(body.model ? { model: body.model } : {}), ...(body.budget ? { budget: body.budget } : {}), ...(typeof body.sessionName === "string" ? { sessionName: body.sessionName } : {}), ...(typeof body.branchName === "string" ? { branchName: body.branchName } : {}) }));
       }
       if (parts[0] === "models" && parts[1]) {
         if (request.method === "GET") return Response.json(await this.supervisor.models.get(parts[1]));
@@ -66,8 +113,14 @@ export class ProtocolServer {
         if (request.method === "GET" && parts[2] === "history" && branchId) return Response.json(await this.supervisor.projections.history(sessionId, branchId));
         if (request.method === "GET" && parts[2] === "stream" && branchId) return this.#stream(sessionId, branchId, url.searchParams.get("after") ?? "0", request.signal);
         if (request.method === "POST" && parts[2] === "messages" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.appendMessage(sessionId, branchId, "user", String(body.content ?? ""))); }
+        if (request.method === "POST" && parts[2] === "stop" && branchId && this.options.service) { const body=await jsonBody(request); return Response.json(await this.options.service.stop(sessionId, branchId, typeof body.reason === "string" ? body.reason : undefined)); }
         if (parts[2] === "runs" && branchId) {
-          if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.runs.start(sessionId, branchId, await jsonBody(request) as any));
+          if (request.method === "POST" && parts.length === 3) {
+            const input = await jsonBody(request) as unknown as StartAgentRunInput;
+            return this.options.service
+              ? Response.json(await this.options.service.startRun(sessionId, branchId, input), { status: 202 })
+              : Response.json(await this.supervisor.runs.start(sessionId, branchId, input));
+          }
           if (request.method === "GET" && parts[3] && parts.length === 4) return Response.json(await this.supervisor.runs.get(sessionId, branchId, parts[3]));
           if (request.method === "POST" && parts[3] && parts[4] === "input" && parts[5]) return Response.json(await this.supervisor.runs.respond(sessionId, branchId, parts[3], parts[5], await jsonBody(request) as any));
           if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.runs.cancel(sessionId, branchId, parts[3], typeof body.reason === "string" ? body.reason : undefined)); }
@@ -195,6 +248,15 @@ export class ProtocolServer {
   }
 }
 
+function authorized(request: Request, expected: string): boolean {
+  const header = request.headers.get("authorization");
+  if (!header?.startsWith("Bearer ")) return false;
+  const received = header.slice(7);
+  const left = Buffer.from(received);
+  const right = Buffer.from(expected);
+  return left.byteLength === right.byteLength && timingSafeEqual(left, right);
+}
+
 async function jsonBody(request: Request): Promise<Record<string, unknown>> {
   if (!request.headers.get("content-length") && !request.headers.get("transfer-encoding")) return {};
   return await request.json() as Record<string, unknown>;
@@ -205,6 +267,7 @@ function httpStatus(error: unknown): number {
   switch (error.code) {
     case "NOT_FOUND": return 404;
     case "CONFLICT":
+    case "EXECUTION_OWNERSHIP_CONFLICT":
     case "INVALID_TRANSITION": return 409;
     case "DEPENDENCY_FAILURE": return 424;
     case "CAPABILITY_UNAVAILABLE": return 501;

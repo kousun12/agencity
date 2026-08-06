@@ -18,9 +18,20 @@ export interface AgentStreamHandlers {
 }
 
 export class AgentClient {
-  constructor(readonly baseUrl: string) {}
+  constructor(readonly baseUrl: string, readonly bearerToken?: string) {}
+  health(): Promise<{ ok: boolean; authenticated?: boolean; workspaceId?: string; instanceId?: string; appVersion?: string; protocolMin?: number; protocolMax?: number; configHash?: string }> { return this.#json("/health"); }
+  serviceStatus(): Promise<unknown> { return this.#json("/service/status"); }
+  shutdownService(): Promise<unknown> { return this.#post("/service/shutdown"); }
+  serviceAgents(): Promise<any[]> { return this.#json("/service/agents"); }
+  productSessions(): Promise<any[]> { return this.#json("/product/sessions"); }
+  productSelect(target?: string, branchId?: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/product/select", { ...(target === undefined ? {} : { target }), ...(branchId === undefined ? {} : { branchId }) }); }
+  productRename(sessionId: string, branchId: string | undefined, name: string): Promise<unknown> { return this.#post("/product/rename", { sessionId, ...(branchId === undefined ? {} : { branchId }), name }); }
+  productConfig(): Promise<{ defaultModel: string | null; credentialReferences: unknown[] }> { return this.#json("/product/config"); }
+  productSetModel(model: string | null): Promise<unknown> { return this.#post("/product/config/model", { model }); }
+  productCredentialReference(provider: string, reference: string, label: string): Promise<unknown> { return this.#post("/product/config/credential-reference", { provider, reference, label }); }
+  stopSession(sessionId: string, branchId: string, reason?: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/stop?branch=${branchId}`, reason === undefined ? {} : { reason }); }
   modelProviders(): Promise<ModelProviderDescriptor[]> { return this.#json("/model-providers"); }
-  createSession(workspaceId: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/sessions", { workspaceId }); }
+  createSession(workspaceId: string, options: { model?: unknown; budget?: unknown; sessionName?: string; branchName?: string } = {}): Promise<{ sessionId: string; branchId: string }> { return this.#post("/sessions", { workspaceId, ...options }); }
   snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
   message(sessionId: string, branchId: string, content: string): Promise<AgentEvent> { return this.#post(`/sessions/${sessionId}/messages?branch=${branchId}`, { content }); }
   startRun(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs?branch=${branchId}`, typeof input === "string" ? { task: input } : input); }
@@ -41,7 +52,7 @@ export class AgentClient {
   ): Promise<void> {
     const response = await fetch(
       `${this.baseUrl}/sessions/${sessionId}/stream?branch=${encodeURIComponent(branchId)}&after=${encodeURIComponent(afterCursor)}`,
-      signal === undefined ? undefined : { signal },
+      { ...(signal === undefined ? {} : { signal }), ...this.#authInit() },
     );
     if (!response.ok) throw new Error(await response.text());
     if (!response.body) throw new Error("Protocol stream response has no body");
@@ -140,7 +151,15 @@ export class AgentClient {
   deleteOwnedData(input:DeleteOwnedDataInput):Promise<PhysicalDeletionReceipt>{return this.#post("/sync/delete",input);}
 
   #post<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "POST", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
-  async #json<T>(path: string, init?: RequestInit): Promise<T> { const response = await fetch(`${this.baseUrl}${path}`, init); const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body as T; }
+  #authInit(): RequestInit { return this.bearerToken ? { headers: { authorization: `Bearer ${this.bearerToken}` } } : {}; }
+  async #json<T>(path: string, init?: RequestInit): Promise<T> {
+    const headers = new Headers(init?.headers);
+    if (this.bearerToken) headers.set("authorization", `Bearer ${this.bearerToken}`);
+    const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
+    const body = await response.json();
+    if (!response.ok) throw new Error(JSON.stringify(body));
+    return body as T;
+  }
 }
 
 async function readProtocolStream(

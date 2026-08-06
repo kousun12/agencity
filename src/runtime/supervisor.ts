@@ -55,6 +55,7 @@ import { HarnessService } from "./harness.ts";
 import { SkillService } from "./skills.ts";
 import { SubagentSpecService } from "./specs.ts";
 import { AgentRunService } from "./agent-runs.ts";
+import { ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "./execution-leases.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -73,6 +74,16 @@ export interface SupervisorOptions {
   readonly heartbeatPollIntervalMs?: number;
   /** Runtime-owned authority key for the profile/user scope. */
   readonly userScopeKey?: string;
+  /** Enables managed workspace+root process fencing for a resident service. */
+  readonly executionLease?: {
+    readonly ownerProcessId: string;
+    readonly workspaceId: string;
+    readonly leaseMs?: number;
+    readonly renewalIntervalMs?: number;
+    readonly onLost?: (error: unknown) => void;
+  };
+  /** Embedded diagnostics may opt out; managed services start only after lease admission. */
+  readonly startWakeSchedulers?: boolean;
   /** Exact generated-skill permission names allowed at activation and invocation (default: none). */
   readonly skillPermissionAllowlist?: readonly string[];
   /** Separate durable profile catalog/preferences/credential-reference database. */
@@ -257,6 +268,7 @@ export class Supervisor {
   /** Process-local executor/provider catalog; descriptors contain no credential material. */
   readonly modelExecutor: ModelExecutor;
   readonly restartConsoleAfterCell: boolean;
+  readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
   readonly #cells = new BranchQueue();
   #closed = false;
 
@@ -274,6 +286,7 @@ export class Supervisor {
     userScopeKey: string,
     skillPermissionAllowlist: readonly string[],
     modelExecutor: ModelExecutor,
+    executionLeases: ManagedExecutionLeaseCoordinator | null,
   ) {
     this.storage = storage;
     this.profile = profile;
@@ -289,6 +302,7 @@ export class Supervisor {
     this.memory = new MemoryService(storage, undefined, userScopeKey);
     this.specs = new SubagentSpecService(storage, this.agents, userScopeKey);
     this.modelExecutor = modelExecutor;
+    this.executionLeases = executionLeases;
     this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
     this.modelLoop = new ModelLoop(storage, this.contexts, outbox);
     this.documents = new DocumentService(storage);
@@ -317,8 +331,21 @@ export class Supervisor {
     }
     await mkdir(options.artifactDirectory,{recursive:true});
     await mkdir(workspaceRoot,{recursive:true});
-    const storage = new LibSqlStorage({ url: options.databaseUrl, deviceId: device.deviceId });
-    await storage.migrate();
+    const rawStorage = new LibSqlStorage({ url: options.databaseUrl, deviceId: device.deviceId });
+    await rawStorage.migrate();
+    let executionLeases: ManagedExecutionLeaseCoordinator | null = null;
+    let storage = rawStorage;
+    if (options.executionLease) {
+      executionLeases = await ManagedExecutionLeaseCoordinator.open(rawStorage, {
+        workspaceId: options.executionLease.workspaceId,
+        ownerProcessId: options.executionLease.ownerProcessId,
+        ownerDeviceId: device.deviceId,
+        ...(options.executionLease.leaseMs === undefined ? {} : { leaseMs: options.executionLease.leaseMs }),
+        ...(options.executionLease.renewalIntervalMs === undefined ? {} : { renewalIntervalMs: options.executionLease.renewalIntervalMs }),
+        ...(options.executionLease.onLost === undefined ? {} : { onLost: options.executionLease.onLost }),
+      });
+      storage = createFencedAgentStorage(rawStorage, executionLeases);
+    }
     const replicaUrl = options.sync?.replicaUrl ?? (options.sync?.syncUrl ? adjacentFileUrl(options.databaseUrl, ".sync-replica.db") : undefined);
     const transport = options.sync?.transport ?? (options.sync?.syncUrl ? new TursoSyncTransport({
       replicaUrl: replicaUrl!,
@@ -342,6 +369,7 @@ export class Supervisor {
     try { await sync.start(options.sync?.startup ?? true); }
     catch (error) {
       await sync.stop().catch(() => {});
+      await executionLeases?.close().catch(() => {});
       storage.close();profile.close();
       throw error;
     }
@@ -374,30 +402,38 @@ export class Supervisor {
       options.userScopeKey ?? "default-user",
       options.skillPermissionAllowlist ?? [],
       modelExecutor,
+      executionLeases,
     );
-    if (options.recover !== false) {
-      await supervisor.outbox.recover();
-      // Durable cancellation intent wins before queued effects or recursive
-      // handles are allowed to resume.
-      await supervisor.agents.recoverCancellations();
-      await supervisor.outbox.drain();
-      await supervisor.modelLoop.recoverIncomplete();
-      await supervisor.modelLoop.reconcileRunningSessions();
-      await supervisor.goals.recoverIncomplete();
-      await supervisor.models.recoverIncomplete();
-      await supervisor.agents.recoverDeliveries();
-      await supervisor.runs.recoverIncomplete();
-      await supervisor.runs.recoverOrphanGoals();
-      await supervisor.heartbeats.recoverDue();
-      await supervisor.schedules.recover();
-    }
-    supervisor.heartbeats.startScheduler(options.heartbeatPollIntervalMs ?? 100);
-    supervisor.schedules.startScheduler(options.heartbeatPollIntervalMs ?? 100);
+    if (options.recover !== false) await supervisor.recoverExecution({ drainPending: executionLeases === null });
+    if (options.startWakeSchedulers !== false) supervisor.startWakeSchedulers(options.heartbeatPollIntervalMs ?? 100);
     return supervisor;
   }
 
   /** Secret-free provider descriptors suitable for onboarding and clients. */
   get modelProviders() { return this.modelExecutor.providers(); }
+
+  /** Reconciles retained work only after managed lease admission. */
+  async recoverExecution(options: { readonly drainPending?: boolean } = {}): Promise<void> {
+    await this.outbox.recover();
+    await this.agents.recoverCancellations();
+    if (options.drainPending !== false) await this.outbox.drain();
+    await this.modelLoop.recoverIncomplete();
+    await this.modelLoop.reconcileRunningSessions();
+    await this.goals.recoverIncomplete();
+    await this.models.recoverIncomplete();
+    await this.agents.recoverDeliveries();
+    await this.runs.recoverIncomplete();
+    await this.runs.recoverOrphanGoals();
+    await this.heartbeats.recoverDue();
+    await this.schedules.recover();
+  }
+
+  /** Wake coordinators are started explicitly by managed services after leases. */
+  startWakeSchedulers(pollIntervalMs = 100): void {
+    if (this.#closed) throw new ValidationError("Supervisor is closed");
+    this.heartbeats.startScheduler(pollIntervalMs);
+    this.schedules.startScheduler(pollIntervalMs);
+  }
 
   async close(): Promise<void> {
     if (this.#closed) return;
@@ -407,6 +443,7 @@ export class Supervisor {
     await this.console.stop();
     await this.models.close();
     await this.sync.stop();
+    await this.executionLeases?.close();
     this.storage.close();
     this.profile.close();
   }
@@ -422,6 +459,7 @@ export class Supervisor {
     try { return await this.sync.deleteOwnedData(input); }
     finally {
       await this.sync.stop().catch(() => {});
+      await this.executionLeases?.close().catch(() => {});
       this.storage.close();this.profile.close();this.#closed = true;
     }
   }
