@@ -48,6 +48,24 @@ export class AcceptanceWorld {
     return this.spawn([this.binary, ...args], this.repository, extraEnvironment);
   }
 
+  async commandWithInput(args: readonly string[], input: string, extraEnvironment: Readonly<Record<string, string>> = {}): Promise<CommandResult> {
+    const child = Bun.spawn([this.binary, ...args], {
+      cwd: this.repository,
+      env: this.environment(extraEnvironment),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    child.stdin.write(input);
+    child.stdin.end();
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    return { code, stdout, stderr };
+  }
+
   start(args: readonly string[], extraEnvironment: Readonly<Record<string, string>> = {}): RunningCommand {
     const child = Bun.spawn([this.binary, ...args], {
       cwd: this.repository,
@@ -92,7 +110,7 @@ export class AcceptanceWorld {
 
   private environment(extra: Readonly<Record<string, string>>): Record<string, string> {
     const clean = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
-    for (const key of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "AGENCITY_PROFILE", "AGENCITY_ACCEPTANCE", "AGENCITY_ACCEPTANCE_FAILPOINT", "AGENCITY_ACCEPTANCE_MAX_RUN_STEPS"]) delete clean[key];
+    for (const key of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "AGENCITY_PROFILE", "AGENCITY_ACCEPTANCE", "AGENCITY_ACCEPTANCE_FAILPOINT", "AGENCITY_ACCEPTANCE_MAX_RUN_STEPS"]) delete clean[key];
     return {
       ...clean,
       HOME: this.home,

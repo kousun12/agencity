@@ -102,6 +102,13 @@ describe("FU-009 installed no-ID release transcript", () => {
     expect(resumed.code).toBe(0);
     expect(resumed.stdout).toContain("acceptance-repair");
 
+    const quit = await world.commandWithInput([], "/quit\n", fixture.environment());
+    expect(quit).toMatchObject({ code: 0, stderr: "" });
+    expect(quit.stdout).toContain("Agencity trusted-local TUI");
+    expect(quit.stdout).toContain("Detached. Session identity and durable work remain owned by the service.");
+    const afterQuit = await world.command(["status", "current", "--json"], fixture.environment());
+    expect(parseSingleJson(afterQuit)).toMatchObject({ status: "succeeded", exitCode: 0 });
+
     const detachedTask = "detached service continuation";
     fixture.script(detachedTask, [action("final", "detached work completed after the client exited")]);
     fixture.hold(detachedTask);
