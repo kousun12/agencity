@@ -125,7 +125,7 @@ export class GoalService {
     this.#assertScope(goal, sessionId, branchId);
     if (["completed", "failed", "cancelled"].includes(goal.status)) return this.#load(goalId);
     if (goal.status === "paused") throw new ValidationError("Paused goal must be resumed before completion is requested");
-    if (goal.status === "blocked") throw new ValidationError("Blocked goal must be continued before completion is requested again");
+    if (goal.status === "blocked") return this.#load(goalId);
 
     if (goal.status === "active") {
       const requestId = newId();

@@ -37,6 +37,45 @@ async function open(temp: TempRuntime, provider?: RecordingActions, recover = fa
   });
 }
 
+function crashAfterGoalCompletionBlocked(supervisor: Supervisor): () => void {
+  const appendEvents = supervisor.storage.appendEvents.bind(supervisor.storage);
+  let crashed = false;
+  Object.defineProperty(supervisor.storage, "appendEvents", {
+    configurable: true,
+    value: async (events: Parameters<typeof appendEvents>[0]) => {
+      const appended = await appendEvents(events);
+      if (!crashed && events.some(event => event.type === "GoalStatusChanged" &&
+        (event.payload as { status?: string }).status === "blocked" &&
+        event.idempotencyKey?.startsWith("goal-completion-outcome:"))) {
+        crashed = true;
+        throw new Error("simulated crash after blocked goal completion");
+      }
+      return appended;
+    },
+  });
+  return () => Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: appendEvents });
+}
+
+function crashAfterGateAttemptStarted(supervisor: Supervisor): () => void {
+  const appendEvents = supervisor.storage.appendEvents.bind(supervisor.storage);
+  let crashed = false;
+  Object.defineProperty(supervisor.storage, "appendEvents", {
+    configurable: true,
+    value: async (events: Parameters<typeof appendEvents>[0]) => {
+      const appended = await appendEvents(events);
+      const started = events.find(event => event.type === "EffectAttemptStarted");
+      const effectId = started && (started.payload as { effectId?: string }).effectId;
+      const effect = effectId ? await supervisor.storage.getOutbox(effectId) : undefined;
+      if (!crashed && effect?.executor === "shell") {
+        crashed = true;
+        throw new Error("simulated crash after gate attempt started");
+      }
+      return appended;
+    },
+  });
+  return () => Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: appendEvents });
+}
+
 function observations(context: JsonValue): Array<{ eventId: string; type: string; payload: JsonValue }> {
   if (!context || typeof context !== "object" || Array.isArray(context) || !context.run || typeof context.run !== "object" || Array.isArray(context.run) || !Array.isArray(context.run.observations)) return [];
   return context.run.observations as Array<{ eventId: string; type: string; payload: JsonValue }>;
@@ -71,6 +110,98 @@ describe("FU-014 product autonomy", () => {
       expect(goal.status).toBe("completed");
       expect(goal.gates[Object.keys(goal.gates)[0]!]!.evaluations).toHaveLength(2);
     } finally { await supervisor.close(); }
+  });
+
+  test("blocked completion recovery reuses the durable gate result and continues the retained final action", async () => {
+    const temp = await makeTempRuntime("agencity-fu014-blocked-recovery-"); temps.push(temp);
+    const provider = new RecordingActions([
+      action({ type: "final", content: "provisional before repair" }),
+      action({ type: "typescript", code: 'await tools.writeFile("recovered-gate-ready", "yes")' }),
+      action({ type: "final", content: "verified after recovery" }),
+    ], "fu014-blocked-recovery");
+    let supervisor = await open(temp, provider);
+    const session = await supervisor.createSession({ workspaceId: "blocked-recovery", model: { provider: provider.name, model: "actions" } });
+    const goal = await supervisor.goals.create(session.sessionId, session.branchId, {
+      description: "repair after retained failure",
+      gates: [{ name: "marker", executor: "shell", operation: "run", input: { command: "test -f recovered-gate-ready" }, idempotent: true }],
+    });
+    const runId = "fu014-blocked-completion-recovery";
+    const restore = crashAfterGoalCompletionBlocked(supervisor);
+    try {
+      await expect(supervisor.runs.start(session.sessionId, session.branchId, {
+        task: "repair across completion crash", goalId: goal.goalId,
+        requestKey: runId, requestedRunId: runId,
+      })).rejects.toThrow("simulated crash after blocked goal completion");
+      restore();
+
+      const beforeRepeat = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      expect(projectEvents(beforeRepeat).goals[goal.goalId]?.status).toBe("blocked");
+      expect(beforeRepeat.filter(event => event.type === "AgentRunGoalCheckRecorded")).toHaveLength(0);
+      expect(beforeRepeat.filter(event => event.type === "EffectRequested" && (event.payload as { executor?: string }).executor === "shell")).toHaveLength(1);
+      const repeated = await supervisor.goals.requestCompletion(session.sessionId, session.branchId, goal.goalId);
+      expect(repeated.status).toBe("blocked");
+      const afterRepeat = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      expect(afterRepeat.map(event => event.id)).toEqual(beforeRepeat.map(event => event.id));
+
+      await supervisor.close();
+      supervisor = await open(temp, provider, true);
+      expect(await supervisor.runs.get(session.sessionId, session.branchId, runId)).toMatchObject({
+        status: "succeeded", final: "verified after recovery", steps: 3,
+      });
+      expect(provider.calls).toBe(3);
+      expect(await Bun.file(`${temp.workspaceRoot}/recovered-gate-ready`).text()).toBe("yes");
+      const history = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      expect(history.filter(event => event.type === "EffectRequested" && (event.payload as { executor?: string }).executor === "shell")).toHaveLength(2);
+      expect(history.filter(event => event.type === "GoalGateEvaluationRecorded")).toHaveLength(2);
+      expect(history.filter(event => event.type === "AgentRunGoalCheckRecorded").map(event =>
+        (event.payload as { status?: string }).status)).toEqual(["failed", "passed"]);
+    } finally { restore(); await supervisor.close(); }
+  });
+
+  test("recovery makes an interrupted non-idempotent completion gate unknown without retrying it", async () => {
+    const temp = await makeTempRuntime("agencity-fu014-unknown-gate-"); temps.push(temp);
+    const provider = new RecordingActions([
+      action({ type: "final", content: "must remain provisional" }),
+    ], "fu014-unknown-gate");
+    let supervisor = await open(temp, provider);
+    const session = await supervisor.createSession({ workspaceId: "unknown-gate", model: { provider: provider.name, model: "actions" } });
+    const goal = await supervisor.goals.create(session.sessionId, session.branchId, {
+      description: "do not retry an ambiguous gate",
+      gates: [{
+        name: "ambiguous", executor: "shell", operation: "run",
+        input: { command: "printf retried > non-idempotent-gate-ran" }, idempotent: false,
+      }],
+    });
+    const runId = "fu014-unknown-gate-recovery";
+    const restore = crashAfterGateAttemptStarted(supervisor);
+    try {
+      await expect(supervisor.runs.start(session.sessionId, session.branchId, {
+        task: "finish with an ambiguous gate", goalId: goal.goalId,
+        requestKey: runId, requestedRunId: runId,
+      })).rejects.toThrow("simulated crash after gate attempt started");
+      restore();
+      expect(provider.calls).toBe(1);
+      expect(await Bun.file(`${temp.workspaceRoot}/non-idempotent-gate-ran`).exists()).toBe(false);
+
+      await supervisor.close();
+      supervisor = await open(temp, provider, true);
+      expect(await supervisor.runs.get(session.sessionId, session.branchId, runId)).toMatchObject({
+        status: "unknown", steps: 1,
+      });
+      expect(provider.calls).toBe(1);
+      expect(await Bun.file(`${temp.workspaceRoot}/non-idempotent-gate-ran`).exists()).toBe(false);
+      const history = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      const gateEffectIds = history.filter(event => event.type === "EffectRequested" &&
+        (event.payload as { executor?: string }).executor === "shell").map(event =>
+        (event.payload as { effectId: string }).effectId);
+      expect(gateEffectIds).toHaveLength(1);
+      expect(history.filter(event => event.type === "EffectAttemptStarted" &&
+        gateEffectIds.includes((event.payload as { effectId: string }).effectId))).toHaveLength(1);
+      expect(history.filter(event => event.type === "GoalGateEvaluationRecorded").map(event =>
+        (event.payload as { status?: string }).status)).toEqual(["unknown"]);
+      expect(history.filter(event => event.type === "AgentRunGoalCheckRecorded").map(event =>
+        (event.payload as { status?: string }).status)).toEqual(["unknown"]);
+    } finally { restore(); await supervisor.close(); }
   });
 
   test("gate cache reuses unchanged terminal evidence and material cell/state changes invalidate it", async () => {
