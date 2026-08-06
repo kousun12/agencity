@@ -77,7 +77,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | Done | FU-004, FU-005, FU-015 |
 | FU-007 | Provide a real installation and executable workflow | Done | FU-001 |
 | FU-008 | Reorganize low-level CLI operations as advanced surfaces without breaking compatibility | Done | FU-001, FU-005 |
-| FU-009 | Add product-level end-to-end acceptance coverage | In progress | FU-001–FU-008, FU-011–FU-019 |
+| FU-009 | Add product-level end-to-end acceptance coverage | Done | FU-001–FU-008, FU-011–FU-019 |
 | FU-010 | Add repository-level purpose and implementation guidance | Done | — |
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
 | FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Done | FU-004 |
@@ -492,7 +492,7 @@ agencity data export|delete
 
 ## FU-009 — Add product-level end-to-end acceptance coverage
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -530,6 +530,17 @@ Use a deterministic structured-action provider for the default suite and an opt-
 - Non-interactive mode has documented exit statuses for succeeded, failed, blocked, budget-exceeded, cancelled, and unknown outcomes.
 - `bun run verify` includes these product gates.
 - External provider and Turso tests remain clearly identified when credential- or binary-gated.
+
+### Completion evidence
+
+- Commits: `6d552da`, `616a61b`, `713b23e`.
+- Implementation: `test/acceptance/` creates a fresh isolated `HOME`, Bun install root, and external repository per case; runs `bun link`; and invokes only the installed `agencity`. A source guard rejects implementation imports, direct runtime/storage clients, opaque diagnostic coordinates, and process-launch bypasses. The external OpenAI-compatible fixture is keyed by durable task/step, emits SSE, retains request logs, and supports deterministic barriers.
+- Primary transcript: truthful missing-provider failure without Echo, explicit persisted fixture model, repository coding cells/tools, durable recursive handle plus retained child follow-up, failed shell completion-gate feedback and repair, distinct JSON result, tree/status/history, named head branch/resume, detach, and resident continuation.
+- Recovery/outcomes: succeeded, failed, blocked, budget-exceeded, cancelled, and unknown have documented distinct process statuses; client loss does not stop service work; acceptance-only post-commit failpoints prove committed-action recovery plus ambiguous model/shell ownership becoming unknown without retry; `reconcile latest` appends evidence without changing the unknown outcome.
+- Satellites and external matrix: actual refinement review, local skill inspection/installation/testing, streaming, compaction/context, and schedule delivery are black-box. `test:acceptance:matrix` reports deterministic, real-provider, official Turso, and Cloud rows as `PASS`, `FAIL`, or `SKIP`. The real-provider test remains opt-in and was skipped in the deterministic completion run.
+- Product fixes demanded by black-box evidence: no-ID `branch head`, `history current`, `tree`, `status current`, `--completion-gate`, strict `agencity.run-result` output, detached output without opaque coordinates, `reconcile latest`, same-batch child-session execution fencing, and narrowly gated acceptance crash controls.
+- Verification at completion: `bun run verify` passed typecheck and architecture checks, then 593 core tests with 2 external Turso skips and 0 failures, followed by 12 acceptance tests with 1 opt-in real-provider skip and 0 failures.
+- Remaining limitations: this is source/link release acceptance, not evidence for a registry or standalone artifact; live provider, official Turso, and Cloud rows are not verified unless their explicit prerequisites are supplied; the TUI remains readline-based and trusted-local.
 
 ---
 

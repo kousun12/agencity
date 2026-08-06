@@ -152,7 +152,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 - Streaming-capable providers emit bounded cursorless progress before an atomic committed response; Echo and explicitly non-streaming providers truthfully report committed-only behavior. Real-provider streaming remains credential-gated.
 - Unknown effects are retained and visible through startup/status plus `unknown` and evidence-only `reconcile` product flows. Reconciliation deliberately does not rewrite the unknown outcome or authorize automatic retry.
 - The on-demand managed workspace service owns detached runs, schedules, and recovery behind the same authenticated loopback protocol, with process fencing and tested client detach/reattach. It is not an OS-login service and has no cross-device execution-owner failover.
-- End-to-end coverage proves clean linked invocation, empty-state/no-ID product entry, selection/resume, autonomous notebook coding cells, streaming and action-boundary recovery, managed detached continuation/reattachment, durable recursive/family calls, cached completion-gate repair, and schedule/wake recovery. The readline TUI remains basic and the broader FU-009 black-box matrix is still incomplete.
+- FU-009 release acceptance now invokes only an isolated `bun link` executable from fresh external repositories. Its guarded black-box matrix covers truthful missing-provider behavior, explicit fixture-model selection, coding cells/tools, durable recursive/family follow-up, failed-gate repair, detach/client loss/service recovery, named head branch/resume/history/tree, distinct JSON run exits, post-commit crash recovery and unknown/no-retry reconciliation, plus refinement, installed skills, streaming, compaction, and schedules. The real-provider, official Turso, and Cloud rows remain explicitly opt-in and may be skipped; the readline TUI remains basic.
 
 ### Deliberately unavailable or deferred
 
@@ -203,6 +203,8 @@ bun test --timeout 30000
 bun run test:unit
 bun run test:integration
 bun run test:e2e
+bun run test:acceptance
+bun run test:acceptance:matrix
 ```
 
 Source-checkout product entrypoint:
@@ -217,6 +219,13 @@ A supported source/link workflow is documented in [`docs/install.md`](./docs/ins
 ## External and gated verification
 
 The default suite may skip external integration tests when their prerequisites are absent. A skipped external test is not evidence that the integration passed in the current environment.
+
+The real-provider installed-product smoke is not part of the deterministic claim and requires explicit opt-in:
+
+```sh
+AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 OPENAI_API_KEY=... AGENCITY_ACCEPTANCE_REAL_MODEL=... \
+  bun run test:acceptance:external
+```
 
 Official Turso Sync server conformance requires an external version-matched binary:
 

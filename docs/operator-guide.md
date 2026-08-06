@@ -72,6 +72,11 @@ agencity new [TASK]
 agencity resume [NAME|ID]
 agencity sessions [--json]
 agencity run TASK                     # run typed autonomous actions and exit
+agencity run --completion-gate 'COMMAND' TASK
+agencity status current [--json]      # latest selected run outcome
+agencity tree [--json]                # retained parent/direct-child roster
+agencity history current [--json]     # retained messages, cells, effects, runs
+agencity branch head [NAME]           # fork selected branch at its committed head
 agencity doctor [--json]
 agencity config
 ```
@@ -80,11 +85,27 @@ Workspace discovery walks upward for explicit `.agencity` or `.git` metadata and
 
 Product state defaults to `<root>/.agencity`, while profile/device preferences default to `~/.agencity/profile.db`. The recent session/branch preference is workspace-scoped. Only one root initial branch may be selected without a preference; multiple plausible roots require an interactive selector or explicit `sessions --select NAME`.
 
-Session and branch labels derive from the first retained task without changing it. Rename a session with `sessions --session ID --name NAME`, or add `--branch ID` to rename one branch. `sessions` shows name, time, model, state, task summary, active goals, unresolved work, and diagnostic IDs.
+Session and branch labels derive from the first retained task without changing it. `branch head NAME` gives a new head fork a human name and selects it without exposing a history position; `resume NAME` reopens a named session or branch. Rename a session with the diagnostic `sessions --session ID --name NAME`, or add `--branch ID` to rename one branch. `sessions` shows name, time, model, state, task summary, active goals, unresolved work, and diagnostic IDs.
+
+### Non-interactive run results and exit status
+
+`agencity run --json TASK` emits exactly one compact `agencity.run-result` version-1 object for an admitted run outcome. Configuration/usage failure emits the existing `agencity.cli-output` error envelope. A detached admission instead emits `agencity.run-accepted` version 1 and intentionally omits opaque run coordinates.
+
+| Run status | Exit status |
+| --- | ---: |
+| `succeeded` | 0 |
+| `failed` | 1 |
+| `blocked` | 4 |
+| `budget_exceeded` | 5 |
+| `unknown` | 7 |
+| `waiting_for_user`, `queued`, or `running` | 8 |
+| `cancelled` | 130 |
+
+`status current --json` renders the same result contract for the latest retained run on the selected branch, which lets automation inspect a recovered outcome without copying an internal identifier. Non-JSON output keeps final text on stdout and distinct non-success descriptions on stderr.
 
 ### Goals, gates, heartbeats, and schedules
 
-Normal product tasks always carry an explicit goal selection policy. `--goal auto` (the default) attaches the current active goal or creates one atomically with the run; `--goal current` refuses when no current goal exists; `--goal create` requires a new goal. Task prose is never inspected to infer this choice. A model `final` action is provisional until required gates pass. Failed or stale gate evidence is delivered once as a bounded repair observation; unknown gate effects terminate visibly.
+Normal product tasks always carry an explicit goal selection policy. `--goal auto` (the default) attaches the current active goal or creates one atomically with the run; `--goal current` refuses when no current goal exists; `--goal create` requires a new goal. Task prose is never inspected to infer this choice. A model `final` action is provisional until required gates pass. Failed or stale gate evidence is delivered once as a bounded repair observation; unknown gate effects terminate visibly. For non-interactive repository verification, `--completion-gate 'COMMAND'` creates a required idempotent shell gate with the task goal. It cannot be combined with `--goal current`. The command runs through the ordinary outbox-backed shell executor at each attributable completion request; it is not executed by the CLI parser.
 
 Inside the TUI, `/goal` and `/goals` show the current/history view, while `/goal create DESCRIPTION`, `/goal pause`, `/goal resume`, `/goal clear`, and `/goal complete` operate without copied IDs. `/heartbeats`, `/heartbeat create MS PROMPT`, and index-based pause/resume/clear commands manage user wakes. `/schedules`, `/schedule once ISO PROMPT`, `/schedule every MS PROMPT`, and index-based lifecycle commands manage one-time and interval prompts. Missed recurring ticks coalesce.
 
@@ -259,7 +280,7 @@ Commands:
 
 The product and diagnostic TUI both use `AgentClient` and the public protocol contract. Product attach uses authenticated loopback HTTP; diagnostic `debug tui`/`tui` uses `InProcessProtocolTransport`, which calls the exact same `ProtocolServer.handle` router rather than private supervisor services. The client snapshots then watches after the last successfully applied committed cursor, deduplicates on reconnect, and clears cursorless progress on commit or disconnect. `/history CURSOR` creates a read-only historical projection while live state continues observationally; `/live` returns to the latest committed state without replaying an effect.
 
-Streaming-capable providers render bounded temporary deltas; the committed model response remains authoritative, and failed/disconnected prefixes are labeled discarded rather than persisted. Echo and other non-streaming providers truthfully report committed responses only. `/unknown` and `/reconcile` inspect and append assessments without retrying or rewriting the unknown outcome. First Ctrl-C requests durable cancellation for an active run; a second Ctrl-C or `/quit` detaches with an explicit warning that external/durable work may outlive the client.
+Streaming-capable providers render bounded temporary deltas; the committed model response remains authoritative, and failed/disconnected prefixes are labeled discarded rather than persisted. Echo and other non-streaming providers truthfully report committed responses only. `/unknown` and `/reconcile` inspect and append assessments without retrying or rewriting the unknown outcome. The non-interactive `agencity reconcile latest ASSESSMENT SUMMARY` form resolves the newest unknown effect inside the selected branch, so ordinary recovery does not require copying an opaque effect identifier. First Ctrl-C requests durable cancellation for an active run; a second Ctrl-C or `/quit` detaches with an explicit warning that external/durable work may outlive the client.
 
 ## Providers
 

@@ -68,6 +68,27 @@ agencity --model openai/MODEL_ID
 
 The key remains process-local. `--model` persists only the provider/model identifiers. `agencity config credential-ref PROVIDER HANDLE LABEL` stores an opaque handle such as `env:OPENAI_API_KEY`, never the referenced value. Use `agencity doctor` for secret-free provider remediation. Echo is a deterministic demo/test fixture and requires `--demo` or a visibly labeled interactive choice.
 
+## Release acceptance from an isolated link
+
+FU-009 release verification never invokes the checkout entry module directly. Each case creates a fresh temporary `HOME` and repository, runs `bun link` with an isolated `BUN_INSTALL`, and invokes that linked `agencity` executable from outside this checkout. A source guard rejects implementation imports, direct runtime clients, LibSQL access, diagnostic session/branch options, and caller-supplied history positions in `test/acceptance/`.
+
+```sh
+bun run test:acceptance
+bun run test:acceptance:matrix
+```
+
+The deterministic suite starts an external loopback OpenAI-compatible endpoint that speaks the strict version-1 action protocol and SSE. It covers missing-provider behavior, explicit model configuration, coding cells and effects, recursive and retained-child work, failed-gate repair, detach/reattach, named head branching, history/tree/status, interruption, recovery, unknown outcomes without retry, reconciliation evidence, refinement, skill installation/testing, compaction, streaming, and scheduled wakes.
+
+The matrix reports `PASS`, `FAIL`, and `SKIP` separately. Live integrations are opt-in:
+
+```sh
+AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 OPENAI_API_KEY=... AGENCITY_ACCEPTANCE_REAL_MODEL=... OPENAI_BASE_URL=https://provider.example/v1   bun run test:acceptance:matrix
+
+TURSO_SYNC_SERVER_BIN=/absolute/path/to/tursodb   bun run test:acceptance:matrix
+```
+
+The real-provider row is `SKIP` unless explicitly enabled with a key and model. The official Turso row is `SKIP` without the external binary, and the real Turso Cloud row remains separately gated by `AGENCITY_TURSO_SMOKE=1` plus disposable credentials. A skipped row is not a pass.
+
 ## Security boundary
 
 All workflows are trusted-local. Model-generated TypeScript and shell commands have the OS authority of the `agencity` process. Linking or installing the executable does not add a hostile-code sandbox.
