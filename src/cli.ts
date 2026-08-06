@@ -33,7 +33,7 @@ import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./proto
 import { Supervisor, type AgentRunResult } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills", "context", "compact"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills", "context", "compact"]);
 
 let activeParsed: ParsedCliArgs | null = null;
 let canonicalHint: { path: AdvancedCommandPath; json: boolean } | null = null;
@@ -52,8 +52,9 @@ try {
     : canonicalHint;
   const code = error instanceof AgentRuntimeError ? error.code : canonical ? "VALIDATION_ERROR" : "CLI_ERROR";
   const message = scrubText(error instanceof Error ? error.message : String(error));
-  if (canonical) {
-    const plan = planCliOutput(createCliErrorEnvelope({ command: canonical.path, code, message }), canonical.json ? "json" : "human");
+  if (canonical || (activeParsed?.command === "run" && activeParsed.flags.has("json"))) {
+    const command = canonical?.path ?? "run";
+    const plan = planCliOutput(createCliErrorEnvelope({ command, code, message }), canonical ? (canonical.json ? "json" : "human") : "json");
     if (plan.stdout !== null) process.stdout.write(`${plan.stdout}\n`);
     if (plan.stderr !== null) process.stderr.write(`${plan.stderr}\n`);
     process.exitCode = plan.exitCode;
@@ -129,6 +130,11 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     if (parsed.command === "config") { await managedConfig(client, parsed); return; }
     if (parsed.command === "sessions") { await managedSessions(client, parsed); return; }
     if (parsed.command === "agents") { printValue(await client.serviceAgents(), parsed.flags.has("json")); return; }
+    if (parsed.command === "tree") {
+      const selected = await client.productSelect();
+      printValue(await client.agents(selected.sessionId, selected.branchId), parsed.flags.has("json"));
+      return;
+    }
     if (parsed.command === "status") { await managedStatus(client, parsed); return; }
     if (parsed.command === "send") { await managedSend(client, parsed); return; }
     if (parsed.command === "stop") { await managedStop(client, parsed); return; }
@@ -137,6 +143,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const existing = await client.productSessions() as ProductBranchSummary[];
     const reconciliationCommand = parsed.command === "unknown" || parsed.command === "reconcile";
     if (reconciliationCommand && existing.length === 0) throw new ValidationError("No retained session is available for effect reconciliation");
+    if ((parsed.command === "branch" || parsed.command === "history") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command}`);
     if (parsed.command === "refine" && existing.length === 0) throw new ValidationError("No retained session is available for trajectory refinement");
     if (parsed.command === "skills" && existing.length === 0) throw new ValidationError("No retained session is available for skill management");
     if ((parsed.command === "context" || parsed.command === "compact") && existing.length === 0) throw new ValidationError("No retained session is available for context management");
@@ -166,7 +173,32 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const providers = await client.modelProviders();
     const available = providers.some(provider => provider.name === summary.model.provider);
     const remediation = available ? null : `Install or configure provider ${summary.model.provider}, then restart the managed service.`;
-    if (!(reconciliationCommand && parsed.flags.has("json"))) printStartup(workspace, summary, available, remediation);
+    if (!parsed.flags.has("json")) printStartup(workspace, summary, available, remediation);
+    if (parsed.command === "branch") {
+      const [position, ...nameParts] = parsed.positionals;
+      if (position !== "head") throw new ValidationError("branch requires `head [NAME]`; low-level point-in-time forks remain under debug branch");
+      const name = nameParts.join(" ").trim() || `branch-${new Date().toISOString().slice(0, 10)}`;
+      const snapshot = await client.snapshot(selection.sessionId, selection.branchId);
+      const forked = await client.fork(selection.sessionId, selection.branchId, snapshot.cursor, name);
+      await client.productSelect(selection.sessionId, forked.branchId);
+      printValue({ created: true, session: summary.sessionName, branch: name, from: "head" }, parsed.flags.has("json"));
+      return;
+    }
+    if (parsed.command === "history") {
+      const target = parsed.positionals.join(" ").trim();
+      if (target && target !== "current") throw new ValidationError("history accepts only `current`; use `resume NAME` before inspecting another named branch");
+      const snapshot = await client.snapshot(selection.sessionId, selection.branchId);
+      printValue({
+        session: summary.sessionName,
+        branch: summary.branchName,
+        status: summary.status,
+        messages: snapshot.state.messages,
+        cells: Object.values(snapshot.state.cells),
+        effects: Object.values(snapshot.state.effects),
+        runs: Object.values(snapshot.state.agentRuns),
+      }, parsed.flags.has("json"));
+      return;
+    }
     if (parsed.command === "unknown") {
       const effectId = parsed.positionals.join(" ").trim();
       printValue(effectId
@@ -175,11 +207,18 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       return;
     }
     if (parsed.command === "reconcile") {
-      const [effectId, assessment, ...summaryParts] = parsed.positionals;
+      let [effectId, assessment, ...summaryParts] = parsed.positionals;
       const summaryText = summaryParts.join(" ").trim();
       if (!effectId || !assessment || !summaryText || !["succeeded", "failed", "no_effect", "still_unknown"].includes(assessment)) {
-        throw new ValidationError("reconcile requires EFFECT_ID succeeded|failed|no_effect|still_unknown SUMMARY");
+        throw new ValidationError("reconcile requires EFFECT_ID|latest succeeded|failed|no_effect|still_unknown SUMMARY");
       }
+      if (effectId === "latest") {
+        const unknown = await client.unknownEffects(selection.sessionId, selection.branchId);
+        const latest = unknown.at(-1);
+        if (!latest) throw new ValidationError("No unknown effect is available to reconcile");
+        effectId = latest.effect.id;
+      }
+      if (!effectId) throw new ValidationError("An unknown effect identity could not be resolved");
       const result = await client.reconcileUnknownEffect(selection.sessionId, selection.branchId, effectId, {
         assessment: assessment as "succeeded" | "failed" | "no_effect" | "still_unknown",
         summary: summaryText,
@@ -231,20 +270,31 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       if (!available) throw new ValidationError(`Run blocked: ${remediation}`);
       const goalMode = option("goal") ?? "auto";
       if (!["auto", "current", "create"].includes(goalMode)) throw new ValidationError("--goal must be auto, current, or create");
-      const input = { task, goalMode: goalMode as "auto" | "current" | "create" };
+      const completionGate = option("completion-gate");
+      if (completionGate && goalMode === "current") throw new ValidationError("--completion-gate creates a goal and cannot be combined with --goal current");
+      const input: ProductRunInput = {
+        task,
+        goalMode: goalMode as "auto" | "current" | "create",
+        ...(completionGate ? { goal: {
+          description: task,
+          completionCriteria: `Required shell verification: ${completionGate}`,
+          gates: [{ name: "CLI completion verification", executor: "shell", operation: "run", input: { command: completionGate }, idempotent: true, required: true }],
+        } } : {}),
+      };
       if (parsed.flags.has("detach")) {
-        const accepted = await client.startRun(selection.sessionId, selection.branchId, input) as AgentRunResult & { accepted?: boolean };
-        console.log(`Run accepted: ${accepted.runId} (detached; the managed service continues after client exit)`);
+        await client.startRun(selection.sessionId, selection.branchId, input);
+        if (parsed.flags.has("json")) console.log(JSON.stringify({ protocol: "agencity.run-accepted", version: 1, accepted: true, detached: true }));
+        else console.log("Run accepted (detached; the managed service continues after client exit)");
         return;
       }
       const result = parsed.command === "run"
         ? await runToTerminalWithInterrupts(client, selection.sessionId, selection.branchId, input)
         : await startAndWaitForRun(client, selection.sessionId, selection.branchId, input);
       if (result === null) return;
+      if (parsed.command === "run") { printProductRunResult(result, parsed.flags.has("json")); return; }
       if (result.status === "succeeded") console.log(result.final ?? "");
       else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
       else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
-      if (parsed.command === "run") return;
     }
 
     if (parsed.command === "attach" || interactive || !task) await attachManagedClient(client, selection.sessionId, selection.branchId);
@@ -428,8 +478,26 @@ async function chooseManagedModel(client: AgentClient, parsed: ParsedCliArgs, in
 }
 
 async function managedStatus(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
-  const agents = await client.serviceAgents() as any[];
   const target = parsed.positionals.join(" ").trim();
+  if (target === "current") {
+    const selected = await client.productSelect();
+    const snapshot = await client.snapshot(selected.sessionId, selected.branchId);
+    const latest = Object.values(snapshot.state.agentRuns).at(-1);
+    if (!latest) throw new ValidationError("The current branch has no agent run outcome");
+    const final = latest.finalMessageId === undefined ? undefined : snapshot.state.messages.find(message => message.id === latest.finalMessageId)?.content;
+    printProductRunResult({
+      runId: latest.id,
+      sessionId: selected.sessionId,
+      branchId: selected.branchId,
+      status: latest.status,
+      steps: latest.steps.length,
+      ...(latest.reason === undefined ? {} : { reason: latest.reason }),
+      ...(latest.finalMessageId === undefined ? {} : { finalMessageId: latest.finalMessageId }),
+      ...(final === undefined ? {} : { final }),
+    }, parsed.flags.has("json"));
+    return;
+  }
+  const agents = await client.serviceAgents() as any[];
   const value = target ? resolveAgentTarget(agents, target) : agents;
   printValue(value, parsed.flags.has("json"));
 }
@@ -456,7 +524,15 @@ function resolveAgentTarget(rows: any[], target: string): any {
   return matches[0];
 }
 
-type ProductRunInput = { readonly task: string; readonly goalMode: "auto" | "current" | "create" };
+type ProductRunInput = {
+  readonly task: string;
+  readonly goalMode: "auto" | "current" | "create";
+  readonly goal?: {
+    readonly description: string;
+    readonly completionCriteria: string;
+    readonly gates: readonly { readonly name: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotent: boolean; readonly required: boolean }[];
+  };
+};
 
 type RunOperation<T> =
   | { readonly kind: "value"; readonly value: T }
@@ -549,6 +625,39 @@ async function manageAutonomyClient(client: AgentClient, sessionId: string, bran
     const items=await client.heartbeats(sessionId,branchId); if(!action){print(items);return;} if(action==="create"){const intervalMs=Number(rest.shift());if(!Number.isSafeInteger(intervalMs)||intervalMs<1)throw new ValidationError("heartbeats create requires positive INTERVAL_MS");print(await client.createHeartbeat(sessionId,branchId,{intervalMs,...(rest.length?{prompt:rest.join(" ")}:{})}));return;} const item=items[Number(rest[0])-1];if(!item)throw new ValidationError("Heartbeat number not found");if(action==="pause")print(await client.pauseHeartbeat(item.heartbeatId));else if(action==="resume")print(await client.resumeHeartbeat(item.heartbeatId));else if(action==="clear")print(await client.cancelHeartbeat(item.heartbeatId));else throw new ValidationError("heartbeats action must be create, pause, resume, or clear");return;
   }
   const items=await client.schedules(sessionId,branchId);if(!action){print(items);return;}if(action==="once"){const at=rest.shift();const prompt=rest.join(" ").trim();if(!at||!prompt)throw new ValidationError("schedules once requires ISO_TIME PROMPT");print(await client.createSchedule(sessionId,branchId,{at,prompt}));return;}if(action==="every"){const intervalMs=Number(rest.shift());const prompt=rest.join(" ").trim();if(!Number.isSafeInteger(intervalMs)||intervalMs<1||!prompt)throw new ValidationError("schedules every requires INTERVAL_MS PROMPT");print(await client.createSchedule(sessionId,branchId,{intervalMs,prompt}));return;}const item=items[Number(rest[0])-1];if(!item)throw new ValidationError("Schedule number not found");if(action==="pause")print(await client.pauseSchedule(item.scheduleId));else if(action==="resume")print(await client.resumeSchedule(item.scheduleId));else if(action==="clear")print(await client.clearSchedule(item.scheduleId));else throw new ValidationError("schedules action must be once, every, pause, resume, or clear");
+}
+
+function productRunExitCode(status: AgentRunResult["status"]): number {
+  switch (status) {
+    case "succeeded": return 0;
+    case "failed": return 1;
+    case "blocked": return 4;
+    case "budget_exceeded": return 5;
+    case "unknown": return 7;
+    case "waiting_for_user":
+    case "queued":
+    case "running": return 8;
+    case "cancelled": return 130;
+  }
+}
+
+function printProductRunResult(result: AgentRunResult, json: boolean): void {
+  const exitCode = productRunExitCode(result.status);
+  if (json) {
+    console.log(JSON.stringify({
+      protocol: "agencity.run-result",
+      version: 1,
+      status: result.status,
+      exitCode,
+      steps: result.steps,
+      ...(result.final === undefined ? {} : { final: result.final }),
+      ...(result.reason === undefined ? {} : { reason: result.reason }),
+      ...(result.pendingInput === undefined ? {} : { pendingInput: { kind: result.pendingInput.kind, question: result.pendingInput.question, permission: result.pendingInput.permission } }),
+    }));
+  } else if (result.status === "succeeded") console.log(result.final ?? "");
+  else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
+  else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
+  process.exitCode = exitCode;
 }
 
 function printValue(value: unknown, json: boolean): void { console.log(json ? JSON.stringify(value, null, 2) : typeof value === "string" ? value : JSON.stringify(value, null, 2)); }
@@ -920,7 +1029,7 @@ function printHelp(): void {
     "",
     ...sections.flatMap((section) => [section, ""]),
     "Common product options:",
-    "  --workspace PATH --model PROVIDER/MODEL --demo --new --detach --json --version --help",
+    "  --workspace PATH --model PROVIDER/MODEL --demo --new --detach --completion-gate COMMAND --json --version --help",
     "Advanced options:",
     "  --session ID --branch ID --cursor N --db PATH --artifacts PATH --workspace-root PATH",
     "  --sync-url URL --replica PATH --scope KIND --scope-id ID --destination PATH",

@@ -186,6 +186,7 @@ export class OutboxRunner {
       idempotencyKey: `effect-attempt:${record.effectId}:${attempt}`,
       payload: { effectId: record.effectId, attempt },
     }]);
+    acceptanceCrashAfterEffectStart(record.executor);
     const executor = this.#executors.get(record.executor);
     const controller = new AbortController();
     this.#controllers.set(record.effectId, controller);
@@ -422,6 +423,13 @@ export class OutboxRunner {
     }
     return { abandonedCellIds, unknownEffectIds, retriedEffectIds };
   }
+}
+
+function acceptanceCrashAfterEffectStart(executor: string): void {
+  if (process.env.AGENCITY_ACCEPTANCE !== "1") return;
+  if (process.env.AGENCITY_ACCEPTANCE_FAILPOINT !== `outbox-started:${executor}`) return;
+  process.stderr.write(`[agencity acceptance failpoint] committed EffectAttemptStarted for ${executor}; exiting service before executor entry\n`);
+  process.exit(86);
 }
 
 export function stableEffectId(sessionId: string, idempotencyKey: string): string {

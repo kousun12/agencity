@@ -323,6 +323,12 @@ export class LibSqlStorage implements AgentStorage {
       throw new ExecutionOwnershipConflictError("Execution workspace fence does not match its retained workspace", { reason: "workspace_mismatch" });
     }
     const roots = new Set<string>();
+    const stagedSessions = new Map(events
+      .filter((event) => event.type === "SessionCreated")
+      .map((event) => {
+        const payload = event.payload as EventPayloads["SessionCreated"];
+        return [event.sessionId, { workspaceId: payload.workspaceId, rootSessionId: payload.parentSessionId ? payload.rootSessionId : event.sessionId }] as const;
+      }));
     let rootCreationOnly = true;
     for (const event of events) {
       if (event.type === "SessionCreated") {
@@ -337,6 +343,15 @@ export class LibSqlStorage implements AgentStorage {
         continue;
       }
       rootCreationOnly = false;
+      const staged = stagedSessions.get(event.sessionId);
+      if (staged) {
+        if (staged.workspaceId !== workspaceId) {
+          throw new ExecutionOwnershipConflictError("Execution write targets another workspace", { reason: "workspace_mismatch", workspaceId: staged.workspaceId });
+        }
+        if (!staged.rootSessionId) throw new ValidationError("Staged child session is missing rootSessionId");
+        roots.add(staged.rootSessionId);
+        continue;
+      }
       const session = await tx.execute({ sql: "SELECT workspace_id,session_id,root_session_id FROM sessions WHERE session_id=?", args: [event.sessionId] });
       const row = session.rows[0];
       if (!row) throw new NotFoundError("session", event.sessionId);

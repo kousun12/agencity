@@ -6,7 +6,7 @@ import {
 } from "./cli/advanced.ts";
 
 export const PRODUCT_CLI_COMMANDS = [
-  "product", "help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules",
+  "product", "help", "version", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules",
   "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills", "context", "compact",
 ] as const;
 export const LEGACY_CLI_COMMANDS = [
@@ -20,7 +20,7 @@ const PRODUCT_ROUTE_COMMANDS = new Set<string>(PRODUCT_CLI_COMMANDS.filter((item
 const VALUE_OPTIONS = new Set([
   "state-dir", "db", "artifacts", "workspace-root", "workspace",
   "session", "branch", "cursor", "name", "select", "model", "goal", "port", "profile", "sync-url", "replica", "credential-ref", "sync-interval",
-  "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by", "reconciliation-id", "evidence", "strategy", "from-context",
+  "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by", "reconciliation-id", "evidence", "strategy", "from-context", "completion-gate",
 ]);
 const BOOLEAN_OPTIONS = new Set([
   "help", "version", "new", "demo", "json", "detach", "restart-console-after-cell", "exclusive-artifacts",

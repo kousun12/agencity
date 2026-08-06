@@ -320,7 +320,7 @@ export class Supervisor {
     this.schedules = new ScheduleService(storage);
     this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox, artifacts, this.memory);
     this.restartConsoleAfterCell = restartConsoleAfterCell;
-    this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), 128, this.compactions, modelExecutor);
+    this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), acceptanceAgentRunMaxSteps(), this.compactions, modelExecutor);
     this.effectReconciliation = new EffectReconciliationService(storage);
     this.refiner = new RefinerService(storage, this.models, this.harness, profile, userScopeKey);
     this.skillManagement = new SkillManagementService(storage, profile, this.harness, this.skills, this.refiner, userScopeKey, device.profileId);
@@ -964,6 +964,15 @@ export class Supervisor {
       if (this.restartConsoleAfterCell) await this.console.stop();
     }
   }
+}
+
+function acceptanceAgentRunMaxSteps(): number {
+  if (process.env.AGENCITY_ACCEPTANCE !== "1") return 128;
+  const raw = process.env.AGENCITY_ACCEPTANCE_MAX_RUN_STEPS;
+  if (raw === undefined) return 128;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 128) throw new ValidationError("AGENCITY_ACCEPTANCE_MAX_RUN_STEPS must be an integer from 1 to 128");
+  return value;
 }
 
 function adjacentFileUrl(databaseUrl: string, suffix: string): string {

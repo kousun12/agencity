@@ -635,6 +635,7 @@ export class AgentRunService {
       idempotencyKey: `agent-run-action:${step.actionId}`,
       payload: { runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId, callId: attempt.callId, raw, action },
     }]);
+    acceptanceCrashAfterActionCommit(step.ordinal);
   }
 
   #actionApplied(state: AgentState, run: AgentRunState, actionId: string, action: AgentAction): boolean {
@@ -939,6 +940,13 @@ export class AgentRunService {
       ...(pendingInput === undefined ? {} : { pendingInput }),
     };
   }
+}
+
+function acceptanceCrashAfterActionCommit(ordinal: number): void {
+  if (process.env.AGENCITY_ACCEPTANCE !== "1") return;
+  if (process.env.AGENCITY_ACCEPTANCE_FAILPOINT !== `agent-action-committed:${ordinal}`) return;
+  process.stderr.write(`[agencity acceptance failpoint] committed AgentRunActionCommitted for step ${ordinal}; exiting service before action application\n`);
+  process.exit(86);
 }
 
 function agentProviderContext(

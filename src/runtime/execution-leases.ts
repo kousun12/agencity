@@ -201,6 +201,12 @@ export class ManagedExecutionLeaseCoordinator {
     this.#assertLive();
     if (!events.length) throw new ValidationError("Cannot fence an empty event append");
     const rootIds = new Set<string>();
+    const stagedRoots = new Map(events
+      .filter((event) => event.type === "SessionCreated")
+      .map((event) => {
+        const payload = event.payload as { parentSessionId?: string; rootSessionId?: string };
+        return [event.sessionId, payload.parentSessionId ? payload.rootSessionId : event.sessionId] as const;
+      }));
     let onlyNewRoot = true;
     for (const event of events) {
       if (event.type === "SessionCreated") {
@@ -211,7 +217,9 @@ export class ManagedExecutionLeaseCoordinator {
         if (payload.parentSessionId) onlyNewRoot = false;
       } else {
         onlyNewRoot = false;
-        rootIds.add(await this.#rootForSession(event.sessionId));
+        const stagedRoot = stagedRoots.get(event.sessionId);
+        if (stagedRoot) rootIds.add(stagedRoot);
+        else rootIds.add(await this.#rootForSession(event.sessionId));
       }
     }
     if (rootIds.size !== 1) throw new ExecutionOwnershipConflictError("One fenced append cannot cross root trees", { reason: "cross_root_write", roots: [...rootIds].sort() });
