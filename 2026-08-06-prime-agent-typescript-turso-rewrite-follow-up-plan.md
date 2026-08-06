@@ -73,10 +73,10 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-002 | Add workspace discovery and human session resume/selection | Done | FU-001 |
 | FU-003 | Add explicit provider and model onboarding | Done | FU-001, FU-002 |
 | FU-004 | Implement the autonomous typed TypeScript agent-run loop | Done | FU-003, FU-011, FU-013 |
-| FU-005 | Turn the TUI into the complete protocol-backed product client | In progress | FU-001, FU-002, FU-004, FU-012, FU-015 |
-| FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | In progress | FU-004, FU-005, FU-015 |
+| FU-005 | Turn the TUI into the complete protocol-backed product client | Done | FU-001, FU-002, FU-004, FU-012, FU-015 |
+| FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | Done | FU-004, FU-005, FU-015 |
 | FU-007 | Provide a real installation and executable workflow | Done | FU-001 |
-| FU-008 | Reorganize low-level CLI operations as advanced surfaces without breaking compatibility | In progress | FU-001, FU-005 |
+| FU-008 | Reorganize low-level CLI operations as advanced surfaces without breaking compatibility | Done | FU-001, FU-005 |
 | FU-009 | Add product-level end-to-end acceptance coverage | Proposed | FU-001–FU-008, FU-011–FU-019 |
 | FU-010 | Add repository-level purpose and implementation guidance | Done | — |
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
@@ -326,7 +326,7 @@ The agent-facing TypeScript SDK should expose the parent PRD's intended general 
 
 ## FU-005 — Turn the TUI into the complete protocol-backed product client
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -357,11 +357,19 @@ The TUI becomes the default terminal product and projects the same public snapsh
 - Real incremental provider output is displayed when supported; providers without it report the limitation honestly.
 - Historical viewing and return to live state never repeats an effect.
 
+
+### Completion evidence
+
+- Commits: `ab17e18`, `dee7118`, `c570c09`, and `11cb70d`.
+- Implementation: shared HTTP/in-process router transport, typed client errors and cursor-safe watcher, protocol-only TUI with live/historical projections, palette/status/cells/autonomy/operations, provisional progress, and trusted-local/capability presentation.
+- Verification: full verify passed 576 tests with 2 external skips; transport/TUI focused suites passed. Independent review validated router equivalence, cursor races/dedupe and no Supervisor/storage dependency; command-error/SSE cleanup defects were fixed and re-review passed.
+- Remaining limitation: readline presentation is intentionally basic; managed lifecycle is supplied by FU-015.
+
 ---
 
 ## FU-006 — Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -388,6 +396,14 @@ Users can stop, detach, resume, and reconcile work while the interface accuratel
 - The UI never labels process exit as confirmed external cancellation.
 - Unknown non-idempotent work is never retried by resume alone.
 - Cancellation recovery remains leaf-first and preserves its first reason.
+
+
+### Completion evidence
+
+- Commits: `ab17e18`, `4c0adbc`, and `11cb70d`.
+- Implementation: append-only effect reconciliation evidence, unknown inspection/no-ID CLI, recovery summary, durable cancel-versus-detach semantics, first/second interrupt handling, and truthful managed/embedded warnings. Reconciliation never rewrites or retries the original unknown effect.
+- Verification: reconciliation reducer/rebuild/protocol/CLI and SIGINT tests passed; independent review and re-review passed after command and cancellation errors were made scrubbed/non-fatal.
+- Remaining limitation: reconciliation records user assessments rather than proving external truth; successor work remains an explicit new run.
 
 ---
 
@@ -432,7 +448,7 @@ Development and installed workflows both expose the same memorable product entry
 
 ## FU-008 — Reorganize low-level CLI operations as advanced surfaces without breaking compatibility
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -463,6 +479,14 @@ agencity data export|delete
 - No destructive command becomes easier to invoke accidentally.
 - Product help can be understood without first learning sessions, branches, or cursors.
 - Advanced JSON output remains stable and versioned where used programmatically.
+
+
+### Completion evidence
+
+- Commits: `2d0e15c`, `dee7118`, and `11cb70d`.
+- Implementation: canonical `debug`, `sync`, and `data` groups; deterministic task ambiguity; silent compatibility aliases; version-1 JSON envelopes/exit classes; and unchanged destructive confirmation/ownership guards.
+- Verification: 29 pure parser/output tests plus runtime alias/help/delete tests; full verify and independent differential review passed. Legacy `--goal` split-form classification was restored before final re-review.
+- Remaining limitation: compatibility aliases remain for one documented window and intentionally preserve their historical raw output.
 
 ---
 
