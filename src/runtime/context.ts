@@ -66,7 +66,7 @@ export class ContextMaterializer {
     for (const goal of Object.values(state.goals)) add(events.find((event) => event.id === goal.eventId),"current autonomous goal");
     for (const heartbeat of Object.values(state.heartbeats)) add(events.find((event) => event.id === heartbeat.eventId),"scheduled heartbeat");
     for (const handle of Object.values(state.recursiveModels)) add(events.find((event) => event.id === handle.eventId),"recursive model handle");
-    const activity = events.filter((event) => ["EffectOutcomeRecorded","CellCommitted","CellFailed","TaskStatusChanged","GoalGateStatusChanged","RefinementObservationRecorded","RefinementDecided"].includes(event.type)).slice(-this.maxRecentRecords);
+    const activity = events.filter((event) => ["EffectOutcomeRecorded","EffectReconciliationRecorded","CellCommitted","CellFailed","TaskStatusChanged","GoalGateStatusChanged","RefinementObservationRecorded","RefinementDecided"].includes(event.type)).slice(-this.maxRecentRecords);
     for (const event of activity) add(event,"recent durable activity");
 
     const latestPrompt = [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
@@ -113,6 +113,7 @@ export class ContextMaterializer {
       budget: state.budget,
       goal: Object.values(state.goals).find((goal) => !["completed","failed","cancelled"].includes(goal.status)) ?? null,
       tasks:Object.values(state.tasks),mailbox:Object.values(state.mailbox),terminalNotices:Object.values(state.terminalNotices),recursiveModels:Object.values(state.recursiveModels),
+      unknownEffectReconciliations:Object.values(state.effectReconciliations),
       documents:Object.values(state.documents).map((document)=>({id:document.id,name:document.name,mediaType:document.mediaType,size:document.size,digest:document.digest,chunkCount:document.chunkCount})),
       inputSets:Object.values(state.inputSets),heartbeats:Object.values(state.heartbeats),
       harness: {

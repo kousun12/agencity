@@ -24,6 +24,7 @@ export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   EffectRequested: "non-material",
   EffectAttemptStarted: "non-material",
   EffectOutcomeRecorded: "file-effect",
+  EffectReconciliationRecorded: "non-material",
   ContextMaterialized: "non-material",
   ModelCallRequested: "non-material",
   ModelOutputChunk: "non-material",

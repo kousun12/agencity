@@ -10,7 +10,7 @@ export const eventTypes = [
   "SessionCreated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
   "WorkingValueSet", "ArtifactRegistered", "EffectRequested", "EffectAttemptStarted",
-  "EffectOutcomeRecorded", "ContextMaterialized", "ModelCallRequested", "ModelOutputChunk",
+  "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ContextMaterialized", "ModelCallRequested", "ModelOutputChunk",
   "ModelCallCompleted", "ModelCallTerminated", "BudgetDebited", "BudgetExceeded", "RecoveryPerformed",
   "TaskCreated", "SubagentAdmitted", "TaskStatusChanged", "SubagentCancellationRequested", "TaskUsageAttributed",
   "MailboxMessageSent", "MailboxMessageDelivered", "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged",
@@ -74,6 +74,7 @@ export interface EventPayloads {
   EffectRequested: { effectId: string; executor: string; operation: string; input: JsonValue; idempotencyKey: string; idempotent: boolean };
   EffectAttemptStarted: { effectId: string; attempt: number };
   EffectOutcomeRecorded: { effectId: string; attempt: number; outcome: EffectOutcome; output?: JsonValue; error?: string; observedAt: string };
+  EffectReconciliationRecorded: { reconciliationId: string; effectId: string; assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; summary: string; evidence?: JsonValue; recordedBy: string; recordedAt: string };
   ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue };
   ModelCallRequested: { callId: string; contextId: string; effectId: string; provider: string; model: string };
   ModelOutputChunk: { callId: string; sequence: number; text: string };
@@ -194,6 +195,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   EffectRequested: z.object({ effectId: id, executor: id, operation: id, input: jsonValueSchema, idempotencyKey: id, idempotent: z.boolean() }),
   EffectAttemptStarted: z.object({ effectId: id, attempt: positiveInteger }),
   EffectOutcomeRecorded: z.object({ effectId: id, attempt: positiveInteger, outcome: z.enum(["succeeded", "failed", "cancelled", "unknown"]), output: jsonValueSchema.optional(), error: z.string().optional(), observedAt: dateTime }),
+  EffectReconciliationRecorded: z.object({ reconciliationId: id, effectId: id, assessment: z.enum(["succeeded", "failed", "no_effect", "still_unknown"]), summary: z.string().min(1).max(16384), evidence: jsonValueSchema.optional(), recordedBy: id, recordedAt: dateTime }).strict(),
   ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional() }),
   ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, provider: id, model: id }),
   ModelOutputChunk: z.object({ callId: id, sequence: z.number().int().nonnegative(), text: z.string() }),

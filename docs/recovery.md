@@ -77,15 +77,19 @@ File write helps make retry safe by writing atomically, accepting an expected pr
 
 ## Manual reconciliation of unknown outcomes
 
-Slice 1 surfaces unknown effects in history/snapshot but has no dedicated reconciliation/approval command. Until one exists:
+Unknown effects are first-class inspectable state. The product client summarizes them at startup and exposes:
 
-1. stop automatic/manual attempts for the same logical action;
-2. inspect the effect ID, input, attempts, timestamps, and idempotency key in canonical history;
-3. query the external system using its own stable request/resource identifiers;
-4. obtain user direction if the effect cannot be established;
-5. submit a **new, explicitly chosen** compensating or retry operation with a new logical idempotency key only when safe.
+```sh
+agencity unknown                       # selected branch
+agencity unknown <EFFECT_ID>
+agencity reconcile <EFFECT_ID> still_unknown "provider audit is inconclusive"
+```
 
-Do not edit the `events` or `outbox` table to turn unknown into success. A future reconciliation API must append attributable evidence/events rather than rewrite retained history.
+The TUI equivalents are `/unknown [EFFECT_ID]` and `/reconcile EFFECT_ID succeeded|failed|no_effect|still_unknown SUMMARY`. Protocol clients use `GET .../effects/unknown`, `GET .../effects/:effect/reconciliation`, and `POST .../effects/:effect/reconciliation`.
+
+A reconciliation appends `EffectReconciliationRecorded` with an attributable operator identity, assessment, summary, optional JSON evidence, and stable reconciliation ID. Repeating the same ID and durable meaning returns the existing assessment; changed meaning conflicts. The event is evidence only: it does **not** replace `EffectOutcomeRecorded`, update the outbox row, change the projected effect from `unknown`, or execute/retry anything. Resume and reconnect likewise never retry an unknown non-idempotent effect. A separately chosen successor operation must receive a new logical idempotency key and should be started only after the operator determines it is safe.
+
+Do not edit the `events` or `outbox` table to turn unknown into success.
 
 ## Guarantees and limits
 

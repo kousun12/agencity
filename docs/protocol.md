@@ -11,15 +11,16 @@ Neither protocol is an authentication or sandbox boundary.
 
 Ordinary product commands discover or start a per-workspace `ManagedWorkspaceService` on demand. It binds an ephemeral `127.0.0.1` port, publishes an owner-only manifest, and requires `Authorization: Bearer …` on every route, including `/health` and SSE. The token is read from the 0600 manifest and is never passed in argv or printed. Authenticated health returns workspace/service identity, application and protocol versions, and the secret-free configuration hash used during discovery.
 
-`bun run src/cli.ts serve --port 3131` remains an advanced embedded diagnostic. It binds `127.0.0.1` but intentionally has no bearer/discovery/process-lease lifecycle. Exposing either server beyond loopback is unsupported without an independently authenticated boundary.
+`bun run src/cli.ts debug protocol-serve --port 3131` remains an advanced embedded diagnostic. It binds `127.0.0.1` but intentionally has no bearer/discovery/process-lease lifecycle. Exposing either server beyond loopback is unsupported without an independently authenticated boundary.
 
-All successful non-streaming responses are JSON. Domain errors use HTTP 400 and `{ "error": { "code", "message" } }`; unexpected failures use HTTP 500 and code `INTERNAL`; unknown routes use HTTP 404.
+All successful non-streaming responses are JSON. Failures use the typed, scrubbed shape `{ "error": { "code", "message", "details" } }`; domain errors map to 400/404/409/424/501, unexpected failures use HTTP 500 and code `INTERNAL`, and unknown routes use HTTP 404. `AgentClient` raises the same `ProtocolClientError { code, status, details }` through HTTP and in-process transports.
 
 ### Endpoints
 
 | Method and path | Input | Result |
 |---|---|---|
 | `GET /health` | none | authenticated managed identity/version/config health (or basic embedded health) |
+| `GET /capabilities` | none | v1 trusted-local, snapshot/resume, progress, historical projection, sync, service/catalog, and provider capability descriptor |
 | `GET /service/status` | none | managed lifecycle, recovery, and resident-root worker states |
 | `POST /service/shutdown` | none | accepted graceful drain; it does not cancel sessions |
 | `GET /service/agents` | none | named root sessions and running/idle/detached state |
@@ -28,6 +29,10 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 | `POST /sessions` | `{ workspaceId?, model?, budget? }` | `{ sessionId, branchId }` |
 | `GET /sessions/:session/snapshot?branch=:branch` | none | `{ cursor, state }` |
 | `GET /sessions/:session/history?branch=:branch` | none | ordered `AgentEvent[]` including branch lineage |
+| `GET /sessions/:session/recovery-summary?branch=:branch` | none | pending/unknown effects, active/cancelling runs and children, gate attention, and terminal notices |
+| `GET /sessions/:session/effects/unknown?branch=:branch` | none | unknown effects plus append-only assessments and safe actions (`retryAllowed: false`) |
+| `GET /sessions/:session/effects/:effect/reconciliation?branch=:branch` | none | one unknown effect and its assessment history |
+| `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | `{ reconciliationId?, assessment, summary, evidence?, recordedBy }` | append-only evidence; effect stays unknown and `retried` is false |
 | `GET /sessions/:session/stream?branch=:branch&after=:cursor` | none | `text/event-stream` committed events plus cursorless ephemeral progress |
 | `POST /sessions/:session/messages?branch=:branch` | `{ content }` | committed user `AgentEvent` |
 | `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalMode?, goalId? }` | managed: durable `202 accepted` with run ID/cursor and resident advancement; embedded: advances through terminal or waiting boundary |
@@ -75,6 +80,12 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 For snapshot/history/stream, the branch may alternatively occupy the fourth path segment, but the query parameter is the documented form. Slice 2 commands require `?branch=`. Family targets are URL-decoded and resolve only within the caller's parent/direct-child/sibling roster; sender identity is the path session/branch and body aliases cannot replace it. Mailbox pages sort newest-first by committed send time plus stable ID, use opaque base64url cursors, and report `queued`, `delivered_to_context`, `acknowledged`, or `failed` receipts with relationship/name/task/artifact/reply provenance. A rejected request returns the ordinary typed protocol error and commits no mailbox row.
 
 Mailbox family/task/artifact authorization, UTF-8/rate/pending bounds, document scope, spent-plus-active tree budgets, recoverable cancellation propagation, durable goal workspace pins, shared provider concurrency, and early-heartbeat rejection are enforced by the same domain services used in-process; transport routing does not weaken them. Domain/storage validation remains authoritative.
+
+### Contract-identical transports
+
+`HttpProtocolTransport` sends loopback requests and owner bearer headers. `InProcessProtocolTransport` constructs a standard `Request` and invokes the same public `ProtocolServer.handle` router; it is not a private `Supervisor` adapter. A shared conformance suite covers JSON bodies, capabilities, typed failures, snapshots/history, and unknown-effect routes through both transports. Body detection uses `request.body`, because an in-process `Request` has no transport-generated content-length header.
+
+`AgentClient.watchBranch` performs snapshot-then-stream, applies committed callbacks serially, advances its reconnect cursor only after a handler successfully applies the event, ignores duplicate/older cursors, and reconnects from that cursor. Cursorless progress is temporary: it is discarded on a committed effect outcome, disconnect, or reconnect and is never replayed as history.
 
 ### Snapshot then SSE
 

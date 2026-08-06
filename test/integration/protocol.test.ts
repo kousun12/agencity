@@ -29,7 +29,7 @@ describe("HTTP domain error mapping", () => {
       });
       expect(missing.status).toBe(404);
       expect(await missing.json()).toEqual({
-        error: { code: "NOT_FOUND", message: "session not found: missing" },
+        error: { code: "NOT_FOUND", message: "session not found: missing", details: { kind: "session", id: "missing" } },
       });
 
       const invalid = await fetch(

@@ -25,11 +25,11 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     const parentBranchId = p.parentBranchId ?? null;
     if ((parentSessionId === null) !== (parentBranchId === null)) throw new ValidationError("Session ancestry requires both parent IDs");
     return {
-      reducerVersion: 3, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
+      reducerVersion: 4, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
       parentSessionId, parentBranchId, rootSessionId: p.rootSessionId ?? event.sessionId,
       depth: p.depth ?? 0, taskId: p.taskId ?? null,
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
-      status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, contexts: {}, modelCalls: {},
+      status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, contexts: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
       tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, agentRuns: {},
     };
@@ -53,6 +53,17 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "EffectRequested": { const p = event.payload as EventPayloads["EffectRequested"]; if (state.effects[p.effectId]) throw new InvalidTransitionError("effect", state.effects[p.effectId]!.status, "requested"); const effect: EffectState = { id: p.effectId, executor: p.executor, operation: p.operation, input: p.input, idempotencyKey: p.idempotencyKey, idempotent: p.idempotent, attempts: 0, status: "requested", eventId: event.id }; return { ...next, effects: { ...state.effects, [p.effectId]: effect } }; }
     case "EffectAttemptStarted": { const p = event.payload as EventPayloads["EffectAttemptStarted"]; const old = state.effects[p.effectId]; if (!old || !["requested", "started"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("effect", old?.status ?? "missing", "started"); return { ...next, effects: { ...state.effects, [p.effectId]: { ...old, status: "started", attempts: p.attempt, eventId: event.id } } }; }
     case "EffectOutcomeRecorded": { const p = event.payload as EventPayloads["EffectOutcomeRecorded"]; const old = state.effects[p.effectId]; if (!old || !["requested", "started"].includes(old.status) || p.attempt < Math.max(1, old.attempts)) throw new InvalidTransitionError("effect", old?.status ?? "missing", p.outcome); const updated: EffectState = { ...old, status: p.outcome, attempts: Math.max(old.attempts, p.attempt), eventId: event.id, ...(p.output === undefined ? {} : { output: p.output }), ...(p.error === undefined ? {} : { error: p.error }) }; return { ...next, effects: { ...state.effects, [p.effectId]: updated } }; }
+    case "EffectReconciliationRecorded": {
+      const p = event.payload as EventPayloads["EffectReconciliationRecorded"];
+      const effect = state.effects[p.effectId];
+      if (!effect || effect.status !== "unknown") throw new InvalidTransitionError("effectReconciliation", effect?.status ?? "missing", p.assessment);
+      if (state.effectReconciliations[p.reconciliationId]) throw new InvalidTransitionError("effectReconciliation", "existing", "recorded");
+      return { ...next, effectReconciliations: { ...state.effectReconciliations, [p.reconciliationId]: {
+        id: p.reconciliationId, effectId: p.effectId, assessment: p.assessment, summary: p.summary,
+        ...(p.evidence === undefined ? {} : { evidence: p.evidence }), recordedBy: p.recordedBy,
+        recordedAt: p.recordedAt, eventId: event.id,
+      } } };
+    }
     case "ContextMaterialized": { const p = event.payload as EventPayloads["ContextMaterialized"]; if (state.contexts[p.contextId]) throw new InvalidTransitionError("context", "materialized", "materialized"); return { ...next, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records, contentHash: p.contentHash, eventId: event.id } } }; }
     case "ModelCallRequested": { const p = event.payload as EventPayloads["ModelCallRequested"]; if (!state.contexts[p.contextId] || state.modelCalls[p.callId]) throw new InvalidTransitionError("modelCall", state.modelCalls[p.callId]?.status ?? "missing-context", "requested"); const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, provider: p.provider, model: p.model, chunks: [], status: "requested", eventId: event.id }; return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } }; }
     case "ModelOutputChunk": { const p = event.payload as EventPayloads["ModelOutputChunk"]; const old = state.modelCalls[p.callId]; if (!old || old.status !== "requested" || p.sequence !== old.chunks.length) throw new InvalidTransitionError("modelCall", old?.status ?? "missing", "streaming"); return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, chunks: [...old.chunks, p.text], eventId: event.id } } }; }

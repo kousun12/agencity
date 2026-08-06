@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { AgentRuntimeError } from "../domain/index.ts";
 import type { AgentRunResult, StartAgentRunInput } from "../runtime/index.ts";
-import { scrubText } from "../security/scrub.ts";
+import { scrubJson, scrubText } from "../security/scrub.ts";
 import type { Supervisor } from "../runtime/index.ts";
 
 export interface ProtocolServiceHooks {
@@ -39,12 +39,13 @@ export class ProtocolServer {
 
   listen(port = 0, hostname = "127.0.0.1"): ReturnType<typeof Bun.serve> {
     if (this.#server) return this.#server;
-    this.#server = Bun.serve({ port, hostname, fetch: (request) => this.#fetch(request) });
+    this.#server = Bun.serve({ port, hostname, fetch: (request) => this.handle(request) });
     return this.#server;
   }
   stop(): void { this.#server?.stop(); this.#server = null; }
 
-  async #fetch(request: Request): Promise<Response> {
+  /** Public router used identically by HTTP and InProcessProtocolTransport. */
+  async handle(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url); const parts = url.pathname.split("/").filter(Boolean);
       if (this.options.bearerToken && !authorized(request, this.options.bearerToken)) {
@@ -54,6 +55,16 @@ export class ProtocolServer {
         ok: true, mode: "trusted-local", authenticated: Boolean(this.options.bearerToken),
         ...(this.options.service?.health ?? {}),
         ...(this.options.service ? { ready: this.options.service.ready?.() ?? true } : {}),
+      }, { headers: { "cache-control": "no-store" } });
+      if (request.method === "GET" && url.pathname === "/capabilities") return Response.json({
+        protocol: "agencity.protocol", version: 1, mode: "trusted-local",
+        trustedLocal: true, hostileCodeSandbox: false,
+        snapshotCursorResume: true, committedEventDeduplication: true,
+        cursorlessProgress: true, historicalProjection: true,
+        managedService: Boolean(this.options.service),
+        productCatalog: Boolean(this.options.service?.productSessions),
+        sync: this.supervisor.sync.capabilities,
+        providers: this.supervisor.modelExecutor.providers(),
       }, { headers: { "cache-control": "no-store" } });
       if (this.options.service) {
         if (request.method === "GET" && url.pathname === "/service/status") return Response.json(await this.options.service.status());
@@ -134,6 +145,12 @@ export class ProtocolServer {
         if (request.method === "POST" && parts[2] === "branches" && branchId) { const body = await jsonBody(request); return Response.json({ branchId: await this.supervisor.fork(sessionId, branchId, String(body.cursor), typeof body.name === "string" ? body.name : undefined) }); }
         if (request.method === "POST" && parts[2] === "resume" && branchId) return Response.json(await this.supervisor.resume(sessionId,branchId));
         if (request.method === "POST" && parts[2] === "compact" && branchId) return Response.json(await this.supervisor.compact(sessionId,branchId));
+        if (request.method === "GET" && parts[2] === "recovery-summary" && branchId) return Response.json(await this.supervisor.effectReconciliation.recoverySummary(sessionId, branchId));
+        if (parts[2] === "effects" && branchId) {
+          if (request.method === "GET" && parts[3] === "unknown") return Response.json(await this.supervisor.effectReconciliation.listUnknown(sessionId, branchId));
+          if (parts[3] && request.method === "GET" && parts[4] === "reconciliation") return Response.json(await this.supervisor.effectReconciliation.inspect(sessionId, branchId, decodeURIComponent(parts[3])));
+          if (parts[3] && request.method === "POST" && parts[4] === "reconciliation") return Response.json(await this.supervisor.effectReconciliation.record(sessionId, branchId, decodeURIComponent(parts[3]), await jsonBody(request) as any), { status: 201 });
+        }
 
         // Slice 3 relational memory, measured harness refinement, exact skill
         // versions, and pinned reusable subagent specifications.
@@ -206,7 +223,11 @@ export class ProtocolServer {
       return Response.json({ error: { code: "NOT_FOUND", message: "Route not found" } }, { status: 404 });
     } catch (error) {
       const status = httpStatus(error);
-      return Response.json({ error: { code: error instanceof AgentRuntimeError ? error.code : "INTERNAL", message: scrubText(error instanceof Error ? error.message : String(error)) } }, { status });
+      return Response.json({ error: {
+        code: error instanceof AgentRuntimeError ? error.code : "INTERNAL",
+        message: scrubText(error instanceof Error ? error.message : String(error)),
+        details: protocolErrorDetails(error),
+      } }, { status });
     }
   }
 
@@ -260,8 +281,17 @@ function authorized(request: Request, expected: string): boolean {
 }
 
 async function jsonBody(request: Request): Promise<Record<string, unknown>> {
-  if (!request.headers.get("content-length") && !request.headers.get("transfer-encoding")) return {};
+  // Constructed in-process Requests do not receive transport-generated
+  // content-length/transfer-encoding headers. Body presence is the shared
+  // semantic boundary for both transports.
+  if (request.body === null) return {};
   return await request.json() as Record<string, unknown>;
+}
+
+function protocolErrorDetails(error: unknown): unknown {
+  if (!(error instanceof AgentRuntimeError) || !error.details) return null;
+  try { return scrubJson(JSON.parse(JSON.stringify(error.details)) as any); }
+  catch { return null; }
 }
 
 function httpStatus(error: unknown): number {

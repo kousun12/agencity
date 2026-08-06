@@ -56,6 +56,7 @@ import { SkillService } from "./skills.ts";
 import { SubagentSpecService } from "./specs.ts";
 import { AgentRunService } from "./agent-runs.ts";
 import { ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "./execution-leases.ts";
+import { EffectReconciliationService } from "./effect-reconciliation.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -265,6 +266,7 @@ export class Supervisor {
   readonly skills: SkillService;
   readonly specs: SubagentSpecService;
   readonly runs: AgentRunService;
+  readonly effectReconciliation: EffectReconciliationService;
   /** Process-local executor/provider catalog; descriptors contain no credential material. */
   readonly modelExecutor: ModelExecutor;
   readonly restartConsoleAfterCell: boolean;
@@ -312,6 +314,7 @@ export class Supervisor {
     this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox, artifacts, this.memory);
     this.restartConsoleAfterCell = restartConsoleAfterCell;
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this));
+    this.effectReconciliation = new EffectReconciliationService(storage);
     this.schedules.attachRunService(this.runs);
     this.agents.attachRunService(this.runs);
     this.runs.setBoundaryObserver((sessionId, branchId, runId) => this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId).then(() => {}));

@@ -11,6 +11,7 @@ export interface MessageState { readonly id: string; readonly role: "system" | "
 export interface CellState { readonly id: string; readonly code: string; readonly status: "proposed" | "running" | "committed" | "failed" | "abandoned"; readonly attempts: number; readonly result?: JsonValue; readonly logs: string[]; readonly error?: string; readonly eventId: string; }
 export interface WorkingValueState { readonly name: string; readonly version: number; readonly value: WorkingValue; readonly eventId: string; }
 export interface EffectState { readonly id: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotencyKey: string; readonly idempotent: boolean; readonly attempts: number; readonly status: "requested" | "started" | EffectOutcome; readonly output?: JsonValue; readonly error?: string; readonly eventId: string; }
+export interface EffectReconciliationState { readonly id: string; readonly effectId: string; readonly assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; readonly summary: string; readonly evidence?: JsonValue; readonly recordedBy: string; readonly recordedAt: string; readonly eventId: string; }
 export interface ModelCallState { readonly id: string; readonly contextId: string; readonly effectId: string; readonly provider: string; readonly model: string; readonly chunks: string[]; readonly status: "requested" | EffectOutcome; readonly responseMessageId?: string; readonly finishReason?: string; readonly usage?: Usage; readonly error?: string; readonly eventId: string; }
 export interface ContextState { readonly id: string; readonly records: ContextRecordReference[]; readonly contentHash: string; readonly eventId: string; }
 export interface BudgetState { readonly limits: BudgetLimits; readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number; readonly exceeded: boolean; }
@@ -68,12 +69,12 @@ export interface AgentRunState {
 }
 
 export interface AgentState {
-  readonly reducerVersion: 3; readonly sessionId: string; readonly workspaceId: string; readonly sessionName?: string | null; readonly branch: BranchState;
+  readonly reducerVersion: 4; readonly sessionId: string; readonly workspaceId: string; readonly sessionName?: string | null; readonly branch: BranchState;
   readonly parentSessionId: string | null; readonly parentBranchId: string | null; readonly rootSessionId: string;
   readonly depth: number; readonly taskId: string | null;
   readonly model: ModelConfiguration; readonly status: SessionStatus; readonly cursor: string; readonly appliedEventIds: string[];
   readonly messages: MessageState[]; readonly cells: Record<string, CellState>; readonly workingValues: Record<string, WorkingValueState>;
-  readonly artifacts: Record<string, ArtifactReference>; readonly effects: Record<string, EffectState>; readonly contexts: Record<string, ContextState>;
+  readonly artifacts: Record<string, ArtifactReference>; readonly effects: Record<string, EffectState>; readonly effectReconciliations: Record<string, EffectReconciliationState>; readonly contexts: Record<string, ContextState>;
   readonly modelCalls: Record<string, ModelCallState>; readonly budget: BudgetState;
   readonly tasks: Record<string, TaskState>; readonly mailbox: Record<string, MailboxMessageState>;
   readonly terminalNotices: Record<string, TerminalNoticeState>; readonly documents: Record<string, DocumentState>;

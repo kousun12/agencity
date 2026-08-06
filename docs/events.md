@@ -72,6 +72,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `EffectRequested` | `{ effectId, executor, operation, input: JsonValue, idempotencyKey, idempotent: boolean }` | Canonical intent and source of a pending outbox projection. Commits before execution. |
 | `EffectAttemptStarted` | `{ effectId, attempt: positive integer }` | Records an execution attempt and projects running status. |
 | `EffectOutcomeRecorded` | `{ effectId, attempt: positive integer, outcome: EffectOutcome, output?: JsonValue, error?: string, observedAt: ISO datetime }` | Canonical terminal observation. Unknown remains visibly distinct. |
+| `EffectReconciliationRecorded` | `{ reconciliationId, effectId, assessment: "succeeded" | "failed" | "no_effect" | "still_unknown", summary, evidence?: JsonValue, recordedBy, recordedAt }` | Append-only operator evidence for an already-unknown effect. It never changes effect/outbox status and never retries work. |
 | `ContextMaterialized` | `{ contextId, records: ContextRecordReference[], contentHash: 64 lowercase hex, context: JsonValue }` | Records exact model context and provenance; also inserts immutable `context_records`. |
 | `ModelCallRequested` | `{ callId, contextId, effectId, provider, model }` | Links a logical model call to exact context and durable effect. |
 | `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends authoritative projected output text. The current runtime commits one sequence-0 chunk in the terminal success batch; live provider deltas are deliberately not this event. |
@@ -172,7 +173,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. A future synchronization adapter must quarantine invalid remote rows rather than weaken local validation.
-- Snapshots include `reducerVersion: 3`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 4`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 

@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentState } from "../domain/index.ts";
+import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
   CreateGoalInput, CreateHeartbeatInput, CreateScheduleInput, CreateInputSetInput, DocumentHandle, GoalHandle,
@@ -7,19 +8,74 @@ import type {
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
   StartAgentRunInput, AgentRunResult, AgentRunUserResponse, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
+  RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
 import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
 
+
+export interface ProtocolCapabilities {
+  readonly protocol: "agencity.protocol";
+  readonly version: 1;
+  readonly mode: "trusted-local";
+  readonly trustedLocal: true;
+  readonly hostileCodeSandbox: false;
+  readonly snapshotCursorResume: boolean;
+  readonly committedEventDeduplication: boolean;
+  readonly cursorlessProgress: boolean;
+  readonly historicalProjection: boolean;
+  readonly managedService: boolean;
+  readonly productCatalog: boolean;
+  readonly sync: Record<string, unknown>;
+  readonly providers: ModelProviderDescriptor[];
+}
+
+/** Typed, scrubbed protocol failure shared by both transports. */
+export class ProtocolClientError extends Error {
+  override readonly name = "ProtocolClientError";
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status: number,
+    readonly details: unknown = null,
+  ) { super(message); }
+}
+
+export interface BranchWatchHandlers {
+  readonly onSnapshot: (snapshot: { cursor: string; state: AgentState }) => unknown | Promise<unknown>;
+  readonly onEvent: (event: AgentEvent) => unknown | Promise<unknown>;
+  readonly onProgress?: (progress: EffectProgressNotification) => unknown | Promise<unknown>;
+  /** Ephemeral prefixes must be removed on commit, disconnect, or reconnect. */
+  readonly onProgressDiscard?: (effectIds: readonly string[], reason: "committed" | "disconnect" | "reconnect") => unknown | Promise<unknown>;
+  readonly onReconnect?: (attempt: number, afterCursor: string) => unknown | Promise<unknown>;
+}
+
+export interface BranchWatchOptions {
+  readonly signal?: AbortSignal;
+  readonly reconnectDelayMs?: number;
+  /** Mainly for bounded clients/tests. Omit to reconnect until aborted. */
+  readonly maxReconnects?: number;
+}
+
 export interface AgentStreamHandlers {
-  readonly onEvent: (event: AgentEvent) => void;
-  readonly onProgress?: (progress: EffectProgressNotification) => void;
+  readonly onEvent: (event: AgentEvent) => unknown | Promise<unknown>;
+  readonly onProgress?: (progress: EffectProgressNotification) => unknown | Promise<unknown>;
 }
 
 export class AgentClient {
-  constructor(readonly baseUrl: string, readonly bearerToken?: string) {}
+  readonly transport: ProtocolTransport;
+  readonly baseUrl: string;
+  readonly bearerToken: string | undefined;
+  constructor(baseUrlOrTransport: string | ProtocolTransport, bearerToken?: string) {
+    this.transport = typeof baseUrlOrTransport === "string"
+      ? new HttpProtocolTransport(baseUrlOrTransport, bearerToken)
+      : baseUrlOrTransport;
+    this.baseUrl = "baseUrl" in this.transport ? String(this.transport.baseUrl) : "http://agencity.in-process";
+    this.bearerToken = bearerToken;
+  }
   health(): Promise<{ ok: boolean; authenticated?: boolean; workspaceId?: string; instanceId?: string; appVersion?: string; protocolMin?: number; protocolMax?: number; configHash?: string }> { return this.#json("/health"); }
+  capabilities(): Promise<ProtocolCapabilities> { return this.#json("/capabilities"); }
   serviceStatus(): Promise<unknown> { return this.#json("/service/status"); }
   shutdownService(): Promise<unknown> { return this.#post("/service/shutdown"); }
   serviceAgents(): Promise<any[]> { return this.#json("/service/agents"); }
@@ -42,6 +98,7 @@ export class AgentClient {
   /** Retained diagnostic one-turn chat. Product tasks use startRun. */
   turn(sessionId: string, branchId: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/turns?branch=${branchId}`); }
   cell(sessionId: string, branchId: string, code: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/cells?branch=${branchId}`, { code }); }
+  fork(sessionId: string, branchId: string, cursor: string, name?: string): Promise<{ branchId: string }> { return this.#post(`/sessions/${sessionId}/branches?branch=${branchId}`, { cursor, ...(name === undefined ? {} : { name }) }); }
   history(sessionId: string, branchId: string): Promise<AgentEvent[]> { return this.#json(`/sessions/${sessionId}/history?branch=${branchId}`); }
   async stream(
     sessionId: string,
@@ -50,31 +107,93 @@ export class AgentClient {
     handlers: AgentStreamHandlers,
     signal?: AbortSignal,
   ): Promise<void> {
-    const response = await fetch(
-      `${this.baseUrl}/sessions/${sessionId}/stream?branch=${encodeURIComponent(branchId)}&after=${encodeURIComponent(afterCursor)}`,
-      { ...(signal === undefined ? {} : { signal }), ...this.#authInit() },
+    const response = await this.transport.request(
+      `/sessions/${encodeURIComponent(sessionId)}/stream?branch=${encodeURIComponent(branchId)}&after=${encodeURIComponent(afterCursor)}`,
+      signal === undefined ? {} : { signal },
     );
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw await protocolError(response);
     if (!response.body) throw new Error("Protocol stream response has no body");
     let cursor = afterCursor;
     try {
-      await readProtocolStream(response.body, (eventName, data) => {
+      await readProtocolStream(response.body, async (eventName, data) => {
         const value = JSON.parse(data) as AgentEvent | EffectProgressNotification;
         if (eventName === "progress") {
-          handlers.onProgress?.(value as EffectProgressNotification);
+          await handlers.onProgress?.(value as EffectProgressNotification);
           return;
         }
         const event = value as AgentEvent;
         if (BigInt(event.cursor) <= BigInt(cursor)) return;
+        await handlers.onEvent(event);
         cursor = event.cursor;
-        handlers.onEvent(event);
       }, signal);
     } catch (error) {
       if (!signal?.aborted) throw error;
     }
   }
+  /**
+   * Snapshot-then-cursor watch. Every reconnect starts after the last committed
+   * cursor, duplicate committed events are ignored, and progress is never replayed.
+   */
+  async watchBranch(
+    sessionId: string,
+    branchId: string,
+    handlers: BranchWatchHandlers,
+    options: BranchWatchOptions = {},
+  ): Promise<void> {
+    const snapshot = await this.snapshot(sessionId, branchId);
+    let cursor = snapshot.cursor;
+    await handlers.onSnapshot(snapshot);
+    let attempt = 0;
+    const delay = options.reconnectDelayMs ?? 50;
+    const progressEffects = new Set<string>();
+    const discard = async (reason: "committed" | "disconnect" | "reconnect", only?: string): Promise<void> => {
+      const ids = only === undefined ? [...progressEffects] : progressEffects.has(only) ? [only] : [];
+      ids.forEach((id) => progressEffects.delete(id));
+      if (ids.length) await handlers.onProgressDiscard?.(ids, reason);
+    };
+    while (!options.signal?.aborted) {
+      if (attempt > 0) {
+        await discard("reconnect");
+        await handlers.onReconnect?.(attempt, cursor);
+      }
+      let endedNormally = false;
+      try {
+        await this.stream(sessionId, branchId, cursor, {
+          onEvent: async (event) => {
+            if (BigInt(event.cursor) <= BigInt(cursor)) return;
+            const effectId = event.type === "EffectOutcomeRecorded"
+              ? (event.payload as { effectId?: string }).effectId
+              : undefined;
+            if (effectId) await discard("committed", effectId);
+            await handlers.onEvent(event);
+            cursor = event.cursor;
+          },
+          onProgress: async (progress) => {
+            progressEffects.add(progress.effectId);
+            await handlers.onProgress?.(progress);
+          },
+        }, options.signal);
+        endedNormally = true;
+      } catch (error) {
+        if (options.signal?.aborted) break;
+        await discard("disconnect");
+        if (error instanceof ProtocolClientError && error.status >= 400 && error.status < 500) throw error;
+      }
+      if (options.signal?.aborted) break;
+      if (endedNormally) await discard("disconnect");
+      if (options.maxReconnects !== undefined && attempt >= options.maxReconnects) break;
+      attempt++;
+      await abortableDelay(delay, options.signal);
+    }
+    await discard("disconnect");
+  }
+
   resume(sessionId:string,branchId:string):Promise<{sessionId:string;branchId:string;cursor:string}>{return this.#post(`/sessions/${sessionId}/resume?branch=${branchId}`);}
   compact(sessionId:string,branchId:string):Promise<{contextId:string;sourceEventIds:string[];summary:string}>{return this.#post(`/sessions/${sessionId}/compact?branch=${branchId}`);}
+  recoverySummary(sessionId: string, branchId: string): Promise<RecoverySummaryView> { return this.#json(`/sessions/${sessionId}/recovery-summary?branch=${branchId}`); }
+  unknownEffects(sessionId: string, branchId: string): Promise<UnknownEffectView[]> { return this.#json(`/sessions/${sessionId}/effects/unknown?branch=${branchId}`); }
+  inspectUnknownEffect(sessionId: string, branchId: string, effectId: string): Promise<UnknownEffectView> { return this.#json(`/sessions/${sessionId}/effects/${encodeURIComponent(effectId)}/reconciliation?branch=${branchId}`); }
+  reconcileUnknownEffect(sessionId: string, branchId: string, effectId: string, input: RecordEffectReconciliationInput): Promise<EffectReconciliationView> { return this.#post(`/sessions/${sessionId}/effects/${encodeURIComponent(effectId)}/reconciliation?branch=${branchId}`, input); }
 
   spawn(sessionId: string, branchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> { return this.#post(`/sessions/${sessionId}/agents?branch=${branchId}`, typeof input === "string" ? { task: input } : input); }
   spawnMany(sessionId: string, branchId: string, inputs: readonly (SpawnAgentInput | string)[]): Promise<SubagentHandle[]> { return this.#post(`/sessions/${sessionId}/agents/batch?branch=${branchId}`, { inputs }); }
@@ -151,20 +270,40 @@ export class AgentClient {
   deleteOwnedData(input:DeleteOwnedDataInput):Promise<PhysicalDeletionReceipt>{return this.#post("/sync/delete",input);}
 
   #post<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "POST", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
-  #authInit(): RequestInit { return this.bearerToken ? { headers: { authorization: `Bearer ${this.bearerToken}` } } : {}; }
   async #json<T>(path: string, init?: RequestInit): Promise<T> {
-    const headers = new Headers(init?.headers);
-    if (this.bearerToken) headers.set("authorization", `Bearer ${this.bearerToken}`);
-    const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
-    const body = await response.json();
-    if (!response.ok) throw new Error(JSON.stringify(body));
-    return body as T;
+    const response = await this.transport.request(path, init);
+    if (!response.ok) throw await protocolError(response);
+    try { return await response.json() as T; }
+    catch { throw new ProtocolClientError("INVALID_RESPONSE", "Protocol response was not valid JSON", response.status); }
   }
+}
+
+async function protocolError(response: Response): Promise<ProtocolClientError> {
+  let body: unknown = null;
+  try { body = await response.json(); } catch { body = await response.text().catch(() => ""); }
+  const candidate = body && typeof body === "object" && "error" in body
+    ? (body as { error?: unknown }).error
+    : body;
+  if (candidate && typeof candidate === "object") {
+    const value = candidate as Record<string, unknown>;
+    if (typeof value.code === "string" && typeof value.message === "string") {
+      return new ProtocolClientError(value.code, value.message, response.status, value.details ?? null);
+    }
+  }
+  return new ProtocolClientError("PROTOCOL_ERROR", `Protocol request failed with HTTP ${response.status}`, response.status, body);
+}
+
+async function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted || milliseconds <= 0) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
 }
 
 async function readProtocolStream(
   body: ReadableStream<Uint8Array>,
-  onItem: (eventName: string, data: string) => void,
+  onItem: (eventName: string, data: string) => void | Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
   const reader = body.getReader();
@@ -172,8 +311,8 @@ async function readProtocolStream(
   let buffer = "";
   let eventName = "message";
   let dataLines: string[] = [];
-  const dispatch = (): void => {
-    if (dataLines.length) onItem(eventName, dataLines.join("\n"));
+  const dispatch = async (): Promise<void> => {
+    if (dataLines.length) await onItem(eventName, dataLines.join("\n"));
     eventName = "message";
     dataLines = [];
   };
@@ -186,7 +325,7 @@ async function readProtocolStream(
       while ((newline = buffer.indexOf("\n")) >= 0) {
         let line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
         if (line.endsWith("\r")) line = line.slice(0, -1);
-        if (line === "") dispatch();
+        if (line === "") await dispatch();
         else if (line.startsWith("event:")) eventName = line.slice(6).replace(/^ /, "");
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
       }
@@ -194,8 +333,9 @@ async function readProtocolStream(
     }
     if (buffer.startsWith("event:")) eventName = buffer.slice(6).replace(/^ /, "");
     else if (buffer.startsWith("data:")) dataLines.push(buffer.slice(5).replace(/^ /, ""));
-    dispatch();
+    await dispatch();
   } finally {
+    try { await reader.cancel(); } catch {}
     reader.releaseLock();
   }
 }
