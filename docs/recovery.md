@@ -135,3 +135,8 @@ When configured, startup opens the modern replica locally with a deferred `null`
 ## FU-014 wake recovery
 
 Heartbeat and schedule ticks atomically advance their definition and append one `WakeQueued`. The managed service starts this coordinator only after workspace lease publication; each session write then requires its root fence. It commits `WakeClaimed` before calling `AgentRunService` with a stable wake-derived run/request ID, then commits `WakeDelivered`. Restart re-enters the same stable run request; an outcome that cannot be safely reconciled becomes `WakeDeliveryUnknown` and is not blindly replayed. Missed intervals coalesce at tick creation.
+
+
+## Context-compaction recovery
+
+A compaction request freezes its exact sources before model work. On startup, outbox recovery runs first: an unclaimed request can proceed; a succeeded terminal model effect is consumed without a second provider call; a lost non-idempotent owner becomes `unknown`. `CompactionService.recoverIncomplete()` then deterministically finishes the derivation or appends `ContextCompactionFailed`. Budget debits and hierarchy effect keys are stable, so replay of committed success boundaries is idempotent. Recovery never deletes source events or treats unknown output as a summary.

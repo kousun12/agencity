@@ -68,6 +68,8 @@ agencity debug session-create --workspace diagnostic
 agencity debug snapshot --session <SESSION_ID> --branch <BRANCH_ID>
 agencity debug history  --session <SESSION_ID> --branch <BRANCH_ID> --json
 agencity debug cell     --session <SESSION_ID> --branch <BRANCH_ID> 'return { ok: true };'
+agencity context --json
+agencity compact "preserve unresolved file paths" --strategy summary
 agencity sync status
 agencity data export --scope session --scope-id <SESSION_ID> --destination ./export
 ```

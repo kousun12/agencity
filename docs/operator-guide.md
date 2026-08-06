@@ -103,6 +103,14 @@ The real-provider path persists only `provider/model`; raw credentials never ent
 
 Programmatically supplied `SupervisorOptions.modelProviders` appear in the same secret-free provider catalog. Providers may expose streaming capability, but model choice still requires a model identifier (an environment `<PROVIDER>_MODEL`, persisted preference, `--model`, or interactive input).
 
+### Context inspection and compaction
+
+`agencity context` reports the branch cursor, canonical/message counts, uncovered narrative estimate, effective strategy, exact source digest, and prior outcomes. `agencity compact [PRESERVATION GUIDANCE] --strategy extractive|summary` requests a retained derived view; `--from-context CONTEXT_ID` rematerializes the exact frozen source set with another strategy. The TUI equivalents are `/context` and `/compact [extractive|summary] [PRESERVE...]`. Generated cells use `sdk.context.inspect()` and `sdk.context.compact({ strategy, instructions })`.
+
+Capacity is provider/model-specific and records whether it came from provider metadata, the model catalog, operator configuration, or is unknown. Known capacities trigger automatic oldest-prefix compaction near 80 percent and target 60 percent while reserving output. Unknown capacities do not guess a proactive limit. A typed provider-confirmed overflow may retry only after a strictly smaller rematerialized candidate; generic failures and unknown outcomes never become overflow retries.
+
+Compaction retains every canonical event. Active goals and gates, heartbeats, schedules and wakes, tasks and mailbox receipts, recursive handles, working values, artifacts, and active run control remain exact in dependent context. `debug branch --strategy extractive|summary` may choose a different derived view over inherited exact history.
+
 ### Advanced command groups and compatibility aliases
 
 Canonical low-level routes are `debug session-create|turn|cell|snapshot|history|rebuild|branch|tui|protocol-serve`, `sync status|now|push|pull|checkpoint|stats|conflicts|resolve`, and `data export|delete`. Canonical `--json` output is one compact `agencity.cli-output` version-1 envelope on stdout for success or stderr for failure; the envelope carries the canonical command and stable exit code. The former spellings remain exact, silent aliases with historical output during the compatibility window.

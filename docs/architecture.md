@@ -200,3 +200,12 @@ Artifact placement is fail-closed: session erasure reference-counts retained eve
 `AgentRunService` is the only autonomous model-to-TypeScript loop. Product run admission records explicit goal mode (`auto`, `current`, or `create`) and commits any created goal/gates in the same append batch as the run. Completion gates use an exhaustive event-classification policy to hash attributable workspace material, and immutable evaluation records cache terminal results by gate-definition hash plus material version.
 
 `HeartbeatService` and `ScheduleService` define/tick recurring work and append the durable wake queue. `ScheduleService` owns a replaceable `WakeCoordinator` seam targeting `AgentRunService`. In product operation the per-workspace managed service starts wake pollers only after acquiring its workspace lease; canonical and outbox admission also checks the matching root-tree fence atomically. The same services remain available embedded for tests and diagnostics, but only the managed service claims detached continuation.
+
+
+## Context-window admission and derived compaction
+
+`ContextWindowController` is a pure admission policy shared by the legacy `ModelLoop` and `AgentRunService`. It estimates the exact provider candidate, uses provider/model capacity with typed source provenance, repeatedly asks `CompactionService` for the oldest eligible narrative prefix, and rebuilds before admitting a call. A provider overflow retry requires an adapter-supplied typed classification and a strictly smaller estimate; `AgentRunModelAttemptStarted` gives every retry a new context/call/effect identity.
+
+`CompactionService` first commits `ContextCompactionRequested` with deep-frozen ordered source envelopes, cursors, and SHA-256 digest. Deterministic extractive output is available without a provider. `model-summary-v1` partitions source material and prior effective summary into deterministic hierarchical levels; each level is a stable, non-idempotent outbox model effect with normal usage and budget debit. Success is a typed `ContextMaterialized.derivation`; failure or unknown is `ContextCompactionFailed`. Recovery resumes from the request and terminal effect records without replaying unknown work.
+
+Context selection includes at most one effective summary, omits the narrative leaves it covers, and includes uncovered messages plus exact live state. Competing/rematerialized strategies coexist as immutable derived contexts, while the latest valid prefix-covering derivation is effective on that branch. Canonical history is never pruned.
