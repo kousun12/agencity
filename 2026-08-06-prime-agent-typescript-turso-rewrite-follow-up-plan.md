@@ -73,8 +73,8 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-002 | Add workspace discovery and human session resume/selection | Done | FU-001 |
 | FU-003 | Add explicit provider and model onboarding | Done | FU-001, FU-002 |
 | FU-004 | Implement the autonomous typed TypeScript agent-run loop | Done | FU-003, FU-011, FU-013 |
-| FU-005 | Turn the TUI into the complete protocol-backed product client | Proposed | FU-001, FU-002, FU-004, FU-012, FU-015 |
-| FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | Proposed | FU-004, FU-005, FU-015 |
+| FU-005 | Turn the TUI into the complete protocol-backed product client | In progress | FU-001, FU-002, FU-004, FU-012, FU-015 |
+| FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | In progress | FU-004, FU-005, FU-015 |
 | FU-007 | Provide a real installation and executable workflow | Done | FU-001 |
 | FU-008 | Reorganize low-level CLI operations as advanced surfaces without breaking compatibility | In progress | FU-001, FU-005 |
 | FU-009 | Add product-level end-to-end acceptance coverage | Proposed | FU-001–FU-008, FU-011–FU-019 |
@@ -326,7 +326,7 @@ The agent-facing TypeScript SDK should expose the parent PRD's intended general 
 
 ## FU-005 — Turn the TUI into the complete protocol-backed product client
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
@@ -361,7 +361,7 @@ The TUI becomes the default terminal product and projects the same public snapsh
 
 ## FU-006 — Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
