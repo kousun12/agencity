@@ -43,6 +43,8 @@ export interface ProfileGlobalSkillRecord extends ProfileGlobalSkillVersion {
 }
 
 export interface ProfileGlobalSkillAction {
+  /** Canonical append order within the local profile database. */
+  readonly sequence: number;
   readonly actionId: string;
   readonly skillId: string;
   readonly versionId: string;
@@ -85,6 +87,8 @@ export interface SetGlobalSkillStatusInput {
   readonly status: ProfileGlobalSkillAvailability;
   readonly expectedVersionId: string;
   readonly expectedDigest: string;
+  readonly expectedAvailability: ProfileGlobalSkillAvailability;
+  readonly expectedActionSequence: number;
   readonly idempotencyKey: string;
   readonly effectRef?: string | null;
 }

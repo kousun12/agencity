@@ -25,6 +25,11 @@ const MAX_CANONICAL_NODES = 32_768;
 const encoder = new TextEncoder();
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const namePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Shared write/read boundary for executable skill names. */
+export function isValidSkillName(value: unknown): value is string {
+  return typeof value === "string" && byteLength(value) <= MAX_NAME_BYTES && namePattern.test(value);
+}
 const digestPattern = /^[a-f0-9]{64}$/;
 const permissionPattern = /^[a-z][a-z0-9]*(?:[.:-][a-z0-9]+)*$/;
 const forbiddenPermissionPattern = /^(?:admin|root|policy|permission|\*)$/i;
@@ -732,9 +737,7 @@ function strictId(value: unknown, field: string, code: SkillCatalogValidationErr
 }
 
 function strictName(value: unknown): string {
-  if (typeof value !== "string" || byteLength(value) > MAX_NAME_BYTES || !namePattern.test(value)) {
-    invalidRecord("Skill name must use bounded lower-kebab-case");
-  }
+  if (!isValidSkillName(value)) invalidRecord("Skill name must use bounded lower-kebab-case");
   return value;
 }
 

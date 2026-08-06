@@ -43,7 +43,7 @@ Do not change the first three columns or class tokens without updating the archi
 | `refinement_rollback_approvals` | `rebuildable-projection` | `mutable` | Separate explicit owner/admin authorization for user/global rollback; promotion approval never satisfies it. |
 | `refinement_rollbacks` | `rebuildable-projection` | `mutable` | Reversible decision/restore mapping derived from rollback events. |
 | `skill_executions` | `rebuildable-projection` | `mutable` | Exact skill-version invocation/test linkage; execution request/outcome remains in canonical effect events. |
-| `skill_availability_actions` | `rebuildable-projection` | `mutable` | Workspace skill enable/disable/remove projection rebuilt from canonical `SkillAvailabilityChanged` events; retained immutable harness versions and invocation history remain separate. |
+| `skill_availability_actions` | `rebuildable-projection` | `mutable` | Workspace skill enable/disable/remove projection rebuilt from canonical `SkillAvailabilityChanged` events; current state is selected by the joined canonical event sequence (not timestamps), while retained immutable harness versions and invocation history remain separate. |
 | `subagent_spec_invocations` | `rebuildable-projection` | `mutable` | Exact specification-version pin for a normally admitted durable child task. |
 | `memory_fts` | `operational-projection` | `mutable` | Disposable FTS5 candidate index; it may be deleted/rebuilt from harness versions and never decides scope/status policy. |
 | `device_clocks` | `operational-projection` | `mutable` | Per-workspace monotonic origin-sequence allocator keyed by stable profile device ID. Event IDs still deduplicate if this operational clock must be reconstructed. |

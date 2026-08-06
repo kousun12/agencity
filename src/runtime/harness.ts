@@ -1,5 +1,5 @@
 import {
-  newId, NotFoundError, ValidationError, type AgentEvent, type CandidateAllocationRecord,
+  isValidSkillName, newId, NotFoundError, ValidationError, type AgentEvent, type CandidateAllocationRecord,
   type EvaluationObservationRecord, type HarnessContent, type HarnessEdit, type HarnessKind,
   type HarnessRecord, type HarnessScope, type HarnessVersionRecord, type HarnessVersionStatus,
   type JsonValue, type ObjectiveEvaluation, type RefinementDecisionRecord, type RefinementProposalRecord,
@@ -81,7 +81,10 @@ export class HarnessService {
         if (edit.scopeKey !== undefined && (typeof edit.scopeKey !== "string" || !edit.scopeKey.trim())) errors.push("scopeKey cannot be empty");
         if (edit.scope === "user" && edit.scopeKey === undefined) errors.push("User scope requires an explicit authority scopeKey");
         validateContent(edit.kind, edit.content, errors);
-        if (edit.kind === "skill") this.#validateSkillPermissions(edit.content, errors);
+        if (edit.kind === "skill") {
+          if (!isValidSkillName(edit.name)) errors.push("Skill name must use bounded lower-kebab-case");
+          this.#validateSkillPermissions(edit.content, errors);
+        }
         if (isImmutablePolicyName(edit.name)) errors.push("The immutable base policy and permission boundary cannot be edited");
         try {
           const scopeKey = await this.#scopeKey(sessionId,edit.scope,edit.scopeKey);
@@ -99,7 +102,10 @@ export class HarnessService {
         if (entry.currentVersionId !== edit.expectedVersionId) errors.push(`Stale expectedVersionId for ${edit.entryId}`);
         if (edit.operation === "replace") {
           validateContent(entry.kind, edit.content, errors);
-          if (entry.kind === "skill") this.#validateSkillPermissions(edit.content, errors);
+          if (entry.kind === "skill") {
+            if (edit.name !== undefined && !isValidSkillName(edit.name)) errors.push("Skill name must use bounded lower-kebab-case");
+            this.#validateSkillPermissions(edit.content, errors);
+          }
           if (edit.name !== undefined && isImmutablePolicyName(edit.name)) errors.push("The immutable base policy and permission boundary cannot be edited");
           if (edit.name !== undefined) {
             const duplicate = await this.storage.readonlyQuery({ sql: "SELECT entry_id FROM harness_entries WHERE kind=? AND scope=? AND scope_key=? AND name=? AND status IN ('active','candidate') AND entry_id<>?", args: [entry.kind,entry.scope,entry.scopeKey,edit.name,entry.entryId] });
@@ -135,7 +141,10 @@ export class HarnessService {
     for (const [editIndex,edit] of proposal.edits.entries()) {
       if (edit.operation === "create") {
         const scopeKey = await this.#scopeKey(sessionId, edit.scope, edit.scopeKey);
-        if (edit.kind === "skill") this.#assertSkillPermissions(edit.content);
+        if (edit.kind === "skill") {
+          assertSkillName(edit.name);
+          this.#assertSkillPermissions(edit.content);
+        }
         const expectedEntryId = `entry-${stableId(`${proposalId}:${editIndex}`)}`;
         const duplicate = await this.storage.readonlyQuery({ sql: "SELECT entry_id FROM harness_entries WHERE kind=? AND scope=? AND scope_key=? AND name=? AND status IN ('active','candidate') AND entry_id<>?", args: [edit.kind,edit.scope,scopeKey,edit.name,expectedEntryId] });
         if (duplicate.length) throw new ValidationError(`Conflicting active harness name ${edit.name}`);
@@ -146,7 +155,10 @@ export class HarnessService {
       await this.#assertEntryScopeAuthority(sessionId, entry);
       if (entry.currentVersionId !== edit.expectedVersionId) throw new ValidationError(`Harness compare-and-swap failed for ${edit.entryId}`);
       if (edit.operation === "replace") {
-        if (entry.kind === "skill") this.#assertSkillPermissions(edit.content);
+        if (entry.kind === "skill") {
+          assertSkillName(edit.name ?? entry.name);
+          this.#assertSkillPermissions(edit.content);
+        }
         const name = edit.name ?? entry.name;
         const duplicate = await this.storage.readonlyQuery({ sql: "SELECT entry_id FROM harness_entries WHERE kind=? AND scope=? AND scope_key=? AND name=? AND status IN ('active','candidate') AND entry_id<>?", args: [entry.kind,entry.scope,entry.scopeKey,name,entry.entryId] });
         if (duplicate.length) throw new ValidationError(`Conflicting active harness name ${name}`);
@@ -222,9 +234,9 @@ export class HarnessService {
     const rows = await this.storage.readonlyQuery({ sql: "SELECT * FROM candidate_allocations WHERE candidate_id=? ORDER BY ordinal", args: [proposal.candidateId] });
     const details = await this.storage.readonlyQuery({ sql: "SELECT allocation_limit FROM refinement_proposals WHERE proposal_id=?", args: [proposalId] });
     const limit = Number((details[0] as any)?.allocation_limit ?? 0);
-    if (rows.length >= limit) throw new ValidationError(`Candidate allocation limit ${limit} exhausted`);
     const duplicate = rows.find((row: any) => row.session_id === targetSessionId && row.branch_id === targetBranchId && (row.task_id ?? null) === (input?.taskId ?? null));
     if (duplicate) return rowToAllocation(duplicate);
+    if (rows.length >= limit) throw new ValidationError(`Candidate allocation limit ${limit} exhausted`);
     const allocationId = `allocation-${stableId(`${proposal.candidateId}:${targetSessionId}:${targetBranchId}:${input?.taskId ?? "session"}`)}`; const ordinal = rows.length + 1;
     await this.storage.appendEvents([{
       sessionId, branchId, type: "RefinementCandidateAllocated", producer: "supervisor", idempotencyKey: `candidate-allocation:${allocationId}`,
@@ -619,9 +631,14 @@ function isImmutablePolicyName(name: string): boolean { return /(?:base[-_ ]?pol
 function assertEditShape(edit: HarnessEdit): void {
   if (!edit || !["create","replace","retire"].includes(edit.operation)) throw new ValidationError("Refinement edit must be typed create, replace, or retire");
   if (edit.operation === "create" && (typeof edit.name !== "string" || !edit.name.trim())) throw new ValidationError("Create edit requires a name");
+  if (edit.operation === "create" && edit.kind === "skill") assertSkillName(edit.name);
   if (edit.operation !== "create" && (!edit.entryId?.trim() || !edit.expectedVersionId?.trim())) throw new ValidationError("Replace/retire edits require entryId and expectedVersionId");
   if (edit.operation === "replace" && !edit.content) throw new ValidationError("Replace edit requires content");
+  if (edit.operation === "replace" && edit.content?.kind === "skill" && edit.name !== undefined) assertSkillName(edit.name);
   if ("confidence" in edit && edit.confidence !== undefined && (!Number.isFinite(edit.confidence) || edit.confidence < 0 || edit.confidence > 1)) throw new ValidationError("Harness confidence must be between zero and one");
+}
+function assertSkillName(name: unknown): asserts name is string {
+  if (!isValidSkillName(name)) throw new ValidationError("Skill name must use bounded lower-kebab-case");
 }
 function validateContent(kind: HarnessKind, content: HarnessContent, errors: string[]): void {
   if (!content || typeof content !== "object" || content.kind !== kind) { errors.push(`Content kind does not match ${kind}`); return; }

@@ -116,12 +116,27 @@ sandbox when hostile-code isolation is required.
 
 ## Lifecycle and compatibility
 
-Disable and re-enable change only availability; identity, version, definition
-digest, provenance, test evidence, and invocation history remain unchanged.
-Removal is terminal for that installed version but does not delete history.
-Workspace actions are canonical `SkillAvailabilityChanged` events whose table
-projection is rebuilt during recovery. Profile actions and versions remain
-append-only in the profile store.
+Disable and re-enable can repeat without a cycle limit and change only
+availability; identity, version, definition digest, provenance, test evidence,
+and invocation history remain unchanged. Each transition compares the exact
+prior availability and append sequence, so concurrent retries of one intent
+share one action while a stale competing transition fails instead of returning
+a misleading post-state. Removal is terminal for that installed version but
+does not delete history. Workspace actions are canonical
+`SkillAvailabilityChanged` events ordered by canonical event sequence whose
+table projection is rebuilt during recovery. Profile actions and versions
+remain append-only in profile rowid sequence.
+
+Install requests derive stable identities from the session, scope, inspected
+manifest/source digests, and installer. Retrying after a durable boundary
+resumes the same proposal, tests, observations, promotion, and import rather
+than creating a duplicate governed lifecycle.
+
+Native skill names use bounded lower-kebab-case at the initial harness proposal
+boundary and are checked again during validation/activation. Retained harness
+rows from older runtimes with invalid skill names stay visible in unavailable
+management/history views for removal or rollback, but are quarantined from
+context and invocation instead of poisoning catalog materialization.
 
 Legacy profile skill rows are migrated without rewriting their original JSON.
 They appear only in management views as quarantined legacy records; they do not

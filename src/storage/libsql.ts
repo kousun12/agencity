@@ -732,8 +732,15 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       if (!row || String(row.kind) !== "skill" || String(row.current_version_id) !== payload.versionId) throw new ConflictError("Skill availability change requires the current workspace skill version", { entryId: payload.entryId, versionId: payload.versionId });
       const content = JSON.parse(String(row.content_json)) as JsonValue;
       if (canonicalSkillDigest(content) !== payload.digest) throw new ConflictError("Skill availability change digest does not match the immutable version", { entryId: payload.entryId, versionId: payload.versionId });
-      const prior = await tx.execute({ sql: "SELECT availability FROM skill_availability_actions WHERE entry_id=? ORDER BY created_at DESC,event_id DESC LIMIT 1", args: [payload.entryId] });
-      if (String(prior.rows[0]?.availability ?? "enabled") === "removed") throw new ValidationError("Removed workspace skills cannot be re-enabled or disabled");
+      const prior = await tx.execute({ sql: "SELECT a.event_id,a.availability,e.sequence FROM skill_availability_actions a JOIN events e ON e.id=a.event_id WHERE a.entry_id=? AND a.version_id=? ORDER BY e.sequence DESC LIMIT 1", args: [payload.entryId,payload.versionId] });
+      const priorAvailability = String(prior.rows[0]?.availability ?? "enabled");
+      const hasExpectedAvailability = payload.expectedAvailability !== undefined;
+      const hasExpectedSequence = payload.expectedPreviousActionSequence !== undefined;
+      if (hasExpectedAvailability !== hasExpectedSequence) throw new ValidationError("Workspace skill availability CAS requires both expected availability and action sequence");
+      if (hasExpectedAvailability && (payload.expectedAvailability !== priorAvailability || payload.expectedPreviousActionSequence !== (prior.rows[0] ? Number(prior.rows[0].sequence) : null))) {
+        throw new ConflictError("Workspace skill availability compare-and-swap failed", { entryId: payload.entryId });
+      }
+      if (priorAvailability === "removed") throw new ValidationError("Removed workspace skills cannot be re-enabled or disabled");
     }
     if (event.type === "HarnessVersionStatusChanged") {
       const payload = event.payload as EventPayloads["HarnessVersionStatusChanged"];
