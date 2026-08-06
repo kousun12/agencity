@@ -1,6 +1,6 @@
 import type { AgentEvent, EventPayloads, TaskStatus } from "./events.ts";
 import type {
-  AgentState, CellState, DocumentChunkState, EffectState, GoalGateState,
+  AgentRunInputRequestState, AgentRunState, AgentRunStepState, AgentState, CellState, DocumentChunkState, EffectState, GoalGateState,
   MailboxMessageState, ModelCallState, RecursiveModelState, TaskState, TerminalNoticeState,
 } from "./state.ts";
 import { InvalidTransitionError, ValidationError } from "./errors.ts";
@@ -24,13 +24,13 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     const parentBranchId = p.parentBranchId ?? null;
     if ((parentSessionId === null) !== (parentBranchId === null)) throw new ValidationError("Session ancestry requires both parent IDs");
     return {
-      reducerVersion: 2, sessionId: event.sessionId, workspaceId: p.workspaceId,
+      reducerVersion: 3, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
       parentSessionId, parentBranchId, rootSessionId: p.rootSessionId ?? event.sessionId,
       depth: p.depth ?? 0, taskId: p.taskId ?? null,
-      branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: null }, model: p.model,
+      branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
       status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, contexts: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
-      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, recursiveModels: {},
+      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, recursiveModels: {}, agentRuns: {},
     };
   }
   if (state.sessionId !== event.sessionId) throw new ValidationError("Cannot reduce an event from another session");
@@ -38,6 +38,8 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
   switch (event.type) {
     case "SessionCreated": return state;
     case "BranchCreated": { const p = event.payload as EventPayloads["BranchCreated"]; return { ...next, branch: { id: p.branchId, parentBranchId: p.parentBranchId, forkCursor: p.forkCursor, name: p.name ?? null } }; }
+    case "SessionNamed": return { ...next, sessionName: (event.payload as EventPayloads["SessionNamed"]).name };
+    case "BranchNamed": return { ...next, branch: { ...state.branch, name: (event.payload as EventPayloads["BranchNamed"]).name } };
     case "SessionStatusChanged": return { ...next, status: (event.payload as EventPayloads["SessionStatusChanged"]).status };
     case "MessageAppended": { const p = event.payload as EventPayloads["MessageAppended"]; return { ...next, messages: [...state.messages, { id: p.messageId, role: p.role, content: p.content, eventId: event.id, modelCallId: p.modelCallId ?? null }] }; }
     case "CellProposed": { const p = event.payload as EventPayloads["CellProposed"]; if (state.cells[p.cellId]) throw new InvalidTransitionError("cell", state.cells[p.cellId]!.status, "proposed"); const cell: CellState = { id: p.cellId, code: p.code, status: "proposed", attempts: 0, logs: [], eventId: event.id }; return { ...next, cells: { ...state.cells, [p.cellId]: cell } }; }
@@ -176,15 +178,84 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     }
     case "RecursiveModelStarted": {
       const p = event.payload as EventPayloads["RecursiveModelStarted"]; if (state.recursiveModels[p.handleId]) throw new InvalidTransitionError("recursiveModel", "existing", "pending");
-      const handle: RecursiveModelState = { id: p.handleId, taskId: p.taskId, parentSessionId: p.parentSessionId, parentBranchId: p.parentBranchId, childSessionId: p.childSessionId, childBranchId: p.childBranchId, model: p.model, inputSetId: p.inputSetId ?? null, status: "pending", eventId: event.id };
+      const handle: RecursiveModelState = { id: p.handleId, taskId: p.taskId, parentSessionId: p.parentSessionId, parentBranchId: p.parentBranchId, childSessionId: p.childSessionId, childBranchId: p.childBranchId, model: p.model, inputSetId: p.inputSetId ?? null, ...(p.input === undefined ? {} : { input: p.input }), ...(p.inputProvenance === undefined ? {} : { inputProvenance: p.inputProvenance }), ...(p.inputHash === undefined ? {} : { inputHash: p.inputHash }), status: "pending", eventId: event.id };
       return { ...next, recursiveModels: { ...state.recursiveModels, [p.handleId]: handle } };
     }
     case "RecursiveModelStatusChanged": {
       const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; const old = state.recursiveModels[p.handleId];
       const valid = old && ((old.status === "pending" && ["running", "completed", "failed", "cancelled"].includes(p.status)) || (old.status === "running" && ["completed", "failed", "cancelled"].includes(p.status)));
       if (!old || !valid) throw new InvalidTransitionError("recursiveModel", old?.status ?? "missing", p.status);
-      const updated: RecursiveModelState = { ...old, status: p.status, eventId: event.id, ...(p.resultMessageId === undefined ? {} : { resultMessageId: p.resultMessageId }), ...(p.error === undefined ? {} : { error: p.error }) };
+      const updated: RecursiveModelState = { ...old, status: p.status, eventId: event.id, ...(p.outcome === undefined ? {} : { outcome: p.outcome }), ...(p.resultMessageId === undefined ? {} : { resultMessageId: p.resultMessageId }), ...(p.result === undefined ? {} : { result: p.result }), ...(p.resultArtifactId === undefined ? {} : { resultArtifactId: p.resultArtifactId }), ...(p.error === undefined ? {} : { error: p.error }) };
       return { ...next, recursiveModels: { ...state.recursiveModels, [p.handleId]: updated } };
+    }
+    case "AgentRunRequested": {
+      const p = event.payload as EventPayloads["AgentRunRequested"];
+      if (state.agentRuns[p.runId]) throw new InvalidTransitionError("agentRun", state.agentRuns[p.runId]!.status, "queued");
+      if (Object.values(state.agentRuns).some((run) => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status))) {
+        throw new InvalidTransitionError("agentRun", "active-run-exists", "queued");
+      }
+      const run: AgentRunState = {
+        id: p.runId, task: p.task, requestKey: p.requestKey, goalId: p.goalId ?? null, status: "queued",
+        steps: [], inputRequests: {}, cancellationRequested: false, requestEventId: event.id, eventId: event.id,
+      };
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: run } };
+    }
+    case "AgentRunStepStarted": {
+      const p = event.payload as EventPayloads["AgentRunStepStarted"]; const run = state.agentRuns[p.runId];
+      const expected = (run?.steps.at(-1)?.ordinal ?? 0) + 1;
+      const prior = run?.steps.at(-1);
+      if (!run || !["queued", "running"].includes(run.status) || p.ordinal !== expected ||
+          (prior !== undefined && prior.action === undefined && prior.rejection === undefined)) {
+        throw new InvalidTransitionError("agentRunStep", run?.status ?? "missing-run", "started");
+      }
+      const step: AgentRunStepState = { id: p.stepId, ordinal: p.ordinal, contextId: p.contextId, callId: p.callId, effectId: p.effectId, actionId: p.actionId, observationEventIds: [...p.observationEventIds], eventId: event.id };
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, status: "running", steps: [...run.steps, step], eventId: event.id } } };
+    }
+    case "AgentRunActionCommitted": {
+      const p = event.payload as EventPayloads["AgentRunActionCommitted"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
+      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId || step.callId !== p.callId || step.action !== undefined || step.rejection !== undefined) {
+        throw new InvalidTransitionError("agentRunAction", step?.action ? "committed" : run?.status ?? "missing-run", "committed");
+      }
+      const updated = { ...step, action: p.action, rawAction: p.raw, eventId: event.id };
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
+    }
+    case "AgentRunActionRejected": {
+      const p = event.payload as EventPayloads["AgentRunActionRejected"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
+      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId || step.callId !== p.callId || step.action !== undefined || step.rejection !== undefined) {
+        throw new InvalidTransitionError("agentRunAction", step?.rejection ? "rejected" : run?.status ?? "missing-run", "rejected");
+      }
+      const updated = { ...step, rejection: p.error, rawAction: p.raw, eventId: event.id };
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
+    }
+    case "AgentRunUserInputRequested": {
+      const p = event.payload as EventPayloads["AgentRunUserInputRequested"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
+      if (!run || run.status !== "running" || !step?.action || step.actionId !== p.actionId || run.inputRequests[p.requestId]) {
+        throw new InvalidTransitionError("agentRunInput", run?.status ?? "missing-run", "requested");
+      }
+      const request: AgentRunInputRequestState = { id: p.requestId, actionId: p.actionId, kind: p.kind, question: p.question, ...(p.permission === undefined ? {} : { permission: p.permission }), requestedEventId: event.id };
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, inputRequests: { ...run.inputRequests, [p.requestId]: request }, eventId: event.id } } };
+    }
+    case "AgentRunUserInputReceived": {
+      const p = event.payload as EventPayloads["AgentRunUserInputReceived"]; const run = state.agentRuns[p.runId]; const request = run?.inputRequests[p.requestId];
+      if (!run || run.status !== "waiting_for_user" || !request || request.response !== undefined) throw new InvalidTransitionError("agentRunInput", request?.response === undefined ? run?.status ?? "missing-run" : "received", "received");
+      const updated = { ...request, response: p.response, ...(p.approved === undefined ? {} : { approved: p.approved }), receivedEventId: event.id };
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, status: "running", inputRequests: { ...run.inputRequests, [p.requestId]: updated }, eventId: event.id } } };
+    }
+    case "AgentRunCancellationRequested": {
+      const p = event.payload as EventPayloads["AgentRunCancellationRequested"]; const run = state.agentRuns[p.runId];
+      if (!run || ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status) || run.cancellationRequested) throw new InvalidTransitionError("agentRun", run?.status ?? "missing", "cancellation_requested");
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, cancellationRequested: true, ...(p.reason === undefined ? {} : { cancellationReason: p.reason }), eventId: event.id } } };
+    }
+    case "AgentRunStatusChanged": {
+      const p = event.payload as EventPayloads["AgentRunStatusChanged"]; const run = state.agentRuns[p.runId];
+      const terminal = ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"];
+      const valid = run && !terminal.includes(run.status) && (
+        (p.status === "waiting_for_user" && run.status === "running" && Object.values(run.inputRequests).some((request) => request.response === undefined)) ||
+        (p.status === "cancelled" && run.cancellationRequested) ||
+        (terminal.includes(p.status) && p.status !== "cancelled")
+      );
+      if (!run || !valid) throw new InvalidTransitionError("agentRun", run?.status ?? "missing", p.status);
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, status: p.status, ...(p.reason === undefined ? {} : { reason: p.reason }), ...(p.finalMessageId === undefined ? {} : { finalMessageId: p.finalMessageId }), eventId: event.id } } };
     }
     // Harness history is canonical and has dedicated rebuildable relational
     // projections. Session projection still advances its cursor so snapshot

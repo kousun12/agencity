@@ -30,17 +30,18 @@
     "verify": "bun run typecheck && bun run check:architecture && bun test --timeout 30000",
     "start": "bun run src/cli.ts",
     "check:architecture": "bun run scripts/check-architecture.ts",
-    "test:turso-official": "bun test --timeout 90000 test/slice4/official-server-conformance.test.ts"
+    "test:turso-official": "bun test --timeout 90000 test/slice4/official-server-conformance.test.ts",
+    "dev": "bun run src/cli.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
     "@tursodatabase/sync": "0.7.2",
+    "typescript": "^5.9.3",
     "ulid": "^3.0.1",
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5.9.3"
+    "@types/bun": "latest"
   },
   "engines": {
     "bun": ">=1.2.0"

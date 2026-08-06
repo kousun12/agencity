@@ -22,36 +22,49 @@ git clone <repository-url> agencity
 cd agencity
 bun install --frozen-lockfile
 bun run verify
+bun run dev -- --version
 ```
 
-No provider credential is needed for the built-in deterministic `echo` provider. The optional OpenAI-compatible provider reads `OPENAI_API_KEY` in the supervisor only; `OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
+For a command on `PATH`, the supported unpublished workflow is `bun link` from this installed checkout, then ensure `~/.bun/bin` is on `PATH`. The checked-in `src/cli.ts` target is mode `100755`, so the link is directly executable and no manual `chmod` is part of installation. There is no supported registry or standalone release yet. See [Installation and executable workflows](./docs/install.md).
 
-## Quick start
+## Product entrypoint
 
-The CLI stores its local database and CAS under `.agencity/` by default.
+From a repository, `agencity` (or `bun run dev`) discovers the nearest `.agencity` or version-control root, canonicalizes path aliases, and creates or resumes named durable work without requiring session IDs:
 
 ```sh
-# 1. Create a session (copy sessionId and branchId from the JSON result).
-bun run src/cli.ts create --workspace demo
+# Real provider: credentials stay in the supervisor process; only this model ID is saved.
+export OPENAI_API_KEY='...'
+agencity --model openai/gpt-4o-mini "inspect this repository"
 
-# 2. Chat with the default echo model.
-bun run src/cli.ts chat --session <SESSION_ID> --branch <BRANCH_ID> \
-  "Summarize what you know"
+# Deterministic fixture behavior is always explicit.
+agencity --demo "exercise the durable product route"
 
-# 3. Execute a generated-style TypeScript cell. The returned value must be JSON.
-bun run src/cli.ts cell --session <SESSION_ID> --branch <BRANCH_ID> \
-  'await state.set("answer", { value: 42 }); return await state.get("answer");'
-
-# 4. Inspect or rebuild the deterministic projection.
-bun run src/cli.ts history  --session <SESSION_ID> --branch <BRANCH_ID>
-bun run src/cli.ts snapshot --session <SESSION_ID> --branch <BRANCH_ID>
-bun run src/cli.ts rebuild  --session <SESSION_ID> --branch <BRANCH_ID>
-
-# 5. Open the terminal client.
-bun run src/cli.ts tui --session <SESSION_ID> --branch <BRANCH_ID>
+agencity sessions
+agencity resume "inspect this repository"
+agencity doctor
+agencity config
 ```
 
-Use `--restart-console-after-cell` to exercise the recovery invariant continuously. Use `--state-dir`, `--db`, `--artifacts`, and `--workspace-root` to change local placement. Full CLI/TUI instructions are in the [operator guide](./docs/operator-guide.md).
+`--workspace PATH` overrides discovery. The canonical root contains an owner-only `.agencity/workspace-id` marker. That opaque identity moves with the repository and makes real paths and symlinked entry paths converge; concurrent first opens atomically choose one marker. A pre-marker `.agencity/agent.db` is migrated once to its legacy path-derived identity. Agencity refuses symlinked, insecure, or malformed markers rather than silently creating a different workspace.
+
+A workspace-scoped recent branch and non-secret model preference live in the separate profile store. If selection is ambiguous the interactive command asks instead of choosing by row order; scripts receive a typed nonzero error and can use `sessions --select NAME`. A retained branch never changes model silently, and remains inspectable when its provider is unavailable.
+
+The startup header identifies the workspace, named session/branch, model, run state, and trusted-local authority; Echo is rendered as `[DEMO FIXTURE]`. The current run still performs one durable text model turn at a time; the typed autonomous model-to-TypeScript action loop remains incomplete.
+
+Command-like task text is deterministic. Multi-word text such as `agencity create a parser` is treated as a task, while exact product commands such as `run`, `new`, and `resume` keep their command meaning. Quote the whole first argument or place `--` before the task to force an ambiguous spelling: `agencity -- run the benchmark`. ID-bearing `chat` and `cell` invocations remain advanced commands.
+
+### Advanced compatibility CLI
+
+The low-level ID-oriented commands remain available for diagnostics and scripts:
+
+```sh
+agencity create --workspace diagnostic
+agencity snapshot --session <SESSION_ID> --branch <BRANCH_ID>
+agencity history  --session <SESSION_ID> --branch <BRANCH_ID>
+agencity cell     --session <SESSION_ID> --branch <BRANCH_ID> 'return { ok: true };'
+```
+
+Use `--restart-console-after-cell` to exercise the recovery invariant continuously. Product placement defaults to `<workspace>/.agencity`; `--state-dir`, `--db`, `--artifacts`, and `--profile` override it. Full CLI/TUI instructions are in the [operator guide](./docs/operator-guide.md).
 
 ## HTTP and event protocol
 
@@ -119,6 +132,7 @@ The architecture check validates package entrypoints, domain dependency directio
 
 ## Design documentation
 
+- [Installation and executable workflows](./docs/install.md)
 - [Operator guide: setup, CLI, and TUI](./docs/operator-guide.md)
 - [TypeScript API](./docs/api.md)
 - [Protocol and console SDK](./docs/protocol.md)

@@ -1,6 +1,7 @@
-import { assertJsonValue } from "../domain/json.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { ConsoleSdk, SqlTag } from "./sdk.ts";
+import { encodeObservation, inspectValue, type InspectOptions } from "./inspect.ts";
+import { notebookCellBody } from "./notebook.ts";
 
 type Incoming =
   | { type: "execute"; executionId: string; code: string; session: { id: string; branchId: string }; restored: Record<string, unknown> }
@@ -115,7 +116,13 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     restored: message.restored,
     get: (name: string) => call("state.get", [name]),
     set: (name: string, value: JsonValue) => call("state.set", [name, value]),
+    list: () => call("state.list", []),
   };
+  const cells = {
+    list: (options: JsonValue = {}) => call("cells.list", [options]),
+    get: (cellId: string) => call("cells.get", [cellId]),
+  };
+  const inspect = (value: unknown, options: InspectOptions = {}) => inspectValue(value, options);
   const artifacts = {
     put: (content: string, mediaType?: string) => call("artifacts.put", [content, mediaType]),
     get: (artifactId: string) => call("artifacts.get", [artifactId]),
@@ -157,6 +164,30 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   };
   const skills = { invoke: (entryId:string,input:JsonValue,options:JsonValue={}) => call("skills.invoke",[entryId,input,options]), test: (entryId:string,versionId?:string) => call("skills.test",[entryId,versionId]) };
   const specs = { spawn: (entryId:string,input:JsonValue={}) => call("specs.spawn",[entryId,input]) };
+  const rlmId = (handle: string | { handleId?: unknown }): string => {
+    const id = typeof handle === "string" ? handle : handle?.handleId;
+    if (typeof id !== "string" || !id) throw new Error("Recursive model handle must contain a non-empty handleId");
+    return id;
+  };
+  let rlm: Record<string, unknown>;
+  const hydrateRlmHandle = (raw: any): any => {
+    const handle = { ...raw };
+    // Convenience functions are deliberately non-enumerable: the same object
+    // remains strict-JSON serializable as a durable identity between workers.
+    Object.defineProperties(handle, {
+      result: { enumerable: false, value: (options: Record<string, unknown> = {}) => call("rlm.result", [raw.handleId, options]) },
+      cancel: { enumerable: false, value: async (reason?: string) => hydrateRlmHandle(await call("rlm.cancel", [raw.handleId, reason])) },
+      refresh: { enumerable: false, value: async () => hydrateRlmHandle(await call("rlm.get", [raw.handleId])) },
+    });
+    return handle;
+  };
+  rlm = {
+    start: async (input: unknown) => hydrateRlmHandle(await call("rlm.start", [input])),
+    startMany: async (inputs: unknown[]) => (await call("rlm.startMany", [inputs]) as any[]).map(hydrateRlmHandle),
+    get: async (handle: string | { handleId?: unknown }) => hydrateRlmHandle(await call("rlm.get", [rlmId(handle)])),
+    result: (handle: string | { handleId?: unknown }, options: Record<string, unknown> = {}) => call("rlm.result", [rlmId(handle), options]),
+    cancel: async (handle: string | { handleId?: unknown }, reason?: string) => hydrateRlmHandle(await call("rlm.cancel", [rlmId(handle), reason])),
+  };
   const sql: SqlTag = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     let text = strings[0] ?? "";
     for (let index = 0; index < values.length; index++) text += `?${strings[index + 1] ?? ""}`;
@@ -166,7 +197,8 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   let response: Record<string, unknown>;
   try {
     const transpiler = new Bun.Transpiler({ loader: "ts", target: "bun" });
-    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools){\n${message.code}\n}`;
+    const body = notebookCellBody(message.code);
+    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools,inspect,cells,rlm){\n${body}\n}`;
     const javascript = transpiler.transformSync(source);
     const factory = new Function(`${javascript}\nreturn __cell;`)() as (
       sdk: ConsoleSdk,
@@ -176,12 +208,13 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       state: unknown,
       artifacts: unknown,
       tools: unknown,
+      inspect: typeof inspectValue,
+      cells: unknown,
+      rlm: unknown,
     ) => Promise<unknown>;
-    const sdk = { state, artifacts, tools, memory, harness, skills, specs } as unknown as ConsoleSdk;
-    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools);
-    const result = value === undefined ? null : value;
-    assertJsonValue(result);
-    response = { type: "result", executionId: message.executionId, ok: true, value: result };
+    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, rlm, inspect } as unknown as ConsoleSdk;
+    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm);
+    response = { type: "result", executionId: message.executionId, ok: true, observation: encodeObservation(value) };
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
     response = {

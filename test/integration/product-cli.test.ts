@@ -1,0 +1,302 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { parseCliArgs } from "../../src/cli-args.ts";
+import { resolveWorkspace, workspacePreferenceKey } from "../../src/product/index.ts";
+import { ProfileStore } from "../../src/storage/index.ts";
+
+const root = resolve(new URL("../..", import.meta.url).pathname);
+const directories: string[] = [];
+afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+
+async function fixture(): Promise<{ directory: string; workspace: string; home: string }> {
+  const directory = await mkdtemp(join(tmpdir(), "agencity-product-")); directories.push(directory);
+  const workspace = join(directory, "repo"); const home = join(directory, "home");
+  await mkdir(workspace); await mkdir(home); await mkdir(join(workspace, ".git"));
+  return { directory, workspace, home };
+}
+
+async function cli(args: readonly string[], options: { cwd?: string; home: string; extraEnv?: Record<string, string> }): Promise<{ code: number; stdout: string; stderr: string }> {
+  const { OPENAI_API_KEY: _key, OPENAI_BASE_URL: _base, OPENAI_MODEL: _model, AGENCITY_PROFILE: _profile, ...clean } = process.env;
+  const child = Bun.spawn([process.execPath, "run", join(root, "src/cli.ts"), ...args], {
+    cwd: options.cwd ?? root,
+    env: { ...clean, HOME: options.home, ...(options.extraEnv ?? {}) },
+    stdout: "pipe", stderr: "pipe", stdin: "ignore",
+  });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  return { code, stdout, stderr };
+}
+
+async function allFileText(directory: string): Promise<string> {
+  let text = "";
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) text += await allFileText(path);
+    else text += (await readFile(path)).toString("latin1");
+  }
+  return text;
+}
+
+describe("product CLI", () => {
+  test("disambiguates command-like tasks from product and retained diagnostic commands", () => {
+    expect(parseCliArgs([])).toMatchObject({ command: "product", positionals: [] });
+    expect(parseCliArgs(["fix", "the", "tests", "--demo"])).toMatchObject({ command: "product", positionals: ["fix", "the", "tests"] });
+    expect(parseCliArgs(["--demo", "create", "a", "parser"])).toMatchObject({ command: "product", positionals: ["create", "a", "parser"] });
+
+    expect(parseCliArgs(["run", "fix", "it", "--model", "openai/gpt-test"])).toMatchObject({ command: "run", positionals: ["fix", "it"] });
+    expect(parseCliArgs(["new", "write", "docs"])).toMatchObject({ command: "new", positionals: ["write", "docs"] });
+    expect(parseCliArgs(["--", "run", "the", "benchmark"])).toMatchObject({ command: "product", positionals: ["run", "the", "benchmark"] });
+    expect(parseCliArgs(["run the benchmark"])).toMatchObject({ command: "product", positionals: ["run the benchmark"] });
+
+    expect(parseCliArgs(["create"]).command).toBe("create");
+    expect(parseCliArgs(["create", "--workspace", "diagnostic"]).command).toBe("create");
+    expect(parseCliArgs(["snapshot", "--session", "s", "--branch", "b"]).command).toBe("snapshot");
+    expect(parseCliArgs(["chat", "--session=s", "--branch=b", "hello"])).toMatchObject({ command: "chat", positionals: ["hello"] });
+    expect(parseCliArgs(["cell", "--session", "s", "--branch", "b", "return 1"])).toMatchObject({ command: "cell", positionals: ["return 1"] });
+
+    expect(parseCliArgs(["create", "a", "parser"])).toMatchObject({ command: "product", positionals: ["create", "a", "parser"] });
+    expect(parseCliArgs(["snapshot", "the", "current", "design"])).toMatchObject({ command: "product", positionals: ["snapshot", "the", "current", "design"] });
+    expect(parseCliArgs(["chat", "with", "the", "team"])).toMatchObject({ command: "product", positionals: ["chat", "with", "the", "team"] });
+    expect(parseCliArgs(["cell", "division", "cleanup"])).toMatchObject({ command: "product", positionals: ["cell", "division", "cleanup"] });
+    expect(parseCliArgs(["create a parser"])).toMatchObject({ command: "product", positionals: ["create a parser"] });
+    expect(parseCliArgs(["--", "create", "--demo"])).toMatchObject({ command: "product", positionals: ["create", "--demo"] });
+  });
+
+  test("canonical workspace discovery resolves nested paths and aliases to one identity", async () => {
+    const value = await fixture();
+    const nested = join(value.workspace, "packages", "app"); await mkdir(nested, { recursive: true });
+    const alias = join(value.directory, "alias"); await symlink(value.workspace, alias);
+    const fromNested = await resolveWorkspace({ startDirectory: nested });
+    const fromAlias = await resolveWorkspace({ override: alias });
+    expect(fromNested.root).toBe(fromAlias.root);
+    expect(fromNested.workspaceId).toBe(fromAlias.workspaceId);
+  });
+
+  test("durable workspace identity survives a repository move and symlinked entry path", async () => {
+    const value = await fixture();
+    const original = await resolveWorkspace({ override: value.workspace });
+    const marker = join(value.workspace, ".agencity", "workspace-id");
+    expect((await lstat(marker)).mode & 0o777).toBe(0o600);
+    expect(await readFile(marker, "utf8")).toBe(`${original.workspaceId}\n`);
+
+    const moved = join(value.directory, "renamed-repo");
+    await rename(value.workspace, moved);
+    const alias = join(value.directory, "renamed-alias");
+    await symlink(moved, alias);
+    const fromMoved = await resolveWorkspace({ override: moved });
+    const fromAlias = await resolveWorkspace({ override: alias });
+    expect(fromMoved.root).toBe(fromAlias.root);
+    expect(fromMoved.root.endsWith("/renamed-repo")).toBe(true);
+    expect(fromMoved.workspaceId).toBe(original.workspaceId);
+    expect(fromAlias.workspaceId).toBe(original.workspaceId);
+    expect(fromMoved.stateDirectory).toBe(join(fromMoved.root, ".agencity"));
+  });
+
+  test("concurrent first opens atomically converge on one complete workspace marker", async () => {
+    const value = await fixture();
+    const resolved = await Promise.all(Array.from({ length: 32 }, () => resolveWorkspace({ override: value.workspace })));
+    expect(new Set(resolved.map(item => item.workspaceId)).size).toBe(1);
+    const workspaceId = resolved[0]!.workspaceId;
+    expect(workspaceId).toMatch(/^workspace-[a-f0-9]{32}$/);
+    expect(await readFile(join(value.workspace, ".agencity", "workspace-id"), "utf8")).toBe(`${workspaceId}\n`);
+    expect((await readdir(join(value.workspace, ".agencity"))).filter(name => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  test("a pre-marker database migrates once to the legacy path-derived workspace identity", async () => {
+    const value = await fixture();
+    const stateDirectory = join(value.workspace, ".agencity");
+    await mkdir(stateDirectory, { mode: 0o700 });
+    await writeFile(join(stateDirectory, "agent.db"), "pre-marker database");
+    const migrated = await resolveWorkspace({ override: value.workspace });
+    const hash = new Bun.CryptoHasher("sha256"); hash.update(migrated.root);
+    const legacyId = `workspace-${hash.digest("hex").slice(0, 24)}`;
+    expect(migrated.workspaceId).toBe(legacyId);
+    expect(await readFile(join(stateDirectory, "workspace-id"), "utf8")).toBe(`${legacyId}\n`);
+
+    await rm(join(stateDirectory, "agent.db"));
+    expect((await resolveWorkspace({ override: value.workspace })).workspaceId).toBe(legacyId);
+
+    const customWorkspace = join(value.directory, "custom-db-repo"); await mkdir(customWorkspace);
+    const customDatabase = join(value.directory, "custom-state", "legacy.db");
+    await mkdir(join(value.directory, "custom-state")); await writeFile(customDatabase, "custom pre-marker database");
+    const customMigrated = await resolveWorkspace({ override: customWorkspace, legacyDatabasePath: customDatabase });
+    const customHash = new Bun.CryptoHasher("sha256"); customHash.update(customMigrated.root);
+    expect(customMigrated.workspaceId).toBe(`workspace-${customHash.digest("hex").slice(0, 24)}`);
+  });
+
+  test("rejects symlinked metadata and symlink, insecure, or invalid workspace markers", async () => {
+    const value = await fixture();
+
+    const metadataTarget = join(value.directory, "metadata-target"); await mkdir(metadataTarget);
+    const metadataLinkWorkspace = join(value.directory, "metadata-link-repo"); await mkdir(metadataLinkWorkspace);
+    await symlink(metadataTarget, join(metadataLinkWorkspace, ".agencity"));
+    await expect(resolveWorkspace({ override: metadataLinkWorkspace })).rejects.toThrow("metadata must be a real directory");
+
+    const symlinkWorkspace = join(value.directory, "symlink-marker-repo"); await mkdir(join(symlinkWorkspace, ".agencity"), { recursive: true });
+    const externalMarker = join(value.directory, "external-workspace-id");
+    await writeFile(externalMarker, "workspace-aaaaaaaaaaaaaaaa\n", { mode: 0o600 });
+    await symlink(externalMarker, join(symlinkWorkspace, ".agencity", "workspace-id"));
+    await expect(resolveWorkspace({ override: symlinkWorkspace })).rejects.toThrow("marker is unavailable");
+
+    const insecureWorkspace = join(value.directory, "insecure-marker-repo"); await mkdir(join(insecureWorkspace, ".agencity"), { recursive: true });
+    const insecureMarker = join(insecureWorkspace, ".agencity", "workspace-id");
+    await writeFile(insecureMarker, "workspace-bbbbbbbbbbbbbbbb\n"); await chmod(insecureMarker, 0o644);
+    await expect(resolveWorkspace({ override: insecureWorkspace })).rejects.toThrow("owner-only");
+
+    const invalidWorkspace = join(value.directory, "invalid-marker-repo"); await mkdir(join(invalidWorkspace, ".agencity"), { recursive: true });
+    const invalidMarker = join(invalidWorkspace, ".agencity", "workspace-id");
+    await writeFile(invalidMarker, "../../not-an-identity\n", { mode: 0o600 });
+    await expect(resolveWorkspace({ override: invalidWorkspace })).rejects.toThrow("marker is invalid");
+  });
+
+  test("no-subcommand route reaches a ready TUI and a second invocation resumes without IDs", async () => {
+    const value = await fixture();
+    const invoke = async (extra: string[]) => {
+      const { OPENAI_API_KEY: _key, ...clean } = process.env;
+      const child = Bun.spawn([process.execPath, "run", join(root, "src/cli.ts"), "--workspace", value.workspace, ...extra], {
+        cwd: root, env: { ...clean, HOME: value.home }, stdout: "pipe", stderr: "pipe", stdin: "pipe",
+      });
+      child.stdin.write("/quit\n"); child.stdin.end();
+      const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+      return { code, stdout, stderr };
+    };
+    const first = await invoke(["--demo"]);
+    expect(first).toMatchObject({ code: 0, stderr: "" });
+    expect(first.stdout).toContain("Agencity product session");
+    expect(first.stdout).toContain("Agencity trusted-local TUI");
+    const second = await invoke([]);
+    expect(second).toMatchObject({ code: 0, stderr: "" });
+    expect(second.stdout).toContain("Session: New session");
+  });
+
+  test("explicit demo run creates named durable work, resumes it, selects, and renames without IDs for normal use", async () => {
+    const value = await fixture();
+    const first = await cli(["run", "--workspace", value.workspace, "--demo", "inspect this repository"], { home: value.home });
+    expect(first).toMatchObject({ code: 0, stderr: "" });
+    expect(first.stdout).toContain("Session: inspect this repository / main");
+    expect(first.stdout).toContain("Model: echo/echo-1 [DEMO FIXTURE]");
+    expect(first.stdout).toContain("Echo: inspect this repository");
+
+    const resumed = await cli(["run", "--workspace", value.workspace, "continue inspection"], { home: value.home });
+    expect(resumed.code).toBe(0);
+    expect(resumed.stdout).toContain("Session: inspect this repository / main");
+    expect(resumed.stdout).toContain("Echo: continue inspection");
+
+    const listed = await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home });
+    const rows = JSON.parse(listed.stdout) as Array<{ sessionId: string; branchId: string; sessionName: string; taskSummary: string; model: { provider: string } }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ sessionName: "inspect this repository", taskSummary: "inspect this repository", model: { provider: "echo" } });
+
+    const renamed = await cli(["sessions", "--workspace", value.workspace, "--session", rows[0]!.sessionId, "--name", "Repository inspection", "--json"], { home: value.home });
+    expect(renamed.code).toBe(0);
+    expect((JSON.parse(renamed.stdout) as Array<{ sessionName: string }>)[0]!.sessionName).toBe("Repository inspection");
+    const selected = await cli(["sessions", "--workspace", value.workspace, "--select", "Repository inspection"], { home: value.home });
+    expect(selected).toMatchObject({ code: 0, stderr: "" });
+    expect(selected.stdout).toContain("Selected");
+  });
+
+  test("multiple equally plausible roots require explicit selection rather than row order", async () => {
+    const value = await fixture();
+    expect((await cli(["run", "--workspace", value.workspace, "--demo", "first root"], { home: value.home })).code).toBe(0);
+    expect((await cli(["run", "--workspace", value.workspace, "--new", "--demo", "second root"], { home: value.home })).code).toBe(0);
+    const workspace = await resolveWorkspace({ override: value.workspace });
+    const profile = await ProfileStore.open(`file:${join(value.home, ".agencity", "profile.db")}`);
+    await profile.setPreference(workspacePreferenceKey(workspace.workspaceId, "recent"), null); profile.close();
+    const ambiguous = await cli(["run", "--workspace", value.workspace, "do not guess"], { home: value.home });
+    expect(ambiguous.code).not.toBe(0);
+    expect(ambiguous.stderr).toContain("Multiple sessions are plausible");
+    const rows = JSON.parse((await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home })).stdout) as Array<{ sessionId: string }>;
+    const selected = await cli(["run", "--workspace", value.workspace, "--session", rows[0]!.sessionId, "explicit work"], { home: value.home });
+    expect(selected.code).toBe(0);
+    expect(selected.stdout).toContain("Echo: explicit work");
+  });
+
+  test("non-interactive new work never silently falls back to Echo", async () => {
+    const value = await fixture();
+    const failed = await cli(["run", "--workspace", value.workspace, "work without provider"], { home: value.home });
+    expect(failed.code).not.toBe(0);
+    expect(failed.stderr).toContain("No usable model is selected");
+    expect(failed.stdout).not.toContain("Echo:");
+    const listed = await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(JSON.parse(listed.stdout)).toEqual([]);
+  });
+
+  test("retained work remains selectable and visibly blocked when its provider becomes unavailable", async () => {
+    const value = await fixture();
+    const invokeTui = async (extraEnv: Record<string, string>) => {
+      const { OPENAI_API_KEY: _key, ...clean } = process.env;
+      const child = Bun.spawn([process.execPath, "run", join(root, "src/cli.ts"), "--workspace", value.workspace, "--model", "openai/test-model"], {
+        cwd: root, env: { ...clean, HOME: value.home, ...extraEnv }, stdout: "pipe", stderr: "pipe", stdin: "pipe",
+      });
+      child.stdin.write("/quit\n"); child.stdin.end();
+      return Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    };
+    const [createdCode] = await invokeTui({ OPENAI_API_KEY: "sk-test-process-only-123456789" });
+    expect(createdCode).toBe(0);
+    const resumed = await cli(["run", "--workspace", value.workspace, "work while unavailable"], { home: value.home });
+    expect(resumed.code).not.toBe(0);
+    expect(resumed.stdout).toContain("Model: openai/test-model [UNAVAILABLE]");
+    expect(resumed.stderr).toContain("Run blocked:");
+    const rows = JSON.parse((await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home })).stdout) as Array<{ model: { provider: string; model: string } }>;
+    expect(rows[0]!.model).toEqual({ provider: "openai", model: "test-model" });
+  });
+
+  test("doctor discovers OpenAI-compatible configuration without outputting or persisting its raw secret", async () => {
+    const value = await fixture(); const secret = "sk-test-NEVER-PERSIST-0123456789";
+    const checked = await cli(["doctor", "--workspace", value.workspace, "--json"], { home: value.home, extraEnv: { OPENAI_API_KEY: secret, OPENAI_BASE_URL: "https://example.invalid/v1" } });
+    expect(checked).toMatchObject({ code: 0, stderr: "" });
+    expect(checked.stdout).not.toContain(secret);
+    const report = JSON.parse(checked.stdout) as { providers: Array<{ provider: string; usable: boolean }> };
+    expect(report.providers).toContainEqual(expect.objectContaining({ provider: "openai", usable: true }));
+    expect(await allFileText(value.directory)).not.toContain(secret);
+  });
+
+  test("credential configuration rejects expanded known secrets and credential-shaped references or labels without disclosure", async () => {
+    const value = await fixture();
+    // This deliberately does not resemble a provider key: rejection proves the
+    // value supplied in argv after shell expansion is matched to the environment.
+    const expandedSecret = "known-shell-expanded-value-4815162342";
+    const shapedReference = "sk-live-CREDENTIALSHAPED0123456789";
+    const shapedLabel = "Bearer credentialshapedlabel123456";
+    const cases: Array<{ reference: string; label: string; rejected: string }> = [
+      { reference: expandedSecret, label: "safe label", rejected: expandedSecret },
+      { reference: "env:OPENAI_API_KEY", label: expandedSecret, rejected: expandedSecret },
+      { reference: shapedReference, label: "safe label", rejected: shapedReference },
+      { reference: "env:OPENAI_API_KEY", label: shapedLabel, rejected: shapedLabel },
+    ];
+    for (const candidate of cases) {
+      const result = await cli([
+        "config", "--workspace", value.workspace, "credential-ref", "openai", candidate.reference, candidate.label,
+      ], { home: value.home, extraEnv: { OPENAI_API_KEY: expandedSecret } });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("must be non-secret opaque identifiers");
+      expect(`${result.stdout}\n${result.stderr}`).not.toContain(candidate.rejected);
+    }
+    const inspected = await cli(["config", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(inspected.code).toBe(0);
+    expect((JSON.parse(inspected.stdout) as { credentialReferences: unknown[] }).credentialReferences).toEqual([]);
+    const durableBytes = await allFileText(value.directory);
+    for (const candidate of [expandedSecret, shapedReference, shapedLabel]) expect(durableBytes).not.toContain(candidate);
+  });
+
+  test("version and isolated bun link executable work outside the source directory", async () => {
+    const value = await fixture(); const installation = join(value.directory, "bun-install");
+    const linked = Bun.spawn([process.execPath, "link", "--cwd", root], { env: { ...process.env, BUN_INSTALL: installation }, stdout: "pipe", stderr: "pipe" });
+    const [linkCode, linkError] = await Promise.all([linked.exited, new Response(linked.stderr).text()]);
+    expect(linkCode, linkError).toBe(0);
+    const executable = join(installation, "bin", "agencity");
+    const indexed = Bun.spawnSync(["git", "ls-files", "-s", "src/cli.ts"], { cwd: root });
+    expect(new TextDecoder().decode(indexed.stdout)).toStartWith("100755 ");
+    expect((await lstat(join(root, "src/cli.ts"))).mode & 0o111).not.toBe(0);
+    const version = Bun.spawn([executable, "--version"], { cwd: value.workspace, env: { ...process.env, HOME: value.home }, stdout: "pipe", stderr: "pipe" });
+    const [code, stdout, stderr] = await Promise.all([version.exited, new Response(version.stdout).text(), new Response(version.stderr).text()]);
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    expect(stdout).toContain("agencity 0.1.0");
+    expect(stdout).toContain("supported: >=1.2.0");
+    const development = Bun.spawn([process.execPath, "run", "dev", "--", "--version"], { cwd: root, stdout: "pipe", stderr: "pipe" });
+    const [developmentCode, developmentStdout, developmentStderr] = await Promise.all([development.exited, new Response(development.stdout).text(), new Response(development.stderr).text()]);
+    expect(developmentCode, developmentStderr).toBe(0);
+    expect(developmentStdout).toBe(stdout);
+  });
+});

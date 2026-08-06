@@ -91,7 +91,7 @@ The adapter creates it from `EffectRequested`, marks running during a serialized
 
 ### Slice 2 recursive projections
 
-`tasks`, mailbox/terminal delivery rows, document/chunk/input-set rows, goals/gates (including the completion workspace pin added by migration 003), heartbeats, and recursive model handles are updated in the same transaction as their canonical event. `rebuildOperationalProjections()` deletes these mutable rows and replays only their source events; it never re-executes a model, gate, tool, heartbeat callback, or subagent. Document content is duplicated in a query-friendly table for the Slice 2 foundation, but the `DocumentChunkAdded` event remains authoritative.
+`tasks`, mailbox/terminal delivery rows, document/chunk/input-set rows, goals/gates (including the completion workspace pin added by migration 003), heartbeats, and recursive model handles are updated in the same transaction as their canonical event. Migration 007 adds only rebuildable recursive-handle input/provenance/hash and outcome/result/artifact columns; the corresponding `RecursiveModel*` events remain authoritative. `rebuildOperationalProjections()` deletes these mutable rows and replays only their source events; it never re-executes a model, gate, tool, heartbeat callback, or subagent. Document content is duplicated in a query-friendly table for the Slice 2 foundation, but the `DocumentChunkAdded` event remains authoritative.
 
 ### Slice 3 harness and retrieval projections
 

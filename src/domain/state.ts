@@ -1,8 +1,9 @@
 import type {
-  ArtifactReference, BudgetLimits, ContextRecordReference, EffectOutcome, GoalGateStatus,
-  GoalStatus, HeartbeatStatus, MailboxMessageKind, ModelConfiguration, RecursiveModelStatus,
+  AgentRunInputKind, AgentRunStatus, ArtifactReference, BudgetLimits, ContextRecordReference, EffectOutcome, GoalGateStatus,
+  GoalStatus, HeartbeatStatus, MailboxMessageKind, ModelConfiguration, RecursiveModelOutcome, RecursiveModelStatus,
   SessionStatus, TaskStatus, Usage, WorkingValue,
 } from "./events.ts";
+import type { AgentAction } from "./agent-action.ts";
 import type { JsonValue } from "./json.ts";
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
@@ -39,10 +40,28 @@ export interface InputSetState { readonly id: string; readonly name: string | nu
 export interface GoalGateState { readonly id: string; readonly name: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotent: boolean; readonly required: boolean; readonly status: GoalGateStatus; readonly effectId?: string; readonly output?: JsonValue; readonly error?: string; readonly eventId: string; }
 export interface GoalState { readonly id: string; readonly description: string; readonly completionCriteria: string | null; readonly maxTurns: number | null; readonly status: GoalStatus; readonly completionRequestId: string | null; readonly completionWorkspaceId: string | null; readonly completionWorkspaceCursor: string | null; readonly completionPinRecorded: boolean; readonly gates: Record<string, GoalGateState>; readonly reason?: string; readonly eventId: string; }
 export interface HeartbeatState { readonly id: string; readonly intervalMs: number; readonly nextTickAt: string; readonly goalId: string | null; readonly payload?: JsonValue; readonly status: HeartbeatStatus; readonly tick: number; readonly lastFiredAt: string | null; readonly eventId: string; }
-export interface RecursiveModelState { readonly id: string; readonly taskId: string; readonly parentSessionId: string; readonly parentBranchId: string; readonly childSessionId: string; readonly childBranchId: string; readonly model: ModelConfiguration; readonly inputSetId: string | null; readonly status: RecursiveModelStatus; readonly resultMessageId?: string; readonly error?: string; readonly eventId: string; }
+export interface RecursiveModelState { readonly id: string; readonly taskId: string; readonly parentSessionId: string; readonly parentBranchId: string; readonly childSessionId: string; readonly childBranchId: string; readonly model: ModelConfiguration; readonly inputSetId: string | null; readonly input?: JsonValue; readonly inputProvenance?: JsonValue; readonly inputHash?: string; readonly status: RecursiveModelStatus; readonly outcome?: RecursiveModelOutcome; readonly resultMessageId?: string; readonly result?: JsonValue; readonly resultArtifactId?: string; readonly error?: string; readonly eventId: string; }
+
+
+export interface AgentRunStepState {
+  readonly id: string; readonly ordinal: number; readonly contextId: string; readonly callId: string;
+  readonly effectId: string; readonly actionId: string; readonly observationEventIds: string[];
+  readonly action?: AgentAction; readonly rawAction?: string; readonly rejection?: string; readonly eventId: string;
+}
+export interface AgentRunInputRequestState {
+  readonly id: string; readonly actionId: string; readonly kind: AgentRunInputKind; readonly question: string;
+  readonly permission?: string; readonly response?: string; readonly approved?: boolean; readonly requestedEventId: string;
+  readonly receivedEventId?: string;
+}
+export interface AgentRunState {
+  readonly id: string; readonly task: string; readonly requestKey: string; readonly goalId: string | null;
+  readonly status: AgentRunStatus; readonly steps: AgentRunStepState[]; readonly inputRequests: Record<string, AgentRunInputRequestState>;
+  readonly cancellationRequested: boolean; readonly cancellationReason?: string; readonly reason?: string;
+  readonly finalMessageId?: string; readonly requestEventId: string; readonly eventId: string;
+}
 
 export interface AgentState {
-  readonly reducerVersion: 2; readonly sessionId: string; readonly workspaceId: string; readonly branch: BranchState;
+  readonly reducerVersion: 3; readonly sessionId: string; readonly workspaceId: string; readonly sessionName?: string | null; readonly branch: BranchState;
   readonly parentSessionId: string | null; readonly parentBranchId: string | null; readonly rootSessionId: string;
   readonly depth: number; readonly taskId: string | null;
   readonly model: ModelConfiguration; readonly status: SessionStatus; readonly cursor: string; readonly appliedEventIds: string[];
@@ -53,4 +72,5 @@ export interface AgentState {
   readonly terminalNotices: Record<string, TerminalNoticeState>; readonly documents: Record<string, DocumentState>;
   readonly inputSets: Record<string, InputSetState>; readonly goals: Record<string, GoalState>;
   readonly heartbeats: Record<string, HeartbeatState>; readonly recursiveModels: Record<string, RecursiveModelState>;
+  readonly agentRuns: Record<string, AgentRunState>;
 }

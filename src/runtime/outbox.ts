@@ -1,9 +1,9 @@
 import { ValidationError, newId, projectEvents, type EffectOutcome } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
-import type { EffectExecutor, ExecutionResult } from "../executors/contract.ts";
+import type { EffectExecutionProgress, EffectExecutor, ExecutionResult } from "../executors/contract.ts";
 import { result } from "../executors/contract.ts";
 import type { AgentStorage, OutboxRecord } from "../storage/index.ts";
-import { containsBrokeredSecret, scrubJson, scrubText } from "../security/index.ts";
+import { containsBrokeredSecret, isSensitiveEnvironmentKey, scrubJson, scrubText } from "../security/index.ts";
 
 export interface EffectRequest {
   readonly sessionId: string;
@@ -15,16 +15,43 @@ export interface EffectRequest {
   readonly idempotent: boolean;
 }
 
+/** Best-effort process-local progress. It has no durable cursor and is not replayed. */
+export interface EffectProgressNotification {
+  readonly type: "effect-progress";
+  readonly effectId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly executor: string;
+  readonly operation: string;
+  readonly attempt: number;
+  readonly sequence: number;
+  readonly kind: string;
+  readonly value: JsonValue;
+  readonly observedAt: string;
+}
+
+const MAX_PROGRESS_NOTIFICATIONS_PER_EFFECT = 2_048;
+const MAX_PROGRESS_BYTES_PER_EFFECT = 1_048_576;
+const MAX_PROGRESS_BYTES_PER_NOTIFICATION = 32_768;
+// Normal progress always leaves room for one visible terminal truncation marker.
+const MAX_PROGRESS_TRUNCATION_MARKER_BYTES = 1_024;
+
 export class OutboxRunner {
   readonly #executors = new Map<string, EffectExecutor>();
   readonly #controllers = new Map<string, AbortController>();
   readonly #inflight = new Map<string, Promise<ExecutionResult>>();
+  readonly #progressListeners = new Set<(notification: EffectProgressNotification) => void>();
   #claimAdmissions = 0;
   #deletionQuiesced = false;
   readonly owner = `runner-${newId()}`;
 
   constructor(readonly storage: AgentStorage, executors: readonly EffectExecutor[]) {
     for (const executor of executors) this.#executors.set(executor.name, executor);
+  }
+
+  onProgress(listener: (notification: EffectProgressNotification) => void): () => void {
+    this.#progressListeners.add(listener);
+    return () => this.#progressListeners.delete(listener);
   }
 
   async request(request: EffectRequest): Promise<string> {
@@ -162,10 +189,111 @@ export class OutboxRunner {
     const executor = this.#executors.get(record.executor);
     const controller = new AbortController();
     this.#controllers.set(record.effectId, controller);
+    let progressOpen = true;
+    let progressBoundReached = false;
+    let progressSequence = 0;
+    let progressBytes = 0;
+    const progressSecrets = brokeredSecretsForProgress();
+    let pendingModelText = "";
+    let pendingModelMetadata: Readonly<Record<string, JsonValue>> | undefined;
+
+    const publishProgress = (kind: string, value: JsonValue, encodedBytes: number): void => {
+      const notification: EffectProgressNotification = {
+        type: "effect-progress",
+        effectId: record.effectId,
+        sessionId: record.sessionId,
+        branchId: record.branchId,
+        executor: record.executor,
+        operation: record.operation,
+        attempt,
+        sequence: progressSequence++,
+        kind,
+        value,
+        observedAt: new Date().toISOString(),
+      };
+      progressBytes += encodedBytes;
+      for (const listener of this.#progressListeners) {
+        try { listener(notification); } catch { /* progress consumers cannot affect the effect */ }
+      }
+    };
+    const truncateProgress = (
+      reason: "notification-limit" | "byte-limit" | "notification-size-limit",
+      suppressedKind: string,
+    ): void => {
+      if (progressBoundReached) return;
+      progressBoundReached = true;
+      const kind = "progress-truncated";
+      const value = { reason, suppressedKind };
+      const encodedBytes = progressJsonBytes(kind, value);
+      // Normal notifications reserve both a sequence and enough aggregate bytes
+      // for this marker, so the first suppressed notification is always visible.
+      if (
+        progressSequence < MAX_PROGRESS_NOTIFICATIONS_PER_EFFECT &&
+        encodedBytes <= MAX_PROGRESS_BYTES_PER_NOTIFICATION &&
+        progressBytes + encodedBytes <= MAX_PROGRESS_BYTES_PER_EFFECT
+      ) publishProgress(kind, value, encodedBytes);
+    };
+    const emitBoundedProgress = (progress: EffectExecutionProgress): void => {
+      if (!progressOpen || progressBoundReached || !progress.kind) return;
+      const kind = scrubText(progress.kind).slice(0, 128);
+      const value = scrubJson(progress.value);
+      const encodedBytes = progressJsonBytes(kind, value);
+      if (encodedBytes > MAX_PROGRESS_BYTES_PER_NOTIFICATION) {
+        truncateProgress("notification-size-limit", kind);
+        return;
+      }
+      if (progressSequence >= MAX_PROGRESS_NOTIFICATIONS_PER_EFFECT - 1) {
+        truncateProgress("notification-limit", kind);
+        return;
+      }
+      if (
+        progressBytes + encodedBytes + MAX_PROGRESS_TRUNCATION_MARKER_BYTES >
+        MAX_PROGRESS_BYTES_PER_EFFECT
+      ) {
+        truncateProgress("byte-limit", kind);
+        return;
+      }
+      publishProgress(kind, value, encodedBytes);
+    };
+    const drainModelProgress = (final: boolean): void => {
+      if (!pendingModelText || !pendingModelMetadata) return;
+      for (const secret of brokeredSecretsForProgress()) {
+        if (!progressSecrets.includes(secret)) progressSecrets.push(secret);
+      }
+      progressSecrets.sort((left, right) => right.length - left.length);
+      const heldCharacters = final ? 0 : secretPrefixSuffixLength(pendingModelText, progressSecrets);
+      const safeEnd = pendingModelText.length - heldCharacters;
+      const safeText = scrubProgressText(pendingModelText.slice(0, safeEnd), progressSecrets);
+      pendingModelText = pendingModelText.slice(safeEnd);
+      if (safeText) {
+        emitBoundedProgress({
+          kind: "model-output-delta",
+          value: { ...pendingModelMetadata, text: safeText },
+        });
+      }
+    };
+    const reportProgress = (progress: EffectExecutionProgress): void => {
+      if (!progressOpen || progressBoundReached || !progress.kind) return;
+      if (
+        record.executor === "model" &&
+        progress.kind === "model-output-delta" &&
+        progress.value !== null &&
+        typeof progress.value === "object" &&
+        !Array.isArray(progress.value) &&
+        typeof progress.value.text === "string"
+      ) {
+        const { text, ...metadata } = progress.value;
+        pendingModelMetadata ??= scrubJson(metadata) as Readonly<Record<string, JsonValue>>;
+        pendingModelText += text;
+        drainModelProgress(false);
+        return;
+      }
+      emitBoundedProgress(progress);
+    };
     let execution: ExecutionResult;
     try {
       execution = executor
-        ? await executor.execute({ ...record, attempt }, { signal: controller.signal })
+        ? await executor.execute({ ...record, attempt }, { signal: controller.signal, reportProgress })
         : result("failed", undefined, `Executor unavailable: ${record.executor}`);
     } catch (error) {
       execution = result(
@@ -174,6 +302,11 @@ export class OutboxRunner {
         error instanceof Error ? error.message : String(error),
       );
     } finally {
+      // A suffix matching the beginning of a known secret is withheld until a
+      // later delta proves it safe. Flush that suffix only when the executor is
+      // terminal, after which it cannot join with another provider delta.
+      drainModelProgress(true);
+      progressOpen = false;
       this.#controllers.delete(record.effectId);
     }
     const safeExecution = result(
@@ -291,10 +424,47 @@ export class OutboxRunner {
   }
 }
 
-function stableEffectId(sessionId: string, idempotencyKey: string): string {
+export function stableEffectId(sessionId: string, idempotencyKey: string): string {
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(sessionId);
   hasher.update("\0");
   hasher.update(idempotencyKey);
   return `effect-${hasher.digest("hex")}`;
+}
+
+function progressJsonBytes(kind: string, value: JsonValue): number {
+  return new TextEncoder().encode(JSON.stringify({ kind, value })).byteLength;
+}
+
+function brokeredSecretsForProgress(): string[] {
+  return Object.entries(process.env)
+    .filter(([key, value]) => isSensitiveEnvironmentKey(key) && typeof value === "string" && value.length >= 4)
+    .map(([, value]) => value as string)
+    .sort((left, right) => right.length - left.length);
+}
+
+function scrubProgressText(text: string, retainedSecrets: readonly string[]): string {
+  // scrubText covers credentials currently brokered by the supervisor. Retain
+  // the effect-start snapshot too, so rotating an environment value during an
+  // in-flight call cannot make an earlier credential observable.
+  let scrubbed = scrubText(text);
+  for (const secret of retainedSecrets) scrubbed = scrubbed.split(secret).join("[REDACTED]");
+  return scrubbed;
+}
+
+function secretPrefixSuffixLength(text: string, secrets: readonly string[]): number {
+  let held = 0;
+  for (const secret of secrets) {
+    // Hold a complete match at the current boundary too. It may also be the
+    // prefix of a longer known secret, and the next delta decides which scrub
+    // replacement the authoritative accumulated text receives.
+    const longest = Math.min(text.length, secret.length);
+    for (let length = longest; length > held; length--) {
+      if (text.endsWith(secret.slice(0, length))) {
+        held = length;
+        break;
+      }
+    }
+  }
+  return held;
 }

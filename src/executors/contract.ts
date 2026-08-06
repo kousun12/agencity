@@ -18,7 +18,19 @@ export interface ExecutionResult {
   readonly output?: JsonValue;
   readonly error?: string;
 }
-export interface EffectExecutionContext { readonly signal: AbortSignal }
+/**
+ * Non-authoritative, process-local progress from a running effect. Progress is
+ * never an effect outcome and callers must not use it as dependent state.
+ */
+export interface EffectExecutionProgress {
+  readonly kind: string;
+  readonly value: JsonValue;
+}
+export interface EffectExecutionContext {
+  readonly signal: AbortSignal;
+  /** Best-effort and non-durable. The outbox may bound or drop notifications. */
+  readonly reportProgress?: (progress: EffectExecutionProgress) => void;
+}
 export interface EffectExecutor {
   readonly name: string;
   execute(request: EffectExecutionRequest, context: EffectExecutionContext): Promise<ExecutionResult>;

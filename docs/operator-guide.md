@@ -6,12 +6,12 @@ Agencity requires Bun 1.2 or newer. From the repository root:
 
 ```sh
 bun install --frozen-lockfile
-bun run typecheck
-bun run check:architecture
-bun test
+bun run verify
+bun run dev
+bun run dev -- "inspect this repository"
 ```
 
-`bun run verify` runs those three gates. Slice 1 needs no network access when the built-in `echo` model is used.
+Run `bun link` from the installed checkout to create `agencity` and `prime-agent-ts` under `~/.bun/bin`; the checked-in `src/cli.ts` target is Git mode `100755`, so no test-side or operator `chmod` is required. This private package has no supported registry or standalone release. `agencity --version` reports the application and Bun compatibility. The source and isolated-link verification workflows are documented in [Installation and executable workflows](./install.md).
 
 ## Local placement
 
@@ -63,15 +63,55 @@ AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=... \
 
 ## CLI
 
-Run `bun run src/cli.ts help` for the compact built-in help. The parser distinguishes boolean flags from value options, accepts `--name=value`, rejects missing/duplicate/unknown options, and supports `--` before positional text/code that begins with `--`. The package also declares `agencity` and `prime-agent-ts` executable aliases for an installed package.
-
-### Create
+Run `agencity --help` (or `bun run dev -- --help`) for the built-in help. With no command, Agencity opens the product rather than developer help. The first unknown positional is treated as the initial task:
 
 ```sh
-bun run src/cli.ts create --workspace <WORKSPACE_ID>
+agencity                              # discover workspace, create/resume, open TUI
+agencity "inspect this repository"   # commit one model turn, then open TUI
+agencity new [TASK]
+agencity resume [NAME|ID]
+agencity sessions [--json]
+agencity run TASK                     # commit one model turn and exit
+agencity doctor [--json]
+agencity config
 ```
 
-This creates a root session and branch using `{ provider: "echo", model: "echo-1" }`. The result contains IDs required by later commands. To select another model or set budgets, use `Supervisor.createSession` or `POST /sessions`.
+Workspace discovery walks upward for explicit `.agencity` or `.git` metadata and canonicalizes the selected root with `realpath`; `--workspace PATH` is an override. The root's durable identity is the opaque value in `.agencity/workspace-id`, created atomically with mode `0600`. It therefore survives a repository rename/move and makes symlink aliases converge. Concurrent first opens retain the single winning complete marker. A repository with a pre-marker `.agencity/agent.db` records its legacy path-derived ID on first migration. Do not copy one marker into an unrelated repository or edit it manually: symlinked metadata/markers, group- or world-accessible markers, wrong ownership, oversized files, and invalid identifiers stop startup rather than falling back to a new identity.
+
+Product state defaults to `<root>/.agencity`, while profile/device preferences default to `~/.agencity/profile.db`. The recent session/branch preference is workspace-scoped. Only one root initial branch may be selected without a preference; multiple plausible roots require an interactive selector or explicit `sessions --select NAME`.
+
+Session and branch labels derive from the first retained task without changing it. Rename a session with `sessions --session ID --name NAME`, or add `--branch ID` to rename one branch. `sessions` shows name, time, model, state, task summary, active goals, unresolved work, and diagnostic IDs.
+
+### Provider and model onboarding
+
+```sh
+export OPENAI_API_KEY='...'
+# optional: export OPENAI_BASE_URL='https://provider.example/v1'
+agencity --model openai/MODEL_ID
+agencity --demo  # visibly labeled deterministic Echo fixture
+```
+
+The real-provider path persists only `provider/model`; raw credentials never enter preferences, events, logs, artifacts, or doctor output. `config credential-ref PROVIDER env:VARIABLE LABEL` records an opaque external handle, not a credential. Non-interactive new work without a usable real provider and model fails nonzero rather than choosing Echo. A resumed branch always retains its original model; if that provider is unavailable the branch remains visible and opens in a blocked configuration state.
+
+Programmatically supplied `SupervisorOptions.modelProviders` appear in the same secret-free provider catalog. Providers may expose streaming capability, but model choice still requires a model identifier (an environment `<PROVIDER>_MODEL`, persisted preference, `--model`, or interactive input).
+
+### Advanced compatibility commands
+
+The parser still distinguishes boolean flags from value options, accepts `--name=value`, and rejects missing, duplicate, or unknown options. Disambiguation is deterministic:
+
+- product route words (`new`, `resume`, `sessions`, `run`, `doctor`, and `config`) are commands when they are the exact first argument;
+- legacy words followed by ordinary natural-language positional text are tasks (`agencity create a parser`, `agencity chat with the team`);
+- `chat` and `cell` with `--session`/`--branch`, and other legacy words supplied only their recognized options, remain low-level commands;
+- a quoted multi-word first argument is a task; and
+- `--` before the task is the authoritative escape for any ambiguous exact spelling, for example `agencity -- run the benchmark` or `agencity -- create --demo`.
+
+Low-level commands keep their prior ID-oriented contracts.
+
+```sh
+agencity create --workspace <WORKSPACE_ID>
+```
+
+This legacy diagnostic command still creates `{ provider: "echo", model: "echo-1" }` for compatibility. It is not the product onboarding path; use `--demo` through `new`, `run`, or the default route when fixture behavior is intended.
 
 ### Message plus one model turn
 
@@ -88,7 +128,11 @@ bun run src/cli.ts cell --session <SESSION_ID> --branch <BRANCH_ID> \
   'const rows = await sql`SELECT type FROM events WHERE session_id = ${session.id}`; return rows;'
 ```
 
-Cells run as the body of an async function. The final value must be JSON-serializable; return `null` for no value. Use `state.set`, not heap variables, for later cells. Static top-level module syntax is not a supported cell interface; use the injected SDK and, only in trusted code, normal Bun dynamic imports.
+Cells run as the body of an async function. If there is no cell-level `return`, the last top-level expression is observed and promises from either path are awaited. Explicit `return` remains supported for early control flow. Logs are bounded separately from the observation.
+
+Structured JSON observations at or below 128 KiB are committed directly. Larger serializable observations are stored once in the content-addressed artifact store; the cell result contains the artifact reference and a bounded preview. `inspect(value, options?)` produces a preview capped at 8 depth levels, 200 total entries, 100 lines, and 16 KiB (smaller defaults apply), never invokes getters, marks circular/depth truncation, and redacts credential-shaped property names. The preview is not authoritative artifact content.
+
+Ordinary `const`/`let` bindings are cell-local, even when a worker happens to be reused. Use `state.set` for typed cross-cell state, `state.list()` to discover it, and `cells.list()`/`cells.get(cellId)` to inspect retained cell source, observation, logs, status, dependencies, and event provenance. Static top-level module syntax is not a supported cell interface; use the injected SDK and, only in trusted code, normal Bun dynamic imports.
 
 ### Inspect and rebuild
 
@@ -122,10 +166,10 @@ The CLI binds to `127.0.0.1`. The server is unauthenticated and must not be expo
 
 ## TUI
 
-Start it with existing session and branch IDs:
+The normal TUI path is simply `agencity` or `agencity [TASK]`; the product bootstrap selects durable work and prints a workspace/session/model/run/trusted-local header. The existing explicit-ID route remains available for diagnostics:
 
 ```sh
-bun run src/cli.ts tui --session <SESSION_ID> --branch <BRANCH_ID>
+agencity tui --session <SESSION_ID> --branch <BRANCH_ID>
 ```
 
 Plain text is committed as a user message and followed by one model turn. Commands:
@@ -157,11 +201,11 @@ Plain text is committed as a user message and followed by one model turn. Comman
 | `/help` | Print command help. |
 | `/quit`, `/exit` | Close the TUI. |
 
-The TUI is a basic in-process client of the same supervisor services and committed event source; it never owns or closes session lifecycle. It supports resume and source-preserving compaction and writes committed `ModelOutputChunk` records as they arrive. Current providers emit one chunk only after provider completion, so this is resumable committed-output display, not a claim of provider token streaming. The TUI does not yet use the HTTP/SSE transport or expose unknown-effect reconciliation; those limitations are visible rather than implied capabilities.
+The TUI is a basic in-process client of the same supervisor services; it never owns or closes session lifecycle. It supports resume and source-preserving compaction. For a provider that truthfully advertises streaming, it renders process-local model deltas before completion and reconciles them with the full terminal response. A failed/cancelled stream is labeled partial and never presented as a committed assistant message. For Echo or another non-streaming provider, the startup header says live output is unavailable and the TUI prints only the committed response. The TUI does not yet use the HTTP/SSE transport or expose unknown-effect reconciliation; those limitations are visible rather than implied capabilities.
 
 ## Providers
 
-`Supervisor.open` always installs `EchoModelProvider`. If `OPENAI_API_KEY` exists, it also installs an OpenAI-compatible provider named `openai`; `OPENAI_BASE_URL` changes its endpoint. Programmatic callers can inject additional `ModelProvider` implementations with `modelProviders`. `providerConcurrency` accepts a positive default or a per-provider map; the one shared limiter covers root turns, recursive calls, and model-backed gates.
+`Supervisor.open` always installs `EchoModelProvider`, visibly named `Echo (demo fixture; non-streaming)`. If `OPENAI_API_KEY` exists, it also installs a streaming OpenAI-compatible provider named `openai`; `OPENAI_BASE_URL` changes its endpoint. Programmatic callers can inject additional `ModelProvider` implementations with `modelProviders`. Providers omit `capabilities` or declare `{ streaming: false }` to use `complete`; streaming providers must declare `{ streaming: true }` and implement `stream`. The runtime does not silently fall back to a second complete request if an advertised stream fails. Secret-free descriptors are available from `supervisor.modelProviders` and `GET /model-providers`. `providerConcurrency` accepts a positive default or a per-provider map; the one shared limiter covers root turns, recursive calls, and model-backed gates.
 
 Provider credentials remain in the supervisor. Common credential-shaped variables are removed from the console worker and non-login shell executor environments. Inputs containing an actual known secret value are rejected; executor outputs/logs/errors redact known values. Benign fields named `token`, `auth`, or similar are not mutated. This reduces accidental disclosure but is not a hostile-code boundary; trusted generated code has OS access and must be contained externally when necessary.
 

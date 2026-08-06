@@ -73,4 +73,31 @@ describe("HTTP domain error mapping", () => {
     }
   });
 
+  test("scrubs known credentials from protocol error responses", async () => {
+    const prior = process.env.REVIEW_API_KEY;
+    process.env.REVIEW_API_KEY = "protocol-secret-value";
+    const supervisor = {
+      appendMessage: async () => {
+        throw new Error(`provider returned ${process.env.REVIEW_API_KEY}`);
+      },
+    } as unknown as Supervisor;
+    const protocol = new ProtocolServer(supervisor);
+    const server = protocol.listen(0);
+    try {
+      const response = await fetch(`http://${server.hostname}:${server.port}/sessions/s/messages?branch=b`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "test" }),
+      });
+      const body = await response.text();
+      expect(response.status).toBe(500);
+      expect(body).toContain("[REDACTED]");
+      expect(body).not.toContain("protocol-secret-value");
+    } finally {
+      protocol.stop();
+      if (prior === undefined) delete process.env.REVIEW_API_KEY;
+      else process.env.REVIEW_API_KEY = prior;
+    }
+  });
+
 });

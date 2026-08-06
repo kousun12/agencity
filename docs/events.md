@@ -56,8 +56,10 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 
 | Event type | Version 1 payload | Projection/semantic effect |
 |---|---|---|
-| `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Initializes a root or a normal child session. Child creation requires the complete parent/root/depth/task tuple; legacy/root rows project self as root and depth zero. |
+| `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, sessionName?, initialBranchName?, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Initializes a root or normal child session, including optional human display labels. Child creation requires the complete parent/root/depth/task tuple; legacy/root rows project self as root and depth zero. |
 | `BranchCreated` | `{ branchId, parentBranchId, forkCursor: decimal string, name?: string }` | Selects the new active branch projection. Storage records ancestry through the exact parent cursor. |
+| `SessionNamed` | `{ name }` | Changes the human session label without changing durable identity or retained task text. Product listing resolves the latest attributable rename across retained branches. |
+| `BranchNamed` | `{ name }` | Changes the current branch label; the rebuildable branch routing projection mirrors it. |
 | `SessionStatusChanged` | `{ status: SessionStatus, reason?: string }` | Sets projected lifecycle status. |
 | `MessageAppended` | `{ messageId, role: "system" | "user" | "assistant" | "tool", content: string, modelCallId?: string }` | Appends one conversation message. |
 | `CellProposed` | `{ cellId, code: string, dependencies: string[] }` | Creates a proposed cell with attempt count zero. |
@@ -72,7 +74,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `EffectOutcomeRecorded` | `{ effectId, attempt: positive integer, outcome: EffectOutcome, output?: JsonValue, error?: string, observedAt: ISO datetime }` | Canonical terminal observation. Unknown remains visibly distinct. |
 | `ContextMaterialized` | `{ contextId, records: ContextRecordReference[], contentHash: 64 lowercase hex, context: JsonValue }` | Records exact model context and provenance; also inserts immutable `context_records`. |
 | `ModelCallRequested` | `{ callId, contextId, effectId, provider, model }` | Links a logical model call to exact context and durable effect. |
-| `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends projected output text. Current complete-style provider emits one sequence-0 chunk after completion. |
+| `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends authoritative projected output text. The current runtime commits one sequence-0 chunk in the terminal success batch; live provider deltas are deliberately not this event. |
 | `ModelCallCompleted` | `{ callId, responseMessageId, finishReason: string, usage: Usage }` | Marks model call succeeded and links its assistant message/usage. |
 | `ModelCallTerminated` | `{ callId, outcome: "failed" | "cancelled" | "unknown", error?: string }` | Visible non-success terminal state; no fabricated response. |
 | `BudgetDebited` | `{ callId, tokens, costUsd, turns, wallTimeMs }` (all nonnegative) | Adds usage to projected counters. |
@@ -88,7 +90,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `GoalCreated` / `GoalCompletionRequested` / `GoalStatusChanged` | Goal/criteria/bound, durable completion request with `{ workspaceId, workspaceCursor }` pin, and validated terminal/blocked transition. | Projects autonomous goal lifecycle; live and recovered succeeded gates must match the durable pin. |
 | `GoalGateAdded` / `GoalGateStatusChanged` | Typed executor request policy and pending/running/passed/failed/cancelled/unknown observation. | Gates are durable requests; required failures prevent completion. |
 | `HeartbeatCreated` / `HeartbeatTicked` / `HeartbeatStatusChanged` | Interval/due time/goal/payload, monotonic tick timing, and active/paused/cancelled state. | Projects a restart-safe schedule; ticking never depends on an in-memory timer identity. |
-| `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs and pending/running/terminal status. | Projects immediately returned recursive model handles backed by normal child sessions. |
+| `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs, bounded materialized input plus identity provenance/hash, lifecycle status, distinct terminal outcome, and bounded result/artifact reference. | Projects immediately returned recursive model handles backed by normal child sessions; fresh workers resolve the same ID and recovery never turns unknown or budget exhaustion into ordinary failure/success. |
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
 
@@ -128,7 +130,7 @@ A send and its recipient delivery commit in one batch. Acknowledgement appends o
 
 ### Model turn
 
-A normal turn appends status-running, `ContextMaterialized`, `ModelCallRequested`, and the model `EffectRequested` before provider execution. Success appends output chunk, assistant message, model completion, budget debit, optional budget-exceeded, and status-idle. Non-success appends `ModelCallTerminated` and status-idle. Startup can finalize a call whose effect terminal event committed before the supervisor's model terminal batch.
+A normal turn appends status-running, `ContextMaterialized`, `ModelCallRequested`, and the model `EffectRequested` before provider execution. A streaming-capable provider may then publish bounded process-local `model-output-delta` progress, but that text is non-canonical and cannot enter messages, context, or dependent work. Success atomically appends the full authoritative output chunk, assistant message, model completion, budget debit, optional budget-exceeded, and status-idle. Non-success appends `ModelCallTerminated` and status-idle without any partial assistant output. Startup can finalize a call whose effect terminal event committed before the supervisor's model terminal batch.
 
 ### Goal gate and heartbeat
 
@@ -146,7 +148,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 
 ## Publication contract
 
-Events are made visible to subscribers only after database commit. Notifications are not stored truth. A consumer must snapshot/catch up by cursor and deduplicate by event ID. Historical/time-travel reduction never executes an effect.
+Events are made visible to subscribers only after database commit. Durable commit notifications only wake cursor-based reads and are not stored truth. Separately, effect progress is best-effort, process-local, bounded, cursorless, and never replayed; clients must discard it on disconnect or a non-success terminal outcome. A consumer reconstructs correctness only from snapshot/catch-up by cursor and deduplicates committed event IDs. Historical/time-travel reduction never executes an effect.
 
 ## Current evolution limitations
 

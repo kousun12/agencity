@@ -1,4 +1,5 @@
 import { AgentRuntimeError } from "../domain/index.ts";
+import { scrubText } from "../security/scrub.ts";
 import type { Supervisor } from "../runtime/index.ts";
 
 export class ProtocolServer {
@@ -16,6 +17,7 @@ export class ProtocolServer {
     try {
       const url = new URL(request.url); const parts = url.pathname.split("/").filter(Boolean);
       if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true, mode: "trusted-local" });
+      if (request.method === "GET" && url.pathname === "/model-providers") return Response.json(this.supervisor.modelExecutor.providers());
       if (parts[0] === "sync") {
         if (request.method === "GET" && parts[1] === "status") return Response.json(await this.supervisor.sync.status());
         if (request.method === "POST" && parts.length === 1) return Response.json(await this.supervisor.sync.sync("manual"));
@@ -115,18 +117,45 @@ export class ProtocolServer {
       return Response.json({ error: { code: "NOT_FOUND", message: "Route not found" } }, { status: 404 });
     } catch (error) {
       const status = httpStatus(error);
-      return Response.json({ error: { code: error instanceof AgentRuntimeError ? error.code : "INTERNAL", message: error instanceof Error ? error.message : String(error) } }, { status });
+      return Response.json({ error: { code: error instanceof AgentRuntimeError ? error.code : "INTERNAL", message: scrubText(error instanceof Error ? error.message : String(error)) } }, { status });
     }
   }
 
   #stream(sessionId: string, branchId: string, after: string, signal: AbortSignal): Response {
-    const encoder = new TextEncoder(); let unsubscribe = () => {};
+    const encoder = new TextEncoder();
+    let active = true;
+    let unsubscribeEvents = () => {};
+    let unsubscribeProgress = () => {};
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        unsubscribe = this.supervisor.projections.subscribe(sessionId, branchId, after, (event) => controller.enqueue(encoder.encode(`id: ${event.cursor}\ndata: ${JSON.stringify(event)}\n\n`)));
-        signal.addEventListener("abort", () => { unsubscribe(); try { controller.close(); } catch {} }, { once: true });
+        const enqueue = (frame: string): void => {
+          if (!active) return;
+          try { controller.enqueue(encoder.encode(frame)); } catch { active = false; }
+        };
+        // Committed events retain their cursor ID and original data shape for
+        // backwards compatibility. Progress is explicitly named and has no ID:
+        // EventSource reconnect cursors therefore never advance on progress.
+        unsubscribeEvents = this.supervisor.projections.subscribe(
+          sessionId,
+          branchId,
+          after,
+          (event) => enqueue(`id: ${event.cursor}\ndata: ${JSON.stringify(event)}\n\n`),
+        );
+        unsubscribeProgress = this.supervisor.outbox.onProgress((progress) => {
+          if (progress.sessionId === sessionId && progress.branchId === branchId) {
+            enqueue(`event: progress\ndata: ${JSON.stringify(progress)}\n\n`);
+          }
+        });
+        signal.addEventListener("abort", () => {
+          active = false;
+          unsubscribeEvents(); unsubscribeProgress();
+          try { controller.close(); } catch {}
+        }, { once: true });
       },
-      cancel: () => unsubscribe(),
+      cancel: () => {
+        active = false;
+        unsubscribeEvents(); unsubscribeProgress();
+      },
     });
     return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
   }

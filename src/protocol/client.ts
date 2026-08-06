@@ -1,23 +1,60 @@
 import type { AgentEvent, AgentState } from "../domain/index.ts";
+import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
   CreateGoalInput, CreateHeartbeatInput, CreateInputSetInput, DocumentHandle, GoalHandle,
   HeartbeatHandle, ImportDocumentInput, InputSetHandle, RecursiveModelHandle, SendMessageInput,
   SpawnAgentInput, StartRecursiveModelInput, SubagentHandle, CreateMemoryInput,
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
-  InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle,
+  InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, SyncConflictRecord, TaskRecord } from "../storage/index.ts";
 import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
 
+export interface AgentStreamHandlers {
+  readonly onEvent: (event: AgentEvent) => void;
+  readonly onProgress?: (progress: EffectProgressNotification) => void;
+}
+
 export class AgentClient {
   constructor(readonly baseUrl: string) {}
+  modelProviders(): Promise<ModelProviderDescriptor[]> { return this.#json("/model-providers"); }
   createSession(workspaceId: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/sessions", { workspaceId }); }
   snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
   message(sessionId: string, branchId: string, content: string): Promise<AgentEvent> { return this.#post(`/sessions/${sessionId}/messages?branch=${branchId}`, { content }); }
   turn(sessionId: string, branchId: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/turns?branch=${branchId}`); }
   cell(sessionId: string, branchId: string, code: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/cells?branch=${branchId}`, { code }); }
   history(sessionId: string, branchId: string): Promise<AgentEvent[]> { return this.#json(`/sessions/${sessionId}/history?branch=${branchId}`); }
+  async stream(
+    sessionId: string,
+    branchId: string,
+    afterCursor: string,
+    handlers: AgentStreamHandlers,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.baseUrl}/sessions/${sessionId}/stream?branch=${encodeURIComponent(branchId)}&after=${encodeURIComponent(afterCursor)}`,
+      signal === undefined ? undefined : { signal },
+    );
+    if (!response.ok) throw new Error(await response.text());
+    if (!response.body) throw new Error("Protocol stream response has no body");
+    let cursor = afterCursor;
+    try {
+      await readProtocolStream(response.body, (eventName, data) => {
+        const value = JSON.parse(data) as AgentEvent | EffectProgressNotification;
+        if (eventName === "progress") {
+          handlers.onProgress?.(value as EffectProgressNotification);
+          return;
+        }
+        const event = value as AgentEvent;
+        if (BigInt(event.cursor) <= BigInt(cursor)) return;
+        cursor = event.cursor;
+        handlers.onEvent(event);
+      }, signal);
+    } catch (error) {
+      if (!signal?.aborted) throw error;
+    }
+  }
   resume(sessionId:string,branchId:string):Promise<{sessionId:string;branchId:string;cursor:string}>{return this.#post(`/sessions/${sessionId}/resume?branch=${branchId}`);}
   compact(sessionId:string,branchId:string):Promise<{contextId:string;sourceEventIds:string[];summary:string}>{return this.#post(`/sessions/${sessionId}/compact?branch=${branchId}`);}
 
@@ -77,4 +114,42 @@ export class AgentClient {
 
   #post<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "POST", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
   async #json<T>(path: string, init?: RequestInit): Promise<T> { const response = await fetch(`${this.baseUrl}${path}`, init); const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body as T; }
+}
+
+async function readProtocolStream(
+  body: ReadableStream<Uint8Array>,
+  onItem: (eventName: string, data: string) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName = "message";
+  let dataLines: string[] = [];
+  const dispatch = (): void => {
+    if (dataLines.length) onItem(eventName, dataLines.join("\n"));
+    eventName = "message";
+    dataLines = [];
+  };
+  try {
+    while (true) {
+      if (signal?.aborted) return;
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let newline: number;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        let line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (line === "") dispatch();
+        else if (line.startsWith("event:")) eventName = line.slice(6).replace(/^ /, "");
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+      }
+      if (done) break;
+    }
+    if (buffer.startsWith("event:")) eventName = buffer.slice(6).replace(/^ /, "");
+    else if (buffer.startsWith("data:")) dataLines.push(buffer.slice(5).replace(/^ /, ""));
+    dispatch();
+  } finally {
+    reader.releaseLock();
+  }
 }

@@ -1,7 +1,8 @@
 import { environmentWithoutSecrets } from "../security/index.ts";
+import type { EncodedObservation } from "./inspect.ts";
 
 export interface ConsoleExecution {
-  readonly value: unknown;
+  readonly observation: EncodedObservation;
   readonly logs: string[];
 }
 
@@ -9,7 +10,7 @@ export type ConsoleRpcHandler = (method: string, args: unknown[]) => Promise<unk
 
 type WorkerMessage =
   | { type: "rpc"; executionId: string; requestId: string; method: string; args: unknown[] }
-  | { type: "result"; executionId: string; ok: boolean; value?: unknown; error?: string; logs: string[] };
+  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; logs: string[] };
 
 interface PendingExecution {
   readonly resolve: (value: ConsoleExecution) => void;
@@ -111,8 +112,10 @@ export class ConsoleProcess {
         throw new Error("Console worker emitted invalid logs");
       }
       this.#pending.delete(message.executionId);
-      if (message.ok) pending.resolve({ value: message.value, logs: message.logs });
-      else pending.reject(new ConsoleCellError(message.error ?? "Console cell failed", message.logs));
+      if (message.ok) {
+        if (!validObservation(message.observation)) throw new Error("Console worker emitted an invalid observation");
+        pending.resolve({ observation: message.observation, logs: message.logs });
+      } else pending.reject(new ConsoleCellError(message.error ?? "Console cell failed", message.logs));
       return;
     }
     if (typeof message.requestId !== "string" || typeof message.method !== "string" || !Array.isArray(message.args)) {
@@ -135,6 +138,20 @@ export class ConsoleProcess {
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
   }
+}
+
+function validObservation(value: unknown): value is EncodedObservation {
+  if (!value || typeof value !== "object") return false;
+  const observation = value as Record<string, unknown>;
+  const preview = observation.preview;
+  if (!preview || typeof preview !== "object" ||
+      (preview as Record<string, unknown>).kind !== "inspect" ||
+      typeof (preview as Record<string, unknown>).preview !== "string") return false;
+  if (observation.kind === "json") {
+    return typeof observation.json === "string" &&
+      Number.isSafeInteger(observation.byteLength) && Number(observation.byteLength) >= 0;
+  }
+  return observation.kind === "unsupported" && typeof observation.reason === "string";
 }
 
 async function drain(stream: ReadableStream<Uint8Array>): Promise<void> {

@@ -3,10 +3,11 @@ import { z } from "zod";
 import type { JsonValue } from "./json.ts";
 import { assertJsonValue } from "./json.ts";
 import { ValidationError } from "./errors.ts";
+import { agentActionSchema, type AgentAction } from "./agent-action.ts";
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
 export const eventTypes = [
-  "SessionCreated", "BranchCreated", "SessionStatusChanged", "MessageAppended",
+  "SessionCreated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
   "WorkingValueSet", "ArtifactRegistered", "EffectRequested", "EffectAttemptStarted",
   "EffectOutcomeRecorded", "ContextMaterialized", "ModelCallRequested", "ModelOutputChunk",
@@ -23,6 +24,8 @@ export const eventTypes = [
   "RefinementCandidateAllocated", "RefinementCandidateExposed", "RefinementObservationRecorded",
   "RefinementDecided", "RefinementApproved", "RefinementRollbackApproved", "RefinementRolledBack",
   "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
+  "AgentRunRequested", "AgentRunStepStarted", "AgentRunActionCommitted", "AgentRunActionRejected",
+  "AgentRunUserInputRequested", "AgentRunUserInputReceived", "AgentRunCancellationRequested", "AgentRunStatusChanged",
 ] as const;
 export type EventType = (typeof eventTypes)[number];
 export type Producer = "supervisor" | "console" | "model" | "executor" | "client" | "recovery" | "scheduler" | string;
@@ -35,6 +38,9 @@ export type GoalStatus = "active" | "completion_requested" | "completed" | "bloc
 export type GoalGateStatus = "pending" | "running" | "passed" | "failed" | "cancelled" | "unknown";
 export type HeartbeatStatus = "active" | "paused" | "cancelled";
 export type RecursiveModelStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type RecursiveModelOutcome = "succeeded" | "failed" | "cancelled" | "budget-exceeded" | "unknown";
+export type AgentRunStatus = "queued" | "running" | "waiting_for_user" | "succeeded" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown";
+export type AgentRunInputKind = "clarification" | "permission";
 
 export interface BudgetLimits { readonly tokenLimit?: number; readonly costLimitUsd?: number; readonly turnLimit?: number; readonly wallTimeLimitMs?: number; }
 export interface ModelConfiguration { readonly provider: string; readonly model: string; readonly temperature?: number; readonly maxOutputTokens?: number; }
@@ -44,8 +50,10 @@ export type WorkingValue = { readonly kind: "json"; readonly value: JsonValue } 
 export interface ContextRecordReference { readonly eventId: string; readonly type: EventType; readonly schemaVersion: number; readonly reason?: string; }
 
 export interface EventPayloads {
-  SessionCreated: { workspaceId: string; initialBranchId: string; model: ModelConfiguration; budget: BudgetLimits; parentSessionId?: string; parentBranchId?: string; rootSessionId?: string; depth?: number; taskId?: string };
+  SessionCreated: { workspaceId: string; initialBranchId: string; model: ModelConfiguration; budget: BudgetLimits; sessionName?: string; initialBranchName?: string; parentSessionId?: string; parentBranchId?: string; rootSessionId?: string; depth?: number; taskId?: string };
   BranchCreated: { branchId: string; parentBranchId: string; forkCursor: string; name?: string };
+  SessionNamed: { name: string };
+  BranchNamed: { name: string };
   SessionStatusChanged: { status: SessionStatus; reason?: string };
   MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string };
   CellProposed: { cellId: string; code: string; dependencies: string[] };
@@ -87,8 +95,8 @@ export interface EventPayloads {
   HeartbeatCreated: { heartbeatId: string; intervalMs: number; nextTickAt: string; goalId?: string; payload?: JsonValue };
   HeartbeatTicked: { heartbeatId: string; tick: number; scheduledAt: string; firedAt: string; nextTickAt: string };
   HeartbeatStatusChanged: { heartbeatId: string; status: HeartbeatStatus; nextTickAt?: string; reason?: string };
-  RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; inputSetId?: string };
-  RecursiveModelStatusChanged: { handleId: string; status: Exclude<RecursiveModelStatus, "pending">; resultMessageId?: string; error?: string };
+  RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; inputSetId?: string; input?: JsonValue; inputProvenance?: JsonValue; inputHash?: string };
+  RecursiveModelStatusChanged: { handleId: string; status: Exclude<RecursiveModelStatus, "pending">; outcome?: RecursiveModelOutcome; resultMessageId?: string; result?: JsonValue; resultArtifactId?: string; error?: string };
   HarnessVersionCreated: { entryId: string; versionId: string; version: number; kind: "memory" | "prompt_note" | "skill" | "subagent_spec"; scope: "local" | "workspace" | "user" | "global"; scopeKey: string; name: string; content: JsonValue; tags: string[]; confidence: number; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; evidenceEventIds: string[]; conflictEntryIds: string[]; supersedesVersionId?: string; proposalId?: string; createdBy: string; lastConfirmedAt: string };
   HarnessVersionStatusChanged: { entryId: string; versionId: string; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; reason: string; proposalId?: string };
   RefinementProposed: { proposalId: string; trigger: string; predictedEffect: string; edits: JsonValue; evidenceEventIds: string[]; evaluation: JsonValue; authority: "agent" | "user" | "system" };
@@ -105,6 +113,14 @@ export interface EventPayloads {
   SkillTestRecorded: { entryId: string; versionId: string; effectId: string; passed: boolean; report: JsonValue };
   SubagentSpecInvoked: { entryId: string; versionId: string; taskId: string; childSessionId: string; childBranchId: string };
   SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
+  AgentRunRequested: { runId: string; task: string; requestKey: string; goalId?: string };
+  AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
+  AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; callId: string; raw: string; action: AgentAction };
+  AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; callId: string; raw: string; error: string };
+  AgentRunUserInputRequested: { runId: string; requestId: string; actionId: string; kind: AgentRunInputKind; question: string; permission?: string };
+  AgentRunUserInputReceived: { runId: string; requestId: string; response: string; approved?: boolean };
+  AgentRunCancellationRequested: { runId: string; reason?: string };
+  AgentRunStatusChanged: { runId: string; status: Exclude<AgentRunStatus, "queued" | "running">; reason?: string; finalMessageId?: string };
 }
 
 export interface AgentEvent<T extends EventType = EventType> {
@@ -143,8 +159,10 @@ const workingValueSchema = z.discriminatedUnion("kind", [z.object({ kind: z.lite
 const taskTerminalSchema = z.object({ noticeId: id, taskId: id, parentSessionId: id, childSessionId: id, status: z.enum(["completed", "failed", "cancelled"]), result: jsonValueSchema.optional(), artifactIds: z.array(id).optional(), error: z.string().optional(), reason: z.string().optional() });
 const mailboxBaseSchema = z.object({ mailboxMessageId: id, fromSessionId: id, fromBranchId: id, toSessionId: id, toBranchId: id, kind: z.enum(["message", "task_completed", "task_failed", "task_cancelled"]), content: z.string(), taskId: id.optional() });
 const payloadSchemas: Record<EventType, z.ZodType> = {
-  SessionCreated: z.object({ workspaceId: id, initialBranchId: id, model: modelSchema, budget: budgetSchema, parentSessionId: id.optional(), parentBranchId: id.optional(), rootSessionId: id.optional(), depth: z.number().int().nonnegative().optional(), taskId: id.optional() }),
+  SessionCreated: z.object({ workspaceId: id, initialBranchId: id, model: modelSchema, budget: budgetSchema, sessionName: z.string().min(1).optional(), initialBranchName: z.string().min(1).optional(), parentSessionId: id.optional(), parentBranchId: id.optional(), rootSessionId: id.optional(), depth: z.number().int().nonnegative().optional(), taskId: id.optional() }),
   BranchCreated: z.object({ branchId: id, parentBranchId: id, forkCursor: z.string().regex(/^\d+$/), name: z.string().optional() }),
+  SessionNamed: z.object({ name: z.string().min(1) }),
+  BranchNamed: z.object({ name: z.string().min(1) }),
   SessionStatusChanged: z.object({ status: z.enum(["idle", "running", "stopped", "failed", "archived"]), reason: z.string().optional() }),
   MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional() }),
   CellProposed: z.object({ cellId: id, code: z.string(), dependencies: z.array(id) }),
@@ -186,8 +204,8 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   HeartbeatCreated: z.object({ heartbeatId: id, intervalMs: positiveInteger, nextTickAt: dateTime, goalId: id.optional(), payload: jsonValueSchema.optional() }),
   HeartbeatTicked: z.object({ heartbeatId: id, tick: positiveInteger, scheduledAt: dateTime, firedAt: dateTime, nextTickAt: dateTime }),
   HeartbeatStatusChanged: z.object({ heartbeatId: id, status: z.enum(["active", "paused", "cancelled"]), nextTickAt: dateTime.optional(), reason: z.string().optional() }),
-  RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, inputSetId: id.optional() }),
-  RecursiveModelStatusChanged: z.object({ handleId: id, status: z.enum(["running", "completed", "failed", "cancelled"]), resultMessageId: id.optional(), error: z.string().optional() }),
+  RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, inputSetId: id.optional(), input: jsonValueSchema.optional(), inputProvenance: jsonValueSchema.optional(), inputHash: digest.optional() }),
+  RecursiveModelStatusChanged: z.object({ handleId: id, status: z.enum(["running", "completed", "failed", "cancelled"]), outcome: z.enum(["succeeded", "failed", "cancelled", "budget-exceeded", "unknown"]).optional(), resultMessageId: id.optional(), result: jsonValueSchema.optional(), resultArtifactId: id.optional(), error: z.string().optional() }),
   HarnessVersionCreated: z.object({ entryId: id, versionId: id, version: positiveInteger, kind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]), scope: z.enum(["local", "workspace", "user", "global"]), scopeKey: id, name: z.string().min(1), content: jsonValueSchema, tags: z.array(z.string()), confidence: z.number().finite().min(0).max(1), status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), evidenceEventIds: z.array(id), conflictEntryIds: z.array(id), supersedesVersionId: id.optional(), proposalId: id.optional(), createdBy: id, lastConfirmedAt: dateTime }),
   HarnessVersionStatusChanged: z.object({ entryId: id, versionId: id, status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), reason: z.string().min(1), proposalId: id.optional() }),
   RefinementProposed: z.object({ proposalId: id, trigger: z.string().min(1), predictedEffect: z.string().min(1), edits: jsonValueSchema, evidenceEventIds: z.array(id), evaluation: jsonValueSchema, authority: z.enum(["agent", "user", "system"]) }),
@@ -204,6 +222,14 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SkillTestRecorded: z.object({ entryId: id, versionId: id, effectId: id, passed: z.boolean(), report: jsonValueSchema }),
   SubagentSpecInvoked: z.object({ entryId: id, versionId: id, taskId: id, childSessionId: id, childBranchId: id }),
   SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
+  AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, goalId: id.optional() }).strict(),
+  AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
+  AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, callId: id, raw: z.string(), action: agentActionSchema }).strict(),
+  AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, callId: id, raw: z.string(), error: z.string().min(1) }).strict(),
+  AgentRunUserInputRequested: z.object({ runId: id, requestId: id, actionId: id, kind: z.enum(["clarification", "permission"]), question: z.string().min(1), permission: z.string().min(1).optional() }).strict(),
+  AgentRunUserInputReceived: z.object({ runId: id, requestId: id, response: z.string(), approved: z.boolean().optional() }).strict(),
+  AgentRunCancellationRequested: z.object({ runId: id, reason: z.string().optional() }).strict(),
+  AgentRunStatusChanged: z.object({ runId: id, status: z.enum(["waiting_for_user", "succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]), reason: z.string().optional(), finalMessageId: id.optional() }).strict(),
 };
 
 export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): void {

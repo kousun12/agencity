@@ -110,7 +110,7 @@ export class ModelLoop {
         effectId,
         executor: "model",
         operation: "complete",
-        input: { context: materialized.context, configuration: state.model as unknown as JsonValue },
+        input: { callId, context: materialized.context, configuration: state.model as unknown as JsonValue },
         idempotencyKey: effectKey,
         idempotent: false,
       },

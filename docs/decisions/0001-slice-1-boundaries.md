@@ -61,7 +61,7 @@ Slice 1 context includes attributable recent messages/activity, active working v
 
 The terminal interface directly calls the supervisor; HTTP exposes snapshot/history/commands/SSE. SSE catches up by durable cursor.
 
-**Consequence:** core reactive semantics are demonstrated without a React dependency. The TUI is not yet itself an HTTP protocol client, model providers are complete-style rather than live token streaming, `AgentClient` lacks SSE/fork helpers, and the HTTP service is unauthenticated.
+**Consequence:** core reactive semantics are demonstrated without a React dependency. Subsequent FU-018 work added optional provider streaming as cursorless, non-canonical SSE progress and an `AgentClient.stream` helper without changing the committed-event contract. The TUI is still not itself an HTTP protocol client, fork helpers remain absent, and the HTTP service is unauthenticated.
 
 ## Known unsupported capabilities
 
@@ -77,7 +77,7 @@ The following are explicitly unavailable; callers must not infer support from a 
 - profile database, workspace/profile split, scoped export/deletion/replica enumeration;
 - remote object storage, remote executor/sandbox, browser tools;
 - hostile-code isolation, authn/authz/TLS, resource/network policy, complete secret broker;
-- true provider token streaming; the current implementation records one output chunk after completion;
+- durable/replayable token deltas (live provider deltas are intentionally ephemeral; the full output commits once);
 - full rich TUI commands/status surfaces from the PRD;
 - event schema upcasting beyond version 1;
 - snapshot content hashing/signing (explicit rebuild repairs a current-cursor cache);

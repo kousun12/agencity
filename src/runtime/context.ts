@@ -12,10 +12,20 @@ export const BASE_POLICY = "You are a durable coding agent running in trusted lo
 export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 1, text: BASE_POLICY });
 function hash(value: string): string { const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex"); }
 
+export interface ContextMaterializeOptions {
+  /** Stable runtime-derived identity used by recoverable agent-run steps. */
+  readonly contextId?: string;
+  readonly idempotencyKey?: string;
+  /** Additional canonical evidence which must be present in the context provenance. */
+  readonly additionalRecordIds?: readonly string[];
+  /** Builds the exact provider-facing context while preserving normal harness selection/provenance. */
+  readonly transform?: (context: JsonValue) => JsonValue;
+}
+
 export class ContextMaterializer {
   constructor(readonly storage: AgentStorage, readonly memory?: MemoryService, readonly harness?: HarnessService, readonly maxRecentRecords = 30, readonly userScopeKey = "default-user", readonly profile?: ProfileDatabase) {}
 
-  async materialize(sessionId: string, branchId: string): Promise<{ contextId: string; context: JsonValue; event: AgentEvent<"ContextMaterialized"> }> {
+  async materialize(sessionId: string, branchId: string, options: ContextMaterializeOptions = {}): Promise<{ contextId: string; context: JsonValue; event: AgentEvent<"ContextMaterialized"> }> {
     let events = await this.storage.loadEvents(sessionId, { branchId });
     if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
     let state = projectEvents(events);
@@ -80,6 +90,7 @@ export class ContextMaterializer {
     const skills = [...exact.values()].filter((record) => record.kind === "skill");
     const specs = [...exact.values()].filter((record) => record.kind === "subagent_spec");
     for (const record of [...memories,...promptNotes,...skills,...specs]) add(await this.storage.getEvent(record.current.createdEventId),`exact harness ${record.kind} ${record.entryId}@${record.current.versionId}`);
+    for (const eventId of options.additionalRecordIds ?? []) add(events.find((event) => event.id === eventId) ?? await this.storage.getEvent(eventId), "agent-run exact dependent evidence");
 
     const ordered = [...selected.values()].sort((left,right) => BigInt(left.event.cursor) < BigInt(right.event.cursor) ? -1 : BigInt(left.event.cursor) > BigInt(right.event.cursor) ? 1 : left.event.id.localeCompare(right.event.id));
     const references: ContextRecordReference[] = ordered.map(({event,reason}) => ({eventId:event.id,type:event.type as EventType,schemaVersion:event.schemaVersion,reason}));
@@ -93,7 +104,7 @@ export class ContextMaterializer {
     const profilePreferences = this.profile ? await this.profile.listPreferences() : [];
     const profileSkills = this.profile ? await this.profile.listGlobalSkills() : [];
     const providerConfigurations = this.profile ? (await this.profile.listCredentialReferences()).map(({reference,provider,label,metadata})=>({reference,provider,label,metadata})) : [];
-    const context: JsonValue = JSON.parse(JSON.stringify({
+    const baseContext: JsonValue = JSON.parse(JSON.stringify({
       basePolicy: BASE_POLICY,
       basePolicyRecord: { id: IMMUTABLE_BASE_POLICY.id, version: IMMUTABLE_BASE_POLICY.version, digest: hash(BASE_POLICY), mutable: false },
       runtime: { mode:"trusted-local",workerIsSecuritySandbox:false,rawSql:{readOnly:true,scope:"shared-non-confidential-diagnostics",candidateIsolationIsConfidentialityBoundary:false} },
@@ -116,7 +127,8 @@ export class ContextMaterializer {
       recentActivity:activity.map((event)=>({eventId:event.id,type:event.type,payload:event.payload})),
       queryHints:{history:"SELECT type, committed_at, payload_json FROM events WHERE session_id = ? ORDER BY sequence",largeRecords:"Resolve artifact references through sdk.artifacts.get",documents:"SELECT chunk_id, ordinal, content FROM document_chunks WHERE document_id = ? ORDER BY ordinal",mailbox:"SELECT * FROM mailbox_messages WHERE to_session_id = ? ORDER BY sent_at",memory:"Use Supervisor.memory.search; candidate generation is FTS5 and scope/status policy remains authoritative"},
     })) as JsonValue;
-    const contextId=newId(); const [event]=await this.storage.appendEvents([{sessionId,branchId,type:"ContextMaterialized",producer:"supervisor",idempotencyKey:`context:${contextId}`,payload:{contextId,records:references,contentHash:hash(JSON.stringify(context)),context,harnessProvenance}}]);
+    const context = options.transform ? options.transform(baseContext) : baseContext;
+    const contextId=options.contextId ?? newId(); const [event]=await this.storage.appendEvents([{sessionId,branchId,type:"ContextMaterialized",producer:"supervisor",idempotencyKey:options.idempotencyKey ?? `context:${contextId}`,payload:{contextId,records:references,contentHash:hash(JSON.stringify(context)),context,harnessProvenance}}]);
     if (!event) throw new Error("Context was not committed"); return {contextId,context,event:event as AgentEvent<"ContextMaterialized">};
   }
 

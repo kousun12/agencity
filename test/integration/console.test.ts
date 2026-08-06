@@ -162,7 +162,7 @@ describe("disposable TypeScript console process", () => {
       const over = { data: "x".repeat(${exactCharacters + 1}) };
       const exactStored = await state.set("exact", exact);
       const overStored = await state.set("overA", over);
-      return { exactStored, overStored };
+      return { exactStoredKind: exactStored.kind, overStored };
     `);
     await supervisor.executeCell(sessionId, branchId, `
       const over = { data: "x".repeat(${exactCharacters + 1}) };
@@ -265,4 +265,159 @@ describe("disposable TypeScript console process", () => {
       .toBeUndefined();
     await supervisor.close();
   });
+
+  test("observes the final top-level expression, awaits promises, and preserves explicit returns", async () => {
+    const { supervisor, sessionId, branchId } = await open(true);
+    const expression = await supervisor.executeCell(sessionId, branchId, `
+      const x = { answer: 42 };
+      console.log("separate-log");
+      x
+    `);
+    expect(expression.result).toEqual({ answer: 42 });
+    expect(expression.logs).toEqual(["separate-log"]);
+
+    const promised = await supervisor.executeCell(sessionId, branchId, `
+      const nested = () => { return 7; };
+      Promise.resolve({ awaited: nested() })
+    `);
+    expect(promised.result).toEqual({ awaited: 7 });
+
+    const explicit = await supervisor.executeCell(sessionId, branchId, `
+      if (true) return Promise.resolve({ path: "explicit" });
+      ({ path: "final-expression" })
+    `);
+    expect(explicit.result).toEqual({ path: "explicit" });
+
+    const declaration = await supervisor.executeCell(sessionId, branchId, `const ephemeral = 42;`);
+    expect(declaration.result).toBeNull();
+    const afterRestart = await supervisor.executeCell(sessionId, branchId, `typeof ephemeral`);
+    expect(afterRestart.result).toBe("undefined");
+    await supervisor.close();
+  });
+
+  test("inspect is byte/line/entry/depth bounded, redacts fields, skips getters, and marks circular values", async () => {
+    const { supervisor, sessionId, branchId } = await open(true);
+    const inspected = await supervisor.executeCell(sessionId, branchId, `
+      let getterCalls = 0;
+      const value: any = { password: "not-for-preview" };
+      Object.defineProperty(value, "computed", { enumerable: true, get() { getterCalls++; return "unsafe"; } });
+      value.circular = value;
+      value.nested = { values: Array.from({ length: 500 }, (_, index) => index) };
+      ({ preview: inspect(value, { bytes: 512, lines: 12, entries: 10, depth: 3 }), getterCalls })
+    `);
+    const result = inspected.result as any;
+    expect(result.getterCalls).toBe(0);
+    expect(result.preview).toMatchObject({
+      kind: "inspect",
+      truncated: true,
+      redacted: 1,
+      omittedGetters: 1,
+      limits: { bytes: 512, lines: 12, entries: 10, depth: 3, getters: 0 },
+    });
+    expect(new TextEncoder().encode(result.preview.preview).byteLength).toBeLessThanOrEqual(512);
+    expect(result.preview.preview.split("\n").length).toBeLessThanOrEqual(12);
+    expect(result.preview.preview).toContain("[REDACTED]");
+    expect(result.preview.preview).toContain("[Getter omitted]");
+    expect(result.preview.preview).toContain("[Circular]");
+    expect(result.preview.preview).not.toContain("not-for-preview");
+
+    const unsupported = await supervisor.executeCell(sessionId, branchId, `
+      class Example { constructor(readonly answer: number) {} }
+      new Example(42)
+    `);
+    expect(unsupported.result).toMatchObject({
+      kind: "unsupported",
+      reason: expect.stringMatching(/Non-plain object/),
+      preview: { kind: "inspect" },
+    });
+    const circular = await supervisor.executeCell(sessionId, branchId, `
+      const value: any = { safe: true };
+      value.self = value;
+      value
+    `);
+    expect(circular.result).toMatchObject({
+      kind: "unsupported",
+      reason: expect.stringMatching(/Circular reference/),
+      preview: { preview: expect.stringContaining("[Circular]") },
+    });
+    await supervisor.close();
+  });
+
+  test("moves oversized observations to one deduplicated JSON artifact and commits only a bounded preview", async () => {
+    const { temp, supervisor, sessionId, branchId } = await open(true);
+    const code = `Array.from({ length: 50_000 }, (_, index) => ({ index, even: index % 2 === 0 }))`;
+    const first = await supervisor.executeCell(sessionId, branchId, code);
+    const second = await supervisor.executeCell(sessionId, branchId, code);
+    const firstResult = first.result as any;
+    const secondResult = second.result as any;
+    expect(firstResult).toMatchObject({
+      kind: "oversized-json",
+      artifact: { mediaType: "application/json" },
+      preview: { kind: "inspect", truncated: true },
+    });
+    expect(firstResult.byteLength).toBeGreaterThan(MAX_WORKING_JSON_BYTES);
+    expect(secondResult.artifact.artifactId).toBe(firstResult.artifact.artifactId);
+    expect(await filesBelow(temp.artifactDirectory)).toHaveLength(1);
+    expect(JSON.stringify(first.result).length).toBeLessThan(20_000);
+
+    const state = projectEvents(await supervisor.storage.loadEvents(sessionId, { branchId }));
+    const reference = state.artifacts[firstResult.artifact.artifactId];
+    expect(reference).toMatchObject(firstResult.artifact);
+    const complete = JSON.parse(new TextDecoder().decode(await supervisor.artifacts.resolve(reference!)));
+    expect(complete).toHaveLength(50_000);
+    expect(complete[49_999]).toEqual({ index: 49_999, even: false });
+    await supervisor.close();
+  });
+
+  test("lists durable state and prior cells with exact event provenance without replay", async () => {
+    const { supervisor, sessionId, branchId } = await open(true);
+    const first = await supervisor.executeCell(sessionId, branchId, `
+      await state.set("x", 42);
+      console.warn("history-log");
+      ({ answer: 42 })
+    `, ["input-dependency"]);
+
+    const historyRead = await supervisor.executeCell(sessionId, branchId, `
+      const values = await state.list();
+      const history = await cells.list({ limit: 10 });
+      const cell = await cells.get(${JSON.stringify(first.cellId)});
+      ({ values, history, cell })
+    `);
+    const result = historyRead.result as any;
+    expect(result.values).toHaveLength(1);
+    expect(result.values[0]).toMatchObject({
+      name: "x",
+      version: 1,
+      value: { kind: "json", value: 42 },
+      status: "committed",
+      provenance: { type: "WorkingValueSet", eventId: expect.any(String), cursor: expect.any(String) },
+    });
+    expect(result.history.items).toHaveLength(1);
+    expect(result.history.nextCursor).toBeNull();
+    expect(result.cell).toMatchObject({
+      cellId: first.cellId,
+      source: expect.stringContaining(`state.set("x", 42)`),
+      status: "committed",
+      dependencies: ["input-dependency"],
+      attempts: 1,
+      observation: { answer: 42 },
+      logs: ["history-log"],
+      durationMs: expect.any(Number),
+      provenance: {
+        proposed: { type: "CellProposed", eventId: expect.any(String), schemaVersion: 1 },
+        starts: [{ type: "CellStarted", eventId: expect.any(String), schemaVersion: 1 }],
+        terminal: { type: "CellCommitted", eventId: expect.any(String), schemaVersion: 1 },
+      },
+    });
+
+    const context = await supervisor.contexts.materialize(sessionId, branchId);
+    expect((context.context as any).workingValues).toContainEqual(expect.objectContaining({
+      name: "x",
+      version: 1,
+      value: { kind: "json", value: 42 },
+      eventId: result.values[0].provenance.eventId,
+    }));
+    await supervisor.close();
+  });
+
 });

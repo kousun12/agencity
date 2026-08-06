@@ -2,7 +2,15 @@ import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalArtifactStore } from "../artifacts/index.ts";
-import { ConsoleCellError, ConsoleProcess } from "../console/index.ts";
+import {
+  ConsoleCellError,
+  ConsoleProcess,
+  MAX_CELL_OBSERVATION_JSON_BYTES,
+  type CellHistoryEntry,
+  type CellHistoryStatus,
+  type CellListOptions,
+  type EventProvenance,
+} from "../console/index.ts";
 import {
   CapabilityUnavailableError,
   assertJsonValue,
@@ -91,6 +99,8 @@ export interface CreateSessionOptions {
   readonly budget?: BudgetLimits;
   readonly sessionId?: string;
   readonly branchId?: string;
+  readonly sessionName?: string;
+  readonly branchName?: string;
 }
 
 /** Serializes committed cell boundaries per branch without retaining domain state. */
@@ -113,6 +123,113 @@ class BranchQueue {
   }
 }
 
+interface CellHistoryWithCursor {
+  readonly entry: CellHistoryEntry;
+  readonly cursor: string;
+}
+
+function provenance(event: AgentEvent): EventProvenance {
+  return {
+    eventId: event.id,
+    cursor: event.cursor,
+    sessionId: event.sessionId,
+    branchId: event.branchId,
+    type: event.type,
+    schemaVersion: event.schemaVersion,
+    committedAt: event.committedAt,
+    producer: event.producer,
+    originDeviceId: event.originDeviceId,
+    originSequence: event.originSequence,
+  };
+}
+
+function cellHistory(events: readonly AgentEvent[]): CellHistoryWithCursor[] {
+  const byId = new Map<string, { proposed: AgentEvent<"CellProposed">; starts: AgentEvent<"CellStarted">[]; terminal?: AgentEvent }>();
+  for (const event of events) {
+    if (event.type === "CellProposed") {
+      const typed = event as AgentEvent<"CellProposed">;
+      byId.set(typed.payload.cellId, { proposed: typed, starts: [] });
+      continue;
+    }
+    if (!["CellStarted", "CellCommitted", "CellFailed", "CellAbandoned"].includes(event.type)) continue;
+    const cellId = (event.payload as { cellId: string }).cellId;
+    const record = byId.get(cellId);
+    if (!record) continue;
+    if (event.type === "CellStarted") record.starts.push(event as AgentEvent<"CellStarted">);
+    else record.terminal = event;
+  }
+  const entries: CellHistoryWithCursor[] = [];
+  for (const { proposed, starts, terminal } of byId.values()) {
+    let status: CellHistoryStatus = starts.length ? "running" : "proposed";
+    let observation: JsonValue | null = null;
+    let logs: string[] = [];
+    let durationMs: number | null = null;
+    let exports: string[] = [];
+    let error: string | null = null;
+    if (terminal?.type === "CellCommitted") {
+      status = "committed";
+      const payload = terminal.payload as { result: JsonValue; logs: string[]; durationMs: number; exports: string[] };
+      observation = payload.result;
+      logs = payload.logs;
+      durationMs = payload.durationMs;
+      exports = payload.exports;
+    } else if (terminal?.type === "CellFailed") {
+      status = "failed";
+      const payload = terminal.payload as { error: string; logs: string[]; durationMs: number };
+      error = payload.error;
+      logs = payload.logs;
+      durationMs = payload.durationMs;
+    } else if (terminal?.type === "CellAbandoned") {
+      status = "abandoned";
+      error = (terminal.payload as { reason: string }).reason;
+    }
+    const cursor = terminal?.cursor ?? starts.at(-1)?.cursor ?? proposed.cursor;
+    entries.push({
+      cursor,
+      entry: {
+        cellId: proposed.payload.cellId,
+        source: proposed.payload.code,
+        status,
+        dependencies: [...proposed.payload.dependencies],
+        attempts: starts.length,
+        observation,
+        logs: [...logs],
+        durationMs,
+        exports: [...exports],
+        error,
+        provenance: {
+          proposed: provenance(proposed),
+          starts: starts.map(provenance),
+          terminal: terminal ? provenance(terminal) : null,
+        },
+      },
+    });
+  }
+  return entries.sort((left, right) => right.cursor.localeCompare(left.cursor));
+}
+
+const CELL_HISTORY_STATUSES: readonly CellHistoryStatus[] = ["proposed", "running", "committed", "failed", "abandoned"];
+function cellListOptions(raw: unknown): Required<Pick<CellListOptions, "limit">> & { statuses: ReadonlySet<CellHistoryStatus>; beforeCursor: string | null } {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new ValidationError("Cell list options must be an object");
+  const options = raw as Record<string, unknown>;
+  const limit = options.limit === undefined ? 20 : Number(options.limit);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ValidationError("Cell list limit must be an integer from 1 to 100");
+  const requested = options.status === undefined
+    ? ["committed", "failed", "abandoned"]
+    : Array.isArray(options.status) ? options.status : [options.status];
+  if (!requested.length || !requested.every((status): status is CellHistoryStatus =>
+    typeof status === "string" && CELL_HISTORY_STATUSES.includes(status as CellHistoryStatus))) {
+    throw new ValidationError("Invalid cell history status filter");
+  }
+  let beforeCursor: string | null = null;
+  if (options.beforeCursor !== undefined) {
+    if (typeof options.beforeCursor !== "string" || !/^\d{1,20}$/.test(options.beforeCursor) ||
+        !Number.isSafeInteger(Number(options.beforeCursor))) throw new ValidationError("Invalid cell history cursor");
+    beforeCursor = Number(options.beforeCursor).toString().padStart(20, "0");
+  }
+  return { limit, statuses: new Set(requested), beforeCursor };
+}
+
 export class Supervisor {
   readonly storage: AgentStorage;
   readonly profile: ProfileStore;
@@ -133,6 +250,8 @@ export class Supervisor {
   readonly harness: HarnessService;
   readonly skills: SkillService;
   readonly specs: SubagentSpecService;
+  /** Process-local executor/provider catalog; descriptors contain no credential material. */
+  readonly modelExecutor: ModelExecutor;
   readonly restartConsoleAfterCell: boolean;
   readonly #cells = new BranchQueue();
   #closed = false;
@@ -150,6 +269,7 @@ export class Supervisor {
     maxChildrenPerSession: number,
     userScopeKey: string,
     skillPermissionAllowlist: readonly string[],
+    modelExecutor: ModelExecutor,
   ) {
     this.storage = storage;
     this.profile = profile;
@@ -164,12 +284,13 @@ export class Supervisor {
     this.harness = new HarnessService(storage, this.skills, userScopeKey);
     this.memory = new MemoryService(storage, undefined, userScopeKey);
     this.specs = new SubagentSpecService(storage, this.agents, userScopeKey);
+    this.modelExecutor = modelExecutor;
     this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
     this.modelLoop = new ModelLoop(storage, this.contexts, outbox);
     this.documents = new DocumentService(storage);
     this.goals = new GoalService(storage, outbox, this.modelLoop);
     this.heartbeats = new HeartbeatService(storage, this.goals);
-    this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox);
+    this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox, artifacts, this.memory);
     this.restartConsoleAfterCell = restartConsoleAfterCell;
   }
 
@@ -223,11 +344,12 @@ export class Supervisor {
         apiKey: () => process.env.OPENAI_API_KEY,
       }));
     }
+    const modelExecutor = new ModelExecutor(providers, options.providerConcurrency ?? 1);
     const executors = [
       new ShellExecutor(workspaceRoot),
       new FileExecutor(workspaceRoot),
       new SkillExecutor(),
-      new ModelExecutor(providers, options.providerConcurrency ?? 1),
+      modelExecutor,
     ];
     const supervisor = new Supervisor(
       storage,
@@ -242,6 +364,7 @@ export class Supervisor {
       options.maxChildrenPerSession ?? 32,
       options.userScopeKey ?? "default-user",
       options.skillPermissionAllowlist ?? [],
+      modelExecutor,
     );
     if (options.recover !== false) {
       await supervisor.outbox.recover();
@@ -258,6 +381,9 @@ export class Supervisor {
     supervisor.heartbeats.startScheduler(options.heartbeatPollIntervalMs ?? 100);
     return supervisor;
   }
+
+  /** Secret-free provider descriptors suitable for onboarding and clients. */
+  get modelProviders() { return this.modelExecutor.providers(); }
 
   async close(): Promise<void> {
     if (this.#closed) return;
@@ -304,9 +430,35 @@ export class Supervisor {
       type: "SessionCreated",
       producer: "supervisor",
       idempotencyKey: `session:${sessionId}`,
-      payload: { workspaceId: options.workspaceId, initialBranchId: branchId, model, budget: options.budget ?? {} },
+      payload: {
+        workspaceId: options.workspaceId,
+        initialBranchId: branchId,
+        model,
+        budget: options.budget ?? {},
+        ...(options.sessionName === undefined ? {} : { sessionName: options.sessionName }),
+        ...(options.branchName === undefined ? {} : { initialBranchName: options.branchName }),
+      },
     }]);
     return { sessionId, branchId };
+  }
+
+  async nameSession(sessionId: string, branchId: string, name: string): Promise<void> {
+    if (!name.trim()) throw new ValidationError("Session display name is required");
+    const branches = (await this.storage.listBranches()).filter(route => route.sessionId === sessionId);
+    if (!branches.some(route => route.branchId === branchId)) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
+    const operationId = newId();
+    await this.storage.appendEvents(branches.map(route => ({
+      sessionId, branchId: route.branchId, type: "SessionNamed" as const, producer: "client",
+      idempotencyKey: `session-name:${operationId}:${route.branchId}`, payload: { name: name.trim() },
+    })));
+  }
+
+  async nameBranch(sessionId: string, branchId: string, name: string): Promise<void> {
+    if (!name.trim()) throw new ValidationError("Branch display name is required");
+    await this.storage.appendEvents([{
+      sessionId, branchId, type: "BranchNamed", producer: "client",
+      idempotencyKey: `branch-name:${newId()}`, payload: { name: name.trim() },
+    }]);
   }
 
   async appendMessage(
@@ -414,6 +566,45 @@ export class Supervisor {
         const name = String(args[0]);
         return stagedValues.get(name) ?? state.workingValues[name]?.value ?? null;
       }
+      if (method === "state.list") {
+        const eventById = new Map(history.map((event) => [event.id, event]));
+        const names = new Set([...Object.keys(state.workingValues), ...stagedValues.keys()]);
+        return [...names].sort().map((name) => {
+          const staged = stagedValues.get(name);
+          if (staged) return {
+            name,
+            version: (state.workingValues[name]?.version ?? 0) + 1,
+            value: staged,
+            status: "staged",
+            provenance: null,
+          };
+          const committed = state.workingValues[name]!;
+          const source = eventById.get(committed.eventId);
+          return {
+            name,
+            version: committed.version,
+            value: committed.value,
+            status: "committed",
+            provenance: source ? provenance(source) : null,
+          };
+        });
+      }
+      if (method === "cells.list") {
+        const options = cellListOptions(args[0] ?? {});
+        const available = cellHistory(await this.storage.loadEvents(sessionId, { branchId }))
+          .filter(({ entry, cursor }) => options.statuses.has(entry.status) &&
+            (options.beforeCursor === null || cursor < options.beforeCursor));
+        const selected = available.slice(0, options.limit);
+        return {
+          items: selected.map(({ entry }) => entry),
+          nextCursor: available.length > selected.length ? selected.at(-1)?.cursor ?? null : null,
+        };
+      }
+      if (method === "cells.get") {
+        if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("Cell id must be a non-empty string");
+        return cellHistory(await this.storage.loadEvents(sessionId, { branchId }))
+          .find(({ entry }) => entry.cellId === args[0])?.entry ?? null;
+      }
       if (method === "state.set") {
         const name = String(args[0]);
         const value = args[1];
@@ -466,6 +657,26 @@ export class Supervisor {
       if (method === "skills.invoke") return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,(args[2] ?? {}) as any);
       if (method === "skills.test") return this.skills.testModelVisible(sessionId,branchId,String(args[0]),typeof args[1] === "string" ? args[1] : undefined);
       if (method === "specs.spawn") return this.specs.spawn(sessionId,branchId,String(args[0]),(args[1] ?? {}) as any);
+      if (method === "rlm.start") return this.models.start(sessionId, branchId, args[0] as any);
+      if (method === "rlm.startMany") {
+        if (!Array.isArray(args[0])) throw new ValidationError("rlm.startMany requires an input array");
+        return this.models.startMany(sessionId, branchId, args[0] as any[]);
+      }
+      if (method === "rlm.get" || method === "rlm.result" || method === "rlm.cancel") {
+        if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("Recursive model handleId must be a non-empty string");
+        const handle = await this.models.get(args[0]);
+        if (handle.parentSessionId !== sessionId || handle.parentBranchId !== branchId) {
+          throw new ValidationError("Recursive model handle is outside the calling session branch scope");
+        }
+        if (method === "rlm.get") return handle;
+        if (method === "rlm.cancel") {
+          if (args[1] !== undefined && typeof args[1] !== "string") throw new ValidationError("Recursive model cancellation reason must be a string");
+          return this.models.cancel(handle.handleId, args[1] as string | undefined);
+        }
+        const options = args[1] === undefined ? {} : args[1];
+        if (!options || typeof options !== "object" || Array.isArray(options)) throw new ValidationError("Recursive model result options must be an object");
+        return this.models.result(handle.handleId, options as any);
+      }
       if (method === "tools.request") {
         const [executor, operation, input, rawOptions] = args;
         if (typeof executor !== "string" || typeof operation !== "string") throw new ValidationError("Invalid tool request");
@@ -495,8 +706,41 @@ export class Supervisor {
 
     try {
       const execution = await this.console.execute(code, { id: sessionId, branchId }, restored, handler);
-      assertJsonValue(execution.value);
-      const result = scrubJson(execution.value);
+      const rawPreview = JSON.parse(JSON.stringify(execution.observation.preview)) as unknown;
+      assertJsonValue(rawPreview);
+      const preview = scrubJson(rawPreview);
+      let result: JsonValue;
+      if (execution.observation.kind === "json") {
+        const parsed = JSON.parse(execution.observation.json) as unknown;
+        assertJsonValue(parsed);
+        const scrubbed = scrubJson(parsed);
+        const serialized = JSON.stringify(scrubbed);
+        const byteLength = new TextEncoder().encode(serialized).byteLength;
+        if (byteLength > MAX_CELL_OBSERVATION_JSON_BYTES) {
+          const reference = await this.artifacts.put(serialized, { mediaType: "application/json" });
+          stagedArtifacts.set(reference.artifactId, reference);
+          result = {
+            kind: "oversized-json",
+            artifact: {
+              artifactId: reference.artifactId,
+              digest: reference.digest,
+              mediaType: reference.mediaType,
+              size: reference.size,
+            },
+            byteLength,
+            preview,
+          };
+        } else {
+          result = scrubbed;
+        }
+      } else {
+        result = {
+          kind: "unsupported",
+          reason: scrubText(execution.observation.reason),
+          preview,
+        };
+      }
+      assertJsonValue(result);
       const logs = execution.logs.map(scrubText);
       const events: any[] = [];
       for (const reference of stagedArtifacts.values()) {

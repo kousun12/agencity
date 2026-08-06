@@ -7,6 +7,9 @@ export class TerminalUI {
   async run(sessionId: string, branchId: string): Promise<void> {
     const rl = createInterface({ input, output }); let branch = branchId;
     output.write("Agencity trusted-local TUI. /help for commands.\n");
+    const selected = (await this.supervisor.projections.getSnapshot(sessionId, branch)).state.model;
+    const provider = this.supervisor.modelExecutor.providers().find((item) => item.name === selected.provider);
+    output.write(`Model: ${provider?.displayName ?? selected.provider}/${selected.model}; live output ${provider?.capabilities.streaming ? "enabled" : "unavailable (committed responses only)"}.\n`);
     try {
       while (true) {
         const line = (await rl.question(`${sessionId.slice(-6)}/${branch.slice(-6)}> `)).trim();
@@ -40,8 +43,25 @@ export class TerminalUI {
         if (line === "/resume" || line.startsWith("/resume ")) { const requested=line.slice(7).trim()||branch;try{const resumed=await this.supervisor.resume(sessionId,requested);branch=requested;output.write(`resumed ${sessionId}/${branch} at ${resumed.cursor}\n`);}catch{output.write(`branch not found: ${requested}\n`);}continue; }
         if (line === "/compact") { output.write(`${JSON.stringify(await this.supervisor.compact(sessionId,branch),null,2)}\n`);continue; }
         await this.supervisor.appendMessage(sessionId, branch, "user", line);
-        let streamed=false;const unsubscribe=this.supervisor.storage.onCommitted(events=>{for(const event of events)if(event.sessionId===sessionId&&event.branchId===branch&&event.type==="ModelOutputChunk"){streamed=true;output.write((event.payload as {text:string}).text);}});
-        try{const result = await this.supervisor.modelLoop.turn(sessionId, branch);output.write(streamed?"\n":`${result.message ?? `[${result.outcome}] ${result.error ?? ""}`}\n`);}finally{unsubscribe();}
+        let progressText = "";
+        const unsubscribe = this.supervisor.outbox.onProgress((progress) => {
+          if (progress.sessionId !== sessionId || progress.branchId !== branch || progress.kind !== "model-output-delta" ||
+              !progress.value || typeof progress.value !== "object" || Array.isArray(progress.value) ||
+              typeof progress.value.text !== "string") return;
+          progressText += progress.value.text;
+          output.write(progress.value.text);
+        });
+        try {
+          const result = await this.supervisor.modelLoop.turn(sessionId, branch);
+          if (result.outcome === "succeeded" && result.message !== undefined) {
+            if (!progressText) output.write(`${result.message}\n`);
+            else if (result.message.startsWith(progressText)) output.write(`${result.message.slice(progressText.length)}\n`);
+            else output.write(`\n${result.message}\n`);
+          } else {
+            if (progressText) output.write("\n[partial model output was not committed]\n");
+            output.write(`[${result.outcome}] ${result.error ?? ""}\n`);
+          }
+        } finally { unsubscribe(); }
       }
     } finally { rl.close(); }
   }

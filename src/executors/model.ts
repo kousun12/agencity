@@ -4,10 +4,35 @@ import type { EffectExecutor, ExecutionResult } from "./contract.ts";
 import { result } from "./contract.ts";
 
 export interface ModelResponse { readonly text: string; readonly finishReason: string; readonly usage: Usage; }
-export interface ModelProvider { readonly name: string; complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse>; }
+export interface ModelOutputDelta { readonly text: string; }
+export interface ModelProviderCapabilities { readonly streaming: boolean; }
+export interface ModelProviderDescriptor {
+  readonly name: string;
+  readonly displayName: string;
+  readonly capabilities: ModelProviderCapabilities;
+}
+export interface ModelProvider {
+  readonly name: string;
+  /** A missing declaration is deliberately treated as non-streaming. */
+  readonly capabilities?: ModelProviderCapabilities;
+  readonly displayName?: string;
+  complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse>;
+  /**
+   * Optional incremental completion. Implementations opt in only by declaring
+   * capabilities.streaming=true; the returned response remains authoritative.
+   */
+  stream?(
+    context: JsonValue,
+    configuration: ModelConfiguration,
+    signal: AbortSignal,
+    onDelta: (delta: ModelOutputDelta) => void,
+  ): Promise<ModelResponse>;
+}
 
 export class EchoModelProvider implements ModelProvider {
   readonly name = "echo";
+  readonly displayName = "Echo (demo fixture; non-streaming)";
+  readonly capabilities = { streaming: false } as const;
   async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     let text = "";
@@ -23,10 +48,27 @@ export class EchoModelProvider implements ModelProvider {
   }
 }
 
-export interface OpenAICompatibleOptions { readonly baseUrl: string; readonly apiKey: () => string | undefined; readonly providerName?: string; }
+export interface OpenAICompatibleOptions {
+  readonly baseUrl: string;
+  readonly apiKey: () => string | undefined;
+  readonly providerName?: string;
+  /**
+   * Explicitly disable streaming for compatible endpoints that do not support
+   * SSE. Streaming defaults to true; a streaming failure is never retried as a
+   * non-streaming request because that could duplicate a non-idempotent call.
+   */
+  readonly streaming?: boolean;
+}
 export class OpenAICompatibleProvider implements ModelProvider {
   readonly name: string;
-  constructor(readonly options: OpenAICompatibleOptions) { this.name = options.providerName ?? "openai"; }
+  readonly displayName: string;
+  readonly capabilities: ModelProviderCapabilities;
+  constructor(readonly options: OpenAICompatibleOptions) {
+    this.name = options.providerName ?? "openai";
+    const streaming = options.streaming ?? true;
+    this.capabilities = { streaming };
+    this.displayName = `${this.name} (OpenAI-compatible; ${streaming ? "streaming" : "non-streaming"})`;
+  }
   async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
     const key = this.options.apiKey(); if (!key) throw new ValidationError(`Credential unavailable for ${this.name}`);
     const contextObject = context && typeof context === "object" && !Array.isArray(context) ? context : {};
@@ -40,13 +82,119 @@ export class OpenAICompatibleProvider implements ModelProvider {
     const choice = body.choices?.[0];
     return { text: choice?.message?.content ?? "", finishReason: choice?.finish_reason ?? "stop", usage: { inputTokens: body.usage?.prompt_tokens ?? 0, outputTokens: body.usage?.completion_tokens ?? 0, costUsd: body.cost_usd ?? 0 } };
   }
+
+  async stream(
+    context: JsonValue,
+    configuration: ModelConfiguration,
+    signal: AbortSignal,
+    onDelta: (delta: ModelOutputDelta) => void,
+  ): Promise<ModelResponse> {
+    const key = this.options.apiKey(); if (!key) throw new ValidationError(`Credential unavailable for ${this.name}`);
+    const contextObject = context && typeof context === "object" && !Array.isArray(context) ? context : {};
+    const messages = Array.isArray(contextObject.messages) ? contextObject.messages : [];
+    const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        model: configuration.model,
+        messages,
+        temperature: configuration.temperature,
+        max_tokens: configuration.maxOutputTokens,
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+      signal,
+    });
+    if (!response.ok) throw new Error(`Model HTTP ${response.status}: ${await response.text()}`);
+    if (!response.body) throw new Error("Model streaming response has no body");
+
+    let text = "";
+    let finishReason = "stop";
+    let usage: Usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+    let completed = false;
+    await readServerSentEvents(response.body, (data) => {
+      if (data === "[DONE]") { completed = true; return; }
+      let chunk: {
+        choices?: Array<{ delta?: { content?: string | null }; finish_reason?: string | null }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
+        cost_usd?: number;
+      };
+      try { chunk = JSON.parse(data) as typeof chunk; }
+      catch { throw new Error("Model stream returned invalid JSON"); }
+      const choice = chunk.choices?.[0];
+      const delta = choice?.delta?.content;
+      if (typeof delta === "string" && delta.length > 0) {
+        text += delta;
+        onDelta({ text: delta });
+      }
+      if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
+      if (chunk.usage) {
+        usage = {
+          inputTokens: chunk.usage.prompt_tokens ?? usage.inputTokens,
+          outputTokens: chunk.usage.completion_tokens ?? usage.outputTokens,
+          costUsd: chunk.cost_usd ?? usage.costUsd,
+        };
+      } else if (typeof chunk.cost_usd === "number") {
+        usage = { ...usage, costUsd: chunk.cost_usd };
+      }
+    }, signal);
+    if (!completed) throw new Error("Model stream ended before [DONE]");
+    return { text, finishReason, usage };
+  }
 }
 
-function parse(input: JsonValue): { context: JsonValue; configuration: ModelConfiguration } {
+async function readServerSentEvents(
+  body: ReadableStream<Uint8Array>,
+  onData: (data: string) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let dataLines: string[] = [];
+  const dispatch = (): void => {
+    if (!dataLines.length) return;
+    const data = dataLines.join("\n");
+    dataLines = [];
+    onData(data);
+  };
+  try {
+    while (true) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let newline: number;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        let line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (line === "") dispatch();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+      }
+      if (done) break;
+    }
+    if (buffer) {
+      const line = buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer;
+      if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+    }
+    dispatch();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parse(input: JsonValue): { context: JsonValue; configuration: ModelConfiguration; callId?: string } {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("Model input must be an object");
   const context = input.context; const config = input.configuration;
   if (context === undefined || !config || typeof config !== "object" || Array.isArray(config) || typeof config.provider !== "string" || typeof config.model !== "string") throw new ValidationError("Model input requires context and configuration");
-  return { context, configuration: config as unknown as ModelConfiguration };
+  return {
+    context,
+    configuration: config as unknown as ModelConfiguration,
+    ...(typeof input.callId === "string" ? { callId: input.callId } : {}),
+  };
 }
 
 export type ProviderConcurrency = number | Readonly<Record<string, number>>;
@@ -103,18 +251,49 @@ export class ModelExecutor implements EffectExecutor {
   readonly #providers = new Map<string, ModelProvider>();
   readonly #limiter: ProviderLimiter;
   constructor(providers: readonly ModelProvider[], concurrency: ProviderConcurrency = 1) {
-    for (const provider of providers) this.#providers.set(provider.name, provider);
+    for (const provider of providers) {
+      if (provider.capabilities?.streaming === true && typeof provider.stream !== "function") {
+        throw new ValidationError(`Model provider ${provider.name} declares streaming without a stream implementation`);
+      }
+      this.#providers.set(provider.name, provider);
+    }
     this.#limiter = new ProviderLimiter(concurrency);
   }
+
+  providers(): ModelProviderDescriptor[] {
+    return [...this.#providers.values()].map((provider) => ({
+      name: provider.name,
+      displayName: provider.displayName ?? provider.name,
+      capabilities: { streaming: provider.capabilities?.streaming === true },
+    }));
+  }
+
   async execute(request: Parameters<EffectExecutor["execute"]>[0], context: Parameters<EffectExecutor["execute"]>[1]): Promise<ExecutionResult> {
     if (request.operation !== "complete") return result("failed", undefined, `Unsupported model operation: ${request.operation}`);
     try {
-      const { context: modelContext, configuration } = parse(request.input);
+      const { context: modelContext, configuration, callId } = parse(request.input);
       const provider = this.#providers.get(configuration.provider);
       if (!provider) return result("failed", undefined, `Unknown model provider: ${configuration.provider}`);
       const release = await this.#limiter.acquire(configuration.provider, context.signal);
       try {
-        const response = await provider.complete(modelContext, configuration, context.signal);
+        const useStreaming = provider.capabilities?.streaming === true;
+        const response = useStreaming
+          ? await provider.stream!(modelContext, configuration, context.signal, (delta) => {
+              // Bound individual notifications before the outbox applies its
+              // per-effect aggregate bound. The final response is unaffected.
+              for (let offset = 0; offset < delta.text.length; offset += 4_096) {
+                context.reportProgress?.({
+                  kind: "model-output-delta",
+                  value: {
+                    text: delta.text.slice(offset, offset + 4_096),
+                    provider: configuration.provider,
+                    model: configuration.model,
+                    ...(callId === undefined ? {} : { callId }),
+                  },
+                });
+              }
+            })
+          : await provider.complete(modelContext, configuration, context.signal);
         return result("succeeded", response as unknown as JsonValue);
       } finally { release(); }
     } catch (error) {

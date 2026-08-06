@@ -26,7 +26,7 @@ Unless `recover: false`, `Supervisor.open` performs:
 9. **Status reconciliation.** A branch left `running` by a crash before model-request/finalization commits is returned to `idle` with a recovery event.
 10. **Heartbeat recovery.** Due active schedules append one aligned tick plus wake message; paused/cancelled schedules are ignored.
 11. **Goal recovery.** Running gate effects are reconciled to passed/failed/cancelled/unknown, the persisted workspace ID/cursor pin is re-checked before recovered success can pass, ambiguous or stale required gates block completion, and active autonomous goals resume bounded model turns.
-12. **Recursive-handle recovery.** Running terminal child calls finalize their durable task/model handle and atomically attribute direct usage to ancestors; safe pending handles re-enter the shared provider limiter. Non-idempotent ambiguous calls are already unknown and are never generated twice.
+12. **Recursive-handle recovery.** Running terminal child calls finalize their durable task/model handle and atomically attribute direct usage to ancestors; safe pending handles re-enter the shared provider limiter. A committed handle resolves after console-worker or supervisor restart without repeating admission. Terminal `succeeded`, `failed`, `cancelled`, `budget-exceeded`, and `unknown` outcomes are retained separately; non-idempotent ambiguous calls are unknown and are never generated twice. Large completed values resolve through their registered content-addressed result artifact.
 
 Recovery commands use stable branch-scoped idempotency keys, so repeating startup does not duplicate terminal state. Projection rebuild is a separate effect-free replay operation and does not run any of these schedulers or queues.
 
@@ -41,6 +41,8 @@ EffectRequested -> pending outbox
 The request commits before execution. A terminal event is authoritative even if its original caller dies before receiving the result. Outbox status is a mutable operational projection of that event history. If two local runners race for a pending row, the loser waits for the winner's durable terminal outcome through the recorded lease instead of reporting a transient `unknown`.
 
 `unknown` means the runtime cannot prove whether an external action happened. It is not failure, cancellation, or success. Examples include process death after a provider/service accepted a request but before the result committed, or after a non-idempotent command may have changed the world.
+
+Provider stream deltas do not alter this lifecycle. They are process-local progress emitted only after `EffectRequested` and `EffectAttemptStarted`, have no cursor, and are never recovered or replayed. If a stream fails or is cancelled before the terminal success batch, no `ModelOutputChunk` or assistant `MessageAppended` commits. If the process disappears while the non-idempotent model effect is running, startup records `unknown`; it never promotes the observed prefix to a response and never retries the generation.
 
 ## Retry rule
 
@@ -62,7 +64,7 @@ File write helps make retry safe by writing atomically, accepting an expected pr
 | Before `EffectRequested` commit | No effect exists. | None; dependent committed work cannot claim it happened. |
 | After request, before claim | `pending`. | Drain once under a local claim. |
 | After claim/start, before external effect | `running`; actual effect uncertain from the database alone. | Requeue only if declared idempotent; otherwise `unknown`. |
-| After external action, before terminal commit | Same as above; this is the ambiguity window. | Same conservative rule; never infer success. |
+| After external action or streamed prefix, before terminal commit | Same as above; this is the ambiguity window. Cursorless progress is absent from history. | Same conservative rule; never infer success or commit the partial model text. |
 | After terminal outcome commit, before caller receives it | Canonical terminal event. | Return/reconstruct it; do not call executor again. |
 | Cell proposed/started, worker dies before terminal cell event | Incomplete cell plus any separately durable effect events. | Append `CellAbandoned`; reconcile effects independently. |
 | Staged state/artifact reference before cell commit | No `WorkingValueSet`/`ArtifactRegistered` event. | Do not expose it. Unreferenced CAS bytes may remain. |

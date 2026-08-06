@@ -1,7 +1,7 @@
 import type {
   AgentEvent, AgentState, BudgetLimits, EffectOutcome, GoalGateStatus, GoalStatus,
   HeartbeatStatus, MailboxMessageKind, ModelConfiguration, NewAgentEvent,
-  RecursiveModelStatus, TaskStatus,
+  RecursiveModelOutcome, RecursiveModelStatus, TaskStatus,
 } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 export interface StorageCapabilities { readonly offlineWrites: boolean; readonly distributedLeases: boolean; readonly analyticalSql: boolean; readonly notifications: boolean; }
@@ -18,7 +18,7 @@ export interface InputSetRecord { readonly inputSetId: string; readonly sessionI
 export interface GoalRecord { readonly goalId: string; readonly sessionId: string; readonly branchId: string; readonly description: string; readonly completionCriteria: string | null; readonly maxTurns: number | null; readonly status: GoalStatus; readonly completionRequestId: string | null; readonly completionWorkspaceId: string | null; readonly completionWorkspaceCursor: string | null; readonly completionPinRecorded: boolean; readonly reason?: string; readonly createdAt: string; readonly updatedAt: string; }
 export interface GoalGateRecord { readonly gateId: string; readonly goalId: string; readonly name: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotent: boolean; readonly required: boolean; readonly status: GoalGateStatus; readonly effectId?: string; readonly output?: JsonValue; readonly error?: string; }
 export interface HeartbeatRecord { readonly heartbeatId: string; readonly sessionId: string; readonly branchId: string; readonly intervalMs: number; readonly nextTickAt: string; readonly goalId: string | null; readonly payload?: JsonValue; readonly status: HeartbeatStatus; readonly tick: number; readonly lastFiredAt: string | null; }
-export interface RecursiveModelRecord { readonly handleId: string; readonly taskId: string; readonly parentSessionId: string; readonly parentBranchId: string; readonly childSessionId: string; readonly childBranchId: string; readonly model: ModelConfiguration; readonly inputSetId: string | null; readonly status: RecursiveModelStatus; readonly resultMessageId?: string; readonly error?: string; readonly createdAt: string; readonly updatedAt: string; }
+export interface RecursiveModelRecord { readonly handleId: string; readonly taskId: string; readonly parentSessionId: string; readonly parentBranchId: string; readonly childSessionId: string; readonly childBranchId: string; readonly model: ModelConfiguration; readonly inputSetId: string | null; readonly input?: JsonValue; readonly inputProvenance?: JsonValue; readonly inputHash?: string; readonly status: RecursiveModelStatus; readonly outcome?: RecursiveModelOutcome; readonly resultMessageId?: string; readonly result?: JsonValue; readonly resultArtifactId?: string; readonly error?: string; readonly createdAt: string; readonly updatedAt: string; }
 
 /** Rebuildable Slice 2 projection reads. Optional for pre-Slice-2 third-party adapters. */
 export interface RecursiveStorageOperations {

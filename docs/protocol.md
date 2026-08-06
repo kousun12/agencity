@@ -18,10 +18,11 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 | Method and path | Input | Result |
 |---|---|---|
 | `GET /health` | none | `{ ok: true, mode: "trusted-local" }` |
+| `GET /model-providers` | none | secret-free provider descriptors with truthful `capabilities.streaming` |
 | `POST /sessions` | `{ workspaceId?, model?, budget? }` | `{ sessionId, branchId }` |
 | `GET /sessions/:session/snapshot?branch=:branch` | none | `{ cursor, state }` |
 | `GET /sessions/:session/history?branch=:branch` | none | ordered `AgentEvent[]` including branch lineage |
-| `GET /sessions/:session/stream?branch=:branch&after=:cursor` | none | `text/event-stream` committed events |
+| `GET /sessions/:session/stream?branch=:branch&after=:cursor` | none | `text/event-stream` committed events plus cursorless ephemeral progress |
 | `POST /sessions/:session/messages?branch=:branch` | `{ content }` | committed user `AgentEvent` |
 | `POST /sessions/:session/turns?branch=:branch` | none | `{ outcome, message? or error? }` |
 | `POST /sessions/:session/cells?branch=:branch` | `{ code }` | `{ cellId, result, logs }` |
@@ -62,10 +63,13 @@ A correct consumer:
 1. calls `GET .../snapshot?branch=B` and renders the returned `state`;
 2. stores its opaque decimal-string `cursor` without converting it to a JavaScript `number`;
 3. connects to `GET .../stream?branch=B&after=<cursor>`;
-4. for each SSE message, parses `data` as an `AgentEvent`, ignores event IDs already applied, reduces it, and persists the new cursor;
-5. reconnects with the last applied cursor after any disconnect.
+4. for each default SSE message, parses `data` as an `AgentEvent`, ignores event IDs already applied, reduces it, and persists the new cursor;
+5. optionally renders `event: progress` items as temporary UI state without reducing or persisting them;
+6. reconnects with the last applied committed cursor after any disconnect and clears temporary progress.
 
-Each SSE item uses the cursor as `id:` and the full event JSON as `data:`. Publication happens after commit. Commit callbacks only wake the server; catch-up reads from storage, so a crash between commit and notification does not lose state. Delivery should be treated as at least once. Causally inherited branch events and branch-local events use database cursor order.
+A committed SSE item uses the cursor as `id:` and the full event JSON as `data:`. Publication happens after commit. Commit callbacks only wake the server; catch-up reads from storage, so a crash between commit and notification does not lose state. Delivery should be treated as at least once. Causally inherited branch events and branch-local events use database cursor order.
+
+Streaming model output uses a distinct `event: progress` frame whose JSON data is an `EffectProgressNotification`. It deliberately has no `id:` or durable cursor. It is delivered only to currently attached clients, is not replayed during catch-up, and may be bounded or dropped. A client displays `model-output-delta` text provisionally; only the later committed assistant message is authoritative. On failure, cancellation, unknown recovery, or disconnect, the client discards the partial text. A non-streaming provider emits no progress and the client renders its committed message normally.
 
 The endpoint does not emit the initial snapshot, heartbeat frames, or an explicit end marker. It also does not yet authenticate, authorize per workspace, negotiate schema versions, or expose a WebSocket transport.
 
@@ -81,19 +85,40 @@ await client.turn(session.sessionId, session.branchId);
 const snapshot = await client.snapshot(session.sessionId, session.branchId);
 ```
 
-`AgentClient` wraps the non-streaming Slice 1 calls plus Slice 2/3 commands and Slice 4 `syncStatus`, `syncNow`, `syncReconnect`, conflicts/resolution, discovery, and manifest methods. Fork and SSE helpers are not yet provided; use `fetch`/`EventSource` or implement the small wire contract directly. Returned Slice 2 values are plain durable JSON handles and may be stored and reused after reconnect.
+`AgentClient` wraps the JSON calls plus `modelProviders()` and `stream(sessionId, branchId, afterCursor, handlers, signal?)`. Its stream helper advances its local cursor only for committed `AgentEvent` items, ignores duplicate/older committed cursors, and delivers cursorless progress through a separate optional handler. Fork helpers are not yet provided. Returned Slice 2 values are plain durable JSON handles and may be stored and reused after reconnect.
 
 ## Console cell environment
 
 A cell is transpiled as the body of an async function and receives these names:
 
 - `session`: `{ id, branchId }`;
-- `state`: durable typed working values;
+- `state`: durable typed working values, including read-only discovery with `state.list()`;
+- `cells`: read-only retained cell history through `list` and `get`;
 - `artifacts`: content-addressed strings;
 - `tools`: durable effect requests plus convenience helpers;
 - `sql`: parameterized read-only tagged template;
-- `sdk`: `{ state, artifacts, tools }`;
+- `inspect`: safe bounded textual inspection;
+- `sdk`: the same `state`, `cells`, `artifacts`, `tools`, `inspect`, memory, harness, skill, and spec surfaces;
 - a cell-local `console` whose log/warn/error strings enter the cell result event.
+
+### Notebook observations
+
+When a cell has no cell-level `return`, its last top-level expression becomes the observation:
+
+```ts
+const rows = await sql`SELECT type FROM events ORDER BY sequence`;
+rows.slice(0, 5) // observed and awaited if it is a promise
+```
+
+An explicit `return` keeps its existing behavior, including early returns; a `return` inside a nested function does not suppress final-expression observation. A cell ending in a declaration has a `null` observation. `console.log`/`warn`/`error`, stdout, and stderr remain separate bounded logs.
+
+Canonical structured observations remain JSON. JSON at or below 128 KiB is committed directly. Above 128 KiB, the complete serializable JSON is placed in the content-addressed artifact store and the committed result is `{ kind: "oversized-json", artifact, byteLength, preview }`. Repeated byte-identical JSON reuses the CAS object. Circular, class-backed, accessor-backed, bigint, and other unsupported JSON results commit `{ kind: "unsupported", reason, preview }` rather than entering the worker protocol as an unsafe value.
+
+```ts
+inspect(value, { depth: 4, entries: 50, lines: 40, bytes: 8192, redact: ["internalField"] })
+```
+
+`inspect` returns `{ kind: "inspect", preview, truncated, redacted, omittedGetters, limits }`. Defaults are depth 4, 50 total entries, 40 lines, and 8 KiB; hard maxima are depth 8, 200 entries, 100 lines, and 16 KiB. Getter invocation is always zero. Circular references and exhausted limits receive markers. Credential-shaped property names and caller-supplied exact property names are redacted. A preview is deliberately lossy and is never authoritative artifact content.
 
 ### Working values
 
@@ -105,6 +130,17 @@ return restored;
 ```
 
 `set` accepts JSON. At or below 128 KiB after JSON serialization it creates `{ kind: "json", value }`; above the threshold it writes an immutable JSON artifact and creates `{ kind: "artifact", artifactId }`. Updates are staged until the cell succeeds. Each committed name receives an increasing version. A failed or interrupted cell cannot expose staged working-value or artifact-reference events, though an unreferenced CAS object may remain physically and may be garbage-collected by future tooling.
+
+`state.list()` returns name, version, working-value handle, `committed`/`staged` status, and exact event provenance for committed values. It never resolves artifact content. Ordinary lexical bindings and `globalThis` are not durable and are never reconstructed; use `state.set` or retain an artifact reference for anything required by another cell or restart.
+
+### Cell history
+
+```ts
+const recent = await cells.list({ limit: 20, status: "committed" });
+const prior = await cells.get(recent.items[0].cellId);
+```
+
+`cells.list` is newest-first and cursor-paginated with `beforeCursor`; its default status set is committed, failed, and abandoned. `cells.get` returns `null` outside the current branch lineage. Entries include retained source, observation, logs, status, dependencies, attempts, duration, exports/error, and the proposed/start/terminal event provenance. These operations only read retained events and never replay code or effects.
 
 ### Artifacts
 
