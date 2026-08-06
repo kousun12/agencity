@@ -76,7 +76,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-005 | Turn the TUI into the complete protocol-backed product client | Proposed | FU-001, FU-002, FU-004, FU-012, FU-015 |
 | FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | Proposed | FU-004, FU-005, FU-015 |
 | FU-007 | Provide a real installation and executable workflow | Done | FU-001 |
-| FU-008 | Reorganize low-level CLI operations as advanced surfaces without breaking compatibility | Proposed | FU-001, FU-005 |
+| FU-008 | Reorganize low-level CLI operations as advanced surfaces without breaking compatibility | In progress | FU-001, FU-005 |
 | FU-009 | Add product-level end-to-end acceptance coverage | Proposed | FU-001–FU-008, FU-011–FU-019 |
 | FU-010 | Add repository-level purpose and implementation guidance | Done | — |
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
@@ -424,7 +424,7 @@ Development and installed workflows both expose the same memorable product entry
 
 ## FU-008 — Reorganize low-level CLI operations as advanced surfaces without breaking compatibility
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
