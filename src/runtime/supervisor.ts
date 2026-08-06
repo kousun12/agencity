@@ -520,10 +520,11 @@ export class Supervisor {
     branchId: string,
     code: string,
     dependencies: string[] = [],
+    stableCellId?: string,
   ): Promise<{ cellId: string; result: JsonValue; logs: string[] }> {
     const session = await this.storage.getSession?.(sessionId);
     if (session?.executionOwnerDeviceId && session.executionOwnerDeviceId !== this.device.deviceId) throw new CapabilityUnavailableError(`execution of session owned by device ${session.executionOwnerDeviceId}`, `device ${this.device.deviceId} (automatic ownership failover is unavailable)`);
-    return this.#cells.run(`${sessionId}/${branchId}`, () => this.#executeCell(sessionId, branchId, code, dependencies));
+    return this.#cells.run(`${sessionId}/${branchId}`, () => this.#executeCell(sessionId, branchId, code, dependencies, stableCellId));
   }
 
   async #executeCell(
@@ -531,6 +532,7 @@ export class Supervisor {
     branchId: string,
     code: string,
     dependencies: string[],
+    stableCellId?: string,
   ): Promise<{ cellId: string; result: JsonValue; logs: string[] }> {
     if (containsBrokeredSecret(code)) {
       throw new ValidationError("Brokered credentials cannot enter console cell source");
@@ -538,7 +540,15 @@ export class Supervisor {
     const history = await this.storage.loadEvents(sessionId, { branchId });
     if (!history.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
     const state = projectEvents(history);
-    const cellId = newId();
+    const cellId = stableCellId ?? newId();
+    const existing = state.cells[cellId];
+    if (existing) {
+      const proposed = history.find((event) => event.type === "CellProposed" && (event.payload as { cellId: string }).cellId === cellId);
+      const payload = proposed?.payload as { code?: string; dependencies?: string[] } | undefined;
+      if (payload?.code !== code || !Bun.deepEquals(payload.dependencies ?? [], dependencies)) throw new ValidationError("Stable cell identity was reused with different source or dependencies");
+      if (existing.status === "committed") return { cellId, result: existing.result!, logs: [...existing.logs] };
+      throw new ValidationError(`Stable cell ${cellId} is ${existing.status}; started cells are never blindly replayed`);
+    }
     const started = performance.now();
     await this.storage.appendEvents([{
       sessionId,
@@ -561,6 +571,12 @@ export class Supervisor {
     const restored = Object.fromEntries(
       Object.entries(state.workingValues).map(([name, value]) => [name, value.value]),
     );
+    const rpcOrdinals = new Map<string, number>();
+    const nextRpcKey = (method: string): string => {
+      const ordinal = (rpcOrdinals.get(method) ?? 0) + 1;
+      rpcOrdinals.set(method, ordinal);
+      return `cell:${cellId}:${method}:${ordinal}`;
+    };
     const handler = async (method: string, args: unknown[]): Promise<unknown> => {
       if (method === "state.get") {
         const name = String(args[0]);
@@ -654,13 +670,25 @@ export class Supervisor {
       if (method === "harness.propose") return this.harness.propose(sessionId,branchId,{...(args[0] as any),authority:"agent"});
       if (method === "harness.list") return this.harness.modelList(sessionId,branchId,(args[0] ?? {}) as any);
       if (method === "harness.history") return this.harness.modelHistory(sessionId,branchId,String(args[0]));
-      if (method === "skills.invoke") return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,(args[2] ?? {}) as any);
+      if (method === "skills.invoke") {
+        const options = (args[2] ?? {}) as Record<string, unknown>;
+        return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: typeof options.idempotencyKey === "string" ? options.idempotencyKey : nextRpcKey(method) } as any);
+      }
       if (method === "skills.test") return this.skills.testModelVisible(sessionId,branchId,String(args[0]),typeof args[1] === "string" ? args[1] : undefined);
-      if (method === "specs.spawn") return this.specs.spawn(sessionId,branchId,String(args[0]),(args[1] ?? {}) as any);
-      if (method === "rlm.start") return this.models.start(sessionId, branchId, args[0] as any);
+      if (method === "specs.spawn") {
+        const input = (args[1] ?? {}) as Record<string, unknown>;
+        return this.specs.spawn(sessionId,branchId,String(args[0]),{ ...input, idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method) } as any);
+      }
+      if (method === "rlm.start") {
+        const raw = args[0]; const input = typeof raw === "string" ? { prompt: raw } : raw as Record<string, unknown>;
+        return this.models.start(sessionId, branchId, { ...input, idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method) } as any);
+      }
       if (method === "rlm.startMany") {
         if (!Array.isArray(args[0])) throw new ValidationError("rlm.startMany requires an input array");
-        return this.models.startMany(sessionId, branchId, args[0] as any[]);
+        return this.models.startMany(sessionId, branchId, args[0].map((raw, index) => {
+          const input = typeof raw === "string" ? { prompt: raw } : raw as Record<string, unknown>;
+          return { ...input, idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : `${nextRpcKey(method)}:${index + 1}` };
+        }) as any[]);
       }
       if (method === "rlm.get" || method === "rlm.result" || method === "rlm.cancel") {
         if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("Recursive model handleId must be a non-empty string");
@@ -686,7 +714,7 @@ export class Supervisor {
           : {};
         const idempotencyKey = typeof options.idempotencyKey === "string"
           ? options.idempotencyKey
-          : `cell:${cellId}:${executor}:${operation}:${newId()}`;
+          : nextRpcKey(`tools.${executor}.${operation}`);
         const idempotent = typeof options.idempotent === "boolean"
           ? options.idempotent
           : executor === "file" && operation !== "replace";

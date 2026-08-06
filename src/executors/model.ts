@@ -1,5 +1,5 @@
 import type { JsonValue } from "../domain/json.ts";
-import { ValidationError, type ModelConfiguration, type Usage } from "../domain/index.ts";
+import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, ValidationError, type AgentAction, type ModelConfiguration, type Usage } from "../domain/index.ts";
 import type { EffectExecutor, ExecutionResult } from "./contract.ts";
 import { result } from "./contract.ts";
 
@@ -45,6 +45,27 @@ export class EchoModelProvider implements ModelProvider {
     }
     const output = text || "Echo model completed.";
     return { text: output, finishReason: "stop", usage: { inputTokens: Math.ceil(JSON.stringify(context).length / 4), outputTokens: Math.ceil(output.length / 4), costUsd: 0 } };
+  }
+}
+
+/** Deterministic structured-action fixture keyed by the durable run step ordinal in context. */
+export class ScriptedAgentActionProvider implements ModelProvider {
+  readonly name: string;
+  readonly displayName: string;
+  readonly capabilities = { streaming: false } as const;
+  constructor(
+    readonly script: Readonly<Record<number, AgentAction | string>> | readonly (AgentAction | string)[],
+    name = "structured-action",
+  ) { this.name = name; this.displayName = `${name} (deterministic agent-action fixture)`; }
+  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const ordinal = context && typeof context === "object" && !Array.isArray(context) && context.run &&
+      typeof context.run === "object" && !Array.isArray(context.run) && typeof context.run.stepOrdinal === "number"
+      ? context.run.stepOrdinal : 1;
+    const selected = Array.isArray(this.script) ? this.script[ordinal - 1] : this.script[ordinal];
+    const fallback: AgentAction = { protocol: AGENT_ACTION_PROTOCOL, version: AGENT_ACTION_VERSION, type: "failed", error: `No scripted agent action for durable step ${ordinal}` };
+    const text = typeof selected === "string" ? selected : JSON.stringify(selected ?? fallback);
+    return { text, finishReason: "stop", usage: { inputTokens: Math.ceil(JSON.stringify(context).length / 4), outputTokens: Math.ceil(text.length / 4), costUsd: 0 } };
   }
 }
 
