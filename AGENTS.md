@@ -1,0 +1,456 @@
+# AGENTS.md
+
+**Role:** Canonical repository guide  
+**Last reviewed:** August 6, 2026
+
+This file is the current source of truth for Agencity's purpose, product intention, design principles, supported behavior, known gaps, architecture, and implementation rules. A new reader should not need another product document to understand what the project is trying to build or what is currently real.
+
+[`docs/stable/BLOG.md`](./docs/stable/BLOG.md) is a companion explanation of the product thesis. This file is authoritative when wording in that essay, the README, or a technical document blurs intended behavior with shipped behavior. Code and tests are the evidence for current capabilities; they do not by themselves redefine the product intention.
+
+Update this file whenever a change alters the product direction, supported user journey, durable domain model, security boundary, major capability, or known limitation.
+
+## What Agencity is
+
+Agencity is a terminal-first autonomous agent runtime informed by Prime Agent. It addresses a limitation of conventional tool-calling agents: a prompt/response loop becomes strained when work outlives one context window, terminal, process, or live language heap.
+
+The project begins from two Prime Agent ideas:
+
+- A **Recursive Language Model (RLM)** treats context as data. The model writes programs that inspect and transform that data, call models, use tools, delegate work, and combine results instead of selecting one fixed tool at a time.
+- A **Continual Harness** lets the agent adapt its prompt notes, memories, skills, and reusable subagent specifications from experience.
+
+Agencity takes those ideas in a different systems direction. The model's intended general programmatic action surface is a Bun TypeScript console, while durable agent identity lives in a relational event history and referenced artifacts. Canonical workspace state is stored in a local LibSQL database. Optional Turso synchronization exchanges immutable envelopes through a separate replica database; Turso is not a distributed lock service or a replacement owner for local canonical state.
+
+The console is disposable: its heap may accelerate a healthy run, but it is never the source of truth. Python workloads can run through trusted shell execution, but Python does not own the agent session and there is no dedicated Python executor.
+
+The central thesis is that an agent can program over its own context without making a language process its identity. Programs may be temporary, while committed work, relationships, evidence, and reasons remain durable and inspectable.
+
+Agencity is inspired by Prime Agent rather than a compatibility port. It does not aim to preserve Prime Agent's Python modules, file formats, extension APIs, or persistent-kernel design, and it does not claim benchmark gains merely from adopting a different architecture.
+
+## Product intention
+
+This repository is not merely a storage library or collection of runtime primitives. The intended product is a usable autonomous agent whose ordinary entrypoint is a repository terminal.
+
+The target user journey is:
+
+```sh
+agencity "find and fix the flaky test"
+```
+
+In that target flow, Agencity resolves the workspace, creates or resumes the appropriate durable session, makes the selected model explicit, commits the task, and opens an inspectable run. Returning later with `agencity` reconstructs committed work without requiring copied session or branch IDs.
+
+The product should let a user:
+
+- give a task and let a typed, budgeted, recoverable agent loop carry it through TypeScript cells, tools, model calls, and subagents;
+- inspect the conversation together with the cells, bounded observations, effects, child sessions, budgets, goals, gates, and unresolved outcomes that produced it;
+- steer, approve, cancel, detach, resume, branch, export, and delete owned work without bypassing durable runtime semantics;
+- use human-readable product flows while retaining internal IDs, SQL, and low-level operations for diagnostics and automation;
+- attach through a terminal client that observes the same public snapshot/event protocol as other clients and does not become the owner of session identity.
+
+The model should receive one general generated-execution surface—the TypeScript console. SQL, files, shell effects, artifacts, recursive model calls, subagents, memory, and refinement are typed APIs inside that environment. Product code should not replace this with a growing hard-coded workflow or independent menu of model tools.
+
+Product success is measured through the complete user journey, not only through storage, reducer, or service tests. Do not optimize for a passing component acceptance matrix while leaving onboarding, autonomous execution, interruption, recovery, or resume incomplete.
+
+## Design constitution
+
+Use these principles when requirements leave an implementation choice:
+
+- **Adapt through experience.** Repeated success and failure should produce scoped memories, skills, subagent roles, retrieval policies, and workflows. Learned specialization must remain attributable, testable, and reversible.
+- **Durable state owns identity.** A process, model connection, console heap, UI, or machine may disappear without taking committed work or task ownership with it.
+- **Context is queryable data.** Retain complete attributable history and give the model bounded projections plus deliberate query tools. Compaction is a derived view, not destructive replacement of evidence.
+- **General mechanisms precede prescribed workflows.** TypeScript, SQL, model calls, durable tasks, evaluators, and policies are the building blocks. Package recurring successful workflows as inspectable skills instead of enlarging a fixed universal loop.
+- **Evidence governs refinement.** A model's explanation or predicted benefit is not proof. Harness changes advance through scoped proposals, validation, bounded exposure, observed evaluation, promotion or rejection, and rollback.
+- **User authority bounds autonomy.** The agent cannot widen its own data, permission, budget, publication, or safety boundaries. Explicit user preferences and owned-scope deletion override inferred tactics and retained provenance.
+- **Uncertainty remains visible.** Unknown effects, stale gates, missing artifacts, conflicting claims, and unavailable capabilities stay explicit. The runtime does not invent success or retry unsafe work to keep a run moving.
+- **Subagents are retained relationships.** Root agents, subagents, and recursive model calls share the durable session/task/mailbox model. Delegation produces inspectable ownership and communication, not anonymous returned strings.
+- **Placement is configuration, not identity.** Local and remote adapters preserve identifiers, causality, recovery, and model-facing behavior. Stronger infrastructure may add capabilities; weaker placement must report unavailable behavior instead of silently weakening semantics.
+- **Autonomy is bounded and inspectable.** Goals, completion gates, budgets, timeouts, permissions, cancellation, and user decisions are durable parts of a run. Completion is not merely the model claiming it is done.
+
+## Product goals
+
+Agencity aims to provide:
+
+- **Programmatic agency:** the model can construct TypeScript programs that query state, transform data, call tools and models, fan work out, and aggregate results.
+- **Durable execution:** committed work survives worker, supervisor, terminal, and machine-process restarts without relying on an intact heap.
+- **Relational context:** complete history remains queryable while each model call receives a bounded, attributable selection of what matters now.
+- **Retained multi-agent work:** subagents and recursive calls are durable sessions with tasks, budgets, messages, artifacts, cancellation, and follow-up—not disposable strings.
+- **Bounded autonomy:** goals, completion gates, permissions, budgets, timeouts, user decisions, and uncertain effects remain visible and enforceable.
+- **Governed adaptation:** memories, prompt notes, skills, and subagent specifications can improve through scoped evidence, evaluation, approval where required, and rollback.
+- **Local-first replaceability:** a complete local runtime works without Cloud, while storage, artifacts, retrieval, execution, and clients can move behind capability-aware contracts without changing agent identity.
+- **Inspectable operation:** users and clients can understand what the agent knew, what it did, which evidence supported it, what remains unresolved, and how to resume or reverse work.
+
+## Non-goals and non-claims
+
+Agencity does not claim or require:
+
+- compatibility with Prime Agent's internal modules, Python API, file formats, or persistent-kernel behavior;
+- benchmark improvement merely because the architecture uses RLM or continual-harness ideas;
+- exactly-once execution of arbitrary external effects;
+- durability of closures, sockets, module instances, subprocesses, or uncommitted console variables;
+- unrestricted model writes to canonical relational tables;
+- a hostile-code sandbox, authentication system, multi-tenant authorization boundary, or network isolation in the current trusted-local runtime;
+- PostgreSQL, embeddings, or distributed coordination as prerequisites for the local product;
+- one database blob containing all durable bytes—artifacts may live outside the database and remain required for complete recovery;
+- a fixed planning ceremony, delegation topology, or ever-growing set of privileged model tools.
+
+## Core product model
+
+- A **workspace** is the ownership and placement boundary for project sessions. Its canonical events and artifact metadata live in a local workspace database; artifact bytes live in a configured content-addressed store.
+- A **profile/device** store is separate from workspace state. It holds durable device identity, cross-workspace preferences and catalog entries, globally installed skills, and opaque credential references.
+- A **session** is a durable actor. It owns a model configuration, budget, goals, conversation state, and event stream. Root agents, delegated subagents, and recursive model calls use the same session model.
+- A **branch** is a durable line of session history. Forking from an earlier cursor creates a new branch; it does not mutate or replay the original history.
+- A **task** records why a child session exists, what completion means, its budget attribution, and its lifecycle. Parent and child sessions communicate through durable mailboxes and terminal notices.
+- A **goal** is a durable autonomous objective. **Completion gates** record required evidence and must pass against attributable workspace state before completion is accepted.
+- A **cell** is a proposed TypeScript program plus its dependencies, logs, observed result, exports, and terminal status. A committed cell boundary is a recovery boundary.
+- An **effect** is external work such as a model, shell, file, or skill request. The outbox records the request before execution and records `succeeded`, `failed`, `cancelled`, or `unknown`.
+- **Context** is a bounded projection assembled for a model call from attributable messages, state, memory, tasks, policy, and harness versions. It is not the complete durable record.
+- A **working value** is durable typed JSON. Larger or byte-oriented content belongs in an immutable **artifact** identified by content digest.
+- **Memory** records scoped claims, observations, preferences, and decisions. The **continual harness** adds versioned prompt notes, executable skills, and reusable subagent specifications with evidence and lifecycle state.
+- A **projection** is deterministic state derived from canonical events. A **cursor** identifies a committed point for snapshots, catch-up, historical inspection, and branch creation.
+- A **run** is a product term for a period in which the supervisor advances a session toward a goal. The current domain represents that work through session status, goals, calls, cells, tasks, effects, and budgets; there is no separate canonical `Run` entity today.
+
+## Intended autonomous lifecycle
+
+The target task path is:
+
+1. Resolve the workspace and create or select a durable root session with an explicit usable model.
+2. Commit the user's instruction and applicable goal, limits, policy, and completion requirements.
+3. Materialize bounded context with the exact source-event and harness provenance supplied to the model.
+4. Ask the model for a versioned typed next action: a user-facing result, clarification or permission request, TypeScript cell, durable delegation, or explicit blocked/failed outcome.
+5. Validate the action, authority, scope, budget, and compatibility before execution.
+6. Execute generated work through the disposable TypeScript console and durable outbox-backed APIs.
+7. Commit the action, cell, effects, observations, usage, child work, and resulting state before making a dependent model call.
+8. Continue until completion gates pass, the user must decide, a bound is reached, cancellation reconciles, or a failed/unknown outcome blocks safe progress.
+
+Unstructured model prose must never be heuristically executed as code. The model receives TypeScript as its general generated-execution surface; run-control outcomes remain typed supervisor decisions rather than additional privileged tools.
+
+The TUI and other clients observe this lifecycle through snapshot-plus-cursor event semantics. They may steer, approve, cancel, detach, and resume, but client attachment is not durable session identity and process exit is not proof that external work stopped.
+
+## Current implementation status
+
+### Implemented runtime foundations
+
+- local LibSQL canonical event storage, immutable event guards, deterministic projection/rebuild, branches, snapshots, and cursor-based subscriptions;
+- disposable Bun TypeScript cells with explicit returned JSON results, bounded logs, durable working values, read-only analytical SQL, and content-addressed artifacts;
+- outbox-backed model, shell, file, and skill effects with crash recovery and explicit unknown outcomes;
+- durable root and child sessions, tasks, mailboxes, cancellation trees, recursive-model runtime handles, documents/input sets, goals, gates, and heartbeats;
+- scoped memory with FTS5 candidate retrieval, versioned prompt notes, skills, subagent specifications, and governed refinement/evaluation/rollback;
+- profile and device identity plus optional offline-first Turso envelope synchronization, divergent-branch preservation, conflict/quarantine records, and single-device session execution ownership;
+- loopback HTTP/JSON and SSE surfaces, a TypeScript API, a low-level diagnostic CLI, and a basic in-process TUI;
+- local and HTTP-backed placement contracts for relational state, artifact storage, candidate retrieval, and execution, with explicit capability reporting and conformance coverage.
+
+### Incomplete product surfaces
+
+- The current CLI is a developer lifecycle interface. A user runs `create`, copies `sessionId` and `branchId`, then invokes `chat`, `cell`, or `tui`; running with no command shows help.
+- CLI-created sessions default to the deterministic `echo/echo-1` fixture. OpenAI-compatible registration is environment-driven, and there is no normal provider/model onboarding or saved model selector.
+- The ordinary model loop performs one text completion and records one assistant message. It does not parse a typed action protocol or autonomously drive cells, tools, recursive work, and completion.
+- Console cells require an explicit `return`; final-expression observation, bounded `inspect`, and model-facing cell history are absent. Durable values can be enumerated through `state.restored`, but there is no dedicated paginated discovery API.
+- Runtime task, mailbox, and recursive-model services exist, but the console SDK does not expose a general retained-family messaging API or a first-class durable `rlm` API.
+- The TUI directly owns a `Supervisor`, requires explicit IDs, and advances one model turn from text input. It is not yet the protocol-backed session selector and autonomous-run client described above.
+- Model providers currently commit one output chunk after completion rather than genuine token streaming.
+- Unknown effects are retained and visible through state/history, but there is no complete user-facing reconciliation workflow.
+- The package declares binary names but is private, has no `bun run dev` script, and has no documented and tested installation workflow that puts a supported `agencity` command on `PATH`.
+- Existing end-to-end coverage proves many runtime recovery properties, but it does not prove the target no-ID install-to-task-to-resume product journey or an autonomous model-to-TypeScript coding loop.
+
+### Deliberately unavailable or deferred
+
+- hostile-code isolation inside the Bun worker;
+- authenticated multi-tenant HTTP service operation;
+- distributed leases, task stealing, global budget reservation, and automatic execution-owner failover;
+- PostgreSQL coordination;
+- embedding-based semantic retrieval;
+- automatic artifact replication and garbage collection;
+- browser execution;
+- production Cloud administrative deletion through the installed Turso data client.
+
+Do not describe Agencity as a complete autonomous product or production-ready system merely because its runtime acceptance matrix passes.
+
+## Product completion bar
+
+The initial terminal product is complete only when all of these are reproducible:
+
+- A clean supported installation exposes `agencity`, and the source-checkout development command enters the same product flow.
+- In a fresh repository, `agencity` creates or selects durable work and opens a ready terminal interface without asking for internal IDs.
+- Re-entering the repository resumes an unambiguous selected branch; ambiguous choices use a human-readable selector rather than incidental row order.
+- Provider/model choice is explicit. Echo is visibly a demo fixture, missing configuration fails truthfully, and a resumed branch never changes model silently.
+- A normal task drives the typed autonomous lifecycle and TypeScript action surface rather than stopping after one chat completion.
+- Worker, supervisor, and client interruption at durable boundaries reconstructs the same committed state without duplicate cells, effects, model calls, or children.
+- Cancellation requests, budget exhaustion, failed gates, unknown effects, and unavailable capabilities are distinct visible states with safe resume or reconciliation behavior.
+- The TUI consumes the public client contract, can detach and catch up from a cursor, and never owns durable session identity.
+- A black-box test covers installation, empty-state start, task execution, verification, quit, resume, branch, and history without calling supervisor internals or parsing IDs.
+
+## Runtime and development requirements
+
+- Bun 1.2 or newer, as declared by the package engine.
+- TypeScript is executed directly by Bun. There is currently no emitted production build step.
+- The runtime is trusted-local unless the entire process is placed in an external sandbox.
+
+Install and run all standard checks from the repository root:
+
+```sh
+bun install --frozen-lockfile
+bun run verify
+```
+
+Individual gates:
+
+```sh
+bun run typecheck
+bun run check:architecture
+bun run check:acceptance
+bun test --timeout 30000
+bun run test:unit
+bun run test:integration
+bun run test:e2e
+```
+
+Current CLI development entrypoint:
+
+```sh
+bun run src/cli.ts --help
+```
+
+There is currently no `bun run dev` script or supported installed-command workflow. The intended product command is `agencity`, but do not document installation or direct task entry as shipped until a clean black-box installation test proves it.
+
+## External and gated verification
+
+The default suite may skip external integration tests when their prerequisites are absent. A skipped external test is not evidence that the integration passed in the current environment.
+
+Official Turso Sync server conformance requires an external version-matched binary:
+
+```sh
+TURSO_SYNC_SERVER_BIN=/absolute/path/to/tursodb   bun run test:turso-official
+```
+
+Real Turso Cloud smoke testing is credential-gated and must use a disposable database:
+
+```sh
+AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=...   bun test test/slice4/cloud-smoke.test.ts
+```
+
+Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified merely because a static acceptance checker passed.
+
+## Architectural map
+
+Primary source areas:
+
+- `src/domain/` — domain types, immutable event schemas, reducers, validation, and shared semantics.
+- `src/storage/` — storage contracts, local LibSQL implementation, migrations, and Turso exchange adapter boundary.
+- `src/artifacts/` — artifact contracts and the local content-addressed store.
+- `src/executors/` — typed effect executors for models, shell, files, skills, and related boundaries.
+- `src/console/` — disposable Bun worker and supervisor-owned RPC interface.
+- `src/runtime/` — supervisor and domain services: model loop, outbox, agents, goals, memory, refinement, recovery, sync integration.
+- `src/protocol/` — loopback HTTP/JSON, SSE, and typed client surfaces.
+- `src/tui/` — terminal client.
+- `src/security/` — SQL restrictions, secret handling, and trusted-local safeguards.
+- `src/sync/` — sync lifecycle, reconciliation, manifests, and data-control services.
+- `src/placement/` — replaceable local/remote contracts, including HTTP-backed and object-store placement adapters.
+- `src/cli.ts` / `src/cli-args.ts` — current raw CLI dispatch and parsing.
+- `test/` — unit, integration, end-to-end, slice-specific, adversarial, and placement conformance tests.
+- `scripts/check-architecture.ts` — architectural boundary and schema/table checks.
+- `scripts/check-full-system-acceptance.ts` — statically checks the acceptance evidence matrix, referenced files, and selected structural markers; it does not execute the linked behavioral tests.
+
+The `docs/` tree contains detailed operator, API, protocol, event, table, recovery, security, placement, decision, and verification material. Those documents elaborate implementation mechanics; they do not replace this file as the product/status authority. Update both when behavior changes, and correct a technical document when current code disproves it.
+
+## Non-negotiable invariants
+
+### Durable state owns identity
+
+A process, worker, model connection, TUI, or machine-local heap may disappear without taking committed agent identity with it. Anything required after a restart must be stored as a canonical event, validated durable record, typed working value, or referenced artifact.
+
+Do not make correctness depend on:
+
+- module globals;
+- a living console worker;
+- an in-memory session registry;
+- an attached TUI/client;
+- uncommitted stdout;
+- an object handle that cannot be reconstructed from durable JSON identity.
+
+### Events are canonical
+
+Canonical domain history is append-only during ordinary operation. Projections, caches, snapshots, leases, sync staging, and indexes may be mutable only when their classification and rebuild/operational semantics are documented.
+
+- Do not update or delete retained canonical events to make a projection convenient.
+- State transitions append typed, validated events through domain/storage commands.
+- Idempotency-key reuse must agree on all durable meaning.
+- Duplicate event application must be a true no-op.
+- Historical projection and rebuild must never re-execute external effects.
+
+Physical owned-scope deletion is a separate, guarded data-control operation. Do not weaken its confirmation, ownership, quiescence, remote-administration, receipt, or retry requirements.
+
+### Event evolution is versioned
+
+Released event meanings are immutable. The current runtime accepts event schema version 1 only and does not yet have a general event-version registry or upcaster pipeline. Before introducing a new version:
+
+- implement explicit version acceptance and deterministic projection/upcasting;
+- preserve and replay retained version-1 fixtures;
+- add validation and protocol compatibility tests;
+- update the event documentation;
+- keep mixed-history projection behavior explicit.
+
+Compatible optional version-1 data may be added only when old retained records, reducers, validators, storage, and clients continue to behave deterministically.
+
+Never rewrite retained history as a migration shortcut.
+
+### No hidden durable heap state
+
+Console cells run as disposable async-function bodies. Values needed by later cells use the typed `state` API; larger content uses artifacts. Handles passed across restart boundaries must be JSON identities resolvable through durable services.
+
+A console worker restart after every committed cell should not change materialized state or task ownership.
+
+### Effects use the outbox
+
+Model calls, shell/file tools, skills, and other external effects must be durably requested before execution and receive explicit terminal outcomes.
+
+- Stable logical retries use stable idempotency keys.
+- Idempotent lost work may be requeued according to the executor contract.
+- Lost non-idempotent work becomes `unknown` and is not blindly retried.
+- Caller death after a committed outcome must not cause duplicate execution.
+- UI history or replay must never repeat effects.
+
+Do not bypass the outbox for convenience in a new CLI, TUI, skill, or agent loop.
+
+### Context and adaptation are attributable
+
+Every model response should be traceable to the immutable messages, context records, memory retrieval results, and harness versions it received.
+
+Memory and continual-harness changes preserve:
+
+- scope and ownership;
+- source evidence;
+- candidate/control exposure;
+- evaluator results;
+- explicit authority for broader scopes;
+- exact version activation and rollback;
+- conflicts rather than silent preference overwrites.
+
+A persuasive model statement is not objective evidence.
+
+### Controlled mutation
+
+Model-generated code does not receive unrestricted canonical database writes. Raw SQL is analytical and read-only. Canonical state changes go through typed SDK/runtime commands with domain validation.
+
+Keep LibSQL/Turso SDK objects confined to their adapters. Public domain and storage contracts must remain adapter-neutral and pass shared capability/conformance tests.
+
+### Placement preserves semantics
+
+Local and remote implementations may have different capabilities, but they must share domain semantics. Unsupported capabilities fail visibly with typed errors rather than silently falling back or changing guarantees.
+
+Local-first operation must remain available when Cloud is absent or unreachable. Remote transport loss must not turn a remote placement into an implicit local placement.
+
+### Uncertainty remains visible
+
+Missing artifacts, corrupt digests, stale gates, divergent claims, unavailable coordination, interrupted non-idempotent effects, and partial deletion are explicit states. Do not convert unknown or unavailable into success to keep a workflow moving.
+
+## Security boundary
+
+The current system is **trusted-local**, not a hostile-code sandbox.
+
+- Model-generated TypeScript and shell commands can exercise the OS authority of the runtime process.
+- The separate Bun console worker provides crash and protocol isolation, not security isolation.
+- The shell executor constrains its initial working directory but is not an OS sandbox.
+- The HTTP server is unauthenticated and should bind to loopback unless protected externally.
+- Read-only SQL is a shared diagnostic surface, not a confidentiality boundary between candidates or workspaces.
+- Scope filtering controls behavior and context selection; it must not be described as protection against hostile local SQL/code.
+
+Provider credentials remain supervisor-side. Preserve secret stripping, known-value rejection/redaction, non-login shell behavior, and opaque credential references. Never put raw credentials into events, logs, artifacts, profile metadata, sync envelopes, test fixtures committed to Git, or error messages.
+
+Any new UI or entrypoint must state trusted-local authority clearly and must not claim sandboxing that does not exist.
+
+## Database, migrations, and table changes
+
+When adding or changing relational state:
+
+1. Decide whether the data is canonical, a rebuildable projection, an operational cache, a lease/claim, an index, or sync/control state.
+2. Prefer canonical domain events for retained agent meaning.
+3. Add a numbered migration in the established migration mechanism.
+4. Update the table classification in `docs/mutable-tables.md`.
+5. Update architecture checks when a new table or boundary is introduced.
+6. Add replay/rebuild and restart tests where the data affects agent identity or execution.
+7. Test idempotent migration/open behavior.
+8. Keep Turso/LibSQL types inside the storage adapter boundary.
+
+Do not add a mutable “current state” table without documenting how it is rebuilt or why it is operational rather than canonical.
+
+## Artifact changes
+
+Artifacts are immutable and content-addressed. The database stores references and provenance, not necessarily payload bytes.
+
+- Verify digest and size on resolution and export.
+- Identical content should deduplicate independently of source name.
+- Missing/corrupt referenced bytes are dependency failures, not empty content.
+- Backups and exports must account for both database state and referenced artifact bytes.
+- Deletion must respect retained references and ownership; do not delete shared CAS content speculatively.
+
+## CLI and TUI direction
+
+The current raw CLI is an implementation surface, not the final desired onboarding experience. Product interface work must preserve this direction:
+
+- `agencity` should eventually create or resume and open the product directly;
+- users should not copy session or branch IDs for normal operation;
+- echo must remain an explicitly labeled demo/test provider;
+- provider setup must not require dropping to HTTP or TypeScript APIs;
+- the TUI should project the public client/event contract;
+- a task should drive a typed, recoverable model-to-TypeScript/tool action loop rather than only one chat response;
+- internal IDs and low-level cell/history/rebuild operations remain available as advanced diagnostics.
+
+Do not paper over the missing autonomous loop by heuristically executing arbitrary assistant prose. Model actions must be typed, versioned, validated, attributed, budgeted, and durably recorded before dependent work.
+
+## Testing expectations
+
+Choose the narrowest relevant test during iteration, then run the full gates before claiming completion.
+
+For changes to:
+
+- reducers/events: add unit replay, duplicate, invalid-transition, and rebuild tests;
+- storage/migrations: add reopen, idempotency, physical-constraint, and architecture checks;
+- effects/recovery: test crash boundaries before request, after request, during execution, and after committed outcome;
+- console RPC: test worker restart, stdout isolation, secret handling, and failed-cell atomicity;
+- recursive agents: test restart, cancellation trees, task budgets, mailbox authorization, and terminal delivery;
+- memory/refinement: test scope, provenance, exposure, evidence, authority, conflict, promotion, and rollback;
+- sync: test offline writes, reconnect, concurrent writers, corruption/quarantine, conflicts, restart, and unsupported capabilities;
+- protocol/TUI: test snapshot-then-stream races, cursor resume, duplicate delivery, typed errors, and no repeated effects;
+- CLI/product entrypoint: add black-box tests that do not call supervisor internals or manually inject IDs;
+- security: include adversarial inputs and prove actual known secret values do not escape.
+
+The legacy static acceptance checker confirms that a fixed evidence matrix, file references, and selected source markers exist. It remains part of `bun run verify`, but it does not execute those behavioral tests and does not define product completeness. The product completion bar in this file is authoritative.
+
+## Documentation expectations
+
+Update documentation in the same change when behavior, commands, events, tables, security claims, recovery semantics, capabilities, or public APIs change.
+
+Do not leave docs claiming:
+
+- a command works when only a package `bin` declaration exists;
+- real streaming when providers emit only a post-completion chunk;
+- cloud verification when the credential-gated test was skipped;
+- sandbox isolation in trusted-local execution;
+- general deletion when only narrower owned scopes are supported;
+- a complete autonomous product when only runtime primitives are wired.
+
+Prefer explicit capability and limitation statements over implied behavior.
+
+## Change discipline
+
+- Keep domain semantics out of CLI/TUI formatting code.
+- Reuse typed services and public contracts rather than opening side-channel database connections.
+- Avoid broad rewrites when a focused event, command, adapter, or projection change is sufficient.
+- Preserve compatibility with retained databases and artifact references unless a migration plan is included.
+- Do not weaken validation or capability errors to make a demo pass.
+- Do not silently broaden permissions, scope, budgets, or publication authority.
+- Do not commit credentials, local `.agencity` state, generated databases, replica sidecars, or temporary artifacts.
+- Record intentional deferrals and their rationale in this file's current-status section rather than representing them as complete.
+
+## Definition of done
+
+A change is done when:
+
+1. The user- or operator-visible outcome is implemented.
+2. Architectural and security invariants still hold.
+3. Relevant automated tests cover success, restart/failure, and adversarial behavior.
+4. Typecheck and architecture checks pass.
+5. This guide, public docs, and acceptance evidence are current.
+6. External tests are either reproduced or clearly reported as skipped/unverified.
+7. Remaining limitations are explicit.
+
+For product tickets, include a black-box path from the documented entrypoint. A direct unit test of the underlying service is not sufficient evidence that the user journey works.
