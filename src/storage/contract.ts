@@ -60,6 +60,16 @@ export interface ProcessExecutionLeaseStorageOperations {
   renewProcessExecutionLease(input: ProcessExecutionLeaseRenewal): Promise<ProcessExecutionLeaseRecord>;
   releaseProcessExecutionLease(input: ProcessExecutionLeaseProof): Promise<ProcessExecutionLeaseRecord>;
 }
+
+/**
+ * Atomic write admission carried by managed execution owners. Existing-session
+ * writes require both the workspace service lease and the root-tree lease;
+ * root SessionCreated admission uses the workspace lease until that root exists.
+ */
+export interface ProcessExecutionWriteFence {
+  readonly workspace: ProcessExecutionLeaseProof;
+  readonly root?: ProcessExecutionLeaseProof;
+}
 export interface ReadonlyStatement { readonly sql: string; readonly args: readonly (string|number|bigint|null|Uint8Array)[]; }
 
 export interface SessionRecord { readonly sessionId: string; readonly workspaceId: string; readonly initialBranchId: string; readonly parentSessionId: string | null; readonly parentBranchId: string | null; readonly rootSessionId: string; readonly depth: number; readonly taskId: string | null; readonly status: TaskStatus | null; readonly executionOwnerDeviceId: string | null; }
@@ -216,7 +226,7 @@ export interface SyncStorageOperations {
 export interface AgentStorage {
  readonly name: string; readonly capabilities: StorageCapabilities; readonly deviceId?: string;
  migrate(): Promise<void>; close(): void;
- appendEvents(events: readonly NewAgentEvent[]): Promise<AgentEvent[]>;
+ appendEvents(events: readonly NewAgentEvent[], fence?: ProcessExecutionWriteFence): Promise<AgentEvent[]>;
  loadEvents(sessionId: string, query?: EventQuery): Promise<AgentEvent[]>;
  getEvent(eventId: string): Promise<AgentEvent | null>;
  getLatestCursor(sessionId: string, branchId: string): Promise<string | null>;
@@ -224,11 +234,11 @@ export interface AgentStorage {
  saveSnapshot(state: AgentState): Promise<void>;
  loadSnapshot(sessionId: string, branchId: string): Promise<AgentState | null>;
  deleteSnapshots(sessionId?: string): Promise<void>;
- claimOutbox(owner: string, limit?: number, leaseMs?: number): Promise<OutboxRecord[]>;
- claimEffect(effectId: string, owner: string, leaseMs?: number): Promise<OutboxRecord | null>;
+ claimOutbox(owner: string, limit?: number, leaseMs?: number, fence?: ProcessExecutionWriteFence): Promise<OutboxRecord[]>;
+ claimEffect(effectId: string, owner: string, leaseMs?: number, fence?: ProcessExecutionWriteFence): Promise<OutboxRecord | null>;
  getOutbox(effectId: string): Promise<OutboxRecord | null>;
  listOutbox(statuses?: readonly OutboxRecord["status"][]): Promise<OutboxRecord[]>;
- resetOutbox(effectId: string): Promise<void>;
+ resetOutbox(effectId: string, fence?: ProcessExecutionWriteFence): Promise<void>;
  readonlyQuery(statement: ReadonlyStatement): Promise<JsonValue[]>;
  onCommitted(listener: (events: readonly AgentEvent[]) => void): () => void;
  getProcessExecutionLease?: ProcessExecutionLeaseStorageOperations["getProcessExecutionLease"];

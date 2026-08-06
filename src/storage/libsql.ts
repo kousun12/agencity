@@ -7,7 +7,7 @@ import type {
   HeartbeatRecord, InputSetRecord, MailboxRecord, OutboxRecord, ReadonlyStatement,
   RecursiveModelRecord, ScheduleRecord, SessionRecord, StorageCapabilities, TaskRecord, WakeRecord,
   ProcessExecutionLeaseClaim, ProcessExecutionLeaseProof, ProcessExecutionLeaseRecord,
-  ProcessExecutionLeaseRenewal, ProcessExecutionLeaseScope,
+  ProcessExecutionLeaseRenewal, ProcessExecutionLeaseScope, ProcessExecutionWriteFence,
   DataManifestRecord, SessionErasureResult, SyncBranchMappingRecord, SyncConflictRecord, SyncIngestReceiptRecord,
   SyncOriginWatermarkRecord, SyncQuarantineRecord, WorkspaceReplicaStatusRecord,
 } from "./contract.ts";
@@ -179,7 +179,95 @@ export class LibSqlStorage implements AgentStorage {
   }
   close(): void { if (this.#closed) return; this.#closed = true; this.#client.close(); }
   onCommitted(listener: (events: readonly AgentEvent[]) => void): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
-  async appendEvents(rawEvents: readonly NewAgentEvent[]): Promise<AgentEvent[]> {
+    async #assertActiveWriteProof(tx: Transaction, proof: ProcessExecutionLeaseProof): Promise<Row> {
+    const parts = leaseScopeParts(proof.scope);
+    assertLeaseOwner(proof.ownerDeviceId, proof.ownerProcessId);
+    assertFenceToken(proof.fenceToken);
+    canonicalLeaseTime(proof.now);
+    const selected = await tx.execute({
+      sql: `SELECT * FROM process_execution_leases
+        WHERE scope_kind=? AND scope_id=? AND owner_device_id=? AND owner_process_id=?
+          AND fence_token=? AND released_at IS NULL
+          AND lease_expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
+      args: [parts.scopeKind, parts.scopeId, proof.ownerDeviceId, proof.ownerProcessId, proof.fenceToken],
+    });
+    const row = selected.rows[0];
+    if (!row) {
+      throw new ExecutionOwnershipConflictError("Execution write was rejected because its lease fence is stale", {
+        reason: "stale_fence_owner_or_expiry", scopeKind: parts.scopeKind,
+        scopeId: parts.scopeId, requestedOwnerDeviceId: proof.ownerDeviceId,
+        requestedOwnerProcessId: proof.ownerProcessId, fenceToken: proof.fenceToken,
+      });
+    }
+    return row;
+  }
+
+  async #assertEventWriteFence(
+    tx: Transaction,
+    events: readonly NewAgentEvent[],
+    fence: ProcessExecutionWriteFence,
+  ): Promise<void> {
+    if (fence.workspace.scope.kind !== "workspace") {
+      throw new ValidationError("Execution write workspace fence must use workspace scope");
+    }
+    const workspaceLease = await this.#assertActiveWriteProof(tx, fence.workspace);
+    const workspaceId = fence.workspace.scope.workspaceId;
+    if (String(workspaceLease.workspace_id) !== workspaceId) {
+      throw new ExecutionOwnershipConflictError("Execution workspace fence does not match its retained workspace", { reason: "workspace_mismatch" });
+    }
+    const roots = new Set<string>();
+    let rootCreationOnly = true;
+    for (const event of events) {
+      if (event.type === "SessionCreated") {
+        const payload = event.payload as EventPayloads["SessionCreated"];
+        if (payload.workspaceId !== workspaceId) {
+          throw new ExecutionOwnershipConflictError("Execution write targets another workspace", { reason: "workspace_mismatch", workspaceId: payload.workspaceId });
+        }
+        const rootSessionId = payload.parentSessionId ? payload.rootSessionId : event.sessionId;
+        if (!rootSessionId) throw new ValidationError("Child SessionCreated is missing rootSessionId");
+        roots.add(rootSessionId);
+        if (payload.parentSessionId) rootCreationOnly = false;
+        continue;
+      }
+      rootCreationOnly = false;
+      const session = await tx.execute({ sql: "SELECT workspace_id,session_id,root_session_id FROM sessions WHERE session_id=?", args: [event.sessionId] });
+      const row = session.rows[0];
+      if (!row) throw new NotFoundError("session", event.sessionId);
+      if (String(row.workspace_id) !== workspaceId) {
+        throw new ExecutionOwnershipConflictError("Execution write targets another workspace", { reason: "workspace_mismatch", workspaceId: String(row.workspace_id) });
+      }
+      roots.add(String(row.root_session_id ?? row.session_id));
+    }
+    if (roots.size !== 1) {
+      throw new ExecutionOwnershipConflictError("One fenced canonical append cannot cross root session trees", { reason: "cross_root_write", roots: [...roots].sort() });
+    }
+    const rootSessionId = [...roots][0]!;
+    if (rootCreationOnly && events.every(event => event.type === "SessionCreated" && event.sessionId === rootSessionId)) {
+      if (fence.root !== undefined) throw new ValidationError("A new root write must not present a root lease before the root exists");
+      return;
+    }
+    if (!fence.root || fence.root.scope.kind !== "root" || fence.root.scope.rootSessionId !== rootSessionId) {
+      throw new ExecutionOwnershipConflictError("Execution write requires the matching root-session lease", { reason: "root_fence_missing_or_mismatched", rootSessionId });
+    }
+    const rootLease = await this.#assertActiveWriteProof(tx, fence.root);
+    if (String(rootLease.workspace_id) !== workspaceId ||
+        rootLease.owner_device_id !== workspaceLease.owner_device_id ||
+        rootLease.owner_process_id !== workspaceLease.owner_process_id) {
+      throw new ExecutionOwnershipConflictError("Workspace and root execution fences must have one active owner", { reason: "nested_fence_owner_mismatch", rootSessionId });
+    }
+  }
+
+  async #assertOutboxWriteFence(tx: Transaction, effectId: string, fence: ProcessExecutionWriteFence): Promise<void> {
+    const selected = await tx.execute({ sql: "SELECT session_id FROM outbox WHERE effect_id=?", args: [effectId] });
+    const row = selected.rows[0];
+    if (!row) throw new NotFoundError("effect", effectId);
+    await this.#assertEventWriteFence(tx, [{
+      sessionId: String(row.session_id), branchId: "fence-only", type: "SessionStatusChanged",
+      producer: "supervisor", payload: { status: "idle" },
+    }], fence);
+  }
+
+async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecutionWriteFence): Promise<AgentEvent[]> {
     if (rawEvents.length === 0) return [];
     for (const event of rawEvents) validateNewEvent(event);
     // Local commands reject actual known credential values rather than
@@ -193,6 +281,7 @@ export class LibSqlStorage implements AgentStorage {
     return this.#writes.run(async () => {
       const tx = await this.#client.transaction("write"); const committed: AgentEvent[] = [];
       try {
+        if (fence) await this.#assertEventWriteFence(tx, rawEvents, fence);
         for (const candidate of rawEvents) committed.push(await this.#appendOne(tx, candidate));
         await tx.commit();
       } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
@@ -727,16 +816,18 @@ export class LibSqlStorage implements AgentStorage {
         ? await tx.execute({
           sql: `SELECT * FROM process_execution_leases
             WHERE workspace_id=? AND NOT(scope_kind=? AND scope_id=?)
+              AND NOT(owner_device_id=? AND owner_process_id=?)
               AND released_at IS NULL AND lease_expires_at>?
             ORDER BY scope_kind,scope_id LIMIT 1`,
-          args: [workspaceId, parts.scopeKind, parts.scopeId, now],
+          args: [workspaceId, parts.scopeKind, parts.scopeId, input.ownerDeviceId, input.ownerProcessId, now],
         })
         : await tx.execute({
           sql: `SELECT * FROM process_execution_leases
             WHERE workspace_id=? AND scope_kind='workspace'
+              AND NOT(owner_device_id=? AND owner_process_id=?)
               AND released_at IS NULL AND lease_expires_at>?
             LIMIT 1`,
-          args: [workspaceId, now],
+          args: [workspaceId, input.ownerDeviceId, input.ownerProcessId, now],
         });
       if (blocker.rows[0]) {
         this.#throwLeaseConflict("claim", parts, "overlapping_scope_owned", blocker.rows[0]);
@@ -932,7 +1023,7 @@ export class LibSqlStorage implements AgentStorage {
     }
   }
 
-  async claimOutbox(owner: string, limit = 1, leaseMs = 30_000): Promise<OutboxRecord[]> {
+  async claimOutbox(owner: string, limit = 1, leaseMs = 30_000, fence?: ProcessExecutionWriteFence): Promise<OutboxRecord[]> {
     return this.#writes.run(async () => {
       const tx = await this.#client.transaction("write");
       const claimed: OutboxRecord[] = [];
@@ -944,6 +1035,7 @@ export class LibSqlStorage implements AgentStorage {
           args: [limit],
         });
         for (const row of result.rows) {
+          if (fence) await this.#assertOutboxWriteFence(tx, String(row.effect_id), fence);
           const updated = await tx.execute({
             sql: "UPDATE outbox SET status='running',owner=?,lease_expires_at=?,updated_at=? WHERE effect_id=? AND status='pending'",
             args: [owner, leaseExpiresAt, now.toISOString(), String(row.effect_id)],
@@ -960,10 +1052,10 @@ export class LibSqlStorage implements AgentStorage {
       return claimed;
     });
   }
-  async claimEffect(effectId: string, owner: string, leaseMs = 30_000): Promise<OutboxRecord | null> {
-    return this.#writes.run(() => this.#claimEffect(effectId, owner, leaseMs));
+  async claimEffect(effectId: string, owner: string, leaseMs = 30_000, fence?: ProcessExecutionWriteFence): Promise<OutboxRecord | null> {
+    return this.#writes.run(() => this.#claimEffect(effectId, owner, leaseMs, fence));
   }
-  async #claimEffect(effectId: string, owner: string, leaseMs: number): Promise<OutboxRecord | null> {
+  async #claimEffect(effectId: string, owner: string, leaseMs: number, fence?: ProcessExecutionWriteFence): Promise<OutboxRecord | null> {
     for (let retry = 0; ; retry++) {
       let tx: Transaction | undefined;
       try {
@@ -976,6 +1068,7 @@ export class LibSqlStorage implements AgentStorage {
         });
         const row = result.rows[0];
         if (!row) { await tx.commit(); return null; }
+        if (fence) await this.#assertOutboxWriteFence(tx, effectId, fence);
         const updated = await tx.execute({
           sql: "UPDATE outbox SET status='running',owner=?,lease_expires_at=?,updated_at=? WHERE effect_id=? AND status='pending'",
           args: [owner, leaseExpiresAt, now.toISOString(), effectId],
@@ -995,8 +1088,17 @@ export class LibSqlStorage implements AgentStorage {
   }
   async getOutbox(effectId:string):Promise<OutboxRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM outbox WHERE effect_id=?",args:[effectId]});return r.rows[0]?rowToOutbox(r.rows[0]):null;}
   async listOutbox(statuses?:readonly OutboxRecord["status"][]):Promise<OutboxRecord[]>{let sql="SELECT * FROM outbox",args:InValue[]=[];if(statuses?.length){sql+=` WHERE status IN (${statuses.map(()=>"?").join(",")})`;args=[...statuses];}const r=await this.#client.execute({sql:sql+" ORDER BY created_at",args});return r.rows.map(rowToOutbox);}
-  async resetOutbox(effectId: string): Promise<void> {
+  async resetOutbox(effectId: string, fence?: ProcessExecutionWriteFence): Promise<void> {
     await this.#writes.run(async () => {
+      if (fence) {
+        const tx = await this.#client.transaction("write");
+        try {
+          await this.#assertOutboxWriteFence(tx, effectId, fence);
+          await tx.execute({ sql: "UPDATE outbox SET status='pending',owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=? AND status='running'", args: [new Date().toISOString(), effectId] });
+          await tx.commit();
+        } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
+        return;
+      }
       await this.#client.execute({
         sql: "UPDATE outbox SET status='pending',owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=? AND status='running'",
         args: [new Date().toISOString(), effectId],
