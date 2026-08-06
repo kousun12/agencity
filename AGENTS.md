@@ -108,7 +108,7 @@ Agencity does not claim or require:
 - A **working value** is durable typed JSON. Larger or byte-oriented content belongs in an immutable **artifact** identified by content digest.
 - **Memory** records scoped claims, observations, preferences, and decisions. The **continual harness** adds versioned prompt notes, executable skills, and reusable subagent specifications with evidence and lifecycle state.
 - A **projection** is deterministic state derived from canonical events. A **cursor** identifies a committed point for snapshots, catch-up, historical inspection, and branch creation.
-- A **run** is a canonical, event-derived period in which the supervisor advances a task toward a typed terminal outcome. Version-1 run/action events and projection state are present; the autonomous advancement service is still being connected to cells, decisions, goals, and recovery.
+- A **run** is a canonical, event-derived period in which the supervisor advances a task through strict versioned model actions toward a typed terminal outcome. Deterministic identities, TypeScript cells, decisions, goals, recovery, and exact observation delivery are integrated.
 
 ## Intended autonomous lifecycle
 
@@ -134,7 +134,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 - local LibSQL canonical event storage, immutable event guards, deterministic projection/rebuild, branches, snapshots, and cursor-based subscriptions;
 - disposable Bun TypeScript cells with final-expression or explicit-return observations, bounded safe inspection/logs, durable working values, retained cell history, read-only analytical SQL, and content-addressed artifacts;
 - outbox-backed model, shell, file, and skill effects with crash recovery and explicit unknown outcomes;
-- durable root and child sessions, tasks, mailboxes, cancellation trees, recursive-model runtime handles, documents/input sets, goals, gates, and heartbeats;
+- durable root and child sessions, nuclear-family mailboxes and retained follow-up, cancellation trees, recursive-model runtime handles, documents/input sets, goals, cached attributable gates, heartbeats, schedules, and wake queues;
 - scoped memory with FTS5 candidate retrieval, versioned prompt notes, skills, subagent specifications, and governed refinement/evaluation/rollback;
 - profile and device identity plus optional offline-first Turso envelope synchronization, divergent-branch preservation, conflict/quarantine records, and single-device session execution ownership;
 - loopback HTTP/JSON and SSE surfaces with cursorless provider progress, a TypeScript API, a no-ID product CLI plus compatible diagnostic commands, and a basic in-process TUI;
@@ -144,13 +144,13 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 
 - `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. The package remains private and has no claimed registry or standalone release channel.
 - Echo is an explicitly labeled demo fixture; ordinary non-interactive work without a usable provider fails rather than silently falling back.
-- The ordinary task route still performs one text completion. A strict version-1 action/run event contract now exists, but the autonomous model-to-TypeScript continuation service and recovery loop are not yet complete.
+- The ordinary task route drives the strict `agencity.agent-action` version-1 autonomous loop. Only validated TypeScript actions execute generated work; final, clarification, permission, blocked, and failed are typed run control. Raw action JSON remains internal attributable history.
 - Console cells support notebook observation, bounded `inspect`, artifact spill, `state.list`, and retained `cells.list/get`; lexical bindings remain deliberately non-durable.
-- The console exposes first-class durable `rlm.start/startMany/get/result/cancel` handles over ordinary child tasks/sessions. General retained-family messaging and follow-up are still not exposed to generated TypeScript.
+- The console exposes first-class durable `rlm.start/startMany/get/result/cancel` handles plus `sdk.agents` roster, spawn, bounded direct messaging, receipts, acknowledgement, cancellation, and same-session retained follow-up.
 - The TUI still directly owns a `Supervisor` and advances one model turn from text input. It is not yet the protocol-backed background-service client described above.
 - Streaming-capable providers emit bounded cursorless progress before an atomic committed response; Echo and explicitly non-streaming providers truthfully report committed-only behavior. Real-provider streaming remains credential-gated.
 - Unknown effects are retained and visible through state/history, but there is no complete user-facing reconciliation workflow.
-- Existing end-to-end coverage now proves clean linked invocation, empty-state/no-ID product entry, selection/resume, notebook cells, streaming recovery, and durable recursive calls. It does not yet prove a detached autonomous coding run through cells, goals, gates, schedules, and retained family messaging.
+- End-to-end coverage proves clean linked invocation, empty-state/no-ID product entry, selection/resume, autonomous notebook coding cells, streaming and action-boundary recovery, durable recursive/family calls, cached completion-gate repair, and schedule/wake recovery. It does not yet prove managed detached execution after the client process exits; that remains FU-015/FU-009.
 
 ### Deliberately unavailable or deferred
 
