@@ -82,7 +82,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
 | FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Done | FU-004 |
 | FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
-| FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | In progress | FU-004 |
+| FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Done | FU-004 |
 | FU-015 | Keep detached sessions executing in a background service | In progress | FU-001, FU-004 |
 | FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | In progress | FU-003, FU-004 |
 | FU-017 | Add skill creation, installation, and management as a product surface | In progress | FU-004 |
@@ -753,7 +753,7 @@ The ergonomic `rlm` API is backed by the ordinary recursive-agent and outbox ser
 
 ## FU-014 — Drive goals, completion gates, heartbeats, and schedules through product runs
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -795,6 +795,14 @@ A normal run with a goal continues until its required completion gates pass agai
 
 - Cross-device schedule execution or distributed schedule ownership.
 - Calendar-style scheduling interfaces beyond time and interval expressions.
+
+
+### Completion evidence
+
+- Commits: `bbeddb1` and `036b533`.
+- Implementation: normal goal-mode task admission; provisional final actions; material-workspace-version gate evaluation cache/history; failed/stale bounded exact-once repair observations; unknown terminal outcomes; read-only model goal inspection; agent-owned heartbeat management; durable once/interval schedules, coalesced wake queue, protocol/client/CLI/TUI surfaces, and migration 010.
+- Verification: full suite after implementation passed 519 tests with 2 external skips; focused FU-014 suite 9/9 after recovery hardening. Independent review found a startup crash loop between blocked gate finalization and run goal-check recording; blocked completion reconciliation is now a read-only reuse, and two crash-window tests prove repair and unknown recovery. Re-review passed.
+- Remaining limitation: detached trigger advancement depends on the FU-015 managed service; embedded recovery remains fully supported.
 
 ---
 
