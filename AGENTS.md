@@ -9,6 +9,8 @@ This file is the current source of truth for Agencity's purpose, product intenti
 
 Update this file whenever a change alters the product direction, supported user journey, durable domain model, security boundary, major capability, or known limitation.
 
+Authoritative implementation plans are the [parent TypeScript/Turso rewrite PRD](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md) and the [FU-001–FU-019 follow-up backlog](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md), in that order after this guide.
+
 ## What Agencity is
 
 Agencity is a terminal-first autonomous agent runtime informed by Prime Agent. It addresses a limitation of conventional tool-calling agents: a prompt/response loop becomes strained when work outlives one context window, terminal, process, or live language heap.
@@ -106,7 +108,7 @@ Agencity does not claim or require:
 - A **working value** is durable typed JSON. Larger or byte-oriented content belongs in an immutable **artifact** identified by content digest.
 - **Memory** records scoped claims, observations, preferences, and decisions. The **continual harness** adds versioned prompt notes, executable skills, and reusable subagent specifications with evidence and lifecycle state.
 - A **projection** is deterministic state derived from canonical events. A **cursor** identifies a committed point for snapshots, catch-up, historical inspection, and branch creation.
-- A **run** is a product term for a period in which the supervisor advances a session toward a goal. The current domain represents that work through session status, goals, calls, cells, tasks, effects, and budgets; there is no separate canonical `Run` entity today.
+- A **run** is a canonical, event-derived period in which the supervisor advances a task toward a typed terminal outcome. Version-1 run/action events and projection state are present; the autonomous advancement service is still being connected to cells, decisions, goals, and recovery.
 
 ## Intended autonomous lifecycle
 
@@ -130,26 +132,25 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 ### Implemented runtime foundations
 
 - local LibSQL canonical event storage, immutable event guards, deterministic projection/rebuild, branches, snapshots, and cursor-based subscriptions;
-- disposable Bun TypeScript cells with explicit returned JSON results, bounded logs, durable working values, read-only analytical SQL, and content-addressed artifacts;
+- disposable Bun TypeScript cells with final-expression or explicit-return observations, bounded safe inspection/logs, durable working values, retained cell history, read-only analytical SQL, and content-addressed artifacts;
 - outbox-backed model, shell, file, and skill effects with crash recovery and explicit unknown outcomes;
 - durable root and child sessions, tasks, mailboxes, cancellation trees, recursive-model runtime handles, documents/input sets, goals, gates, and heartbeats;
 - scoped memory with FTS5 candidate retrieval, versioned prompt notes, skills, subagent specifications, and governed refinement/evaluation/rollback;
 - profile and device identity plus optional offline-first Turso envelope synchronization, divergent-branch preservation, conflict/quarantine records, and single-device session execution ownership;
-- loopback HTTP/JSON and SSE surfaces, a TypeScript API, a low-level diagnostic CLI, and a basic in-process TUI;
+- loopback HTTP/JSON and SSE surfaces with cursorless provider progress, a TypeScript API, a no-ID product CLI plus compatible diagnostic commands, and a basic in-process TUI;
 - local and HTTP-backed placement contracts for relational state, artifact storage, candidate retrieval, and execution, with explicit capability reporting and conformance coverage.
 
 ### Incomplete product surfaces
 
-- The current CLI is a developer lifecycle interface. A user runs `create`, copies `sessionId` and `branchId`, then invokes `chat`, `cell`, or `tui`; running with no command shows help.
-- CLI-created sessions default to the deterministic `echo/echo-1` fixture. OpenAI-compatible registration is environment-driven, and there is no normal provider/model onboarding or saved model selector.
-- The ordinary model loop performs one text completion and records one assistant message. It does not parse a typed action protocol or autonomously drive cells, tools, recursive work, and completion.
-- Console cells require an explicit `return`; final-expression observation, bounded `inspect`, and model-facing cell history are absent. Durable values can be enumerated through `state.restored`, but there is no dedicated paginated discovery API.
-- Runtime task, mailbox, and recursive-model services exist, but the console SDK does not expose a general retained-family messaging API or a first-class durable `rlm` API.
-- The TUI directly owns a `Supervisor`, requires explicit IDs, and advances one model turn from text input. It is not yet the protocol-backed session selector and autonomous-run client described above.
-- Model providers currently commit one output chunk after completion rather than genuine token streaming.
+- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. The package remains private and has no claimed registry or standalone release channel.
+- Echo is an explicitly labeled demo fixture; ordinary non-interactive work without a usable provider fails rather than silently falling back.
+- The ordinary task route still performs one text completion. A strict version-1 action/run event contract now exists, but the autonomous model-to-TypeScript continuation service and recovery loop are not yet complete.
+- Console cells support notebook observation, bounded `inspect`, artifact spill, `state.list`, and retained `cells.list/get`; lexical bindings remain deliberately non-durable.
+- The console exposes first-class durable `rlm.start/startMany/get/result/cancel` handles over ordinary child tasks/sessions. General retained-family messaging and follow-up are still not exposed to generated TypeScript.
+- The TUI still directly owns a `Supervisor` and advances one model turn from text input. It is not yet the protocol-backed background-service client described above.
+- Streaming-capable providers emit bounded cursorless progress before an atomic committed response; Echo and explicitly non-streaming providers truthfully report committed-only behavior. Real-provider streaming remains credential-gated.
 - Unknown effects are retained and visible through state/history, but there is no complete user-facing reconciliation workflow.
-- The package declares binary names but is private, has no `bun run dev` script, and has no documented and tested installation workflow that puts a supported `agencity` command on `PATH`.
-- Existing end-to-end coverage proves many runtime recovery properties, but it does not prove the target no-ID install-to-task-to-resume product journey or an autonomous model-to-TypeScript coding loop.
+- Existing end-to-end coverage now proves clean linked invocation, empty-state/no-ID product entry, selection/resume, notebook cells, streaming recovery, and durable recursive calls. It does not yet prove a detached autonomous coding run through cells, goals, gates, schedules, and retained family messaging.
 
 ### Deliberately unavailable or deferred
 
@@ -202,13 +203,14 @@ bun run test:integration
 bun run test:e2e
 ```
 
-Current CLI development entrypoint:
+Source-checkout product entrypoint:
 
 ```sh
-bun run src/cli.ts --help
+bun run dev
+bun run dev -- "inspect this repository"
 ```
 
-There is currently no `bun run dev` script or supported installed-command workflow. The intended product command is `agencity`, but do not document installation or direct task entry as shipped until a clean black-box installation test proves it.
+A supported source/link workflow is documented in [`docs/install.md`](./docs/install.md): `bun link` exposes the executable `agencity` outside the checkout, and black-box tests verify runtime asset resolution from another working directory. The package is private; do not claim registry or standalone installation until such a channel is actually published and tested.
 
 ## External and gated verification
 
@@ -382,9 +384,9 @@ Artifacts are immutable and content-addressed. The database stores references an
 
 ## CLI and TUI direction
 
-The current raw CLI is an implementation surface, not the final desired onboarding experience. Product interface work must preserve this direction:
+The no-ID product entrypoint and compatible raw diagnostic CLI are both implemented. Remaining product interface work must preserve this direction:
 
-- `agencity` should eventually create or resume and open the product directly;
+- `agencity` creates or resumes and opens the product directly;
 - users should not copy session or branch IDs for normal operation;
 - echo must remain an explicitly labeled demo/test provider;
 - provider setup must not require dropping to HTTP or TypeScript APIs;

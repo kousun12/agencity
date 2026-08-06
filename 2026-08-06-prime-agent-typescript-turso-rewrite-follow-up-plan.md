@@ -44,7 +44,8 @@ The follow-up is complete only when:
 - the ordinary user path matches the terminal-first TypeScript Prime Agent intention of the parent PRD;
 - representative end-to-end use does not require knowledge of internal database identifiers or direct SDK calls;
 - an agent can autonomously perform durable programmatic work rather than only return chat text;
-- recovery, cancellation, permissions, budgets, and unknown outcomes remain visible through the product surface;
+- detaching or closing a client does not stop committed autonomous work, and reattachment reconstructs it;
+- recovery, cancellation, permissions, budgets, goals, completion gates, and unknown outcomes remain visible through the product surface;
 - the documentation describes both how to use the product and why its architectural constraints exist;
 - the full verification suite includes product-level acceptance tests, not only component and storage tests.
 
@@ -68,25 +69,31 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 
 | ID | Ticket | Status | Depends on |
 |---|---|---|---|
-| FU-001 | Make `agencity` the default product entrypoint | Proposed | — |
-| FU-002 | Add workspace discovery and human session resume/selection | Proposed | FU-001 |
-| FU-003 | Add explicit provider and model onboarding | Proposed | FU-001, FU-002 |
-| FU-004 | Implement the autonomous typed TypeScript agent-run loop | Proposed | FU-003, FU-011, FU-013 |
-| FU-005 | Turn the TUI into the complete protocol-backed product client | Proposed | FU-001, FU-002, FU-004, FU-012 |
-| FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | Proposed | FU-004, FU-005 |
-| FU-007 | Provide a real installation and executable workflow | Proposed | FU-001 |
+| FU-001 | Make `agencity` the default product entrypoint | Done | — |
+| FU-002 | Add workspace discovery and human session resume/selection | Done | FU-001 |
+| FU-003 | Add explicit provider and model onboarding | Done | FU-001, FU-002 |
+| FU-004 | Implement the autonomous typed TypeScript agent-run loop | In progress | FU-003, FU-011, FU-013 |
+| FU-005 | Turn the TUI into the complete protocol-backed product client | Proposed | FU-001, FU-002, FU-004, FU-012, FU-015 |
+| FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | Proposed | FU-004, FU-005, FU-015 |
+| FU-007 | Provide a real installation and executable workflow | Done | FU-001 |
 | FU-008 | Reorganize low-level CLI operations as advanced surfaces without breaking compatibility | Proposed | FU-001, FU-005 |
-| FU-009 | Add product-level end-to-end acceptance coverage | Proposed | FU-001–FU-008, FU-011–FU-013 |
+| FU-009 | Add product-level end-to-end acceptance coverage | Proposed | FU-001–FU-008, FU-011–FU-019 |
 | FU-010 | Add repository-level purpose and implementation guidance | Done | — |
-| FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Proposed | — |
+| FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
 | FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Proposed | FU-004 |
-| FU-013 | Add first-class recursive model calls with durable handles | Proposed | FU-003 |
+| FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
+| FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Proposed | FU-004 |
+| FU-015 | Keep detached sessions executing in a background service | Proposed | FU-001, FU-004 |
+| FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | Proposed | FU-003, FU-004 |
+| FU-017 | Add skill creation, installation, and management as a product surface | Proposed | FU-004 |
+| FU-018 | Stream provider output incrementally to attached clients | Done | FU-003 |
+| FU-019 | Add automatic and agent-directed context compaction | Proposed | FU-003, FU-004 |
 
 ---
 
 ## FU-001 — Make `agencity` the default product entrypoint
 
-**Status:** Proposed
+**Status:** Done
 
 ### Gap
 
@@ -149,11 +156,19 @@ agencity config                 Manage non-secret preferences
 
 This ticket does not define automatic resume selection, provider setup, or autonomous action semantics in detail; those are separate tickets below.
 
+
+### Completion evidence
+
+- Commit: `42982e4`.
+- Implementation: default `agencity [TASK]`, `new`, `resume`, `sessions`, `run`, `doctor`, and `config` routes in `src/cli.ts`, `src/cli-args.ts`, and `src/product/`; durable display-name events and startup header.
+- Verification: product black-box suite in `test/integration/product-cli.test.ts`; combined typecheck and architecture checks passed before commit.
+- Remaining limitation: tasks use the legacy one-turn model path until FU-004 is complete; the TUI remains supervisor-owned until FU-005.
+
 ---
 
 ## FU-002 — Add workspace discovery and human session resume/selection
 
-**Status:** Proposed
+**Status:** Done
 
 ### Gap
 
@@ -193,11 +208,19 @@ Automatic resume is allowed only when the candidate:
 - Explicit selection updates the durable recent preference.
 - Missing provider configuration never makes retained work disappear from the selector.
 
+
+### Completion evidence
+
+- Commit: `42982e4`.
+- Implementation: canonical realpath/project discovery plus owner-only durable `.agencity/workspace-id`, move/alias/concurrent-open stability, durable recent preference, human session/branch names, deterministic ambiguity refusal, and retained unavailable-provider visibility.
+- Verification: move, symlink, 32-way concurrent creation, legacy migration, invalid marker, ambiguity, selection, and resume tests in `test/integration/product-cli.test.ts`; name replay tests in `test/unit/product-names.test.ts`.
+- Remaining limitation: Cloud session rows appear after canonical envelopes synchronize locally because the current Cloud catalog is workspace-level.
+
 ---
 
 ## FU-003 — Add explicit provider and model onboarding
 
-**Status:** Proposed
+**Status:** Done
 
 ### Gap
 
@@ -227,11 +250,19 @@ Interactive startup discovers usable providers, makes model choice explicit, and
 - Resuming an unavailable model produces a visible blocked/configuration state rather than a silent replacement.
 - Persistence and diagnostic tests prove that raw credentials never enter durable state or output.
 
+
+### Completion evidence
+
+- Commit: `42982e4`.
+- Implementation: secret-free provider descriptors, explicit `--model`/`--demo`, OpenAI-compatible discovery, saved non-secret model preference, blocked unavailable resume, doctor remediation, and credential-reference validation at CLI and profile-store boundaries.
+- Verification: no-silent-Echo, unavailable-resume, doctor, expanded-secret rejection, output/database byte scans, and profile adapter tests in `test/integration/product-cli.test.ts` and `test/slice4/profile-adapter.test.ts`.
+- Remaining limitation: real-provider behavior remains credential-gated; Echo is explicitly a demo fixture.
+
 ---
 
 ## FU-004 — Implement the autonomous typed TypeScript agent-run loop
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
@@ -261,11 +292,11 @@ For every run:
    - explicit blocked or failed outcome.
 6. Execute cells and effects through the existing disposable console and outbox.
 7. Commit the action, logs, results, and run state before the next dependent model call.
-8. Continue until terminal outcome, cancellation, user decision, budget exhaustion, or visible unknown effect.
+8. Continue until a terminal outcome, cancellation, user decision, budget exhaustion, or visible unknown effect; when the run carries a goal, completion is accepted only after its required completion gates pass (FU-014).
 
 Unstructured assistant text must not be heuristically executed as code. Providers may use native structured output or a tested portable encoding, but all actions share one domain contract.
 
-After a cell commits, the next model call receives its bounded result, logs, exported working-value references, effect outcomes, and exact event provenance. Values that remain in the disposable Bun heap are not observable state. FU-011 defines the cell-level observation contract, FU-012 adds model-facing family messaging, and FU-013 provides the programmatic recursive model API.
+After a cell commits, the next model call receives its bounded result, logs, exported working-value references, effect outcomes, and exact event provenance. Values that remain in the disposable Bun heap are not observable state. FU-011 defines the cell-level observation contract, FU-012 adds model-facing family messaging, FU-013 provides the programmatic recursive model API, and FU-014 wires durable goals, completion gates, heartbeats, and schedules into run continuation.
 
 The agent-facing TypeScript SDK should expose the parent PRD's intended general mechanisms: read-only SQL, durable state, artifacts, shell/file effects, model calls, subagent/task handles, mailboxes, skills, and refinement proposals, all within existing permission and scope rules.
 
@@ -280,6 +311,7 @@ The agent-facing TypeScript SDK should expose the parent PRD's intended general 
 - Budgets stop further admission at their exact boundary.
 - Permission and clarification requests pause durably and continue after a user response.
 - Unknown non-idempotent effects block blind continuation.
+- A run whose goal defines required completion gates does not report success while a required gate fails or its result is stale (FU-014 defines the gate contract).
 - Model action, context, cell, tool, subagent, and final response provenance is queryable from retained records.
 
 ---
@@ -301,12 +333,12 @@ The TUI becomes the default terminal product and projects the same public snapsh
 - Consume the public client/protocol contract for snapshots, commands, and resumable committed events.
 - Permit a contract-compatible in-process transport only when it behaves identically to loopback transport.
 - Add session selection and a command palette.
-- Show committed streaming assistant output where provider adapters support it.
+- Show incremental streaming assistant output where provider adapters support it (FU-018).
 - Display expandable TypeScript cells, logs, SQL results, and tool outcomes.
 - Show current run/task state, model, budgets, recursive tree, mailbox activity, goals, memory, harness/refinement state, sync, and conflicts.
 - Surface failed, blocked, cancelled, budget-exceeded, and unknown outcomes distinctly.
 - Keep trusted-local mode visible.
-- Support `/new`, `/sessions`, `/info`, `/model`, `/run`, `/stop`, `/history`, `/cell`, `/tree`, `/budget`, `/memory`, `/refine`, `/branch`, `/resume`, `/compact`, `/sync`, `/conflicts`, and `/quit`.
+- Support `/new`, `/sessions`, `/agents`, `/info`, `/model`, `/run`, `/stop`, `/goal`, `/heartbeat`, `/schedule`, `/history`, `/cell`, `/tree`, `/budget`, `/memory`, `/skills`, `/refine`, `/branch`, `/resume`, `/compact`, `/sync`, `/conflicts`, and `/quit`.
 
 ### Acceptance criteria
 
@@ -336,7 +368,7 @@ Users can stop, detach, resume, and reconcile work while the interface accuratel
 - First `Ctrl-C` requests durable cancellation of the active run and shows reconciliation.
 - A subsequent interrupt may detach after warning that durable work can outlive the client.
 - `/quit` detaches cleanly without deleting or implicitly cancelling the session.
-- Startup summarizes recovered work, pending effects, active children, and unknown outcomes.
+- Startup summarizes recovered work, pending effects, active children, failed or stale completion gates, and unknown outcomes.
 - Add an inspect/reconcile flow for unknown effects without automatic retry of non-idempotent work.
 - Show cancellation cascades and child terminal delivery.
 - Preserve original cancellation reasons across recovery.
@@ -353,7 +385,7 @@ Users can stop, detach, resume, and reconcile work while the interface accuratel
 
 ## FU-007 — Provide a real installation and executable workflow
 
-**Status:** Proposed
+**Status:** Done
 
 ### Gap
 
@@ -379,6 +411,14 @@ Development and installed workflows both expose the same memorable product entry
 - The executable finds its runtime assets outside the source working directory.
 - `agencity --version` reports application and relevant Bun compatibility information.
 - Installation documentation clearly distinguishes source, linked, and published/standalone use.
+
+
+### Completion evidence
+
+- Commit: `42982e4`.
+- Implementation: `bun run dev`, version/runtime checks, executable `src/cli.ts` mode `100755`, and documented source/link installation in `docs/install.md`.
+- Verification: isolated `bun link` execution from outside the checkout resolves console-worker assets without test-side chmod.
+- Remaining limitation: there is no claimed registry or standalone release channel.
 
 ---
 
@@ -439,6 +479,8 @@ Add black-box acceptance tests that invoke the executable rather than only super
 - explicit provider selection;
 - task submission;
 - autonomous cell/tool execution;
+- goal and completion-gate outcomes;
+- detached background continuation and reattachment;
 - interruption and resume;
 - human session selection;
 - branching;
@@ -504,7 +546,7 @@ The root guide should include:
 
 ## FU-011 — Give TypeScript cells notebook-style observation and inspection semantics
 
-**Status:** Proposed
+**Status:** Done
 
 ### Gap
 
@@ -557,6 +599,14 @@ TypeScript cells provide explicit, bounded notebook semantics. A model can assig
 - Persisting arbitrary lexical bindings, closures, sockets, processes, iterators, or module instances.
 - Replaying prior cells to reconstruct a JavaScript heap.
 - Treating a preview as the authoritative value of an artifact.
+
+
+### Completion evidence
+
+- Commit: `42982e4`.
+- Implementation: TypeScript-AST final-expression capture, safe bounded `inspect`, typed unsupported observations, CAS spill/deduplication, `state.list`, and retained `cells.list/get` provenance.
+- Verification: ten console integration tests cover explicit/final returns, promises, errors, logs, redaction, cycles/getters, oversized artifacts, state/cell history, and restart-after-every-cell; independent review passed.
+- Remaining limitation: lexical JavaScript bindings remain deliberately disposable and TypeScript parsing adds per-worker startup cost.
 
 ---
 
@@ -613,7 +663,7 @@ The TypeScript SDK gives every session a durable family roster and plain-text me
 
 ## FU-013 — Add first-class recursive model calls with durable handles
 
-**Status:** Proposed
+**Status:** Done
 
 ### Gap
 
@@ -675,6 +725,290 @@ The ergonomic `rlm` API is backed by the ordinary recursive-agent and outbox ser
 - Long-lived family steering and follow-up messaging, which belongs to FU-012.
 - PostgreSQL coordination or cross-device task stealing.
 
+
+### Completion evidence
+
+- Commit: `42982e4`.
+- Implementation: `rlm.start/startMany/get/result/cancel` over existing durable child tasks/sessions, bounded typed input references, policy-checked models, durable terminal outcomes, result artifacts, and migration `007_recursive_model_input_results.sql` for the rebuildable projection.
+- Verification: `test/integration/recursive-console.test.ts` plus the Slice 2 recursive/recovery suites; independent adversarial review reported 30/30 probes passing.
+- Remaining limitation: result waiting polls durable projection state; reference/result limits are fixed bounded runtime policy.
+
+---
+
+## FU-014 — Drive goals, completion gates, heartbeats, and schedules through product runs
+
+**Status:** Proposed
+
+### Gap
+
+The runtime already implements durable goals, required completion gates whose results are pinned to a workspace cursor and marked stale when the workspace changes, gate recovery after crashes, and heartbeats with coalesced missed ticks that can continue a goal. The product does not use them. The ordinary model loop stops only on budget exhaustion or a stopped/failed session status and never consults goal or gate state, so nothing prevents a run from ending because the model claimed completion. The raw TUI lists goals and heartbeats and accepts `/complete-goal <id>` by internal ID, but an ordinary task never creates a goal, no gate runs during a normal run, and there is no one-time or recurring schedule surface.
+
+The parent PRD's autonomous-operation section requires persistent goals, completion gates, timeouts, and scheduled heartbeats. The Prime Agent reference implementation exposes `/goal`, a user-owned heartbeat, agent-created heartbeats, general one-time and cron schedules, and bounded autonomous continuation with user-defined quality gates that are not rerun while the workspace is unchanged.
+
+### Outcome
+
+A normal run with a goal continues until its required completion gates pass against attributable workspace state or a visible bound is reached. Users manage goals, heartbeats, and schedules through product commands without internal IDs. The model manages its own heartbeats and inspects its goal state through the console SDK.
+
+### Scope
+
+- Create or attach a durable goal, its gates, and its limits when a task requests autonomous completion.
+- Make FU-004 run continuation consult goal state: completion is accepted only after required gates pass, and a failed gate returns its bounded output to the model for another attempt.
+- Do not re-execute an identical gate while the pinned workspace state is unchanged; present the stale or blocked state instead.
+- Expose goal lifecycle operations (create, status, pause, resume, clear) through the product surface with human-readable presentation.
+- Expose user heartbeats and agent-created heartbeats: creation, interval, delivery mode, pause, resume, and clear.
+- Add one-time and recurring schedules that queue a durable prompt for a session. Due ticks are claimed before delivery, missed ticks are coalesced, and a crash never replays a prompt whose delivery is uncertain.
+- Add `goals` and `heartbeats` operations to the console SDK so the model can manage its own recurring wake-ups within existing scope and budget rules.
+- Present goal, gate, heartbeat, and schedule state distinctly in FU-005 surfaces, including failed, stale, blocked, and budget-limited outcomes.
+
+### Acceptance criteria
+
+- A run with a configured required gate does not report success while the gate fails, and the failed gate's bounded output appears in the next model context.
+- An unchanged workspace does not re-execute an identical completion gate; the blocked state names the stale reason.
+- A heartbeat wakes an idle session into exactly one attributable follow-up turn; restarting between the tick and the turn duplicates neither.
+- A one-time schedule fires once, survives supervisor restart before firing, and never fires twice after recovery.
+- Goal completion is recorded only through gate-checked completion events, never from assistant text alone.
+- Goal, gate, heartbeat, and schedule records remain queryable with event provenance.
+
+### Dependencies
+
+- FU-004 owns the typed run loop this ticket extends.
+- FU-015 provides heartbeat and schedule turn delivery while no client is attached.
+- FU-005 presents these records in the TUI.
+
+### Exclusions
+
+- Cross-device schedule execution or distributed schedule ownership.
+- Calendar-style scheduling interfaces beyond time and interval expressions.
+
+---
+
+## FU-015 — Keep detached sessions executing in a background service
+
+**Status:** Proposed
+
+### Gap
+
+FU-005 and FU-006 assume durable work can outlive a terminal client, but no component provides that behavior. The current TUI constructs an in-process supervisor, so exiting the client stops model turns, cell execution, goal continuation, and heartbeat delivery. Committed state remains resumable, but nothing continues it. The `serve` command starts a loopback HTTP/SSE server that must be managed manually and has no lifecycle, discovery, or health surface.
+
+The Prime Agent reference implementation runs a detached supervisor with one resident worker per root session tree. Closing the terminal detaches the client without stopping work; `list`, `attach`, `rename`, `stop`, `status`, `doctor`, and `shutdown` manage the background services; per-session leases prevent concurrent owners; and crash recovery restores workers without replaying uncertain effects.
+
+### Outcome
+
+Runs, goals, heartbeats, schedules, and child sessions continue while no client is attached. The product entrypoint discovers and reattaches to background work, and explicit commands inspect, stop, and shut down the background service. Client exit and execution stop become visibly different operations.
+
+### Scope
+
+- Run session execution in a local background service that owns supervision and the loopback protocol server; clients attach through the same public snapshot/event contract FU-005 consumes.
+- Start the service on demand from the product entrypoint without requiring a manually managed `serve` terminal.
+- Add product lifecycle commands covering agent listing, attach, stop, service status, and shutdown, plus a user-initiated `send` that delivers a durable message to a named session through the existing mailbox model.
+- Enforce one execution owner per session: extend the existing device-level ownership with process-level leases so a second service or client cannot advance the same branch concurrently.
+- Recover after a service crash from durable state only, preserving no-duplicate-effect guarantees; work whose outcome was lost in flight becomes `unknown` rather than being replayed.
+- Protect service state, sockets, and tokens with owner-only permissions, and keep the trusted-local boundary explicit: process separation is lifecycle isolation, not a sandbox.
+- Keep single-process embedded operation available for tests and diagnostics with identical contract behavior.
+
+### Acceptance criteria
+
+- Starting a task and quitting the client leaves the run continuing to a gate-checked terminal outcome; reattaching shows the completed work from committed events.
+- Reattachment resumes from the client's last cursor without missing or duplicating committed activity.
+- Killing the background service at durable boundaries loses no committed state, and restart reconciles in-flight effects to explicit outcomes.
+- Two concurrent clients cannot both advance the same branch; the second observes, steers, or receives a typed ownership error.
+- Service status distinguishes running, idle, detached, and stopped work; shutdown stops services without deleting or corrupting sessions.
+- The client never reports process exit as proof that external work stopped.
+
+### Dependencies
+
+- FU-001 routes the product entrypoint through this service.
+- FU-004 provides the autonomous run being continued.
+- FU-005 and FU-006 consume attach/detach semantics.
+
+### Exclusions
+
+- Multi-device or remote execution-ownership failover.
+- Coordinated in-place upgrade of running services.
+- Authentication for non-loopback clients.
+
+---
+
+## FU-016 — Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers
+
+**Status:** Proposed
+
+### Gap
+
+The continual-harness services govern proposal validation, candidate exposure, evaluation, promotion, and rollback, but every proposal must arrive fully formed: the current TUI `/refine` accepts a raw JSON proposal document, and the harness service requires the caller to supply the trigger text and typed edits. Nothing reads a trajectory and produces a proposal. The parent PRD's refinement lifecycle begins with a trigger that identifies repeated failure, reusable success, user correction, stale memory, or unproductive delegation, followed by a refiner that reads the source trajectory and current harness versions.
+
+The Prime Agent reference implementation exposes `/refine [instructions]`, which reviews the current trajectory and applies small, evidence-backed updates to supplemental prompts, memories, skill descriptions, and subagent specifications with recorded history and rollback.
+
+### Outcome
+
+A user runs `/refine`, optionally with instructions, and a refiner model call reviews the retained trajectory, cites durable evidence, and emits typed proposals through the existing governance pipeline. Detected triggers — repeated effect failure, repeatedly failing completion gates, explicit user corrections — can invoke the refiner automatically within existing scope and authority rules.
+
+### Scope
+
+- Run the refiner as an ordinary durable model call or recursive session with attributable context, never as an untracked side channel.
+- Give the refiner bounded access to the trajectory, current harness versions, memory, and evaluation history through the normal query surfaces.
+- Emit proposals as typed edits validated by the existing harness service; malformed or over-broad output is rejected, not partially applied.
+- Detect triggers from durable records such as effect outcomes, gate results, and user corrections, not from heuristic parsing of assistant prose.
+- Preserve existing promotion rules: session-local activation may be automatic, workspace changes require objective evaluators and repeated evidence, and user or global scope requires explicit approval.
+- Record refiner provenance: the trigger, source events, model call, and produced proposals.
+- Make `/refine` a product command backed by this refiner; keep the raw JSON proposal path as an advanced diagnostic.
+
+### Acceptance criteria
+
+- `/refine` on a session with a repeated tool failure produces a validated proposal whose evidence IDs reference the actual failure events.
+- The refiner cannot propose outside its authority scope; an over-broad proposal is rejected with a typed error.
+- An automatic trigger fires only after its configured repeated durable evidence exists and records why it fired.
+- Applying and rolling back a refiner-produced change restores the exact prior harness versions.
+- A proposal with persuasive text but no durable evidence does not activate beyond the allowed session-local scope.
+- Restarting the supervisor during refinement resumes or fails visibly without duplicate proposals.
+
+### Dependencies
+
+- FU-003 for a usable non-echo model.
+- FU-004 for invocation during autonomous runs; FU-013's recursive-call API is a natural execution vehicle but the existing internal services are sufficient.
+
+### Exclusions
+
+- Model-weight training.
+- Changes to promotion policy; existing evaluator and authority rules are unchanged.
+
+---
+
+## FU-017 — Add skill creation, installation, and management as a product surface
+
+**Status:** Proposed
+
+### Gap
+
+The runtime stores versioned TypeScript skills with required tests, candidate exposure, and outbox-backed invocation, and the profile store supports globally installed skills. There is no product flow to create, install, inspect, enable, or remove a skill; a skill currently enters the system only inside a raw harness proposal. The design constitution expects recurring successful workflows to be packaged as inspectable skills instead of enlarging a fixed universal loop.
+
+The Prime Agent reference implementation treats skills as first-class: global, project, and package skill locations; a built-in skill creator that teaches the agent to package new skills; commands to list and manage them; and executable skills that run under the same trust model as generated code.
+
+### Outcome
+
+A user or the agent can package a recurring workflow as an inspectable, tested skill; list installed skills with scope, version, and provenance; enable, disable, and remove them; and install skills from a local directory. Skills remain visible to context selection and callable from the console SDK.
+
+### Scope
+
+- Add product commands (an `agencity skills` group and `/skills`) for list, show, test, enable, disable, and remove, presenting name, scope, version, provenance, and test status.
+- Support workspace-scoped and profile/global-scoped installation consistent with the existing store boundaries.
+- Provide a skill-creation flow in which the agent drafts a skill through the existing harness proposal lifecycle, including required tests before activation.
+- Support importing a skill from a local directory with explicit user confirmation and a trusted-local warning; imported content records its source provenance.
+- Keep executable skills inside existing effect, permission, and secret-handling rules; a skill cannot widen authority.
+- Disabling a skill removes it from context selection and invocation without deleting retained versions or history.
+
+### Acceptance criteria
+
+- A skill created from a session activates only after its tests pass and is invocable from a later console cell.
+- Installed skills are listed with scope and provenance; internal IDs are available under details but not required.
+- A disabled skill no longer appears in materialized context or accepts invocation, and re-enabling restores the same version.
+- Importing a skill directory requires explicit confirmation and records source provenance.
+- A skill cannot read brokered secrets or perform writes outside the typed SDK surface.
+- Removal respects retained history; prior invocations remain attributable.
+
+### Dependencies
+
+- FU-004 for agent-driven creation and invocation inside autonomous runs.
+- FU-016 makes trajectory-derived skill proposals ergonomic but is not a prerequisite for manual management.
+
+### Exclusions
+
+- A public skill registry or remote skill installation.
+- Compatibility with other harnesses' skill formats.
+
+---
+
+## FU-018 — Stream provider output incrementally to attached clients
+
+**Status:** Done
+
+### Gap
+
+Model providers currently record one output chunk after a completion finishes, so clients see nothing until the turn completes. The parent PRD lists chat with streaming model output as part of the initial terminal product, and FU-005 can only display incremental output if an adapter produces it. The Prime Agent reference implementation streams assistant deltas to attached clients while keeping the transcript authoritative.
+
+### Outcome
+
+Providers that support token streaming deliver incremental assistant output to attached clients during a model call. Canonical durable state remains consistent: an interrupted stream never leaves a partial message that later work depends on.
+
+### Scope
+
+- Extend the model executor contract with an optional streaming capability and truthful capability reporting for providers without it.
+- Decide and document the durable representation: either bounded committed `ModelOutputChunk` events or non-canonical progress notifications. In both cases, dependent work reads only the committed completion (message, usage, terminal outcome), and event volume stays bounded.
+- Keep the outbox lifecycle unchanged: durable request before execution, one terminal outcome, and `unknown` on uncertain interruption.
+- Define interruption behavior: a stream that dies before commit produces no committed assistant message; recovery observes the effect outcome, not the partial text.
+- Carry in-progress output through the protocol/SSE surface separately from committed events without breaking cursor-resume semantics.
+- Keep echo non-streaming and visibly labeled as the demo fixture.
+
+### Acceptance criteria
+
+- With a streaming-capable provider, an attached client displays output before the completion commits.
+- Killing the supervisor mid-stream yields a `failed` or `unknown` model effect with no committed partial assistant message, and resume does not replay the stream.
+- Cursor-based catch-up after reconnect returns only committed events; progress delivery is never required for correctness and never duplicates history.
+- A provider without streaming reports the limitation, and the client renders the committed message without pretending to stream.
+- Existing recovery, idempotency, and duplicate-effect tests pass with streaming enabled.
+
+### Dependencies
+
+- FU-003 for real provider configuration.
+- FU-005 consumes the client-visible behavior.
+
+### Exclusions
+
+- Token streaming for the echo fixture.
+- Streaming cell or tool output; bounded logs already cover cells.
+
+
+### Completion evidence
+
+- Commit: `42982e4`.
+- Implementation: truthful optional provider streaming, OpenAI-compatible SSE parsing, cursorless bounded/redacted progress, authoritative atomic completion, provider capability endpoint, client/TUI progress rendering, and explicit non-streaming mode.
+- Verification: ten streaming integration tests include pre-commit deltas, fragmentation, cancellation, supervisor `SIGKILL`/unknown recovery, committed-only reconnect, progress bounds, and a known secret split across deltas; independent review passed.
+- Remaining limitation: real OpenAI streaming was not credential-verified; progress is intentionally ephemeral and droppable.
+
+---
+
+## FU-019 — Add automatic and agent-directed context compaction
+
+**Status:** Proposed
+
+### Gap
+
+Compaction exists as a manual, single-strategy operation: the supervisor produces a deterministic extractive summary of all but the most recent twenty messages, and context materialization includes the last twenty messages plus the last three compaction summaries. Nothing observes context growth against the configured model's limits, the model cannot request compaction with guidance about what to preserve, and no summarizing strategy exists. The parent PRD treats compaction as a derived view with multiple coexisting strategies, and long autonomous runs will exceed a fixed recent-message window.
+
+The Prime Agent reference implementation compacts automatically on overflow or near a configured threshold, lets the agent inspect and request compaction with custom instructions, and continues goals, heartbeats, and child sessions across compaction.
+
+### Outcome
+
+Long runs continue past context limits. Compaction happens automatically when materialized context approaches the model's capacity, can be requested by the user or the model with preservation guidance, records its sources and strategy, and never deletes canonical history.
+
+### Scope
+
+- Track provider context-window capacity and estimate materialized context size; trigger compaction near a configured threshold and on provider context-overflow errors.
+- Add a model-generated summarization strategy alongside the deterministic extractive strategy, recorded with its strategy identity and source event IDs; the summarizing model call is a normal outbox-backed effect.
+- Add `compact` operations to the console SDK and product surface that accept optional preservation instructions.
+- Keep compaction a derived view: source events are retained, and a branch can be re-materialized under a different strategy.
+- Compaction must not interrupt active goals, heartbeats, schedules, child sessions, or durable working values.
+- Include compaction provenance in each dependent model call's context records.
+
+### Acceptance criteria
+
+- A run whose history exceeds the model's context window continues after automatic compaction without manual intervention.
+- The next model call's context records name the compaction strategy and its source events.
+- User- or model-requested compaction with instructions biases the summary accordingly and records the request.
+- Compaction never deletes or rewrites canonical events, and rebuild after compaction produces identical projected state.
+- Goals, heartbeats, and child sessions remain active across compaction.
+- A branch re-materialized with a different strategy yields a different derived view over identical canonical history.
+
+### Dependencies
+
+- FU-004 integrates automatic compaction into the run loop.
+- FU-003 provides the model used by the summarizing strategy; the deterministic strategy remains available without it.
+
+### Exclusions
+
+- Destructive history pruning; owned-scope deletion remains a separate guarded operation.
+- Cross-session or workspace-level summarization.
+
 ---
 
 ## Template for additional follow-up tickets
@@ -729,15 +1063,15 @@ The following areas should be assessed and promoted into concrete tickets when e
 
 - real Turso Cloud verification and operational onboarding;
 - official sync-server test reproducibility in ordinary development environments;
-- provider-native streaming and structured-action compatibility;
-- user-facing permission review and approval workflows;
+- user-facing permission review and approval workflows, including the policy model that decides which effects require approval;
 - reconciliation UI for sync conflicts and uncertain external effects;
 - artifact backup, export, garbage collection, and restore ergonomics;
-- continual-harness proposal/evaluation UX beyond raw JSON commands;
 - subagent tree visualization and terminal-result presentation beyond the messaging contract in FU-012;
 - session naming, search, archival, and deletion UX;
+- MCP or comparable external tool integrations inside the console permission model;
+- bundled first-party skills such as web search;
 - accessibility, terminal compatibility, and large-history performance;
-- packaging, release versioning, upgrade, and migration testing;
+- packaging, release versioning, upgrade, migration testing, and coordinated in-place upgrade of running background services;
 - external sandbox placement and truthful capability presentation;
 - documentation drift between the parent PRD, README, API, and shipped behavior.
 
@@ -764,3 +1098,20 @@ Add dated review and implementation evidence here.
 
 - Added a root `AGENTS.md` covering repository purpose, authoritative plans, current implementation status, architectural invariants, security boundaries, development and verification commands, source layout, testing expectations, documentation discipline, and definition of done.
 - Verified that its local plan/document links resolve in the current tree.
+
+### August 6, 2026 — Prime Agent parity review
+
+- Compared this backlog against a local checkout of the Prime Agent reference implementation, including its daemon, long-running-agents, skills, compaction, and usage documentation.
+- The reference implementation provides daemon-backed detached execution with attach, list, rename, stop, status, doctor, and shutdown lifecycle commands; persistent goals, user and agent-created heartbeats, and one-time/cron schedules; bounded autonomous continuation with user-defined quality gates that are not rerun while the workspace is unchanged; a `/refine` flow whose refiner reviews the trajectory and applies evidence-backed harness updates with rollback; first-class skill locations, management commands, and a built-in skill creator; automatic threshold-based compaction with agent-directed preservation instructions; and incremental assistant output streaming.
+- Agencity's runtime already implements durable goals, gates with workspace-cursor pinning and staleness detection, coalesced heartbeats, harness proposal governance, versioned tested skills, and manual deterministic compaction, but FU-001 through FU-013 never connected them to the product run loop or product surfaces. The ordinary model loop stops only on budget or session status and never consults gates; the TUI `/refine` accepts only raw JSON proposals; exiting the client stops execution because the supervisor is in-process; providers commit one post-completion output chunk; and compaction is manual with a single extractive strategy.
+- These findings seeded FU-014 through FU-019 and amendments to FU-004, FU-005, FU-006, FU-009, the ticket index, the follow-up completion standard, and the candidate list.
+
+
+### August 6, 2026 — Product foundation, notebook, recursive-model, and streaming tranche completed
+
+- Commit `42982e4` completes FU-001, FU-002, FU-003, FU-007, FU-011, FU-013, and FU-018 with implementation, tests, documentation, and independent review.
+- Review found and implementation fixed three release-blocking issues before completion: path-derived workspace identity did not survive repository moves; credential-reference input could persist a shell-expanded secret; and the linked CLI source lacked executable Git mode. The fixes added a durable owner-only workspace marker, credential-material rejection/byte-scan tests, and mode `100755` with out-of-tree link verification.
+- Streaming review identified cross-delta secret leakage as a possible ephemeral-progress risk. Progress redaction now buffers secret prefixes across deltas, emits a bounded truncation marker, and keeps the authoritative completion atomic.
+- FU-013 reused the existing task/session/outbox runtime rather than adding a stateless provider-call path; migration 007 changes only the rebuildable recursive-handle projection.
+- The accepted parity amendments already present in the working plan added FU-014 through FU-019 and tightened the completion standard/dependencies; they were retained because the Prime Agent parity review showed these capabilities are required rather than optional candidate work.
+- External Turso and real-provider checks remain separately gated and are not represented as verified by this tranche.
