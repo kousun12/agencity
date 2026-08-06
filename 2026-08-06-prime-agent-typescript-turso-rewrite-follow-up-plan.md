@@ -87,7 +87,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | In progress | FU-003, FU-004 |
 | FU-017 | Add skill creation, installation, and management as a product surface | In progress | FU-004 |
 | FU-018 | Stream provider output incrementally to attached clients | Done | FU-003 |
-| FU-019 | Add automatic and agent-directed context compaction | Proposed | FU-003, FU-004 |
+| FU-019 | Add automatic and agent-directed context compaction | In progress | FU-003, FU-004 |
 
 ---
 
@@ -969,7 +969,7 @@ Providers that support token streaming deliver incremental assistant output to a
 
 ## FU-019 — Add automatic and agent-directed context compaction
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
