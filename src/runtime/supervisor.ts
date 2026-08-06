@@ -943,6 +943,7 @@ export class Supervisor {
         },
       });
       await this.storage.appendEvents(events);
+      acceptanceCrashAfterCellCommit(cellId);
       return { cellId, result, logs };
     } catch (error) {
       const logs = error instanceof ConsoleCellError ? error.logs.map(scrubText) : [];
@@ -964,6 +965,13 @@ export class Supervisor {
       if (this.restartConsoleAfterCell) await this.console.stop();
     }
   }
+}
+
+function acceptanceCrashAfterCellCommit(cellId: string): void {
+  if (process.env.AGENCITY_ACCEPTANCE !== "1") return;
+  if (process.env.AGENCITY_ACCEPTANCE_FAILPOINT !== "cell-committed") return;
+  process.stderr.write(`[agencity acceptance failpoint] committed CellCommitted for ${cellId}; exiting service before caller acknowledgement\n`);
+  process.exit(86);
 }
 
 function acceptanceAgentRunMaxSteps(): number {

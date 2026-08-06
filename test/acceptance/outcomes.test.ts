@@ -78,9 +78,9 @@ describe("FU-009 external outcome and interruption matrix", () => {
     expect(fixture.count(task)).toBe(1);
   }, 120_000);
 
-  test("a committed action survives service loss and resumes without repeating its model step or cell", async () => {
-    const acceptance = { AGENCITY_ACCEPTANCE: "1", AGENCITY_ACCEPTANCE_FAILPOINT: "agent-action-committed:1" };
-    const { world, fixture, environment } = await setup("action-recovery", acceptance);
+  test.each(["agent-action-committed:1", "cell-committed"])("the %s boundary survives service loss without repeating its model step or cell", async failpoint => {
+    const acceptance = { AGENCITY_ACCEPTANCE: "1", AGENCITY_ACCEPTANCE_FAILPOINT: failpoint };
+    const { world, fixture, environment } = await setup(`action-recovery-${failpoint.replaceAll(":", "-")}`, acceptance);
     const task = "fixture committed action recovery";
     fixture.script(task, [
       action("typescript", `await tools.writeFile("action-recovery.txt", "committed-once"); return { repaired: true };`),

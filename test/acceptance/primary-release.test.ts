@@ -79,6 +79,8 @@ describe("FU-009 installed no-ID release transcript", () => {
     expect(fixture.requests.filter(item => item.task === task).every(item => item.streaming)).toBe(true);
     expect(fixture.requests.find(item => item.task === task && item.step === 4)?.lastUserText).toContain("AgentRunGoalCheckRecorded");
     expect(fixture.count("acceptance child initial")).toBe(1);
+    await fixture.waitFor("acceptance child follow-up");
+    expect(fixture.count("acceptance child follow-up")).toBe(1);
 
     const tree = await world.command(["tree", "--json"], fixture.environment());
     expect(tree.code).toBe(0);
