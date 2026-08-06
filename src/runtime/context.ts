@@ -7,6 +7,7 @@ import type { MemoryService } from "./memory.ts";
 import type { HarnessService } from "./harness.ts";
 import type { ProfileDatabase } from "../sync/index.ts";
 import { rowToHarness } from "./harness.ts";
+import type { SkillManagementService, SkillManagementView } from "./skill-management.ts";
 
 export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. Persist every value needed after a cell boundary. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
 export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 1, text: BASE_POLICY });
@@ -23,7 +24,9 @@ export interface ContextMaterializeOptions {
 }
 
 export class ContextMaterializer {
+  #skillCatalog: SkillManagementService | null = null;
   constructor(readonly storage: AgentStorage, readonly memory?: MemoryService, readonly harness?: HarnessService, readonly maxRecentRecords = 30, readonly userScopeKey = "default-user", readonly profile?: ProfileDatabase) {}
+  attachSkillCatalog(catalog: SkillManagementService): void { this.#skillCatalog = catalog; }
 
   async materialize(sessionId: string, branchId: string, options: ContextMaterializeOptions = {}): Promise<{ contextId: string; context: JsonValue; event: AgentEvent<"ContextMaterialized"> }> {
     let events = await this.storage.loadEvents(sessionId, { branchId });
@@ -87,7 +90,10 @@ export class ContextMaterializer {
     const candidateMemoryIds=new Set(candidateMemories.map((item)=>item.entryId));
     const memories = [...memoryResult.items.map((item:any) => item.record).filter((item:HarnessRecord)=>!candidateMemoryIds.has(item.entryId)&&!retiredByCandidate.has(item.entryId)),...candidateMemories];
     const promptNotes = [...exact.values()].filter((record) => record.kind === "prompt_note");
-    const skills = [...exact.values()].filter((record) => record.kind === "skill");
+    const managedSkills = this.#skillCatalog ? await this.#skillCatalog.contextSkills(sessionId,branchId) : [];
+    const managedHarnessIds = new Set(managedSkills.filter((item) => item.source === "harness").map((item) => `${item.entryId}:${item.versionId}`));
+    const skills = [...exact.values()].filter((record) => record.kind === "skill" && (!this.#skillCatalog || managedHarnessIds.has(`${record.entryId}:${record.current.versionId}`)));
+    const profileSkillSelections = managedSkills.filter((item) => item.source === "profile");
     const specs = [...exact.values()].filter((record) => record.kind === "subagent_spec");
     for (const record of [...memories,...promptNotes,...skills,...specs]) add(await this.storage.getEvent(record.current.createdEventId),`exact harness ${record.kind} ${record.entryId}@${record.current.versionId}`);
     for (const eventId of options.additionalRecordIds ?? []) add(events.find((event) => event.id === eventId) ?? await this.storage.getEvent(eventId), "agent-run exact dependent evidence");
@@ -98,11 +104,16 @@ export class ContextMaterializer {
       basePolicy: { id: IMMUTABLE_BASE_POLICY.id, version: IMMUTABLE_BASE_POLICY.version, digest: hash(BASE_POLICY), mutable: false },
       retrieval: { ...memoryResult.provenance, candidateOverlay: { replacements: candidateMemories.map((item)=>({entryId:item.entryId,versionId:item.current.versionId})), retirements: [...retiredByCandidate].sort(), finalSelections: memories.map((item,index)=>({entryId:item.entryId,versionId:item.current.versionId,rank:index+1})) } },
       candidates: candidateProvenance,
-      selections: [...memories,...promptNotes,...skills,...specs].map((record) => ({entryId:record.entryId,versionId:record.current.versionId,kind:record.kind,scope:record.scope,status:record.current.status,createdEventId:record.current.createdEventId})),
+      selections: [
+        ...[...memories,...promptNotes,...skills,...specs].map((record) => ({entryId:record.entryId,versionId:record.current.versionId,kind:record.kind,scope:record.scope,status:record.current.status,createdEventId:record.current.createdEventId})),
+        ...profileSkillSelections.map((record) => ({entryId:record.entryId,versionId:record.versionId,kind:"skill",scope:"global",status:"active",source:"profile",digest:record.digest,provenance:record.provenance})),
+      ],
       candidateRetirements: [...retiredByCandidate].sort(),
     })) as JsonValue;
     const profilePreferences = this.profile ? await this.profile.listPreferences() : [];
-    const profileSkills = this.profile ? await this.profile.listGlobalSkills() : [];
+    // Compatibility rows are retained in profile history and management views,
+    // but never enter ordinary executable context until reinstalled and tested.
+    const profileSkills = profileSkillSelections.map(publicManagedSkill);
     const providerConfigurations = this.profile ? (await this.profile.listCredentialReferences()).map(({reference,provider,label,metadata})=>({reference,provider,label,metadata})) : [];
     const baseContext: JsonValue = JSON.parse(JSON.stringify({
       basePolicy: BASE_POLICY,
@@ -119,7 +130,7 @@ export class ContextMaterializer {
       harness: {
         promptNotes: promptNotes.map(publicHarness),
         memories: memories.map(publicHarness),
-        skills: skills.map(publicSkill),
+        skills: [...skills.map(publicSkill),...profileSkillSelections.map(publicManagedSkill)],
         subagentSpecs: specs.map(publicSpec),
       },
       compactions,
@@ -150,4 +161,5 @@ function rowToHarnessWithEntry(row:any):HarnessRecord { const record=rowToHarnes
 function publicHarness(record:HarnessRecord) { return {entryId:record.entryId,versionId:record.current.versionId,name:record.name,kind:record.kind,scope:record.scope,scopeKey:record.scopeKey,status:record.current.status,confidence:record.current.confidence,tags:record.current.tags,content:record.current.content,evidenceEventIds:record.current.evidenceEventIds,conflictEntryIds:record.current.conflictEntryIds}; }
 
 function publicSkill(record:HarnessRecord) { const content=record.current.content.kind==="skill" ? record.current.content : null; return {entryId:record.entryId,versionId:record.current.versionId,name:record.name,scope:record.scope,status:record.current.status,confidence:record.current.confidence,tags:record.current.tags,description:content?.description ?? "",inputSchema:content?.inputSchema ?? null,permissions:content?.permissions ?? [],runtime:content?.runtime ?? "bun"}; }
+function publicManagedSkill(record:SkillManagementView) { return {entryId:record.entryId,versionId:record.versionId,name:record.name,scope:record.scope,status:record.availability,source:record.source,digest:record.digest,description:record.description,inputSchema:record.inputSchema,permissions:record.permissions,provenance:record.provenance,runtime:record.runtime}; }
 function publicSpec(record:HarnessRecord) { const content=record.current.content.kind==="subagent_spec" ? record.current.content : null; return {entryId:record.entryId,versionId:record.current.versionId,name:record.name,scope:record.scope,status:record.current.status,confidence:record.current.confidence,tags:record.current.tags,role:content?.role ?? "",invocationCriteria:content?.invocationCriteria ?? "",expectedArtifact:content?.expectedArtifact ?? ""}; }

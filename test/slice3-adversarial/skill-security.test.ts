@@ -119,7 +119,8 @@ describe("Slice 3 generated skill security and durable execution", () => {
       sql: "SELECT version_id,passed,report_json FROM skill_executions WHERE entry_id=? AND execution_kind='test'",
       args: [entry.entryId],
     });
-    expect(rows).toHaveLength(1);
+    // Activation and the exact exposed allocation each retain a distinct test boundary.
+    expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ version_id: entry.current.versionId, passed: 1 });
     const durable = JSON.stringify(await s.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
     expect(durable).not.toContain(secret);
@@ -244,12 +245,13 @@ describe("Slice 3 generated skill security and durable execution", () => {
     }) as Array<{ version_id: string; effect_id: string; passed: number }>;
     expect(executions.map((row) => [row.version_id, row.passed])).toEqual([
       [versionV1, 1],
+      [versionV1, 1], // required post-exposure same-version retest
       [versionV2.versionId, 0],
     ]);
 
     const requests = (await s.storage.loadEvents(session.sessionId, { branchId: session.branchId }))
       .filter((event) => event.type === "EffectRequested" && (event.payload as any).executor === "skill" && (event.payload as any).operation === "test");
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3); // v1 activation + exposed retest, then v2 activation
     const requestByVersion = new Map(requests.map((event) => [
       String((event.payload as any).input.versionId),
       (event.payload as any).input,
@@ -636,7 +638,7 @@ describe("Slice 3 refinement recovery around generated-skill tests", () => {
     expect(active?.current.status).toBe("active");
     const events = await s.storage.loadEvents(session.sessionId, { branchId: session.branchId });
     expect(eventCount(events, "HarnessVersionCreated")).toBe(1);
-    expect(eventCount(events, "SkillTestRecorded")).toBe(1);
+    expect(eventCount(events, "SkillTestRecorded")).toBe(2); // activation is deduplicated; exposure adds the required retest
     expect(events.filter((event) => event.type === "EffectOutcomeRecorded" &&
       (event.payload as any).effectId === (events.find((item) => item.type === "SkillTestRecorded")?.payload as any)?.effectId)).toHaveLength(1);
     expect(eventCount(events, "RefinementCandidateActivated")).toBe(1);

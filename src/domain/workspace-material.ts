@@ -83,6 +83,8 @@ export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   RefinementApproved: "non-material",
   RefinementRollbackApproved: "non-material",
   RefinementRolledBack: "non-material",
+  SkillImported: "non-material",
+  SkillAvailabilityChanged: "non-material",
   SkillInvocationRecorded: "non-material",
   SkillTestRecorded: "non-material",
   SubagentSpecInvoked: "non-material",

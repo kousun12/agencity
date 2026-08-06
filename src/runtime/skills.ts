@@ -1,17 +1,32 @@
 import {
   newId, NotFoundError, ValidationError, type HarnessContent, type HarnessVersionRecord,
-  type JsonValue, type SkillInvocationResult, type SkillTestReport,
+  type JsonValue, type SkillInvocationResult, type SkillTestReport, type TypeScriptSkillDefinition,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
 import { rowToVersion } from "./harness.ts";
 
 export interface InvokeSkillOptions { readonly versionId?: string; readonly idempotencyKey?: string; }
+export interface TestSkillOptions { readonly idempotencyKey?: string; readonly requireExposedCandidate?: boolean; }
+export interface ResolvedExecutableSkill {
+  readonly entryId: string;
+  readonly versionId: string;
+  readonly definition: TypeScriptSkillDefinition;
+  readonly candidate: boolean;
+}
+export interface ExecutableSkillCatalog {
+  resolveExecutable(sessionId: string, branchId: string, reference: string, options?: { readonly versionId?: string; readonly allowCandidate?: boolean }): Promise<ResolvedExecutableSkill>;
+}
+
+/** Executes every skill through the same schema, permission, secret-free environment and durable outbox boundary. */
 export class SkillService {
   readonly permissionAllowlist: ReadonlySet<string>;
+  #catalog: ExecutableSkillCatalog | null = null;
   constructor(readonly storage: AgentStorage, readonly outbox: OutboxRunner, permissionAllowlist: readonly string[] = [], readonly userScopeKey = "default-user") {
     this.permissionAllowlist = new Set(permissionAllowlist.map((permission) => permission.trim()).filter(Boolean));
   }
+
+  attachCatalog(catalog: ExecutableSkillCatalog): void { this.#catalog = catalog; }
 
   assertPermissionsAllowed(permissions: readonly string[]): void {
     for (const permission of permissions) if (!this.permissionAllowlist.has(permission)) {
@@ -19,39 +34,63 @@ export class SkillService {
     }
   }
 
-  async invoke(sessionId: string, branchId: string, entryId: string, input: JsonValue, options: InvokeSkillOptions = {}): Promise<SkillInvocationResult> {
-    const version = await this.#resolve(entryId, options.versionId, false); const content = skillContent(version);
-    await this.#assertScopeAuthority(sessionId, branchId, version, false);
+  async invoke(sessionId: string, branchId: string, reference: string, input: JsonValue, options: InvokeSkillOptions = {}): Promise<SkillInvocationResult> {
+    const skill = this.#catalog
+      ? await this.#catalog.resolveExecutable(sessionId, branchId, reference, { ...(options.versionId ? { versionId: options.versionId } : {}), allowCandidate: true })
+      : await this.#legacyResolve(sessionId, branchId, reference, options.versionId, true, true);
+    const content = skill.definition;
     this.assertPermissionsAllowed(content.permissions);
     validateJsonSchema(input, content.inputSchema);
-    const key = options.idempotencyKey ?? `skill-invoke:${version.versionId}:${newId()}`;
-    const effectId = await this.outbox.request({ sessionId, branchId, executor: "skill", operation: "invoke", input: { entryId, versionId: version.versionId, source: content.source, input }, idempotencyKey: key, idempotent: false });
+    const key = options.idempotencyKey ?? `skill-invoke:${skill.versionId}:${newId()}`;
+    const effectId = await this.outbox.request({ sessionId, branchId, executor: "skill", operation: "invoke", input: { entryId: skill.entryId, versionId: skill.versionId, source: content.source, input }, idempotencyKey: key, idempotent: false });
     await this.storage.appendEvents([{
       sessionId, branchId, type: "SkillInvocationRecorded", producer: "supervisor", idempotencyKey: `skill-invocation:${effectId}`,
-      payload: { entryId, versionId: version.versionId, effectId, input },
+      payload: { entryId: skill.entryId, versionId: skill.versionId, effectId, input },
     }]);
     const execution = await this.outbox.run(effectId);
-    return { effectId, entryId, versionId: version.versionId, outcome: execution.outcome, ...(execution.output === undefined ? {} : { output: execution.output }), ...(execution.error === undefined ? {} : { error: execution.error }) };
+    return { effectId, entryId: skill.entryId, versionId: skill.versionId, outcome: execution.outcome, ...(execution.output === undefined ? {} : { output: execution.output }), ...(execution.error === undefined ? {} : { error: execution.error }) };
   }
 
-  async test(sessionId: string, branchId: string, entryId: string, versionId?: string, requireExposedCandidate = false): Promise<SkillTestReport> {
-    const version = await this.#resolve(entryId, versionId, true); const content = skillContent(version);
-    await this.#assertScopeAuthority(sessionId, branchId, version, requireExposedCandidate);
-    this.assertPermissionsAllowed(content.permissions);
-    if (!content.tests.length) throw new ValidationError("Generated skills require runtime tests");
-    const effectId = await this.outbox.request({ sessionId, branchId, executor: "skill", operation: "test", input: { entryId, versionId: version.versionId, source: content.source, tests: content.tests as unknown as JsonValue }, idempotencyKey: `skill-test:${version.versionId}`, idempotent: false });
+  async test(sessionId: string, branchId: string, reference: string, versionId?: string, requireExposedCandidate = false, options: TestSkillOptions = {}): Promise<SkillTestReport> {
+    const skill = this.#catalog && requireExposedCandidate
+      ? await this.#catalog.resolveExecutable(sessionId, branchId, reference, { ...(versionId ? { versionId } : {}), allowCandidate: true })
+      : await this.#legacyResolve(sessionId, branchId, reference, versionId, true, requireExposedCandidate);
+    if (requireExposedCandidate && !skill.candidate) throw new ValidationError("Model-visible candidate testing requires an exposed candidate version");
+    return this.testDefinition(sessionId, branchId, skill.entryId, skill.versionId, skill.definition, options.idempotencyKey);
+  }
+
+  async testDefinition(sessionId: string, branchId: string, entryId: string, versionId: string, definition: TypeScriptSkillDefinition, idempotencyKey?: string): Promise<SkillTestReport> {
+    this.assertPermissionsAllowed(definition.permissions);
+    if (!definition.tests.length) throw new ValidationError("Generated skills require runtime tests");
+    const effectId = await this.outbox.request({ sessionId, branchId, executor: "skill", operation: "test", input: { entryId, versionId, source: definition.source, tests: definition.tests as unknown as JsonValue }, idempotencyKey: idempotencyKey ?? `skill-test:${versionId}:${newId()}`, idempotent: false });
     const execution = await this.outbox.run(effectId);
     const report = execution.output && typeof execution.output === "object" && !Array.isArray(execution.output) ? execution.output as Record<string,JsonValue> : {};
-    const value: SkillTestReport = { effectId, entryId, versionId: version.versionId, outcome: execution.outcome, compiled: report.compiled === true, passed: typeof report.passed === "number" ? report.passed : 0, failed: typeof report.failed === "number" ? report.failed : content.tests.length, tests: Array.isArray(report.tests) ? report.tests : [], ...(execution.output === undefined ? {} : { output: execution.output }), ...(execution.error === undefined ? {} : { error: execution.error }) };
+    const value: SkillTestReport = { effectId, entryId, versionId, outcome: execution.outcome, compiled: report.compiled === true, passed: typeof report.passed === "number" ? report.passed : 0, failed: typeof report.failed === "number" ? report.failed : definition.tests.length, tests: Array.isArray(report.tests) ? report.tests : [], ...(execution.output === undefined ? {} : { output: execution.output }), ...(execution.error === undefined ? {} : { error: execution.error }) };
     await this.storage.appendEvents([{
-      sessionId, branchId, type: "SkillTestRecorded", producer: "supervisor", idempotencyKey: `skill-test-recorded:${version.versionId}`,
-      payload: { entryId, versionId: version.versionId, effectId, passed: value.outcome === "succeeded" && value.compiled && value.failed === 0, report: { compiled: value.compiled, passed: value.passed, failed: value.failed, tests: value.tests, outcome: value.outcome, ...(value.error === undefined ? {} : { error: value.error }) } },
+      sessionId, branchId, type: "SkillTestRecorded", producer: "supervisor", idempotencyKey: `skill-test-recorded:${effectId}`,
+      payload: { entryId, versionId, effectId, passed: value.outcome === "succeeded" && value.compiled && value.failed === 0, report: { compiled: value.compiled, passed: value.passed, failed: value.failed, tests: value.tests, outcome: value.outcome, ...(value.error === undefined ? {} : { error: value.error }) } },
     }]);
     return value;
   }
 
-  async testModelVisible(sessionId: string, branchId: string, entryId: string, versionId?: string): Promise<SkillTestReport> {
-    return this.test(sessionId, branchId, entryId, versionId, true);
+  async testModelVisible(sessionId: string, branchId: string, reference: string, versionId?: string, idempotencyKey?: string): Promise<SkillTestReport> {
+    return this.test(sessionId, branchId, reference, versionId, true, idempotencyKey === undefined ? {} : { idempotencyKey });
+  }
+
+  async #legacyResolve(sessionId: string, branchId: string, entryId: string, explicit: string | undefined, allowCandidate: boolean, requireExposedCandidate = false): Promise<ResolvedExecutableSkill> {
+    const rows = explicit
+      ? await this.storage.readonlyQuery({ sql: "SELECT v.* FROM harness_versions v WHERE v.entry_id=? AND v.version_id=?", args: [entryId,explicit] })
+      : await this.storage.readonlyQuery({ sql: "SELECT v.* FROM harness_entries e JOIN harness_versions v ON v.version_id=e.active_version_id WHERE e.entry_id=?", args: [entryId] });
+    if (!rows[0] && allowCandidate) {
+      const candidates = await this.storage.readonlyQuery({ sql: "SELECT * FROM harness_versions WHERE entry_id=? AND status='candidate' ORDER BY created_at DESC,version_id DESC LIMIT 1", args: [entryId] });
+      if (candidates[0]) rows.push(candidates[0]);
+    }
+    if (!rows[0]) throw new NotFoundError("skill version", explicit ?? entryId);
+    const version = rowToVersion(rows[0] as any);
+    if (version.kind !== "skill") throw new ValidationError("Harness entry is not a TypeScript skill");
+    if (version.status !== "active" && !(allowCandidate && version.status === "candidate")) throw new ValidationError(`Skill version ${version.versionId} is ${version.status}, not invocable`);
+    await this.#assertScopeAuthority(sessionId, branchId, version, requireExposedCandidate);
+    return { entryId: version.entryId, versionId: version.versionId, definition: skillContent(version), candidate: version.status === "candidate" };
   }
 
   async #assertScopeAuthority(sessionId:string, branchId:string, version:HarnessVersionRecord, requireExposedCandidate:boolean):Promise<void> {
@@ -63,24 +102,14 @@ export class SkillService {
       : version.scope === "user" ? version.scopeKey === this.userScopeKey
       : version.scopeKey === "global";
     if (!allowed) throw new ValidationError("Skill version belongs to another session or workspace scope");
-    if (version.status === "candidate" && requireExposedCandidate) {
+    if (requireExposedCandidate) {
       const allocations = await this.storage.readonlyQuery({ sql: "SELECT a.allocation_id FROM candidate_allocations a JOIN refinement_proposals p ON p.proposal_id=a.proposal_id WHERE a.proposal_id=? AND a.session_id=? AND a.branch_id=? AND a.exposed_at IS NOT NULL AND p.status='candidate'", args: [version.proposalId,sessionId,branchId] });
-      if (!allocations.length) throw new ValidationError("Candidate skill is not exposed to this exact allocation");
+      if (!allocations.length) throw new ValidationError("Candidate skill is not exposed to this exact allocation branch");
     }
-  }
-
-  async #resolve(entryId: string, explicit: string | undefined, allowCandidate: boolean): Promise<HarnessVersionRecord> {
-    const rows = explicit
-      ? await this.storage.readonlyQuery({ sql: "SELECT v.* FROM harness_versions v WHERE v.entry_id=? AND v.version_id=?", args: [entryId,explicit] })
-      : await this.storage.readonlyQuery({ sql: "SELECT v.* FROM harness_entries e JOIN harness_versions v ON v.version_id=e.active_version_id WHERE e.entry_id=?", args: [entryId] });
-    if (!rows[0]) throw new NotFoundError("skill version", explicit ?? entryId);
-    const version = rowToVersion(rows[0] as any);
-    if (version.kind !== "skill") throw new ValidationError("Harness entry is not a TypeScript skill");
-    if (version.status !== "active" && !(allowCandidate && version.status === "candidate")) throw new ValidationError(`Skill version ${version.versionId} is ${version.status}, not invocable`);
-    return version;
   }
 }
 function skillContent(version: HarnessVersionRecord): Extract<HarnessContent,{kind:"skill"}> { if (version.content.kind !== "skill") throw new ValidationError("Skill version content is malformed"); return version.content; }
+export function validateSkillInput(value: JsonValue, schema?: JsonValue): void { validateJsonSchema(value, schema); }
 function validateJsonSchema(value: JsonValue, schema?: JsonValue, path = "input"): void {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return;
   const rule=schema as Record<string,JsonValue>;
@@ -90,7 +119,7 @@ function validateJsonSchema(value: JsonValue, schema?: JsonValue, path = "input"
   if((expected==="object"||rule.properties)&&value&&typeof value==="object"&&!Array.isArray(value)){
     const object=value as Record<string,JsonValue>;const required=Array.isArray(rule.required)?rule.required:[];
     for(const key of required)if(typeof key==="string"&&!(key in object))throw new ValidationError(`${path} schema requires ${key}`);
-    const properties=rule.properties&&typeof rule.properties==="object"&&!Array.isArray(rule.properties)?rule.properties as Record<string,JsonValue>:{};
+    const properties=rule.properties&&typeof rule.properties==="object"&&!Array.isArray(rule.properties)?rule.properties as Record<string,JsonValue>:{ };
     for(const [key,item] of Object.entries(object)) { if(key in properties)validateJsonSchema(item,properties[key],`${path}.${key}`);else if(rule.additionalProperties===false)throw new ValidationError(`${path} schema does not allow ${key}`); }
   }
   if((expected==="array"||rule.items)&&Array.isArray(value)&&rule.items!==undefined)for(const [index,item] of value.entries())validateJsonSchema(item,rule.items,`${path}[${index}]`);

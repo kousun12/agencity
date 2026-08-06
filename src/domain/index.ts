@@ -7,4 +7,5 @@ export * from "./state.ts";
 export * from "./reducer.ts";
 
 export * from "./harness.ts";
+export * from "./skill-catalog.ts";
 export * from "./workspace-material.ts";

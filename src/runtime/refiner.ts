@@ -122,6 +122,19 @@ export class RefinerService {
     return this.#admit(sessionId, branchId, internal);
   }
 
+  /** Constrained agent skill-creation review; the child may propose only a skill edit in the requested scope. */
+  async createSkill(sessionId: string, branchId: string, rawInput: Pick<StartRefinementReviewInput, "instructions" | "requestedScope"> = {}): Promise<RefinementReviewRecord> {
+    const input = normalizeReviewInput({ ...rawInput, allowedKinds: ["skill"] });
+    const internal: InternalReviewInput = {
+      ...input,
+      mode: "skill_creation",
+      allowedKinds: ["skill"],
+      trigger: { kind: "skill_creation", summary: input.instructions?.trim() || "Package a recurring workflow as one tested TypeScript skill", evidenceEventIds: [] },
+      trajectoryTrigger: { kind: "manual" },
+    };
+    return this.#admit(sessionId, branchId, internal);
+  }
+
   /** Canonical user correction; prose messages alone never enter automatic correction policy. */
   async correct(sessionId: string, branchId: string, correction: string, correctedEventIds: readonly string[]): Promise<string> {
     if (!correction.trim()) throw new ValidationError("User correction text is required");

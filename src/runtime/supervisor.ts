@@ -58,6 +58,7 @@ import { AgentRunService } from "./agent-runs.ts";
 import { ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "./execution-leases.ts";
 import { EffectReconciliationService } from "./effect-reconciliation.ts";
 import { RefinerService } from "./refiner.ts";
+import { SkillManagementService } from "./skill-management.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -265,6 +266,7 @@ export class Supervisor {
   readonly memory: MemoryService;
   readonly harness: HarnessService;
   readonly skills: SkillService;
+  readonly skillManagement: SkillManagementService;
   readonly specs: SubagentSpecService;
   readonly runs: AgentRunService;
   readonly effectReconciliation: EffectReconciliationService;
@@ -318,6 +320,9 @@ export class Supervisor {
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this));
     this.effectReconciliation = new EffectReconciliationService(storage);
     this.refiner = new RefinerService(storage, this.models, this.harness, profile, userScopeKey);
+    this.skillManagement = new SkillManagementService(storage, profile, this.harness, this.skills, this.refiner, userScopeKey, device.profileId);
+    this.skills.attachCatalog(this.skillManagement);
+    this.contexts.attachSkillCatalog(this.skillManagement);
     this.schedules.attachRunService(this.runs);
     this.agents.attachRunService(this.runs);
     this.runs.setBoundaryObserver(async (sessionId, branchId, runId) => { await this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId); await this.refiner.scanBoundary(sessionId, branchId); });
@@ -759,11 +764,14 @@ export class Supervisor {
       if (method === "harness.propose") return this.harness.propose(sessionId,branchId,{...(args[0] as any),authority:"agent"});
       if (method === "harness.list") return this.harness.modelList(sessionId,branchId,(args[0] ?? {}) as any);
       if (method === "harness.history") return this.harness.modelHistory(sessionId,branchId,String(args[0]));
+      if (method === "skills.list") return this.skillManagement.list(sessionId,branchId,(args[0] ?? {}) as any);
+      if (method === "skills.get") return this.skillManagement.get(sessionId,branchId,String(args[0] ?? ""));
+      if (method === "skills.propose") return this.skillManagement.propose(sessionId,branchId,String(args[0] ?? ""),(args[1] === "local" ? "local" : "workspace"));
       if (method === "skills.invoke") {
         const options = (args[2] ?? {}) as Record<string, unknown>;
         return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: typeof options.idempotencyKey === "string" ? options.idempotencyKey : nextRpcKey(method) } as any);
       }
-      if (method === "skills.test") return this.skills.testModelVisible(sessionId,branchId,String(args[0]),typeof args[1] === "string" ? args[1] : undefined);
+      if (method === "skills.test") return this.skillManagement.test(sessionId,branchId,String(args[0]));
       if (method === "agents.spawn") {
         const raw = args[0]; const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.spawn requires a task string or object");

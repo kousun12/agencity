@@ -12,6 +12,8 @@ export * from "./heartbeats.ts";
 export * from "./memory.ts";
 export * from "./harness.ts";
 export * from "./skills.ts";
+export * from "./skill-import.ts";
+export * from "./skill-management.ts";
 export * from "./specs.ts";
 export * from "./agent-runs.ts";
 export * from "./schedules.ts";

@@ -1,6 +1,6 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, DependencyFailureError, ExecutionOwnershipConflictError, NotFoundError, ValidationError, newId, projectEvents, reduceAgentState, validateNewEvent, validateRefinementReviewRequest } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, ExecutionOwnershipConflictError, NotFoundError, ValidationError, canonicalSkillDigest, newId, projectEvents, reduceAgentState, validateNewEvent, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
@@ -259,6 +259,7 @@ export class LibSqlStorage implements AgentStorage {
         { version: 10, name: "autonomous-goals-schedules", url: new URL("./migrations/010_autonomous_goals_schedules.sql", import.meta.url) },
         { version: 11, name: "refinement-reviews", url: new URL("./migrations/011_refinement_reviews.sql", import.meta.url) },
         { version: 12, name: "refinement-review-snapshots", url: new URL("./migrations/012_refinement_review_snapshots.sql", import.meta.url) },
+        { version: 13, name: "skill-management", url: new URL("./migrations/013_skill_management.sql", import.meta.url) },
       ];
       for (const migration of migrations) {
         const script = await Bun.file(migration.url).text();
@@ -717,6 +718,23 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         if (!(await tx.execute({ sql: "SELECT entry_id FROM harness_entries WHERE entry_id=?", args: [conflictId] })).rows.length) throw new ValidationError(`Conflicting harness entry does not exist: ${conflictId}`);
       }
     }
+    if (event.type === "SkillImported") {
+      const payload = event.payload as EventPayloads["SkillImported"];
+      const found = await tx.execute({ sql: "SELECT v.kind,v.scope,v.content_json,e.current_version_id FROM harness_versions v JOIN harness_entries e ON e.entry_id=v.entry_id WHERE v.version_id=? AND v.entry_id=?", args: [payload.versionId,payload.entryId] });
+      const row = found.rows[0];
+      if (!row || String(row.kind) !== "skill" || String(row.scope) !== payload.scope || String(row.current_version_id) !== payload.versionId) throw new ConflictError("Skill import provenance requires the current workspace skill version", { entryId: payload.entryId, versionId: payload.versionId });
+      if (canonicalSkillDigest(JSON.parse(String(row.content_json)) as JsonValue) !== payload.digest) throw new ConflictError("Skill import provenance digest does not match the immutable version", { entryId: payload.entryId, versionId: payload.versionId });
+    }
+    if (event.type === "SkillAvailabilityChanged") {
+      const payload = event.payload as EventPayloads["SkillAvailabilityChanged"];
+      const found = await tx.execute({ sql: "SELECT v.kind,v.content_json,e.current_version_id FROM harness_versions v JOIN harness_entries e ON e.entry_id=v.entry_id WHERE v.version_id=? AND v.entry_id=?", args: [payload.versionId,payload.entryId] });
+      const row = found.rows[0];
+      if (!row || String(row.kind) !== "skill" || String(row.current_version_id) !== payload.versionId) throw new ConflictError("Skill availability change requires the current workspace skill version", { entryId: payload.entryId, versionId: payload.versionId });
+      const content = JSON.parse(String(row.content_json)) as JsonValue;
+      if (canonicalSkillDigest(content) !== payload.digest) throw new ConflictError("Skill availability change digest does not match the immutable version", { entryId: payload.entryId, versionId: payload.versionId });
+      const prior = await tx.execute({ sql: "SELECT availability FROM skill_availability_actions WHERE entry_id=? ORDER BY created_at DESC,event_id DESC LIMIT 1", args: [payload.entryId] });
+      if (String(prior.rows[0]?.availability ?? "enabled") === "removed") throw new ValidationError("Removed workspace skills cannot be re-enabled or disabled");
+    }
     if (event.type === "HarnessVersionStatusChanged") {
       const payload = event.payload as EventPayloads["HarnessVersionStatusChanged"];
       const found = await tx.execute({ sql: "SELECT v.status,e.current_version_id FROM harness_versions v JOIN harness_entries e ON e.entry_id=v.entry_id WHERE v.version_id=? AND v.entry_id=?", args: [payload.versionId,payload.entryId] });
@@ -867,6 +885,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     if (event.type === "RefinementApproved") { const p = event.payload as EventPayloads["RefinementApproved"]; await tx.execute({ sql: "INSERT INTO refinement_approvals(event_id,proposal_id,approved_by,scope,note,created_at) VALUES(?,?,?,?,?,?)", args: [event.id,p.proposalId,p.approvedBy,p.scope,p.note ?? null,event.committedAt] }); const scopes = await tx.execute({ sql: "SELECT scope FROM refinement_approvals WHERE proposal_id=? ORDER BY scope", args: [p.proposalId] }); await tx.execute({ sql: "UPDATE refinement_proposals SET approved_scopes_json=?,last_event_id=?,updated_at=? WHERE proposal_id=?", args: [json(scopes.rows.map((row) => String(row.scope))),event.id,event.committedAt,p.proposalId] }); }
     if (event.type === "RefinementRollbackApproved") { const p = event.payload as EventPayloads["RefinementRollbackApproved"]; await tx.execute({ sql: "INSERT INTO refinement_rollback_approvals(event_id,proposal_id,approved_by,role,note,created_at) VALUES(?,?,?,?,?,?)", args: [event.id,p.proposalId,p.approvedBy,p.role,p.note ?? null,event.committedAt] }); }
     if (event.type === "RefinementRolledBack") { const p = event.payload as EventPayloads["RefinementRolledBack"]; await tx.execute({ sql: "INSERT INTO refinement_rollbacks(rollback_id,proposal_id,candidate_id,version_ids_json,restored_version_ids_json,reason,event_id,created_at) VALUES(?,?,?,?,?,?,?,?)", args: [p.rollbackId,p.proposalId,p.candidateId,json(p.versionIds),json(p.restoredVersionIds),p.reason,event.id,event.committedAt] }); await tx.execute({ sql: "UPDATE refinement_proposals SET status='rolled_back',last_event_id=?,updated_at=? WHERE proposal_id=?", args: [event.id,event.committedAt,p.proposalId] }); }
+    if (event.type === "SkillAvailabilityChanged") { const p = event.payload as EventPayloads["SkillAvailabilityChanged"]; await tx.execute({ sql: "INSERT INTO skill_availability_actions(event_id,entry_id,version_id,digest,availability,reason,created_at) VALUES(?,?,?,?,?,?,?)", args: [event.id,p.entryId,p.versionId,p.digest,p.availability,p.reason,event.committedAt] }); }
     if (event.type === "SkillInvocationRecorded") { const p = event.payload as EventPayloads["SkillInvocationRecorded"]; await tx.execute({ sql: "INSERT INTO skill_executions(event_id,entry_id,version_id,effect_id,execution_kind,created_at) VALUES(?,?,?,?,'invoke',?)", args: [event.id,p.entryId,p.versionId,p.effectId,event.committedAt] }); }
     if (event.type === "SkillTestRecorded") { const p = event.payload as EventPayloads["SkillTestRecorded"]; await tx.execute({ sql: "INSERT INTO skill_executions(event_id,entry_id,version_id,effect_id,execution_kind,passed,report_json,created_at) VALUES(?,?,?,?,'test',?,?,?)", args: [event.id,p.entryId,p.versionId,p.effectId,p.passed ? 1 : 0,json(p.report),event.committedAt] }); }
     if (event.type === "SubagentSpecInvoked") { const p = event.payload as EventPayloads["SubagentSpecInvoked"]; await tx.execute({ sql: "INSERT INTO subagent_spec_invocations(event_id,entry_id,version_id,task_id,child_session_id,child_branch_id,created_at) VALUES(?,?,?,?,?,?,?)", args: [event.id,p.entryId,p.versionId,p.taskId,p.childSessionId,p.childBranchId,event.committedAt] }); }
@@ -1313,9 +1332,9 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
 
   async rebuildOperationalProjections(): Promise<void> {
     await this.#writes.run(() => this.#withTransaction(async (tx) => {
-      for (const table of ["refinement_trigger_consumptions","user_corrections","refinement_reviews","memory_fts","subagent_spec_invocations","skill_executions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
+      for (const table of ["refinement_trigger_consumptions","user_corrections","refinement_reviews","memory_fts","subagent_spec_invocations","skill_executions","skill_availability_actions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
       const rows = await tx.execute("SELECT * FROM events ORDER BY sequence");
-      const selected = new Set(["SessionCreated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
+      const selected = new Set(["SessionCreated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillAvailabilityChanged","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
       for (const row of rows.rows) { const event = rowToEvent(row); if (selected.has(event.type)) await this.#applyOperationalRows(tx,event); }
     }, { kind: "ordinary", operation: "rebuild operational projections" }));
   }
@@ -1421,7 +1440,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       "HarnessVersionCreated", "HarnessVersionStatusChanged", "RefinementProposed", "RefinementValidated",
       "RefinementCandidateActivated", "RefinementCandidateAllocated", "RefinementCandidateExposed",
       "RefinementObservationRecorded", "RefinementDecided", "RefinementApproved",
-      "RefinementRollbackApproved", "RefinementRolledBack", "SkillInvocationRecorded", "SkillTestRecorded",
+      "RefinementRollbackApproved", "RefinementRolledBack", "SkillImported", "SkillAvailabilityChanged", "SkillInvocationRecorded", "SkillTestRecorded",
       "SubagentSpecInvoked", "SyncConflictResolved",
     ];
     const unsupported = await this.#execute({

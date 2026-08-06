@@ -190,7 +190,7 @@ export class HarnessService {
     if (this.skills) for (const versionId of versionIds) {
       const version = await this.getVersion(versionId);
       if (version?.kind !== "skill") continue;
-      const report = await this.skills.test(sessionId, branchId, version.entryId, versionId);
+      const report = await this.skills.test(sessionId, branchId, version.entryId, versionId, false, { idempotencyKey: `skill-candidate-test:${versionId}` });
       if (report.outcome !== "succeeded" || !report.compiled || report.failed > 0) {
         await this.storage.appendEvents([{
           sessionId, branchId, type: "HarnessVersionStatusChanged", producer: "supervisor", idempotencyKey: `skill-candidate-rejected:${versionId}`,
@@ -284,7 +284,17 @@ export class HarnessService {
     if (proposal.status !== "candidate" || !proposal.candidateId) throw new ValidationError("Observations require an active candidate");
     const allocation = await this.#allocation(input.allocationId);
     if (allocation.candidateId !== proposal.candidateId || allocation.proposalId !== proposal.proposalId || !allocation.exposedAt) throw new ValidationError("Observation allocation must be exposed for this candidate");
-    const evidenceEventIds = unique([...(input.evidenceEventIds ?? [])]);
+    const automaticSkillEvidence: string[] = [];
+    if (this.skills) {
+      const candidateSkills = await this.storage.readonlyQuery({ sql: "SELECT entry_id,version_id FROM harness_versions WHERE proposal_id=? AND kind='skill' AND status='candidate' ORDER BY version_id", args: [proposalId] });
+      for (const row of candidateSkills as any[]) {
+        const report = await this.skills.testModelVisible(allocation.sessionId,allocation.branchId,String(row.entry_id),String(row.version_id),`skill-exposure-retest:${String(row.version_id)}:${allocation.allocationId}`);
+        if (input.success && (report.outcome !== "succeeded" || !report.compiled || report.failed > 0)) throw new ValidationError("A successful skill observation requires its post-exposure same-version retest to pass");
+        const executions = await this.storage.readonlyQuery({ sql: "SELECT event_id FROM skill_executions WHERE version_id=? AND effect_id=? AND execution_kind='test'", args: [String(row.version_id),report.effectId] });
+        if (executions[0]) automaticSkillEvidence.push(String((executions[0] as any).event_id));
+      }
+    }
+    const evidenceEventIds = unique([...(input.evidenceEventIds ?? []),...automaticSkillEvidence]);
     const evidenceEvents:AgentEvent[]=[];
     for (const id of evidenceEventIds) {
       const found=await this.storage.getEvent(id);
@@ -557,6 +567,20 @@ export class HarnessService {
 
   async #assertPromotion(proposal: RefinementProposalRecord, observations: EvaluationObservationRecord[]): Promise<void> {
     const scopes = await this.#proposalScopes(proposal);
+    const candidateSkills = await this.storage.readonlyQuery({ sql: "SELECT version_id FROM harness_versions WHERE proposal_id=? AND kind='skill' ORDER BY version_id", args: [proposal.proposalId] });
+    if (candidateSkills.length) {
+      const versionIds = new Set(candidateSkills.map((row:any) => String(row.version_id)));
+      const evidencedAllocations = new Set<string>();
+      for (const observation of observations.filter((item) => item.success)) {
+        for (const eventId of observation.evidenceEventIds) {
+          const event = await this.storage.getEvent(eventId);
+          const payload = event?.payload as any;
+          if (event?.type === "SkillTestRecorded" && payload?.passed === true && versionIds.has(String(payload.versionId))) evidencedAllocations.add(observation.allocationId);
+        }
+      }
+      const required = scopes.includes("workspace") ? 2 : 1;
+      if (evidencedAllocations.size < required) throw new ValidationError(`Skill promotion requires ${required} distinct exposed allocation retest${required === 1 ? "" : "s"} with passing same-version durable evidence`);
+    }
     const successes = observations.filter((item) => item.success);
     if (scopes.includes("local") && successes.filter((item) => item.evidenceEventIds.length > 0).length < 1) throw new ValidationError("Local promotion requires one supported successful observation with durable evidence");
     if (scopes.includes("workspace")) { const successful=observations.filter((item)=>item.success&&item.objective&&item.evidenceEventIds.length>0); if(new Set(successful.map((item)=>item.allocationId)).size<2 || new Set(successful.flatMap((item)=>item.evidenceEventIds)).size<2) throw new ValidationError("Workspace promotion requires repeated objective successes in distinct allocations with distinct durable evidence"); }

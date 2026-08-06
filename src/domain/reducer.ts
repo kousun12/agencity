@@ -403,6 +403,8 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "RefinementApproved":
     case "RefinementRollbackApproved":
     case "RefinementRolledBack":
+    case "SkillImported":
+    case "SkillAvailabilityChanged":
     case "SkillInvocationRecorded":
     case "SkillTestRecorded":
     case "SubagentSpecInvoked":

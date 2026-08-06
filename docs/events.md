@@ -207,6 +207,8 @@ All Slice 3 payloads use schema version 1 and retain stable entry/version/propos
 | `RefinementRollbackApproved` | Separate explicit owner/admin authority for user/global rollback; promotion approval never satisfies it. |
 | `RefinementDecided` | Promote/revise/reject decision with evaluator, baseline, observation IDs, and the scope-sensitive rule applied. |
 | `RefinementRolledBack` | Exact candidate versions invalidated and exact superseded versions restored, with reason. |
+| `SkillImported` | Canonical local-directory provenance for an installed workspace skill, pinned to the immutable entry/version/digest and exact inspected manifest/source digests. |
+| `SkillAvailabilityChanged` | Canonical workspace skill enable/disable/remove action pinned to the immutable entry/version/digest; rebuilds the availability projection without deleting history. |
 | `SkillInvocationRecorded` | Exact skill entry/version and durable effect ID/input for an invocation. |
 | `SkillTestRecorded` | Exact skill entry/version/effect and compile/runtime test report. The associated `Effect*` events own execution outcome. |
 | `SubagentSpecInvoked` | Exact spec entry/version pinned to a normally admitted durable task and child session/branch. |
