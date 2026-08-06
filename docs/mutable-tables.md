@@ -39,13 +39,13 @@ Do not change the first three columns or class tokens without updating the archi
 | `subagent_spec_invocations` | `rebuildable-projection` | `mutable` | Exact specification-version pin for a normally admitted durable child task. |
 | `memory_fts` | `operational-projection` | `mutable` | Disposable FTS5 candidate index; it may be deleted/rebuilt from harness versions and never decides scope/status policy. |
 | `device_clocks` | `operational-projection` | `mutable` | Per-workspace monotonic origin-sequence allocator keyed by stable profile device ID. Event IDs still deduplicate if this operational clock must be reconstructed. |
-| `workspace_replica_status` | `operational-projection` | `mutable` | Truthful local lifecycle/error/incarnation/count and official CDC/WAL/revision/network-stat observation for each configured replica. It never asserts cloud coordination or network success before the corresponding push/pull completes. |
+| `workspace_replica_status` | `operational-projection` | `mutable` | Truthful local lifecycle/error/incarnation/count, durable local replica placement, and official CDC/WAL/revision/network-stat observation for every current or historical replica identity. Administrative enumeration does not discard inactive rows or treat current configuration as the whole ownership boundary. |
 | `sync_ingest_receipts` | `operational-projection` | `mutable` | Durable envelope dedupe/ingestion receipt. It can be rebuilt by comparing retained envelopes with canonical event IDs and origin metadata. |
 | `sync_origin_watermarks` | `operational-projection` | `mutable` | Per-replica/per-origin incremental stage and terminal-ingest frontiers. They are performance hints: pending causal envelopes stop ingest advancement, a changed replica incarnation resets only staging, and retained receipts/quarantine remain the correctness boundary. |
-| `sync_quarantine` | `operational-projection` | `mutable` | Invalid or causally incomplete replicated input, retained outside canonical history with explicit reason and release state. |
+| `sync_quarantine` | `operational-projection` | `mutable` | Invalid or causally incomplete replicated input, retained outside canonical history with explicit reason and release state. Independent-session erasure deletes rows whose envelope belongs to that session but blocks when a retained envelope for another session contains its ID. |
 | `sync_branch_mappings` | `operational-projection` | `mutable` | Deterministic source-to-derived branch routing for offline divergent origin streams. Canonical source events plus envelope parents reproduce it. |
 | `sync_reconciliations` | `operational-projection` | `mutable` | Surfaced duplicate intents, divergent advances, rejected mutations, and task claims. A user resolution is explicit metadata; it never rewrites canonical history or silently chooses a claim. |
-| `data_manifests` | `operational-projection` | `mutable` | Ownership-checked export/deletion plan enumerating workspace/profile/artifact/replica resources and unsupported remote deletion. It is not evidence that a planned physical operation completed. |
+| `data_manifests` | `operational-projection` | `mutable` | Ownership-checked export/deletion plan enumerating workspace/profile/artifact resources, every replica status/watermark/catalog placement, managed URLs and unaddressable identities. Planned/blocked/partial is never evidence that physical deletion completed. |
 | `sqlite_sequence` | `engine-metadata` | `mutable` | SQLite-owned allocator created by `events.sequence INTEGER PRIMARY KEY AUTOINCREMENT`. It preserves increasing local cursors and is recoverable from the greatest retained sequence under SQLite rules. Application/model code must not mutate it directly. |
 
 ### Allowed classification vocabulary
@@ -120,3 +120,9 @@ Forbidden:
 - generated console DML/DDL or private operational table access;
 - treating a mutable row as proof when the corresponding event is absent;
 - changing a classification without documenting recovery/authority consequences.
+
+
+## Explicit physical erasure exception
+
+The append-only guards above remain mandatory while data is retained. The sole scoped exception is
+`LibSqlStorage.assertIndependentSessionErasable` plus `eraseIndependentSession`, operator-only capabilities absent from generated code and remote relational RPC. The first is non-mutating and protects CAS from later relational refusal; erasure repeats the check. Architecture checking audits the exact session predicate plus the transactional drop/recreate pair for `events_no_delete` and `context_no_delete`. Linked, replicated, harness/refinement, retained-event, or hidden retained-quarantine references return `CAPABILITY_UNAVAILABLE`; selected-session quarantine is deleted with the other operational rows. Whole-workspace deletion closes the database and removes its physical files; it does not issue ordinary canonical-table mutations.

@@ -52,6 +52,8 @@ export interface SyncReplicaStatsRecord {
 export interface WorkspaceReplicaStatusRecord {
   readonly replicaId: string; readonly replicaIncarnation: string | null;
   readonly workspaceId: string; readonly deviceId: string;
+  /** Durable local placement evidence; never an authentication value. */
+  readonly replicaUrl: string | null;
   readonly syncUrl: string | null; readonly credentialReference: string | null;
   readonly lifecycle: SyncReplicaLifecycle; readonly lastAttemptAt: string | null;
   readonly lastSuccessAt: string | null; readonly lastError: string | null;
@@ -96,6 +98,23 @@ export interface DataManifestRecord {
   readonly createdAt: string; readonly completedAt: string | null;
 }
 
+/** Result of the deliberately narrow, administrative physical session erasure path. */
+export interface SessionErasureResult {
+  readonly sessionId: string;
+  readonly deletedEvents: number;
+  readonly deletedRows: Readonly<Record<string, number>>;
+}
+
+/**
+ * Optional local administrative operation. It is intentionally absent from the
+ * ordinary domain contract and every remote relational RPC surface.
+ */
+export interface PhysicalDataControlStorageOperations {
+  /** Non-mutating refusal check used before deleting external CAS objects. */
+  assertIndependentSessionErasable(sessionId: string): Promise<void>;
+  eraseIndependentSession(sessionId: string): Promise<SessionErasureResult>;
+}
+
 /** Private administrative operations used by the optional synchronization service. */
 export interface SyncStorageOperations {
   readonly deviceId: string;
@@ -107,6 +126,8 @@ export interface SyncStorageOperations {
   getDirectBranchTip(sessionId: string, branchId: string): Promise<AgentEvent | null>;
   getEventCursor(eventId: string): Promise<string | null>;
   getReplicaStatus(replicaId: string): Promise<WorkspaceReplicaStatusRecord | null>;
+  /** Enumerates every durable replica identity for a workspace, including inactive configurations. */
+  listReplicaStatuses(workspaceId: string): Promise<WorkspaceReplicaStatusRecord[]>;
   putReplicaStatus(status: WorkspaceReplicaStatusRecord): Promise<void>;
   getSyncReceipt(envelopeId: string): Promise<SyncIngestReceiptRecord | null>;
   getSyncReceiptForEvent(eventId: string): Promise<SyncIngestReceiptRecord | null>;
@@ -167,6 +188,9 @@ export interface AgentStorage {
  rebuildOperationalProjections?: RecursiveStorageOperations["rebuildOperationalProjections"];
  /** Rebuilds the disposable FTS5 candidate index from harness projections. */
  rebuildMemoryCandidateIndex?: () => Promise<void>;
+ /** Local-only destructive administration; never exposed through generated code or relational RPC. */
+ assertIndependentSessionErasable?: PhysicalDataControlStorageOperations["assertIndependentSessionErasable"];
+ eraseIndependentSession?: PhysicalDataControlStorageOperations["eraseIndependentSession"];
 }
 
 export function requireRecursiveStorage(storage: AgentStorage): AgentStorage & RecursiveStorageOperations {

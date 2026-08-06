@@ -149,13 +149,15 @@ Plain text is committed as a user message and followed by one model turn. Comman
 | `/complete-goal <id>` | Run current-version completion gates for a goal. |
 | `/cell <typescript>` | Execute one disposable-console cell and print its result. |
 | `/branch <cursor> [name]` | Fork at a historical cursor and switch this TUI to the child. |
+| `/resume [branch]` | Rebuild and reattach to a retained durable branch without taking execution ownership. |
+| `/compact` | Create an immutable deterministic extractive summary linked to retained source messages. |
 | `/sync` / `/sync-status` | Run a manual directional push/pull cycle or inspect truthful capabilities/lifecycle. |
 | `/conflicts` | List unresolved divergence/claim/intent reconciliation. |
 | `/resolve-conflict <id> <json>` | Record an explicit typed conflict resolution. |
 | `/help` | Print command help. |
 | `/quit`, `/exit` | Close the TUI. |
 
-The current TUI is a basic in-process supervisor client. It does not yet consume the HTTP/SSE transport, render live token streaming, expose unknown-effect reconciliation, or implement the remaining richer PRD commands (`resume`, `compact`). Sync and conflict views are available. Those limitations are intentional and visible rather than implied capabilities.
+The TUI is a basic in-process client of the same supervisor services and committed event source; it never owns or closes session lifecycle. It supports resume and source-preserving compaction and writes committed `ModelOutputChunk` records as they arrive. Current providers emit one chunk only after provider completion, so this is resumable committed-output display, not a claim of provider token streaming. The TUI does not yet use the HTTP/SSE transport or expose unknown-effect reconciliation; those limitations are visible rather than implied capabilities.
 
 ## Providers
 
@@ -181,3 +183,35 @@ Opening a supervisor runs recovery by default:
 A live database poller also fires schedules that become due after startup; `heartbeatPollIntervalMs` configures its cadence and `Supervisor.close()` stops it. Cancellation intents interrupted by a crash resume leaf-first before queued effects are drained.
 
 Pass `recover: false` only from controlled tests or tooling that deliberately owns recovery. See [Crash recovery](./recovery.md).
+
+
+## Ownership-aware export and physical deletion
+
+Deletion is terminal and fail-closed. Plan/export manifests do not delete anything. Use the explicit
+command with an exact confirmation string:
+
+```sh
+# Independent, unreplicated session (shared artifact bytes are retained):
+bun run src/cli.ts delete-data --workspace demo --scope session --scope-id "$SESSION" \
+  --confirmation "DELETE session $SESSION" --receipt-dir .agencity/deletion-receipts
+
+# Whole local workspace. The CAS-root ownership assertion is mandatory:
+bun run src/cli.ts delete-data --workspace demo --scope workspace --scope-id demo \
+  --confirmation "DELETE workspace demo" --receipt-dir .agencity/deletion-receipts \
+  --exclusive-artifacts
+```
+
+Workspace/profile erasure requires an external receipt directory; it may not be inside the artifact root. Whole-workspace deletion removes the local workspace DB, exact LibSQL sidecars, every durable local replica path, the official Turso Sync `-wal`, `-wal-revert`, `-info`, `-changes`, replace-base/allowlisted backup and `.db-log` files, and the entire explicitly exclusive CAS root; similarly named unrelated sentinels are retained. Receipt removed-lists contain only entries found absent after the attempt. A permission failure leaves the catalog owned (not tombstoned), so fix the filesystem and repeat the same confirmed request. Session deletion preflights links before touching CAS, removes only artifact objects with no retained local reference, then rechecks and transactionally erases rows. Linked/recursive, replicated, harness/quarantine-referenced, or otherwise cross-referenced sessions return `CAPABILITY_UNAVAILABLE` without losing their artifacts.
+
+Remote-managed status is durable evidence, not current configuration: every replica-status row, progress/watermark, profile catalog URL/reference, and the old adjacent default path is consulted after reopen. Data-plane sync authentication is not Cloud administrative authority. A workspace delete is blocked unless an operator supplies a separately authenticated `ManagedReplicaDeletionAdmin`, every managed identity has an addressable sync URL, and the adapter returns a receipt for every distinct URL. Retries reuse stable scope/owner/URL idempotency keys. Remote session/profile granularity is unavailable. New workspaces cannot silently reuse a successful deletion tombstone, whose placement and credential-reference fields are scrubbed.
+
+Deletion also quiesces outbox admission and refuses while an executor is running or a claim is being admitted; retry only after that effect has a durable outcome.
+
+Credential-free official-server conformance:
+
+```sh
+TURSO_SYNC_SERVER_BIN=/absolute/path/to/official-v0.7.2/tursodb \
+  bun run test:turso-official
+```
+
+See [Full-system PRD acceptance](./full-system-acceptance.md) for the exact harness and current evidence.

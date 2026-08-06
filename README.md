@@ -6,11 +6,11 @@ Agencity implements Delivery Slices 1–4 of the [Prime Agent TypeScript/Turso r
 
 ## Delivery Slice 4 status
 
-Slices 1–3 provide recoverable execution, recursive agents, and relational continual-harness refinement. Slice 4 adds stable profile/device identity, a separate profile catalog/preferences/global-skill/credential-reference database, optional Turso Cloud envelope exchange through the pinned official `@tursodatabase/sync@0.7.2` adapter, deterministic replicated-envelope validation/ingestion, offline divergent branches, duplicate-intent and task-claim reconciliation, sync lifecycle/status/discovery, and ownership-aware export/deletion manifests.
+Slices 1–3 provide recoverable execution, recursive agents, and relational continual-harness refinement. Slice 4 adds stable profile/device identity, a separate profile catalog/preferences/global-skill/credential-reference database, optional Turso Cloud envelope exchange through the pinned official `@tursodatabase/sync@0.7.2` adapter, deterministic replicated-envelope validation/ingestion, offline divergent branches, duplicate-intent and task-claim reconciliation, sync lifecycle/status/discovery, ownership-aware export, and retryable physical deletion for supported owned scopes. Destructive planning follows durable historical replica/catalog evidence rather than only the current transport and requires a separate authenticated admin for every managed URL.
 
 The installed adapter exposes real directional `push()`, `pull()`, `checkpoint()`, and `stats()` primitives. A deferred URL keeps initialization local-only, and each cycle pushes staged local CDC before pulling conflict-resolved state, so Cloud failure never blocks or erases canonical local writes. Distributed coordination is still unavailable and reported as such. Conflicting offline task claims stay unresolved until an explicit user resolution event. See [ADR 0003](./docs/decisions/0003-turso-envelope-sync.md) and the [operator guide](./docs/operator-guide.md).
 
-This is not the whole PRD. PostgreSQL, semantic/embedding retrieval, remote artifacts/executors, Cloud administrative deletion, and a hostile-code sandbox remain later work. `bun run verify` covers local, deterministic multi-replica, offline/conflict/restart/protocol, and real-adapter failure/incarnation tests; a real Cloud smoke is opt-in and credential-gated.
+This is not the whole PRD. PostgreSQL, semantic/embedding retrieval, a production Cloud administrative-deletion adapter, and a hostile-code sandbox remain later work. HTTP relational, object-CAS, candidate-index, and sandbox-executor placement adapters ship behind explicit capability contracts. `bun run verify` covers local, deterministic multi-replica, offline/conflict/restart/protocol, and real-adapter failure/incarnation tests; a real Cloud smoke is opt-in and credential-gated.
 
 ## Requirements and install
 
@@ -130,3 +130,4 @@ The architecture check validates package entrypoints, domain dependency directio
 - [Consequential decisions and unsupported capabilities](./docs/decisions/0001-slice-1-boundaries.md)
 - [Slice 3 relational memory and refinement decision](./docs/decisions/0002-relational-memory-refinement.md)
 - [Slice 1 acceptance mapping and verification](./docs/slice-1-verification.md)
+- [Full-system PRD acceptance matrix and official-server evidence](./docs/full-system-acceptance.md)

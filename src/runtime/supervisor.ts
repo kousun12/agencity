@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { LocalArtifactStore } from "../artifacts/index.ts";
 import { ConsoleCellError, ConsoleProcess } from "../console/index.ts";
 import {
@@ -29,7 +30,7 @@ import {
   type ProviderConcurrency,
 } from "../executors/index.ts";
 import { LibSqlStorage, ProfileStore, TursoSyncTransport, type AgentStorage } from "../storage/index.ts";
-import { SyncService, type DeviceIdentity, type SyncTransport } from "../sync/index.ts";
+import { SyncService, type DeleteOwnedDataInput, type DeviceIdentity, type ManagedReplicaDeletionAdmin, type PhysicalDeletionReceipt, type SyncTransport } from "../sync/index.ts";
 import { ContextMaterializer } from "./context.ts";
 import { ModelLoop } from "./model-loop.ts";
 import { OutboxRunner } from "./outbox.ts";
@@ -48,6 +49,8 @@ import { SubagentSpecService } from "./specs.ts";
 export interface SupervisorOptions {
   readonly databaseUrl: string;
   readonly artifactDirectory: string;
+  /** Defaults to shared/fail-closed; assert exclusive only for a workspace-owned CAS root. */
+  readonly artifactDirectoryOwnership?: "exclusive" | "shared";
   readonly workspaceRoot?: string;
   readonly restartConsoleAfterCell?: boolean;
   readonly modelProviders?: readonly ModelProvider[];
@@ -77,6 +80,8 @@ export interface SupervisorOptions {
     readonly startup?: boolean;
     /** Deterministic in-process transports can be injected for conformance tests. */
     readonly transport?: SyncTransport;
+    /** Separate authenticated control plane; sync credentials alone cannot delete Cloud data. */
+    readonly remoteDeletionAdmin?: ManagedReplicaDeletionAdmin;
   };
 }
 
@@ -130,6 +135,7 @@ export class Supervisor {
   readonly specs: SubagentSpecService;
   readonly restartConsoleAfterCell: boolean;
   readonly #cells = new BranchQueue();
+  #closed = false;
 
   private constructor(
     storage: AgentStorage,
@@ -168,19 +174,24 @@ export class Supervisor {
   }
 
   static async open(options: SupervisorOptions): Promise<Supervisor> {
-    await mkdir(options.artifactDirectory, { recursive: true });
     const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
-    await mkdir(workspaceRoot, { recursive: true });
-    const profile = await ProfileStore.open(options.profileDatabaseUrl ?? adjacentFileUrl(options.databaseUrl, ".profile.db"));
+    const profileDatabaseUrl=options.profileDatabaseUrl??adjacentFileUrl(options.databaseUrl,".profile.db");
+    if(profileDatabaseUrl.startsWith("file:"))await mkdir(dirname(fileURLToPath(new URL(profileDatabaseUrl))),{recursive:true});
+    const profile = await ProfileStore.open(profileDatabaseUrl);
     const device = await profile.getOrCreateDeviceIdentity(options.deviceName);
+    const openingWorkspaceId=options.sync?.workspaceId??"default";const catalog=await profile.getWorkspace(openingWorkspaceId);
+    if(catalog?.deletedAt){profile.close();throw new ValidationError("Configured workspace is tombstoned and cannot be silently reclaimed",{workspaceId:openingWorkspaceId,deletedAt:catalog.deletedAt});}
     if (options.sync?.credentialReference && !await profile.getCredentialReference(options.sync.credentialReference)) {
       profile.close();
       throw new ValidationError(`Unknown profile credential reference: ${options.sync.credentialReference}`);
     }
+    await mkdir(options.artifactDirectory,{recursive:true});
+    await mkdir(workspaceRoot,{recursive:true});
     const storage = new LibSqlStorage({ url: options.databaseUrl, deviceId: device.deviceId });
     await storage.migrate();
+    const replicaUrl = options.sync?.replicaUrl ?? (options.sync?.syncUrl ? adjacentFileUrl(options.databaseUrl, ".sync-replica.db") : undefined);
     const transport = options.sync?.transport ?? (options.sync?.syncUrl ? new TursoSyncTransport({
-      replicaUrl: options.sync.replicaUrl ?? adjacentFileUrl(options.databaseUrl, ".sync-replica.db"),
+      replicaUrl: replicaUrl!,
       syncUrl: options.sync.syncUrl,
       ...(options.sync.authToken === undefined ? {} : { authToken: options.sync.authToken }),
     }) : undefined);
@@ -190,13 +201,20 @@ export class Supervisor {
       ...(options.sync?.workspaceName === undefined ? {} : { workspaceName: options.sync.workspaceName }),
       databaseUrl: options.databaseUrl,
       artifactDirectory: options.artifactDirectory,
+      ...(options.artifactDirectoryOwnership === undefined ? {} : { artifactDirectoryOwnership: options.artifactDirectoryOwnership }),
       ...(options.sync?.syncUrl === undefined ? {} : { syncUrl: options.sync.syncUrl }),
-      ...(options.sync?.replicaUrl === undefined ? {} : { replicaUrl: options.sync.replicaUrl }),
+      ...(replicaUrl === undefined ? {} : { replicaUrl }),
       ...(options.sync?.credentialReference === undefined ? {} : { credentialReference: options.sync.credentialReference }),
+      ...(options.sync?.remoteDeletionAdmin === undefined ? {} : { remoteDeletionAdmin: options.sync.remoteDeletionAdmin }),
       ...(options.sync?.intervalMs === undefined ? {} : { intervalMs: options.sync.intervalMs }),
       ...(transport === undefined ? {} : { transport }),
     });
-    await sync.start(options.sync?.startup ?? true);
+    try { await sync.start(options.sync?.startup ?? true); }
+    catch (error) {
+      await sync.stop().catch(() => {});
+      storage.close();profile.close();
+      throw error;
+    }
     const artifacts = new LocalArtifactStore(options.artifactDirectory);
     const providers: ModelProvider[] = [new EchoModelProvider(), ...(options.modelProviders ?? [])];
     if (process.env.OPENAI_API_KEY) {
@@ -242,6 +260,8 @@ export class Supervisor {
   }
 
   async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
     await this.heartbeats.close();
     await this.console.stop();
     await this.models.close();
@@ -250,12 +270,30 @@ export class Supervisor {
     this.profile.close();
   }
 
+  /** Quiesces all workers before invoking the terminal physical deletion path. */
+  async deleteOwnedData(input: DeleteOwnedDataInput): Promise<PhysicalDeletionReceipt> {
+    if (this.#closed) throw new ValidationError("Supervisor is closed");
+    await this.heartbeats.close();
+    await this.console.stop();
+    await this.models.close();
+    await this.outbox.quiesceForDeletion();
+    try { return await this.sync.deleteOwnedData(input); }
+    finally {
+      await this.sync.stop().catch(() => {});
+      this.storage.close();this.profile.close();this.#closed = true;
+    }
+  }
+
   async createSession(options: CreateSessionOptions): Promise<{ sessionId: string; branchId: string }> {
     if (this.sync.capabilities.configured && options.workspaceId !== this.sync.workspaceId) {
       throw new ValidationError(`Configured cloud replica belongs to workspace ${this.sync.workspaceId}, not ${options.workspaceId}`);
     }
     const now = new Date().toISOString();
     const catalog = await this.profile.getWorkspace(options.workspaceId);
+    if (catalog?.ownerProfileId !== undefined && catalog.ownerProfileId !== this.device.profileId) {
+      throw new ValidationError("Workspace is owned by another profile", { workspaceId: options.workspaceId, ownerProfileId: catalog.ownerProfileId, profileId: this.device.profileId });
+    }
+    if (catalog?.deletedAt) throw new ValidationError("Workspace was deleted and cannot be silently reclaimed", { workspaceId: options.workspaceId, deletedAt: catalog.deletedAt });
     if (!catalog) await this.profile.putWorkspace({ workspaceId: options.workspaceId, name: options.workspaceId, databaseUrl: this.sync.databaseUrl, replicaUrl: null, syncUrl: null, credentialReference: null, ownerProfileId: this.device.profileId, createdAt: now, updatedAt: now, deletedAt: null });
     const sessionId = options.sessionId ?? newId();
     const branchId = options.branchId ?? newId();
@@ -290,6 +328,21 @@ export class Supervisor {
     }]);
     if (!event) throw new Error("Message not committed");
     return event as AgentEvent<"MessageAppended">;
+  }
+
+  /** Rebuilds and reattaches to a durable branch without changing execution ownership. */
+  async resume(sessionId:string,branchId:string):Promise<{sessionId:string;branchId:string;cursor:string}>{const events=await this.storage.loadEvents(sessionId,{branchId});if(!events.length)throw new NotFoundError("session branch",`${sessionId}/${branchId}`);const state=await this.projections.rebuild(sessionId,branchId);return{sessionId,branchId,cursor:state.cursor};}
+
+  /** Creates an immutable, source-linked deterministic extractive summary; source messages remain canonical. */
+  async compact(sessionId: string, branchId: string): Promise<{ contextId: string; sourceEventIds: string[]; summary: string }> {
+    const events=await this.storage.loadEvents(sessionId,{branchId});if(!events.length)throw new NotFoundError("session branch",`${sessionId}/${branchId}`);
+    const messages=events.filter(event=>event.type==="MessageAppended");const source=messages.slice(0,Math.max(0,messages.length-20));
+    if(!source.length)throw new CapabilityUnavailableError("compaction before more than 20 retained messages exist","deterministic-extractive-v1");
+    const summary=source.map(event=>{const payload=event.payload as {role:string;content:string};return `[${payload.role}] ${payload.content.slice(0,500)}`;}).join("\n").slice(0,64*1024);
+    const contextId=newId();const context=JSON.parse(JSON.stringify({kind:"compaction",strategy:"deterministic-extractive-v1",summary,sourceEventIds:source.map(event=>event.id),sourceCount:source.length})) as JsonValue;
+    const encoded=JSON.stringify(context);const hasher=new Bun.CryptoHasher("sha256");hasher.update(encoded);const contentHash=hasher.digest("hex");
+    await this.storage.appendEvents([{sessionId,branchId,type:"ContextMaterialized",producer:"supervisor",idempotencyKey:`compaction:${contextId}`,payload:{contextId,records:source.map(event=>({eventId:event.id,type:event.type,schemaVersion:event.schemaVersion,reason:"compaction source retained"})),contentHash,context}}]);
+    return{contextId,sourceEventIds:source.map(event=>event.id),summary};
   }
 
   async fork(sessionId: string, parentBranchId: string, forkCursor: string, name?: string): Promise<string> {

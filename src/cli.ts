@@ -31,6 +31,8 @@ Commands:
   sync-stats
   sync-status
   conflicts
+  delete-data --scope workspace|session|profile --scope-id ID \
+    --confirmation 'DELETE <scope> <id>' [--receipt-dir PATH]
 
 Global options:
   --state-dir PATH
@@ -40,6 +42,7 @@ Global options:
   --profile PATH
   --sync-url libsql://... [--replica PATH] [--credential-ref HANDLE] [--sync-interval MS]
   --restart-console-after-cell
+  --exclusive-artifacts   assert the configured CAS directory is workspace-owned
   --help
 
 Use -- before positional TEXT/CODE that begins with --.`);
@@ -55,17 +58,18 @@ const syncUrl = option("sync-url", process.env.TURSO_DATABASE_URL);
 const supervisor = await Supervisor.open({
   databaseUrl: `file:${database}`,
   artifactDirectory: artifacts,
+  artifactDirectoryOwnership: has("exclusive-artifacts") ? "exclusive" : "shared",
   workspaceRoot,
   restartConsoleAfterCell: has("restart-console-after-cell"),
   ...(option("profile") ? { profileDatabaseUrl: `file:${resolve(option("profile")!)}` } : {}),
-  ...(syncUrl ? { sync: {
+  sync: {
     workspaceId: option("workspace", "default")!,
-    syncUrl,
+    ...(syncUrl ? { syncUrl } : {}),
     ...(option("replica") ? { replicaUrl: `file:${resolve(option("replica")!)}` } : {}),
     ...(process.env.TURSO_AUTH_TOKEN ? { authToken: process.env.TURSO_AUTH_TOKEN } : {}),
     ...(option("credential-ref") ? { credentialReference: option("credential-ref")! } : {}),
     ...(option("sync-interval") ? { intervalMs: Number(option("sync-interval")) } : {}),
-  } } : {}),
+  },
 });
 const sessionId = option("session");
 const branchId = option("branch");
@@ -112,6 +116,10 @@ try {
     console.log(JSON.stringify(await supervisor.sync.status(), null, 2));
   } else if (command === "conflicts") {
     console.log(JSON.stringify(await supervisor.sync.conflicts("unresolved"), null, 2));
+  } else if (command === "delete-data") {
+    const scope=required(option("scope"),"scope") as "workspace"|"session"|"profile";
+    const scopeId=required(option("scope-id"),"scope-id");
+    console.log(JSON.stringify(await supervisor.deleteOwnedData({scopeKind:scope,scopeId,requestedBy:"cli-owner",confirmation:required(option("confirmation"),"confirmation"),...(option("receipt-dir")?{receiptDirectory:resolve(option("receipt-dir")!)}:{})}),null,2));
   } else if (command === "tui") {
     required(sessionId, "session");
     required(branchId, "branch");

@@ -1,12 +1,12 @@
 import { createClient, type Client, type InValue, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { ConflictError, NotFoundError, ValidationError, newId, projectEvents, reduceAgentState, validateNewEvent } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, NotFoundError, ValidationError, newId, projectEvents, reduceAgentState, validateNewEvent } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateRecord, GoalRecord,
   HeartbeatRecord, InputSetRecord, MailboxRecord, OutboxRecord, ReadonlyStatement,
   RecursiveModelRecord, SessionRecord, StorageCapabilities, TaskRecord,
-  DataManifestRecord, SyncBranchMappingRecord, SyncConflictRecord, SyncIngestReceiptRecord,
+  DataManifestRecord, SessionErasureResult, SyncBranchMappingRecord, SyncConflictRecord, SyncIngestReceiptRecord,
   SyncOriginWatermarkRecord, SyncQuarantineRecord, WorkspaceReplicaStatusRecord,
 } from "./contract.ts";
 import { containsBrokeredSecret } from "../security/index.ts";
@@ -50,6 +50,7 @@ function rowToRecursiveModel(row: Row): RecursiveModelRecord { return { handleId
 function rowToReplicaStatus(row: Row): WorkspaceReplicaStatusRecord { return {
   replicaId:String(row.replica_id), replicaIncarnation:row.replica_incarnation===null?null:String(row.replica_incarnation),
   workspaceId:String(row.workspace_id), deviceId:String(row.device_id),
+  replicaUrl:row.replica_url===null||row.replica_url===undefined?null:String(row.replica_url),
   syncUrl:row.sync_url===null?null:String(row.sync_url), credentialReference:row.credential_reference===null?null:String(row.credential_reference),
   lifecycle:String(row.lifecycle) as WorkspaceReplicaStatusRecord["lifecycle"], lastAttemptAt:row.last_attempt_at===null?null:String(row.last_attempt_at),
   lastSuccessAt:row.last_success_at===null?null:String(row.last_success_at), lastError:row.last_error===null?null:String(row.last_error),
@@ -89,6 +90,7 @@ export class LibSqlStorage implements AgentStorage {
   readonly #writes = new LocalWriteQueue();
   readonly #deviceIdSupplied: boolean;
   #deviceId: string;
+  #closed = false;
   constructor(options: LibSqlStorageOptions | string) {
     const supplied = typeof options === "string" ? { url: options } : options;
     const { deviceId, url } = supplied;
@@ -108,6 +110,7 @@ export class LibSqlStorage implements AgentStorage {
       { version: 3, name: "slice2-review-hardening", url: new URL("./migrations/003_slice2_review_hardening.sql", import.meta.url) },
       { version: 4, name: "relational-memory-refinement", url: new URL("./migrations/004_relational_memory_refinement.sql", import.meta.url) },
       { version: 5, name: "turso-cloud-sync", url: new URL("./migrations/005_turso_cloud_sync.sql", import.meta.url) },
+      { version: 6, name: "data-control-evidence", url: new URL("./migrations/006_data_control_evidence.sql", import.meta.url) },
     ];
     for (const migration of migrations) {
       const applied = await this.#client.execute({ sql: "SELECT version FROM schema_migrations WHERE version=?", args: [migration.version] });
@@ -124,7 +127,7 @@ export class LibSqlStorage implements AgentStorage {
       args: [this.#deviceId],
     });
   }
-  close(): void { this.#client.close(); }
+  close(): void { if (this.#closed) return; this.#closed = true; this.#client.close(); }
   onCommitted(listener: (events: readonly AgentEvent[]) => void): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   async appendEvents(rawEvents: readonly NewAgentEvent[]): Promise<AgentEvent[]> {
     if (rawEvents.length === 0) return [];
@@ -794,7 +797,8 @@ export class LibSqlStorage implements AgentStorage {
     return result.rows[0] ? cursorOf(Number(result.rows[0].sequence)) : null;
   }
   async getReplicaStatus(replicaId: string): Promise<WorkspaceReplicaStatusRecord | null> { const r=await this.#client.execute({sql:"SELECT * FROM workspace_replica_status WHERE replica_id=?",args:[replicaId]});return r.rows[0]?rowToReplicaStatus(r.rows[0]):null; }
-  async putReplicaStatus(s: WorkspaceReplicaStatusRecord): Promise<void> { await this.#writes.run(async()=>{await this.#client.execute({sql:`INSERT INTO workspace_replica_status(replica_id,replica_incarnation,workspace_id,device_id,sync_url,credential_reference,lifecycle,last_attempt_at,last_success_at,last_error,last_stats_json,staged_envelopes,ingested_envelopes,quarantined_envelopes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(replica_id) DO UPDATE SET replica_incarnation=excluded.replica_incarnation,workspace_id=excluded.workspace_id,device_id=excluded.device_id,sync_url=excluded.sync_url,credential_reference=excluded.credential_reference,lifecycle=excluded.lifecycle,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error=excluded.last_error,last_stats_json=excluded.last_stats_json,staged_envelopes=excluded.staged_envelopes,ingested_envelopes=excluded.ingested_envelopes,quarantined_envelopes=excluded.quarantined_envelopes,updated_at=excluded.updated_at`,args:[s.replicaId,s.replicaIncarnation,s.workspaceId,s.deviceId,s.syncUrl,s.credentialReference,s.lifecycle,s.lastAttemptAt,s.lastSuccessAt,s.lastError,s.lastStats===null?null:json(s.lastStats),s.stagedEnvelopes,s.ingestedEnvelopes,s.quarantinedEnvelopes,s.updatedAt]});}); }
+  async listReplicaStatuses(workspaceId: string): Promise<WorkspaceReplicaStatusRecord[]> { const r=await this.#client.execute({sql:"SELECT * FROM workspace_replica_status WHERE workspace_id=? ORDER BY updated_at,replica_id",args:[workspaceId]});return r.rows.map(rowToReplicaStatus); }
+  async putReplicaStatus(s: WorkspaceReplicaStatusRecord): Promise<void> { await this.#writes.run(async()=>{await this.#client.execute({sql:`INSERT INTO workspace_replica_status(replica_id,replica_incarnation,workspace_id,device_id,replica_url,sync_url,credential_reference,lifecycle,last_attempt_at,last_success_at,last_error,last_stats_json,staged_envelopes,ingested_envelopes,quarantined_envelopes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(replica_id) DO UPDATE SET replica_incarnation=excluded.replica_incarnation,workspace_id=excluded.workspace_id,device_id=excluded.device_id,replica_url=COALESCE(excluded.replica_url,workspace_replica_status.replica_url),sync_url=COALESCE(excluded.sync_url,workspace_replica_status.sync_url),credential_reference=COALESCE(excluded.credential_reference,workspace_replica_status.credential_reference),lifecycle=excluded.lifecycle,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error=excluded.last_error,last_stats_json=excluded.last_stats_json,staged_envelopes=excluded.staged_envelopes,ingested_envelopes=excluded.ingested_envelopes,quarantined_envelopes=excluded.quarantined_envelopes,updated_at=excluded.updated_at`,args:[s.replicaId,s.replicaIncarnation,s.workspaceId,s.deviceId,s.replicaUrl,s.syncUrl,s.credentialReference,s.lifecycle,s.lastAttemptAt,s.lastSuccessAt,s.lastError,s.lastStats===null?null:json(s.lastStats),s.stagedEnvelopes,s.ingestedEnvelopes,s.quarantinedEnvelopes,s.updatedAt]});}); }
   async getSyncReceipt(envelopeId:string):Promise<SyncIngestReceiptRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_ingest_receipts WHERE envelope_id=?",args:[envelopeId]});return r.rows[0]?rowToReceipt(r.rows[0]):null;}
   async getSyncReceiptForEvent(eventId:string):Promise<SyncIngestReceiptRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_ingest_receipts WHERE event_id=? ORDER BY ingested_at,envelope_id LIMIT 1",args:[eventId]});return r.rows[0]?rowToReceipt(r.rows[0]):null;}
   async putSyncReceipt(x:SyncIngestReceiptRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_ingest_receipts(envelope_id,digest,origin_device_id,origin_sequence,event_id,source_branch_id,mapped_branch_id,ingested_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(envelope_id) DO NOTHING",args:[x.envelopeId,x.digest,x.originDeviceId,x.originSequence,x.eventId,x.sourceBranchId,x.mappedBranchId,x.ingestedAt]});});}
@@ -813,6 +817,106 @@ export class LibSqlStorage implements AgentStorage {
   async putDataManifest(x:DataManifestRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO data_manifests(manifest_id,operation,scope_kind,scope_id,requested_by,owned,resources_json,replica_status_json,status,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",args:[x.manifestId,x.operation,x.scopeKind,x.scopeId,x.requestedBy,x.owned?1:0,json(x.resources),json(x.replicaStatus),x.status,x.createdAt,x.completedAt]});});}
   async getDataManifest(manifestId:string):Promise<DataManifestRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM data_manifests WHERE manifest_id=?",args:[manifestId]});return r.rows[0]?rowToManifest(r.rows[0]):null;}
   async completeDataManifest(manifestId:string,status:"completed"|"partial"|"blocked",resources:JsonValue,completedAt:string):Promise<DataManifestRecord>{return this.#writes.run(async()=>{const changed=await this.#client.execute({sql:"UPDATE data_manifests SET status=?,resources_json=?,completed_at=? WHERE manifest_id=? AND status='planned'",args:[status,json(resources),completedAt,manifestId]});if(changed.rowsAffected!==1)throw new ConflictError("Data manifest is not pending completion",{manifestId});const r=await this.#client.execute({sql:"SELECT * FROM data_manifests WHERE manifest_id=?",args:[manifestId]});return rowToManifest(r.rows[0]!);});}
+
+  /**
+   * Physically erases one independent local session. Cross-session graphs,
+   * harness/refinement state, and replicated sessions are deliberately refused:
+   * pretending to erase those granularities would leave canonical references.
+   * The immutable-table guards are removed and recreated inside one write
+   * transaction, so retained history is never exposed without append-only guards.
+   */
+  async assertIndependentSessionErasable(sessionId: string): Promise<void> {
+    if (!sessionId.trim()) throw new ValidationError("Session ID is required");
+    await this.#writes.run(async () => { await this.#assertIndependentSessionErasable(sessionId); });
+  }
+  async #assertIndependentSessionErasable(sessionId: string): Promise<void> {
+    const sessionResult = await this.#client.execute({ sql: "SELECT * FROM sessions WHERE session_id=?", args: [sessionId] });
+    const session = sessionResult.rows[0];
+    if (!session) throw new NotFoundError("session", sessionId);
+    const linked = await this.#client.execute({
+      sql: `SELECT
+        (SELECT count(*) FROM sessions WHERE parent_session_id=? OR (session_id=? AND parent_session_id IS NOT NULL)) AS session_links,
+        (SELECT count(*) FROM tasks WHERE parent_session_id=? OR child_session_id=?) AS task_links,
+        (SELECT count(*) FROM mailbox_messages WHERE from_session_id=? OR to_session_id=?) AS mailbox_links,
+        (SELECT count(*) FROM terminal_notices WHERE parent_session_id=? OR child_session_id=?) AS notice_links,
+        (SELECT count(*) FROM recursive_model_handles WHERE parent_session_id=? OR child_session_id=?) AS model_links,
+        (SELECT count(*) FROM candidate_allocations WHERE session_id=?) AS allocation_links,
+        (SELECT count(*) FROM sync_branch_mappings WHERE session_id=?) AS branch_mapping_links,
+        (SELECT count(*) FROM sync_reconciliations WHERE session_id=?) AS reconciliation_links,
+        (SELECT count(*) FROM sync_ingest_receipts r JOIN events e ON e.id=r.event_id WHERE e.session_id=?) AS replica_links,
+        (SELECT count(*) FROM sync_quarantine q
+           WHERE (
+             EXISTS (SELECT 1 FROM json_tree(q.envelope_json) value WHERE value.atom=?) OR
+             EXISTS (SELECT 1 FROM json_tree(q.envelope_json) value WHERE value.atom IN (SELECT branch_id FROM branches WHERE session_id=?)) OR
+             EXISTS (SELECT 1 FROM json_tree(q.envelope_json) value WHERE value.atom IN (SELECT id FROM events WHERE session_id=?))
+           ) AND COALESCE(json_extract(q.envelope_json,'$.body.sessionId'),'')<>?) AS retained_quarantine_links,
+        (SELECT count(*) FROM events retained
+           WHERE retained.session_id<>? AND (
+             retained.causation_id IN (SELECT id FROM events WHERE session_id=?) OR
+             retained.correlation_id IN (SELECT id FROM events WHERE session_id=?) OR
+             retained.stream_parent_id IN (SELECT id FROM events WHERE session_id=?) OR
+             EXISTS (SELECT 1 FROM json_tree(retained.payload_json) value WHERE value.atom=?) OR
+             EXISTS (SELECT 1 FROM json_tree(retained.payload_json) value WHERE value.atom IN (SELECT branch_id FROM branches WHERE session_id=?)) OR
+             EXISTS (SELECT 1 FROM json_tree(retained.payload_json) value WHERE value.atom IN (SELECT id FROM events WHERE session_id=?))
+           )) AS retained_event_links`,
+      args: [sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId],
+    });
+    const links = linked.rows[0]!;
+    if (Object.values(links).some((value) => Number(value) > 0)) {
+      throw new CapabilityUnavailableError("physical deletion of linked or replicated session scope", this.name);
+    }
+    const unsupportedTypes = [
+      "HarnessVersionCreated", "HarnessVersionStatusChanged", "RefinementProposed", "RefinementValidated",
+      "RefinementCandidateActivated", "RefinementCandidateAllocated", "RefinementCandidateExposed",
+      "RefinementObservationRecorded", "RefinementDecided", "RefinementApproved",
+      "RefinementRollbackApproved", "RefinementRolledBack", "SkillInvocationRecorded", "SkillTestRecorded",
+      "SubagentSpecInvoked", "SyncConflictResolved",
+    ];
+    const unsupported = await this.#client.execute({
+      sql: `SELECT type FROM events WHERE session_id=? AND type IN (${unsupportedTypes.map(() => "?").join(",")}) LIMIT 1`,
+      args: [sessionId, ...unsupportedTypes],
+    });
+    if (unsupported.rows.length) {
+      throw new CapabilityUnavailableError("physical deletion of session-scoped harness or reconciliation history", this.name);
+    }
+  }
+  async eraseIndependentSession(sessionId: string): Promise<SessionErasureResult> {
+    if (!sessionId.trim()) throw new ValidationError("Session ID is required");
+    return this.#writes.run(async () => {
+      // Recheck after the external CAS pass so any intervening durable link
+      // refuses relational erasure rather than leaving a hidden dangling row.
+      await this.#assertIndependentSessionErasable(sessionId);
+
+      const tx = await this.#client.transaction("write");
+      const counts: Record<string, number> = {};
+      const remove = async (table: string, sql: string, args: InValue[] = []): Promise<void> => {
+        const result = await tx.execute({ sql, args });
+        counts[table] = (counts[table] ?? 0) + result.rowsAffected;
+      };
+      try {
+        // These two guards are the only immutable-row guards touched. DDL and
+        // erasure are transaction-local; rollback restores both rows and guards.
+        await tx.execute("DROP TRIGGER events_no_delete");
+        await tx.execute("DROP TRIGGER context_no_delete");
+        await remove("goal_gates", "DELETE FROM goal_gates WHERE goal_id IN (SELECT goal_id FROM goals WHERE session_id=?)", [sessionId]);
+        await remove("input_set_chunks", "DELETE FROM input_set_chunks WHERE input_set_id IN (SELECT input_set_id FROM input_sets WHERE session_id=?)", [sessionId]);
+        await remove("document_chunks", "DELETE FROM document_chunks WHERE document_id IN (SELECT document_id FROM documents WHERE session_id=?)", [sessionId]);
+        await remove("sync_quarantine", "DELETE FROM sync_quarantine WHERE json_extract(envelope_json,'$.body.sessionId')=?", [sessionId]);
+        for (const table of ["heartbeats", "goals", "input_sets", "documents", "outbox", "snapshots", "context_records", "branches"]) {
+          await remove(table, `DELETE FROM ${table} WHERE session_id=?`, [sessionId]);
+        }
+        await remove("sessions", "DELETE FROM sessions WHERE session_id=?", [sessionId]);
+        await remove("events", "DELETE FROM events WHERE session_id=?", [sessionId]);
+        await tx.execute("CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'canonical events are append-only'); END");
+        await tx.execute("CREATE TRIGGER context_no_delete BEFORE DELETE ON context_records BEGIN SELECT RAISE(ABORT,'context records are immutable'); END");
+        await tx.commit();
+      } catch (error) {
+        if (!tx.closed) await tx.rollback();
+        throw error;
+      } finally { tx.close(); }
+      return { sessionId, deletedEvents: counts.events ?? 0, deletedRows: counts };
+    });
+  }
 
   async readonlyQuery(statement: ReadonlyStatement): Promise<JsonValue[]> {
     assertReadonlySql(statement.sql);

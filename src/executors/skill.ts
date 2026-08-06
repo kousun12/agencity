@@ -63,6 +63,10 @@ async function runCase(runnerPath: string, input: JsonValue, cwd: string, signal
   catch { return {ok:false,error:"Skill returned malformed JSON",logs,cancelled:false}; }
 }
 async function spawn(command: string[], cwd: string, signal: AbortSignal): Promise<{exitCode:number;stdout:string;stderr:string;cancelled:boolean}> {
+  // AbortSignal does not replay an already-fired abort event to a listener added
+  // later. Check before every compiler/runtime subprocess so cancellation in the
+  // narrow handoff between phases cannot accidentally launch the next phase.
+  if(signal.aborted)return{exitCode:143,stdout:"",stderr:"",cancelled:true};
   const child = Bun.spawn(command,{cwd,stdout:"pipe",stderr:"pipe",env:environmentWithoutSecrets()});
   let cancelled=false,timedOut=false; const abort=()=>{cancelled=true;child.kill();}; signal.addEventListener("abort",abort,{once:true}); const timer=setTimeout(()=>{timedOut=true;child.kill();},30_000);
   try { const [exitCode,out,err]=await Promise.all([child.exited,new Response(child.stdout).arrayBuffer(),new Response(child.stderr).arrayBuffer()]); const decode=(value:ArrayBuffer)=>scrubText(new TextDecoder().decode(value.slice(0,MAX_OUTPUT_BYTES))); return {exitCode,stdout:decode(out),stderr:timedOut ? `${decode(err)}\nTimed out` : decode(err),cancelled}; }

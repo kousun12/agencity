@@ -19,6 +19,8 @@ export class OutboxRunner {
   readonly #executors = new Map<string, EffectExecutor>();
   readonly #controllers = new Map<string, AbortController>();
   readonly #inflight = new Map<string, Promise<ExecutionResult>>();
+  #claimAdmissions = 0;
+  #deletionQuiesced = false;
   readonly owner = `runner-${newId()}`;
 
   constructor(readonly storage: AgentStorage, executors: readonly EffectExecutor[]) {
@@ -26,6 +28,7 @@ export class OutboxRunner {
   }
 
   async request(request: EffectRequest): Promise<string> {
+    if (this.#deletionQuiesced) throw new ValidationError("Outbox is quiesced for physical deletion");
     if (!request.idempotencyKey) throw new ValidationError("Effect requests require an idempotency key");
     if (containsBrokeredSecret(request.input)) throw new ValidationError("Brokered credentials cannot be stored in effect requests");
     // The durable handle is a pure function of the idempotency scope. A retry must
@@ -51,6 +54,7 @@ export class OutboxRunner {
   }
 
   run(effectId: string): Promise<ExecutionResult> {
+    if (this.#deletionQuiesced) throw new ValidationError("Outbox is quiesced for physical deletion");
     const inflight = this.#inflight.get(effectId);
     if (inflight) return inflight;
     // Publish the promise before the first storage await so concurrent callers in
@@ -95,14 +99,38 @@ export class OutboxRunner {
   }
 
   async drain(limit = 100): Promise<number> {
+    if (this.#deletionQuiesced) throw new ValidationError("Outbox is quiesced for physical deletion");
     let count = 0;
     while (count < limit) {
-      const [record] = await this.storage.claimOutbox(this.owner, 1);
+      this.#claimAdmissions++;
+      let record: OutboxRecord | undefined;
+      try { [record] = await this.storage.claimOutbox(this.owner, 1); }
+      finally { this.#claimAdmissions--; }
       if (!record) break;
+      if (this.#deletionQuiesced) {
+        // The claim has attempt=0 and no executor was admitted. Returning it to
+        // pending is safe even for a non-idempotent request.
+        await this.storage.resetOutbox(record.effectId);
+        throw new ValidationError("Outbox was quiesced before the claimed effect started");
+      }
       await this.#startExecution(record);
       count++;
     }
     return count;
+  }
+
+  /** Stops new effects and fails closed if an effect could still touch physical data. */
+  async quiesceForDeletion(): Promise<void> {
+    this.#deletionQuiesced = true;
+    const running = await this.storage.listOutbox(["running"]);
+    if (this.#claimAdmissions || this.#inflight.size || running.length) {
+      this.#deletionQuiesced = false;
+      throw new ValidationError("Physical deletion refused while outbox effects are running or being admitted", {
+        claimAdmissions: this.#claimAdmissions,
+        inFlightEffectIds: [...this.#inflight.keys()].sort(),
+        runningEffectIds: running.map((row) => row.effectId).sort(),
+      });
+    }
   }
 
   cancel(effectId: string): boolean {
@@ -113,6 +141,7 @@ export class OutboxRunner {
   }
 
   #startExecution(record: OutboxRecord): Promise<ExecutionResult> {
+    if (this.#deletionQuiesced) return Promise.reject(new ValidationError("Outbox is quiesced for physical deletion"));
     const existing = this.#inflight.get(record.effectId);
     if (existing) return existing;
     const promise = this.#execute(record).finally(() => this.#inflight.delete(record.effectId));

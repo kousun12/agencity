@@ -182,3 +182,12 @@ All session mutation routes require `?branch=:branch` and return durable JSON re
 `AgentClient` supplies the corresponding `memoryCreate`, `memorySearch`, `memoryList`, `refine`, `validateRefinement`, `activateRefinement`, `allocateRefinement`, `observeRefinement`, `approveRefinement`, `decideRefinement`, `approveRollback`, `rollback`, `harnessList/history`, `invokeSkill/testSkill`, and `spawnSpec` methods.
 
 The private console RPC injects `sdk.memory`, `sdk.harness`, `sdk.skills`, and `sdk.specs`. Those facades call the same supervisor services; they do not expose SQL writes or evaluator/user-owned validation, activation, allocation, observation, decision, approval, or rollback. `sdk.harness.list/history` are scope-filtered model views: active authorized entries plus only an exact exposed candidate allocation. The raw `sql` tag remains a shared trusted-local, non-confidential diagnostic read and can inspect non-private cross-workspace/candidate projections; exposure is behavioral isolation, not secrecy. Agent direct-memory creation is local-only with source-trajectory evidence. The TUI adds `/memory`, `/skills`, `/refine`, `/rollback`, `/skill-test`, and `/skill` commands. JSON arguments preserve the same typed lifecycle instead of creating a TUI-only mutation path.
+
+
+## Physical deletion route
+
+`POST /sync/delete` accepts `{ scopeKind, scopeId, requestedBy, confirmation, receiptDirectory? }`
+and returns `PhysicalDeletionReceipt`. `confirmation` must exactly equal
+`DELETE <scopeKind> <scopeId>`. The call quiesces worker/outbox admission and refuses while an effect is running or being claimed. The serving process must treat a destructive attempt as terminal for that runtime. Foreign ownership is a validation failure; durable remote evidence without authenticated, fully addressable administration and unsupported local/remote granularity are `CAPABILITY_UNAVAILABLE`. Completed/partial receipts enumerate observed removals, including all per-URL admin receipts. The typed client method is `AgentClient.deleteOwnedData`.
+
+`POST /sessions/:id/resume?branch=...` rebuilds and reattaches to a retained branch; `POST /sessions/:id/compact?branch=...` creates a source-linked immutable extractive summary. Typed client methods are `AgentClient.resume` and `AgentClient.compact`.

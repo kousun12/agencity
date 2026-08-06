@@ -254,6 +254,18 @@ for (const table of immutableTables) {
 for (const file of sourceFiles) {
   const source = await Bun.file(file).text();
   const fileRel = rel(file);
+  let checkedSource = source;
+  if (fileRel === "storage/libsql.ts") {
+    const erasureStatement = "DELETE FROM events WHERE session_id=?";
+    const requiredGuards = [
+      "async eraseIndependentSession", "DROP TRIGGER events_no_delete",
+      "CREATE TRIGGER events_no_delete BEFORE DELETE ON events",
+      "DROP TRIGGER context_no_delete", "CREATE TRIGGER context_no_delete BEFORE DELETE ON context_records",
+    ];
+    if (source.split(erasureStatement).length !== 2 || requiredGuards.some((marker) => !source.includes(marker))) {
+      violations.push("storage/libsql.ts: scoped erasure must retain its exact audited statement and transactional immutable guards");
+    } else checkedSource = source.replace(erasureStatement, "AUDITED_PHYSICAL_SESSION_ERASURE");
+  }
   for (const table of immutableTables) {
     const target = `(?:["\`\\[])?(?:main\\s*\\.\\s*)?${escapeRegExp(table)}(?:["\`\\]])?`;
     const destructive = new RegExp(
@@ -261,7 +273,7 @@ for (const file of sourceFiles) {
       `DELETE\\s+FROM\\s+${target}|REPLACE\\s+(?:INTO\\s+)?${target})\\b`,
       "i",
     );
-    if (destructive.test(source)) violations.push(`${fileRel}: forbidden mutation of immutable table ${table}`);
+    if (destructive.test(checkedSource)) violations.push(`${fileRel}: forbidden mutation of immutable table ${table}`);
     const insert = new RegExp(
       `\\bINSERT\\s+(?:OR\\s+(?:ROLLBACK|ABORT|FAIL|IGNORE|REPLACE)\\s+)?INTO\\s+${target}\\b`,
       "i",

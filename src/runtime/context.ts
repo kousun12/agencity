@@ -40,6 +40,7 @@ export class ContextMaterializer {
     }
 
     const messages = state.messages.slice(-20);
+    const compactions=events.filter(event=>event.type==="ContextMaterialized"&&(event.payload as any).context?.kind==="compaction").slice(-3).map(event=>({eventId:event.id,...((event.payload as any).context as Record<string,JsonValue>)}));
     const selected = new Map<string, { event: AgentEvent; reason: string }>();
     const add = (event: AgentEvent | undefined | null, reason: string) => { if (event) selected.set(event.id,{event,reason}); };
     add(events.find((event) => event.type === "SessionCreated"), "session model, workspace, and budget policy");
@@ -109,6 +110,7 @@ export class ContextMaterializer {
         skills: skills.map(publicSkill),
         subagentSpecs: specs.map(publicSpec),
       },
+      compactions,
       messages:messages.map((message)=>({role:message.role,content:message.content,eventId:message.eventId})),
       workingValues:Object.values(state.workingValues).map((value)=>({name:value.name,version:value.version,value:value.value,eventId:value.eventId})),artifacts:Object.values(state.artifacts),
       recentActivity:activity.map((event)=>({eventId:event.id,type:event.type,payload:event.payload})),

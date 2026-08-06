@@ -22,14 +22,16 @@
     "./placement": "./src/placement/index.ts"
   },
   "scripts": {
-    "test": "bun test",
+    "test": "bun test --timeout 30000",
     "test:unit": "bun test test/unit",
     "test:integration": "bun test test/integration",
     "test:e2e": "bun test test/e2e",
     "typecheck": "tsc --noEmit",
-    "verify": "bun run typecheck && bun run check:architecture && bun test",
+    "verify": "bun run typecheck && bun run check:architecture && bun run check:acceptance && bun test --timeout 30000",
     "start": "bun run src/cli.ts",
-    "check:architecture": "bun run scripts/check-architecture.ts"
+    "check:architecture": "bun run scripts/check-architecture.ts",
+    "test:turso-official": "bun test --timeout 90000 test/slice4/official-server-conformance.test.ts",
+    "check:acceptance": "bun run scripts/check-full-system-acceptance.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",

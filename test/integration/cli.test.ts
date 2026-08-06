@@ -65,5 +65,9 @@ describe("CLI option parsing", () => {
     ]);
     expect(history).toMatchObject({ code: 0, stderr: "" });
     expect(history.stdout).toContain("SessionCreated");
+
+    const deleted=await cli(["delete-data","--state-dir",stateDir,"--workspace","cli-test","--scope","session","--scope-id",ids.sessionId,"--confirmation",`DELETE session ${ids.sessionId}`,"--receipt-dir",join(stateDir,"deletion-receipts")]);
+    expect(deleted).toMatchObject({code:0,stderr:""});expect(JSON.parse(deleted.stdout).status).toBe("completed");
+    const missing=await cli(["snapshot","--state-dir",stateDir,"--workspace","cli-test","--session",ids.sessionId,"--branch",ids.branchId]);expect(missing.code).not.toBe(0);expect(missing.stderr).toContain("not found");
   });
 });

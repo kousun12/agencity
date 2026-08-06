@@ -175,6 +175,57 @@ export interface SyncStatusView {
   readonly quarantineCount: number;
 }
 
+/** Operator-supplied, authenticated control-plane adapter; data-plane sync is insufficient. */
+export interface ManagedReplicaDeletionAdmin {
+  readonly name: string;
+  readonly capabilities: {
+    readonly authenticatedAdministration: true;
+    readonly deleteWorkspaceReplica: boolean;
+  };
+  deleteWorkspaceReplica(input: {
+    readonly workspaceId: string;
+    readonly syncUrl: string;
+    readonly requestedBy: string;
+    /** Stable scope/owner/URL deletion identity; adapters must return the same provider receipt on retry. */
+    readonly idempotencyKey: string;
+  }): Promise<{ readonly receiptId: string; readonly deletedAt: string }>;
+}
+
+export interface DeleteOwnedDataInput {
+  readonly scopeKind: "workspace" | "session" | "profile";
+  readonly scopeId: string;
+  readonly requestedBy: string;
+  /** Must exactly equal `DELETE <scopeKind> <scopeId>`. */
+  readonly confirmation: string;
+  /** Required for workspace/profile erasure because their database receipt disappears. */
+  readonly receiptDirectory?: string;
+}
+
+export interface PhysicalDeletionReceipt {
+  readonly version: 1;
+  readonly manifestId: string;
+  readonly scopeKind: DeleteOwnedDataInput["scopeKind"];
+  readonly scopeId: string;
+  readonly requestedBy: string;
+  readonly ownerProfileId: string;
+  readonly status: "executing" | "completed" | "partial" | "blocked";
+  readonly createdAt: string;
+  readonly completedAt: string | null;
+  readonly receiptPath: string | null;
+  readonly removed: {
+    readonly databaseFiles: readonly string[];
+    readonly replicaFiles: readonly string[];
+    readonly artifactFiles: readonly string[];
+    readonly rows: Readonly<Record<string, number>>;
+  };
+  readonly retainedSharedArtifacts: readonly string[];
+  /** First receipt retained for backwards-compatible single-replica consumers. */
+  readonly remoteAdminReceipt: { readonly adapter: string; readonly receiptId: string; readonly deletedAt: string } | null;
+  /** One receipt for every distinct durable managed sync URL. */
+  readonly remoteAdminReceipts: readonly { readonly adapter: string; readonly syncUrl: string; readonly receiptId: string; readonly deletedAt: string }[];
+  readonly error: string | null;
+}
+
 export function stableJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;

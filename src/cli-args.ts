@@ -1,13 +1,14 @@
 export const CLI_COMMANDS = [
-  "help", "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve", "sync", "sync-push", "sync-pull", "sync-checkpoint", "sync-stats", "sync-status", "conflicts",
+  "help", "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve", "sync", "sync-push", "sync-pull", "sync-checkpoint", "sync-stats", "sync-status", "conflicts", "delete-data",
 ] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
 const VALUE_OPTIONS = new Set([
   "state-dir", "db", "artifacts", "workspace-root", "workspace",
   "session", "branch", "cursor", "name", "port", "profile", "sync-url", "replica", "credential-ref", "sync-interval",
+  "scope", "scope-id", "confirmation", "receipt-dir",
 ]);
-const BOOLEAN_OPTIONS = new Set(["help", "restart-console-after-cell"]);
+const BOOLEAN_OPTIONS = new Set(["help", "restart-console-after-cell", "exclusive-artifacts"]);
 
 export interface ParsedCliArgs {
   readonly command: CliCommand;

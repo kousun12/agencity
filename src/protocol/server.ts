@@ -28,6 +28,7 @@ export class ProtocolServer {
         if (request.method === "POST" && parts[1] === "conflicts" && parts[2] && parts[3] === "resolve") return Response.json(await this.supervisor.sync.resolveConflict(parts[2], await jsonBody(request) as any));
         if (request.method === "GET" && parts[1] === "workspaces") return Response.json(await this.supervisor.sync.discoverCloudWorkspaces(url.searchParams.get("refresh") === "1"));
         if (request.method === "POST" && parts[1] === "export") { const body=await jsonBody(request); return Response.json(await this.supervisor.sync.exportBundle(String(body.destination??""),String(body.scopeKind) as any,String(body.scopeId??""),String(body.requestedBy??""))); }
+        if (request.method === "POST" && parts[1] === "delete") { const body=await jsonBody(request); return Response.json(await this.supervisor.deleteOwnedData({scopeKind:String(body.scopeKind) as any,scopeId:String(body.scopeId??""),requestedBy:String(body.requestedBy??""),confirmation:String(body.confirmation??""),...(body.receiptDirectory===undefined?{}:{receiptDirectory:String(body.receiptDirectory)})})); }
         if (request.method === "POST" && parts[1] === "manifests") { const body=await jsonBody(request); return Response.json(await this.supervisor.sync.createManifest(String(body.operation) as any,String(body.scopeKind) as any,String(body.scopeId??""),String(body.requestedBy??""))); }
       }
       if (request.method === "POST" && url.pathname === "/sessions") {
@@ -58,6 +59,8 @@ export class ProtocolServer {
         if (request.method === "POST" && parts[2] === "turns" && branchId) return Response.json(await this.supervisor.modelLoop.turn(sessionId, branchId));
         if (request.method === "POST" && parts[2] === "cells" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.executeCell(sessionId, branchId, String(body.code ?? ""))); }
         if (request.method === "POST" && parts[2] === "branches" && branchId) { const body = await jsonBody(request); return Response.json({ branchId: await this.supervisor.fork(sessionId, branchId, String(body.cursor), typeof body.name === "string" ? body.name : undefined) }); }
+        if (request.method === "POST" && parts[2] === "resume" && branchId) return Response.json(await this.supervisor.resume(sessionId,branchId));
+        if (request.method === "POST" && parts[2] === "compact" && branchId) return Response.json(await this.supervisor.compact(sessionId,branchId));
 
         // Slice 3 relational memory, measured harness refinement, exact skill
         // versions, and pinned reusable subagent specifications.

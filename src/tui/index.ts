@@ -13,7 +13,7 @@ export class TerminalUI {
         if (!line) continue;
         if (line === "/quit" || line === "/exit") break;
         if (line === "/help") {
-          output.write("/history /budget /snapshot /tree /tasks /goals /heartbeats /memory [query] /skills /refine <json> /rollback <proposal> <reason> /skill-test <entry> [version] /skill <entry> <json-input> /sync /sync-status /conflicts /resolve-conflict <id> <json> /cancel-task <id> [reason] /complete-goal <id> /cell <ts> /branch <cursor> [name] /quit\n");
+          output.write("/history /budget /snapshot /tree /tasks /goals /heartbeats /memory [query] /skills /refine <json> /rollback <proposal> <reason> /skill-test <entry> [version] /skill <entry> <json-input> /sync /sync-status /conflicts /resolve-conflict <id> <json> /cancel-task <id> [reason] /complete-goal <id> /cell <ts> /branch <cursor> [name] /resume [branch] /compact /quit\n");
           continue;
         }
         if (line === "/history") { for (const event of await this.supervisor.projections.history(sessionId, branch)) output.write(`${event.cursor} ${event.type} ${JSON.stringify(event.payload)}\n`); continue; }
@@ -37,9 +37,11 @@ export class TerminalUI {
         if (line.startsWith("/complete-goal ")) { const goalId = line.slice(15).trim(); if (goalId) output.write(`${JSON.stringify(await this.supervisor.goals.requestCompletion(sessionId, branch, goalId), null, 2)}\n`); continue; }
         if (line.startsWith("/cell ")) { const result = await this.supervisor.executeCell(sessionId, branch, line.slice(6)); output.write(`${JSON.stringify(result, null, 2)}\n`); continue; }
         if (line.startsWith("/branch ")) { const [, cursor, ...name] = line.split(/\s+/); if (!cursor) continue; branch = await this.supervisor.fork(sessionId, branch, cursor, name.join(" ") || undefined); output.write(`switched to branch ${branch}\n`); continue; }
+        if (line === "/resume" || line.startsWith("/resume ")) { const requested=line.slice(7).trim()||branch;try{const resumed=await this.supervisor.resume(sessionId,requested);branch=requested;output.write(`resumed ${sessionId}/${branch} at ${resumed.cursor}\n`);}catch{output.write(`branch not found: ${requested}\n`);}continue; }
+        if (line === "/compact") { output.write(`${JSON.stringify(await this.supervisor.compact(sessionId,branch),null,2)}\n`);continue; }
         await this.supervisor.appendMessage(sessionId, branch, "user", line);
-        const result = await this.supervisor.modelLoop.turn(sessionId, branch);
-        output.write(`${result.message ?? `[${result.outcome}] ${result.error ?? ""}`}\n`);
+        let streamed=false;const unsubscribe=this.supervisor.storage.onCommitted(events=>{for(const event of events)if(event.sessionId===sessionId&&event.branchId===branch&&event.type==="ModelOutputChunk"){streamed=true;output.write((event.payload as {text:string}).text);}});
+        try{const result = await this.supervisor.modelLoop.turn(sessionId, branch);output.write(streamed?"\n":`${result.message ?? `[${result.outcome}] ${result.error ?? ""}`}\n`);}finally{unsubscribe();}
       }
     } finally { rl.close(); }
   }

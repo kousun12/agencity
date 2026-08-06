@@ -86,6 +86,7 @@ function rowToWorkspace(row: Row): WorkspaceCatalogEntry { return {
 /** LibSQL-backed profile DB. It stores opaque credential references, never credential values. */
 export class ProfileStore implements ProfileDatabase {
   readonly #client: Client;
+  #closed = false;
   constructor(readonly url: string) { this.#client=createClient({url}); }
   static async open(url: string): Promise<ProfileStore> { const value=new ProfileStore(url);await value.migrate();return value; }
   async migrate():Promise<void>{await this.#client.executeMultiple(PROFILE_SCHEMA);}
@@ -113,8 +114,8 @@ export class ProfileStore implements ProfileDatabase {
   async putWorkspace(x:WorkspaceCatalogEntry):Promise<void>{if(x.syncUrl)assertSafeRemoteUrl(x.syncUrl);await this.#client.execute({sql:"INSERT INTO workspace_catalog(workspace_id,name,database_url,replica_url,sync_url,credential_reference,owner_profile_id,created_at,updated_at,deleted_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET name=excluded.name,database_url=excluded.database_url,replica_url=excluded.replica_url,sync_url=excluded.sync_url,credential_reference=excluded.credential_reference,owner_profile_id=excluded.owner_profile_id,updated_at=excluded.updated_at,deleted_at=excluded.deleted_at",args:[x.workspaceId,x.name,x.databaseUrl,x.replicaUrl,x.syncUrl,x.credentialReference,x.ownerProfileId,x.createdAt,x.updatedAt,x.deletedAt]});}
   async getWorkspace(workspaceId:string):Promise<WorkspaceCatalogEntry|null>{const r=await this.#client.execute({sql:"SELECT * FROM workspace_catalog WHERE workspace_id=?",args:[workspaceId]});return r.rows[0]?rowToWorkspace(r.rows[0]):null;}
   async listWorkspaces(includeDeleted=false):Promise<WorkspaceCatalogEntry[]>{const r=await this.#client.execute(`SELECT * FROM workspace_catalog${includeDeleted?"":" WHERE deleted_at IS NULL"} ORDER BY workspace_id`);return r.rows.map(rowToWorkspace);}
-  async markWorkspaceDeleted(workspaceId:string,deletedAt:string):Promise<void>{const r=await this.#client.execute({sql:"UPDATE workspace_catalog SET deleted_at=?,updated_at=? WHERE workspace_id=? AND deleted_at IS NULL",args:[deletedAt,deletedAt,workspaceId]});if(r.rowsAffected!==1)throw new ConflictError("Workspace is missing or already deleted",{workspaceId});}
-  close():void{this.#client.close();}
+  async markWorkspaceDeleted(workspaceId:string,deletedAt:string):Promise<void>{const r=await this.#client.execute({sql:"UPDATE workspace_catalog SET name='',database_url='',replica_url=NULL,sync_url=NULL,credential_reference=NULL,deleted_at=?,updated_at=? WHERE workspace_id=? AND deleted_at IS NULL",args:[deletedAt,deletedAt,workspaceId]});if(r.rowsAffected!==1)throw new ConflictError("Workspace is missing or already deleted",{workspaceId});}
+  close():void{if(this.#closed)return;this.#closed=true;this.#client.close();}
 }
 
 export interface TursoSyncTransportOptions {
