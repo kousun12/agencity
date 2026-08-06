@@ -85,7 +85,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Proposed | FU-004 |
 | FU-015 | Keep detached sessions executing in a background service | In progress | FU-001, FU-004 |
 | FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | Proposed | FU-003, FU-004 |
-| FU-017 | Add skill creation, installation, and management as a product surface | Proposed | FU-004 |
+| FU-017 | Add skill creation, installation, and management as a product surface | In progress | FU-004 |
 | FU-018 | Stream provider output incrementally to attached clients | Done | FU-003 |
 | FU-019 | Add automatic and agent-directed context compaction | Proposed | FU-003, FU-004 |
 
@@ -876,7 +876,7 @@ A user runs `/refine`, optionally with instructions, and a refiner model call re
 
 ## FU-017 — Add skill creation, installation, and management as a product surface
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
