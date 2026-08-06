@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
 import { LibSqlStorage } from "../../src/storage/index.ts";
-import { ExecutionLeaseService } from "../../src/runtime/execution-leases.ts";
+import { ExecutionLeaseService, ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "../../src/runtime/execution-leases.ts";
+import { AgentService } from "../../src/runtime/agents.ts";
 import { makeTempRuntime, removeTempRuntime, seedSession, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -197,6 +198,25 @@ describe("transactional process execution fencing", () => {
       },
     });
     expect(await service.get({ kind: "root", rootSessionId: "remote-root" })).toBeNull();
+  });
+
+  test("fences one atomic child admission whose later events target the staged child session", async () => {
+    const value = await temp("agencity-process-lease-staged-child-");
+    const store = await storage(value);
+    await seedSession(store, { sessionId: "root-staged", workspaceId: "workspace-1" });
+    const coordinator = await ManagedExecutionLeaseCoordinator.open(store, {
+      workspaceId: "workspace-1",
+      ownerProcessId: "managed-staged-child",
+      leaseMs: 10_000,
+      renewalIntervalMs: 9_000,
+    });
+    try {
+      const fenced = createFencedAgentStorage(store, coordinator);
+      const child = await new AgentService(fenced).spawn("root-staged", "main", { task: "atomic child", name: "staged-child" });
+      expect(coordinator.rootSessionIds).toEqual(["root-staged"]);
+      expect(await store.getSession(child.sessionId)).toMatchObject({ rootSessionId: "root-staged", parentSessionId: "root-staged" });
+      expect((await store.loadEvents(child.sessionId, { branchId: child.branchId })).map(event => event.type)).toEqual(["SessionCreated", "MessageAppended"]);
+    } finally { await coordinator.close(); }
   });
 
   test("rejects malformed clocks, durations, scopes, and cross-owner handles", async () => {

@@ -133,6 +133,8 @@ describe("product CLI", () => {
     expect(parseCliArgs(["--demo", "create", "a", "parser"])).toMatchObject({ command: "product", positionals: ["create", "a", "parser"] });
 
     expect(parseCliArgs(["run", "fix", "it", "--model", "openai/gpt-test"])).toMatchObject({ command: "run", positionals: ["fix", "it"] });
+    expect(parseCliArgs(["history", "current"])).toMatchObject({ command: "history", positionals: ["current"] });
+    expect(parseCliArgs(["branch", "head", "named-fork"])).toMatchObject({ command: "branch", positionals: ["head", "named-fork"] });
     expect(parseCliArgs(["new", "write", "docs"])).toMatchObject({ command: "new", positionals: ["write", "docs"] });
     expect(parseCliArgs(["skills", "install", "./bundle", "--scope", "profile", "--confirmation", "abc"])).toMatchObject({ command: "skills", positionals: ["install", "./bundle"] });
     expect(parseCliArgs(["--", "run", "the", "benchmark"])).toMatchObject({ command: "product", positionals: ["run", "the", "benchmark"] });
@@ -324,8 +326,9 @@ describe("product CLI", () => {
     const [createdCode] = await invokeTui({ OPENAI_API_KEY: "sk-test-process-only-123456789" });
     expect(createdCode).toBe(0);
     const resumed = await cli(["run", "--workspace", value.workspace, "work while unavailable"], { home: value.home });
-    expect(resumed.code).toBe(0);
+    expect(resumed.code).toBe(1);
     expect(resumed.stdout).toContain("Model: openai/test-model");
+    expect(resumed.stderr).toContain("Run failed");
     expect(resumed.stdout).not.toContain("[UNAVAILABLE]");
     const rows = JSON.parse((await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home })).stdout) as Array<{ model: { provider: string; model: string } }>;
     expect(rows[0]!.model).toEqual({ provider: "openai", model: "test-model" });

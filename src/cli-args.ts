@@ -48,7 +48,8 @@ export function parseCliArgs(args: readonly string[]): ParsedCliArgs {
 
   const argv = recognized.args;
   const first = argv[0];
-  const hasCommand = first !== undefined && !first.startsWith("--") && PRODUCT_ROUTE_COMMANDS.has(first);
+  const productShape = first === "history" ? argv[1] === "current" : first === "branch" ? argv[1] === "head" : true;
+  const hasCommand = first !== undefined && !first.startsWith("--") && PRODUCT_ROUTE_COMMANDS.has(first) && productShape;
   const command: CliCommand = hasCommand ? first as CliCommand : "product";
   return parseOptions(command, argv.slice(hasCommand ? 1 : 0));
 }
