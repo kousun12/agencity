@@ -213,5 +213,3 @@ Credential-free official-server conformance:
 TURSO_SYNC_SERVER_BIN=/absolute/path/to/official-v0.7.2/tursodb \
   bun run test:turso-official
 ```
-
-See [Full-system PRD acceptance](./full-system-acceptance.md) for the exact harness and current evidence.

@@ -48,7 +48,7 @@ The product should let a user:
 
 The model should receive one general generated-execution surface—the TypeScript console. SQL, files, shell effects, artifacts, recursive model calls, subagents, memory, and refinement are typed APIs inside that environment. Product code should not replace this with a growing hard-coded workflow or independent menu of model tools.
 
-Product success is measured through the complete user journey, not only through storage, reducer, or service tests. Do not optimize for a passing component acceptance matrix while leaving onboarding, autonomous execution, interruption, recovery, or resume incomplete.
+Product success is measured through the complete user journey, not only through storage, reducer, or service tests. Do not optimize for passing component tests while leaving onboarding, autonomous execution, interruption, recovery, or resume incomplete.
 
 ## Design constitution
 
@@ -162,7 +162,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 - browser execution;
 - production Cloud administrative deletion through the installed Turso data client.
 
-Do not describe Agencity as a complete autonomous product or production-ready system merely because its runtime acceptance matrix passes.
+Do not describe Agencity as a complete autonomous product or production-ready system merely because its runtime test suite passes.
 
 ## Product completion bar
 
@@ -196,7 +196,6 @@ Individual gates:
 ```sh
 bun run typecheck
 bun run check:architecture
-bun run check:acceptance
 bun test --timeout 30000
 bun run test:unit
 bun run test:integration
@@ -227,7 +226,7 @@ Real Turso Cloud smoke testing is credential-gated and must use a disposable dat
 AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=...   bun test test/slice4/cloud-smoke.test.ts
 ```
 
-Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified merely because a static acceptance checker passed.
+Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified.
 
 ## Architectural map
 
@@ -247,7 +246,6 @@ Primary source areas:
 - `src/cli.ts` / `src/cli-args.ts` — current raw CLI dispatch and parsing.
 - `test/` — unit, integration, end-to-end, slice-specific, adversarial, and placement conformance tests.
 - `scripts/check-architecture.ts` — architectural boundary and schema/table checks.
-- `scripts/check-full-system-acceptance.ts` — statically checks the acceptance evidence matrix, referenced files, and selected structural markers; it does not execute the linked behavioral tests.
 
 The `docs/` tree contains detailed operator, API, protocol, event, table, recovery, security, placement, decision, and verification material. Those documents elaborate implementation mechanics; they do not replace this file as the product/status authority. Update both when behavior changes, and correct a technical document when current code disproves it.
 
@@ -413,7 +411,7 @@ For changes to:
 - CLI/product entrypoint: add black-box tests that do not call supervisor internals or manually inject IDs;
 - security: include adversarial inputs and prove actual known secret values do not escape.
 
-The legacy static acceptance checker confirms that a fixed evidence matrix, file references, and selected source markers exist. It remains part of `bun run verify`, but it does not execute those behavioral tests and does not define product completeness. The product completion bar in this file is authoritative.
+Static structure checks do not replace behavioral tests, black-box product verification, or independent review. The product completion bar in this file is authoritative.
 
 ## Documentation expectations
 
@@ -449,7 +447,7 @@ A change is done when:
 2. Architectural and security invariants still hold.
 3. Relevant automated tests cover success, restart/failure, and adversarial behavior.
 4. Typecheck and architecture checks pass.
-5. This guide, public docs, and acceptance evidence are current.
+5. This guide, public docs, and verification evidence are current.
 6. External tests are either reproduced or clearly reported as skipped/unverified.
 7. Remaining limitations are explicit.
 

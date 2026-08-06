@@ -130,4 +130,3 @@ The architecture check validates package entrypoints, domain dependency directio
 - [Consequential decisions and unsupported capabilities](./docs/decisions/0001-slice-1-boundaries.md)
 - [Slice 3 relational memory and refinement decision](./docs/decisions/0002-relational-memory-refinement.md)
 - [Slice 1 acceptance mapping and verification](./docs/slice-1-verification.md)
-- [Full-system PRD acceptance matrix and official-server evidence](./docs/full-system-acceptance.md)
