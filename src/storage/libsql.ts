@@ -1,6 +1,6 @@
-import { createClient, type Client, type InValue, type Row, type Transaction } from "@libsql/client";
+import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, ExecutionOwnershipConflictError, NotFoundError, ValidationError, newId, projectEvents, reduceAgentState, validateNewEvent } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, ExecutionOwnershipConflictError, NotFoundError, ValidationError, newId, projectEvents, reduceAgentState, validateNewEvent } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
@@ -12,6 +12,20 @@ import type {
   SyncOriginWatermarkRecord, SyncQuarantineRecord, WorkspaceReplicaStatusRecord,
 } from "./contract.ts";
 import { containsBrokeredSecret } from "../security/index.ts";
+
+const SQLITE_BUSY_TIMEOUT_MS = 250;
+const SQLITE_CONTENTION_ATTEMPTS = 8;
+const SQLITE_RETRY_BASE_MS = 4;
+const SQLITE_RETRY_CAP_MS = 100;
+
+type SqliteContentionFailure =
+  | { readonly kind: "ordinary"; readonly operation: string }
+  | {
+    readonly kind: "lease";
+    readonly action: "claim" | "renew" | "release";
+    readonly scopeKind: "workspace" | "root";
+    readonly scopeId: string;
+  };
 
 const cursorOf = (sequence: number) => sequence.toString().padStart(20, "0");
 const sequenceOf = (cursor: string) => { const n = Number(cursor); if (!Number.isSafeInteger(n) || n < 0) throw new ValidationError(`Invalid cursor: ${cursor}`); return n; };
@@ -146,35 +160,124 @@ export class LibSqlStorage implements AgentStorage {
     this.#client = createClient(this.#config);
   }
   get deviceId(): string { return this.#deviceId; }
-  async migrate(): Promise<void> {
-    // Migration files are immutable. Apply each once so ALTER statements remain
-    // safe when a runtime reopens an existing local database.
-    await this.#client.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
-    const migrations = [
-      { version: 1, name: "initial", url: new URL("./migrations/001_initial.sql", import.meta.url) },
-      { version: 2, name: "recursive-sessions", url: new URL("./migrations/002_recursive_sessions.sql", import.meta.url) },
-      { version: 3, name: "slice2-review-hardening", url: new URL("./migrations/003_slice2_review_hardening.sql", import.meta.url) },
-      { version: 4, name: "relational-memory-refinement", url: new URL("./migrations/004_relational_memory_refinement.sql", import.meta.url) },
-      { version: 5, name: "turso-cloud-sync", url: new URL("./migrations/005_turso_cloud_sync.sql", import.meta.url) },
-      { version: 6, name: "data-control-evidence", url: new URL("./migrations/006_data_control_evidence.sql", import.meta.url) },
-      { version: 7, name: "recursive-model-input-results", url: new URL("./migrations/007_recursive_model_input_results.sql", import.meta.url) },
-      { version: 8, name: "process-execution-leases", url: new URL("./migrations/008_process_execution_leases.sql", import.meta.url) },
-      { version: 9, name: "retained-family-messaging", url: new URL("./migrations/009_retained_family_messaging.sql", import.meta.url) },
-      { version: 10, name: "autonomous-goals-schedules", url: new URL("./migrations/010_autonomous_goals_schedules.sql", import.meta.url) },
-    ];
-    for (const migration of migrations) {
-      const applied = await this.#client.execute({ sql: "SELECT version FROM schema_migrations WHERE version=?", args: [migration.version] });
-      if (applied.rows.length) continue;
-      await this.#client.executeMultiple(await Bun.file(migration.url).text());
-      await this.#client.execute({ sql: "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)", args: [migration.version, migration.name, new Date().toISOString()] });
+
+  async #prepareClient(client: Client): Promise<void> {
+    if (client.protocol === "file") {
+      await client.execute(`PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS}`);
+      await client.execute("PRAGMA foreign_keys=ON");
     }
-    // A directly-opened adapter still gets a restart-stable identity. Normal
-    // Supervisor composition supplies the identity from ProfileStore instead.
-    const clocks = await this.#client.execute("SELECT device_id FROM device_clocks ORDER BY rowid LIMIT 1");
-    if (clocks.rows[0] && !this.#deviceIdSupplied) this.#deviceId = String(clocks.rows[0].device_id);
-    await this.#client.execute({
-      sql: "INSERT INTO device_clocks(device_id,next_sequence) SELECT ?,COALESCE(max(sequence),0)+1 FROM events WHERE true ON CONFLICT(device_id) DO NOTHING",
-      args: [this.#deviceId],
+  }
+
+  async #withSqliteRetry<T>(operation: () => Promise<T>, failure: SqliteContentionFailure): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (!isSqliteContention(error)) throw error;
+        if (attempt >= SQLITE_CONTENTION_ATTEMPTS) {
+          const details = {
+            reason: "sqlite_contention_exhausted",
+            attempts: attempt,
+            sqliteCode: sqliteErrorCode(error),
+            ...(failure.kind === "ordinary"
+              ? { operation: failure.operation }
+              : {
+                action: failure.action,
+                scopeKind: failure.scopeKind,
+                scopeId: failure.scopeId,
+              }),
+          };
+          if (failure.kind === "lease") {
+            throw new ExecutionOwnershipConflictError(
+              `Cannot ${failure.action} process execution lease: SQLite contention was not resolved`,
+              details,
+            );
+          }
+          throw new DependencyFailureError("SQLite contention was not resolved within the bounded retry window", details);
+        }
+        const ceiling = Math.min(SQLITE_RETRY_CAP_MS, SQLITE_RETRY_BASE_MS * (2 ** (attempt - 1)));
+        await Bun.sleep(Math.floor(Math.random() * (ceiling + 1)));
+      }
+    }
+  }
+
+  async #execute(statement: InStatement, operation?: string): Promise<ResultSet>;
+  async #execute(sql: string, operation: string): Promise<ResultSet>;
+  async #execute(sql: string, args?: InArgs, operation?: string): Promise<ResultSet>;
+  async #execute(statementOrSql: InStatement | string, argsOrOperation?: InArgs | string, operation = "statement"): Promise<ResultSet> {
+    const args = typeof argsOrOperation === "string" ? undefined : argsOrOperation;
+    const label = typeof argsOrOperation === "string" ? argsOrOperation : operation;
+    return this.#withSqliteRetry(async () => {
+      await this.#prepareClient(this.#client);
+      return typeof statementOrSql === "string"
+        ? this.#client.execute(statementOrSql, args)
+        : this.#client.execute(statementOrSql);
+    }, { kind: "ordinary", operation: label });
+  }
+
+  async #withTransaction<T>(
+    operation: (tx: Transaction) => Promise<T>,
+    failure: SqliteContentionFailure,
+  ): Promise<T> {
+    return this.#withSqliteRetry(async () => {
+      let tx: Transaction | undefined;
+      try {
+        await this.#prepareClient(this.#client);
+        tx = await this.#client.transaction("write");
+        const result = await operation(tx);
+        await tx.commit();
+        return result;
+      } catch (error) {
+        if (tx && !tx.closed) {
+          try { await tx.rollback(); } catch { /* Preserve the boundary's original typed failure. */ }
+        }
+        throw error;
+      } finally {
+        try { tx?.close(); } catch { /* The transaction was already committed or rolled back. */ }
+      }
+    }, failure);
+  }
+
+  async migrate(): Promise<void> {
+    await this.#writes.run(async () => {
+      // WAL lets readers proceed beside the single SQLite writer. busy_timeout is
+      // connection-local, so every retry boundary reapplies it before work begins.
+      if (this.#client.protocol === "file") await this.#execute("PRAGMA journal_mode=WAL", "configure WAL");
+      // Migration files are immutable. Apply each once so ALTER statements remain
+      // safe when a runtime reopens an existing local database.
+      await this.#execute("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)", "bootstrap migrations");
+      const migrations = [
+        { version: 1, name: "initial", url: new URL("./migrations/001_initial.sql", import.meta.url) },
+        { version: 2, name: "recursive-sessions", url: new URL("./migrations/002_recursive_sessions.sql", import.meta.url) },
+        { version: 3, name: "slice2-review-hardening", url: new URL("./migrations/003_slice2_review_hardening.sql", import.meta.url) },
+        { version: 4, name: "relational-memory-refinement", url: new URL("./migrations/004_relational_memory_refinement.sql", import.meta.url) },
+        { version: 5, name: "turso-cloud-sync", url: new URL("./migrations/005_turso_cloud_sync.sql", import.meta.url) },
+        { version: 6, name: "data-control-evidence", url: new URL("./migrations/006_data_control_evidence.sql", import.meta.url) },
+        { version: 7, name: "recursive-model-input-results", url: new URL("./migrations/007_recursive_model_input_results.sql", import.meta.url) },
+        { version: 8, name: "process-execution-leases", url: new URL("./migrations/008_process_execution_leases.sql", import.meta.url) },
+        { version: 9, name: "retained-family-messaging", url: new URL("./migrations/009_retained_family_messaging.sql", import.meta.url) },
+        { version: 10, name: "autonomous-goals-schedules", url: new URL("./migrations/010_autonomous_goals_schedules.sql", import.meta.url) },
+      ];
+      for (const migration of migrations) {
+        const script = await Bun.file(migration.url).text();
+        await this.#withTransaction(async (tx) => {
+          const applied = await tx.execute({ sql: "SELECT version FROM schema_migrations WHERE version=?", args: [migration.version] });
+          if (applied.rows.length) return;
+          await tx.executeMultiple(script);
+          await tx.execute({
+            sql: "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
+            args: [migration.version, migration.name, new Date().toISOString()],
+          });
+        }, { kind: "ordinary", operation: `migration ${migration.version}` });
+      }
+      // A directly-opened adapter still gets a restart-stable identity. Normal
+      // Supervisor composition supplies the identity from ProfileStore instead.
+      const clocks = await this.#execute("SELECT device_id FROM device_clocks ORDER BY rowid LIMIT 1", "load device clock");
+      if (clocks.rows[0] && !this.#deviceIdSupplied) this.#deviceId = String(clocks.rows[0].device_id);
+      await this.#execute({
+        sql: "INSERT INTO device_clocks(device_id,next_sequence) SELECT ?,COALESCE(max(sequence),0)+1 FROM events WHERE true ON CONFLICT(device_id) DO NOTHING",
+        args: [this.#deviceId],
+      }, "initialize device clock");
     });
   }
   close(): void { if (this.#closed) return; this.#closed = true; this.#client.close(); }
@@ -317,13 +420,13 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       }
     }
     return this.#writes.run(async () => {
-      const tx = await this.#client.transaction("write"); const committed: AgentEvent[] = [];
-      try {
+      const committed = await this.#withTransaction(async (tx) => {
+        const appended: AgentEvent[] = [];
         if (fence) await this.#assertEventWriteFence(tx, rawEvents, fence);
         else await this.#assertUnfencedEventWriteAllowed(tx, rawEvents);
-        for (const candidate of rawEvents) committed.push(await this.#appendOne(tx, candidate));
-        await tx.commit();
-      } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
+        for (const candidate of rawEvents) appended.push(await this.#appendOne(tx, candidate));
+        return appended;
+      }, { kind: "ordinary", operation: "append events" });
       for (const listener of this.#listeners) listener(committed);
       return committed;
     });
@@ -817,26 +920,29 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const args: InValue[] = [sessionId];
       if (query.afterCursor) { clauses.push("sequence>?"); args.push(sequenceOf(query.afterCursor)); }
       if (query.untilCursor) { clauses.push("sequence<=?"); args.push(sequenceOf(query.untilCursor)); }
-      const result = await this.#client.execute({
+      const result = await this.#execute({
         sql: `SELECT * FROM events WHERE ${clauses.join(" AND ")} ORDER BY sequence`,
         args,
       });
       return result.rows.map(rowToEvent);
     }
-    const events = await this.#loadBranchEvents(this.#client, sessionId, query.branchId, query.untilCursor);
+    const events = await this.#withSqliteRetry(async () => {
+      await this.#prepareClient(this.#client);
+      return this.#loadBranchEvents(this.#client, sessionId, query.branchId!, query.untilCursor);
+    }, { kind: "ordinary", operation: "load branch events" });
     const after = query.afterCursor ? sequenceOf(query.afterCursor) : -1;
     return events.filter((event) => sequenceOf(event.cursor) > after);
   }
-  async getEvent(eventId: string): Promise<AgentEvent|null> { const r=await this.#client.execute({sql:"SELECT * FROM events WHERE id=?",args:[eventId]}); return r.rows[0]?rowToEvent(r.rows[0]):null; }
+  async getEvent(eventId: string): Promise<AgentEvent|null> { const r=await this.#execute({sql:"SELECT * FROM events WHERE id=?",args:[eventId]}); return r.rows[0]?rowToEvent(r.rows[0]):null; }
   async getLatestCursor(sessionId: string, branchId: string): Promise<string|null> { const events=await this.loadEvents(sessionId,{branchId}); return events.at(-1)?.cursor ?? null; }
-  async listBranches():Promise<Array<{sessionId:string;branchId:string}>>{const r=await this.#client.execute("SELECT session_id,branch_id FROM branches ORDER BY session_id,branch_id");return r.rows.map(row=>({sessionId:String(row.session_id),branchId:String(row.branch_id)}));}
-  async saveSnapshot(state: AgentState): Promise<void> { await this.#client.execute({sql:"INSERT INTO snapshots(session_id,branch_id,cursor,reducer_version,state_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(session_id,branch_id) DO UPDATE SET cursor=excluded.cursor,reducer_version=excluded.reducer_version,state_json=excluded.state_json,updated_at=excluded.updated_at",args:[state.sessionId,state.branch.id,state.cursor,state.reducerVersion,json(state),new Date().toISOString()]}); }
-  async loadSnapshot(sessionId:string,branchId:string):Promise<AgentState|null>{const r=await this.#client.execute({sql:"SELECT reducer_version,state_json FROM snapshots WHERE session_id=? AND branch_id=?",args:[sessionId,branchId]});if(!r.rows[0]||Number(r.rows[0].reducer_version)!==4)return null;return JSON.parse(String(r.rows[0].state_json)) as AgentState;}
-  async deleteSnapshots(sessionId?:string):Promise<void>{if(sessionId)await this.#client.execute({sql:"DELETE FROM snapshots WHERE session_id=?",args:[sessionId]});else await this.#client.execute("DELETE FROM snapshots");}
+  async listBranches():Promise<Array<{sessionId:string;branchId:string}>>{const r=await this.#execute("SELECT session_id,branch_id FROM branches ORDER BY session_id,branch_id");return r.rows.map(row=>({sessionId:String(row.session_id),branchId:String(row.branch_id)}));}
+  async saveSnapshot(state: AgentState): Promise<void> { await this.#execute({sql:"INSERT INTO snapshots(session_id,branch_id,cursor,reducer_version,state_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(session_id,branch_id) DO UPDATE SET cursor=excluded.cursor,reducer_version=excluded.reducer_version,state_json=excluded.state_json,updated_at=excluded.updated_at",args:[state.sessionId,state.branch.id,state.cursor,state.reducerVersion,json(state),new Date().toISOString()]}); }
+  async loadSnapshot(sessionId:string,branchId:string):Promise<AgentState|null>{const r=await this.#execute({sql:"SELECT reducer_version,state_json FROM snapshots WHERE session_id=? AND branch_id=?",args:[sessionId,branchId]});if(!r.rows[0]||Number(r.rows[0].reducer_version)!==4)return null;return JSON.parse(String(r.rows[0].state_json)) as AgentState;}
+  async deleteSnapshots(sessionId?:string):Promise<void>{if(sessionId)await this.#execute({sql:"DELETE FROM snapshots WHERE session_id=?",args:[sessionId]});else await this.#execute("DELETE FROM snapshots");}
 
   async getProcessExecutionLease(scope: ProcessExecutionLeaseScope): Promise<ProcessExecutionLeaseRecord | null> {
     const { scopeKind, scopeId } = leaseScopeParts(scope);
-    const result = await this.#client.execute({
+    const result = await this.#execute({
       sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
       args: [scopeKind, scopeId],
     });
@@ -922,7 +1028,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         args: [parts.scopeKind, parts.scopeId],
       });
       return rowToProcessExecutionLease(claimed.rows[0]!);
-    }));
+    }, "claim", parts));
   }
 
   async renewProcessExecutionLease(input: ProcessExecutionLeaseRenewal): Promise<ProcessExecutionLeaseRecord> {
@@ -953,7 +1059,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         args: [parts.scopeKind, parts.scopeId],
       });
       return rowToProcessExecutionLease(renewed.rows[0]!);
-    }));
+    }, "renew", parts));
   }
 
   async releaseProcessExecutionLease(input: ProcessExecutionLeaseProof): Promise<ProcessExecutionLeaseRecord> {
@@ -982,7 +1088,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         args: [parts.scopeKind, parts.scopeId],
       });
       return rowToProcessExecutionLease(released.rows[0]!);
-    }));
+    }, "release", parts));
   }
 
   #leaseExpiry(now: string, leaseMs: number): string {
@@ -1044,189 +1150,154 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     });
   }
 
-  async #withLeaseTransaction<T>(operation: (tx: Transaction) => Promise<T>): Promise<T> {
-    for (let retry = 0; ; retry++) {
-      let tx: Transaction | undefined;
-      try {
-        tx = await this.#client.transaction("write");
-        const result = await operation(tx);
-        await tx.commit();
-        return result;
-      } catch (error) {
-        if (tx && !tx.closed) await tx.rollback();
-        if (!isSqliteBusy(error) || retry >= 100) throw error;
-        await Bun.sleep(Math.min(10, retry + 1));
-      } finally {
-        tx?.close();
-      }
-    }
+  async #withLeaseTransaction<T>(
+    operation: (tx: Transaction) => Promise<T>,
+    action: "claim" | "renew" | "release",
+    scope: { readonly scopeKind: "workspace" | "root"; readonly scopeId: string },
+  ): Promise<T> {
+    return this.#withTransaction(operation, {
+      kind: "lease",
+      action,
+      scopeKind: scope.scopeKind,
+      scopeId: scope.scopeId,
+    });
   }
 
   async claimOutbox(owner: string, limit = 1, leaseMs = 30_000, fence?: ProcessExecutionWriteFence): Promise<OutboxRecord[]> {
-    return this.#writes.run(async () => {
-      const tx = await this.#client.transaction("write");
+    return this.#writes.run(() => this.#withTransaction(async (tx) => {
       const claimed: OutboxRecord[] = [];
-      try {
-        const now = new Date();
-        const leaseExpiresAt = new Date(now.getTime() + leaseMs).toISOString();
-        const result = await tx.execute({
-          sql: "SELECT * FROM outbox WHERE status='pending' ORDER BY created_at LIMIT ?",
-          args: [limit],
+      const now = new Date();
+      const leaseExpiresAt = new Date(now.getTime() + leaseMs).toISOString();
+      const result = await tx.execute({
+        sql: "SELECT * FROM outbox WHERE status='pending' ORDER BY created_at LIMIT ?",
+        args: [limit],
+      });
+      for (const row of result.rows) {
+        if (fence) await this.#assertOutboxWriteFence(tx, String(row.effect_id), fence);
+        else await this.#assertUnfencedOutboxWriteAllowed(tx, String(row.effect_id));
+        const updated = await tx.execute({
+          sql: "UPDATE outbox SET status='running',owner=?,lease_expires_at=?,updated_at=? WHERE effect_id=? AND status='pending'",
+          args: [owner, leaseExpiresAt, now.toISOString(), String(row.effect_id)],
         });
-        for (const row of result.rows) {
-          if (fence) await this.#assertOutboxWriteFence(tx, String(row.effect_id), fence);
-          else await this.#assertUnfencedOutboxWriteAllowed(tx, String(row.effect_id));
-          const updated = await tx.execute({
-            sql: "UPDATE outbox SET status='running',owner=?,lease_expires_at=?,updated_at=? WHERE effect_id=? AND status='pending'",
-            args: [owner, leaseExpiresAt, now.toISOString(), String(row.effect_id)],
-          });
-          if (updated.rowsAffected === 1) {
-            claimed.push({ ...rowToOutbox(row), status: "running", owner, leaseExpiresAt });
-          }
+        if (updated.rowsAffected === 1) {
+          claimed.push({ ...rowToOutbox(row), status: "running", owner, leaseExpiresAt });
         }
-        await tx.commit();
-      } catch (error) {
-        if (!tx.closed) await tx.rollback();
-        throw error;
-      } finally { tx.close(); }
+      }
       return claimed;
-    });
+    }, { kind: "ordinary", operation: "claim outbox batch" }));
   }
   async claimEffect(effectId: string, owner: string, leaseMs = 30_000, fence?: ProcessExecutionWriteFence): Promise<OutboxRecord | null> {
     return this.#writes.run(() => this.#claimEffect(effectId, owner, leaseMs, fence));
   }
   async #claimEffect(effectId: string, owner: string, leaseMs: number, fence?: ProcessExecutionWriteFence): Promise<OutboxRecord | null> {
-    for (let retry = 0; ; retry++) {
-      let tx: Transaction | undefined;
-      try {
-        tx = await this.#client.transaction("write");
-        const now = new Date();
-        const leaseExpiresAt = new Date(now.getTime() + leaseMs).toISOString();
-        const result = await tx.execute({
-          sql: "SELECT * FROM outbox WHERE effect_id=? AND status='pending'",
-          args: [effectId],
-        });
-        const row = result.rows[0];
-        if (!row) { await tx.commit(); return null; }
-        if (fence) await this.#assertOutboxWriteFence(tx, effectId, fence);
-        else await this.#assertUnfencedOutboxWriteAllowed(tx, effectId);
-        const updated = await tx.execute({
-          sql: "UPDATE outbox SET status='running',owner=?,lease_expires_at=?,updated_at=? WHERE effect_id=? AND status='pending'",
-          args: [owner, leaseExpiresAt, now.toISOString(), effectId],
-        });
-        await tx.commit();
-        return updated.rowsAffected === 1
-          ? { ...rowToOutbox(row), status: "running", owner, leaseExpiresAt }
-          : null;
-      } catch (error) {
-        if (tx && !tx.closed) await tx.rollback();
-        if (!isSqliteBusy(error) || retry >= 20) throw error;
-        await Bun.sleep(Math.min(25, retry + 1));
-      } finally {
-        tx?.close();
-      }
-    }
+    return this.#withTransaction(async (tx) => {
+      const now = new Date();
+      const leaseExpiresAt = new Date(now.getTime() + leaseMs).toISOString();
+      const result = await tx.execute({
+        sql: "SELECT * FROM outbox WHERE effect_id=? AND status='pending'",
+        args: [effectId],
+      });
+      const row = result.rows[0];
+      if (!row) return null;
+      if (fence) await this.#assertOutboxWriteFence(tx, effectId, fence);
+      else await this.#assertUnfencedOutboxWriteAllowed(tx, effectId);
+      const updated = await tx.execute({
+        sql: "UPDATE outbox SET status='running',owner=?,lease_expires_at=?,updated_at=? WHERE effect_id=? AND status='pending'",
+        args: [owner, leaseExpiresAt, now.toISOString(), effectId],
+      });
+      return updated.rowsAffected === 1
+        ? { ...rowToOutbox(row), status: "running", owner, leaseExpiresAt }
+        : null;
+    }, { kind: "ordinary", operation: "claim outbox effect" });
   }
-  async getOutbox(effectId:string):Promise<OutboxRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM outbox WHERE effect_id=?",args:[effectId]});return r.rows[0]?rowToOutbox(r.rows[0]):null;}
-  async listOutbox(statuses?:readonly OutboxRecord["status"][]):Promise<OutboxRecord[]>{let sql="SELECT * FROM outbox",args:InValue[]=[];if(statuses?.length){sql+=` WHERE status IN (${statuses.map(()=>"?").join(",")})`;args=[...statuses];}const r=await this.#client.execute({sql:sql+" ORDER BY created_at",args});return r.rows.map(rowToOutbox);}
+  async getOutbox(effectId:string):Promise<OutboxRecord|null>{const r=await this.#execute({sql:"SELECT * FROM outbox WHERE effect_id=?",args:[effectId]});return r.rows[0]?rowToOutbox(r.rows[0]):null;}
+  async listOutbox(statuses?:readonly OutboxRecord["status"][]):Promise<OutboxRecord[]>{let sql="SELECT * FROM outbox",args:InValue[]=[];if(statuses?.length){sql+=` WHERE status IN (${statuses.map(()=>"?").join(",")})`;args=[...statuses];}const r=await this.#execute({sql:sql+" ORDER BY created_at",args});return r.rows.map(rowToOutbox);}
   async resetOutbox(effectId: string, fence?: ProcessExecutionWriteFence): Promise<void> {
-    await this.#writes.run(async () => {
-      const tx = await this.#client.transaction("write");
-      try {
-        if (fence) await this.#assertOutboxWriteFence(tx, effectId, fence);
-        else await this.#assertUnfencedOutboxWriteAllowed(tx, effectId);
-        await tx.execute({ sql: "UPDATE outbox SET status='pending',owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=? AND status='running'", args: [new Date().toISOString(), effectId] });
-        await tx.commit();
-      } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
-    });
+    await this.#writes.run(() => this.#withTransaction(async (tx) => {
+      if (fence) await this.#assertOutboxWriteFence(tx, effectId, fence);
+      else await this.#assertUnfencedOutboxWriteAllowed(tx, effectId);
+      await tx.execute({ sql: "UPDATE outbox SET status='pending',owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=? AND status='running'", args: [new Date().toISOString(), effectId] });
+    }, { kind: "ordinary", operation: "reset outbox effect" }));
   }
 
-  async getSession(sessionId: string): Promise<SessionRecord | null> { const result = await this.#client.execute({ sql: "SELECT s.*,t.status AS task_status FROM sessions s LEFT JOIN tasks t ON t.task_id=s.task_id WHERE s.session_id=?", args: [sessionId] }); return result.rows[0] ? rowToSession(result.rows[0]) : null; }
-  async listChildren(parentSessionId: string): Promise<SessionRecord[]> { const result = await this.#client.execute({ sql: "SELECT s.*,t.status AS task_status FROM sessions s LEFT JOIN tasks t ON t.task_id=s.task_id WHERE s.parent_session_id=? ORDER BY s.depth,s.session_id", args: [parentSessionId] }); return result.rows.map(rowToSession); }
-  async getTask(taskId: string): Promise<TaskRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM tasks WHERE task_id=?", args: [taskId] }); return result.rows[0] ? rowToTask(result.rows[0]) : null; }
-  async findTaskByChild(childSessionId: string): Promise<TaskRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM tasks WHERE child_session_id=?", args: [childSessionId] }); return result.rows[0] ? rowToTask(result.rows[0]) : null; }
+  async getSession(sessionId: string): Promise<SessionRecord | null> { const result = await this.#execute({ sql: "SELECT s.*,t.status AS task_status FROM sessions s LEFT JOIN tasks t ON t.task_id=s.task_id WHERE s.session_id=?", args: [sessionId] }); return result.rows[0] ? rowToSession(result.rows[0]) : null; }
+  async listChildren(parentSessionId: string): Promise<SessionRecord[]> { const result = await this.#execute({ sql: "SELECT s.*,t.status AS task_status FROM sessions s LEFT JOIN tasks t ON t.task_id=s.task_id WHERE s.parent_session_id=? ORDER BY s.depth,s.session_id", args: [parentSessionId] }); return result.rows.map(rowToSession); }
+  async getTask(taskId: string): Promise<TaskRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM tasks WHERE task_id=?", args: [taskId] }); return result.rows[0] ? rowToTask(result.rows[0]) : null; }
+  async findTaskByChild(childSessionId: string): Promise<TaskRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM tasks WHERE child_session_id=?", args: [childSessionId] }); return result.rows[0] ? rowToTask(result.rows[0]) : null; }
   async listTasks(parentSessionId: string, parentBranchId?: string): Promise<TaskRecord[]> {
     const result = parentBranchId === undefined
-      ? await this.#client.execute({ sql: "SELECT * FROM tasks WHERE parent_session_id=? ORDER BY created_at,task_id", args: [parentSessionId] })
-      : await this.#client.execute({ sql: "SELECT * FROM tasks WHERE parent_session_id=? AND parent_branch_id=? ORDER BY created_at,task_id", args: [parentSessionId,parentBranchId] });
+      ? await this.#execute({ sql: "SELECT * FROM tasks WHERE parent_session_id=? ORDER BY created_at,task_id", args: [parentSessionId] })
+      : await this.#execute({ sql: "SELECT * FROM tasks WHERE parent_session_id=? AND parent_branch_id=? ORDER BY created_at,task_id", args: [parentSessionId,parentBranchId] });
     return result.rows.map(rowToTask);
   }
-  async getMailboxMessage(messageId: string): Promise<MailboxRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM mailbox_messages WHERE mailbox_message_id=?", args: [messageId] }); return result.rows[0] ? rowToMailbox(result.rows[0]) : null; }
+  async getMailboxMessage(messageId: string): Promise<MailboxRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM mailbox_messages WHERE mailbox_message_id=?", args: [messageId] }); return result.rows[0] ? rowToMailbox(result.rows[0]) : null; }
   async listMailboxMessages(sessionId: string, direction: "inbound" | "outbound" | "all" = "all"): Promise<MailboxRecord[]> {
     const where = direction === "inbound" ? "to_session_id=?" : direction === "outbound" ? "from_session_id=?" : "(from_session_id=? OR to_session_id=?)";
     const args: InValue[] = direction === "all" ? [sessionId,sessionId] : [sessionId];
-    const result = await this.#client.execute({ sql: `SELECT * FROM mailbox_messages WHERE ${where} ORDER BY sent_at,mailbox_message_id`, args });
+    const result = await this.#execute({ sql: `SELECT * FROM mailbox_messages WHERE ${where} ORDER BY sent_at,mailbox_message_id`, args });
     return result.rows.map(rowToMailbox);
   }
-  async getDocument(documentId: string): Promise<DocumentRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM documents WHERE document_id=?", args: [documentId] }); return result.rows[0] ? rowToDocument(result.rows[0]) : null; }
-  async getDocumentChunk(chunkId: string): Promise<DocumentChunkRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM document_chunks WHERE chunk_id=?", args: [chunkId] }); return result.rows[0] ? rowToDocumentChunk(result.rows[0]) : null; }
+  async getDocument(documentId: string): Promise<DocumentRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM documents WHERE document_id=?", args: [documentId] }); return result.rows[0] ? rowToDocument(result.rows[0]) : null; }
+  async getDocumentChunk(chunkId: string): Promise<DocumentChunkRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM document_chunks WHERE chunk_id=?", args: [chunkId] }); return result.rows[0] ? rowToDocumentChunk(result.rows[0]) : null; }
   async readDocumentChunks(documentId: string, options: { readonly start?: number; readonly limit?: number; readonly chunkIds?: readonly string[] } = {}): Promise<DocumentChunkRecord[]> {
     const start = options.start ?? 0; const limit = Math.min(options.limit ?? 100, 1000);
     if (!Number.isInteger(start) || start < 0 || !Number.isInteger(limit) || limit < 1) throw new ValidationError("Invalid document chunk range");
     if (options.chunkIds) {
       if (options.chunkIds.length === 0) return [];
-      const result = await this.#client.execute({ sql: `SELECT * FROM document_chunks WHERE document_id=? AND chunk_id IN (${options.chunkIds.map(() => "?").join(",")}) ORDER BY ordinal LIMIT ?`, args: [documentId,...options.chunkIds,limit] });
+      const result = await this.#execute({ sql: `SELECT * FROM document_chunks WHERE document_id=? AND chunk_id IN (${options.chunkIds.map(() => "?").join(",")}) ORDER BY ordinal LIMIT ?`, args: [documentId,...options.chunkIds,limit] });
       return result.rows.map(rowToDocumentChunk);
     }
-    const result = await this.#client.execute({ sql: "SELECT * FROM document_chunks WHERE document_id=? AND ordinal>=? ORDER BY ordinal LIMIT ?", args: [documentId,start,limit] });
+    const result = await this.#execute({ sql: "SELECT * FROM document_chunks WHERE document_id=? AND ordinal>=? ORDER BY ordinal LIMIT ?", args: [documentId,start,limit] });
     return result.rows.map(rowToDocumentChunk);
   }
   async getInputSet(inputSetId: string): Promise<InputSetRecord | null> {
-    const result = await this.#client.execute({ sql: "SELECT * FROM input_sets WHERE input_set_id=?", args: [inputSetId] }); const row = result.rows[0]; if (!row) return null;
-    const chunks = await this.#client.execute({ sql: "SELECT chunk_id FROM input_set_chunks WHERE input_set_id=? ORDER BY ordinal", args: [inputSetId] });
+    const result = await this.#execute({ sql: "SELECT * FROM input_sets WHERE input_set_id=?", args: [inputSetId] }); const row = result.rows[0]; if (!row) return null;
+    const chunks = await this.#execute({ sql: "SELECT chunk_id FROM input_set_chunks WHERE input_set_id=? ORDER BY ordinal", args: [inputSetId] });
     const metadata = optionalJson(row,"metadata_json");
     return { inputSetId: String(row.input_set_id), sessionId: String(row.session_id), branchId: String(row.branch_id), name: row.name === null ? null : String(row.name), chunkIds: chunks.rows.map((chunk) => String(chunk.chunk_id)), ...(metadata === undefined ? {} : { metadata }), createdAt: String(row.created_at) };
   }
-  async getGoal(goalId: string): Promise<GoalRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM goals WHERE goal_id=?", args: [goalId] }); return result.rows[0] ? rowToGoal(result.rows[0]) : null; }
-  async listGoalGates(goalId: string): Promise<GoalGateRecord[]> { const result = await this.#client.execute({ sql: "SELECT * FROM goal_gates WHERE goal_id=? ORDER BY created_at,gate_id", args: [goalId] }); return result.rows.map(rowToGoalGate); }
-  async listGoalGateEvaluations(goalId: string, gateId?: string): Promise<GoalGateEvaluationRecord[]> { const result = await this.#client.execute(gateId === undefined ? { sql: "SELECT * FROM goal_gate_evaluations WHERE goal_id=? ORDER BY created_at,evaluation_id", args: [goalId] } : { sql: "SELECT * FROM goal_gate_evaluations WHERE goal_id=? AND gate_id=? ORDER BY created_at,evaluation_id", args: [goalId,gateId] }); return result.rows.map(rowToGoalGateEvaluation); }
-  async getHeartbeat(heartbeatId: string): Promise<HeartbeatRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM heartbeats WHERE heartbeat_id=?", args: [heartbeatId] }); return result.rows[0] ? rowToHeartbeat(result.rows[0]) : null; }
-  async listHeartbeats(sessionId: string, branchId?: string): Promise<HeartbeatRecord[]> { const result = await this.#client.execute(branchId === undefined ? { sql: "SELECT * FROM heartbeats WHERE session_id=? ORDER BY created_at,heartbeat_id", args: [sessionId] } : { sql: "SELECT * FROM heartbeats WHERE session_id=? AND branch_id=? ORDER BY created_at,heartbeat_id", args: [sessionId,branchId] }); return result.rows.map(rowToHeartbeat); }
-  async listDueHeartbeats(at: string): Promise<HeartbeatRecord[]> { const result = await this.#client.execute({ sql: "SELECT * FROM heartbeats WHERE status='active' AND next_tick_at<=? ORDER BY next_tick_at,heartbeat_id", args: [at] }); return result.rows.map(rowToHeartbeat); }
-  async getSchedule(scheduleId: string): Promise<ScheduleRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM schedules WHERE schedule_id=?", args: [scheduleId] }); return result.rows[0] ? rowToSchedule(result.rows[0]) : null; }
-  async listSchedules(sessionId: string, branchId?: string): Promise<ScheduleRecord[]> { const result = await this.#client.execute(branchId === undefined ? { sql: "SELECT * FROM schedules WHERE session_id=? ORDER BY created_at,schedule_id", args: [sessionId] } : { sql: "SELECT * FROM schedules WHERE session_id=? AND branch_id=? ORDER BY created_at,schedule_id", args: [sessionId,branchId] }); return result.rows.map(rowToSchedule); }
-  async listDueSchedules(at: string): Promise<ScheduleRecord[]> { const result = await this.#client.execute({ sql: "SELECT * FROM schedules WHERE status='active' AND next_tick_at<=? ORDER BY next_tick_at,schedule_id", args: [at] }); return result.rows.map(rowToSchedule); }
-  async getWake(wakeId: string): Promise<WakeRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM wake_queue WHERE wake_id=?", args: [wakeId] }); return result.rows[0] ? rowToWake(result.rows[0]) : null; }
-  async listWakes(sessionId: string, branchId?: string, statuses?: readonly WakeRecord["status"][]): Promise<WakeRecord[]> { const args: InValue[] = [sessionId]; let sql = "SELECT * FROM wake_queue WHERE session_id=?"; if (branchId !== undefined) { sql += " AND branch_id=?"; args.push(branchId); } if (statuses?.length) { sql += ` AND status IN (${statuses.map(() => "?").join(",")})`; args.push(...statuses); } const result = await this.#client.execute({ sql: `${sql} ORDER BY created_at,wake_id`, args }); return result.rows.map(rowToWake); }
-  async getRecursiveModel(handleId: string): Promise<RecursiveModelRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM recursive_model_handles WHERE handle_id=?", args: [handleId] }); return result.rows[0] ? rowToRecursiveModel(result.rows[0]) : null; }
+  async getGoal(goalId: string): Promise<GoalRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM goals WHERE goal_id=?", args: [goalId] }); return result.rows[0] ? rowToGoal(result.rows[0]) : null; }
+  async listGoalGates(goalId: string): Promise<GoalGateRecord[]> { const result = await this.#execute({ sql: "SELECT * FROM goal_gates WHERE goal_id=? ORDER BY created_at,gate_id", args: [goalId] }); return result.rows.map(rowToGoalGate); }
+  async listGoalGateEvaluations(goalId: string, gateId?: string): Promise<GoalGateEvaluationRecord[]> { const result = await this.#execute(gateId === undefined ? { sql: "SELECT * FROM goal_gate_evaluations WHERE goal_id=? ORDER BY created_at,evaluation_id", args: [goalId] } : { sql: "SELECT * FROM goal_gate_evaluations WHERE goal_id=? AND gate_id=? ORDER BY created_at,evaluation_id", args: [goalId,gateId] }); return result.rows.map(rowToGoalGateEvaluation); }
+  async getHeartbeat(heartbeatId: string): Promise<HeartbeatRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM heartbeats WHERE heartbeat_id=?", args: [heartbeatId] }); return result.rows[0] ? rowToHeartbeat(result.rows[0]) : null; }
+  async listHeartbeats(sessionId: string, branchId?: string): Promise<HeartbeatRecord[]> { const result = await this.#execute(branchId === undefined ? { sql: "SELECT * FROM heartbeats WHERE session_id=? ORDER BY created_at,heartbeat_id", args: [sessionId] } : { sql: "SELECT * FROM heartbeats WHERE session_id=? AND branch_id=? ORDER BY created_at,heartbeat_id", args: [sessionId,branchId] }); return result.rows.map(rowToHeartbeat); }
+  async listDueHeartbeats(at: string): Promise<HeartbeatRecord[]> { const result = await this.#execute({ sql: "SELECT * FROM heartbeats WHERE status='active' AND next_tick_at<=? ORDER BY next_tick_at,heartbeat_id", args: [at] }); return result.rows.map(rowToHeartbeat); }
+  async getSchedule(scheduleId: string): Promise<ScheduleRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM schedules WHERE schedule_id=?", args: [scheduleId] }); return result.rows[0] ? rowToSchedule(result.rows[0]) : null; }
+  async listSchedules(sessionId: string, branchId?: string): Promise<ScheduleRecord[]> { const result = await this.#execute(branchId === undefined ? { sql: "SELECT * FROM schedules WHERE session_id=? ORDER BY created_at,schedule_id", args: [sessionId] } : { sql: "SELECT * FROM schedules WHERE session_id=? AND branch_id=? ORDER BY created_at,schedule_id", args: [sessionId,branchId] }); return result.rows.map(rowToSchedule); }
+  async listDueSchedules(at: string): Promise<ScheduleRecord[]> { const result = await this.#execute({ sql: "SELECT * FROM schedules WHERE status='active' AND next_tick_at<=? ORDER BY next_tick_at,schedule_id", args: [at] }); return result.rows.map(rowToSchedule); }
+  async getWake(wakeId: string): Promise<WakeRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM wake_queue WHERE wake_id=?", args: [wakeId] }); return result.rows[0] ? rowToWake(result.rows[0]) : null; }
+  async listWakes(sessionId: string, branchId?: string, statuses?: readonly WakeRecord["status"][]): Promise<WakeRecord[]> { const args: InValue[] = [sessionId]; let sql = "SELECT * FROM wake_queue WHERE session_id=?"; if (branchId !== undefined) { sql += " AND branch_id=?"; args.push(branchId); } if (statuses?.length) { sql += ` AND status IN (${statuses.map(() => "?").join(",")})`; args.push(...statuses); } const result = await this.#execute({ sql: `${sql} ORDER BY created_at,wake_id`, args }); return result.rows.map(rowToWake); }
+  async getRecursiveModel(handleId: string): Promise<RecursiveModelRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM recursive_model_handles WHERE handle_id=?", args: [handleId] }); return result.rows[0] ? rowToRecursiveModel(result.rows[0]) : null; }
   async listRecursiveModels(statuses?: readonly RecursiveModelRecord["status"][]): Promise<RecursiveModelRecord[]> {
     const args: InValue[] = []; let sql = "SELECT * FROM recursive_model_handles";
     if (statuses?.length) { sql += ` WHERE status IN (${statuses.map(() => "?").join(",")})`; args.push(...statuses); }
-    const result = await this.#client.execute({ sql: `${sql} ORDER BY created_at,handle_id`, args }); return result.rows.map(rowToRecursiveModel);
+    const result = await this.#execute({ sql: `${sql} ORDER BY created_at,handle_id`, args }); return result.rows.map(rowToRecursiveModel);
   }
 
   async rebuildMemoryCandidateIndex(): Promise<void> {
-    await this.#writes.run(async () => {
-      const tx = await this.#client.transaction("write");
-      try {
-        await tx.execute("DELETE FROM memory_fts");
-        const rows = await tx.execute("SELECT version_id,entry_id,content_json,tags_json FROM harness_versions WHERE kind='memory' ORDER BY version_id");
-        for (const row of rows.rows) {
-          const content = JSON.parse(String(row.content_json)) as { text?: string };
-          const tags = JSON.parse(String(row.tags_json)) as string[];
-          await tx.execute({ sql: "INSERT INTO memory_fts(version_id,entry_id,content,tags) VALUES(?,?,?,?)", args: [String(row.version_id),String(row.entry_id),content.text ?? "",tags.join(" ")] });
-        }
-        await tx.commit();
-      } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
-    });
+    await this.#writes.run(() => this.#withTransaction(async (tx) => {
+      await tx.execute("DELETE FROM memory_fts");
+      const rows = await tx.execute("SELECT version_id,entry_id,content_json,tags_json FROM harness_versions WHERE kind='memory' ORDER BY version_id");
+      for (const row of rows.rows) {
+        const content = JSON.parse(String(row.content_json)) as { text?: string };
+        const tags = JSON.parse(String(row.tags_json)) as string[];
+        await tx.execute({ sql: "INSERT INTO memory_fts(version_id,entry_id,content,tags) VALUES(?,?,?,?)", args: [String(row.version_id),String(row.entry_id),content.text ?? "",tags.join(" ")] });
+      }
+    }, { kind: "ordinary", operation: "rebuild memory candidate index" }));
   }
 
   async rebuildOperationalProjections(): Promise<void> {
-    await this.#writes.run(async () => {
-      const tx = await this.#client.transaction("write");
-      try {
-        for (const table of ["memory_fts","subagent_spec_invocations","skill_executions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
-        const rows = await tx.execute("SELECT * FROM events ORDER BY sequence");
-        const selected = new Set(["SessionCreated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
-        for (const row of rows.rows) { const event = rowToEvent(row); if (selected.has(event.type)) await this.#applyOperationalRows(tx,event); }
-        await tx.commit();
-      } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
-    });
+    await this.#writes.run(() => this.#withTransaction(async (tx) => {
+      for (const table of ["memory_fts","subagent_spec_invocations","skill_executions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
+      const rows = await tx.execute("SELECT * FROM events ORDER BY sequence");
+      const selected = new Set(["SessionCreated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
+      for (const row of rows.rows) { const event = rowToEvent(row); if (selected.has(event.type)) await this.#applyOperationalRows(tx,event); }
+    }, { kind: "ordinary", operation: "rebuild operational projections" }));
   }
 
   async listOriginEvents(deviceId: string, afterOriginSequence = 0): Promise<AgentEvent[]> {
     if (!Number.isSafeInteger(afterOriginSequence) || afterOriginSequence < 0) throw new ValidationError("Invalid origin sequence cursor");
-    const result = await this.#client.execute({
+    const result = await this.#execute({
       sql: "SELECT * FROM events WHERE (origin_device_id=? AND origin_sequence>?) OR (origin_device_id IS NULL AND sequence>?) ORDER BY COALESCE(origin_sequence,sequence),sequence",
       args: [deviceId,afterOriginSequence,afterOriginSequence],
     });
@@ -1239,40 +1310,40 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     return committed;
   }
   async findEventByIntent(sessionId: string, type: string, idempotencyKey: string): Promise<AgentEvent | null> {
-    const result = await this.#client.execute({ sql:"SELECT * FROM events WHERE session_id=? AND type=? AND idempotency_key=?", args:[sessionId,type,idempotencyKey] });
+    const result = await this.#execute({ sql:"SELECT * FROM events WHERE session_id=? AND type=? AND idempotency_key=?", args:[sessionId,type,idempotencyKey] });
     return result.rows[0] ? rowToEvent(result.rows[0]) : null;
   }
-  async findEventByOriginSequence(originDeviceId:string,originSequence:number):Promise<AgentEvent|null>{const result=await this.#client.execute({sql:"SELECT * FROM events WHERE origin_device_id=? AND origin_sequence=? LIMIT 1",args:[originDeviceId,originSequence]});return result.rows[0]?rowToEvent(result.rows[0]):null;}
-  async findTaskClaimEvents(taskId:string):Promise<AgentEvent[]>{const r=await this.#client.execute({sql:"SELECT * FROM events WHERE type='TaskStatusChanged' AND json_extract(payload_json,'$.taskId')=? AND json_extract(payload_json,'$.status')='running' ORDER BY sequence",args:[taskId]});return r.rows.map(rowToEvent);}
+  async findEventByOriginSequence(originDeviceId:string,originSequence:number):Promise<AgentEvent|null>{const result=await this.#execute({sql:"SELECT * FROM events WHERE origin_device_id=? AND origin_sequence=? LIMIT 1",args:[originDeviceId,originSequence]});return result.rows[0]?rowToEvent(result.rows[0]):null;}
+  async findTaskClaimEvents(taskId:string):Promise<AgentEvent[]>{const r=await this.#execute({sql:"SELECT * FROM events WHERE type='TaskStatusChanged' AND json_extract(payload_json,'$.taskId')=? AND json_extract(payload_json,'$.status')='running' ORDER BY sequence",args:[taskId]});return r.rows.map(rowToEvent);}
   async getDirectBranchTip(sessionId: string, branchId: string): Promise<AgentEvent | null> {
-    const result = await this.#client.execute({ sql:"SELECT * FROM events WHERE session_id=? AND branch_id=? ORDER BY sequence DESC LIMIT 1", args:[sessionId,branchId] });
+    const result = await this.#execute({ sql:"SELECT * FROM events WHERE session_id=? AND branch_id=? ORDER BY sequence DESC LIMIT 1", args:[sessionId,branchId] });
     return result.rows[0] ? rowToEvent(result.rows[0]) : null;
   }
   async getEventCursor(eventId: string): Promise<string | null> {
-    const result=await this.#client.execute({sql:"SELECT sequence FROM events WHERE id=?",args:[eventId]});
+    const result=await this.#execute({sql:"SELECT sequence FROM events WHERE id=?",args:[eventId]});
     return result.rows[0] ? cursorOf(Number(result.rows[0].sequence)) : null;
   }
-  async getReplicaStatus(replicaId: string): Promise<WorkspaceReplicaStatusRecord | null> { const r=await this.#client.execute({sql:"SELECT * FROM workspace_replica_status WHERE replica_id=?",args:[replicaId]});return r.rows[0]?rowToReplicaStatus(r.rows[0]):null; }
-  async listReplicaStatuses(workspaceId: string): Promise<WorkspaceReplicaStatusRecord[]> { const r=await this.#client.execute({sql:"SELECT * FROM workspace_replica_status WHERE workspace_id=? ORDER BY updated_at,replica_id",args:[workspaceId]});return r.rows.map(rowToReplicaStatus); }
-  async putReplicaStatus(s: WorkspaceReplicaStatusRecord): Promise<void> { await this.#writes.run(async()=>{await this.#client.execute({sql:`INSERT INTO workspace_replica_status(replica_id,replica_incarnation,workspace_id,device_id,replica_url,sync_url,credential_reference,lifecycle,last_attempt_at,last_success_at,last_error,last_stats_json,staged_envelopes,ingested_envelopes,quarantined_envelopes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(replica_id) DO UPDATE SET replica_incarnation=excluded.replica_incarnation,workspace_id=excluded.workspace_id,device_id=excluded.device_id,replica_url=COALESCE(excluded.replica_url,workspace_replica_status.replica_url),sync_url=COALESCE(excluded.sync_url,workspace_replica_status.sync_url),credential_reference=COALESCE(excluded.credential_reference,workspace_replica_status.credential_reference),lifecycle=excluded.lifecycle,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error=excluded.last_error,last_stats_json=excluded.last_stats_json,staged_envelopes=excluded.staged_envelopes,ingested_envelopes=excluded.ingested_envelopes,quarantined_envelopes=excluded.quarantined_envelopes,updated_at=excluded.updated_at`,args:[s.replicaId,s.replicaIncarnation,s.workspaceId,s.deviceId,s.replicaUrl,s.syncUrl,s.credentialReference,s.lifecycle,s.lastAttemptAt,s.lastSuccessAt,s.lastError,s.lastStats===null?null:json(s.lastStats),s.stagedEnvelopes,s.ingestedEnvelopes,s.quarantinedEnvelopes,s.updatedAt]});}); }
-  async getSyncReceipt(envelopeId:string):Promise<SyncIngestReceiptRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_ingest_receipts WHERE envelope_id=?",args:[envelopeId]});return r.rows[0]?rowToReceipt(r.rows[0]):null;}
-  async getSyncReceiptForEvent(eventId:string):Promise<SyncIngestReceiptRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_ingest_receipts WHERE event_id=? ORDER BY ingested_at,envelope_id LIMIT 1",args:[eventId]});return r.rows[0]?rowToReceipt(r.rows[0]):null;}
-  async putSyncReceipt(x:SyncIngestReceiptRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_ingest_receipts(envelope_id,digest,origin_device_id,origin_sequence,event_id,source_branch_id,mapped_branch_id,ingested_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(envelope_id) DO NOTHING",args:[x.envelopeId,x.digest,x.originDeviceId,x.originSequence,x.eventId,x.sourceBranchId,x.mappedBranchId,x.ingestedAt]});});}
-  async listSyncOriginWatermarks(replicaId:string):Promise<SyncOriginWatermarkRecord[]>{const r=await this.#client.execute({sql:"SELECT * FROM sync_origin_watermarks WHERE replica_id=? ORDER BY origin_device_id",args:[replicaId]});return r.rows.map(rowToOriginWatermark);}
-  async putSyncOriginWatermark(x:SyncOriginWatermarkRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_origin_watermarks(replica_id,origin_device_id,staged_sequence,ingested_sequence,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(replica_id,origin_device_id) DO UPDATE SET staged_sequence=MAX(sync_origin_watermarks.staged_sequence,excluded.staged_sequence),ingested_sequence=MAX(sync_origin_watermarks.ingested_sequence,excluded.ingested_sequence),updated_at=excluded.updated_at",args:[x.replicaId,x.originDeviceId,x.stagedSequence,x.ingestedSequence,x.updatedAt]});});}
-  async resetSyncStaging(replicaId:string):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"UPDATE sync_origin_watermarks SET staged_sequence=0,updated_at=? WHERE replica_id=?",args:[new Date().toISOString(),replicaId]});});}
-  async getSyncQuarantine(envelopeId:string):Promise<SyncQuarantineRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_quarantine WHERE envelope_id=?",args:[envelopeId]});return r.rows[0]?rowToQuarantine(r.rows[0]):null;}
-  async listSyncQuarantine():Promise<SyncQuarantineRecord[]>{const r=await this.#client.execute("SELECT * FROM sync_quarantine ORDER BY first_seen_at,envelope_id");return r.rows.map(rowToQuarantine);}
-  async putSyncQuarantine(x:SyncQuarantineRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:`INSERT INTO sync_quarantine(envelope_id,workspace_id,origin_device_id,origin_sequence,reason_code,reason,envelope_json,digest,status,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(envelope_id) DO UPDATE SET reason_code=excluded.reason_code,reason=excluded.reason,envelope_json=excluded.envelope_json,digest=excluded.digest,status=excluded.status,last_seen_at=excluded.last_seen_at`,args:[x.envelopeId,x.workspaceId,x.originDeviceId,x.originSequence,x.reasonCode,x.reason,json(x.envelope),x.digest,x.status,x.firstSeenAt,x.lastSeenAt]});});}
-  async getBranchMapping(originDeviceId:string,sessionId:string,sourceBranchId:string,sourceParentEventId:string):Promise<SyncBranchMappingRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_branch_mappings WHERE origin_device_id=? AND session_id=? AND source_branch_id=? AND last_source_event_id=? ORDER BY created_at LIMIT 1",args:[originDeviceId,sessionId,sourceBranchId,sourceParentEventId]});return r.rows[0]?rowToMapping(r.rows[0]):null;}
-  async putBranchMapping(x:SyncBranchMappingRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_branch_mappings(mapping_id,origin_device_id,session_id,source_branch_id,fork_event_id,derived_branch_id,last_source_event_id,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(mapping_id) DO NOTHING",args:[x.mappingId,x.originDeviceId,x.sessionId,x.sourceBranchId,x.forkEventId,x.derivedBranchId,x.lastSourceEventId,x.createdAt]});});}
-  async advanceBranchMapping(mappingId:string,lastSourceEventId:string):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"UPDATE sync_branch_mappings SET last_source_event_id=? WHERE mapping_id=?",args:[lastSourceEventId,mappingId]});});}
-  async listSyncConflicts(status?:"unresolved"|"resolved"):Promise<SyncConflictRecord[]>{const r=status?await this.#client.execute({sql:"SELECT * FROM sync_reconciliations WHERE status=? ORDER BY detected_at,conflict_id",args:[status]}):await this.#client.execute("SELECT * FROM sync_reconciliations ORDER BY detected_at,conflict_id");return r.rows.map(rowToSyncConflict);}
-  async putSyncConflict(x:SyncConflictRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_reconciliations(conflict_id,kind,workspace_id,session_id,task_id,event_ids_json,origin_device_ids_json,details_json,status,resolution_json,detected_at,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(conflict_id) DO NOTHING",args:[x.conflictId,x.kind,x.workspaceId,x.sessionId,x.taskId,json(x.eventIds),json(x.originDeviceIds),json(x.details),x.status,x.resolution===undefined?null:json(x.resolution),x.detectedAt,x.resolvedAt]});const resolution=await this.#client.execute({sql:"SELECT payload_json FROM events WHERE type='SyncConflictResolved' AND json_extract(payload_json,'$.conflictId')=? ORDER BY sequence DESC LIMIT 1",args:[x.conflictId]});if(resolution.rows[0]){const payload=JSON.parse(String(resolution.rows[0].payload_json)) as EventPayloads["SyncConflictResolved"];const metadata={action:payload.action,resolvedBy:payload.resolvedBy,...(payload.chosenEventId===undefined?{}:{chosenEventId:payload.chosenEventId}),...(payload.note===undefined?{}:{note:payload.note})};await this.#client.execute({sql:"UPDATE sync_reconciliations SET status='resolved',resolution_json=?,resolved_at=? WHERE conflict_id=? AND status='unresolved'",args:[json(metadata),payload.resolvedAt,x.conflictId]});}});}
-  async resolveSyncConflict(conflictId:string,resolution:JsonValue,resolvedAt:string):Promise<SyncConflictRecord>{return this.#writes.run(async()=>{const changed=await this.#client.execute({sql:"UPDATE sync_reconciliations SET status='resolved',resolution_json=?,resolved_at=? WHERE conflict_id=? AND status='unresolved'",args:[json(resolution),resolvedAt,conflictId]});if(changed.rowsAffected!==1)throw new ConflictError("Sync conflict is missing or already resolved",{conflictId});const r=await this.#client.execute({sql:"SELECT * FROM sync_reconciliations WHERE conflict_id=?",args:[conflictId]});return rowToSyncConflict(r.rows[0]!);});}
-  async putDataManifest(x:DataManifestRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO data_manifests(manifest_id,operation,scope_kind,scope_id,requested_by,owned,resources_json,replica_status_json,status,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",args:[x.manifestId,x.operation,x.scopeKind,x.scopeId,x.requestedBy,x.owned?1:0,json(x.resources),json(x.replicaStatus),x.status,x.createdAt,x.completedAt]});});}
-  async getDataManifest(manifestId:string):Promise<DataManifestRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM data_manifests WHERE manifest_id=?",args:[manifestId]});return r.rows[0]?rowToManifest(r.rows[0]):null;}
-  async completeDataManifest(manifestId:string,status:"completed"|"partial"|"blocked",resources:JsonValue,completedAt:string):Promise<DataManifestRecord>{return this.#writes.run(async()=>{const changed=await this.#client.execute({sql:"UPDATE data_manifests SET status=?,resources_json=?,completed_at=? WHERE manifest_id=? AND status='planned'",args:[status,json(resources),completedAt,manifestId]});if(changed.rowsAffected!==1)throw new ConflictError("Data manifest is not pending completion",{manifestId});const r=await this.#client.execute({sql:"SELECT * FROM data_manifests WHERE manifest_id=?",args:[manifestId]});return rowToManifest(r.rows[0]!);});}
+  async getReplicaStatus(replicaId: string): Promise<WorkspaceReplicaStatusRecord | null> { const r=await this.#execute({sql:"SELECT * FROM workspace_replica_status WHERE replica_id=?",args:[replicaId]});return r.rows[0]?rowToReplicaStatus(r.rows[0]):null; }
+  async listReplicaStatuses(workspaceId: string): Promise<WorkspaceReplicaStatusRecord[]> { const r=await this.#execute({sql:"SELECT * FROM workspace_replica_status WHERE workspace_id=? ORDER BY updated_at,replica_id",args:[workspaceId]});return r.rows.map(rowToReplicaStatus); }
+  async putReplicaStatus(s: WorkspaceReplicaStatusRecord): Promise<void> { await this.#writes.run(async()=>{await this.#execute({sql:`INSERT INTO workspace_replica_status(replica_id,replica_incarnation,workspace_id,device_id,replica_url,sync_url,credential_reference,lifecycle,last_attempt_at,last_success_at,last_error,last_stats_json,staged_envelopes,ingested_envelopes,quarantined_envelopes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(replica_id) DO UPDATE SET replica_incarnation=excluded.replica_incarnation,workspace_id=excluded.workspace_id,device_id=excluded.device_id,replica_url=COALESCE(excluded.replica_url,workspace_replica_status.replica_url),sync_url=COALESCE(excluded.sync_url,workspace_replica_status.sync_url),credential_reference=COALESCE(excluded.credential_reference,workspace_replica_status.credential_reference),lifecycle=excluded.lifecycle,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error=excluded.last_error,last_stats_json=excluded.last_stats_json,staged_envelopes=excluded.staged_envelopes,ingested_envelopes=excluded.ingested_envelopes,quarantined_envelopes=excluded.quarantined_envelopes,updated_at=excluded.updated_at`,args:[s.replicaId,s.replicaIncarnation,s.workspaceId,s.deviceId,s.replicaUrl,s.syncUrl,s.credentialReference,s.lifecycle,s.lastAttemptAt,s.lastSuccessAt,s.lastError,s.lastStats===null?null:json(s.lastStats),s.stagedEnvelopes,s.ingestedEnvelopes,s.quarantinedEnvelopes,s.updatedAt]});}); }
+  async getSyncReceipt(envelopeId:string):Promise<SyncIngestReceiptRecord|null>{const r=await this.#execute({sql:"SELECT * FROM sync_ingest_receipts WHERE envelope_id=?",args:[envelopeId]});return r.rows[0]?rowToReceipt(r.rows[0]):null;}
+  async getSyncReceiptForEvent(eventId:string):Promise<SyncIngestReceiptRecord|null>{const r=await this.#execute({sql:"SELECT * FROM sync_ingest_receipts WHERE event_id=? ORDER BY ingested_at,envelope_id LIMIT 1",args:[eventId]});return r.rows[0]?rowToReceipt(r.rows[0]):null;}
+  async putSyncReceipt(x:SyncIngestReceiptRecord):Promise<void>{await this.#writes.run(async()=>{await this.#execute({sql:"INSERT INTO sync_ingest_receipts(envelope_id,digest,origin_device_id,origin_sequence,event_id,source_branch_id,mapped_branch_id,ingested_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(envelope_id) DO NOTHING",args:[x.envelopeId,x.digest,x.originDeviceId,x.originSequence,x.eventId,x.sourceBranchId,x.mappedBranchId,x.ingestedAt]});});}
+  async listSyncOriginWatermarks(replicaId:string):Promise<SyncOriginWatermarkRecord[]>{const r=await this.#execute({sql:"SELECT * FROM sync_origin_watermarks WHERE replica_id=? ORDER BY origin_device_id",args:[replicaId]});return r.rows.map(rowToOriginWatermark);}
+  async putSyncOriginWatermark(x:SyncOriginWatermarkRecord):Promise<void>{await this.#writes.run(async()=>{await this.#execute({sql:"INSERT INTO sync_origin_watermarks(replica_id,origin_device_id,staged_sequence,ingested_sequence,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(replica_id,origin_device_id) DO UPDATE SET staged_sequence=MAX(sync_origin_watermarks.staged_sequence,excluded.staged_sequence),ingested_sequence=MAX(sync_origin_watermarks.ingested_sequence,excluded.ingested_sequence),updated_at=excluded.updated_at",args:[x.replicaId,x.originDeviceId,x.stagedSequence,x.ingestedSequence,x.updatedAt]});});}
+  async resetSyncStaging(replicaId:string):Promise<void>{await this.#writes.run(async()=>{await this.#execute({sql:"UPDATE sync_origin_watermarks SET staged_sequence=0,updated_at=? WHERE replica_id=?",args:[new Date().toISOString(),replicaId]});});}
+  async getSyncQuarantine(envelopeId:string):Promise<SyncQuarantineRecord|null>{const r=await this.#execute({sql:"SELECT * FROM sync_quarantine WHERE envelope_id=?",args:[envelopeId]});return r.rows[0]?rowToQuarantine(r.rows[0]):null;}
+  async listSyncQuarantine():Promise<SyncQuarantineRecord[]>{const r=await this.#execute("SELECT * FROM sync_quarantine ORDER BY first_seen_at,envelope_id");return r.rows.map(rowToQuarantine);}
+  async putSyncQuarantine(x:SyncQuarantineRecord):Promise<void>{await this.#writes.run(async()=>{await this.#execute({sql:`INSERT INTO sync_quarantine(envelope_id,workspace_id,origin_device_id,origin_sequence,reason_code,reason,envelope_json,digest,status,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(envelope_id) DO UPDATE SET reason_code=excluded.reason_code,reason=excluded.reason,envelope_json=excluded.envelope_json,digest=excluded.digest,status=excluded.status,last_seen_at=excluded.last_seen_at`,args:[x.envelopeId,x.workspaceId,x.originDeviceId,x.originSequence,x.reasonCode,x.reason,json(x.envelope),x.digest,x.status,x.firstSeenAt,x.lastSeenAt]});});}
+  async getBranchMapping(originDeviceId:string,sessionId:string,sourceBranchId:string,sourceParentEventId:string):Promise<SyncBranchMappingRecord|null>{const r=await this.#execute({sql:"SELECT * FROM sync_branch_mappings WHERE origin_device_id=? AND session_id=? AND source_branch_id=? AND last_source_event_id=? ORDER BY created_at LIMIT 1",args:[originDeviceId,sessionId,sourceBranchId,sourceParentEventId]});return r.rows[0]?rowToMapping(r.rows[0]):null;}
+  async putBranchMapping(x:SyncBranchMappingRecord):Promise<void>{await this.#writes.run(async()=>{await this.#execute({sql:"INSERT INTO sync_branch_mappings(mapping_id,origin_device_id,session_id,source_branch_id,fork_event_id,derived_branch_id,last_source_event_id,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(mapping_id) DO NOTHING",args:[x.mappingId,x.originDeviceId,x.sessionId,x.sourceBranchId,x.forkEventId,x.derivedBranchId,x.lastSourceEventId,x.createdAt]});});}
+  async advanceBranchMapping(mappingId:string,lastSourceEventId:string):Promise<void>{await this.#writes.run(async()=>{await this.#execute({sql:"UPDATE sync_branch_mappings SET last_source_event_id=? WHERE mapping_id=?",args:[lastSourceEventId,mappingId]});});}
+  async listSyncConflicts(status?:"unresolved"|"resolved"):Promise<SyncConflictRecord[]>{const r=status?await this.#execute({sql:"SELECT * FROM sync_reconciliations WHERE status=? ORDER BY detected_at,conflict_id",args:[status]}):await this.#execute("SELECT * FROM sync_reconciliations ORDER BY detected_at,conflict_id");return r.rows.map(rowToSyncConflict);}
+  async putSyncConflict(x:SyncConflictRecord):Promise<void>{await this.#writes.run(async()=>{await this.#execute({sql:"INSERT INTO sync_reconciliations(conflict_id,kind,workspace_id,session_id,task_id,event_ids_json,origin_device_ids_json,details_json,status,resolution_json,detected_at,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(conflict_id) DO NOTHING",args:[x.conflictId,x.kind,x.workspaceId,x.sessionId,x.taskId,json(x.eventIds),json(x.originDeviceIds),json(x.details),x.status,x.resolution===undefined?null:json(x.resolution),x.detectedAt,x.resolvedAt]});const resolution=await this.#execute({sql:"SELECT payload_json FROM events WHERE type='SyncConflictResolved' AND json_extract(payload_json,'$.conflictId')=? ORDER BY sequence DESC LIMIT 1",args:[x.conflictId]});if(resolution.rows[0]){const payload=JSON.parse(String(resolution.rows[0].payload_json)) as EventPayloads["SyncConflictResolved"];const metadata={action:payload.action,resolvedBy:payload.resolvedBy,...(payload.chosenEventId===undefined?{}:{chosenEventId:payload.chosenEventId}),...(payload.note===undefined?{}:{note:payload.note})};await this.#execute({sql:"UPDATE sync_reconciliations SET status='resolved',resolution_json=?,resolved_at=? WHERE conflict_id=? AND status='unresolved'",args:[json(metadata),payload.resolvedAt,x.conflictId]});}});}
+  async resolveSyncConflict(conflictId:string,resolution:JsonValue,resolvedAt:string):Promise<SyncConflictRecord>{return this.#writes.run(async()=>{const changed=await this.#execute({sql:"UPDATE sync_reconciliations SET status='resolved',resolution_json=?,resolved_at=? WHERE conflict_id=? AND status='unresolved'",args:[json(resolution),resolvedAt,conflictId]});if(changed.rowsAffected!==1)throw new ConflictError("Sync conflict is missing or already resolved",{conflictId});const r=await this.#execute({sql:"SELECT * FROM sync_reconciliations WHERE conflict_id=?",args:[conflictId]});return rowToSyncConflict(r.rows[0]!);});}
+  async putDataManifest(x:DataManifestRecord):Promise<void>{await this.#writes.run(async()=>{await this.#execute({sql:"INSERT INTO data_manifests(manifest_id,operation,scope_kind,scope_id,requested_by,owned,resources_json,replica_status_json,status,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",args:[x.manifestId,x.operation,x.scopeKind,x.scopeId,x.requestedBy,x.owned?1:0,json(x.resources),json(x.replicaStatus),x.status,x.createdAt,x.completedAt]});});}
+  async getDataManifest(manifestId:string):Promise<DataManifestRecord|null>{const r=await this.#execute({sql:"SELECT * FROM data_manifests WHERE manifest_id=?",args:[manifestId]});return r.rows[0]?rowToManifest(r.rows[0]):null;}
+  async completeDataManifest(manifestId:string,status:"completed"|"partial"|"blocked",resources:JsonValue,completedAt:string):Promise<DataManifestRecord>{return this.#writes.run(async()=>{const changed=await this.#execute({sql:"UPDATE data_manifests SET status=?,resources_json=?,completed_at=? WHERE manifest_id=? AND status='planned'",args:[status,json(resources),completedAt,manifestId]});if(changed.rowsAffected!==1)throw new ConflictError("Data manifest is not pending completion",{manifestId});const r=await this.#execute({sql:"SELECT * FROM data_manifests WHERE manifest_id=?",args:[manifestId]});return rowToManifest(r.rows[0]!);});}
 
   /**
    * Physically erases one independent local session. Cross-session graphs,
@@ -1286,10 +1357,10 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     await this.#writes.run(async () => { await this.#assertIndependentSessionErasable(sessionId); });
   }
   async #assertIndependentSessionErasable(sessionId: string): Promise<void> {
-    const sessionResult = await this.#client.execute({ sql: "SELECT * FROM sessions WHERE session_id=?", args: [sessionId] });
+    const sessionResult = await this.#execute({ sql: "SELECT * FROM sessions WHERE session_id=?", args: [sessionId] });
     const session = sessionResult.rows[0];
     if (!session) throw new NotFoundError("session", sessionId);
-    const linked = await this.#client.execute({
+    const linked = await this.#execute({
       sql: `SELECT
         (SELECT count(*) FROM sessions WHERE parent_session_id=? OR (session_id=? AND parent_session_id IS NOT NULL)) AS session_links,
         (SELECT count(*) FROM tasks WHERE parent_session_id=? OR child_session_id=?) AS task_links,
@@ -1328,7 +1399,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       "RefinementRollbackApproved", "RefinementRolledBack", "SkillInvocationRecorded", "SkillTestRecorded",
       "SubagentSpecInvoked", "SyncConflictResolved",
     ];
-    const unsupported = await this.#client.execute({
+    const unsupported = await this.#execute({
       sql: `SELECT type FROM events WHERE session_id=? AND type IN (${unsupportedTypes.map(() => "?").join(",")}) LIMIT 1`,
       args: [sessionId, ...unsupportedTypes],
     });
@@ -1343,13 +1414,12 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       // refuses relational erasure rather than leaving a hidden dangling row.
       await this.#assertIndependentSessionErasable(sessionId);
 
-      const tx = await this.#client.transaction("write");
-      const counts: Record<string, number> = {};
-      const remove = async (table: string, sql: string, args: InValue[] = []): Promise<void> => {
-        const result = await tx.execute({ sql, args });
-        counts[table] = (counts[table] ?? 0) + result.rowsAffected;
-      };
-      try {
+      const counts = await this.#withTransaction(async (tx) => {
+        const attemptCounts: Record<string, number> = {};
+        const remove = async (table: string, sql: string, args: InValue[] = []): Promise<void> => {
+          const result = await tx.execute({ sql, args });
+          attemptCounts[table] = (attemptCounts[table] ?? 0) + result.rowsAffected;
+        };
         // These two guards are the only immutable-row guards touched. DDL and
         // erasure are transaction-local; rollback restores both rows and guards.
         await tx.execute("DROP TRIGGER events_no_delete");
@@ -1367,11 +1437,8 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         await remove("events", "DELETE FROM events WHERE session_id=?", [sessionId]);
         await tx.execute("CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'canonical events are append-only'); END");
         await tx.execute("CREATE TRIGGER context_no_delete BEFORE DELETE ON context_records BEGIN SELECT RAISE(ABORT,'context records are immutable'); END");
-        await tx.commit();
-      } catch (error) {
-        if (!tx.closed) await tx.rollback();
-        throw error;
-      } finally { tx.close(); }
+        return attemptCounts;
+      }, { kind: "ordinary", operation: "erase independent session" });
       return { sessionId, deletedEvents: counts.events ?? 0, deletedRows: counts };
     });
   }
@@ -1379,34 +1446,48 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
   async readonlyQuery(statement: ReadonlyStatement): Promise<JsonValue[]> {
     assertReadonlySql(statement.sql);
     const client = createClient(this.#config);
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       // A dedicated query-only client can be closed on timeout without
       // disabling or poisoning the supervisor's canonical write connection.
-      await client.execute("PRAGMA query_only=ON");
-      const sql = boundedReadonlySql(statement.sql);
-      const execution = client.execute({ sql, args: [...statement.args] });
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new ValidationError(
-          `Console SQL exceeded the ${MAX_ANALYTICAL_QUERY_MS}ms time limit`,
-        )), MAX_ANALYTICAL_QUERY_MS);
-      });
-      const result = await Promise.race([execution, timeout]);
-      if (result.rows.length > MAX_ANALYTICAL_ROWS) {
-        throw new ValidationError(`Console SQL exceeded the ${MAX_ANALYTICAL_ROWS}-row limit`);
-      }
-      return result.rows.map(rowToObject);
+      return await this.#withSqliteRetry(async () => {
+        await this.#prepareClient(client);
+        await client.execute("PRAGMA query_only=ON");
+        const sql = boundedReadonlySql(statement.sql);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const execution = client.execute({ sql, args: [...statement.args] });
+          const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new ValidationError(
+              `Console SQL exceeded the ${MAX_ANALYTICAL_QUERY_MS}ms time limit`,
+            )), MAX_ANALYTICAL_QUERY_MS);
+          });
+          const result = await Promise.race([execution, timeout]);
+          if (result.rows.length > MAX_ANALYTICAL_ROWS) {
+            throw new ValidationError(`Console SQL exceeded the ${MAX_ANALYTICAL_ROWS}-row limit`);
+          }
+          return result.rows.map(rowToObject);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }, { kind: "ordinary", operation: "analytical read" });
     } finally {
-      if (timer) clearTimeout(timer);
       client.close();
     }
   }
 }
 
-function isSqliteBusy(error: unknown): boolean {
-  return typeof error === "object" && error !== null &&
-    (("code" in error && error.code === "SQLITE_BUSY") ||
-      (error instanceof Error && /database is locked/i.test(error.message)));
+function sqliteErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  return typeof error.code === "string" ? error.code : null;
+}
+
+function isSqliteContention(error: unknown, seen = new Set<unknown>()): boolean {
+  if (typeof error !== "object" || error === null || seen.has(error)) return false;
+  seen.add(error);
+  const code = sqliteErrorCode(error);
+  if (code !== null && (/^SQLITE_BUSY(?:_|$)/.test(code) || /^SQLITE_LOCKED(?:_|$)/.test(code))) return true;
+  if (error instanceof Error && /(?:database|database table|database schema) (?:is )?(?:busy|locked)/i.test(error.message)) return true;
+  return "cause" in error && isSqliteContention(error.cause, seen);
 }
 
 export const MAX_ANALYTICAL_ROWS = 1_000;
