@@ -63,8 +63,10 @@ export interface MailboxListOptions {
   readonly before?: string;
   readonly pendingOnly?: boolean;
 }
+/** Rendering-only relationship for retained mailbox rows. `legacy` never grants family reach. */
+export type FamilyMessageRelationship = FamilyRelationship | "legacy";
 export interface FamilyMessageRecord extends MailboxRecord {
-  readonly relationship: FamilyRelationship;
+  readonly relationship: FamilyMessageRelationship;
   readonly senderName: string | null;
   readonly recipientName: string | null;
 }
@@ -104,6 +106,38 @@ export class AgentService {
 
   spawnMany(parentSessionId: string, parentBranchId: string, rawInputs: readonly (SpawnAgentInput | string)[]): Promise<SubagentHandle[]> {
     return this.spawnManyWithEvents(parentSessionId, parentBranchId, rawInputs, () => []);
+  }
+
+  /**
+   * Atomically admits a child and its initial autonomous run. The queued
+   * `advance` is only a latency optimization: recovery can advance the durable
+   * AgentRunRequested event if this process exits immediately after admission.
+   */
+  async spawnRunnable(parentSessionId: string, parentBranchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> {
+    const [handle] = await this.spawnManyWithEvents(parentSessionId, parentBranchId, [input], (items) => items
+      .filter((item) => !item.existing)
+      .map((item): NewAgentEvent<"AgentRunRequested"> => {
+        const runId = spawnRunId(item.handle.taskId);
+        return {
+          sessionId: item.handle.sessionId,
+          branchId: item.handle.branchId,
+          type: "AgentRunRequested",
+          producer: "client",
+          idempotencyKey: `agent-run-request:${runId}`,
+          payload: {
+            runId,
+            task: item.input.task.trim(),
+            requestKey: `agent-spawn:${item.handle.taskId}`,
+          },
+        };
+      }));
+    this.#scheduleSpawnAdvance(handle!);
+    return handle!;
+  }
+
+  /** Compatibility spelling for callers that prefer an explicit action name. */
+  spawnAndRun(parentSessionId: string, parentBranchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> {
+    return this.spawnRunnable(parentSessionId, parentBranchId, input);
   }
 
   /**
@@ -451,7 +485,13 @@ export class AgentService {
   scheduleSpawn(handle: SubagentHandle, task: string): void {
     if (!this.#runs) throw new ValidationError("Agent run service is unavailable");
     const runs = this.#runs;
-    queueMicrotask(() => { void runs.start(handle.sessionId, handle.branchId, { task, requestKey: `agent-spawn:${handle.taskId}`, requestedRunId: `agent-spawn-run-${stableId(handle.taskId)}`, suppressTaskMessage: true }).catch(() => {}); });
+    queueMicrotask(() => { void runs.start(handle.sessionId, handle.branchId, { task, requestKey: `agent-spawn:${handle.taskId}`, requestedRunId: spawnRunId(handle.taskId), suppressTaskMessage: true }).catch(() => {}); });
+  }
+
+  #scheduleSpawnAdvance(handle: SubagentHandle): void {
+    if (!this.#runs) return;
+    const runs = this.#runs;
+    queueMicrotask(() => { void runs.advance(handle.sessionId, handle.branchId, spawnRunId(handle.taskId)).catch(() => {}); });
   }
 
   async cancelFamilyTarget(sessionId: string, branchId: string, target: string, reason?: string): Promise<TaskRecord | AgentRunResult> {
@@ -580,9 +620,23 @@ export class AgentService {
   async #publicMessage(viewerSessionId: string, message: MailboxRecord): Promise<FamilyMessageRecord> {
     const sender = await this.#recursive.getSession(message.fromSessionId); const recipient = await this.#recursive.getSession(message.toSessionId);
     if (!sender || !recipient) throw new ValidationError("Family message endpoint projection is missing");
-    const relationship = viewerSessionId === message.fromSessionId
-      ? (await this.#resolveFamilyTarget(sender, recipient.sessionId)).relationship
-      : (await this.#resolveFamilyTarget(recipient, sender.sessionId)).relationship;
+    if (viewerSessionId !== sender.sessionId && viewerSessionId !== recipient.sessionId) {
+      throw new ValidationError("Only a family message endpoint can view the retained message");
+    }
+    const viewer = viewerSessionId === sender.sessionId ? sender : recipient;
+    const other = viewerSessionId === sender.sessionId ? recipient : sender;
+    let relationship: FamilyMessageRelationship;
+    try {
+      relationship = (await this.#resolveFamilyTarget(viewer, other.sessionId)).relationship;
+    } catch (error) {
+      // Pre-FU-012 events allowed same-root communication beyond the nuclear
+      // family. Preserve those rows for endpoint inspection only. Keeping this
+      // fallback here (rather than in target resolution) prevents retained
+      // history from authorizing sends, follow-ups, or cancellation.
+      const retainedShape = message.intentKey === null || message.intentKey === undefined;
+      if (!(error instanceof FamilyReachError) || !retainedShape || sender.rootSessionId !== recipient.rootSessionId) throw error;
+      relationship = "legacy";
+    }
     const senderEvents = await this.storage.loadEvents(sender.sessionId, { branchId: sender.initialBranchId });
     const recipientEvents = await this.storage.loadEvents(recipient.sessionId, { branchId: recipient.initialBranchId });
     return { ...message, relationship, senderName: senderEvents.length ? projectEvents(senderEvents).sessionName ?? null : null, recipientName: recipientEvents.length ? projectEvents(recipientEvents).sessionName ?? null : null };
@@ -845,6 +899,7 @@ function decodeMessageCursor(cursor: string): { sentAt: string; id: string } {
   } catch { throw new ValidationError("Invalid family message pagination cursor"); }
 }
 
+function spawnRunId(taskId: string): string { return `agent-spawn-run-${stableId(taskId)}`; }
 function stableId(value: string): string {
   const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex").slice(0, 32);
 }
