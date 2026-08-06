@@ -85,7 +85,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Done | FU-004 |
 | FU-015 | Keep detached sessions executing in a background service | Done | FU-001, FU-004 |
 | FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | Done | FU-003, FU-004 |
-| FU-017 | Add skill creation, installation, and management as a product surface | In progress | FU-004 |
+| FU-017 | Add skill creation, installation, and management as a product surface | Done | FU-004 |
 | FU-018 | Stream provider output incrementally to attached clients | Done | FU-003 |
 | FU-019 | Add automatic and agent-directed context compaction | In progress | FU-003, FU-004 |
 
@@ -940,7 +940,7 @@ A user runs `/refine`, optionally with instructions, and a refiner model call re
 
 ## FU-017 — Add skill creation, installation, and management as a product surface
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -979,6 +979,14 @@ A user or the agent can package a recurring workflow as an inspectable, tested s
 
 - A public skill registry or remote skill installation.
 - Compatibility with other harnesses' skill formats.
+
+
+### Completion evidence
+
+- Commits: `2c0ade1`, `79cfd8d`, `e6d7c26`, `0e2d347`, `dc7f309`, and `d8ff246`.
+- Implementation: strict native local bundle import; unified workspace/profile catalog; digest confirmation/provenance; outbox testing and governed activation; name/ID SDK/protocol/CLI/TUI management; exact exposed-candidate retesting; enable/disable/remove with immutable history; profile context/invocation under the same permission/secret rules.
+- Verification: full verify after implementation passed 581 tests with 2 external skips; after hardening 586 passed. Independent review found repeated availability transitions silently no-op and retained invalid names poisoning context; sequence-CAS transitions, early validation, defensive quarantine, and resumable install fixed them. Adversarial re-review passed with unlimited cycles and crash-boundary probes.
+- Remaining limitations: local directories only, no registry; executable skills retain trusted-local OS authority and are not a hostile-code sandbox; loose legacy profile definitions remain quarantined until reinstalled.
 
 ---
 
