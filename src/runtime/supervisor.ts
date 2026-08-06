@@ -24,6 +24,7 @@ import {
   OpenAICompatibleProvider,
   ShellExecutor,
   type ModelProvider,
+  type ProviderConcurrency,
 } from "../executors/index.ts";
 import { LibSqlStorage, type AgentStorage } from "../storage/index.ts";
 import { ContextMaterializer } from "./context.ts";
@@ -31,6 +32,11 @@ import { ModelLoop } from "./model-loop.ts";
 import { OutboxRunner } from "./outbox.ts";
 import { ProjectionService } from "./projection.ts";
 import { containsBrokeredSecret, scrubJson, scrubText } from "../security/index.ts";
+import { AgentService } from "./agents.ts";
+import { DocumentService } from "./documents.ts";
+import { GoalService } from "./goals.ts";
+import { HeartbeatService } from "./heartbeats.ts";
+import { RecursiveModelService } from "./models.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -39,6 +45,12 @@ export interface SupervisorOptions {
   readonly restartConsoleAfterCell?: boolean;
   readonly modelProviders?: readonly ModelProvider[];
   readonly recover?: boolean;
+  readonly maxSessionDepth?: number;
+  readonly maxChildrenPerSession?: number;
+  /** Shared limit for every model effect; a map may override individual providers. */
+  readonly providerConcurrency?: ProviderConcurrency;
+  /** Poll interval for the live database-driven heartbeat scheduler (default 100ms). */
+  readonly heartbeatPollIntervalMs?: number;
 }
 
 export interface CreateSessionOptions {
@@ -77,6 +89,11 @@ export class Supervisor {
   readonly projections: ProjectionService;
   readonly contexts: ContextMaterializer;
   readonly modelLoop: ModelLoop;
+  readonly agents: AgentService;
+  readonly documents: DocumentService;
+  readonly models: RecursiveModelService;
+  readonly goals: GoalService;
+  readonly heartbeats: HeartbeatService;
   readonly restartConsoleAfterCell: boolean;
   readonly #cells = new BranchQueue();
 
@@ -86,6 +103,8 @@ export class Supervisor {
     consoleProcess: ConsoleProcess,
     outbox: OutboxRunner,
     restartConsoleAfterCell: boolean,
+    maxSessionDepth: number,
+    maxChildrenPerSession: number,
   ) {
     this.storage = storage;
     this.artifacts = artifacts;
@@ -94,6 +113,11 @@ export class Supervisor {
     this.projections = new ProjectionService(storage);
     this.contexts = new ContextMaterializer(storage);
     this.modelLoop = new ModelLoop(storage, this.contexts, outbox);
+    this.agents = new AgentService(storage, outbox, maxSessionDepth, maxChildrenPerSession);
+    this.documents = new DocumentService(storage);
+    this.goals = new GoalService(storage, outbox, this.modelLoop);
+    this.heartbeats = new HeartbeatService(storage, this.goals);
+    this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox);
     this.restartConsoleAfterCell = restartConsoleAfterCell;
   }
 
@@ -114,7 +138,7 @@ export class Supervisor {
     const executors = [
       new ShellExecutor(workspaceRoot),
       new FileExecutor(workspaceRoot),
-      new ModelExecutor(providers),
+      new ModelExecutor(providers, options.providerConcurrency ?? 1),
     ];
     const supervisor = new Supervisor(
       storage,
@@ -122,18 +146,29 @@ export class Supervisor {
       new ConsoleProcess(),
       new OutboxRunner(storage, executors),
       options.restartConsoleAfterCell ?? false,
+      options.maxSessionDepth ?? 8,
+      options.maxChildrenPerSession ?? 32,
     );
     if (options.recover !== false) {
       await supervisor.outbox.recover();
+      // Durable cancellation intent wins before queued effects or recursive
+      // handles are allowed to resume.
+      await supervisor.agents.recoverCancellations();
       await supervisor.outbox.drain();
       await supervisor.modelLoop.recoverIncomplete();
       await supervisor.modelLoop.reconcileRunningSessions();
+      await supervisor.heartbeats.recoverDue();
+      await supervisor.goals.recoverIncomplete();
+      await supervisor.models.recoverIncomplete();
     }
+    supervisor.heartbeats.startScheduler(options.heartbeatPollIntervalMs ?? 100);
     return supervisor;
   }
 
   async close(): Promise<void> {
+    await this.heartbeats.close();
     await this.console.stop();
+    await this.models.close();
     this.storage.close();
   }
 

@@ -136,13 +136,17 @@ export class ModelLoop {
   async recoverIncomplete(): Promise<number> {
     let recovered = 0;
     for (const branch of await this.storage.listBranches()) {
-      const state = projectEvents(await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId }));
+      const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
+      const state = projectEvents(events);
       for (const call of Object.values(state.modelCalls)) {
         if (call.status !== "requested") continue;
         const effect = state.effects[call.effectId];
         if (!effect || effect.status === "requested" || effect.status === "started") continue;
         if (effect.status === "succeeded") {
-          await this.#finalizeSucceeded(branch.sessionId, branch.branchId, call.id, parseOutput(effect.output), 0);
+          const started = events.find((event) => event.type === "EffectAttemptStarted" && (event.payload as EventPayloads["EffectAttemptStarted"]).effectId === effect.id);
+          const outcome = [...events].reverse().find((event) => event.type === "EffectOutcomeRecorded" && (event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId === effect.id);
+          const elapsed = started && outcome ? Math.max(0, Date.parse(outcome.committedAt) - Date.parse(started.committedAt)) : 0;
+          await this.#finalizeSucceeded(branch.sessionId, branch.branchId, call.id, parseOutput(effect.output), elapsed);
         } else {
           await this.#finalizeTerminated(branch.sessionId, branch.branchId, call.id, effect.status, effect.error);
         }

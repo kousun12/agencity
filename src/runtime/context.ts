@@ -47,10 +47,16 @@ export class ContextMaterializer {
       ), "active artifact reference");
     }
     for (const event of events) {
-      if (event.type === "BudgetDebited" || event.type === "BudgetExceeded") add(event, "current budget projection");
+      if (event.type === "BudgetDebited" || event.type === "TaskUsageAttributed" || event.type === "BudgetExceeded") add(event, "current budget projection");
     }
+    for (const task of Object.values(state.tasks)) add(events.find((event) => event.id === task.eventId), "current child task");
+    for (const message of Object.values(state.mailbox)) add(events.find((event) => event.id === message.eventId), "session mailbox");
+    for (const notice of Object.values(state.terminalNotices)) add(events.find((event) => event.id === notice.eventId), "child terminal notice");
+    for (const goal of Object.values(state.goals)) add(events.find((event) => event.id === goal.eventId), "current autonomous goal");
+    for (const heartbeat of Object.values(state.heartbeats)) add(events.find((event) => event.id === heartbeat.eventId), "scheduled heartbeat");
+    for (const handle of Object.values(state.recursiveModels)) add(events.find((event) => event.id === handle.eventId), "recursive model handle");
     const activity = events.filter(
-      (event) => event.type === "EffectOutcomeRecorded" || event.type === "CellCommitted" || event.type === "CellFailed",
+      (event) => event.type === "EffectOutcomeRecorded" || event.type === "CellCommitted" || event.type === "CellFailed" || event.type === "TaskStatusChanged" || event.type === "GoalGateStatusChanged",
     ).slice(-this.maxRecentRecords);
     for (const event of activity) add(event, "recent durable activity");
 
@@ -64,8 +70,16 @@ export class ContextMaterializer {
     const context: JsonValue = JSON.parse(JSON.stringify({
       basePolicy: BASE_POLICY,
       runtime: { mode: "trusted-local", workerIsSecuritySandbox: false },
-      session: { id: sessionId, branchId, status: state.status, model: state.model },
+      session: { id: sessionId, branchId, status: state.status, model: state.model, parentSessionId: state.parentSessionId, parentBranchId: state.parentBranchId, rootSessionId: state.rootSessionId, depth: state.depth, taskId: state.taskId },
       budget: state.budget,
+      goal: Object.values(state.goals).find((goal) => !["completed", "failed", "cancelled"].includes(goal.status)) ?? null,
+      tasks: Object.values(state.tasks),
+      mailbox: Object.values(state.mailbox),
+      terminalNotices: Object.values(state.terminalNotices),
+      recursiveModels: Object.values(state.recursiveModels),
+      documents: Object.values(state.documents).map((document) => ({ id: document.id, name: document.name, mediaType: document.mediaType, size: document.size, digest: document.digest, chunkCount: document.chunkCount })),
+      inputSets: Object.values(state.inputSets),
+      heartbeats: Object.values(state.heartbeats),
       messages: messages.map((message) => ({
         role: message.role,
         content: message.content,
@@ -86,6 +100,8 @@ export class ContextMaterializer {
       queryHints: {
         history: "SELECT type, committed_at, payload_json FROM events WHERE session_id = ? ORDER BY sequence",
         largeRecords: "Resolve artifact references through sdk.artifacts.get",
+        documents: "SELECT chunk_id, ordinal, content FROM document_chunks WHERE document_id = ? ORDER BY ordinal",
+        mailbox: "SELECT * FROM mailbox_messages WHERE to_session_id = ? ORDER BY sent_at",
       },
     })) as JsonValue;
     const serialized = JSON.stringify(context);

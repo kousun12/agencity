@@ -101,6 +101,12 @@ Plain text is committed as a user message and followed by one model turn. Comman
 | `/history` | Print projected branch history as cursor, event type, and payload. |
 | `/budget` | Print current token, cost, turn, and wall-time counters/limits. |
 | `/snapshot` | Print the entire current `AgentState`. |
+| `/tree` | Print the recursive child-session tree and task status. |
+| `/tasks` | Print durable tasks owned by the current session/branch. |
+| `/goals` | Print projected autonomous goals and completion gates. |
+| `/heartbeats` | Print projected heartbeat schedules. |
+| `/cancel-task <id> [reason]` | Cascade cancellation through a task's descendants. |
+| `/complete-goal <id>` | Run current-version completion gates for a goal. |
 | `/cell <typescript>` | Execute one disposable-console cell and print its result. |
 | `/branch <cursor> [name]` | Fork at a historical cursor and switch this TUI to the child. |
 | `/help` | Print command help. |
@@ -110,7 +116,7 @@ The current TUI is a basic in-process supervisor client. It does not yet consume
 
 ## Providers
 
-`Supervisor.open` always installs `EchoModelProvider`. If `OPENAI_API_KEY` exists, it also installs an OpenAI-compatible provider named `openai`; `OPENAI_BASE_URL` changes its endpoint. Programmatic callers can inject additional `ModelProvider` implementations with `modelProviders`.
+`Supervisor.open` always installs `EchoModelProvider`. If `OPENAI_API_KEY` exists, it also installs an OpenAI-compatible provider named `openai`; `OPENAI_BASE_URL` changes its endpoint. Programmatic callers can inject additional `ModelProvider` implementations with `modelProviders`. `providerConcurrency` accepts a positive default or a per-provider map; the one shared limiter covers root turns, recursive calls, and model-backed gates.
 
 Provider credentials remain in the supervisor. Common credential-shaped variables are removed from the console worker and non-login shell executor environments. Inputs containing an actual known secret value are rejected; executor outputs/logs/errors redact known values. Benign fields named `token`, `auth`, or similar are not mutated. This reduces accidental disclosure but is not a hostile-code boundary; trusted generated code has OS access and must be contained externally when necessary.
 
@@ -121,8 +127,14 @@ Opening a supervisor runs recovery by default:
 1. running idempotent effects are requeued;
 2. running (or anomalous prior-attempt pending) non-idempotent effects are completed as `unknown`;
 3. interrupted cells are abandoned with branch-scoped recovery events, including inherited incomplete cells on forks;
-4. normal pending/requeued effects are drained;
-5. model calls whose durable effect already completed are finalized without calling the provider again;
-6. a session branch stranded in `running` is reconciled to `idle`.
+4. recorded cancellation crash-prefixes finish leaf-first with their original reason;
+5. normal pending/requeued effects are drained;
+6. model calls whose durable effect already completed are finalized without calling the provider again;
+7. a session branch stranded in `running` is reconciled to `idle`;
+8. due active heartbeats fire once with aligned schedules;
+9. incomplete completion gates reconcile and active goals resume;
+10. pending/running recursive handles resume through the shared provider limiter.
+
+A live database poller also fires schedules that become due after startup; `heartbeatPollIntervalMs` configures its cadence and `Supervisor.close()` stops it. Cancellation intents interrupted by a crash resume leaf-first before queued effects are drained.
 
 Pass `recover: false` only from controlled tests or tooling that deliberately owns recovery. See [Crash recovery](./recovery.md).

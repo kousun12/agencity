@@ -1,6 +1,6 @@
 # Event schemas (version 1)
 
-`events` is the canonical append-only history. Version 1 is validated at the storage boundary; any other schema version is rejected. Released payload meaning must not be edited in place. Evolution requires a new event schema version and an explicit tested projection/upcast path. Slice 1 has no upcaster because only version 1 exists.
+`events` is the canonical append-only history. Version 1 is validated at the storage boundary; any other schema version is rejected. Released payload meaning must not be edited in place. Evolution requires a new event schema version and an explicit tested projection/upcast path. No upcaster exists because only event schema version 1 exists; Slice 2 adds new v1 event types and optional ancestry fields without rewriting retained rows.
 
 ## Header
 
@@ -53,7 +53,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 
 | Event type | Version 1 payload | Projection/semantic effect |
 |---|---|---|
-| `SessionCreated` | `{ workspaceId, initialBranchId, model: ModelConfiguration, budget: BudgetLimits }` | Must be first projected event; initializes session, branch, model, counters, and idle status. |
+| `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Initializes a root or a normal child session. Child creation requires the complete parent/root/depth/task tuple; legacy/root rows project self as root and depth zero. |
 | `BranchCreated` | `{ branchId, parentBranchId, forkCursor: decimal string, name?: string }` | Selects the new active branch projection. Storage records ancestry through the exact parent cursor. |
 | `SessionStatusChanged` | `{ status: SessionStatus, reason?: string }` | Sets projected lifecycle status. |
 | `MessageAppended` | `{ messageId, role: "system" | "user" | "assistant" | "tool", content: string, modelCallId?: string }` | Appends one conversation message. |
@@ -75,6 +75,17 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `BudgetDebited` | `{ callId, tokens, costUsd, turns, wallTimeMs }` (all nonnegative) | Adds usage to projected counters. |
 | `BudgetExceeded` | `{ dimension: "tokens" | "cost" | "turns" | "wallTime", limit: nonnegative, spent: nonnegative }` | Sets exceeded and idle; future turns reject. Boundary comparison is `>=`. |
 | `RecoveryPerformed` | `{ abandonedCellIds: string[], unknownEffectIds: string[], retriedEffectIds: string[] }` | Audit evidence for a branch recovery pass; otherwise projection-neutral. |
+| `TaskCreated` / `SubagentAdmitted` | Durable parent/task/child/model/budget intent, followed by matching admitted child IDs/time. | Creates a pending task then admits the already-created normal child session. |
+| `TaskStatusChanged` / `SubagentCancellationRequested` | Task ID plus validated status/result/artifacts/error/reason or child cancellation intent. | Projects current task lifecycle without hiding cancellation intent; startup finishes recorded nonterminal cascades leaf-first and the first recorded reason wins retries. |
+| `TaskUsageAttributed` | `{ taskId, childSessionId, tokens, costUsd, turns, wallTimeMs, conservative }` | Attributes a terminal child’s direct usage to each ancestor exactly once; unknown model usage consumes the unaccounted reservation conservatively. |
+| `MailboxMessageSent` / `MailboxMessageDelivered` / `MailboxMessageAcknowledged` | Stable message and endpoint IDs, kind/content/task; delivery links `sentEventId`; ack names recipient/time. | Paired sender/recipient events project durable at-least-once mailbox delivery and acknowledgement. |
+| `TaskTerminalNoticeSent` / `TaskTerminalNoticeDelivered` | Stable notice/task/parent/child IDs, terminal status and optional result/artifacts/error/reason; delivery links send. | Makes child termination visible in both session histories. |
+| `DocumentImported` / `DocumentChunkAdded` | Document metadata/digest/count and ordered chunk ID/content/size/digest. | Imports exact large-input rows without injecting all content into model context. |
+| `InputSetCreated` | `{ inputSetId, name?, chunkIds, metadata? }` | Freezes an ordered set of exact chunk row IDs for delegation/model input. |
+| `GoalCreated` / `GoalCompletionRequested` / `GoalStatusChanged` | Goal/criteria/bound, durable completion request with `{ workspaceId, workspaceCursor }` pin, and validated terminal/blocked transition. | Projects autonomous goal lifecycle; live and recovered succeeded gates must match the durable pin. |
+| `GoalGateAdded` / `GoalGateStatusChanged` | Typed executor request policy and pending/running/passed/failed/cancelled/unknown observation. | Gates are durable requests; required failures prevent completion. |
+| `HeartbeatCreated` / `HeartbeatTicked` / `HeartbeatStatusChanged` | Interval/due time/goal/payload, monotonic tick timing, and active/paused/cancelled state. | Projects a restart-safe schedule; ticking never depends on an in-memory timer identity. |
+| `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs and pending/running/terminal status. | Projects immediately returned recursive model handles backed by normal child sessions. |
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
 
@@ -99,9 +110,28 @@ EffectRequested -> EffectAttemptStarted -> EffectOutcomeRecorded
 
 Retries append a new positive attempt number. Terminal truth is the outcome event; outbox owner/lease/status is operational.
 
+### Task and child session
+
+```text
+TaskCreated -> child SessionCreated -> SubagentAdmitted -> TaskStatusChanged(running)
+                                                    \-> completed | failed | cancelled
+```
+
+Completion/failure/cancellation atomically records a child-side terminal send, parent task transition and delivery, and child lifecycle stop/failure. A child is never a special persistence object: its `SessionCreated` ancestry and parent task are validated transactionally.
+
+### Mailbox
+
+A send and its recipient delivery commit in one batch. Acknowledgement appends one event to each endpoint so either detached session can rebuild what it knows; `mailbox_messages` is only a query projection.
+
 ### Model turn
 
 A normal turn appends status-running, `ContextMaterialized`, `ModelCallRequested`, and the model `EffectRequested` before provider execution. Success appends output chunk, assistant message, model completion, budget debit, optional budget-exceeded, and status-idle. Non-success appends `ModelCallTerminated` and status-idle. Startup can finalize a call whose effect terminal event committed before the supervisor's model terminal batch.
+
+### Goal gate and heartbeat
+
+A completion request establishes one durable `requestId` plus its workspace ID/cursor pin. Each gate moves to `running` with its effect ID, then to `passed`, `failed`, `cancelled`, or `unknown`. A successful executor result is still changed to failed/stale if the workspace-relevant branch cursor moved during evaluation. Required non-passed gates lead to `GoalStatusChanged(blocked)`; only all current required passes permit `completed`.
+
+A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTicked` (scheduled time, actual fire time, aligned next due time) and a system `MessageAppended` wake-up. Missed periods do not emit a backlog. Replay/rebuild projects those events but never invokes the scheduler or goal loop.
 
 ## Ordering, branching, and reduction
 
@@ -109,7 +139,7 @@ A normal turn appends status-running, `ContextMaterialized`, `ModelCallRequested
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. A future synchronization adapter must quarantine invalid remote rows rather than weaken local validation.
-- Snapshots include `reducerVersion: 1`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 2`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 

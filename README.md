@@ -1,12 +1,14 @@
 # Agencity — recoverable Bun/LibSQL agent runtime
 
-Agencity is the Delivery Slice 1 implementation described by the [Prime Agent TypeScript/Turso rewrite PRD](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md). It runs one durable agent against a local LibSQL database. Canonical events, explicitly checkpointed working values, and content-addressed artifacts survive process and console-worker restarts; the Bun heap does not.
+Agencity implements Delivery Slices 1 and 2 of the [Prime Agent TypeScript/Turso rewrite PRD](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md). It runs durable root and recursive child agents against a local LibSQL database. Canonical events, explicitly checkpointed working values, task/mailbox/model handles, schedules, and content-addressed artifacts survive supervisor and console-worker restarts; the Bun heap does not.
 
 > **Security boundary:** Slice 1 is **trusted-local only**. Model-generated TypeScript and shell commands have the operating-system authority of the runtime. The separate Bun console worker provides crash isolation, **not a security sandbox**. The HTTP server has no authentication. Run only trusted workloads, keep it loopback-only, or put the entire runtime inside an independently managed sandbox. See [Security](./docs/security.md).
 
-## Slice 1 status
+## Delivery Slice 2 status
 
-Implemented foundations include the append-only event store, deterministic projection and branch history, disposable TypeScript console, typed working state, local content-addressed artifacts, durable effect outbox, shell/file/model executors, context provenance, budgets, snapshots/history/SSE, and a basic TUI. This is not the whole PRD. Recursive sessions, relational memory and harness refinement, Turso Cloud synchronization, PostgreSQL, semantic retrieval, remote artifacts/executors, and a hostile-code sandbox are not implemented. The exact acceptance status and gaps are in [Slice 1 verification](./docs/slice-1-verification.md).
+The Slice 1 recovery foundation is complete. Slice 2 adds transactional recursive-session admission, spent-and-reserved tree budgets with terminal ancestor attribution, family-scoped durable mailboxes, crash-recoverable cascading cancellation, deterministic document chunks/input sets, atomic idempotent recursive model handles with configurable provider concurrency, persistent goals and durably pinned current-version completion gates, live database-driven heartbeats, restart recovery, and rebuildable operational projections. The TypeScript API, HTTP protocol, and TUI expose these handles without making heap objects durable identity.
+
+This is not the whole PRD. Relational memory and harness refinement, Turso Cloud synchronization, PostgreSQL, semantic retrieval, remote artifacts/executors, and a hostile-code sandbox remain later slices. [Slice 1 verification](./docs/slice-1-verification.md) still records the original foundation evidence; Slice 2 behavior is covered by the recursive integration and adversarial suites run by `bun run verify`.
 
 ## Requirements and install
 

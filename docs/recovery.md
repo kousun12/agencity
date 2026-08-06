@@ -20,11 +20,15 @@ Unless `recover: false`, `Supervisor.open` performs:
 3. **Visible uncertainty.** A non-idempotent running effect gets a canonical `EffectOutcomeRecorded { outcome: "unknown" }`; it is not requeued. An anomalous pending non-idempotent row with a retained prior attempt is treated the same way; a normal pending first attempt remains safe to drain because it was never claimed.
 4. **Cell abandonment.** Every branch projection with a `proposed`/`running` cell gets a branch-scoped idempotent `CellAbandoned` event. This includes a child fork that inherited an incomplete ancestor cell, without reusing the ancestor's idempotency key.
 5. **Recovery evidence.** Affected branches get `RecoveryPerformed` with abandoned, unknown, and retried IDs.
-6. **Drain.** Pending/requeued effects execute and commit attempt/outcome events.
-7. **Model finalization.** If a requested model call already has a durable terminal effect, the runtime records model/message/budget completion or termination without calling the model again.
-8. **Status reconciliation.** A branch left `running` by a crash before model-request/finalization commits is returned to `idle` with a recovery event.
+6. **Cancellation recovery.** Recorded `SubagentCancellationRequested` crash prefixes are resumed before queued work; the original reason wins and descendants terminate leaf-first.
+7. **Drain.** Pending/requeued effects execute and commit attempt/outcome events.
+8. **Model finalization.** If a requested model call already has a durable terminal effect, the runtime records model/message/budget completion or termination without calling the model again.
+9. **Status reconciliation.** A branch left `running` by a crash before model-request/finalization commits is returned to `idle` with a recovery event.
+10. **Heartbeat recovery.** Due active schedules append one aligned tick plus wake message; paused/cancelled schedules are ignored.
+11. **Goal recovery.** Running gate effects are reconciled to passed/failed/cancelled/unknown, the persisted workspace ID/cursor pin is re-checked before recovered success can pass, ambiguous or stale required gates block completion, and active autonomous goals resume bounded model turns.
+12. **Recursive-handle recovery.** Running terminal child calls finalize their durable task/model handle and atomically attribute direct usage to ancestors; safe pending handles re-enter the shared provider limiter. Non-idempotent ambiguous calls are already unknown and are never generated twice.
 
-Recovery commands use stable branch-scoped idempotency keys, so repeating startup does not duplicate terminal state.
+Recovery commands use stable branch-scoped idempotency keys, so repeating startup does not duplicate terminal state. Projection rebuild is a separate effect-free replay operation and does not run any of these schedulers or queues.
 
 ## Effect state machine
 

@@ -15,6 +15,17 @@ Do not change the first three columns or class tokens without updating the archi
 | `snapshots` | `rebuildable-projection` | `mutable` | Disposable cached `AgentState` keyed by session/branch. Upsert/delete is expected. `rebuild` discards it and reduces canonical history. A current-cursor cache has no integrity hash in Slice 1 and must never be treated as authority. |
 | `context_records` | `immutable-derived` | `immutable` | Exact derived model-context/provenance copy, tied one-to-one to `ContextMaterialized.event_id`. `context_no_update`/`context_no_delete` prevent drift; it can be reconstructed from retained context events, but a retained row is never rewritten. |
 | `outbox` | `operational-projection` | `mutable` | Execution queue/status/attempt projection plus disposable owner/lease. Intent and terminal truth are `Effect*` events. Rebuild status from them; lost lease ownership is reconciled as safe retry or canonical unknown, never treated as success. |
+| `tasks` | `rebuildable-projection` | `mutable` | Current task admission/status/result projection of `Task*` and `Subagent*` events. Parent/child identity and terminal truth remain canonical events. |
+| `mailbox_messages` | `rebuildable-projection` | `mutable` | Delivery/ack query projection of paired mailbox events. It can be deleted and replayed without losing a message or acknowledgement. |
+| `terminal_notices` | `rebuildable-projection` | `mutable` | Parent-visible terminal delivery projection of paired `TaskTerminalNotice*` events. |
+| `documents` | `rebuildable-projection` | `mutable` | Imported document metadata projection of `DocumentImported`; canonical payload retains the metadata. |
+| `document_chunks` | `rebuildable-projection` | `mutable` | Ordered content/query projection of `DocumentChunkAdded`. Chunk identity, digest, ordinal, and content are retained canonically. |
+| `input_sets` | `rebuildable-projection` | `mutable` | Input-set header projection of `InputSetCreated`; exact ordered chunk IDs remain in the event. |
+| `input_set_chunks` | `rebuildable-projection` | `mutable` | Normalized ordered membership projection derived entirely from `InputSetCreated.chunkIds`. |
+| `goals` | `rebuildable-projection` | `mutable` | Current autonomous goal/request/status and completion workspace-pin projection; all transitions, pins, and reasons are canonical goal events. |
+| `goal_gates` | `rebuildable-projection` | `mutable` | Current completion-gate request/outcome projection. Gate effects also use the canonical effect/outbox protocol. |
+| `heartbeats` | `rebuildable-projection` | `mutable` | Due-time/tick/status projection of heartbeat events. Scheduler ownership is not durable identity. |
+| `recursive_model_handles` | `rebuildable-projection` | `mutable` | Current recursive-call lookup/status projection; task, child session, model, and terminal transitions are events. |
 | `sqlite_sequence` | `engine-metadata` | `mutable` | SQLite-owned allocator created by `events.sequence INTEGER PRIMARY KEY AUTOINCREMENT`. It preserves increasing local cursors and is recoverable from the greatest retained sequence under SQLite rules. Application/model code must not mutate it directly. |
 
 ### Allowed classification vocabulary
@@ -26,7 +37,7 @@ Do not change the first three columns or class tokens without updating the archi
 - `migration-metadata`: migrator-owned version ledger, not agent domain state.
 - `engine-metadata`: database-engine-owned state, not an application write surface.
 
-No Slice 1 table is an unclassified mutable source of business truth. New migrations must add registry rows in the same change. A future lease/sync/index table must use an allowed operational class or extend this policy deliberately.
+No table is an unclassified mutable source of business truth. New migrations must add registry rows in the same change. A future lease/sync/index table must use an allowed operational class or extend this policy deliberately.
 
 ## Per-table write rules
 
@@ -44,7 +55,7 @@ SQL triggers make update/delete fail even on a separate administrative client. T
 
 These tables speed listing and branch-lineage queries. Adapter event application inserts rows transactionally. They currently have no ordinary update API. Because they have no immutable trigger and are not authoritative, they are conservatively classified mutable/rebuildable rather than append-only truth.
 
-A rebuild procedure for these routing tables is not exposed in Slice 1, although their complete source fields exist in `SessionCreated`/`BranchCreated`. Until tooling exists, repair should happen offline from canonical events rather than by ad hoc edits during execution.
+`LibSqlStorage.rebuildOperationalProjections()` deletes and replays the session/branch routing rows together with all Slice 2 projections in global event cursor order. Repair uses that operation rather than ad hoc edits during execution.
 
 ### `snapshots`
 
@@ -57,6 +68,10 @@ The same append transaction that stores `ContextMaterialized` inserts its contex
 ### `outbox`
 
 The adapter creates it from `EffectRequested`, marks running during a serialized local claim/attempt, and applies terminal outcome. The row may transiently carry `owner` and `lease_expires_at`; those fields are never durable identity. A competing local claimant waits for the winner's durable outcome through that lease instead of reporting a race as unknown. If ownership disappears, recovery checks the canonical request's idempotence assertion: idempotent work returns pending, while running non-idempotent work appends an unknown outcome. A normal pending first attempt is safe to drain because no local claim occurred; a pending non-idempotent row with a retained attempt is conservatively marked unknown. Direct outbox edits are not a supported reconciliation API, and the table is private to model-visible SQL.
+
+### Slice 2 recursive projections
+
+`tasks`, mailbox/terminal delivery rows, document/chunk/input-set rows, goals/gates (including the completion workspace pin added by migration 003), heartbeats, and recursive model handles are updated in the same transaction as their canonical event. `rebuildOperationalProjections()` deletes these mutable rows and replays only their source events; it never re-executes a model, gate, tool, heartbeat callback, or subagent. Document content is duplicated in a query-friendly table for the Slice 2 foundation, but the `DocumentChunkAdded` event remains authoritative.
 
 ### `sqlite_sequence`
 

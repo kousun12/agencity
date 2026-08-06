@@ -26,8 +26,23 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 | `POST /sessions/:session/turns?branch=:branch` | none | `{ outcome, message? or error? }` |
 | `POST /sessions/:session/cells?branch=:branch` | `{ code }` | `{ cellId, result, logs }` |
 | `POST /sessions/:session/branches?branch=:parent` | `{ cursor, name? }` | `{ branchId }` |
+| `GET/POST /sessions/:session/agents?branch=:branch` | none or `SpawnAgentInput` | child list or durable child handle |
+| `POST /sessions/:session/agents/batch?branch=:branch` | `{ inputs: SpawnAgentInput[] }` | atomically admitted child handles |
+| `GET /sessions/:session/tasks?branch=:branch` | none | durable branch task records |
+| `POST /sessions/:session/tasks/:task/cancel?branch=:branch` | `{ reason? }` | cascaded terminal task record |
+| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` | durable delivery handle |
+| `POST /sessions/:session/mailbox/:message/ack?branch=:branch` | none | acknowledged mailbox record |
+| `POST /sessions/:session/documents?branch=:branch` | `ImportDocumentInput` | document handle |
+| `POST /sessions/:session/input-sets?branch=:branch` | `CreateInputSetInput` | exact ordered input-set handle |
+| `POST /sessions/:session/models?branch=:branch` | `StartRecursiveModelInput` (`idempotencyKey` recommended for retry) | stable recursive model handle |
+| `GET /models/:handle` / `POST /models/:handle/cancel` | none or `{ reason? }` | current/terminal model handle |
+| `POST /sessions/:session/goals?branch=:branch` | `CreateGoalInput` | goal plus gates |
+| `POST /sessions/:session/goals/:goal/completion?branch=:branch` | none | current-version completion result |
+| `POST /sessions/:session/goals/:goal/continue?branch=:branch` | `{ maxTurns? }` | continued goal handle |
+| `POST /sessions/:session/heartbeats?branch=:branch` | `CreateHeartbeatInput` | heartbeat handle |
+| `POST /heartbeats/:id/(tick|pause|cancel)` | `{ at? }` or `{ reason? }` | updated schedule handle |
 
-For snapshot/history/stream, the branch may alternatively occupy the fourth path segment, but the query parameter is the documented form. Request validation is currently minimal at the transport boundary; domain/storage validation remains authoritative.
+For snapshot/history/stream, the branch may alternatively occupy the fourth path segment, but the query parameter is the documented form. Slice 2 commands require `?branch=`. Mailbox family/task authorization, document scope, spent-plus-active tree budgets, recoverable cancellation propagation, durable goal workspace pins, shared provider concurrency, and early-heartbeat rejection are enforced by the same domain services used in-process; transport routing does not weaken them. Request validation is currently minimal at the transport boundary; domain/storage validation remains authoritative.
 
 ### Snapshot then SSE
 
@@ -55,7 +70,7 @@ await client.turn(session.sessionId, session.branchId);
 const snapshot = await client.snapshot(session.sessionId, session.branchId);
 ```
 
-`AgentClient` currently wraps create, snapshot, message, turn, cell, and history only. Fork and SSE helpers are not yet provided; use `fetch`/`EventSource` or implement the small wire contract directly.
+`AgentClient` wraps the non-streaming Slice 1 calls plus Slice 2 spawn/task/mailbox, document/input-set, recursive-model, goal, and heartbeat commands. Fork and SSE helpers are not yet provided; use `fetch`/`EventSource` or implement the small wire contract directly. Returned Slice 2 values are plain durable JSON handles and may be stored and reused after reconnect.
 
 ## Console cell environment
 

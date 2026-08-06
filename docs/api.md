@@ -30,6 +30,8 @@ async function usingRuntime() {
     restartConsoleAfterCell: true,
     recover: true,
     // modelProviders: [customProvider],
+    providerConcurrency: { openai: 2, echo: 4 },
+    heartbeatPollIntervalMs: 100,
   });
   try {
     const { sessionId, branchId } = await supervisor.createSession({
@@ -45,7 +47,7 @@ async function usingRuntime() {
 }
 ```
 
-`Supervisor.open` migrates storage, creates the artifact directory, installs file/shell/model executors, and normally recovers incomplete work. `close` stops the console worker and closes LibSQL clients. A supervisor process is the sole supported execution owner for a session in Slice 1.
+`Supervisor.open` migrates storage, creates the artifact directory, installs file/shell/model executors, normally recovers incomplete work, and starts the database-driven heartbeat scheduler. `providerConcurrency` is either one positive default or a provider-to-limit map. `close` stops heartbeat polling, drains local recursive runners, stops the console worker, and closes LibSQL clients. A supervisor process is the sole supported execution owner for a session in Slice 1.
 
 ## Core operations
 
@@ -54,7 +56,7 @@ async function usingRuntime() {
 - `fork`: validates the parent lineage cursor, then appends `BranchCreated` on a new branch.
 - `executeCell`: serializes cells per branch, stages state/artifact references, and atomically commits them with `CellCommitted` after successful execution.
 - `modelLoop.turn`: materializes attributable context, requests a model effect, records response/usage, and updates status.
-- `modelLoop.run`: performs a caller-bounded number of turns; it is not the autonomous-goal/completion-gate loop planned for later slices.
+- `modelLoop.run`: performs a caller-bounded number of turns. `goals.runContinuation` and startup goal recovery compose it into the durable Slice 2 autonomous loop.
 
 ## Storage contract
 
@@ -113,3 +115,67 @@ The callback receives durable events strictly after the supplied cursor. It is a
 ## Stable errors
 
 `AgentRuntimeError` subclasses expose stable codes: `VALIDATION_ERROR`, `CONFLICT`, `NOT_FOUND`, `CAPABILITY_UNAVAILABLE`, `INVALID_TRANSITION`, and `DEPENDENCY_FAILURE`. Consumers should branch on `code`, never message text. HTTP maps `NOT_FOUND` to 404, conflicts/transitions to 409, validation to 400, dependency failure to 424, unavailable capability to 501, and unknown failures to 500/`INTERNAL`.
+
+## Slice 2 recursive services
+
+`Supervisor.open` also exposes five typed domain services. Every creation method resolves only after its canonical event batch commits, and every returned handle is JSON-serializable (no promise/controller/provider/LibSQL object is durable identity).
+
+```ts
+const child = await supervisor.agents.spawn(parentSessionId, parentBranchId, {
+  task: "Investigate the failing tests",
+  completionCriteria: "Return root cause and a verified patch",
+});
+const children = await supervisor.agents.spawnMany(parentSessionId, parentBranchId, [
+  { task: "Inspect logs" }, { task: "Find the regression" },
+]);
+const mail = await supervisor.agents.sendMessage(parentSessionId, parentBranchId, {
+  toSessionId: child.sessionId, content: "Prioritize the first failure",
+});
+await supervisor.agents.acknowledgeMessage(child.sessionId, child.branchId, mail.mailboxMessageId);
+await supervisor.agents.completeTask(child.sessionId, child.branchId, { result: { summary: "..." } });
+// failTask, cancel, listTasks, and listChildren use the same durable task IDs.
+
+const document = await supervisor.documents.import(parentSessionId, parentBranchId, {
+  name: "build.log", content: veryLargeText, chunkBytes: 32 * 1024,
+});
+const chunks = await supervisor.documents.readChunks(document.documentId, { start: 0, limit: 20 });
+const inputSet = await supervisor.documents.createInputSet(parentSessionId, parentBranchId, {
+  chunkIds: chunks.map((chunk) => chunk.chunkId),
+});
+
+const call = await supervisor.models.start(parentSessionId, parentBranchId, {
+  prompt: "Summarize the selected log ranges", inputSetId: inputSet.inputSetId,
+  idempotencyKey: "summarize-build-log-v1",
+});
+await supervisor.models.get(call.handleId);
+await supervisor.models.cancel(call.handleId);
+// startMany admits many durable children before their asynchronous results arrive.
+
+const goal = await supervisor.goals.create(parentSessionId, parentBranchId, {
+  description: "Ship a passing patch",
+  gates: [{ name: "tests", executor: "shell", operation: "run",
+    input: { command: "bun test" }, required: true }],
+});
+await supervisor.goals.runContinuation(parentSessionId, parentBranchId, goal.goalId, { maxTurns: 3 });
+await supervisor.goals.requestCompletion(parentSessionId, parentBranchId, goal.goalId);
+
+const heartbeat = await supervisor.heartbeats.create(parentSessionId, parentBranchId, {
+  intervalMs: 60_000, goalId: goal.goalId,
+});
+await supervisor.heartbeats.tick(heartbeat.heartbeatId);
+await supervisor.heartbeats.pause(heartbeat.heartbeatId);
+await supervisor.heartbeats.cancel(heartbeat.heartbeatId);
+```
+
+`AgentStorage` retains the original mandatory Slice 1 contract and advertises the Slice 2 query/rebuild methods as optional for compatibility with existing third-party adapters. `requireRecursiveStorage` fails composition explicitly when one of these operations is unavailable. `LibSqlStorage` implements all of them, including `getSession`, child/task/mailbox/document/input-set/goal/heartbeat/model lookups and `rebuildOperationalProjections`.
+
+### Slice 2 command and recovery semantics
+
+- `agents.spawnMany` validates the entire request, reserves the complete active-child and sibling-budget envelope, and commits all task/session/prompt/admission events in one transaction. `idempotencyKey` gives a request a stable task/session identity; an exact retry returns the original handle with its durable current status and changed intent conflicts. Completed children release their child-count and unused-budget reservations. Actual terminal usage is attributed to each ancestor exactly once; unknown usage consumes the remaining reservation conservatively. A child inherits remaining parent limits and cannot widen its provider/model/output or budget envelope.
+- Mail delivery is restricted to sessions with the same `rootSessionId`; an optional `taskId` must resolve inside that family. Cancelling a task walks and terminates its admitted descendant tree leaf-first. Startup resumes recorded cancellation prefixes, and later retries cannot replace the first recorded reason.
+- `documents.import(..., { idempotencyKey })` derives stable document and chunk IDs. `createInputSet` accepts only chunks owned by the caller's root family and preserves caller order. Root contexts contain document metadata, while an isolated recursive child gets the exact authorized chunk IDs and contents for its selected input set.
+- Recursive start atomically admits the task/child/prompt/input/handle; `idempotencyKey` makes retry return the stable handle, and `startMany` is all-or-nothing. A shared configurable limiter covers all model effects with a default per-provider concurrency of one. Cancelling a queued call prevents provider admission; cancelling an in-flight call aborts its effect. Lost non-idempotent calls recover as `unknown` and terminate their durable handles without provider replay.
+- Completion requests persist the workspace ID and branch's current workspace-relevant cursor. A concurrent workspace change makes gate output stale and blocks completion. Required `failed`, `cancelled`, `unknown`, or stale gates block; continuation plus a new completion request re-evaluates all gates against the new version. Startup reconciles incomplete gates and resumes active goals.
+- A heartbeat rejects an early tick, coalesces all missed intervals into one aligned advancement, and atomically appends `HeartbeatTicked` plus its wake-up `MessageAppended`. Startup and the live database poller fire due active schedules; paused and cancelled rows are excluded, and `close()` stops polling.
+
+`Supervisor.close()` waits for locally queued recursive runners before closing storage. With recovery enabled, startup reconciles outbox/model outcomes, due heartbeats, completion gates and autonomous goals, then resumes pending recursive handles. Operational rebuild and historical projection never execute those effects.
