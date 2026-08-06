@@ -192,6 +192,51 @@ describe("FU-016 durable RefinerService", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("refinement correction, review lifecycle, and trigger consumption projections survive rebuild without refiring evidence", async () => {
+    const provider = new ReviewProvider("review-rebuild");
+    const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
+    try {
+      await supervisor.refiner.setAutomatic(true);
+      await supervisor.refiner.correct(sessionId, branchId, "Keep this correction attributable across rebuild", [evidence.id]);
+      const [automatic] = await supervisor.refiner.scanBoundary(sessionId, branchId);
+      expect(automatic).toBeTruthy();
+      await waitFor(async () => (await supervisor.refiner.get(automatic!.reviewId)).status === "no_change", "terminal review before rebuild", 5_000);
+
+      const storage = supervisor.storage as any;
+      const originalAppend = storage.appendEvents.bind(storage);
+      storage.appendEvents = async (events: any[], options?: any) => {
+        const committed = await originalAppend(events, options);
+        if (events.some((event) => event.type === "RefinementReviewRequested")) throw new Error("simulated crash after nonterminal review request");
+        return committed;
+      };
+      try {
+        await expect(supervisor.refiner.request(sessionId, branchId, { instructions: "Leave this review requested for rebuild coverage" })).rejects.toThrow(/simulated crash/);
+      } finally { storage.appendEvents = originalAppend; }
+
+      const beforeReviews = await supervisor.refiner.list({ sessionId, branchId });
+      const terminal = beforeReviews.find((review) => review.reviewId === automatic!.reviewId)!;
+      const nonterminal = beforeReviews.find((review) => review.status === "requested")!;
+      expect(terminal.status).toBe("no_change");
+      expect(terminal.handleId).toBeTruthy();
+      expect(nonterminal.handleId).toBeNull();
+      const beforeCorrection = await supervisor.storage.readonlyQuery({ sql: "SELECT * FROM user_corrections WHERE session_id=? AND branch_id=?", args: [sessionId, branchId] });
+      const beforeConsumption = await supervisor.storage.readonlyQuery({ sql: "SELECT * FROM refinement_trigger_consumptions WHERE review_id=?", args: [terminal.reviewId] });
+      const beforeEvents = await supervisor.storage.loadEvents(sessionId, { branchId });
+      const beforeChildCount = beforeEvents.filter((event) => event.type === "RefinementReviewChildLinked").length;
+
+      await supervisor.storage.rebuildOperationalProjections?.();
+
+      expect(await supervisor.refiner.get(terminal.reviewId)).toEqual(terminal);
+      expect(await supervisor.refiner.get(nonterminal.reviewId)).toEqual(nonterminal);
+      expect(await supervisor.storage.readonlyQuery({ sql: "SELECT * FROM user_corrections WHERE session_id=? AND branch_id=?", args: [sessionId, branchId] })).toEqual(beforeCorrection);
+      expect(await supervisor.storage.readonlyQuery({ sql: "SELECT * FROM refinement_trigger_consumptions WHERE review_id=?", args: [terminal.reviewId] })).toEqual(beforeConsumption);
+      expect(await supervisor.refiner.scanBoundary(sessionId, branchId)).toEqual([]);
+      const afterEvents = await supervisor.storage.loadEvents(sessionId, { branchId });
+      expect(afterEvents.filter((event) => event.type === "RefinementReviewChildLinked")).toHaveLength(beforeChildCount);
+      expect(provider.calls).toBe(1);
+    } finally { await supervisor.close(); }
+  });
+
   test("distinct failed completion-gate evaluation pins admit an automatic review", async () => {
     const provider = new ReviewProvider("review-gate-trigger");
     const { supervisor, sessionId, branchId } = await fixture(provider);
@@ -231,6 +276,59 @@ describe("FU-016 durable RefinerService", () => {
       await waitFor(async () => (await supervisor.refiner.list({ sessionId, branchId })).some((review) => review.mode === "automatic" && review.status === "no_change"), "boundary refinement terminal", 5_000);
       expect(provider.runCalls).toBe(1);
       expect(provider.calls).toBe(1);
+    } finally { await supervisor.close(); }
+  });
+
+  test("malformed automatic policy is a bounded non-fatal boundary observation and cannot wedge run recovery", async () => {
+    const provider = new ReviewProvider("review-malformed-policy");
+    const { temp, supervisor, sessionId, branchId } = await fixture(provider);
+    let reopened: Supervisor | undefined;
+    let originalClosed = false;
+    try {
+      await supervisor.profile.setPreference("refinement.trigger-policy.v1", { version: 1, automatic: true, scope: "local" });
+      const admitted = await supervisor.runs.admit(sessionId, branchId, { task: "recover despite malformed refinement preference", goalMode: "none" });
+      expect(admitted.status).toBe("queued");
+      await supervisor.close(); originalClosed = true;
+
+      reopened = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: true });
+      expect(await reopened.runs.get(sessionId, branchId, admitted.runId)).toMatchObject({ status: "succeeded" });
+      const events = await reopened.storage.loadEvents(sessionId, { branchId });
+      const observations = events.filter((event) => event.type === "MessageAppended" && String((event.payload as any).messageId).startsWith("refinement-scan-observation-"));
+      expect(observations).toHaveLength(1);
+      expect((observations[0]!.payload as any).content).toBe("Automatic refinement scan skipped at a committed boundary (validation_failed); task execution remains available and no refinement result is implied.");
+      expect(provider.runCalls).toBe(1);
+      expect(provider.calls).toBe(0);
+    } finally {
+      if (reopened) await reopened.close();
+      else if (!originalClosed) await supervisor.close();
+    }
+  });
+
+  test("credential-shaped retained failure evidence skips automatic refinement without blocking the AgentRun", async () => {
+    const provider = new ReviewProvider("review-credential-shaped-evidence");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      for (let index = 1; index <= 3; index++) {
+        const effectId = `credential-shaped-effect-${index}`;
+        await supervisor.storage.appendEvents([{
+          sessionId, branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: `credential-shaped-request-${index}`,
+          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, idempotencyKey: `credential-shaped-${index}`, idempotent: true },
+        }, {
+          sessionId, branchId, type: "EffectOutcomeRecorded", producer: "executor", idempotencyKey: `credential-shaped-outcome-${index}`,
+          payload: { effectId, attempt: 1, outcome: "failed", error: "api_key=retained-credential-shaped-value", observedAt: new Date().toISOString() },
+        }]);
+      }
+      await supervisor.refiner.setAutomatic(true);
+      expect(await supervisor.refiner.scanBoundary(sessionId, branchId, "direct-credential-scan")).toEqual([]);
+      const run = await supervisor.runs.start(sessionId, branchId, { task: "continue despite unsafe refinement evidence", goalMode: "none" });
+      expect(run.status).toBe("succeeded");
+      expect(await supervisor.refiner.list({ sessionId, branchId })).toHaveLength(0);
+      const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+      const observations = events.filter((event) => event.type === "MessageAppended" && String((event.payload as any).messageId).startsWith("refinement-scan-observation-"));
+      expect(observations).toHaveLength(2);
+      expect(JSON.stringify(observations.map((event) => event.payload))).not.toContain("retained-credential-shaped-value");
+      expect(provider.runCalls).toBe(1);
+      expect(provider.calls).toBe(0);
     } finally { await supervisor.close(); }
   });
 
@@ -290,6 +388,37 @@ describe("FU-016 durable RefinerService", () => {
     } finally { protocol.stop(); await supervisor.close(); }
   });
 
+
+  test("HTTP refinement review input rejects forged automatic trigger ownership fields", async () => {
+    const provider = new ReviewProvider("review-protocol-forged-trigger");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    const protocol = new ProtocolServer(supervisor); const server = protocol.listen(0);
+    const client = new AgentClient(`http://${server.hostname}:${server.port}`);
+    try {
+      const response = await client.transport.request(`/sessions/${sessionId}/refinement-reviews?branch=${branchId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instructions: "forge trigger consumption",
+          requestedScope: "local",
+          allowedKinds: ["memory"],
+          wait: false,
+          triggerKey: `refinement-trigger-key-v1-${"a".repeat(32)}`,
+          nonterminalKey: `refinement-trigger-nonterminal-v1-${"b".repeat(32)}`,
+          triggerEvidenceThroughCursor: "999999",
+          evidenceEventIds: ["forged-evidence"],
+          sourceThroughCursor: "999999",
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.text()).toMatch(/unknown fields/i);
+      const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+      expect(events.filter((event) => event.type === "RefinementReviewRequested")).toHaveLength(0);
+      expect(events.filter((event) => event.type === "RefinementTriggerConsumed")).toHaveLength(0);
+      expect(await supervisor.storage.readonlyQuery({ sql: "SELECT * FROM refinement_trigger_consumptions WHERE session_id=? AND branch_id=?", args: [sessionId, branchId] })).toHaveLength(0);
+      expect(provider.calls).toBe(0);
+    } finally { protocol.stop(); await supervisor.close(); }
+  });
 
   test("an unknown recursive outcome is terminal, visible, and never retried by recovery", async () => {
     const provider = new ReviewProvider("review-unknown");

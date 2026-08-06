@@ -325,7 +325,7 @@ export class Supervisor {
     this.contexts.attachSkillCatalog(this.skillManagement);
     this.schedules.attachRunService(this.runs);
     this.agents.attachRunService(this.runs);
-    this.runs.setBoundaryObserver(async (sessionId, branchId, runId) => { await this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId); await this.refiner.scanBoundary(sessionId, branchId); });
+    this.runs.setBoundaryObserver(async (sessionId, branchId, runId) => { await this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId); await this.refiner.scanBoundary(sessionId, branchId, runId); });
   }
 
   static async open(options: SupervisorOptions): Promise<Supervisor> {

@@ -174,24 +174,50 @@ export class RefinerService {
     return policy;
   }
 
-  /** Called only at committed AgentRun boundaries. It never blocks the next model step on review completion. */
-  async scanBoundary(sessionId: string, branchId: string): Promise<readonly RefinementReviewRecord[]> {
-    const policy = await this.automaticPolicy();
-    if (!policy.automatic) return [];
-    const events = await this.storage.loadEvents(sessionId, { branchId });
-    if (!events.length) return [];
-    const rows = await this.storage.readonlyQuery({ sql: "SELECT trigger_key,last_consumed_evidence_cursor FROM refinement_trigger_consumptions WHERE session_id=? AND branch_id=? ORDER BY trigger_key", args: [sessionId,branchId] });
-    const pending = await this.storage.readonlyQuery({ sql: "SELECT nonterminal_key FROM refinement_reviews WHERE session_id=? AND branch_id=? AND status IN ('requested','running') AND nonterminal_key IS NOT NULL ORDER BY nonterminal_key", args: [sessionId,branchId] });
-    const detected = scanRefinementTriggers({
-      sessionId, branchId, policy,
-      records: events.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: canonicalCursor(event.cursor), type: event.type, payload: event.payload })),
-      consumptions: (rows as any[]).map((row) => ({ triggerKey: String(row.trigger_key), lastConsumedEvidenceCursor: canonicalCursor(String(row.last_consumed_evidence_cursor)) })),
-      nonterminalKeys: (pending as any[]).map((row) => String(row.nonterminal_key)),
-      brokeredCredentialValues: knownSecretValues(),
-    });
-    const admitted: RefinementReviewRecord[] = [];
-    for (const trigger of detected) admitted.push(await this.#admitAutomatic(trigger));
-    return admitted;
+  /**
+   * Called only at committed AgentRun boundaries. Review completion is always
+   * background work, and malformed retained policy/evidence is a non-fatal
+   * observation rather than authority to wedge the owning run or recovery.
+   */
+  async scanBoundary(sessionId: string, branchId: string, boundaryKey?: string): Promise<readonly RefinementReviewRecord[]> {
+    try {
+      const policy = await this.automaticPolicy();
+      if (!policy.automatic) return [];
+      const events = await this.storage.loadEvents(sessionId, { branchId });
+      if (!events.length) return [];
+      const rows = await this.storage.readonlyQuery({ sql: "SELECT trigger_key,last_consumed_evidence_cursor FROM refinement_trigger_consumptions WHERE session_id=? AND branch_id=? ORDER BY trigger_key", args: [sessionId,branchId] });
+      const pending = await this.storage.readonlyQuery({ sql: "SELECT nonterminal_key FROM refinement_reviews WHERE session_id=? AND branch_id=? AND status IN ('requested','running') AND nonterminal_key IS NOT NULL ORDER BY nonterminal_key", args: [sessionId,branchId] });
+      const detected = scanRefinementTriggers({
+        sessionId, branchId, policy,
+        records: events.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: canonicalCursor(event.cursor), type: event.type, payload: event.payload })),
+        consumptions: (rows as any[]).map((row) => ({ triggerKey: String(row.trigger_key), lastConsumedEvidenceCursor: canonicalCursor(String(row.last_consumed_evidence_cursor)) })),
+        nonterminalKeys: (pending as any[]).map((row) => String(row.nonterminal_key)),
+        brokeredCredentialValues: knownSecretValues(),
+      });
+      const admitted: RefinementReviewRecord[] = [];
+      for (const trigger of detected) admitted.push(await this.#admitAutomatic(trigger));
+      return admitted;
+    } catch (error) {
+      // The observation is deliberately fixed-shape: neither malformed policy
+      // values nor credential-shaped retained errors are copied into history.
+      await this.#recordBoundaryScanFailure(sessionId, branchId, boundaryKey, error).catch(() => {});
+      return [];
+    }
+  }
+
+  async #recordBoundaryScanFailure(sessionId: string, branchId: string, boundaryKey: string | undefined, error: unknown): Promise<void> {
+    const category = error instanceof ValidationError ? "validation_failed" : "scan_unavailable";
+    const fingerprint = stableSha256({ sessionId, branchId, boundaryKey: boundaryKey ?? "direct-scan", category }).slice(0, 32);
+    await this.storage.appendEvents([{
+      id: `refinement-scan-observation-${fingerprint}`,
+      sessionId, branchId, type: "MessageAppended", producer: "supervisor",
+      idempotencyKey: `refinement-scan-observation:${fingerprint}`,
+      payload: {
+        messageId: `refinement-scan-observation-${fingerprint}`,
+        role: "tool",
+        content: `Automatic refinement scan skipped at a committed boundary (${category}); task execution remains available and no refinement result is implied.`,
+      },
+    }]);
   }
 
   async get(reviewId: string): Promise<RefinementReviewRecord> {
@@ -445,6 +471,9 @@ export class RefinerService {
 
 function normalizeReviewInput(input: StartRefinementReviewInput): StartRefinementReviewInput {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("Refinement review input must be an object");
+  const allowedFields = new Set(["instructions", "requestedScope", "allowedKinds", "wait"]);
+  const unknownFields = Object.keys(input).filter((field) => !allowedFields.has(field));
+  if (unknownFields.length > 0) throw new ValidationError(`Refinement review input contains unknown fields: ${unknownFields.sort().join(", ")}`);
   if (input.instructions !== undefined && typeof input.instructions !== "string") throw new ValidationError("Refinement instructions must be a string");
   if (input.requestedScope !== undefined && !ALLOWED_SCOPE_SET.has(input.requestedScope)) throw new ValidationError("Requested refinement scope is invalid");
   if (input.wait !== undefined && typeof input.wait !== "boolean") throw new ValidationError("Refinement wait must be boolean");
@@ -453,7 +482,12 @@ function normalizeReviewInput(input: StartRefinementReviewInput): StartRefinemen
       throw new ValidationError("Refinement allowedKinds must contain 1-4 distinct supported harness kinds");
     }
   }
-  return input;
+  return {
+    ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
+    ...(input.requestedScope === undefined ? {} : { requestedScope: input.requestedScope }),
+    ...(input.allowedKinds === undefined ? {} : { allowedKinds: [...input.allowedKinds] }),
+    ...(input.wait === undefined ? {} : { wait: input.wait }),
+  };
 }
 
 function canonicalCursor(cursor: string): string { return BigInt(cursor).toString(); }
