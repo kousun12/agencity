@@ -68,8 +68,16 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const p = event.payload as EventPayloads["ContextCompactionRequested"];
       if (state.compactions[p.compactionId]) throw new InvalidTransitionError("contextCompaction", state.compactions[p.compactionId]!.status, "requested");
       const sourceIds = new Set(p.sourceEventIds);
-      if (sourceIds.size !== p.sourceEventIds.length || p.frozenSources.some((source, index) => source.eventId !== p.sourceEventIds[index] || !state.appliedEventIds.includes(source.eventId) || BigInt(source.cursor) > BigInt(p.throughCursor))) {
-        throw new ValidationError("Context compaction sources must be unique retained prior events at or before throughCursor");
+      if (sourceIds.size !== p.sourceEventIds.length || p.frozenSources.some((source, index) => {
+        const message = state.messages.find((candidate) => candidate.eventId === source.eventId);
+        const exactPayload = message ? {
+          messageId: message.id, role: message.role, content: message.content,
+          ...(message.modelCallId === null ? {} : { modelCallId: message.modelCallId }),
+          ...(message.mailbox === undefined ? {} : { mailbox: message.mailbox }),
+        } : null;
+        return source.eventId !== p.sourceEventIds[index] || !state.appliedEventIds.includes(source.eventId) || BigInt(source.cursor) > BigInt(p.throughCursor) || source.type !== "MessageAppended" || exactPayload === null || !Bun.deepEquals(source.payload, exactPayload);
+      })) {
+        throw new ValidationError("Context compaction sources must be exact unique retained prior narrative events at or before throughCursor");
       }
       return { ...next, compactions: { ...state.compactions, [p.compactionId]: {
         id: p.compactionId, strategy: p.strategy, reason: p.reason, requestedBy: p.requestedBy,

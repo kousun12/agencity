@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeTempRuntime, openTempStorage, removeTempRuntime, seedSession } from "../helpers.ts";
-import { ContextMaterializer, CompactionService, OutboxRunner, ProjectionService, Supervisor } from "../../src/runtime/index.ts";
+import { ContextMaterializer, CompactionService, OutboxRunner, ProjectionService, Supervisor, stableEffectId } from "../../src/runtime/index.ts";
 import { EchoModelProvider, ModelExecutor, ModelProviderContextWindowOverflowError, type ModelProvider } from "../../src/executors/index.ts";
-import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, type JsonValue } from "../../src/domain/index.ts";
+import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, projectEvents, type AgentEvent, type JsonValue } from "../../src/domain/index.ts";
+import { AgentClient, ProtocolServer } from "../../src/protocol/index.ts";
+import { createExactSourceManifest, planCompactionSources } from "../../src/runtime/compaction-core.ts";
 
 const temps: Awaited<ReturnType<typeof makeTempRuntime>>[] = [];
 afterEach(async () => { while (temps.length) await removeTempRuntime(temps.pop()!); });
@@ -23,6 +25,24 @@ async function messages(storage: any, sessionId: string, branchId: string, count
   }]);
 }
 
+async function appendPendingModelRequest(storage: any, sessionId: string, branchId: string, compactionId: string) {
+  const events = await storage.loadEvents(sessionId, { branchId }) as AgentEvent[];
+  const throughCursor = BigInt(projectEvents(events).cursor).toString();
+  const sources = events.filter((event) => event.type === "MessageAppended").slice(0, -4);
+  const plan = planCompactionSources(sources.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: BigInt(event.cursor).toString(), type: event.type, schemaVersion: event.schemaVersion, payload: event.payload })), { sessionId, branchId, throughCursor });
+  const manifest = createExactSourceManifest(plan.compactable, { sessionId, branchId, throughCursor });
+  const [request] = await storage.appendEvents([{
+    sessionId, branchId, type: "ContextCompactionRequested", producer: "supervisor",
+    idempotencyKey: `context-compaction-request:${compactionId}`,
+    payload: {
+      compactionId, strategy: "model-summary-v1", reason: "user-request", requestedBy: "user", throughCursor,
+      sourceEventIds: [...manifest.sourceEventIds], sourceDigest: manifest.sourceDigest,
+      frozenSources: plan.compactable.map((source) => ({ eventId: source.eventId, sessionId: source.sessionId, branchId: source.branchId, cursor: source.cursor, type: source.type, schemaVersion: source.schemaVersion, payload: source.payload, disposition: "compactable", classificationReason: source.classificationReason, payloadUtf8Bytes: source.payloadUtf8Bytes })),
+    },
+  }]);
+  return request as AgentEvent<"ContextCompactionRequested">;
+}
+
 describe("FU-019 durable context compaction", () => {
   test("freezes exact sources, retains canonical history, and materializes one effective summary beside uncovered narrative", async () => {
     const { storage, root, service } = await fixture();
@@ -37,6 +57,10 @@ describe("FU-019 durable context compaction", () => {
     const request = after.find((event) => event.type === "ContextCompactionRequested")!;
     expect((request.payload as any).frozenSources).toHaveLength(23);
     expect((request.payload as any).frozenSources[0]).toMatchObject({ eventId: compacted.sourceEventIds[0], disposition: "compactable" });
+    await expect(storage.appendEvents([{
+      sessionId: root.sessionId, branchId: root.branchId, type: "ContextCompactionRequested", producer: "client", idempotencyKey: "tampered-compaction",
+      payload: { ...(request.payload as any), compactionId: "tampered-compaction", sourceDigest: "0".repeat(64) },
+    }])).rejects.toThrow("source digest");
     const context = await new ContextMaterializer(storage).materialize(root.sessionId, root.branchId);
     const value = context.context as Record<string, JsonValue>;
     expect(value.compactions).toHaveLength(1);
@@ -125,6 +149,83 @@ describe("FU-019 durable context compaction", () => {
     expect(run.steps[0]?.modelAttempts[1]).toMatchObject({ attempt: 2, reason: "provider-overflow", retryOfCallId: run.steps[0]?.modelAttempts[0]?.callId });
     expect(run.steps[0]!.modelAttempts[1]!.estimatedInputTokens).toBeLessThan(run.steps[0]!.modelAttempts[0]!.estimatedInputTokens);
     expect(Object.values(state.compactions).some((item) => item.reason === "provider-overflow" && item.status === "completed")).toBe(true);
+    await supervisor.close();
+  });
+
+
+  test("recovers request/effect crash boundaries and makes a lost model summary explicitly unknown", async () => {
+    let calls = 0;
+    const provider: ModelProvider = {
+      name: "recovery-summary", capabilities: { streaming: false },
+      async complete() { calls++; return { text: "recovered concise summary", finishReason: "stop", usage: { inputTokens: 9, outputTokens: 3, costUsd: 0 } }; },
+    };
+    const first = await fixture(provider);
+    await messages(first.storage, first.root.sessionId, first.root.branchId, 26);
+    await appendPendingModelRequest(first.storage, first.root.sessionId, first.root.branchId, "crash-before-effect");
+    expect(await first.service.recoverIncomplete()).toBe(1);
+    expect(calls).toBe(1);
+    expect((await first.service.inspect(first.root.sessionId, first.root.branchId)).compactions.find((item) => item.compactionId === "crash-before-effect")?.status).toBe("completed");
+    expect(await first.service.recoverIncomplete()).toBe(0);
+    first.storage.close();
+
+    calls = 0;
+    const second = await fixture(provider);
+    await messages(second.storage, second.root.sessionId, second.root.branchId, 26);
+    await appendPendingModelRequest(second.storage, second.root.sessionId, second.root.branchId, "crash-after-effect");
+    const effectKey = "context-compaction-model:crash-after-effect:level:0:chunk:0";
+    const effectId = await second.outbox.request({ sessionId: second.root.sessionId, branchId: second.root.branchId, executor: "model", operation: "complete", input: { context: { messages: [] }, configuration: { provider: provider.name, model: "test" } }, idempotencyKey: effectKey, idempotent: false });
+    expect(await second.outbox.run(effectId)).toMatchObject({ outcome: "succeeded" });
+    expect(calls).toBe(1);
+    expect(await second.service.recoverIncomplete()).toBe(1);
+    expect(calls).toBe(1);
+    second.storage.close();
+
+    calls = 0;
+    const third = await fixture(provider);
+    await messages(third.storage, third.root.sessionId, third.root.branchId, 26);
+    const request = await appendPendingModelRequest(third.storage, third.root.sessionId, third.root.branchId, "crash-unknown");
+    const unknownKey = "context-compaction-model:crash-unknown:level:0:chunk:0";
+    const unknownEffectId = await third.outbox.request({ sessionId: third.root.sessionId, branchId: third.root.branchId, executor: "model", operation: "complete", input: { context: { messages: [] }, configuration: { provider: provider.name, model: "test" } }, idempotencyKey: unknownKey, idempotent: false });
+    expect(unknownEffectId).toBe(stableEffectId(third.root.sessionId, unknownKey));
+    await third.storage.appendEvents([{ sessionId: third.root.sessionId, branchId: third.root.branchId, type: "EffectAttemptStarted", producer: "executor", idempotencyKey: `effect-attempt:${unknownEffectId}:1`, payload: { effectId: unknownEffectId, attempt: 1 } }]);
+    const recovered = await third.outbox.recover();
+    expect(recovered.unknownEffectIds).toContain(unknownEffectId);
+    expect(await third.service.recoverIncomplete()).toBe(1);
+    const unknown = projectEvents(await third.storage.loadEvents(third.root.sessionId, { branchId: third.root.branchId })).compactions[request.payload.compactionId]!;
+    expect(unknown.status).toBe("unknown");
+    expect(calls).toBe(0);
+    third.storage.close();
+  });
+
+
+  test("exposes inspect/compact through sdk and protocol and selects another strategy on a branch", async () => {
+    const provider: ModelProvider = {
+      name: "surface-summary", capabilities: { streaming: false },
+      async complete() { return { text: "surface summary", finishReason: "stop", usage: { inputTokens: 8, outputTokens: 2, costUsd: 0 } }; },
+    };
+    const temp = await makeTempRuntime("agencity-compaction-surfaces-"); temps.push(temp);
+    const supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
+    const root = await supervisor.createSession({ workspaceId: "surfaces", model: { provider: provider.name, model: "surface" } });
+    await messages(supervisor.storage, root.sessionId, root.branchId, 26);
+    const sdkCompaction = await supervisor.executeCell(root.sessionId, root.branchId, `return await sdk.context.compact({ strategy: "deterministic-extractive-v1", instructions: "preserve decisions", idempotencyKey: "sdk-surface" });`);
+    expect(sdkCompaction.result).toMatchObject({ status: "completed", requestedBy: "agent", reason: "agent-request" });
+    const sdkInspection = await supervisor.executeCell(root.sessionId, root.branchId, `return await sdk.context.inspect();`);
+    expect(sdkInspection.result).toMatchObject({ messageCount: 26, effective: { strategy: "deterministic-extractive-v1" } });
+
+    const protocol = new ProtocolServer(supervisor); const server = protocol.listen(0);
+    const client = new AgentClient(`http://${server.hostname}:${server.port}`);
+    try {
+      const inspected = await client.inspectContext(root.sessionId, root.branchId);
+      expect(inspected.effective?.strategy).toBe("deterministic-extractive-v1");
+      expect(inspected.capacity).toMatchObject({ provider: provider.name, model: "surface", source: "unknown", contextWindowTokens: null });
+      const guided = await client.compact(root.sessionId, root.branchId, { strategy: "model-summary-v1", instructions: "preserve protocol evidence", rematerializeFromContextId: (sdkCompaction.result as any).contextId, idempotencyKey: "protocol-surface" });
+      expect(guided).toMatchObject({ status: "completed", strategy: "model-summary-v1" });
+      const history = await supervisor.storage.loadEvents(root.sessionId, { branchId: root.branchId });
+      const childBranchId = await supervisor.fork(root.sessionId, root.branchId, history.at(-1)!.cursor, "extractive branch", "deterministic-extractive-v1");
+      const child = await supervisor.inspectContext(root.sessionId, childBranchId);
+      expect(child.effective).toMatchObject({ strategy: "deterministic-extractive-v1", reason: "rematerialize" });
+      expect(child.effective?.sourceDigest).toBe(guided.sourceDigest);
+    } finally { server.stop(true); }
     await supervisor.close();
   });
 

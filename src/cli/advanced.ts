@@ -122,6 +122,8 @@ export const LEGACY_CLI_VALUE_OPTIONS = Object.freeze([
   "receipt-dir",
   "destination",
   "requested-by",
+  "strategy",
+  "from-context",
 ] as const);
 
 /** Exact boolean option spellings understood by the compatibility parser today. */

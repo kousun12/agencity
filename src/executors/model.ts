@@ -305,6 +305,7 @@ export class ModelExecutor implements EffectExecutor {
   readonly #limiter: ProviderLimiter;
   constructor(providers: readonly ModelProvider[], concurrency: ProviderConcurrency = 1) {
     for (const provider of providers) {
+      if (provider.capabilities?.contextWindowTokens !== undefined && (!Number.isSafeInteger(provider.capabilities.contextWindowTokens) || provider.capabilities.contextWindowTokens < 2)) throw new ValidationError(`Model provider ${provider.name} context window must be an integer of at least 2 tokens`);
       if (provider.capabilities?.streaming === true && typeof provider.stream !== "function") {
         throw new ValidationError(`Model provider ${provider.name} declares streaming without a stream implementation`);
       }

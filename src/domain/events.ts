@@ -69,7 +69,7 @@ export interface ContextCapacityProvenance {
   readonly estimatorId: string; readonly triggerRatio: number; readonly targetRatio: number;
 }
 export interface FrozenContextCompactionSource {
-  readonly eventId: string; readonly sessionId: string; readonly branchId: string; readonly cursor: string; readonly type: EventType; readonly schemaVersion: number;
+  readonly eventId: string; readonly sessionId: string; readonly branchId: string; readonly cursor: string; readonly type: "MessageAppended"; readonly schemaVersion: number;
   readonly payload: JsonValue; readonly disposition: "compactable"; readonly classificationReason: string;
   readonly payloadUtf8Bytes: number;
 }
@@ -232,14 +232,14 @@ const capacityProvenanceSchema = z.object({
 }).strict().refine((value) => value.targetRatio < value.triggerRatio, "targetRatio must be below triggerRatio")
   .refine((value) => value.contextWindowTokens === null || value.outputReserveTokens < value.contextWindowTokens, "output reserve must be below capacity");
 const frozenCompactionSourceSchema = z.object({
-  eventId: id, sessionId: id, branchId: id, cursor: z.string().regex(/^\d+$/), type: z.enum(eventTypes), schemaVersion: positiveInteger,
-  payload: jsonValueSchema, disposition: z.literal("compactable"), classificationReason: z.string().min(1),
+  eventId: id, sessionId: id, branchId: id, cursor: z.string().regex(/^(?:0|[1-9][0-9]*)$/), type: z.literal("MessageAppended"), schemaVersion: positiveInteger,
+  payload: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional(), mailbox: z.object({ mailboxMessageId: id, fromSessionId: id, relationship: z.enum(["parent", "child", "sibling"]), taskId: id.optional(), artifactIds: z.array(id).optional(), receiptEventId: id }).optional() }).strict(), disposition: z.literal("compactable"), classificationReason: z.string().min(1),
   payloadUtf8Bytes: z.number().int().nonnegative(),
 }).strict();
 const compactionDerivationSchema = z.object({
   kind: z.literal("compaction"), compactionId: id, requestEventId: id, strategy: compactionStrategySchema,
   reason: compactionReasonSchema, requestedBy: z.enum(["user", "agent", "supervisor"]), instructions: z.string().max(8192).optional(),
-  throughCursor: z.string().regex(/^\d+$/), sourceEventIds: z.array(id).min(1), sourceDigest: digest,
+  throughCursor: z.string().regex(/^(?:0|[1-9][0-9]*)$/), sourceEventIds: z.array(id).min(1), sourceDigest: digest,
   leafEventIds: z.array(id).min(1), leafDigest: digest, generation: positiveInteger, summary: z.string().min(1).max(1048576),
   effectIds: z.array(id).optional(), usage: usageSchema.optional(), capacity: capacityProvenanceSchema.optional(), rematerializedFromContextId: id.optional(),
 }).strict();
@@ -359,6 +359,30 @@ export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): 
   assertJsonValue(event.payload);
   const payload = payloadSchemas[event.type].safeParse(event.payload);
   if (!payload.success) throw new ValidationError(`Invalid ${event.type} payload`, { issues: payload.error.issues });
+  if (event.type === "ContextCompactionRequested") validateCompactionRequestIntegrity(event.payload as unknown as EventPayloads["ContextCompactionRequested"]);
+}
+
+function validateCompactionRequestIntegrity(payload: EventPayloads["ContextCompactionRequested"]): void {
+  const ordered = [...payload.frozenSources].sort((left, right) => {
+    const cursor = BigInt(left.cursor) < BigInt(right.cursor) ? -1 : BigInt(left.cursor) > BigInt(right.cursor) ? 1 : 0;
+    return cursor || (left.eventId < right.eventId ? -1 : left.eventId > right.eventId ? 1 : 0);
+  });
+  if (ordered.some((source, index) => source.eventId !== payload.sourceEventIds[index] || source.eventId !== payload.frozenSources[index]?.eventId || BigInt(source.cursor) > BigInt(payload.throughCursor))) {
+    throw new ValidationError("Context compaction frozen sources must be canonically ordered at or before throughCursor");
+  }
+  const sourceEnvelope = {
+    format: "agencity-compaction-sources-v1",
+    sources: ordered.map((source) => ({ eventId: source.eventId, sessionId: source.sessionId, branchId: source.branchId, cursor: source.cursor, type: source.type, schemaVersion: source.schemaVersion, payload: source.payload })),
+  };
+  const hasher = new Bun.CryptoHasher("sha256"); hasher.update(canonicalEventJson(sourceEnvelope));
+  if (hasher.digest("hex") !== payload.sourceDigest) throw new ValidationError("Context compaction source digest does not match its frozen sources");
+}
+
+function canonicalEventJson(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalEventJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalEventJson(record[key])}`).join(",")}}`;
 }
 
 export function newId(): string { return ulid(); }

@@ -20,7 +20,7 @@ import { CompactionService, AUTOMATIC_COMPACTION_RECENT_MESSAGES } from "./conte
 import {
   ModelContextCapacitySource,
   ProviderModelErrorCode,
-  admitContextWindow,
+  ContextWindowController,
   planContextWindowOverflowRetry,
   type ModelContextWindowConfiguration,
   type ProviderModelErrorClassification,
@@ -100,7 +100,7 @@ export class ModelLoop {
     const window = this.#windowConfiguration(state);
     let materialized;
     if (this.compactions) {
-      const admission = await admitContextWindow(window.configuration, {
+      const admission = await new ContextWindowController(window.configuration).admit({
         buildCandidate: ({ completedCompactions }) => this.contexts.materialize(sessionId, branchId, {
           contextId: `legacy-turn-${turnId}-context-${completedCompactions}`,
           idempotencyKey: `legacy-turn-context:${turnId}:${completedCompactions}`,
@@ -188,7 +188,7 @@ export class ModelLoop {
       const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
       const state = projectEvents(events);
       const agentRunCallIds = new Set(
-        Object.values(state.agentRuns).flatMap((run) => run.steps.map((step) => step.callId)),
+        Object.values(state.agentRuns).flatMap((run) => run.steps.flatMap((step) => [step.callId, ...step.modelAttempts.map((attempt) => attempt.callId)])),
       );
       for (const call of Object.values(state.modelCalls)) {
         if (call.status !== "requested" || agentRunCallIds.has(call.id)) continue;

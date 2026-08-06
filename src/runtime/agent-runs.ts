@@ -464,7 +464,7 @@ export class AgentRunService {
       let materialized;
       let proactiveCompactions = 0;
       if (this.compactions) {
-        const admission = await admitContextWindow(window.configuration, {
+        const admission = await new ContextWindowController(window.configuration).admit({
           buildCandidate: ({ completedCompactions }) => this.contexts.materialize(sessionId, branchId, {
             contextId: completedCompactions === 0 ? step.contextId : `${step.contextId}-window-${completedCompactions}`,
             idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}:window:${completedCompactions}`,

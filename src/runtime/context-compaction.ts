@@ -63,6 +63,7 @@ export interface ContextCompactionView {
   readonly summary?: string;
   readonly effectIds: readonly string[];
   readonly usage?: Usage;
+  readonly capacity?: ContextCapacityProvenance;
   readonly error?: string;
 }
 
@@ -74,6 +75,7 @@ export interface ContextInspection {
   readonly messageCount: number;
   readonly uncoveredMessageCount: number;
   readonly estimatedUncompactedNarrativeTokens: number;
+  readonly capacity: ContextCapacityProvenance;
   readonly effective: ContextCompactionView | null;
   readonly compactions: readonly ContextCompactionView[];
 }
@@ -95,6 +97,7 @@ export class CompactionService {
   constructor(
     readonly storage: AgentStorage,
     readonly outbox: OutboxRunner,
+    readonly capacities?: { contextCapacity(configuration: AgentState["model"]): Readonly<{ provider: string; model: string; source: ContextCapacityProvenance["source"]; contextWindowTokens: number | null }> },
   ) {}
 
   async inspect(sessionId: string, branchId: string): Promise<ContextInspection> {
@@ -106,10 +109,15 @@ export class CompactionService {
     const uncovered = messages.filter((event) => !covered.has(event.id));
     const narrative = uncovered.map((event) => String((event.payload as EventPayloads["MessageAppended"]).content)).join("\n");
     const compactions = Object.values(state.compactions).map((item) => viewOf(item, state)).sort((left, right) => left.compactionId.localeCompare(right.compactionId));
+    const resolved = this.capacities?.contextCapacity(state.model) ?? { provider: state.model.provider, model: state.model.model, source: "unknown" as const, contextWindowTokens: null };
+    const outputReserveTokens = resolved.contextWindowTokens === null ? Math.max(0, state.model.maxOutputTokens ?? 0)
+      : Math.min(resolved.contextWindowTokens - 1, Math.max(1, state.model.maxOutputTokens ?? Math.min(4_096, Math.floor(resolved.contextWindowTokens * 0.1))));
+    const capacity: ContextCapacityProvenance = { ...resolved, outputReserveTokens, estimatorId: "utf8-bytes-per-token-v1", triggerRatio: 0.8, targetRatio: 0.6 };
     return Object.freeze({
       sessionId, branchId, canonicalCursor: state.cursor, canonicalEventCount: events.length,
       messageCount: messages.length, uncoveredMessageCount: uncovered.length,
       estimatedUncompactedNarrativeTokens: estimateContextWindow(narrative).estimatedTokens,
+      capacity,
       effective: effective ? viewOf(effective, state) : null,
       compactions: Object.freeze(compactions),
     });
@@ -209,7 +217,8 @@ export class CompactionService {
     if (request.strategy === "deterministic-extractive-v1") {
       const inputBytes = sourceRecords.reduce((sum, source) => sum + source.payloadUtf8Bytes, 0);
       const maximum = Math.min(64 * 1024, 2 * 1024, Math.max(64, Math.floor(inputBytes * 0.6)));
-      summary = buildDeterministicExtractiveSummary(sourceRecords, { maxUtf8Bytes: maximum }).text;
+      const extractive = buildDeterministicExtractiveSummary(sourceRecords, { maxUtf8Bytes: maximum });
+      summary = extractive.includedEventIds.length === 0 ? conciseExtractive(sourceRecords, Math.min(2 * 1024, Math.max(64, inputBytes - 1))) : extractive.text;
     } else {
       const modelResult = await this.#modelSummary(requestEvent, input.state, input.events, sourceRecords);
       if (modelResult.outcome !== "succeeded") return modelResult.view;
@@ -239,14 +248,13 @@ export class CompactionService {
       ...(request.capacity === undefined ? {} : { capacity: request.capacity }),
       ...(request.rematerializedFromContextId === undefined ? {} : { rematerializedFromContextId: request.rematerializedFromContextId }),
     };
-    const context = validatedJson({ kind: "compaction-summary", summary });
+    const context = validatedJson({ kind: "compaction", strategy: request.strategy, summary, sourceEventIds: [...request.sourceEventIds], sourceCount: request.sourceEventIds.length });
     const recordEvents = new Map(input.events.map((event) => [event.id, event]));
     const records = request.sourceEventIds.map((eventId) => {
       const event = recordEvents.get(eventId);
       if (!event) throw new ValidationError(`Frozen compaction source event is unavailable: ${eventId}`);
       return { eventId, type: event.type, schemaVersion: event.schemaVersion, reason: `covered narrative leaf for ${request.strategy}` };
     });
-    records.push({ eventId: request.requestEventId, type: "ContextCompactionRequested", schemaVersion: requestEvent.schemaVersion, reason: "typed compaction request and frozen source manifest" });
     await this.storage.appendEvents([{
       sessionId: requestEvent.sessionId, branchId: requestEvent.branchId, type: "ContextMaterialized", producer: "supervisor",
       idempotencyKey: `context-compaction-complete:${request.id}`,
@@ -306,11 +314,19 @@ export class CompactionService {
         const text = boundedUtf8(output.text.trim(), MAX_MODEL_SUMMARY_BYTES);
         if (!text) return { outcome: "terminal", view: await this.#fail(requestEvent, "failed", "Compaction model returned an empty summary", effectId) };
         const elapsed = effectElapsedMs(await this.#events(requestEvent.sessionId, requestEvent.branchId), effectId);
-        await this.storage.appendEvents([{
+        const callId = `context-compaction:${request.compactionId}:${level}:${index}`;
+        const tokens = output.usage.inputTokens + output.usage.outputTokens;
+        const budgetEvents: any[] = [{
           sessionId: requestEvent.sessionId, branchId: requestEvent.branchId, type: "BudgetDebited", producer: "supervisor",
           idempotencyKey: `context-compaction-budget:${request.compactionId}:${level}:${index}`,
-          payload: { callId: `context-compaction:${request.compactionId}:${level}:${index}`, tokens: output.usage.inputTokens + output.usage.outputTokens, costUsd: output.usage.costUsd, turns: 1, wallTimeMs: elapsed },
-        }]);
+          payload: { callId, tokens, costUsd: output.usage.costUsd, turns: 1, wallTimeMs: elapsed },
+        }];
+        const exceeded = budgetExceeded(current, { tokens, costUsd: output.usage.costUsd, turns: 1, wallTimeMs: elapsed });
+        if (exceeded) budgetEvents.push({
+          sessionId: requestEvent.sessionId, branchId: requestEvent.branchId, type: "BudgetExceeded", producer: "supervisor",
+          idempotencyKey: `context-compaction-budget-exceeded:${request.compactionId}:${level}:${index}`, payload: exceeded,
+        });
+        await this.storage.appendEvents(budgetEvents);
         usage = { inputTokens: usage.inputTokens + output.usage.inputTokens, outputTokens: usage.outputTokens + output.usage.outputTokens, costUsd: usage.costUsd + output.usage.costUsd };
         next.push({ label: `hierarchical level ${level + 1} chunk ${index + 1}`, text });
       }
@@ -376,6 +392,7 @@ function viewOf(request: ContextCompactionState, state: AgentState): ContextComp
     ...(derivation?.summary === undefined ? {} : { summary: derivation.summary }),
     effectIds: Object.freeze([...(derivation?.effectIds ?? request.effectIds ?? [])]),
     ...(derivation?.usage === undefined ? {} : { usage: derivation.usage }),
+    ...(request.capacity === undefined ? {} : { capacity: request.capacity }),
     ...(request.error === undefined ? {} : { error: request.error }),
   });
 }
@@ -389,6 +406,24 @@ function toDomainSource(source: FrozenCompactionSourceRecord): FrozenContextComp
 }
 function toCoreSource(source: FrozenContextCompactionSource, _sessionId: string, _branchId: string): FrozenCompactionSourceRecord {
   return Object.freeze({ eventId: source.eventId, sessionId: source.sessionId, branchId: source.branchId, cursor: canonicalCursor(source.cursor), type: source.type, schemaVersion: source.schemaVersion, payload: source.payload, disposition: source.disposition, classificationReason: source.classificationReason, payloadUtf8Bytes: source.payloadUtf8Bytes });
+}
+
+function conciseExtractive(sources: readonly FrozenCompactionSourceRecord[], maximumBytes: number): string {
+  const prefix = "[compaction strategy:deterministic-extractive-v1]";
+  const lines = [prefix];
+  for (const source of sources) {
+    const payload = source.payload as { role?: unknown; content?: unknown };
+    if (typeof payload.role !== "string" || typeof payload.content !== "string") continue;
+    const line = `[${payload.role}] ${payload.content}`;
+    const candidate = [...lines, line].join("\n");
+    if (new TextEncoder().encode(candidate).byteLength > maximumBytes) {
+      const marker = `[TRUNCATED summary omitted_events=${sources.length - lines.length + 1}]`;
+      if (new TextEncoder().encode([...lines, marker].join("\n")).byteLength <= maximumBytes) lines.push(marker);
+      break;
+    }
+    lines.push(line);
+  }
+  return lines.join("\n");
 }
 
 function partitionSources(sources: readonly FrozenCompactionSourceRecord[]): FrozenCompactionSourceRecord[][] {
@@ -433,6 +468,15 @@ function parseModelOutput(value: JsonValue | undefined): ModelOutput {
   const usage = value.usage;
   if (typeof usage.inputTokens !== "number" || !Number.isFinite(usage.inputTokens) || usage.inputTokens < 0 || typeof usage.outputTokens !== "number" || !Number.isFinite(usage.outputTokens) || usage.outputTokens < 0 || typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0) throw new ValidationError("Compaction model usage is invalid");
   return { text: value.text, finishReason: value.finishReason, usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd } };
+}
+function budgetExceeded(state: AgentState, delta: { tokens: number; costUsd: number; turns: number; wallTimeMs: number }): EventPayloads["BudgetExceeded"] | null {
+  const limits = state.budget.limits;
+  const spent = { tokens: state.budget.tokens + delta.tokens, costUsd: state.budget.costUsd + delta.costUsd, turns: state.budget.turns + delta.turns, wallTimeMs: state.budget.wallTimeMs + delta.wallTimeMs };
+  if (limits.tokenLimit !== undefined && spent.tokens >= limits.tokenLimit) return { dimension: "tokens", limit: limits.tokenLimit, spent: spent.tokens };
+  if (limits.costLimitUsd !== undefined && spent.costUsd >= limits.costLimitUsd) return { dimension: "cost", limit: limits.costLimitUsd, spent: spent.costUsd };
+  if (limits.turnLimit !== undefined && spent.turns >= limits.turnLimit) return { dimension: "turns", limit: limits.turnLimit, spent: spent.turns };
+  if (limits.wallTimeLimitMs !== undefined && spent.wallTimeMs >= limits.wallTimeLimitMs) return { dimension: "wallTime", limit: limits.wallTimeLimitMs, spent: spent.wallTimeMs };
+  return null;
 }
 function budgetBoundaryReached(state: AgentState): boolean {
   const limits = state.budget.limits;

@@ -216,6 +216,18 @@ export interface AdmitContextWindowOptions {
   readonly mode?: ContextWindowAdmissionMode;
 }
 
+/** Stateful facade for one provider/model admission policy. Durable state remains caller-owned. */
+export class ContextWindowController {
+  constructor(readonly configuration: ModelContextWindowConfiguration) {}
+
+  admit<TCandidate, TCompactionProvenance>(
+    callbacks: ContextWindowAdmissionCallbacks<TCandidate, TCompactionProvenance>,
+    options: AdmitContextWindowOptions = {},
+  ): Promise<ContextWindowAdmissionResult<TCandidate, TCompactionProvenance>> {
+    return admitContextWindow(this.configuration, callbacks, options);
+  }
+}
+
 /**
  * Builds and estimates the exact provider candidate before admission. Known
  * capacities compact inclusively at the trigger and continue toward the lower

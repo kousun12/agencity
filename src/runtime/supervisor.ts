@@ -312,7 +312,7 @@ export class Supervisor {
     this.modelExecutor = modelExecutor;
     this.executionLeases = executionLeases;
     this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
-    this.compactions = new CompactionService(storage, outbox);
+    this.compactions = new CompactionService(storage, outbox, modelExecutor);
     this.modelLoop = new ModelLoop(storage, this.contexts, outbox, this.compactions, modelExecutor);
     this.documents = new DocumentService(storage);
     this.goals = new GoalService(storage, outbox);
