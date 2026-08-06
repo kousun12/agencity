@@ -83,7 +83,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Done | FU-004 |
 | FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
 | FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Done | FU-004 |
-| FU-015 | Keep detached sessions executing in a background service | In progress | FU-001, FU-004 |
+| FU-015 | Keep detached sessions executing in a background service | Done | FU-001, FU-004 |
 | FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | In progress | FU-003, FU-004 |
 | FU-017 | Add skill creation, installation, and management as a product surface | In progress | FU-004 |
 | FU-018 | Stream provider output incrementally to attached clients | Done | FU-003 |
@@ -808,7 +808,7 @@ A normal run with a goal continues until its required completion gates pass agai
 
 ## FU-015 — Keep detached sessions executing in a background service
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -850,6 +850,14 @@ Runs, goals, heartbeats, schedules, and child sessions continue while no client 
 - Multi-device or remote execution-ownership failover.
 - Coordinated in-place upgrade of running services.
 - Authentication for non-loopback clients.
+
+
+### Completion evidence
+
+- Commits: `d364c72`, `f76c64b`, `a6b1feb`, `7314e8c`, `2359c0c`, `5581ddf`, `a8bf5b8`, `e507e55`, `9ee6ef6`, and `1f7a16f`.
+- Implementation: secure on-demand per-workspace managed service; authenticated loopback discovery; workspace/root process fencing on canonical/outbox writes; resident detached run workers; recovery-ready admission; schedule coordination; attach/status/send/stop/shutdown; graceful signal/idle lifecycle; bounded typed SQLite contention handling.
+- Verification: final pristine review ran 554 tests with 2 external skips; managed-service 12/12, contention 3/3, product CLI 15/15, plus manual detach, restart, lease release, and idle shutdown. Initial review found opt-in fencing, leaked service children, and raw `SQLITE_BUSY`; all three were fixed and final adversarial re-review passed.
+- Remaining limitations: on-demand startup is not an OS-login service; cross-device/distributed failover remains unavailable; trusted-local authority and resident provider credentials remain explicit.
 
 ---
 
