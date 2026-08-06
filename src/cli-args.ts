@@ -1,11 +1,11 @@
 export const CLI_COMMANDS = [
-  "help", "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve",
+  "help", "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve", "sync", "sync-push", "sync-pull", "sync-checkpoint", "sync-stats", "sync-status", "conflicts",
 ] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
 const VALUE_OPTIONS = new Set([
   "state-dir", "db", "artifacts", "workspace-root", "workspace",
-  "session", "branch", "cursor", "name", "port",
+  "session", "branch", "cursor", "name", "port", "profile", "sync-url", "replica", "credential-ref", "sync-interval",
 ]);
 const BOOLEAN_OPTIONS = new Set(["help", "restart-console-after-cell"]);
 

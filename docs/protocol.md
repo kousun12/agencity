@@ -41,6 +41,17 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 | `POST /sessions/:session/goals/:goal/continue?branch=:branch` | `{ maxTurns? }` | continued goal handle |
 | `POST /sessions/:session/heartbeats?branch=:branch` | `CreateHeartbeatInput` | heartbeat handle |
 | `POST /heartbeats/:id/(tick|pause|cancel)` | `{ at? }` or `{ reason? }` | updated schedule handle |
+| `GET /sync/status` | none | capabilities, persisted replica lifecycle, unresolved conflicts, quarantine count |
+| `POST /sync` / `POST /sync/reconnect` | none | manual/reconnect cycle (`stage → push → pull → ingest → checkpoint` for the official adapter) |
+| `POST /sync/push` | none | staged count, official post-push stats, and status |
+| `POST /sync/pull` | none | official pull-change flag, ingestion result, stats, and status |
+| `POST /sync/checkpoint` | none | official checkpoint result and stats |
+| `GET /sync/stats` | none | official local CDC/WAL/revision/network statistics |
+| `GET /sync/conflicts?status=unresolved|resolved` | none | attributable reconciliation records |
+| `POST /sync/conflicts/:id/resolve` | `ResolveConflictInput` | explicit durable `SyncConflictResolved` result |
+| `GET /sync/workspaces?refresh=1` | none | replicated workspace announcements (`refresh` invokes a real pull first) |
+| `POST /sync/manifests` | `{ operation, scopeKind, scopeId, requestedBy }` | ownership-aware resource/replica manifest |
+| `POST /sync/export` | `{ destination, scopeKind, scopeId, requestedBy }` | inspectable events/profile/replica-envelope/artifact bundle plus completed/partial manifest |
 
 For snapshot/history/stream, the branch may alternatively occupy the fourth path segment, but the query parameter is the documented form. Slice 2 commands require `?branch=`. Mailbox family/task authorization, document scope, spent-plus-active tree budgets, recoverable cancellation propagation, durable goal workspace pins, shared provider concurrency, and early-heartbeat rejection are enforced by the same domain services used in-process; transport routing does not weaken them. Request validation is currently minimal at the transport boundary; domain/storage validation remains authoritative.
 
@@ -70,7 +81,7 @@ await client.turn(session.sessionId, session.branchId);
 const snapshot = await client.snapshot(session.sessionId, session.branchId);
 ```
 
-`AgentClient` wraps the non-streaming Slice 1 calls plus Slice 2 spawn/task/mailbox, document/input-set, recursive-model, goal, and heartbeat commands. Fork and SSE helpers are not yet provided; use `fetch`/`EventSource` or implement the small wire contract directly. Returned Slice 2 values are plain durable JSON handles and may be stored and reused after reconnect.
+`AgentClient` wraps the non-streaming Slice 1 calls plus Slice 2/3 commands and Slice 4 `syncStatus`, `syncNow`, `syncReconnect`, conflicts/resolution, discovery, and manifest methods. Fork and SSE helpers are not yet provided; use `fetch`/`EventSource` or implement the small wire contract directly. Returned Slice 2 values are plain durable JSON handles and may be stored and reused after reconnect.
 
 ## Console cell environment
 

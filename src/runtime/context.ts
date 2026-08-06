@@ -5,6 +5,7 @@ import {
 import type { AgentStorage } from "../storage/index.ts";
 import type { MemoryService } from "./memory.ts";
 import type { HarnessService } from "./harness.ts";
+import type { ProfileDatabase } from "../sync/index.ts";
 import { rowToHarness } from "./harness.ts";
 
 export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. Persist every value needed after a cell boundary. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
@@ -12,7 +13,7 @@ export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy",
 function hash(value: string): string { const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex"); }
 
 export class ContextMaterializer {
-  constructor(readonly storage: AgentStorage, readonly memory?: MemoryService, readonly harness?: HarnessService, readonly maxRecentRecords = 30, readonly userScopeKey = "default-user") {}
+  constructor(readonly storage: AgentStorage, readonly memory?: MemoryService, readonly harness?: HarnessService, readonly maxRecentRecords = 30, readonly userScopeKey = "default-user", readonly profile?: ProfileDatabase) {}
 
   async materialize(sessionId: string, branchId: string): Promise<{ contextId: string; context: JsonValue; event: AgentEvent<"ContextMaterialized"> }> {
     let events = await this.storage.loadEvents(sessionId, { branchId });
@@ -88,10 +89,14 @@ export class ContextMaterializer {
       selections: [...memories,...promptNotes,...skills,...specs].map((record) => ({entryId:record.entryId,versionId:record.current.versionId,kind:record.kind,scope:record.scope,status:record.current.status,createdEventId:record.current.createdEventId})),
       candidateRetirements: [...retiredByCandidate].sort(),
     })) as JsonValue;
+    const profilePreferences = this.profile ? await this.profile.listPreferences() : [];
+    const profileSkills = this.profile ? await this.profile.listGlobalSkills() : [];
+    const providerConfigurations = this.profile ? (await this.profile.listCredentialReferences()).map(({reference,provider,label,metadata})=>({reference,provider,label,metadata})) : [];
     const context: JsonValue = JSON.parse(JSON.stringify({
       basePolicy: BASE_POLICY,
       basePolicyRecord: { id: IMMUTABLE_BASE_POLICY.id, version: IMMUTABLE_BASE_POLICY.version, digest: hash(BASE_POLICY), mutable: false },
       runtime: { mode:"trusted-local",workerIsSecuritySandbox:false,rawSql:{readOnly:true,scope:"shared-non-confidential-diagnostics",candidateIsolationIsConfidentialityBoundary:false} },
+      profile: { preferences: profilePreferences, globalSkills: profileSkills, providerConfigurations },
       session: { id:sessionId,branchId,status:state.status,model:state.model,parentSessionId:state.parentSessionId,parentBranchId:state.parentBranchId,rootSessionId:state.rootSessionId,depth:state.depth,taskId:state.taskId },
       budget: state.budget,
       goal: Object.values(state.goals).find((goal) => !["completed","failed","cancelled"].includes(goal.status)) ?? null,

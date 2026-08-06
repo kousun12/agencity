@@ -20,8 +20,11 @@ Every stored event has:
 | `producer` | non-empty string | Usually `supervisor`, `console`, `model`, `executor`, `client`, or `recovery`. |
 | `idempotencyKey` | string or `null` | Unique within `(sessionId, type)` when present. Same payload/branch deduplicates; changed meaning conflicts. |
 | `payload` | JSON value | Typed by `type` and validated before append. |
+| `originDeviceId` | non-empty string | Stable profile device that first committed the event; legacy rows expose a local fallback only during migration/export. |
+| `originSequence` | positive safe integer | Monotonic sequence allocated by that origin device, independent of the local database cursor. |
+| `streamParentId` | string or `null` | Previous event in the writer's source branch. Sync uses it for causal order and offline divergence detection. |
 
-The relational columns use snake case and `payload_json`; TypeScript event objects use the camel-case fields above.
+The relational columns use snake case and `payload_json`; TypeScript event objects use the camel-case fields above. Replication never treats `cursor` as portable. Immutable transport envelopes use `(originDeviceId, originSequence, id)`, `streamParentId`, explicit dependencies, and a SHA-256 digest; ingestion assigns a fresh local cursor after validation.
 
 ## Shared value schemas
 
@@ -173,3 +176,11 @@ All Slice 3 payloads use schema version 1 and retain stable entry/version/propos
 | `SubagentSpecInvoked` | Exact spec entry/version pinned to a normally admitted durable task and child session/branch. |
 
 `ContextMaterialized.harnessProvenance` records the immutable base-policy ID/version/digest separately from editable harness state, complete FTS query/candidate/rejection/selection provenance, candidate allocation/exposure provenance, and every selected entry/version/source event. Its `records` array also references selected `HarnessVersionCreated` event IDs.
+
+## Slice 4 reconciliation event
+
+| Event type | Version 1 payload | Projection/semantic effect |
+|---|---|---|
+| `SyncConflictResolved` | `{ conflictId, action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge", resolvedBy, chosenEventId?, note?, resolvedAt }` | Records explicit authority over a surfaced reconciliation. It updates the local reconciliation projection and replicates as ordinary canonical history; it never rewrites either claim or branch. |
+
+Transport envelopes are not domain events. Invalid envelopes live in `sync_quarantine`; duplicate-intent, divergent-session, task-claim, and rejected-mutation observations live in sync reconciliation structures. Only a typed resolution is canonical.

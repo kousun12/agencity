@@ -7,7 +7,8 @@ import type {
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
-import type { TaskRecord } from "../storage/index.ts";
+import type { DataManifestRecord, SyncConflictRecord, TaskRecord } from "../storage/index.ts";
+import type { ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
 
 export class AgentClient {
   constructor(readonly baseUrl: string) {}
@@ -57,6 +58,19 @@ export class AgentClient {
   invokeSkill(sessionId: string, branchId: string, entryId: string, input: JsonValue, options: InvokeSkillOptions = {}): Promise<SkillInvocationResult> { return this.#post(`/sessions/${sessionId}/skills/${entryId}/invoke?branch=${branchId}`, { input, options }); }
   testSkill(sessionId: string, branchId: string, entryId: string, versionId?: string): Promise<SkillTestReport> { return this.#post(`/sessions/${sessionId}/skills/${entryId}/test?branch=${branchId}`, versionId === undefined ? {} : { versionId }); }
   spawnSpec(sessionId: string, branchId: string, entryId: string, input: SpawnSpecInput = {}): Promise<SpecSubagentHandle> { return this.#post(`/sessions/${sessionId}/specs/${entryId}/spawn?branch=${branchId}`, input); }
+
+  syncStatus(): Promise<SyncStatusView> { return this.#json("/sync/status"); }
+  syncNow(): Promise<SyncCycleResult> { return this.#post("/sync"); }
+  syncReconnect(): Promise<SyncCycleResult> { return this.#post("/sync/reconnect"); }
+  syncPush(): Promise<SyncPushResult> { return this.#post("/sync/push"); }
+  syncPull(): Promise<SyncPullResult> { return this.#post("/sync/pull"); }
+  syncCheckpoint(): Promise<SyncCheckpointResult> { return this.#post("/sync/checkpoint"); }
+  syncStats(): Promise<SyncTransportStats> { return this.#json("/sync/stats"); }
+  syncConflicts(status?: "unresolved"|"resolved"): Promise<SyncConflictRecord[]> { return this.#json(`/sync/conflicts${status?`?status=${status}`:""}`); }
+  resolveSyncConflict(conflictId:string,input:ResolveConflictInput):Promise<SyncConflictRecord>{return this.#post(`/sync/conflicts/${conflictId}/resolve`,input);}
+  cloudWorkspaces(refresh=false):Promise<WorkspaceAnnouncement[]>{return this.#json(`/sync/workspaces${refresh?"?refresh=1":""}`);}
+  dataManifest(operation:"export"|"delete",scopeKind:"workspace"|"session"|"profile",scopeId:string,requestedBy:string):Promise<DataManifestRecord>{return this.#post("/sync/manifests",{operation,scopeKind,scopeId,requestedBy});}
+  exportData(destination:string,scopeKind:"workspace"|"session"|"profile",scopeId:string,requestedBy:string):Promise<DataManifestRecord>{return this.#post("/sync/export",{destination,scopeKind,scopeId,requestedBy});}
 
   #post<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "POST", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
   async #json<T>(path: string, init?: RequestInit): Promise<T> { const response = await fetch(`${this.baseUrl}${path}`, init); const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body as T; }

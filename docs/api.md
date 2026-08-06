@@ -1,6 +1,6 @@
 # TypeScript API
 
-All public contracts use domain values. No `@libsql/client`/Turso SDK value appears in a public method signature. Package subpaths exist so callers can depend on a boundary instead of the composition root.
+All public contracts use domain values. No `@libsql/client`/`@tursodatabase/sync` SDK value appears in a public method signature. Package subpaths exist so callers can depend on a boundary instead of the composition root.
 
 | Import | Main surface |
 |---|---|
@@ -14,6 +14,7 @@ All public contracts use domain values. No `@libsql/client`/Turso SDK value appe
 | `@prime-agent/runtime/protocol` | HTTP server/client and wire-envelope types. |
 | `@prime-agent/runtime/security` | Secret scrubbing/filtering helpers. |
 | `@prime-agent/runtime/tui` | Basic terminal client. |
+| `@prime-agent/runtime/sync` | Profile DB, envelope protocol, sync lifecycle/capabilities, official directional Turso Sync adapter, and deterministic test hub. |
 
 ## Supervisor lifecycle
 
@@ -76,7 +77,45 @@ interface AgentStorage {
 
 `readonlyQuery` accepts `{ sql, args }` and returns JSON rows. It is intentionally LibSQL-oriented analytical SQL, not a portable storage interface. Reads are bounded to 64 KiB of SQL, 1,000 result rows, and 2 seconds, and SQLite/private operational schemas are unavailable. Typed domain commands own canonical writes. Local `appendEvents` validates target session/branch existence and reduces each new event against transaction-visible state before insert; a missing target raises `NOT_FOUND` and an invalid lifecycle raises `INVALID_TRANSITION` without committing any part of the batch. The local implementation advertises offline writes, analytical SQL, and in-process notifications; it explicitly does not advertise distributed leases.
 
-Although `LibSqlStorageOptions` reflects upstream client configuration fields including `syncUrl`, Slice 1 does not implement a Cloud sync lifecycle, conflict reconciliation, device ownership, or call a supported explicit synchronization operation. Treat local `file:` storage as the supported topology.
+`LibSqlStorage` remains the local workspace adapter. Optional Cloud lifecycle is composed through `SyncService` and `TursoSyncTransport`; passing an upstream `syncUrl` to storage alone is not a lifecycle. The pinned `@tursodatabase/sync@0.7.2` adapter uses its official directional primitives and keeps all SDK values confined to `src/storage/turso.ts`.
+
+## Profile and Turso synchronization
+
+```ts
+const supervisor = await Supervisor.open({
+  databaseUrl: "file:.agencity/workspace.db",
+  profileDatabaseUrl: "file:.agencity/profile.db",
+  artifactDirectory: ".agencity/artifacts",
+  sync: {
+    workspaceId: "example",
+    syncUrl: process.env.TURSO_DATABASE_URL!,
+    authToken: process.env.TURSO_AUTH_TOKEN, // memory only
+    credentialReference: "credential:turso-example", // must exist in profile DB
+    replicaUrl: "file:.agencity/sync-replica.db",
+    intervalMs: 30_000,
+  },
+});
+
+await supervisor.sync.sync("manual");       // stage + push + pull + ingest + checkpoint
+await supervisor.sync.push();                // stage + official directional push
+await supervisor.sync.pull();                // official pull + local ingestion
+await supervisor.sync.checkpoint();          // official local WAL checkpoint
+await supervisor.sync.stats();               // official CDC/WAL/revision/network stats
+await supervisor.sync.reconnect();           // reconnect lifecycle + cycle
+await supervisor.sync.stage();                // local envelope preparation only
+await supervisor.sync.ingest();               // local replica ingestion only
+await supervisor.sync.status();
+await supervisor.sync.conflicts("unresolved");
+await supervisor.sync.resolveConflict(id, {
+  action: "choose-claim", chosenEventId, resolvedBy: "owner",
+});
+```
+
+The official adapter advertises directional push/pull plus checkpoint/statistics because those methods exist in the pinned SDK. The in-process deterministic hub stays `bidirectional-only`, so those calls still fail honestly against that test transport. A missing `sync` option yields a fully functional local-only runtime. Initialization uses a URL callback that returns `null` until a network call; a failed push or pull leaves staged CDC and local reads/writes usable.
+
+`ProfileStore` provides stable device identity, JSON preferences/cross-workspace defaults, immutable global-skill versions with a current pointer, opaque credential references, and workspace catalog entries. It rejects credential-shaped metadata. Model context may see preferences, installed skill definitions, and opaque provider references, never authentication values.
+
+`exportBundle(destination, scopeKind, scopeId, requestedBy)` writes an inspectable `events.jsonl`, redaction-safe `profile.json`, replica-envelope JSONL, verified referenced artifact bytes, and final manifest (`partial` if artifact content is missing). `createManifest("export"|"delete", scopeKind, scopeId, requestedBy)` verifies profile/workspace/session ownership and lists workspace DB, profile DB, artifact directory, indexes, and replica observation. A Cloud-managed deletion is returned as `blocked`; no data-client call is mislabeled as remote administrative deletion.
 
 ## Artifacts
 

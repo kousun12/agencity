@@ -58,6 +58,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "BudgetDebited": { const p = event.payload as EventPayloads["BudgetDebited"]; return { ...next, budget: { ...state.budget, tokens: state.budget.tokens + p.tokens, costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns, wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs } }; }
     case "BudgetExceeded": return { ...next, budget: { ...state.budget, exceeded: true }, status: "idle" };
     case "RecoveryPerformed": return next;
+    case "SyncConflictResolved": return next;
     case "TaskCreated": {
       const p = event.payload as EventPayloads["TaskCreated"];
       if (state.tasks[p.taskId]) throw new InvalidTransitionError("task", state.tasks[p.taskId]!.status, "pending");

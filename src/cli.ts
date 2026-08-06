@@ -24,12 +24,21 @@ Commands:
   branch --session ID --branch ID --cursor CURSOR [--name NAME]
   tui --session ID --branch ID
   serve [--port 3131]
+  sync
+  sync-push
+  sync-pull
+  sync-checkpoint
+  sync-stats
+  sync-status
+  conflicts
 
 Global options:
   --state-dir PATH
   --db PATH
   --artifacts PATH
   --workspace-root PATH
+  --profile PATH
+  --sync-url libsql://... [--replica PATH] [--credential-ref HANDLE] [--sync-interval MS]
   --restart-console-after-cell
   --help
 
@@ -42,11 +51,21 @@ await mkdir(stateDir, { recursive: true });
 const database = resolve(option("db", `${stateDir}/agent.db`)!);
 const artifacts = resolve(option("artifacts", `${stateDir}/artifacts`)!);
 const workspaceRoot = resolve(option("workspace-root", process.cwd())!);
+const syncUrl = option("sync-url", process.env.TURSO_DATABASE_URL);
 const supervisor = await Supervisor.open({
   databaseUrl: `file:${database}`,
   artifactDirectory: artifacts,
   workspaceRoot,
   restartConsoleAfterCell: has("restart-console-after-cell"),
+  ...(option("profile") ? { profileDatabaseUrl: `file:${resolve(option("profile")!)}` } : {}),
+  ...(syncUrl ? { sync: {
+    workspaceId: option("workspace", "default")!,
+    syncUrl,
+    ...(option("replica") ? { replicaUrl: `file:${resolve(option("replica")!)}` } : {}),
+    ...(process.env.TURSO_AUTH_TOKEN ? { authToken: process.env.TURSO_AUTH_TOKEN } : {}),
+    ...(option("credential-ref") ? { credentialReference: option("credential-ref")! } : {}),
+    ...(option("sync-interval") ? { intervalMs: Number(option("sync-interval")) } : {}),
+  } } : {}),
 });
 const sessionId = option("session");
 const branchId = option("branch");
@@ -79,6 +98,20 @@ try {
     required(sessionId, "session");
     required(branchId, "branch");
     console.log(await supervisor.fork(sessionId!, branchId!, required(option("cursor"), "cursor"), option("name")));
+  } else if (command === "sync") {
+    console.log(JSON.stringify(await supervisor.sync.sync("manual"), null, 2));
+  } else if (command === "sync-push") {
+    console.log(JSON.stringify(await supervisor.sync.push(), null, 2));
+  } else if (command === "sync-pull") {
+    console.log(JSON.stringify(await supervisor.sync.pull(), null, 2));
+  } else if (command === "sync-checkpoint") {
+    console.log(JSON.stringify(await supervisor.sync.checkpoint(), null, 2));
+  } else if (command === "sync-stats") {
+    console.log(JSON.stringify(await supervisor.sync.stats(), null, 2));
+  } else if (command === "sync-status") {
+    console.log(JSON.stringify(await supervisor.sync.status(), null, 2));
+  } else if (command === "conflicts") {
+    console.log(JSON.stringify(await supervisor.sync.conflicts("unresolved"), null, 2));
   } else if (command === "tui") {
     required(sessionId, "session");
     required(branchId, "branch");

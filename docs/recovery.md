@@ -102,3 +102,7 @@ Not guaranteed:
 - crash-atomicity across database and artifact/filesystem placement;
 - cleanup of unreferenced CAS bytes;
 - complete operating-system kill tests for every crash instruction boundary (tests simulate the durable boundary states).
+
+## Synchronization recovery
+
+When configured, startup opens the modern replica locally with a deferred `null` URL, checks its durable incarnation, and runs one envelope cycle before ordinary execution recovery. A new replica stages and pushes local CDC before its first pull; an established replica may pre-pull. Failure records replica `error` and startup continues locally with unsent CDC intact. Receipts make a crash after canonical append but before lifecycle reporting idempotent: the next cycle finds the event ID/receipt and does not append again. A dependency-missing envelope remains `pending_dependency`; integrity/schema/reducer failures remain quarantined. Reconnect and interval use the same serialized push/pull/checkpoint cycle. If the local replica file was replaced, an incarnation mismatch resets only staged watermarks and restages canonical local history; ingestion receipts/frontiers remain valid. Offline divergent source parents create deterministic derived branches, and synthetic fork events are local routing evidence rather than re-enveloped remote work.

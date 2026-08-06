@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentState, BudgetLimits, JsonValue, ModelConfiguration } from "../domain/index.ts";
+import type { ResolveConflictInput } from "../sync/index.ts";
 import type { CreateGoalInput, CreateHeartbeatInput, CreateInputSetInput, ImportDocumentInput, SendMessageInput, SpawnAgentInput, StartRecursiveModelInput, CreateMemoryInput, ProposeRefinementInput, ActivateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput, InvokeSkillOptions, SpawnSpecInput } from "../runtime/index.ts";
 
 export type ProtocolRequest =
@@ -23,7 +24,16 @@ export type ProtocolRequest =
   | { type: "refineDecide"; sessionId: string; branchId: string; proposalId: string; input?: DecideRefinementInput }
   | { type: "refineApproveRollback"; sessionId: string; branchId: string; proposalId: string; input?: ApproveRollbackInput }
   | { type: "skillInvoke"; sessionId: string; branchId: string; entryId: string; input: JsonValue; options?: InvokeSkillOptions }
-  | { type: "specSpawn"; sessionId: string; branchId: string; entryId: string; input?: SpawnSpecInput };
+  | { type: "specSpawn"; sessionId: string; branchId: string; entryId: string; input?: SpawnSpecInput }
+  | { type: "sync" }
+  | { type: "syncPush" }
+  | { type: "syncPull" }
+  | { type: "syncCheckpoint" }
+  | { type: "syncStats" }
+  | { type: "syncReconnect" }
+  | { type: "syncResolve"; conflictId: string; input: ResolveConflictInput }
+  | { type: "syncManifest"; operation: "export" | "delete"; scopeKind: "workspace" | "session" | "profile"; scopeId: string; requestedBy: string }
+  | { type: "syncExport"; destination: string; scopeKind: "workspace" | "session" | "profile"; scopeId: string; requestedBy: string };
 export type ProtocolResponse = { ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } };
 export interface SnapshotEnvelope { cursor: string; state: AgentState }
 export interface EventEnvelope { cursor: string; event: AgentEvent }

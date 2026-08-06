@@ -55,6 +55,9 @@ describe("read-only analytical SQL", () => {
     "VACUUM INTO '/tmp/export.db'",
     "SELECT * FROM outbox",
     "SELECT * FROM snapshots",
+    "SELECT * FROM sync_reconciliations",
+    "SELECT * FROM workspace_replica_status",
+    "SELECT * FROM data_manifests",
     "SELECT * FROM schema_migrations",
     "SELECT sql FROM sqlite_schema",
     "SELECT * FROM sqlite_master",
@@ -97,7 +100,7 @@ describe("read-only analytical SQL", () => {
     temps.push(temp);
     const storage: LibSqlStorage = await openTempStorage(temp);
     await seedSession(storage);
-    for (const table of ["outbox", "snapshots", "schema_migrations"]) {
+    for (const table of ["outbox", "snapshots", "sync_quarantine", "sync_reconciliations", "workspace_replica_status", "data_manifests", "schema_migrations"]) {
       await expect(storage.readonlyQuery({ sql: `SELECT * FROM ${table}`, args: [] }))
         .rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     }

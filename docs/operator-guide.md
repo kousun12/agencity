@@ -23,9 +23,43 @@ The CLI accepts these options on every command:
 | `--db PATH` | `<state-dir>/agent.db` | Local LibSQL file. The CLI converts it to a `file:` URL. |
 | `--artifacts PATH` | `<state-dir>/artifacts` | Local SHA-256 content-addressed store. |
 | `--workspace-root PATH` | current directory | Initial cwd and intended root for local executors. |
+| `--profile PATH` | `<db>.profile.db` | Separate device/preferences/global-skills/credential-reference/workspace catalog. |
+| `--sync-url URL` | `TURSO_DATABASE_URL` | Optional Turso database used for immutable envelope exchange. |
+| `--replica PATH` | `<db>.sync-replica.db` | Local Turso Sync envelope database path (the CLI supplies a `file:` URL). |
+| `--credential-ref HANDLE` | none | Opaque profile credential reference (the token itself comes from `TURSO_AUTH_TOKEN`). |
+| `--sync-interval MS` | 30000 | Runtime-owned interval; zero disables interval sync. |
 | `--restart-console-after-cell` | off | Stop the disposable worker after each cell; use this for recovery diagnostics. |
 
 The database is the canonical session record, but artifact payloads live outside it. Back up/export both when a session references artifacts. Workspace files and external services are not owned snapshots and cannot be reconstructed from the database.
+
+## Optional Turso Cloud sync
+
+Local-only is the default and needs no Cloud credentials. For one workspace replica:
+
+```sh
+export TURSO_DATABASE_URL='libsql://database-organization.turso.io'
+export TURSO_AUTH_TOKEN='...'
+bun run src/cli.ts sync --workspace example --state-dir .agencity
+bun run src/cli.ts sync-push --workspace example --state-dir .agencity
+bun run src/cli.ts sync-pull --workspace example --state-dir .agencity
+bun run src/cli.ts sync-checkpoint --workspace example --state-dir .agencity
+bun run src/cli.ts sync-stats --workspace example --state-dir .agencity
+bun run src/cli.ts sync-status --workspace example --state-dir .agencity
+bun run src/cli.ts conflicts --workspace example --state-dir .agencity
+```
+
+The auth token stays in process memory and is not written to workspace/profile/replica metadata by Agencity. Create any named credential reference through `ProfileStore` before passing `--credential-ref`. The pinned `@tursodatabase/sync@0.7.2` adapter connects with a deferred URL callback that is `null` outside network calls, so initialization and local staging never contact Cloud. A normal cycle stages immutable event envelopes, optionally pre-pulls an established revision, invokes the official `push()`, invokes the official `pull()`, validates/ingests, then checkpoints. A brand-new replica pushes its local CDC before pulling. `error` means a network phase did not complete; local reads/writes and unsent CDC remain available.
+
+Directional push/pull, checkpoint, and statistics commands are real SDK operations. Statistics report local CDC count, main/revert WAL sizes, last push/pull times, opaque revision, and network byte counters. Distributed leases, task stealing, automatic ownership failover, and remote administrative deletion remain unavailable. If the local sync database is replaced, its incarnation changes and canonical local history is restaged rather than skipped by a stale watermark.
+
+Shared replica writers are a trusted single-user group, not mutually untrusted tenants. A request created on one trusted device for a session whose execution owner is another device is an effect command to that owner after synchronization. Only the `execution_owner_device_id` materializes/runs the outbox work; the requesting/non-owner replica never does. Do not share envelope-database write credentials with untrusted devices.
+
+Run the optional real Cloud smoke only against a disposable credential-gated database:
+
+```sh
+AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=... \
+  bun test test/slice4/cloud-smoke.test.ts
+```
 
 ## CLI
 
@@ -115,10 +149,13 @@ Plain text is committed as a user message and followed by one model turn. Comman
 | `/complete-goal <id>` | Run current-version completion gates for a goal. |
 | `/cell <typescript>` | Execute one disposable-console cell and print its result. |
 | `/branch <cursor> [name]` | Fork at a historical cursor and switch this TUI to the child. |
+| `/sync` / `/sync-status` | Run a manual directional push/pull cycle or inspect truthful capabilities/lifecycle. |
+| `/conflicts` | List unresolved divergence/claim/intent reconciliation. |
+| `/resolve-conflict <id> <json>` | Record an explicit typed conflict resolution. |
 | `/help` | Print command help. |
 | `/quit`, `/exit` | Close the TUI. |
 
-The current TUI is a basic in-process supervisor client. It does not yet consume the HTTP/SSE transport, render live token streaming, expose unknown-effect reconciliation, or implement the remaining richer PRD commands (`resume`, `compact`, sync/conflict views). Those limitations are intentional and visible rather than implied capabilities.
+The current TUI is a basic in-process supervisor client. It does not yet consume the HTTP/SSE transport, render live token streaming, expose unknown-effect reconciliation, or implement the remaining richer PRD commands (`resume`, `compact`). Sync and conflict views are available. Those limitations are intentional and visible rather than implied capabilities.
 
 ## Providers
 

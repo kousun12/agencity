@@ -22,6 +22,7 @@ async function walk(directory: string, predicate: (name: string) => boolean): Pr
 const sourceFiles = await walk(src, (name) => name.endsWith(".ts"));
 const adapterFiles = new Set(["storage/libsql.ts", "storage/turso.ts"]);
 const sdkModule = /^(?:@libsql(?:\/|$)|@turso(?:\/|$)|@tursodatabase(?:\/|$)|libsql(?:\/|$)|turso(?:\/|$))/i;
+const modernSyncSdk = /^@tursodatabase\/sync(?:\/|$)/i;
 const importSpecifier = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s*)["']([^"']+)["']/g;
 
 for (const file of sourceFiles) {
@@ -35,6 +36,9 @@ for (const file of sourceFiles) {
     const specifier = imported[1]!;
     if (sdkModule.test(specifier) && !adapterFiles.has(fileRel)) {
       violations.push(`${fileRel}: ${specifier} is confined to the LibSQL/Turso adapter`);
+    }
+    if (modernSyncSdk.test(specifier) && fileRel !== "storage/turso.ts") {
+      violations.push(`${fileRel}: ${specifier} is confined specifically to storage/turso.ts`);
     }
   }
 
@@ -63,9 +67,13 @@ interface PackageMetadata {
   readonly bin?: Record<string, string>;
   readonly exports?: Record<string, string>;
   readonly scripts?: Record<string, string>;
+  readonly dependencies?: Record<string, string>;
 }
 const packagePath = resolve(root, "package.json");
 const packageJson = JSON.parse(await Bun.file(packagePath).text()) as PackageMetadata;
+if (packageJson.dependencies?.["@tursodatabase/sync"] !== "0.7.2") {
+  violations.push("package.json: @tursodatabase/sync must be pinned exactly to compatible version 0.7.2");
+}
 const expectedExports: Readonly<Record<string, string>> = {
   ".": "./src/index.ts",
   "./domain": "./src/domain/index.ts",
@@ -77,6 +85,8 @@ const expectedExports: Readonly<Record<string, string>> = {
   "./protocol": "./src/protocol/index.ts",
   "./security": "./src/security/index.ts",
   "./tui": "./src/tui/index.ts",
+  "./sync": "./src/sync/index.ts",
+  "./placement": "./src/placement/index.ts",
 };
 for (const [subpath, target] of Object.entries(expectedExports)) {
   if (packageJson.exports?.[subpath] !== target) {
@@ -98,13 +108,14 @@ for (const [subpath, target] of Object.entries(expectedExports)) {
 }
 const expectedBarrelMembers: Readonly<Record<string, readonly string[]>> = {
   "domain/index.ts": ["errors.ts", "events.ts", "json.ts", "state.ts", "reducer.ts"],
-  "storage/index.ts": ["contract.ts", "libsql.ts"],
+  "storage/index.ts": ["contract.ts", "libsql.ts", "turso.ts"],
   "artifacts/index.ts": ["store.ts"],
   "executors/index.ts": ["contract.ts", "shell.ts", "file.ts", "model.ts"],
   "console/index.ts": ["sdk.ts", "process.ts"],
   "runtime/index.ts": ["supervisor.ts", "projection.ts", "context.ts", "model-loop.ts", "outbox.ts"],
   "protocol/index.ts": ["types.ts", "server.ts", "client.ts"],
   "security/index.ts": ["scrub.ts"],
+  "placement/index.ts": ["capabilities.ts", "relational.ts", "object-cas.ts", "candidate-index.ts", "executor.ts"],
 };
 for (const [barrel, members] of Object.entries(expectedBarrelMembers)) {
   const source = await Bun.file(resolve(src, barrel)).text();

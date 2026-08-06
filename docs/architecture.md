@@ -30,7 +30,7 @@ The Bun heap, console globals, open handles, child processes, notifications, sna
 ```
 
 - `src/domain` has no adapter/runtime imports. Its event and state semantics are placement-independent.
-- `src/storage/contract.ts` uses only domain values. Only `src/storage/libsql.ts` may import the LibSQL/Turso SDK, and emitted package declarations must not expose those SDK types.
+- `src/storage/contract.ts` uses only domain values. Only `src/storage/libsql.ts` and `src/storage/turso.ts` may import LibSQL/Turso SDKs; the modern `@tursodatabase/sync` package is confined specifically to `src/storage/turso.ts`, and emitted package declarations must not expose SDK types.
 - Artifact and executor interfaces expose stable IDs, JSON requests, four-way outcomes, and explicit failures rather than filesystem/child-process types.
 - Runtime services compose contracts and own valid writes. Generated console SQL is analytical/read-only; SDK RPC invokes typed commands.
 - Protocol and UI adapt runtime operations. The current TUI is in-process rather than an HTTP client; this is a known Slice 1 limitation.
@@ -43,7 +43,7 @@ The Bun heap, console globals, open handles, child processes, notifications, sna
 
 `AgentStorage` owns append/stream event operations, branch lookups, snapshots, outbox claims, analytical reads, migration, and post-commit wakeups. Its public values are `AgentEvent`, `AgentState`, `JsonValue`, `OutboxRecord`, and domain request types. It is not a generic cross-database query abstraction.
 
-| Capability | `LibSqlStorage` in Slice 1 | Boundary meaning |
+| Capability | `LibSqlStorage` | Boundary meaning |
 |---|---:|---|
 | `offlineWrites` | yes | A local `file:` database can accept writes without a cloud service. |
 | `analyticalSql` | yes | LibSQL-oriented, parameterized read-only SQL is available to console/runtime callers. |
@@ -52,7 +52,19 @@ The Bun heap, console globals, open handles, child processes, notifications, sna
 
 The adapter retains a supervisor write/read client and creates a short-lived query-only analytical client per generated query so a deadline can close it without poisoning canonical writes. Local writes are serialized before SQLite transactions. Event append plus affected routing/context/outbox rows occurs in one local transaction. Before insertion, local commands are reduced against the transaction-visible branch state; nonexistent targets and invalid transitions are rejected atomically. A future sync adapter may quarantine invalid remote events rather than route them through this local command path. Event IDs are ULIDs and event cursors are zero-padded local sequence numbers. Cursors are ordering tokens, not portable timestamps.
 
-Cloud sync, remote conflict behavior, two offline writers advancing a session, device identity, profile/workspace database split, export/delete enumeration, and PostgreSQL are not implemented. An upstream `syncUrl` configuration property is not a supported synchronization lifecycle.
+PostgreSQL remains deferred. Slice 4 implements optional Turso Cloud exchange through a **separate envelope replica database**, leaving the workspace database locally authoritative and complete. A raw `syncUrl` on `LibSqlStorage` is still not itself a lifecycle; `SyncService` owns staging, the native exchange, ingestion, status, quarantine, reconciliation, and interval/reconnect behavior.
+
+## Turso Cloud synchronization (Slice 4)
+
+`ProfileStore` is a separate local LibSQL database containing a restart-stable device/profile identity, cross-workspace preferences, version-pinned globally installed skills, opaque credential references, and a workspace catalog. Credential values are never accepted. Each workspace retains its own canonical database and artifact directory.
+
+Cloud exchange uses a second local file through `TursoSyncTransport` and pinned `@tursodatabase/sync@0.7.2`. Its `connect()` URL callback returns `null` during initialization, schema creation, staging, queries, checkpointing, and stats, and returns the configured URL only during an explicit official `push()` or `pull()`. This is the installed offline-first equivalent of `bootstrapIfEmpty:false`. There is no remote schema client, client swap, legacy frame topology, or invented `sync()` wrapper. Rejected network calls leave the same local database and unsent CDC usable. Capabilities truthfully advertise directional push/pull/checkpoint/stats for this adapter; the deterministic in-process hub remains `bidirectional-only`.
+
+Only immutable, globally keyed `ReplicatedEnvelope` rows travel through the replica database. Turso Sync pushes logical CDC statements with last-push-wins conflict settlement, so physical envelope identity hashes the origin tuple plus event content; logical event ID and origin sequence are indexed claims, not transport primary keys, so colliding raw claims remain available for quarantine and reconciliation. Workspace `events.sequence`, snapshots, outbox leases, and other mutable projections never rely on libSQL's replicated last-write behavior. Envelopes carry device/origin sequence, exact event identity, source-branch parent, dependency IDs, and a stable SHA-256 digest. Ingestion validates schema/integrity, compares duplicate-event content digests, topologically orders causal parents, deterministically orders concurrent envelopes, and quarantines divergent/invalid/incomplete input before canonical append. Durable per-origin staging and terminal-ingest frontiers avoid rescanning settled history; a pending dependency stops frontier advancement and receipts/quarantine remain the correctness boundary. An immutable replica-incarnation marker detects a lost/replaced local sync file and clears only the staging frontier so canonical history is restaged.
+
+If two devices advance one historical branch offline, the local execution stream stays on its original branch and the remote stream is mapped to a deterministic derived branch at the shared parent. Both histories remain inspectable. Duplicate intents and rejected mutations enter reconciliation records. Competing `TaskStatusChanged(...running)` claims produce an unresolved `task_claim`; no last-writer policy chooses an owner. `sessions.execution_owner_device_id` remains the creating device. Only that device materializes effect/goal/heartbeat/model requests as locally executable operational work; every non-owner retains the canonical events but has no outbox row, and model/cell execution there returns `CAPABILITY_UNAVAILABLE`. A request authored on another trusted device can therefore become a command for the owner after replication. This is an explicit trusted single-user cross-device effect channel, not an authenticated multi-tenant channel; replica writers must share the owner's trust boundary. An explicit `SyncConflictResolved` event records the user's action and synchronizes it. Distributed leases, task stealing, global budget reservation, and automatic owner failover remain unavailable.
+
+Startup, reconnect, interval, and manual cycles stage local envelopes, optionally pre-pull an established revision, push, pull conflict-resolved state, ingest, and checkpoint. A new replica pushes first so first-launch CDC is never discarded. Directional calls and official CDC/WAL/revision/network statistics update `workspace_replica_status` only after the corresponding operation. Network failure leaves local execution available and records `error`; it never fabricates a successful push/pull. Cloud discovery reads replicated workspace announcements. Export/deletion manifests enumerate the workspace/profile/artifact/replica resources and mark remote deletion blocked because the installed data client has no ownership-admin deletion API.
 
 ## Canonical versus derived relational data
 

@@ -16,6 +16,20 @@ export class ProtocolServer {
     try {
       const url = new URL(request.url); const parts = url.pathname.split("/").filter(Boolean);
       if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true, mode: "trusted-local" });
+      if (parts[0] === "sync") {
+        if (request.method === "GET" && parts[1] === "status") return Response.json(await this.supervisor.sync.status());
+        if (request.method === "POST" && parts.length === 1) return Response.json(await this.supervisor.sync.sync("manual"));
+        if (request.method === "POST" && parts[1] === "reconnect") return Response.json(await this.supervisor.sync.reconnect());
+        if (request.method === "POST" && parts[1] === "push") return Response.json(await this.supervisor.sync.push());
+        if (request.method === "POST" && parts[1] === "pull") return Response.json(await this.supervisor.sync.pull());
+        if (request.method === "POST" && parts[1] === "checkpoint") return Response.json(await this.supervisor.sync.checkpoint());
+        if (request.method === "GET" && parts[1] === "stats") return Response.json(await this.supervisor.sync.stats());
+        if (request.method === "GET" && parts[1] === "conflicts") return Response.json(await this.supervisor.sync.conflicts(url.searchParams.get("status") as "unresolved"|"resolved"|null ?? undefined));
+        if (request.method === "POST" && parts[1] === "conflicts" && parts[2] && parts[3] === "resolve") return Response.json(await this.supervisor.sync.resolveConflict(parts[2], await jsonBody(request) as any));
+        if (request.method === "GET" && parts[1] === "workspaces") return Response.json(await this.supervisor.sync.discoverCloudWorkspaces(url.searchParams.get("refresh") === "1"));
+        if (request.method === "POST" && parts[1] === "export") { const body=await jsonBody(request); return Response.json(await this.supervisor.sync.exportBundle(String(body.destination??""),String(body.scopeKind) as any,String(body.scopeId??""),String(body.requestedBy??""))); }
+        if (request.method === "POST" && parts[1] === "manifests") { const body=await jsonBody(request); return Response.json(await this.supervisor.sync.createManifest(String(body.operation) as any,String(body.scopeKind) as any,String(body.scopeId??""),String(body.requestedBy??""))); }
+      }
       if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await request.json() as any;
         return Response.json(await this.supervisor.createSession({ workspaceId: String(body.workspaceId ?? "default"), ...(body.model ? { model: body.model } : {}), ...(body.budget ? { budget: body.budget } : {}) }));

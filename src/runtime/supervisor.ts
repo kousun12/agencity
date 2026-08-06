@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { LocalArtifactStore } from "../artifacts/index.ts";
 import { ConsoleCellError, ConsoleProcess } from "../console/index.ts";
 import {
+  CapabilityUnavailableError,
   assertJsonValue,
   jsonBytes,
   MAX_WORKING_JSON_BYTES,
@@ -27,7 +28,8 @@ import {
   type ModelProvider,
   type ProviderConcurrency,
 } from "../executors/index.ts";
-import { LibSqlStorage, type AgentStorage } from "../storage/index.ts";
+import { LibSqlStorage, ProfileStore, TursoSyncTransport, type AgentStorage } from "../storage/index.ts";
+import { SyncService, type DeviceIdentity, type SyncTransport } from "../sync/index.ts";
 import { ContextMaterializer } from "./context.ts";
 import { ModelLoop } from "./model-loop.ts";
 import { OutboxRunner } from "./outbox.ts";
@@ -60,6 +62,22 @@ export interface SupervisorOptions {
   readonly userScopeKey?: string;
   /** Exact generated-skill permission names allowed at activation and invocation (default: none). */
   readonly skillPermissionAllowlist?: readonly string[];
+  /** Separate durable profile catalog/preferences/credential-reference database. */
+  readonly profileDatabaseUrl?: string;
+  readonly deviceName?: string;
+  /** Optional cloud transport. Without this block the runtime is completely local-only. */
+  readonly sync?: {
+    readonly workspaceId: string;
+    readonly workspaceName?: string;
+    readonly syncUrl?: string;
+    readonly replicaUrl?: string;
+    readonly authToken?: string;
+    readonly credentialReference?: string;
+    readonly intervalMs?: number;
+    readonly startup?: boolean;
+    /** Deterministic in-process transports can be injected for conformance tests. */
+    readonly transport?: SyncTransport;
+  };
 }
 
 export interface CreateSessionOptions {
@@ -92,6 +110,9 @@ class BranchQueue {
 
 export class Supervisor {
   readonly storage: AgentStorage;
+  readonly profile: ProfileStore;
+  readonly device: DeviceIdentity;
+  readonly sync: SyncService;
   readonly artifacts: LocalArtifactStore;
   readonly console: ConsoleProcess;
   readonly outbox: OutboxRunner;
@@ -112,6 +133,9 @@ export class Supervisor {
 
   private constructor(
     storage: AgentStorage,
+    profile: ProfileStore,
+    device: DeviceIdentity,
+    sync: SyncService,
     artifacts: LocalArtifactStore,
     consoleProcess: ConsoleProcess,
     outbox: OutboxRunner,
@@ -122,6 +146,9 @@ export class Supervisor {
     skillPermissionAllowlist: readonly string[],
   ) {
     this.storage = storage;
+    this.profile = profile;
+    this.device = device;
+    this.sync = sync;
     this.artifacts = artifacts;
     this.console = consoleProcess;
     this.outbox = outbox;
@@ -131,7 +158,7 @@ export class Supervisor {
     this.harness = new HarnessService(storage, this.skills, userScopeKey);
     this.memory = new MemoryService(storage, undefined, userScopeKey);
     this.specs = new SubagentSpecService(storage, this.agents, userScopeKey);
-    this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey);
+    this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
     this.modelLoop = new ModelLoop(storage, this.contexts, outbox);
     this.documents = new DocumentService(storage);
     this.goals = new GoalService(storage, outbox, this.modelLoop);
@@ -144,8 +171,32 @@ export class Supervisor {
     await mkdir(options.artifactDirectory, { recursive: true });
     const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
     await mkdir(workspaceRoot, { recursive: true });
-    const storage = new LibSqlStorage(options.databaseUrl);
+    const profile = await ProfileStore.open(options.profileDatabaseUrl ?? adjacentFileUrl(options.databaseUrl, ".profile.db"));
+    const device = await profile.getOrCreateDeviceIdentity(options.deviceName);
+    if (options.sync?.credentialReference && !await profile.getCredentialReference(options.sync.credentialReference)) {
+      profile.close();
+      throw new ValidationError(`Unknown profile credential reference: ${options.sync.credentialReference}`);
+    }
+    const storage = new LibSqlStorage({ url: options.databaseUrl, deviceId: device.deviceId });
     await storage.migrate();
+    const transport = options.sync?.transport ?? (options.sync?.syncUrl ? new TursoSyncTransport({
+      replicaUrl: options.sync.replicaUrl ?? adjacentFileUrl(options.databaseUrl, ".sync-replica.db"),
+      syncUrl: options.sync.syncUrl,
+      ...(options.sync.authToken === undefined ? {} : { authToken: options.sync.authToken }),
+    }) : undefined);
+    const sync = new SyncService({
+      storage, profile, device,
+      workspaceId: options.sync?.workspaceId ?? "default",
+      ...(options.sync?.workspaceName === undefined ? {} : { workspaceName: options.sync.workspaceName }),
+      databaseUrl: options.databaseUrl,
+      artifactDirectory: options.artifactDirectory,
+      ...(options.sync?.syncUrl === undefined ? {} : { syncUrl: options.sync.syncUrl }),
+      ...(options.sync?.replicaUrl === undefined ? {} : { replicaUrl: options.sync.replicaUrl }),
+      ...(options.sync?.credentialReference === undefined ? {} : { credentialReference: options.sync.credentialReference }),
+      ...(options.sync?.intervalMs === undefined ? {} : { intervalMs: options.sync.intervalMs }),
+      ...(transport === undefined ? {} : { transport }),
+    });
+    await sync.start(options.sync?.startup ?? true);
     const artifacts = new LocalArtifactStore(options.artifactDirectory);
     const providers: ModelProvider[] = [new EchoModelProvider(), ...(options.modelProviders ?? [])];
     if (process.env.OPENAI_API_KEY) {
@@ -162,6 +213,9 @@ export class Supervisor {
     ];
     const supervisor = new Supervisor(
       storage,
+      profile,
+      device,
+      sync,
       artifacts,
       new ConsoleProcess(),
       new OutboxRunner(storage, executors),
@@ -191,10 +245,18 @@ export class Supervisor {
     await this.heartbeats.close();
     await this.console.stop();
     await this.models.close();
+    await this.sync.stop();
     this.storage.close();
+    this.profile.close();
   }
 
   async createSession(options: CreateSessionOptions): Promise<{ sessionId: string; branchId: string }> {
+    if (this.sync.capabilities.configured && options.workspaceId !== this.sync.workspaceId) {
+      throw new ValidationError(`Configured cloud replica belongs to workspace ${this.sync.workspaceId}, not ${options.workspaceId}`);
+    }
+    const now = new Date().toISOString();
+    const catalog = await this.profile.getWorkspace(options.workspaceId);
+    if (!catalog) await this.profile.putWorkspace({ workspaceId: options.workspaceId, name: options.workspaceId, databaseUrl: this.sync.databaseUrl, replicaUrl: null, syncUrl: null, credentialReference: null, ownerProfileId: this.device.profileId, createdAt: now, updatedAt: now, deletedAt: null });
     const sessionId = options.sessionId ?? newId();
     const branchId = options.branchId ?? newId();
     const model = options.model ?? { provider: "echo", model: "echo-1" };
@@ -254,6 +316,8 @@ export class Supervisor {
     code: string,
     dependencies: string[] = [],
   ): Promise<{ cellId: string; result: JsonValue; logs: string[] }> {
+    const session = await this.storage.getSession?.(sessionId);
+    if (session?.executionOwnerDeviceId && session.executionOwnerDeviceId !== this.device.deviceId) throw new CapabilityUnavailableError(`execution of session owned by device ${session.executionOwnerDeviceId}`, `device ${this.device.deviceId} (automatic ownership failover is unavailable)`);
     return this.#cells.run(`${sessionId}/${branchId}`, () => this.#executeCell(sessionId, branchId, code, dependencies));
   }
 
@@ -438,4 +502,9 @@ export class Supervisor {
       if (this.restartConsoleAfterCell) await this.console.stop();
     }
   }
+}
+
+function adjacentFileUrl(databaseUrl: string, suffix: string): string {
+  if (!databaseUrl.startsWith("file:")) throw new ValidationError("Profile and local sync-replica defaults require a file: workspace database URL");
+  return `${databaseUrl}${suffix}`;
 }

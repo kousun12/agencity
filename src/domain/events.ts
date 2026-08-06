@@ -22,7 +22,7 @@ export const eventTypes = [
   "RefinementProposed", "RefinementValidated", "RefinementCandidateActivated",
   "RefinementCandidateAllocated", "RefinementCandidateExposed", "RefinementObservationRecorded",
   "RefinementDecided", "RefinementApproved", "RefinementRollbackApproved", "RefinementRolledBack",
-  "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked",
+  "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
 ] as const;
 export type EventType = (typeof eventTypes)[number];
 export type Producer = "supervisor" | "console" | "model" | "executor" | "client" | "recovery" | "scheduler" | string;
@@ -104,6 +104,7 @@ export interface EventPayloads {
   SkillInvocationRecorded: { entryId: string; versionId: string; effectId: string; input: JsonValue };
   SkillTestRecorded: { entryId: string; versionId: string; effectId: string; passed: boolean; report: JsonValue };
   SubagentSpecInvoked: { entryId: string; versionId: string; taskId: string; childSessionId: string; childBranchId: string };
+  SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
 }
 
 export interface AgentEvent<T extends EventType = EventType> {
@@ -111,12 +112,21 @@ export interface AgentEvent<T extends EventType = EventType> {
   readonly causationId: string | null; readonly correlationId: string | null; readonly type: T;
   readonly schemaVersion: number; readonly committedAt: string; readonly producer: Producer;
   readonly idempotencyKey: string | null; readonly payload: EventPayloads[T];
+  /** Globally stable writer identity and monotonic writer sequence used by replication. */
+  readonly originDeviceId: string;
+  readonly originSequence: number;
+  /** Previous event in the writer's source branch, independent of this database's cursor. */
+  readonly streamParentId: string | null;
 }
 export interface NewAgentEvent<T extends EventType = EventType> {
   readonly id?: string; readonly sessionId: string; readonly branchId: string;
   readonly causationId?: string | null; readonly correlationId?: string | null; readonly type: T;
   readonly schemaVersion?: number; readonly committedAt?: string; readonly producer: Producer;
   readonly idempotencyKey?: string | null; readonly payload: EventPayloads[T];
+  /** Reserved for verified replicated-envelope ingestion. Ordinary commands omit these fields. */
+  readonly originDeviceId?: string;
+  readonly originSequence?: number;
+  readonly streamParentId?: string | null;
 }
 const headerSchema = z.object({ sessionId: z.string().min(1), branchId: z.string().min(1), type: z.enum(eventTypes), producer: z.string().min(1), schemaVersion: z.number().int().positive().optional() });
 const id = z.string().min(1);
@@ -193,6 +203,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SkillInvocationRecorded: z.object({ entryId: id, versionId: id, effectId: id, input: jsonValueSchema }),
   SkillTestRecorded: z.object({ entryId: id, versionId: id, effectId: id, passed: z.boolean(), report: jsonValueSchema }),
   SubagentSpecInvoked: z.object({ entryId: id, versionId: id, taskId: id, childSessionId: id, childBranchId: id }),
+  SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
 };
 
 export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): void {

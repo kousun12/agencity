@@ -1,4 +1,5 @@
 import {
+  CapabilityUnavailableError,
   NotFoundError,
   ValidationError,
   newId,
@@ -66,6 +67,10 @@ export class ModelLoop {
   ): Promise<{ outcome: EffectOutcome; message?: string; error?: string }> {
     const history = await this.storage.loadEvents(sessionId, { branchId });
     if (!history.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
+    const session = await this.storage.getSession?.(sessionId);
+    if (session?.executionOwnerDeviceId && this.storage.deviceId && session.executionOwnerDeviceId !== this.storage.deviceId) {
+      throw new CapabilityUnavailableError(`execution of session owned by device ${session.executionOwnerDeviceId}`, `${this.storage.name} device ${this.storage.deviceId} (automatic ownership failover is unavailable)`);
+    }
     const state = projectEvents(history);
     assertBudgetAvailable(state);
     const turnId = newId();

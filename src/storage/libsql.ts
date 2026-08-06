@@ -6,6 +6,8 @@ import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateRecord, GoalRecord,
   HeartbeatRecord, InputSetRecord, MailboxRecord, OutboxRecord, ReadonlyStatement,
   RecursiveModelRecord, SessionRecord, StorageCapabilities, TaskRecord,
+  DataManifestRecord, SyncBranchMappingRecord, SyncConflictRecord, SyncIngestReceiptRecord,
+  SyncOriginWatermarkRecord, SyncQuarantineRecord, WorkspaceReplicaStatusRecord,
 } from "./contract.ts";
 import { containsBrokeredSecret } from "../security/index.ts";
 
@@ -22,14 +24,21 @@ function valueToJson(value: unknown): JsonValue {
 }
 function rowToObject(row: Row): JsonValue { const result: Record<string, JsonValue> = {}; for (const key of Object.keys(row)) if (!/^\d+$/.test(key)) result[key] = valueToJson(row[key]); return result; }
 function rowToEvent(row: Row): AgentEvent {
-  return { cursor: cursorOf(Number(row.sequence)), id: String(row.id), sessionId: String(row.session_id), branchId: String(row.branch_id),
+  const localSequence = Number(row.sequence);
+  return { cursor: cursorOf(localSequence), id: String(row.id), sessionId: String(row.session_id), branchId: String(row.branch_id),
     causationId: row.causation_id === null ? null : String(row.causation_id), correlationId: row.correlation_id === null ? null : String(row.correlation_id),
     type: String(row.type) as EventType, schemaVersion: Number(row.schema_version), committedAt: String(row.committed_at), producer: String(row.producer),
-    idempotencyKey: row.idempotency_key === null ? null : String(row.idempotency_key), payload: JSON.parse(String(row.payload_json)) as never };
+    idempotencyKey: row.idempotency_key === null ? null : String(row.idempotency_key), payload: JSON.parse(String(row.payload_json)) as never,
+    // Legacy rows predate Slice 4. Their stable event ID still deduplicates; the
+    // fallback origin is never advertised as a real device identity.
+    originDeviceId: row.origin_device_id === null || row.origin_device_id === undefined ? "legacy" : String(row.origin_device_id),
+    originSequence: row.origin_sequence === null || row.origin_sequence === undefined ? localSequence : Number(row.origin_sequence),
+    streamParentId: row.stream_parent_id === null || row.stream_parent_id === undefined ? null : String(row.stream_parent_id),
+  };
 }
 function rowToOutbox(row: Row): OutboxRecord { return { effectId: String(row.effect_id), sessionId: String(row.session_id), branchId: String(row.branch_id), executor: String(row.executor), operation: String(row.operation), input: JSON.parse(String(row.input_json)) as JsonValue, idempotencyKey: String(row.idempotency_key), idempotent: Number(row.idempotent) === 1, status: String(row.status) as OutboxRecord["status"], attempt: Number(row.attempt), owner: row.owner === null ? null : String(row.owner), leaseExpiresAt: row.lease_expires_at === null ? null : String(row.lease_expires_at) }; }
 function optionalJson(row: Row, key: string): JsonValue | undefined { const value = row[key]; return value === null || value === undefined ? undefined : JSON.parse(String(value)) as JsonValue; }
-function rowToSession(row: Row): SessionRecord { return { sessionId: String(row.session_id), workspaceId: String(row.workspace_id), initialBranchId: String(row.initial_branch_id), parentSessionId: row.parent_session_id === null ? null : String(row.parent_session_id), parentBranchId: row.parent_branch_id === null ? null : String(row.parent_branch_id), rootSessionId: row.root_session_id === null ? String(row.session_id) : String(row.root_session_id), depth: Number(row.depth), taskId: row.task_id === null ? null : String(row.task_id), status: row.task_status === null || row.task_status === undefined ? null : String(row.task_status) as SessionRecord["status"] }; }
+function rowToSession(row: Row): SessionRecord { return { sessionId: String(row.session_id), workspaceId: String(row.workspace_id), initialBranchId: String(row.initial_branch_id), parentSessionId: row.parent_session_id === null ? null : String(row.parent_session_id), parentBranchId: row.parent_branch_id === null ? null : String(row.parent_branch_id), rootSessionId: row.root_session_id === null ? String(row.session_id) : String(row.root_session_id), depth: Number(row.depth), taskId: row.task_id === null ? null : String(row.task_id), status: row.task_status === null || row.task_status === undefined ? null : String(row.task_status) as SessionRecord["status"], executionOwnerDeviceId: row.execution_owner_device_id === null || row.execution_owner_device_id === undefined ? null : String(row.execution_owner_device_id) }; }
 function rowToTask(row: Row): TaskRecord { const result = optionalJson(row, "result_json"); return { taskId: String(row.task_id), parentSessionId: String(row.parent_session_id), parentBranchId: String(row.parent_branch_id), childSessionId: String(row.child_session_id), childBranchId: String(row.child_branch_id), task: String(row.task_text), completionCriteria: row.completion_criteria === null ? null : String(row.completion_criteria), model: JSON.parse(String(row.model_json)), budget: JSON.parse(String(row.budget_json)), status: String(row.status) as TaskRecord["status"], cancellationRequested: Number(row.cancellation_requested) === 1, ...(result === undefined ? {} : { result }), artifactIds: JSON.parse(String(row.artifact_ids_json)) as string[], ...(row.error === null ? {} : { error: String(row.error) }), ...(row.reason === null ? {} : { reason: String(row.reason) }), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
 function rowToMailbox(row: Row): MailboxRecord { return { mailboxMessageId: String(row.mailbox_message_id), fromSessionId: String(row.from_session_id), fromBranchId: String(row.from_branch_id), toSessionId: String(row.to_session_id), toBranchId: String(row.to_branch_id), kind: String(row.kind) as MailboxRecord["kind"], content: String(row.content), taskId: row.task_id === null ? null : String(row.task_id), delivered: row.delivered_event_id !== null, acknowledged: row.acknowledged_event_id !== null, sentAt: String(row.sent_at), deliveredAt: row.delivered_at === null ? null : String(row.delivered_at), acknowledgedAt: row.acknowledged_at === null ? null : String(row.acknowledged_at) }; }
 function rowToDocument(row: Row): DocumentRecord { return { documentId: String(row.document_id), sessionId: String(row.session_id), branchId: String(row.branch_id), name: String(row.name), mediaType: String(row.media_type), size: Number(row.size), digest: String(row.digest), chunkCount: Number(row.chunk_count), createdAt: String(row.created_at) }; }
@@ -38,6 +47,21 @@ function rowToGoal(row: Row): GoalRecord { return { goalId: String(row.goal_id),
 function rowToGoalGate(row: Row): GoalGateRecord { const output = optionalJson(row, "output_json"); return { gateId: String(row.gate_id), goalId: String(row.goal_id), name: String(row.name), executor: String(row.executor), operation: String(row.operation), input: JSON.parse(String(row.input_json)) as JsonValue, idempotent: Number(row.idempotent) === 1, required: Number(row.required) === 1, status: String(row.status) as GoalGateRecord["status"], ...(row.effect_id === null ? {} : { effectId: String(row.effect_id) }), ...(output === undefined ? {} : { output }), ...(row.error === null ? {} : { error: String(row.error) }) }; }
 function rowToHeartbeat(row: Row): HeartbeatRecord { const payload = optionalJson(row, "payload_json"); return { heartbeatId: String(row.heartbeat_id), sessionId: String(row.session_id), branchId: String(row.branch_id), intervalMs: Number(row.interval_ms), nextTickAt: String(row.next_tick_at), goalId: row.goal_id === null ? null : String(row.goal_id), ...(payload === undefined ? {} : { payload }), status: String(row.status) as HeartbeatRecord["status"], tick: Number(row.tick), lastFiredAt: row.last_fired_at === null ? null : String(row.last_fired_at) }; }
 function rowToRecursiveModel(row: Row): RecursiveModelRecord { return { handleId: String(row.handle_id), taskId: String(row.task_id), parentSessionId: String(row.parent_session_id), parentBranchId: String(row.parent_branch_id), childSessionId: String(row.child_session_id), childBranchId: String(row.child_branch_id), model: JSON.parse(String(row.model_json)), inputSetId: row.input_set_id === null ? null : String(row.input_set_id), status: String(row.status) as RecursiveModelRecord["status"], ...(row.result_message_id === null ? {} : { resultMessageId: String(row.result_message_id) }), ...(row.error === null ? {} : { error: String(row.error) }), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
+function rowToReplicaStatus(row: Row): WorkspaceReplicaStatusRecord { return {
+  replicaId:String(row.replica_id), replicaIncarnation:row.replica_incarnation===null?null:String(row.replica_incarnation),
+  workspaceId:String(row.workspace_id), deviceId:String(row.device_id),
+  syncUrl:row.sync_url===null?null:String(row.sync_url), credentialReference:row.credential_reference===null?null:String(row.credential_reference),
+  lifecycle:String(row.lifecycle) as WorkspaceReplicaStatusRecord["lifecycle"], lastAttemptAt:row.last_attempt_at===null?null:String(row.last_attempt_at),
+  lastSuccessAt:row.last_success_at===null?null:String(row.last_success_at), lastError:row.last_error===null?null:String(row.last_error),
+  lastStats:row.last_stats_json===null?null:JSON.parse(String(row.last_stats_json)),
+  stagedEnvelopes:Number(row.staged_envelopes), ingestedEnvelopes:Number(row.ingested_envelopes), quarantinedEnvelopes:Number(row.quarantined_envelopes), updatedAt:String(row.updated_at),
+}; }
+function rowToReceipt(row: Row): SyncIngestReceiptRecord { return { envelopeId:String(row.envelope_id),digest:String(row.digest),originDeviceId:String(row.origin_device_id),originSequence:Number(row.origin_sequence),eventId:String(row.event_id),sourceBranchId:String(row.source_branch_id),mappedBranchId:String(row.mapped_branch_id),ingestedAt:String(row.ingested_at) }; }
+function rowToOriginWatermark(row: Row): SyncOriginWatermarkRecord { return { replicaId:String(row.replica_id),originDeviceId:String(row.origin_device_id),stagedSequence:Number(row.staged_sequence),ingestedSequence:Number(row.ingested_sequence),updatedAt:String(row.updated_at) }; }
+function rowToQuarantine(row: Row): SyncQuarantineRecord { return { envelopeId:String(row.envelope_id),workspaceId:String(row.workspace_id),originDeviceId:row.origin_device_id===null?null:String(row.origin_device_id),originSequence:row.origin_sequence===null?null:Number(row.origin_sequence),reasonCode:String(row.reason_code),reason:String(row.reason),envelope:JSON.parse(String(row.envelope_json)) as JsonValue,digest:row.digest===null?null:String(row.digest),status:String(row.status) as SyncQuarantineRecord["status"],firstSeenAt:String(row.first_seen_at),lastSeenAt:String(row.last_seen_at) }; }
+function rowToMapping(row: Row): SyncBranchMappingRecord { return { mappingId:String(row.mapping_id),originDeviceId:String(row.origin_device_id),sessionId:String(row.session_id),sourceBranchId:String(row.source_branch_id),forkEventId:String(row.fork_event_id),derivedBranchId:String(row.derived_branch_id),lastSourceEventId:row.last_source_event_id===null?null:String(row.last_source_event_id),createdAt:String(row.created_at) }; }
+function rowToSyncConflict(row: Row): SyncConflictRecord { const resolution=row.resolution_json===null?undefined:JSON.parse(String(row.resolution_json)) as JsonValue; return { conflictId:String(row.conflict_id),kind:String(row.kind) as SyncConflictRecord["kind"],workspaceId:String(row.workspace_id),sessionId:row.session_id===null?null:String(row.session_id),taskId:row.task_id===null?null:String(row.task_id),eventIds:JSON.parse(String(row.event_ids_json)) as string[],originDeviceIds:JSON.parse(String(row.origin_device_ids_json)) as string[],details:JSON.parse(String(row.details_json)) as JsonValue,status:String(row.status) as SyncConflictRecord["status"],...(resolution===undefined?{}:{resolution}),detectedAt:String(row.detected_at),resolvedAt:row.resolved_at===null?null:String(row.resolved_at) }; }
+function rowToManifest(row: Row): DataManifestRecord { return { manifestId:String(row.manifest_id),operation:String(row.operation) as DataManifestRecord["operation"],scopeKind:String(row.scope_kind) as DataManifestRecord["scopeKind"],scopeId:String(row.scope_id),requestedBy:String(row.requested_by),owned:Number(row.owned)===1,resources:JSON.parse(String(row.resources_json)) as JsonValue,replicaStatus:JSON.parse(String(row.replica_status_json)) as JsonValue,status:String(row.status) as DataManifestRecord["status"],createdAt:String(row.created_at),completedAt:row.completed_at===null?null:String(row.completed_at) }; }
 
 class LocalWriteQueue {
   #tail: Promise<void> = Promise.resolve();
@@ -51,18 +75,29 @@ class LocalWriteQueue {
   }
 }
 
-export interface LibSqlStorageOptions { readonly url: string; readonly authToken?: string; readonly syncUrl?: string; }
+export interface LibSqlStorageOptions {
+  readonly url: string;
+  /** Stable identity supplied by the separate profile database. */
+  readonly deviceId?: string;
+}
 export class LibSqlStorage implements AgentStorage {
   readonly name = "libsql";
   readonly capabilities: StorageCapabilities = { offlineWrites: true, distributedLeases: false, analyticalSql: true, notifications: true };
   readonly #client: Client;
-  readonly #config: LibSqlStorageOptions;
+  readonly #config: { readonly url:string };
   readonly #listeners = new Set<(events: readonly AgentEvent[]) => void>();
   readonly #writes = new LocalWriteQueue();
+  readonly #deviceIdSupplied: boolean;
+  #deviceId: string;
   constructor(options: LibSqlStorageOptions | string) {
-    this.#config = typeof options === "string" ? { url: options } : options;
+    const supplied = typeof options === "string" ? { url: options } : options;
+    const { deviceId, url } = supplied;
+    this.#config = {url};
+    this.#deviceIdSupplied = deviceId !== undefined;
+    this.#deviceId = deviceId ?? newId();
     this.#client = createClient(this.#config);
   }
+  get deviceId(): string { return this.#deviceId; }
   async migrate(): Promise<void> {
     // Migration files are immutable. Apply each once so ALTER statements remain
     // safe when a runtime reopens an existing local database.
@@ -72,6 +107,7 @@ export class LibSqlStorage implements AgentStorage {
       { version: 2, name: "recursive-sessions", url: new URL("./migrations/002_recursive_sessions.sql", import.meta.url) },
       { version: 3, name: "slice2-review-hardening", url: new URL("./migrations/003_slice2_review_hardening.sql", import.meta.url) },
       { version: 4, name: "relational-memory-refinement", url: new URL("./migrations/004_relational_memory_refinement.sql", import.meta.url) },
+      { version: 5, name: "turso-cloud-sync", url: new URL("./migrations/005_turso_cloud_sync.sql", import.meta.url) },
     ];
     for (const migration of migrations) {
       const applied = await this.#client.execute({ sql: "SELECT version FROM schema_migrations WHERE version=?", args: [migration.version] });
@@ -79,6 +115,14 @@ export class LibSqlStorage implements AgentStorage {
       await this.#client.executeMultiple(await Bun.file(migration.url).text());
       await this.#client.execute({ sql: "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)", args: [migration.version, migration.name, new Date().toISOString()] });
     }
+    // A directly-opened adapter still gets a restart-stable identity. Normal
+    // Supervisor composition supplies the identity from ProfileStore instead.
+    const clocks = await this.#client.execute("SELECT device_id FROM device_clocks ORDER BY rowid LIMIT 1");
+    if (clocks.rows[0] && !this.#deviceIdSupplied) this.#deviceId = String(clocks.rows[0].device_id);
+    await this.#client.execute({
+      sql: "INSERT INTO device_clocks(device_id,next_sequence) SELECT ?,COALESCE(max(sequence),0)+1 FROM events WHERE true ON CONFLICT(device_id) DO NOTHING",
+      args: [this.#deviceId],
+    });
   }
   close(): void { this.#client.close(); }
   onCommitted(listener: (events: readonly AgentEvent[]) => void): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
@@ -104,6 +148,16 @@ export class LibSqlStorage implements AgentStorage {
     });
   }
   async #appendOne(tx: Transaction, candidate: NewAgentEvent): Promise<AgentEvent> {
+    const id = candidate.id ?? newId();
+    const byId = await tx.execute({ sql: "SELECT * FROM events WHERE id=?", args: [id] });
+    if (byId.rows[0]) {
+      const existing = rowToEvent(byId.rows[0]);
+      if (existing.sessionId !== candidate.sessionId || existing.branchId !== candidate.branchId ||
+          existing.type !== candidate.type || json(existing.payload) !== json(candidate.payload)) {
+        throw new ConflictError("Event ID reused with different durable meaning", { eventId: id });
+      }
+      return existing;
+    }
     if (candidate.idempotencyKey) {
       const found = await tx.execute({ sql: "SELECT * FROM events WHERE session_id=? AND type=? AND idempotency_key=?", args: [candidate.sessionId, candidate.type, candidate.idempotencyKey] });
       const row = found.rows[0];
@@ -113,7 +167,16 @@ export class LibSqlStorage implements AgentStorage {
         return existing;
       }
     }
-    const id = candidate.id ?? newId(), committedAt = candidate.committedAt ?? new Date().toISOString();
+    const replicated = candidate.originDeviceId !== undefined || candidate.originSequence !== undefined;
+    if (replicated && (!candidate.originDeviceId || !Number.isSafeInteger(candidate.originSequence) || candidate.originSequence! < 1)) {
+      throw new ValidationError("Replicated event origin requires a device ID and positive safe sequence");
+    }
+    const originDeviceId = candidate.originDeviceId ?? this.#deviceId;
+    const originSequence = candidate.originSequence ?? await this.#nextOriginSequence(tx, originDeviceId);
+    const committedAt = candidate.committedAt ?? new Date().toISOString();
+    const streamParentId = candidate.streamParentId !== undefined
+      ? candidate.streamParentId
+      : await this.#findStreamParent(tx, candidate);
     const pending: AgentEvent = {
       cursor: "99999999999999999999",
       id,
@@ -127,14 +190,40 @@ export class LibSqlStorage implements AgentStorage {
       producer: candidate.producer,
       idempotencyKey: candidate.idempotencyKey ?? null,
       payload: candidate.payload as never,
+      originDeviceId,
+      originSequence,
+      streamParentId,
     };
     await this.#validateCanonicalAppend(tx, pending);
-    const result = await tx.execute({ sql: `INSERT INTO events(id,session_id,branch_id,causation_id,correlation_id,type,schema_version,committed_at,producer,idempotency_key,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-      args: [id,candidate.sessionId,candidate.branchId,candidate.causationId ?? null,candidate.correlationId ?? null,candidate.type,candidate.schemaVersion ?? 1,committedAt,candidate.producer,candidate.idempotencyKey ?? null,json(candidate.payload)] });
-    const event: AgentEvent = { cursor: cursorOf(Number(result.lastInsertRowid)), id, sessionId: candidate.sessionId, branchId: candidate.branchId, causationId: candidate.causationId ?? null, correlationId: candidate.correlationId ?? null, type: candidate.type, schemaVersion: candidate.schemaVersion ?? 1, committedAt, producer: candidate.producer, idempotencyKey: candidate.idempotencyKey ?? null, payload: candidate.payload as never };
+    const result = await tx.execute({ sql: `INSERT INTO events(id,session_id,branch_id,causation_id,correlation_id,type,schema_version,committed_at,producer,idempotency_key,payload_json,origin_device_id,origin_sequence,stream_parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      args: [id,candidate.sessionId,candidate.branchId,candidate.causationId ?? null,candidate.correlationId ?? null,candidate.type,candidate.schemaVersion ?? 1,committedAt,candidate.producer,candidate.idempotencyKey ?? null,json(candidate.payload),originDeviceId,originSequence,streamParentId] });
+    const event: AgentEvent = { ...pending, cursor: cursorOf(Number(result.lastInsertRowid)) };
     await this.#applyOperationalRows(tx, event);
     return event;
   }
+
+  async #nextOriginSequence(tx: Transaction, deviceId: string): Promise<number> {
+    await tx.execute({ sql: "INSERT INTO device_clocks(device_id,next_sequence) VALUES(?,1) ON CONFLICT(device_id) DO NOTHING", args: [deviceId] });
+    const result = await tx.execute({ sql: "UPDATE device_clocks SET next_sequence=next_sequence+1 WHERE device_id=? RETURNING next_sequence-1 AS allocated", args: [deviceId] });
+    const allocated = Number(result.rows[0]?.allocated);
+    if (!Number.isSafeInteger(allocated) || allocated < 1) throw new ValidationError("Device origin sequence exhausted");
+    return allocated;
+  }
+
+  async #findStreamParent(tx: Transaction, candidate: NewAgentEvent): Promise<string | null> {
+    if (candidate.type === "SessionCreated") return null;
+    if (candidate.type === "BranchCreated") {
+      const forkCursor = (candidate.payload as EventPayloads["BranchCreated"]).forkCursor;
+      const fork = await tx.execute({ sql: "SELECT id FROM events WHERE sequence=?", args: [sequenceOf(forkCursor)] });
+      return fork.rows[0] ? String(fork.rows[0].id) : null;
+    }
+    const result = await tx.execute({
+      sql: "SELECT id FROM events WHERE session_id=? AND branch_id=? ORDER BY sequence DESC LIMIT 1",
+      args: [candidate.sessionId, candidate.branchId],
+    });
+    return result.rows[0] ? String(result.rows[0].id) : null;
+  }
+
   /**
    * Validates local canonical commands against the projected state before the
    * insert. A future sync adapter may quarantine remote invalid history instead;
@@ -328,14 +417,17 @@ export class LibSqlStorage implements AgentStorage {
   async #applyOperationalRows(tx: Transaction, event: AgentEvent): Promise<void> {
     if (event.type === "SessionCreated") {
       const p = event.payload as EventPayloads["SessionCreated"];
-      await tx.execute({ sql: "INSERT OR IGNORE INTO sessions(session_id,workspace_id,initial_branch_id,created_event_id,parent_session_id,parent_branch_id,root_session_id,depth,task_id) VALUES(?,?,?,?,?,?,?,?,?)", args: [event.sessionId,p.workspaceId,p.initialBranchId,event.id,p.parentSessionId ?? null,p.parentBranchId ?? null,p.rootSessionId ?? event.sessionId,p.depth ?? 0,p.taskId ?? null] });
+      await tx.execute({ sql: "INSERT OR IGNORE INTO sessions(session_id,workspace_id,initial_branch_id,created_event_id,parent_session_id,parent_branch_id,root_session_id,depth,task_id,execution_owner_device_id) VALUES(?,?,?,?,?,?,?,?,?,?)", args: [event.sessionId,p.workspaceId,p.initialBranchId,event.id,p.parentSessionId ?? null,p.parentBranchId ?? null,p.rootSessionId ?? event.sessionId,p.depth ?? 0,p.taskId ?? null,event.originDeviceId] });
       await tx.execute({ sql: "INSERT OR IGNORE INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,NULL,NULL,NULL,?)", args: [event.sessionId,p.initialBranchId,event.id] });
     }
+    const ownerResult = await tx.execute({ sql:"SELECT execution_owner_device_id FROM sessions WHERE session_id=?", args:[event.sessionId] });
+    const executionOwner = ownerResult.rows[0]?.execution_owner_device_id;
+    const executionOwned = executionOwner === null || executionOwner === undefined || String(executionOwner) === "legacy" || String(executionOwner) === this.#deviceId;
     if (event.type === "BranchCreated") { const p = event.payload as EventPayloads["BranchCreated"]; await tx.execute({ sql: "INSERT INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,?,?,?,?)", args: [event.sessionId,p.branchId,p.parentBranchId,p.forkCursor,p.name ?? null,event.id] }); }
     if (event.type === "ContextMaterialized") { const p = event.payload as EventPayloads["ContextMaterialized"]; await tx.execute({ sql: "INSERT INTO context_records(context_id,session_id,branch_id,event_id,content_hash,records_json,context_json,created_at,harness_provenance_json) VALUES(?,?,?,?,?,?,?,?,?)", args: [p.contextId,event.sessionId,event.branchId,event.id,p.contentHash,json(p.records),json(p.context),event.committedAt,p.harnessProvenance === undefined ? null : json(p.harnessProvenance)] }); }
-    if (event.type === "EffectRequested") { const p = event.payload as EventPayloads["EffectRequested"]; await tx.execute({ sql: "INSERT INTO outbox(effect_id,session_id,branch_id,executor,operation,input_json,idempotency_key,idempotent,status,requested_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.effectId,event.sessionId,event.branchId,p.executor,p.operation,json(p.input),p.idempotencyKey,p.idempotent ? 1 : 0,"pending",event.id,event.committedAt,event.committedAt] }); }
-    if (event.type === "EffectAttemptStarted") { const p = event.payload as EventPayloads["EffectAttemptStarted"]; await tx.execute({ sql: "UPDATE outbox SET status='running',attempt=?,updated_at=? WHERE effect_id=? AND status IN ('pending','running')", args: [p.attempt,event.committedAt,p.effectId] }); }
-    if (event.type === "EffectOutcomeRecorded") { const p = event.payload as EventPayloads["EffectOutcomeRecorded"]; await tx.execute({ sql: "UPDATE outbox SET status=?,attempt=?,owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=?", args: [p.outcome,p.attempt,event.committedAt,p.effectId] }); }
+    if (event.type === "EffectRequested" && executionOwned) { const p = event.payload as EventPayloads["EffectRequested"]; await tx.execute({ sql: "INSERT INTO outbox(effect_id,session_id,branch_id,executor,operation,input_json,idempotency_key,idempotent,status,requested_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.effectId,event.sessionId,event.branchId,p.executor,p.operation,json(p.input),p.idempotencyKey,p.idempotent ? 1 : 0,"pending",event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "EffectAttemptStarted" && executionOwned) { const p = event.payload as EventPayloads["EffectAttemptStarted"]; await tx.execute({ sql: "UPDATE outbox SET status='running',attempt=?,updated_at=? WHERE effect_id=? AND status IN ('pending','running')", args: [p.attempt,event.committedAt,p.effectId] }); }
+    if (event.type === "EffectOutcomeRecorded" && executionOwned) { const p = event.payload as EventPayloads["EffectOutcomeRecorded"]; await tx.execute({ sql: "UPDATE outbox SET status=?,attempt=?,owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=?", args: [p.outcome,p.attempt,event.committedAt,p.effectId] }); }
     if (event.type === "TaskCreated") {
       const p = event.payload as EventPayloads["TaskCreated"];
       await tx.execute({ sql: "INSERT INTO tasks(task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,task_text,completion_criteria,model_json,budget_json,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)", args: [p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,p.task,p.completionCriteria ?? null,json(p.model),json(p.budget),event.id,event.id,event.committedAt,event.committedAt] });
@@ -344,7 +436,7 @@ export class LibSqlStorage implements AgentStorage {
     if (event.type === "SubagentCancellationRequested") { const p = event.payload as EventPayloads["SubagentCancellationRequested"]; await tx.execute({ sql: "UPDATE tasks SET cancellation_requested=1,reason=COALESCE(?,reason),last_event_id=?,updated_at=? WHERE task_id=?", args: [p.reason ?? null,event.id,event.committedAt,p.taskId] }); }
     if (event.type === "TaskStatusChanged") {
       const p = event.payload as EventPayloads["TaskStatusChanged"];
-      await tx.execute({ sql: "UPDATE tasks SET status=?,result_json=COALESCE(?,result_json),artifact_ids_json=COALESCE(?,artifact_ids_json),error=COALESCE(?,error),reason=COALESCE(?,reason),last_event_id=?,updated_at=? WHERE task_id=?", args: [p.status,p.result === undefined ? null : json(p.result),p.artifactIds === undefined ? null : json(p.artifactIds),p.error ?? null,p.reason ?? null,event.id,event.committedAt,p.taskId] });
+      await tx.execute({ sql: "UPDATE tasks SET status=?,result_json=COALESCE(?,result_json),artifact_ids_json=COALESCE(?,artifact_ids_json),error=COALESCE(?,error),reason=COALESCE(?,reason),last_event_id=?,updated_at=? WHERE task_id=? AND parent_branch_id=?", args: [p.status,p.result === undefined ? null : json(p.result),p.artifactIds === undefined ? null : json(p.artifactIds),p.error ?? null,p.reason ?? null,event.id,event.committedAt,p.taskId,event.branchId] });
     }
     if (event.type === "MailboxMessageSent") {
       const p = event.payload as EventPayloads["MailboxMessageSent"];
@@ -364,14 +456,14 @@ export class LibSqlStorage implements AgentStorage {
       await tx.execute({ sql: "INSERT INTO input_sets(input_set_id,session_id,branch_id,name,metadata_json,event_id,created_at) VALUES(?,?,?,?,?,?,?)", args: [p.inputSetId,event.sessionId,event.branchId,p.name ?? null,p.metadata === undefined ? null : json(p.metadata),event.id,event.committedAt] });
       for (const [ordinal, chunkId] of p.chunkIds.entries()) await tx.execute({ sql: "INSERT INTO input_set_chunks(input_set_id,chunk_id,ordinal) VALUES(?,?,?)", args: [p.inputSetId,chunkId,ordinal] });
     }
-    if (event.type === "GoalCreated") { const p = event.payload as EventPayloads["GoalCreated"]; await tx.execute({ sql: "INSERT INTO goals(goal_id,session_id,branch_id,description,completion_criteria,max_turns,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,'active',?,?,?,?)", args: [p.goalId,event.sessionId,event.branchId,p.description,p.completionCriteria ?? null,p.maxTurns ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
-    if (event.type === "GoalCompletionRequested") { const p = event.payload as EventPayloads["GoalCompletionRequested"]; await tx.execute({ sql: "UPDATE goals SET status='completion_requested',completion_request_id=?,completion_workspace_id=?,completion_workspace_cursor=?,completion_pin_recorded=?,last_event_id=?,updated_at=? WHERE goal_id=?", args: [p.requestId,p.workspaceId ?? null,p.workspaceCursor ?? null,p.workspaceId !== undefined && Object.prototype.hasOwnProperty.call(p, "workspaceCursor") ? 1 : 0,event.id,event.committedAt,p.goalId] }); }
-    if (event.type === "GoalStatusChanged") { const p = event.payload as EventPayloads["GoalStatusChanged"]; await tx.execute({ sql: "UPDATE goals SET status=?,reason=?,last_event_id=?,updated_at=? WHERE goal_id=?", args: [p.status,p.reason ?? null,event.id,event.committedAt,p.goalId] }); }
-    if (event.type === "GoalGateAdded") { const p = event.payload as EventPayloads["GoalGateAdded"]; await tx.execute({ sql: "INSERT INTO goal_gates(gate_id,goal_id,name,executor,operation,input_json,idempotent,required,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?)", args: [p.gateId,p.goalId,p.name,p.executor,p.operation,json(p.input),p.idempotent ? 1 : 0,p.required ? 1 : 0,event.id,event.id,event.committedAt,event.committedAt] }); }
-    if (event.type === "GoalGateStatusChanged") { const p = event.payload as EventPayloads["GoalGateStatusChanged"]; await tx.execute({ sql: "UPDATE goal_gates SET status=?,effect_id=COALESCE(?,effect_id),output_json=?,error=?,last_event_id=?,updated_at=? WHERE gate_id=?", args: [p.status,p.effectId ?? null,p.output === undefined ? null : json(p.output),p.error ?? null,event.id,event.committedAt,p.gateId] }); }
-    if (event.type === "HeartbeatCreated") { const p = event.payload as EventPayloads["HeartbeatCreated"]; await tx.execute({ sql: "INSERT INTO heartbeats(heartbeat_id,session_id,branch_id,interval_ms,next_tick_at,goal_id,payload_json,status,tick,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'active',0,?,?,?,?)", args: [p.heartbeatId,event.sessionId,event.branchId,p.intervalMs,p.nextTickAt,p.goalId ?? null,p.payload === undefined ? null : json(p.payload),event.id,event.id,event.committedAt,event.committedAt] }); }
-    if (event.type === "HeartbeatTicked") { const p = event.payload as EventPayloads["HeartbeatTicked"]; await tx.execute({ sql: "UPDATE heartbeats SET tick=?,last_fired_at=?,next_tick_at=?,last_event_id=?,updated_at=? WHERE heartbeat_id=?", args: [p.tick,p.firedAt,p.nextTickAt,event.id,event.committedAt,p.heartbeatId] }); }
-    if (event.type === "HeartbeatStatusChanged") { const p = event.payload as EventPayloads["HeartbeatStatusChanged"]; await tx.execute({ sql: "UPDATE heartbeats SET status=?,next_tick_at=COALESCE(?,next_tick_at),last_event_id=?,updated_at=? WHERE heartbeat_id=?", args: [p.status,p.nextTickAt ?? null,event.id,event.committedAt,p.heartbeatId] }); }
+    if (event.type === "GoalCreated" && executionOwned) { const p = event.payload as EventPayloads["GoalCreated"]; await tx.execute({ sql: "INSERT INTO goals(goal_id,session_id,branch_id,description,completion_criteria,max_turns,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,'active',?,?,?,?)", args: [p.goalId,event.sessionId,event.branchId,p.description,p.completionCriteria ?? null,p.maxTurns ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "GoalCompletionRequested" && executionOwned) { const p = event.payload as EventPayloads["GoalCompletionRequested"]; await tx.execute({ sql: "UPDATE goals SET status='completion_requested',completion_request_id=?,completion_workspace_id=?,completion_workspace_cursor=?,completion_pin_recorded=?,last_event_id=?,updated_at=? WHERE goal_id=?", args: [p.requestId,p.workspaceId ?? null,p.workspaceCursor ?? null,p.workspaceId !== undefined && Object.prototype.hasOwnProperty.call(p, "workspaceCursor") ? 1 : 0,event.id,event.committedAt,p.goalId] }); }
+    if (event.type === "GoalStatusChanged" && executionOwned) { const p = event.payload as EventPayloads["GoalStatusChanged"]; await tx.execute({ sql: "UPDATE goals SET status=?,reason=?,last_event_id=?,updated_at=? WHERE goal_id=?", args: [p.status,p.reason ?? null,event.id,event.committedAt,p.goalId] }); }
+    if (event.type === "GoalGateAdded" && executionOwned) { const p = event.payload as EventPayloads["GoalGateAdded"]; await tx.execute({ sql: "INSERT INTO goal_gates(gate_id,goal_id,name,executor,operation,input_json,idempotent,required,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?)", args: [p.gateId,p.goalId,p.name,p.executor,p.operation,json(p.input),p.idempotent ? 1 : 0,p.required ? 1 : 0,event.id,event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "GoalGateStatusChanged" && executionOwned) { const p = event.payload as EventPayloads["GoalGateStatusChanged"]; await tx.execute({ sql: "UPDATE goal_gates SET status=?,effect_id=COALESCE(?,effect_id),output_json=?,error=?,last_event_id=?,updated_at=? WHERE gate_id=?", args: [p.status,p.effectId ?? null,p.output === undefined ? null : json(p.output),p.error ?? null,event.id,event.committedAt,p.gateId] }); }
+    if (event.type === "HeartbeatCreated" && executionOwned) { const p = event.payload as EventPayloads["HeartbeatCreated"]; await tx.execute({ sql: "INSERT INTO heartbeats(heartbeat_id,session_id,branch_id,interval_ms,next_tick_at,goal_id,payload_json,status,tick,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'active',0,?,?,?,?)", args: [p.heartbeatId,event.sessionId,event.branchId,p.intervalMs,p.nextTickAt,p.goalId ?? null,p.payload === undefined ? null : json(p.payload),event.id,event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "HeartbeatTicked" && executionOwned) { const p = event.payload as EventPayloads["HeartbeatTicked"]; await tx.execute({ sql: "UPDATE heartbeats SET tick=?,last_fired_at=?,next_tick_at=?,last_event_id=?,updated_at=? WHERE heartbeat_id=?", args: [p.tick,p.firedAt,p.nextTickAt,event.id,event.committedAt,p.heartbeatId] }); }
+    if (event.type === "HeartbeatStatusChanged" && executionOwned) { const p = event.payload as EventPayloads["HeartbeatStatusChanged"]; await tx.execute({ sql: "UPDATE heartbeats SET status=?,next_tick_at=COALESCE(?,next_tick_at),last_event_id=?,updated_at=? WHERE heartbeat_id=?", args: [p.status,p.nextTickAt ?? null,event.id,event.committedAt,p.heartbeatId] }); }
     if (event.type === "DocumentImported") {
       const payload = event.payload as EventPayloads["DocumentImported"];
       if (payload.chunkCount === 0 && (payload.size !== 0 || payload.digest !== sha256(""))) throw new ValidationError("Empty document metadata has an invalid size or digest");
@@ -388,8 +480,8 @@ export class LibSqlStorage implements AgentStorage {
         if (new TextEncoder().encode(content).byteLength !== Number(documentRow.size) || sha256(content) !== String(documentRow.digest)) throw new ValidationError("Document chunks do not match imported document integrity metadata");
       }
     }
-    if (event.type === "RecursiveModelStarted") { const p = event.payload as EventPayloads["RecursiveModelStarted"]; await tx.execute({ sql: "INSERT INTO recursive_model_handles(handle_id,task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,model_json,input_set_id,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", args: [p.handleId,p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,json(p.model),p.inputSetId ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
-    if (event.type === "RecursiveModelStatusChanged") { const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; await tx.execute({ sql: "UPDATE recursive_model_handles SET status=?,result_message_id=COALESCE(?,result_message_id),error=COALESCE(?,error),last_event_id=?,updated_at=? WHERE handle_id=?", args: [p.status,p.resultMessageId ?? null,p.error ?? null,event.id,event.committedAt,p.handleId] }); }
+    if (event.type === "RecursiveModelStarted" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStarted"]; await tx.execute({ sql: "INSERT INTO recursive_model_handles(handle_id,task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,model_json,input_set_id,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", args: [p.handleId,p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,json(p.model),p.inputSetId ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "RecursiveModelStatusChanged" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; await tx.execute({ sql: "UPDATE recursive_model_handles SET status=?,result_message_id=COALESCE(?,result_message_id),error=COALESCE(?,error),last_event_id=?,updated_at=? WHERE handle_id=?", args: [p.status,p.resultMessageId ?? null,p.error ?? null,event.id,event.committedAt,p.handleId] }); }
     if (event.type === "HarnessVersionCreated") {
       const p = event.payload as EventPayloads["HarnessVersionCreated"];
       await tx.execute({ sql: "INSERT INTO harness_versions(version_id,entry_id,version,kind,scope,scope_key,name,content_json,tags_json,confidence,status,evidence_event_ids_json,conflict_entry_ids_json,supersedes_version_id,proposal_id,created_by,created_event_id,last_event_id,created_at,last_confirmed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.versionId,p.entryId,p.version,p.kind,p.scope,p.scopeKey,p.name,json(p.content),json(p.tags),p.confidence,p.status,json(p.evidenceEventIds),json(p.conflictEntryIds),p.supersedesVersionId ?? null,p.proposalId ?? null,p.createdBy,event.id,event.id,event.committedAt,p.lastConfirmedAt] });
@@ -435,6 +527,7 @@ export class LibSqlStorage implements AgentStorage {
     if (event.type === "SkillInvocationRecorded") { const p = event.payload as EventPayloads["SkillInvocationRecorded"]; await tx.execute({ sql: "INSERT INTO skill_executions(event_id,entry_id,version_id,effect_id,execution_kind,created_at) VALUES(?,?,?,?,'invoke',?)", args: [event.id,p.entryId,p.versionId,p.effectId,event.committedAt] }); }
     if (event.type === "SkillTestRecorded") { const p = event.payload as EventPayloads["SkillTestRecorded"]; await tx.execute({ sql: "INSERT INTO skill_executions(event_id,entry_id,version_id,effect_id,execution_kind,passed,report_json,created_at) VALUES(?,?,?,?,'test',?,?,?)", args: [event.id,p.entryId,p.versionId,p.effectId,p.passed ? 1 : 0,json(p.report),event.committedAt] }); }
     if (event.type === "SubagentSpecInvoked") { const p = event.payload as EventPayloads["SubagentSpecInvoked"]; await tx.execute({ sql: "INSERT INTO subagent_spec_invocations(event_id,entry_id,version_id,task_id,child_session_id,child_branch_id,created_at) VALUES(?,?,?,?,?,?,?)", args: [event.id,p.entryId,p.versionId,p.taskId,p.childSessionId,p.childBranchId,event.committedAt] }); }
+    if (event.type === "SyncConflictResolved") { const p = event.payload as EventPayloads["SyncConflictResolved"]; const resolution = { action:p.action,resolvedBy:p.resolvedBy,...(p.chosenEventId===undefined?{}:{chosenEventId:p.chosenEventId}),...(p.note===undefined?{}:{note:p.note}) }; await tx.execute({ sql:"UPDATE sync_reconciliations SET status='resolved',resolution_json=?,resolved_at=? WHERE conflict_id=? AND status='unresolved'", args:[json(resolution),p.resolvedAt,p.conflictId] }); }
   }
 
   async #lineage(
@@ -665,12 +758,61 @@ export class LibSqlStorage implements AgentStorage {
       try {
         for (const table of ["memory_fts","subagent_spec_invocations","skill_executions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gates","goals","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
         const rows = await tx.execute("SELECT * FROM events ORDER BY sequence");
-        const selected = new Set(["SessionCreated","BranchCreated","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","RecursiveModelStarted","RecursiveModelStatusChanged","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked"]);
+        const selected = new Set(["SessionCreated","BranchCreated","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","RecursiveModelStarted","RecursiveModelStatusChanged","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
         for (const row of rows.rows) { const event = rowToEvent(row); if (selected.has(event.type)) await this.#applyOperationalRows(tx,event); }
         await tx.commit();
       } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
     });
   }
+
+  async listOriginEvents(deviceId: string, afterOriginSequence = 0): Promise<AgentEvent[]> {
+    if (!Number.isSafeInteger(afterOriginSequence) || afterOriginSequence < 0) throw new ValidationError("Invalid origin sequence cursor");
+    const result = await this.#client.execute({
+      sql: "SELECT * FROM events WHERE (origin_device_id=? AND origin_sequence>?) OR (origin_device_id IS NULL AND sequence>?) ORDER BY COALESCE(origin_sequence,sequence),sequence",
+      args: [deviceId,afterOriginSequence,afterOriginSequence],
+    });
+    return result.rows.map(rowToEvent).map((event) => event.originDeviceId === "legacy" ? { ...event, originDeviceId: deviceId } : event);
+  }
+  async appendReplicatedEvent(event: NewAgentEvent): Promise<AgentEvent> {
+    if (!event.id || !event.originDeviceId || event.originSequence === undefined || event.streamParentId === undefined) throw new ValidationError("Replicated append requires complete envelope identity");
+    const [committed] = await this.appendEvents([event]);
+    if (!committed) throw new Error("Replicated event was not committed");
+    return committed;
+  }
+  async findEventByIntent(sessionId: string, type: string, idempotencyKey: string): Promise<AgentEvent | null> {
+    const result = await this.#client.execute({ sql:"SELECT * FROM events WHERE session_id=? AND type=? AND idempotency_key=?", args:[sessionId,type,idempotencyKey] });
+    return result.rows[0] ? rowToEvent(result.rows[0]) : null;
+  }
+  async findEventByOriginSequence(originDeviceId:string,originSequence:number):Promise<AgentEvent|null>{const result=await this.#client.execute({sql:"SELECT * FROM events WHERE origin_device_id=? AND origin_sequence=? LIMIT 1",args:[originDeviceId,originSequence]});return result.rows[0]?rowToEvent(result.rows[0]):null;}
+  async findTaskClaimEvents(taskId:string):Promise<AgentEvent[]>{const r=await this.#client.execute({sql:"SELECT * FROM events WHERE type='TaskStatusChanged' AND json_extract(payload_json,'$.taskId')=? AND json_extract(payload_json,'$.status')='running' ORDER BY sequence",args:[taskId]});return r.rows.map(rowToEvent);}
+  async getDirectBranchTip(sessionId: string, branchId: string): Promise<AgentEvent | null> {
+    const result = await this.#client.execute({ sql:"SELECT * FROM events WHERE session_id=? AND branch_id=? ORDER BY sequence DESC LIMIT 1", args:[sessionId,branchId] });
+    return result.rows[0] ? rowToEvent(result.rows[0]) : null;
+  }
+  async getEventCursor(eventId: string): Promise<string | null> {
+    const result=await this.#client.execute({sql:"SELECT sequence FROM events WHERE id=?",args:[eventId]});
+    return result.rows[0] ? cursorOf(Number(result.rows[0].sequence)) : null;
+  }
+  async getReplicaStatus(replicaId: string): Promise<WorkspaceReplicaStatusRecord | null> { const r=await this.#client.execute({sql:"SELECT * FROM workspace_replica_status WHERE replica_id=?",args:[replicaId]});return r.rows[0]?rowToReplicaStatus(r.rows[0]):null; }
+  async putReplicaStatus(s: WorkspaceReplicaStatusRecord): Promise<void> { await this.#writes.run(async()=>{await this.#client.execute({sql:`INSERT INTO workspace_replica_status(replica_id,replica_incarnation,workspace_id,device_id,sync_url,credential_reference,lifecycle,last_attempt_at,last_success_at,last_error,last_stats_json,staged_envelopes,ingested_envelopes,quarantined_envelopes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(replica_id) DO UPDATE SET replica_incarnation=excluded.replica_incarnation,workspace_id=excluded.workspace_id,device_id=excluded.device_id,sync_url=excluded.sync_url,credential_reference=excluded.credential_reference,lifecycle=excluded.lifecycle,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error=excluded.last_error,last_stats_json=excluded.last_stats_json,staged_envelopes=excluded.staged_envelopes,ingested_envelopes=excluded.ingested_envelopes,quarantined_envelopes=excluded.quarantined_envelopes,updated_at=excluded.updated_at`,args:[s.replicaId,s.replicaIncarnation,s.workspaceId,s.deviceId,s.syncUrl,s.credentialReference,s.lifecycle,s.lastAttemptAt,s.lastSuccessAt,s.lastError,s.lastStats===null?null:json(s.lastStats),s.stagedEnvelopes,s.ingestedEnvelopes,s.quarantinedEnvelopes,s.updatedAt]});}); }
+  async getSyncReceipt(envelopeId:string):Promise<SyncIngestReceiptRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_ingest_receipts WHERE envelope_id=?",args:[envelopeId]});return r.rows[0]?rowToReceipt(r.rows[0]):null;}
+  async getSyncReceiptForEvent(eventId:string):Promise<SyncIngestReceiptRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_ingest_receipts WHERE event_id=? ORDER BY ingested_at,envelope_id LIMIT 1",args:[eventId]});return r.rows[0]?rowToReceipt(r.rows[0]):null;}
+  async putSyncReceipt(x:SyncIngestReceiptRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_ingest_receipts(envelope_id,digest,origin_device_id,origin_sequence,event_id,source_branch_id,mapped_branch_id,ingested_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(envelope_id) DO NOTHING",args:[x.envelopeId,x.digest,x.originDeviceId,x.originSequence,x.eventId,x.sourceBranchId,x.mappedBranchId,x.ingestedAt]});});}
+  async listSyncOriginWatermarks(replicaId:string):Promise<SyncOriginWatermarkRecord[]>{const r=await this.#client.execute({sql:"SELECT * FROM sync_origin_watermarks WHERE replica_id=? ORDER BY origin_device_id",args:[replicaId]});return r.rows.map(rowToOriginWatermark);}
+  async putSyncOriginWatermark(x:SyncOriginWatermarkRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_origin_watermarks(replica_id,origin_device_id,staged_sequence,ingested_sequence,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(replica_id,origin_device_id) DO UPDATE SET staged_sequence=MAX(sync_origin_watermarks.staged_sequence,excluded.staged_sequence),ingested_sequence=MAX(sync_origin_watermarks.ingested_sequence,excluded.ingested_sequence),updated_at=excluded.updated_at",args:[x.replicaId,x.originDeviceId,x.stagedSequence,x.ingestedSequence,x.updatedAt]});});}
+  async resetSyncStaging(replicaId:string):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"UPDATE sync_origin_watermarks SET staged_sequence=0,updated_at=? WHERE replica_id=?",args:[new Date().toISOString(),replicaId]});});}
+  async getSyncQuarantine(envelopeId:string):Promise<SyncQuarantineRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_quarantine WHERE envelope_id=?",args:[envelopeId]});return r.rows[0]?rowToQuarantine(r.rows[0]):null;}
+  async listSyncQuarantine():Promise<SyncQuarantineRecord[]>{const r=await this.#client.execute("SELECT * FROM sync_quarantine ORDER BY first_seen_at,envelope_id");return r.rows.map(rowToQuarantine);}
+  async putSyncQuarantine(x:SyncQuarantineRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:`INSERT INTO sync_quarantine(envelope_id,workspace_id,origin_device_id,origin_sequence,reason_code,reason,envelope_json,digest,status,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(envelope_id) DO UPDATE SET reason_code=excluded.reason_code,reason=excluded.reason,envelope_json=excluded.envelope_json,digest=excluded.digest,status=excluded.status,last_seen_at=excluded.last_seen_at`,args:[x.envelopeId,x.workspaceId,x.originDeviceId,x.originSequence,x.reasonCode,x.reason,json(x.envelope),x.digest,x.status,x.firstSeenAt,x.lastSeenAt]});});}
+  async getBranchMapping(originDeviceId:string,sessionId:string,sourceBranchId:string,sourceParentEventId:string):Promise<SyncBranchMappingRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM sync_branch_mappings WHERE origin_device_id=? AND session_id=? AND source_branch_id=? AND last_source_event_id=? ORDER BY created_at LIMIT 1",args:[originDeviceId,sessionId,sourceBranchId,sourceParentEventId]});return r.rows[0]?rowToMapping(r.rows[0]):null;}
+  async putBranchMapping(x:SyncBranchMappingRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_branch_mappings(mapping_id,origin_device_id,session_id,source_branch_id,fork_event_id,derived_branch_id,last_source_event_id,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(mapping_id) DO NOTHING",args:[x.mappingId,x.originDeviceId,x.sessionId,x.sourceBranchId,x.forkEventId,x.derivedBranchId,x.lastSourceEventId,x.createdAt]});});}
+  async advanceBranchMapping(mappingId:string,lastSourceEventId:string):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"UPDATE sync_branch_mappings SET last_source_event_id=? WHERE mapping_id=?",args:[lastSourceEventId,mappingId]});});}
+  async listSyncConflicts(status?:"unresolved"|"resolved"):Promise<SyncConflictRecord[]>{const r=status?await this.#client.execute({sql:"SELECT * FROM sync_reconciliations WHERE status=? ORDER BY detected_at,conflict_id",args:[status]}):await this.#client.execute("SELECT * FROM sync_reconciliations ORDER BY detected_at,conflict_id");return r.rows.map(rowToSyncConflict);}
+  async putSyncConflict(x:SyncConflictRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO sync_reconciliations(conflict_id,kind,workspace_id,session_id,task_id,event_ids_json,origin_device_ids_json,details_json,status,resolution_json,detected_at,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(conflict_id) DO NOTHING",args:[x.conflictId,x.kind,x.workspaceId,x.sessionId,x.taskId,json(x.eventIds),json(x.originDeviceIds),json(x.details),x.status,x.resolution===undefined?null:json(x.resolution),x.detectedAt,x.resolvedAt]});const resolution=await this.#client.execute({sql:"SELECT payload_json FROM events WHERE type='SyncConflictResolved' AND json_extract(payload_json,'$.conflictId')=? ORDER BY sequence DESC LIMIT 1",args:[x.conflictId]});if(resolution.rows[0]){const payload=JSON.parse(String(resolution.rows[0].payload_json)) as EventPayloads["SyncConflictResolved"];const metadata={action:payload.action,resolvedBy:payload.resolvedBy,...(payload.chosenEventId===undefined?{}:{chosenEventId:payload.chosenEventId}),...(payload.note===undefined?{}:{note:payload.note})};await this.#client.execute({sql:"UPDATE sync_reconciliations SET status='resolved',resolution_json=?,resolved_at=? WHERE conflict_id=? AND status='unresolved'",args:[json(metadata),payload.resolvedAt,x.conflictId]});}});}
+  async resolveSyncConflict(conflictId:string,resolution:JsonValue,resolvedAt:string):Promise<SyncConflictRecord>{return this.#writes.run(async()=>{const changed=await this.#client.execute({sql:"UPDATE sync_reconciliations SET status='resolved',resolution_json=?,resolved_at=? WHERE conflict_id=? AND status='unresolved'",args:[json(resolution),resolvedAt,conflictId]});if(changed.rowsAffected!==1)throw new ConflictError("Sync conflict is missing or already resolved",{conflictId});const r=await this.#client.execute({sql:"SELECT * FROM sync_reconciliations WHERE conflict_id=?",args:[conflictId]});return rowToSyncConflict(r.rows[0]!);});}
+  async putDataManifest(x:DataManifestRecord):Promise<void>{await this.#writes.run(async()=>{await this.#client.execute({sql:"INSERT INTO data_manifests(manifest_id,operation,scope_kind,scope_id,requested_by,owned,resources_json,replica_status_json,status,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",args:[x.manifestId,x.operation,x.scopeKind,x.scopeId,x.requestedBy,x.owned?1:0,json(x.resources),json(x.replicaStatus),x.status,x.createdAt,x.completedAt]});});}
+  async getDataManifest(manifestId:string):Promise<DataManifestRecord|null>{const r=await this.#client.execute({sql:"SELECT * FROM data_manifests WHERE manifest_id=?",args:[manifestId]});return r.rows[0]?rowToManifest(r.rows[0]):null;}
+  async completeDataManifest(manifestId:string,status:"completed"|"partial"|"blocked",resources:JsonValue,completedAt:string):Promise<DataManifestRecord>{return this.#writes.run(async()=>{const changed=await this.#client.execute({sql:"UPDATE data_manifests SET status=?,resources_json=?,completed_at=? WHERE manifest_id=? AND status='planned'",args:[status,json(resources),completedAt,manifestId]});if(changed.rowsAffected!==1)throw new ConflictError("Data manifest is not pending completion",{manifestId});const r=await this.#client.execute({sql:"SELECT * FROM data_manifests WHERE manifest_id=?",args:[manifestId]});return rowToManifest(r.rows[0]!);});}
 
   async readonlyQuery(statement: ReadonlyStatement): Promise<JsonValue[]> {
     assertReadonlySql(statement.sql);
@@ -709,7 +851,7 @@ export const MAX_ANALYTICAL_ROWS = 1_000;
 export const MAX_ANALYTICAL_QUERY_MS = 2_000;
 const MAX_ANALYTICAL_SQL_BYTES = 64 * 1024;
 const forbidden = /\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|ATTACH|DETACH|VACUUM|REINDEX|ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b/i;
-const privateTables = /\b(schema_migrations|outbox|snapshots|sqlite_(?:schema|master|temp_schema|temp_master|sequence))\b/i;
+const privateTables = /\b(schema_migrations|outbox|snapshots|device_clocks|workspace_replica_status|sync_ingest_receipts|sync_origin_watermarks|sync_quarantine|sync_branch_mappings|sync_reconciliations|data_manifests|sqlite_(?:schema|master|temp_schema|temp_master|sequence))\b/i;
 const dangerousFunctions = /\b(load_extension|writefile|readfile)\s*\(/i;
 
 export function assertReadonlySql(sql: string): void {

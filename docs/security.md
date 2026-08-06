@@ -43,6 +43,10 @@ This is best-effort accidental-leak prevention. Names outside the heuristic, sho
 
 `FileExecutor` requires paths beneath its root lexically and checks resolved existing ancestors to resist symlink escape. It refuses to overwrite a symlink or delete a directory. Writes use temporary files and rename. These checks apply only to calls through `tools.readFile`/`writeFile`/`request("file", ...)`; they are not a filesystem sandbox for generated code or shell commands.
 
+### Replica writer trust and cross-device effects
+
+The envelope digest detects corruption; it is not a signature or writer authorization mechanism. A device that can write the shared envelope database is inside the same trusted single-user authority boundary. In particular, a canonical `EffectRequested` authored on one trusted device for a session owned by another is a command to that execution owner: after ingestion, only the owner may materialize and run the outbox row, while every non-owner retains history but must not execute it. Do not grant an untrusted party write access to the envelope database; use a separately authenticated authorization/tenancy layer before treating replica writers as mutually untrusted.
+
 ### Durable validation
 
 Event headers/payloads and JSON values are validated before append. Working JSON is finite, plain, acyclic JSON. Immutable-table triggers prevent update/delete even through another database connection. Typed SDK commands, not model-visible SQL, own writes.
@@ -51,7 +55,7 @@ Event headers/payloads and JSON values are validated before append. Working JSON
 
 Do not intentionally put secrets in prompts, workspace files read into context, artifact content, tool command strings, or user messages. Scrubbing cannot provide erasure guarantees after arbitrary secret transformation. Provider configuration should contain references/closures resolved by trusted supervisor code rather than key strings in model-visible tables.
 
-If a secret is found in retained data, stop the runtime, rotate the secret, determine all database/artifact/log replicas, and apply an ownership-approved deletion/export policy. Slice 1 does not yet provide the PRD's cross-store scoped deletion workflow.
+If a secret is found in retained data, stop the runtime, rotate the secret, determine all database/artifact/log replicas, and apply an ownership-approved deletion/export policy. Slice 4 manifests enumerate managed local/profile/artifact/replica resources and block unsupported Cloud administrative deletion; operators must complete and verify the physical deletion through the owning Turso administration surface rather than treating a data-client sync call as deletion.
 
 ## Operational checklist
 
