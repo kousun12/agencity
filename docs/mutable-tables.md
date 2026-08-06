@@ -32,6 +32,9 @@ Do not change the first three columns or class tokens without updating the archi
 | `recursive_model_handles` | `rebuildable-projection` | `mutable` | Current recursive-call lookup/status projection; task, child session, model, and terminal transitions are events. |
 | `harness_entries` | `rebuildable-projection` | `mutable` | Current harness entry/latest/active-version routing derived from canonical harness events. |
 | `harness_versions` | `rebuildable-projection` | `mutable` | Query projection of immutable version identity/content and canonical status transitions; rebuilt from harness events. |
+| `refinement_reviews` | `rebuildable-projection` | `mutable` | Current trajectory-review request, durable recursive-child link, exact source hash/IDs, and terminal status derived from canonical review events. |
+| `refinement_trigger_consumptions` | `rebuildable-projection` | `mutable` | Per-branch automatic-trigger evidence frontier derived from canonical consumption events; it suppresses duplicate review admission but never hides the cited evidence. |
+| `user_corrections` | `rebuildable-projection` | `mutable` | Typed user correction query projection; the correction text and exact earlier corrected event IDs remain in canonical `UserCorrection` events. |
 | `refinement_proposals` | `rebuildable-projection` | `mutable` | Current proposal lifecycle, bounds, validation, and approval summary derived from refinement events. |
 | `candidate_allocations` | `rebuildable-projection` | `mutable` | Bounded allocation/exposure projection; allocation and exposure events are canonical. |
 | `refinement_observations` | `rebuildable-projection` | `mutable` | Objective evaluation observation projection retaining event/evidence linkage. |

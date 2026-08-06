@@ -125,6 +125,8 @@ export interface RefinementProposalRecord {
   readonly evidenceEventIds: string[];
   readonly evaluation: ObjectiveEvaluation;
   readonly authority: "agent" | "user" | "system";
+  readonly sourceReviewId?: string;
+  readonly proposalFingerprint?: string;
   readonly validation?: JsonValue;
   readonly candidateId: string | null;
   readonly createdEventId: string;

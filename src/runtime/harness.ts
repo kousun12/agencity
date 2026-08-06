@@ -14,6 +14,10 @@ export interface ProposeRefinementInput {
   readonly evidenceEventIds?: readonly string[];
   readonly evaluation: ObjectiveEvaluation;
   readonly authority?: "agent" | "user" | "system";
+  /** Stable identities are reserved for strict refiner integration. */
+  readonly proposalId?: string;
+  readonly sourceReviewId?: string;
+  readonly proposalFingerprint?: string;
 }
 export interface ActivateCandidateInput { readonly allocationLimit?: number; readonly exposureLimit?: number; }
 export interface AllocateCandidateInput { readonly sessionId: string; readonly branchId: string; readonly taskId?: string; }
@@ -42,11 +46,19 @@ export class HarnessService {
     if (input.evidenceEventIds !== undefined && (!Array.isArray(input.evidenceEventIds) || input.evidenceEventIds.some((id) => typeof id !== "string" || !id))) throw new ValidationError("Refinement evidence IDs must be non-empty strings");
     for (const edit of input.edits) assertEditShape(edit);
     const evidenceEventIds = unique([...(input.evidenceEventIds ?? []), ...input.edits.flatMap((edit) => [...(edit.evidenceEventIds ?? [])])]);
-    const proposalId = newId();
+    const proposalId = input.proposalId ?? newId();
+    const existing = await this.storage.readonlyQuery({ sql: "SELECT * FROM refinement_proposals WHERE proposal_id=?", args: [proposalId] });
+    if (existing[0]) {
+      const record = rowToProposal(existing[0] as any);
+      const same = record.sessionId === sessionId && record.branchId === branchId && record.trigger === input.trigger.trim() && record.predictedEffect === input.predictedEffect.trim() && Bun.deepEquals(record.edits, input.edits) && Bun.deepEquals(record.evidenceEventIds, evidenceEventIds) && Bun.deepEquals(record.evaluation, input.evaluation) && record.authority === (input.authority ?? "agent") && record.sourceReviewId === input.sourceReviewId && record.proposalFingerprint === input.proposalFingerprint;
+      if (!same) throw new ValidationError("Stable refinement proposal identity was reused with different intent");
+      return record;
+    }
+    if ((input.sourceReviewId === undefined) !== (input.proposalFingerprint === undefined)) throw new ValidationError("Refiner proposals require both sourceReviewId and proposalFingerprint");
     await this.storage.appendEvents([{
       sessionId, branchId, type: "RefinementProposed", producer: input.authority === "user" ? "client" : "supervisor",
       idempotencyKey: `refinement-proposed:${proposalId}`,
-      payload: { proposalId, trigger: input.trigger.trim(), predictedEffect: input.predictedEffect.trim(), edits: input.edits as unknown as JsonValue, evidenceEventIds, evaluation: input.evaluation as unknown as JsonValue, authority: input.authority ?? "agent" },
+      payload: { proposalId, trigger: input.trigger.trim(), predictedEffect: input.predictedEffect.trim(), edits: input.edits as unknown as JsonValue, evidenceEventIds, evaluation: input.evaluation as unknown as JsonValue, authority: input.authority ?? "agent", ...(input.sourceReviewId === undefined ? {} : { sourceReviewId: input.sourceReviewId, proposalFingerprint: input.proposalFingerprint! }) },
     }]);
     return this.#proposal(proposalId);
   }
@@ -622,7 +634,7 @@ function modelRowToHarness(row:any):HarnessRecord {
   return { ...record, currentVersionId: record.current.versionId, status: record.current.status,
     createdAt: String(row.entry_created_at ?? row.created_at), updatedAt: String(row.entry_updated_at ?? row.updated_at) };
 }
-function rowToProposal(row: any): RefinementProposalRecord { return { proposalId: String(row.proposal_id), sessionId: String(row.session_id), branchId: String(row.branch_id), status: String(row.status) as RefinementProposalRecord["status"], trigger: String(row.trigger_text), predictedEffect: String(row.predicted_effect), edits: parseJson(row.edits_json, []), evidenceEventIds: parseJson(row.evidence_event_ids_json, []), evaluation: parseJson(row.evaluation_json, null) as unknown as ObjectiveEvaluation, authority: String(row.authority) as RefinementProposalRecord["authority"], ...(row.validation_json === null ? {} : { validation: parseJson(row.validation_json, null) as JsonValue }), candidateId: row.candidate_id === null ? null : String(row.candidate_id), createdEventId: String(row.created_event_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
+function rowToProposal(row: any): RefinementProposalRecord { return { proposalId: String(row.proposal_id), sessionId: String(row.session_id), branchId: String(row.branch_id), status: String(row.status) as RefinementProposalRecord["status"], trigger: String(row.trigger_text), predictedEffect: String(row.predicted_effect), edits: parseJson(row.edits_json, []), evidenceEventIds: parseJson(row.evidence_event_ids_json, []), evaluation: parseJson(row.evaluation_json, null) as unknown as ObjectiveEvaluation, authority: String(row.authority) as RefinementProposalRecord["authority"], ...(row.source_review_id === null || row.source_review_id === undefined ? {} : { sourceReviewId: String(row.source_review_id) }), ...(row.proposal_fingerprint === null || row.proposal_fingerprint === undefined ? {} : { proposalFingerprint: String(row.proposal_fingerprint) }), ...(row.validation_json === null ? {} : { validation: parseJson(row.validation_json, null) as JsonValue }), candidateId: row.candidate_id === null ? null : String(row.candidate_id), createdEventId: String(row.created_event_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
 function rowToAllocation(row: any): CandidateAllocationRecord { return { allocationId: String(row.allocation_id), candidateId: String(row.candidate_id), proposalId: String(row.proposal_id), sessionId: String(row.session_id), branchId: String(row.branch_id), taskId: row.task_id === null ? null : String(row.task_id), ordinal: Number(row.ordinal), exposedAt: row.exposed_at === null ? null : String(row.exposed_at), createdAt: String(row.created_at) }; }
 function rowToObservation(row: any): EvaluationObservationRecord { return { observationId: String(row.observation_id), candidateId: String(row.candidate_id), allocationId: String(row.allocation_id), evaluator: String(row.evaluator), objective: Number(row.objective) === 1, success: Number(row.success) === 1, metric: parseJson(row.metric_json, null) as JsonValue, ...(row.baseline_json === null ? {} : { baseline: parseJson(row.baseline_json, null) as JsonValue }), evidenceEventIds: parseJson(row.evidence_event_ids_json, []), ...(row.notes === null ? {} : { notes: String(row.notes) }), createdAt: String(row.created_at) }; }
 function rowToDecision(row: any): RefinementDecisionRecord { return { decisionId: String(row.decision_id), proposalId: String(row.proposal_id), candidateId: String(row.candidate_id), decision: String(row.decision) as RefinementDecisionRecord["decision"], rule: String(row.rule), evaluator: String(row.evaluator), ...(row.baseline_json === null ? {} : { baseline: parseJson(row.baseline_json, null) as JsonValue }), observationIds: parseJson(row.observation_ids_json, []), createdAt: String(row.created_at) }; }

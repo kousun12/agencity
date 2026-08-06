@@ -25,13 +25,13 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     const parentBranchId = p.parentBranchId ?? null;
     if ((parentSessionId === null) !== (parentBranchId === null)) throw new ValidationError("Session ancestry requires both parent IDs");
     return {
-      reducerVersion: 4, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
+      reducerVersion: 5, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
       parentSessionId, parentBranchId, rootSessionId: p.rootSessionId ?? event.sessionId,
       depth: p.depth ?? 0, taskId: p.taskId ?? null,
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
       status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, contexts: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
-      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, agentRuns: {},
+      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, agentRuns: {}, userCorrections: {}, refinementReviews: {}, refinementTriggerConsumptions: {},
     };
   }
   if (state.sessionId !== event.sessionId) throw new ValidationError("Cannot reduce an event from another session");
@@ -359,6 +359,38 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     // Harness history is canonical and has dedicated rebuildable relational
     // projections. Session projection still advances its cursor so snapshot
     // recovery retains the exact committed boundary.
+    case "UserCorrection": {
+      const p = event.payload as EventPayloads["UserCorrection"];
+      if (state.userCorrections[p.correctionId]) throw new InvalidTransitionError("userCorrection", "existing", "recorded");
+      if (new Set(p.correctedEventIds).size !== p.correctedEventIds.length || p.correctedEventIds.some((id) => !state.appliedEventIds.includes(id))) throw new ValidationError("User correction must cite distinct earlier events in this trajectory");
+      return { ...next, userCorrections: { ...state.userCorrections, [p.correctionId]: { id: p.correctionId, correctedEventIds: [...p.correctedEventIds], correction: p.correction, eventId: event.id } } };
+    }
+    case "RefinementReviewRequested": {
+      const p = event.payload as EventPayloads["RefinementReviewRequested"];
+      if (state.refinementReviews[p.reviewId]) throw new InvalidTransitionError("refinementReview", state.refinementReviews[p.reviewId]!.status, "requested");
+      if (p.sourceEventIds.some((id) => !state.appliedEventIds.includes(id)) || p.evidenceEventIds.some((id) => !p.sourceEventIds.includes(id))) throw new ValidationError("Refinement review sources must be earlier visible trajectory events");
+      const review = { id: p.reviewId, fingerprint: p.fingerprint, mode: p.mode, requestedScope: p.requestedScope, requestedScopeKey: p.requestedScopeKey, allowedKinds: [...p.allowedKinds], triggerId: p.triggerId, triggerKind: p.triggerKind, triggerFingerprint: p.triggerFingerprint, ...(p.triggerKey === undefined ? {} : { triggerKey: p.triggerKey }), ...(p.nonterminalKey === undefined ? {} : { nonterminalKey: p.nonterminalKey }), evidenceEventIds: [...p.evidenceEventIds], sourceEventIds: [...p.sourceEventIds], sourceSnapshotHash: p.sourceSnapshotHash, sourceThroughCursor: p.sourceThroughCursor, ...(p.instructions === undefined ? {} : { instructions: p.instructions }), status: "requested" as const, requestEventId: event.id, eventId: event.id };
+      return { ...next, refinementReviews: { ...state.refinementReviews, [p.reviewId]: review } };
+    }
+    case "RefinementReviewChildLinked": {
+      const p = event.payload as EventPayloads["RefinementReviewChildLinked"]; const old = state.refinementReviews[p.reviewId];
+      if (!old || old.status !== "requested" || old.handleId !== undefined) throw new InvalidTransitionError("refinementReview", old?.status ?? "missing", "child-linked");
+      return { ...next, refinementReviews: { ...state.refinementReviews, [p.reviewId]: { ...old, handleId: p.handleId, childSessionId: p.childSessionId, childBranchId: p.childBranchId, eventId: event.id } } };
+    }
+    case "RefinementReviewStatusChanged": {
+      const p = event.payload as EventPayloads["RefinementReviewStatusChanged"]; const old = state.refinementReviews[p.reviewId];
+      const terminal = ["no_change", "candidate", "revision_required", "failed", "cancelled", "unknown"];
+      if (!old || old.status !== p.expectedStatus || terminal.includes(old.status) || (p.status === "running" && old.handleId === undefined)) throw new InvalidTransitionError("refinementReview", old?.status ?? "missing", p.status);
+      if (p.status === "candidate" && p.proposalId === undefined) throw new ValidationError("Candidate refinement review requires its proposal link");
+      return { ...next, refinementReviews: { ...state.refinementReviews, [p.reviewId]: { ...old, status: p.status, ...(p.decisionFingerprint === undefined ? {} : { decisionFingerprint: p.decisionFingerprint }), ...(p.proposalId === undefined ? {} : { proposalId: p.proposalId }), ...(p.reason === undefined ? {} : { reason: p.reason }), eventId: event.id } } };
+    }
+    case "RefinementTriggerConsumed": {
+      const p = event.payload as EventPayloads["RefinementTriggerConsumed"]; const review = state.refinementReviews[p.reviewId];
+      if (!review || !["no_change", "candidate", "revision_required", "failed", "cancelled", "unknown"].includes(review.status) || review.triggerKey !== p.triggerKey) throw new InvalidTransitionError("refinementTrigger", review?.status ?? "missing-review", "consumed");
+      const old = state.refinementTriggerConsumptions[p.triggerKey];
+      if (old && BigInt(p.evidenceThroughCursor) <= BigInt(old.lastConsumedEvidenceCursor)) throw new ValidationError("Refinement trigger consumption cursor must advance");
+      return { ...next, refinementTriggerConsumptions: { ...state.refinementTriggerConsumptions, [p.triggerKey]: { triggerKey: p.triggerKey, lastConsumedEvidenceCursor: p.evidenceThroughCursor, reviewId: p.reviewId, eventId: event.id } } };
+    }
     case "HarnessVersionCreated":
     case "HarnessVersionStatusChanged":
     case "RefinementProposed":
