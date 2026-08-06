@@ -28,6 +28,9 @@ import {
 
 export const MANAGED_SERVICE_PROTOCOL_VERSION = 1;
 export const MANAGED_SERVICE_CONFIG_ENV = "AGENCITY_SERVICE_CONFIG";
+export const DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 60_000;
+const MIN_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 100;
+const MAX_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 24 * 60 * 60 * 1_000;
 
 export interface ManagedServiceConfiguration {
   readonly workspace: ResolvedWorkspace;
@@ -37,6 +40,8 @@ export interface ManagedServiceConfiguration {
   readonly restartConsoleAfterCell?: boolean;
   /** Internal/test override; production defaults to a five-second local lease. */
   readonly leaseMs?: number;
+  /** Internal/test override for bounded shutdown after the workspace becomes quiescent. */
+  readonly idleShutdownMs?: number;
   readonly sync?: {
     readonly syncUrl?: string;
     readonly replicaPath?: string;
@@ -52,6 +57,7 @@ interface SerializedManagedServiceConfiguration {
   readonly profileDatabasePath: string;
   readonly restartConsoleAfterCell: boolean;
   readonly leaseMs: number;
+  readonly idleShutdownMs: number;
   readonly sync: {
     readonly syncUrl: string | null;
     readonly replicaPath: string | null;
@@ -84,6 +90,14 @@ export interface ManagedServiceStatus {
   }[];
 }
 
+function normalizedIdleShutdownMs(value: number | undefined): number {
+  const candidate = value ?? DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS;
+  if (!Number.isSafeInteger(candidate) || candidate < MIN_MANAGED_SERVICE_IDLE_SHUTDOWN_MS || candidate > MAX_MANAGED_SERVICE_IDLE_SHUTDOWN_MS) {
+    throw new ValidationError(`Managed service idle shutdown must be between ${MIN_MANAGED_SERVICE_IDLE_SHUTDOWN_MS} and ${MAX_MANAGED_SERVICE_IDLE_SHUTDOWN_MS} milliseconds`);
+  }
+  return candidate;
+}
+
 function normalizedConfiguration(input: ManagedServiceConfiguration): ManagedServiceConfiguration {
   return {
     workspace: { root: resolve(input.workspace.root), workspaceId: input.workspace.workspaceId, name: input.workspace.name, stateDirectory: resolve(input.workspace.stateDirectory) },
@@ -92,6 +106,7 @@ function normalizedConfiguration(input: ManagedServiceConfiguration): ManagedSer
     profileDatabasePath: resolve(input.profileDatabasePath),
     restartConsoleAfterCell: input.restartConsoleAfterCell ?? false,
     leaseMs: input.leaseMs ?? 5_000,
+    idleShutdownMs: normalizedIdleShutdownMs(input.idleShutdownMs),
     sync: {
       ...(input.sync?.syncUrl ? { syncUrl: input.sync.syncUrl } : {}),
       ...(input.sync?.replicaPath ? { replicaPath: resolve(input.sync.replicaPath) } : {}),
@@ -115,6 +130,7 @@ function serializedConfiguration(input: ManagedServiceConfiguration): Serialized
     profileDatabasePath: resolve(normalized.profileDatabasePath),
     restartConsoleAfterCell: normalized.restartConsoleAfterCell ?? false,
     leaseMs: normalized.leaseMs ?? 5_000,
+    idleShutdownMs: normalized.idleShutdownMs ?? DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS,
     sync: {
       syncUrl: normalized.sync?.syncUrl ?? null,
       replicaPath: normalized.sync?.replicaPath ? resolve(normalized.sync.replicaPath) : null,
@@ -146,6 +162,7 @@ export function decodeManagedServiceConfiguration(value: string): ManagedService
     workspace: serialized.workspace!, databasePath: serialized.databasePath!, artifactDirectory: serialized.artifactDirectory!, profileDatabasePath: serialized.profileDatabasePath!,
     restartConsoleAfterCell: serialized.restartConsoleAfterCell,
     leaseMs: serialized.leaseMs,
+    idleShutdownMs: serialized.idleShutdownMs,
     sync: {
       ...(serialized.sync?.syncUrl ? { syncUrl: serialized.sync.syncUrl } : {}),
       ...(serialized.sync?.replicaPath ? { replicaPath: serialized.sync.replicaPath } : {}),
@@ -176,6 +193,8 @@ class ResidentRootQueue {
     return this.#tails.has(rootSessionId) ? "idle" : "detached";
   }
 
+  get busy(): boolean { return this.#active.size > 0 || this.#tails.size > 0; }
+
   async drain(): Promise<void> {
     this.#draining = true;
     await Promise.allSettled([...this.#tails.values()]);
@@ -190,11 +209,15 @@ export class ManagedWorkspaceService {
   readonly config: ManagedServiceConfiguration;
   readonly #workers = new ResidentRootQueue();
   readonly #startedAt: string;
+  readonly #attachmentProbe: () => boolean;
   #lifecycle: ManagedServiceStatus["lifecycle"] = "starting";
   #recovery: ManagedServiceStatus["recovery"] = "pending";
   #recoveryError: string | null = null;
   #recoveryPromise: Promise<void> | null = null;
   #closePromise: Promise<void> | null = null;
+  #idleTimer: ReturnType<typeof setTimeout> | null = null;
+  #lastActivityAt = Date.now();
+  #exitProcessWhenClosed = false;
 
   private constructor(
     supervisor: Supervisor,
@@ -202,6 +225,7 @@ export class ManagedWorkspaceService {
     protocol: ProtocolServer,
     manifest: ServiceManifestV1,
     config: ManagedServiceConfiguration,
+    attachmentProbe: () => boolean,
   ) {
     this.supervisor = supervisor;
     this.catalog = catalog;
@@ -209,6 +233,7 @@ export class ManagedWorkspaceService {
     this.manifest = manifest;
     this.config = config;
     this.#startedAt = manifest.startedAt;
+    this.#attachmentProbe = attachmentProbe;
   }
 
   static async open(config: ManagedServiceConfiguration, appVersion: string): Promise<ManagedWorkspaceService> {
@@ -241,76 +266,102 @@ export class ManagedWorkspaceService {
         ...(normalized.sync?.intervalMs === undefined ? {} : { intervalMs: normalized.sync.intervalMs }),
       },
     });
-    const catalog = new ProductCatalog(supervisor, normalized.workspace.workspaceId);
-    const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
-    const bearerToken = Buffer.from(tokenBytes).toString("base64url");
-    let protocol!: ProtocolServer;
-    const hooks = {
-      health: {
+    let protocol: ProtocolServer | null = null;
+    let publishedManifest: ServiceManifestV1 | null = null;
+    try {
+      const catalog = new ProductCatalog(supervisor, normalized.workspace.workspaceId);
+      const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+      const bearerToken = Buffer.from(tokenBytes).toString("base64url");
+      const hooks = {
+        health: {
+          workspaceId: normalized.workspace.workspaceId,
+          instanceId,
+          appVersion,
+          protocolMin: MANAGED_SERVICE_PROTOCOL_VERSION,
+          protocolMax: MANAGED_SERVICE_PROTOCOL_VERSION,
+          configHash: managedServiceConfigurationHash(normalized),
+        },
+        ready: () => service?.ready ?? false,
+        status: () => service!.status(),
+        shutdown: () => service!.requestShutdown(),
+        agents: () => service!.agents(),
+        startRun: (sessionId: string, branchId: string, input: StartAgentRunInput) => service!.startRun(sessionId, branchId, input),
+        stop: (sessionId: string, branchId: string, reason?: string) => service!.stop(sessionId, branchId, reason),
+        productSessions: () => catalog.list(),
+        productSelect: (target?: string, branchId?: string) => catalog.select(target, branchId),
+        productRename: async (sessionId: string, branchId: string | undefined, name: string) => { await catalog.rename(sessionId, branchId, name); return { renamed: true }; },
+        productConfig: async () => {
+          const model = await supervisor.profile.getPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"));
+          const credentialReferences = (await supervisor.profile.listCredentialReferences()).map(({ reference, provider, label, createdAt, updatedAt }) => ({ reference, provider, label, createdAt, updatedAt }));
+          return { defaultModel: typeof model?.value === "string" ? model.value : null, credentialReferences };
+        },
+        productSetModel: async (model: string | null) => {
+          if (model !== null && !model.trim()) throw new ValidationError("Model preference is required");
+          await supervisor.profile.setPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"), model === null ? null : model.trim());
+          return { defaultModel: model === null ? null : model.trim() };
+        },
+        productCredentialReference: async (provider: string, reference: string, label: string) => {
+          const record = await supervisor.profile.putCredentialReference({ reference, provider, label, metadata: { kind: "opaque-handle" } });
+          return { reference: record.reference, provider: record.provider, label: record.label };
+        },
+      };
+      protocol = new ProtocolServer(supervisor, { bearerToken, service: hooks });
+      const originalHandle = protocol.handle.bind(protocol);
+      protocol.handle = async (request: Request): Promise<Response> => {
+        const response = await originalHandle(request);
+        if (response.status !== 401 && service) service.#recordActivity();
+        return response;
+      };
+      const listener = protocol.listen(0, "127.0.0.1");
+      const manifest = createServiceManifest({
         workspaceId: normalized.workspace.workspaceId,
+        deviceId: supervisor.device.deviceId,
         instanceId,
+        url: `http://127.0.0.1:${listener.port}`,
         appVersion,
         protocolMin: MANAGED_SERVICE_PROTOCOL_VERSION,
         protocolMax: MANAGED_SERVICE_PROTOCOL_VERSION,
-        configHash: managedServiceConfigurationHash(normalized),
-      },
-      ready: () => service?.ready ?? false,
-      status: () => service!.status(),
-      shutdown: () => service!.requestShutdown(),
-      agents: () => service!.agents(),
-      startRun: (sessionId: string, branchId: string, input: StartAgentRunInput) => service!.startRun(sessionId, branchId, input),
-      stop: (sessionId: string, branchId: string, reason?: string) => service!.stop(sessionId, branchId, reason),
-      productSessions: () => catalog.list(),
-      productSelect: (target?: string, branchId?: string) => catalog.select(target, branchId),
-      productRename: async (sessionId: string, branchId: string | undefined, name: string) => { await catalog.rename(sessionId, branchId, name); return { renamed: true }; },
-      productConfig: async () => {
-        const model = await supervisor.profile.getPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"));
-        const credentialReferences = (await supervisor.profile.listCredentialReferences()).map(({ reference, provider, label, createdAt, updatedAt }) => ({ reference, provider, label, createdAt, updatedAt }));
-        return { defaultModel: typeof model?.value === "string" ? model.value : null, credentialReferences };
-      },
-      productSetModel: async (model: string | null) => {
-        if (model !== null && !model.trim()) throw new ValidationError("Model preference is required");
-        await supervisor.profile.setPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"), model === null ? null : model.trim());
-        return { defaultModel: model === null ? null : model.trim() };
-      },
-      productCredentialReference: async (provider: string, reference: string, label: string) => {
-        const record = await supervisor.profile.putCredentialReference({ reference, provider, label, metadata: { kind: "opaque-handle" } });
-        return { reference: record.reference, provider: record.provider, label: record.label };
-      },
-    };
-    protocol = new ProtocolServer(supervisor, { bearerToken, service: hooks });
-    const listener = protocol.listen(0, "127.0.0.1");
-    const manifest = createServiceManifest({
-      workspaceId: normalized.workspace.workspaceId,
-      deviceId: supervisor.device.deviceId,
-      instanceId,
-      url: `http://127.0.0.1:${listener.port}`,
-      appVersion,
-      protocolMin: MANAGED_SERVICE_PROTOCOL_VERSION,
-      protocolMax: MANAGED_SERVICE_PROTOCOL_VERSION,
-      configHash: hooks.health.configHash,
-      randomToken: () => tokenBytes,
-    });
-    try {
+        configHash: hooks.health.configHash,
+        randomToken: () => tokenBytes,
+      });
       const publication = await publishServiceManifest({ workspaceRoot: normalized.workspace.root, workspaceId: normalized.workspace.workspaceId, manifest });
       if (publication.kind !== "published" || publication.manifest.instanceId !== instanceId) {
         throw new ValidationError("Another managed workspace service won discovery publication");
       }
+      publishedManifest = manifest;
+      service = new ManagedWorkspaceService(
+        supervisor,
+        catalog,
+        protocol,
+        manifest,
+        normalized,
+        () => listener.pendingRequests > 0 || listener.pendingWebSockets > 0,
+      );
+      service.#startRecovery();
+      await service.#recoveryPromise;
+      if (service.#recovery !== "complete") {
+        throw new ValidationError(`Managed service recovery failed${service.#recoveryError ? `: ${service.#recoveryError}` : ""}`);
+      }
+      supervisor.startWakeSchedulers();
+      service.#lifecycle = "running";
+      service.#exitProcessWhenClosed = Bun.argv[2] === "__service-child";
+      service.#recordActivity();
+      return service;
     } catch (error) {
-      protocol.stop();
-      await supervisor.close();
+      if (service) await service.close().catch(() => {});
+      else {
+        if (publishedManifest) {
+          await unpublishServiceManifest({
+            workspaceRoot: normalized.workspace.root,
+            workspaceId: normalized.workspace.workspaceId,
+            manifest: publishedManifest,
+          }).catch(() => {});
+        }
+        protocol?.stop();
+        await supervisor.close().catch(() => {});
+      }
       throw error;
     }
-    service = new ManagedWorkspaceService(supervisor, catalog, protocol, manifest, normalized);
-    service.#startRecovery();
-    await service.#recoveryPromise;
-    if (service.#recovery !== "complete") {
-      await service.close();
-      throw new ValidationError(`Managed service recovery failed${service.#recoveryError ? `: ${service.#recoveryError}` : ""}`);
-    }
-    supervisor.startWakeSchedulers();
-    service.#lifecycle = "running";
-    return service;
   }
 
   get ready(): boolean { return this.#lifecycle === "running"; }
@@ -340,6 +391,7 @@ export class ManagedWorkspaceService {
 
   async startRun(sessionId: string, branchId: string, input: StartAgentRunInput): Promise<unknown> {
     if (this.#lifecycle !== "running") throw new ValidationError("Managed service is not accepting execution");
+    this.#recordActivity();
     const session = await this.supervisor.storage.getSession?.(sessionId);
     if (!session) throw new ValidationError(`Session not found: ${sessionId}`);
     await this.supervisor.executionLeases!.ensureRoot(session.rootSessionId);
@@ -375,22 +427,109 @@ export class ManagedWorkspaceService {
 
   async close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
+    if (this.#idleTimer) clearTimeout(this.#idleTimer);
+    this.#idleTimer = null;
     this.#closePromise = (async () => {
       if (this.#lifecycle !== "failed") this.#lifecycle = "draining";
-      await this.#recoveryPromise?.catch(() => {});
-      await this.#workers.drain();
-      await this.supervisor.heartbeats.close();
-      await this.supervisor.schedules.close();
+      const failures: unknown[] = [];
+      const settle = async (operation: () => Promise<unknown>): Promise<void> => {
+        try { await operation(); } catch (error) { failures.push(error); }
+      };
+      await this.#recoveryPromise?.catch(error => { failures.push(error); });
+      await settle(() => this.#workers.drain());
+      await settle(() => this.supervisor.heartbeats.close());
+      await settle(() => this.supervisor.schedules.close());
       await unpublishServiceManifest({
         workspaceRoot: this.config.workspace.root,
         workspaceId: this.config.workspace.workspaceId,
         manifest: this.manifest,
       }).catch(() => {});
-      this.protocol.stop();
-      await this.supervisor.close();
+      try { this.protocol.stop(); } catch (error) { failures.push(error); }
+      await settle(() => this.supervisor.close());
       if (this.#lifecycle !== "failed") this.#lifecycle = "stopped";
+      if (this.#exitProcessWhenClosed) {
+        const code = this.#lifecycle === "failed" || failures.length > 0 ? 1 : 0;
+        setTimeout(() => process.exit(code), 0);
+      } else if (failures.length > 0) {
+        throw failures[0];
+      }
     })();
     return this.#closePromise;
+  }
+
+  #recordActivity(): void {
+    if (this.#lifecycle === "draining" || this.#lifecycle === "stopped" || this.#lifecycle === "failed") return;
+    this.#lastActivityAt = Date.now();
+    this.#scheduleIdleCheck();
+  }
+
+  #scheduleIdleCheck(delayMs?: number): void {
+    if (this.#idleTimer) clearTimeout(this.#idleTimer);
+    const ttl = this.config.idleShutdownMs ?? DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS;
+    const delay = delayMs ?? Math.max(1, this.#lastActivityAt + ttl - Date.now());
+    this.#idleTimer = setTimeout(() => {
+      this.#idleTimer = null;
+      void this.#checkIdle().catch(error => {
+        this.#recoveryError = scrubText(error instanceof Error ? error.message : String(error));
+      });
+    }, delay);
+    this.#idleTimer.unref?.();
+  }
+
+  async #checkIdle(): Promise<void> {
+    if (this.#lifecycle !== "running") return;
+    const ttl = this.config.idleShutdownMs ?? DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS;
+    const remaining = this.#lastActivityAt + ttl - Date.now();
+    if (remaining > 0) { this.#scheduleIdleCheck(remaining); return; }
+    const observedActivityAt = this.#lastActivityAt;
+    let workspacePresent = true;
+    try { await access(this.config.workspace.root); }
+    catch { workspacePresent = false; }
+    if (!workspacePresent) {
+      // A removed owned workspace cannot be discovered or resumed. Local worker
+      // and transport activity still drain first; an otherwise idle child exits.
+      if (this.#attachmentProbe() || this.#workers.busy) { this.#recordActivity(); return; }
+      await this.close();
+      return;
+    }
+    try {
+      if (this.#attachmentProbe() || await this.#hasOutstandingWork()) {
+        this.#recordActivity();
+        return;
+      }
+    } catch {
+      // Inspection failure must preserve detached work rather than infer quiescence.
+      this.#recordActivity();
+      return;
+    }
+    if (this.#lifecycle !== "running") return;
+    if (observedActivityAt !== this.#lastActivityAt || this.#attachmentProbe() || this.#workers.busy) {
+      this.#scheduleIdleCheck();
+      return;
+    }
+    await this.close();
+  }
+
+  async #hasOutstandingWork(): Promise<boolean> {
+    if (this.#workers.busy) return true;
+    const storage = this.supervisor.storage;
+    const now = new Date().toISOString();
+    if ((await storage.listDueSchedules?.(now))?.length) return true;
+    if ((await storage.listDueHeartbeats?.(now))?.length) return true;
+    for (const route of await storage.listBranches()) {
+      const events = await storage.loadEvents(route.sessionId, { branchId: route.branchId });
+      if (events.length) {
+        const state = projectEvents(events);
+        if (Object.values(state.agentRuns).some(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status))) return true;
+        if (Object.values(state.effects).some(effect => effect.status === "requested" || effect.status === "started")) return true;
+      }
+      if ((await storage.listWakes?.(route.sessionId, route.branchId, ["queued", "claimed"]))?.length) return true;
+      // Future active triggers are detached work too: exiting would prevent them
+      // from becoming due because this local product has no boot/login daemon.
+      if ((await storage.listSchedules?.(route.sessionId, route.branchId))?.some(schedule => schedule.status === "active")) return true;
+      if ((await storage.listHeartbeats?.(route.sessionId, route.branchId))?.some(heartbeat => heartbeat.status === "active")) return true;
+    }
+    return false;
   }
 
   #startRecovery(): void {
@@ -452,6 +591,20 @@ async function assessment(config: ManagedServiceConfiguration): Promise<ServiceA
   });
 }
 
+async function terminateSpawnedServiceChild(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolveExit) => {
+    child.once("exit", () => resolveExit());
+    child.once("error", () => resolveExit());
+  });
+  child.kill("SIGTERM");
+  await Promise.race([exited, Bun.sleep(1_000)]);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await Promise.race([exited, Bun.sleep(1_000)]);
+  }
+}
+
 /** Discovers a compatible service or securely elects one detached child on demand. */
 export async function connectManagedService(config: ManagedServiceConfiguration, options: { readonly spawn?: boolean; readonly timeoutMs?: number } = {}): Promise<ManagedServiceConnection> {
   let current = await assessment(config);
@@ -468,6 +621,8 @@ export async function connectManagedService(config: ManagedServiceConfiguration,
     ...specification.options,
     env: { ...process.env, [MANAGED_SERVICE_CONFIG_ENV]: encodeManagedServiceConfiguration(config) },
   });
+  let spawnError: unknown;
+  child.once("error", error => { spawnError = error; });
   child.unref();
   const deadline = Date.now() + (options.timeoutMs ?? 10_000);
   let lastError: unknown;
@@ -476,11 +631,14 @@ export async function connectManagedService(config: ManagedServiceConfiguration,
     try {
       current = await assessment(config);
       if (current.kind === "found" && current.decision.kind === "authoritative") {
+        if (child.pid !== current.manifest.pidHint && child.exitCode === null && child.signalCode === null) await terminateSpawnedServiceChild(child);
         return { client: new AgentClient(current.manifest.url, current.manifest.bearerToken), manifest: current.manifest, started: true };
       }
       if (current.kind === "found" && current.decision.kind === "conflict") lastError = authorityDecisionError(current.decision);
+      else if (spawnError) lastError = spawnError;
     } catch (error) { lastError = error; }
   }
+  await terminateSpawnedServiceChild(child);
   throw new ValidationError(`Managed workspace service did not become healthy${lastError instanceof Error ? `: ${scrubText(lastError.message)}` : ""}`);
 }
 

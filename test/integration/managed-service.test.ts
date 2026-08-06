@@ -1,28 +1,98 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { stat } from "node:fs/promises";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { LibSqlStorage } from "../../src/storage/index.ts";
 import { Supervisor } from "../../src/runtime/index.ts";
-import { ManagedWorkspaceService, connectManagedService, managedServiceConfigurationHash, resolveWorkspace, serviceStatePaths, type ManagedServiceConfiguration } from "../../src/product/index.ts";
+import { ManagedWorkspaceService, connectManagedService, managedServiceConfigurationHash, readServiceManifest, resolveWorkspace, serviceStatePaths, type ManagedServiceConfiguration, type ServiceManifestV1 } from "../../src/product/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 const services: ManagedWorkspaceService[] = [];
-afterEach(async () => {
+const configurations: ManagedServiceConfiguration[] = [];
+const ownedWorkspaceRoots = new Set<string>();
+let baselineServicePids = new Set<number>();
+
+function serviceChildren(): Array<{ pid: number; command: string }> {
+  const result = Bun.spawnSync(["ps", "-axo", "pid=,command="]);
+  if (result.exitCode !== 0) return [];
+  return result.stdout.toString().split("\n").flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    return match && match[2]!.includes("__service-child") ? [{ pid: Number(match[1]), command: match[2]! }] : [];
+  });
+}
+
+function processIsLive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch { return false; }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processIsLive(pid)) return true;
+    await Bun.sleep(25);
+  }
+  return !processIsLive(pid);
+}
+
+function isOwnedServiceChild(manifest: ServiceManifestV1, workspaceRoot: string): boolean {
+  if (manifest.pidHint === process.pid) return false;
+  const command = serviceChildren().find(candidate => candidate.pid === manifest.pidHint)?.command;
+  return Boolean(command?.includes(`__service-child --workspace ${workspaceRoot}`));
+}
+
+async function shutdownDetachedService(config: ManagedServiceConfiguration): Promise<void> {
+  const manifest = await readServiceManifest({ workspaceRoot: config.workspace.root, workspaceId: config.workspace.workspaceId }).catch(() => null);
+  if (!manifest || manifest.pidHint === process.pid) return;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 750);
+  try {
+    await fetch(`${manifest.url}/service/shutdown`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { authorization: `Bearer ${manifest.bearerToken}` },
+    });
+  } catch {} finally { clearTimeout(timeout); }
+  if (await waitForProcessExit(manifest.pidHint)) return;
+  // pidHint is only a test fallback after the owner-authenticated shutdown. It
+  // is constrained to the service child whose argv names this owned temp root.
+  if (!isOwnedServiceChild(manifest, config.workspace.root)) return;
+  try { process.kill(manifest.pidHint, "SIGTERM"); } catch { return; }
+  if (await waitForProcessExit(manifest.pidHint, 1_000)) return;
+  if (!isOwnedServiceChild(manifest, config.workspace.root)) return;
+  try { process.kill(manifest.pidHint, "SIGKILL"); } catch {}
+  await waitForProcessExit(manifest.pidHint, 1_000);
+}
+
+async function teardownFixtures(): Promise<void> {
   await Promise.allSettled(services.splice(0).map(service => service.close()));
+  await Promise.allSettled(configurations.splice(0).map(shutdownDetachedService));
   await Promise.all(temps.splice(0).map(removeTempRuntime));
+}
+
+beforeAll(() => { baselineServicePids = new Set(serviceChildren().map(child => child.pid)); });
+afterEach(teardownFixtures);
+afterAll(async () => {
+  await teardownFixtures();
+  const leaked = serviceChildren().filter(child =>
+    !baselineServicePids.has(child.pid) && [...ownedWorkspaceRoots].some(root => child.command.includes(root))
+  );
+  expect(leaked).toEqual([]);
 });
 
 async function configuration(prefix: string): Promise<ManagedServiceConfiguration> {
   const temp = await makeTempRuntime(prefix);
   temps.push(temp);
+  ownedWorkspaceRoots.add(temp.directory);
   const workspace = await resolveWorkspace({ override: temp.directory, stateDirectory: join(temp.directory, ".agencity") });
-  return {
+  const config: ManagedServiceConfiguration = {
     workspace,
     databasePath: join(workspace.stateDirectory, "agent.db"),
     artifactDirectory: join(workspace.stateDirectory, "artifacts"),
     profileDatabasePath: join(workspace.stateDirectory, "profile.db"),
   };
+  configurations.push(config);
+  return config;
 }
 
 async function opened(config: ManagedServiceConfiguration): Promise<ManagedWorkspaceService> {
@@ -153,6 +223,83 @@ describe("managed workspace service", () => {
       expect(history.filter(event => event.type === "EffectAttemptStarted" && (event.payload as any).effectId === effectId)).toHaveLength(0);
       await restarted.client.shutdownService();
     } finally { raw.close(); }
+  });
+
+
+  test("service child startup failure does not orphan the spawned process", async () => {
+    const base = await configuration("agencity-managed-startup-failure-");
+    const config = { ...base, databasePath: base.workspace.root };
+    const before = new Set(serviceChildren().map(child => child.pid));
+    await expect(connectManagedService(config, { timeoutMs: 500 })).rejects.toThrow("did not become healthy");
+    await Bun.sleep(100);
+    const owned = serviceChildren().filter(child => !before.has(child.pid) && child.command.includes(base.workspace.root));
+    expect(owned).toEqual([]);
+    expect(await Bun.file(serviceStatePaths(base.workspace.root).manifestPath).exists()).toBe(false);
+  });
+
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    test(`service child ${signal} drains, unpublishes, and releases its lease`, async () => {
+      const config = await configuration(`agencity-managed-${signal.toLowerCase()}-`);
+      const connection = await connectManagedService(config, { timeoutMs: 5_000 });
+      process.kill(connection.manifest.pidHint, signal);
+      expect(await waitForProcessExit(connection.manifest.pidHint, 5_000)).toBe(true);
+      expect(await Bun.file(serviceStatePaths(config.workspace.root).manifestPath).exists()).toBe(false);
+      const raw = new LibSqlStorage({ url: `file:${config.databasePath}`, deviceId: connection.manifest.deviceId });
+      try {
+        const lease = await raw.getProcessExecutionLease({ kind: "workspace", workspaceId: config.workspace.workspaceId });
+        expect(lease).toMatchObject({ ownerProcessId: connection.manifest.instanceId });
+        expect(lease?.releasedAt).not.toBeNull();
+      } finally { raw.close(); }
+    });
+  }
+
+  test("bounded idle shutdown releases discovery and execution ownership", async () => {
+    const config = { ...(await configuration("agencity-managed-idle-")), idleShutdownMs: 100 };
+    const service = await opened(config);
+    const manifestPath = serviceStatePaths(config.workspace.root).manifestPath;
+    await waitFor(async () => !(await Bun.file(manifestPath).exists()), "idle service shutdown", 5_000);
+    await service.close();
+    const raw = new LibSqlStorage({ url: `file:${config.databasePath}`, deviceId: service.manifest.deviceId });
+    try {
+      const lease = await raw.getProcessExecutionLease({ kind: "workspace", workspaceId: config.workspace.workspaceId });
+      expect(lease).toMatchObject({ ownerProcessId: service.manifest.instanceId });
+      expect(lease?.releasedAt).not.toBeNull();
+    } finally { raw.close(); }
+  });
+
+  test("idle shutdown preserves attached clients and future detached schedules", async () => {
+    const config = { ...(await configuration("agencity-managed-idle-safety-")), idleShutdownMs: 250 };
+    const service = await opened(config);
+    const client = (await connectManagedService(config, { spawn: false })).client;
+    const session = await client.createSession(config.workspace.workspaceId, { model: { provider: "echo", model: "echo-1" } });
+    const controller = new AbortController();
+    const response = await fetch(`${service.manifest.url}/sessions/${session.sessionId}/stream?branch=${session.branchId}&after=0`, {
+      signal: controller.signal,
+      headers: { authorization: `Bearer ${service.manifest.bearerToken}` },
+    });
+    expect(response.status).toBe(200);
+    await Bun.sleep(300);
+    expect(service.ready).toBe(true);
+    controller.abort();
+    await response.body?.cancel().catch(() => {});
+
+    const schedule = await client.createSchedule(session.sessionId, session.branchId, {
+      at: new Date(Date.now() + 10_000).toISOString(),
+      prompt: "future detached schedule",
+    });
+    expect((await service.supervisor.storage.listSchedules?.(session.sessionId, session.branchId))?.[0]).toMatchObject({ scheduleId: schedule.scheduleId, status: "active" });
+    await Bun.sleep(700);
+    expect(service.ready).toBe(true);
+    await client.clearSchedule(schedule.scheduleId, "idle policy test complete");
+    await waitFor(async () => !(await Bun.file(serviceStatePaths(config.workspace.root).manifestPath).exists()), "idle shutdown after detach safety clears", 5_000);
+  });
+
+  test("a deleted temporary workspace does not leave its detached service child alive", async () => {
+    const config = { ...(await configuration("agencity-managed-deleted-workspace-")), idleShutdownMs: 100 };
+    const connection = await connectManagedService(config, { timeoutMs: 5_000 });
+    expect(connection.manifest.pidHint).not.toBe(process.pid);
+    await rm(config.workspace.root, { recursive: true, force: true });
+    expect(await waitForProcessExit(connection.manifest.pidHint, 5_000)).toBe(true);
   });
 
 });

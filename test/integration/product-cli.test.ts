@@ -1,17 +1,105 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { parseCliArgs } from "../../src/cli-args.ts";
-import { resolveWorkspace, workspacePreferenceKey } from "../../src/product/index.ts";
+import { resolveWorkspace, validateServiceManifest, workspacePreferenceKey, type ServiceManifestV1 } from "../../src/product/index.ts";
 import { ProfileStore } from "../../src/storage/index.ts";
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const directories: string[] = [];
-afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+const ownedFixtureRoots = new Set<string>();
+let baselineServicePids = new Set<number>();
+
+function serviceChildren(): Array<{ pid: number; command: string }> {
+  const result = Bun.spawnSync(["ps", "-axo", "pid=,command="]);
+  if (result.exitCode !== 0) return [];
+  return result.stdout.toString().split("\n").flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    return match && match[2]!.includes("__service-child") ? [{ pid: Number(match[1]), command: match[2]! }] : [];
+  });
+}
+
+function processIsLive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch { return false; }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processIsLive(pid)) return true;
+    await Bun.sleep(25);
+  }
+  return !processIsLive(pid);
+}
+
+async function ownedManifests(directory: string): Promise<Array<{ manifest: ServiceManifestV1; workspaceRoot: string }>> {
+  const found: Array<{ manifest: ServiceManifestV1; workspaceRoot: string }> = [];
+  const visit = async (current: string): Promise<void> => {
+    const entries = await readdir(current, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) { await visit(path); continue; }
+      if (entry.name !== "manifest.json" || !current.endsWith(`${join(".agencity", "service")}`)) continue;
+      try {
+        const manifest = validateServiceManifest(JSON.parse(await readFile(path, "utf8")));
+        found.push({ manifest, workspaceRoot: resolve(current, "..", "..") });
+      } catch {}
+    }
+  };
+  await visit(directory);
+  return found;
+}
+
+function isOwnedServiceChild(manifest: ServiceManifestV1, workspaceRoot: string): boolean {
+  if (manifest.pidHint === process.pid) return false;
+  const command = serviceChildren().find(candidate => candidate.pid === manifest.pidHint)?.command;
+  return Boolean(command?.includes(`__service-child --workspace ${workspaceRoot}`));
+}
+
+async function shutdownOwnedServices(directory: string): Promise<void> {
+  for (const { manifest, workspaceRoot } of await ownedManifests(directory)) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 750);
+    try {
+      await fetch(`${manifest.url}/service/shutdown`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${manifest.bearerToken}` },
+      });
+    } catch {} finally { clearTimeout(timeout); }
+    if (await waitForProcessExit(manifest.pidHint)) continue;
+    // The fallback is limited to a manifest discovered below this test's temp
+    // root and a live service-child argv containing the same owned root.
+    if (!isOwnedServiceChild(manifest, workspaceRoot)) continue;
+    try { process.kill(manifest.pidHint, "SIGTERM"); } catch { continue; }
+    if (await waitForProcessExit(manifest.pidHint, 1_000)) continue;
+    if (!isOwnedServiceChild(manifest, workspaceRoot)) continue;
+    try { process.kill(manifest.pidHint, "SIGKILL"); } catch {}
+    await waitForProcessExit(manifest.pidHint, 1_000);
+  }
+}
+
+async function teardownFixtures(): Promise<void> {
+  for (const directory of directories.splice(0)) {
+    await shutdownOwnedServices(directory);
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+beforeAll(() => { baselineServicePids = new Set(serviceChildren().map(child => child.pid)); });
+afterEach(teardownFixtures);
+afterAll(async () => {
+  await teardownFixtures();
+  const leaked = serviceChildren().filter(child =>
+    !baselineServicePids.has(child.pid) && [...ownedFixtureRoots].some(fixtureRoot => child.command.includes(fixtureRoot))
+  );
+  expect(leaked).toEqual([]);
+});
 
 async function fixture(): Promise<{ directory: string; workspace: string; home: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "agencity-product-")); directories.push(directory);
+  const directory = await mkdtemp(join(tmpdir(), "agencity-product-")); directories.push(directory); ownedFixtureRoots.add(directory);
   const workspace = join(directory, "repo"); const home = join(directory, "home");
   await mkdir(workspace); await mkdir(home); await mkdir(join(workspace, ".git"));
   return { directory, workspace, home };
