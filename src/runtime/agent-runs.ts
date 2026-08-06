@@ -28,7 +28,7 @@ import type { ModelExecutor } from "../executors/index.ts";
 import { CompactionService, AUTOMATIC_COMPACTION_RECENT_MESSAGES } from "./context-compaction.ts";
 import { estimateContextWindow } from "./compaction-core.ts";
 import {
-  ModelContextCapacitySource, ProviderModelErrorCode, admitContextWindow, planContextWindowOverflowRetry,
+  ModelContextCapacitySource, ProviderModelErrorCode, ContextWindowController, planContextWindowOverflowRetry,
   type ModelContextWindowConfiguration, type ProviderModelErrorClassification,
 } from "./context-window.ts";
 
