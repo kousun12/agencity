@@ -1206,3 +1206,12 @@ Add dated review and implementation evidence here.
 - FU-013 reused the existing task/session/outbox runtime rather than adding a stateless provider-call path; migration 007 changes only the rebuildable recursive-handle projection.
 - The accepted parity amendments already present in the working plan added FU-014 through FU-019 and tightened the completion standard/dependencies; they were retained because the Prime Agent parity review showed these capabilities are required rather than optional candidate work.
 - External Turso and real-provider checks remain separately gated and are not represented as verified by this tranche.
+
+
+### August 6, 2026 — FU-001 through FU-019 completion closure
+
+- Every indexed follow-up ticket is `Done` with ticket-local commit, implementation, verification, and limitation evidence. No ticket was silently deferred.
+- Final installed acceptance was independently reviewed as genuinely black-box: isolated `bun link`, fresh external repository and home, installed executable only, external OpenAI-compatible fixture, out-of-process managed service, no internal runtime/storage imports, and no opaque diagnostic IDs fed between commands.
+- The reproduced product journey covers missing-provider truthfulness, explicit model setup, autonomous coding cells/tools, executed recursive result, retained same-child follow-up, failed-gate repair, installed TUI `/quit`, detach and client loss, resident completion, no-ID reattach/status/tree/history, named branch/resume, distinct terminal outcomes, post-commit crash recovery, unknown/no-retry reconciliation, refinement, skills, streaming, compaction, and schedules.
+- Final `bun run verify` after the last hardening commit passed typecheck and architecture checks, 593 core tests with 2 external skips, and 12 installed acceptance tests with 1 opt-in real-provider skip. `bun run test:acceptance:matrix` reported deterministic `PASS` and real-provider, official Turso server, and Turso Cloud rows as `SKIP` with prerequisite names only.
+- External live-provider and Turso rows remain unverified in this environment; source/link installation is proven, while registry or standalone packaging is not claimed. Trusted-local OS authority, no cross-device automatic failover, and the basic readline presentation remain explicit limitations.
