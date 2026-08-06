@@ -77,7 +77,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-006 | Expose durable interruption, recovery, and unknown outcomes in the CLI/TUI | Done | FU-004, FU-005, FU-015 |
 | FU-007 | Provide a real installation and executable workflow | Done | FU-001 |
 | FU-008 | Reorganize low-level CLI operations as advanced surfaces without breaking compatibility | Done | FU-001, FU-005 |
-| FU-009 | Add product-level end-to-end acceptance coverage | Proposed | FU-001–FU-008, FU-011–FU-019 |
+| FU-009 | Add product-level end-to-end acceptance coverage | In progress | FU-001–FU-008, FU-011–FU-019 |
 | FU-010 | Add repository-level purpose and implementation guidance | Done | — |
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
 | FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Done | FU-004 |
@@ -492,7 +492,7 @@ agencity data export|delete
 
 ## FU-009 — Add product-level end-to-end acceptance coverage
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
