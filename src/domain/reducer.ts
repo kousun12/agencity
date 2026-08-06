@@ -31,7 +31,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
       status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, contexts: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
-      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, recursiveModels: {}, agentRuns: {},
+      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, agentRuns: {},
     };
   }
   if (state.sessionId !== event.sessionId) throw new ValidationError("Cannot reduce an event from another session");
@@ -152,17 +152,17 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     }
     case "GoalCreated": {
       const p = event.payload as EventPayloads["GoalCreated"]; if (state.goals[p.goalId] || Object.values(state.goals).some((goal) => !["completed", "failed", "cancelled"].includes(goal.status))) throw new InvalidTransitionError("goal", "active-goal-exists", "active");
-      return { ...next, goals: { ...state.goals, [p.goalId]: { id: p.goalId, description: p.description, completionCriteria: p.completionCriteria ?? null, maxTurns: p.maxTurns ?? null, status: "active", completionRequestId: null, completionWorkspaceId: null, completionWorkspaceCursor: null, completionPinRecorded: false, gates: {}, eventId: event.id } } };
+      return { ...next, goals: { ...state.goals, [p.goalId]: { id: p.goalId, description: p.description, completionCriteria: p.completionCriteria ?? null, maxTurns: p.maxTurns ?? null, status: "active", completionRequestId: null, completionWorkspaceId: null, completionWorkspaceCursor: null, completionMaterialVersion: null, completionMaterialEventIds: [], completionPinRecorded: false, gates: {}, eventId: event.id } } };
     }
     case "GoalCompletionRequested": {
       const p = event.payload as EventPayloads["GoalCompletionRequested"]; const old = state.goals[p.goalId];
       if (!old || old.status !== "active") throw new InvalidTransitionError("goal", old?.status ?? "missing", "completion_requested");
-      return { ...next, goals: { ...state.goals, [p.goalId]: { ...old, status: "completion_requested", completionRequestId: p.requestId, completionWorkspaceId: p.workspaceId ?? null, completionWorkspaceCursor: p.workspaceCursor ?? null, completionPinRecorded: p.workspaceId !== undefined && Object.prototype.hasOwnProperty.call(p, "workspaceCursor"), eventId: event.id } } };
+      return { ...next, goals: { ...state.goals, [p.goalId]: { ...old, status: "completion_requested", completionRequestId: p.requestId, completionWorkspaceId: p.workspaceId ?? null, completionWorkspaceCursor: p.workspaceCursor ?? null, completionMaterialVersion: p.materialVersion ?? null, completionMaterialEventIds: [...(p.materialEventIds ?? [])], completionPinRecorded: p.materialVersion !== undefined || (p.workspaceId !== undefined && Object.prototype.hasOwnProperty.call(p, "workspaceCursor")), eventId: event.id } } };
     }
     case "GoalGateAdded": {
       const p = event.payload as EventPayloads["GoalGateAdded"]; const goal = state.goals[p.goalId];
       if (!goal || goal.gates[p.gateId] || goal.status !== "active") throw new InvalidTransitionError("goalGate", goal?.status ?? "missing-goal", "pending");
-      const gate: GoalGateState = { id: p.gateId, name: p.name, executor: p.executor, operation: p.operation, input: p.input, idempotent: p.idempotent, required: p.required, status: "pending", eventId: event.id };
+      const gate: GoalGateState = { id: p.gateId, name: p.name, executor: p.executor, operation: p.operation, input: p.input, idempotent: p.idempotent, required: p.required, status: "pending", evaluations: [], eventId: event.id };
       return { ...next, goals: { ...state.goals, [p.goalId]: { ...goal, gates: { ...goal.gates, [p.gateId]: gate }, eventId: event.id } } };
     }
     case "GoalGateStatusChanged": {
@@ -173,13 +173,22 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const gate: GoalGateState = { ...baseGate, status: p.status, eventId: event.id, ...(p.effectId === undefined ? {} : { effectId: p.effectId }), ...(p.output === undefined ? {} : { output: p.output }), ...(p.error === undefined ? {} : { error: p.error }) };
       return { ...next, goals: { ...state.goals, [p.goalId]: { ...goal, gates: { ...goal.gates, [p.gateId]: gate }, eventId: event.id } } };
     }
+    case "GoalGateEvaluationRecorded": {
+      const p = event.payload as EventPayloads["GoalGateEvaluationRecorded"]; const goal = state.goals[p.goalId]; const old = goal?.gates[p.gateId];
+      if (!goal || !old || old.evaluations.some((item) => item.id === p.evaluationId)) throw new InvalidTransitionError("goalGateEvaluation", old ? "duplicate" : "missing", p.status);
+      const evaluation = { id: p.evaluationId, requestId: p.requestId, definitionHash: p.definitionHash, materialVersion: p.materialVersion, materialEventIds: [...p.materialEventIds], status: p.status, ...(p.effectId === undefined ? {} : { effectId: p.effectId }), ...(p.output === undefined ? {} : { output: p.output }), ...(p.error === undefined ? {} : { error: p.error }), ...(p.cachedFromEvaluationId === undefined ? {} : { cachedFromEvaluationId: p.cachedFromEvaluationId }), eventId: event.id };
+      const { output: _oldOutput, error: _oldError, ...baseGate } = old;
+      const gate: GoalGateState = { ...baseGate, status: p.status, currentEvaluationId: p.evaluationId, evaluations: [...old.evaluations, evaluation], eventId: event.id, ...(p.effectId === undefined ? {} : { effectId: p.effectId }), ...(p.output === undefined ? {} : { output: p.output }), ...(p.error === undefined ? {} : { error: p.error }) };
+      return { ...next, goals: { ...state.goals, [p.goalId]: { ...goal, gates: { ...goal.gates, [p.gateId]: gate }, eventId: event.id } } };
+    }
     case "GoalStatusChanged": {
       const p = event.payload as EventPayloads["GoalStatusChanged"]; const old = state.goals[p.goalId];
       const valid = old && !["completed", "failed", "cancelled"].includes(old.status) &&
         (p.status === "failed" || p.status === "cancelled" ||
           (p.status === "completed" && old.status === "completion_requested") ||
-          (p.status === "blocked" && old.status === "completion_requested") ||
-          (p.status === "active" && old.status === "blocked") ||
+          (p.status === "blocked" && ["completion_requested", "active"].includes(old.status)) ||
+          (p.status === "paused" && ["active", "blocked"].includes(old.status)) ||
+          (p.status === "active" && ["blocked", "paused"].includes(old.status)) ||
           (p.status === "completion_requested" && old.status === "active"));
       if (!old || !valid) throw new InvalidTransitionError("goal", old?.status ?? "missing", p.status);
       const { reason: _oldReason, ...baseGoal } = old;
@@ -188,7 +197,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "HeartbeatCreated": {
       const p = event.payload as EventPayloads["HeartbeatCreated"]; if (state.heartbeats[p.heartbeatId]) throw new InvalidTransitionError("heartbeat", "existing", "active");
       if (p.goalId && !state.goals[p.goalId]) throw new ValidationError("Heartbeat goal does not exist");
-      return { ...next, heartbeats: { ...state.heartbeats, [p.heartbeatId]: { id: p.heartbeatId, intervalMs: p.intervalMs, nextTickAt: p.nextTickAt, goalId: p.goalId ?? null, ...(p.payload === undefined ? {} : { payload: p.payload }), status: "active", tick: 0, lastFiredAt: null, eventId: event.id } } };
+      return { ...next, heartbeats: { ...state.heartbeats, [p.heartbeatId]: { id: p.heartbeatId, intervalMs: p.intervalMs, nextTickAt: p.nextTickAt, goalId: p.goalId ?? null, prompt: p.prompt ?? null, ...(p.payload === undefined ? {} : { payload: p.payload }), owner: p.owner ?? "user", status: "active", tick: 0, lastFiredAt: null, eventId: event.id } } };
     }
     case "HeartbeatTicked": {
       const p = event.payload as EventPayloads["HeartbeatTicked"]; const old = state.heartbeats[p.heartbeatId];
@@ -199,6 +208,42 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const p = event.payload as EventPayloads["HeartbeatStatusChanged"]; const old = state.heartbeats[p.heartbeatId];
       if (!old || old.status === "cancelled" || old.status === p.status) throw new InvalidTransitionError("heartbeat", old?.status ?? "missing", p.status);
       return { ...next, heartbeats: { ...state.heartbeats, [p.heartbeatId]: { ...old, status: p.status, ...(p.nextTickAt === undefined ? {} : { nextTickAt: p.nextTickAt }), eventId: event.id } } };
+    }
+    case "ScheduleCreated": {
+      const p = event.payload as EventPayloads["ScheduleCreated"];
+      if (state.schedules[p.scheduleId] || (p.kind === "once" && p.intervalMs !== undefined) || (p.kind === "interval" && p.intervalMs === undefined)) throw new InvalidTransitionError("schedule", state.schedules[p.scheduleId] ? "existing" : "invalid-definition", "active");
+      return { ...next, schedules: { ...state.schedules, [p.scheduleId]: { id: p.scheduleId, kind: p.kind, prompt: p.prompt, intervalMs: p.intervalMs ?? null, nextTickAt: p.nextTickAt, owner: p.owner, goalMode: p.goalMode, status: "active", tick: 0, lastFiredAt: null, eventId: event.id } } };
+    }
+    case "ScheduleTicked": {
+      const p = event.payload as EventPayloads["ScheduleTicked"]; const old = state.schedules[p.scheduleId];
+      if (!old || old.status !== "active" || p.tick !== old.tick + 1) throw new InvalidTransitionError("schedule", old?.status ?? "missing", "ticked");
+      return { ...next, schedules: { ...state.schedules, [p.scheduleId]: { ...old, tick: p.tick, lastFiredAt: p.firedAt, nextTickAt: p.nextTickAt ?? old.nextTickAt, status: p.nextTickAt === null ? "completed" : old.status, eventId: event.id } } };
+    }
+    case "ScheduleStatusChanged": {
+      const p = event.payload as EventPayloads["ScheduleStatusChanged"]; const old = state.schedules[p.scheduleId];
+      const valid = old && old.status !== "cancelled" && old.status !== "completed" && old.status !== p.status && ((old.status === "active" && ["paused", "cancelled"].includes(p.status)) || (old.status === "paused" && ["active", "cancelled"].includes(p.status)));
+      if (!valid) throw new InvalidTransitionError("schedule", old?.status ?? "missing", p.status);
+      return { ...next, schedules: { ...state.schedules, [p.scheduleId]: { ...old!, status: p.status, ...(p.nextTickAt === undefined ? {} : { nextTickAt: p.nextTickAt }), ...(p.reason === undefined ? {} : { reason: p.reason }), eventId: event.id } } };
+    }
+    case "WakeQueued": {
+      const p = event.payload as EventPayloads["WakeQueued"];
+      if (state.wakes[p.wakeId]) throw new InvalidTransitionError("wake", state.wakes[p.wakeId]!.status, "queued");
+      return { ...next, wakes: { ...state.wakes, [p.wakeId]: { id: p.wakeId, sourceType: p.sourceType, sourceId: p.sourceId, tick: p.tick, scheduledAt: p.scheduledAt, firedAt: p.firedAt, prompt: p.prompt, goalId: p.goalId ?? null, goalMode: p.goalMode, status: "queued", claimId: null, claimedAt: null, runId: null, deliveredAt: null, eventId: event.id } } };
+    }
+    case "WakeClaimed": {
+      const p = event.payload as EventPayloads["WakeClaimed"]; const old = state.wakes[p.wakeId];
+      if (!old || old.status !== "queued") throw new InvalidTransitionError("wake", old?.status ?? "missing", "claimed");
+      return { ...next, wakes: { ...state.wakes, [p.wakeId]: { ...old, status: "claimed", claimId: p.claimId, claimedAt: p.claimedAt, eventId: event.id } } };
+    }
+    case "WakeDelivered": {
+      const p = event.payload as EventPayloads["WakeDelivered"]; const old = state.wakes[p.wakeId];
+      if (!old || old.status !== "claimed" || old.claimId !== p.claimId) throw new InvalidTransitionError("wake", old?.status ?? "missing", "delivered");
+      return { ...next, wakes: { ...state.wakes, [p.wakeId]: { ...old, status: "delivered", runId: p.runId, deliveredAt: p.deliveredAt, eventId: event.id } } };
+    }
+    case "WakeDeliveryUnknown": {
+      const p = event.payload as EventPayloads["WakeDeliveryUnknown"]; const old = state.wakes[p.wakeId];
+      if (!old || old.status !== "claimed" || old.claimId !== p.claimId) throw new InvalidTransitionError("wake", old?.status ?? "missing", "unknown");
+      return { ...next, wakes: { ...state.wakes, [p.wakeId]: { ...old, status: "unknown", reason: p.reason, eventId: event.id } } };
     }
     case "RecursiveModelStarted": {
       const p = event.payload as EventPayloads["RecursiveModelStarted"]; if (state.recursiveModels[p.handleId]) throw new InvalidTransitionError("recursiveModel", "existing", "pending");
@@ -219,8 +264,8 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         throw new InvalidTransitionError("agentRun", "active-run-exists", "queued");
       }
       const run: AgentRunState = {
-        id: p.runId, task: p.task, requestKey: p.requestKey, goalId: p.goalId ?? null, status: "queued",
-        steps: [], inputRequests: {}, cancellationRequested: false, requestEventId: event.id, eventId: event.id,
+        id: p.runId, task: p.task, requestKey: p.requestKey, goalId: p.goalId ?? null, goalMode: p.goalMode ?? (p.goalId ? "current" : "none"), wakeId: p.wakeId ?? null, status: "queued",
+        steps: [], inputRequests: {}, goalChecks: {}, cancellationRequested: false, requestEventId: event.id, eventId: event.id,
       };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: run } };
     }
@@ -256,6 +301,11 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       }
       const updated = { ...step, rejection: p.error, rawAction: p.raw, eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
+    }
+    case "AgentRunGoalCheckRecorded": {
+      const p = event.payload as EventPayloads["AgentRunGoalCheckRecorded"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
+      if (!run || run.status !== "running" || !step?.action || step.action.type !== "final" || step.actionId !== p.actionId || run.goalId !== p.goalId || run.goalChecks[p.actionId]) throw new InvalidTransitionError("agentRunGoalCheck", run?.status ?? "missing-run", p.status);
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, goalChecks: { ...run.goalChecks, [p.actionId]: { actionId: p.actionId, goalId: p.goalId, requestId: p.requestId, status: p.status, summary: p.summary, gateEvaluationEventIds: [...p.gateEvaluationEventIds], eventId: event.id } }, eventId: event.id } } };
     }
     case "AgentRunUserInputRequested": {
       const p = event.payload as EventPayloads["AgentRunUserInputRequested"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);

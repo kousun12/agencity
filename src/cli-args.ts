@@ -1,16 +1,16 @@
 export const CLI_COMMANDS = [
-  "product", "help", "version", "new", "resume", "sessions", "run", "doctor", "config",
+  "product", "help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config",
   "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve",
   "sync", "sync-push", "sync-pull", "sync-checkpoint", "sync-stats", "sync-status", "conflicts", "delete-data",
 ] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
 const KNOWN_COMMANDS = new Set<string>(CLI_COMMANDS);
-const PRODUCT_ROUTE_COMMANDS = new Set<string>(["help", "version", "new", "resume", "sessions", "run", "doctor", "config"]);
+const PRODUCT_ROUTE_COMMANDS = new Set<string>(["help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config"]);
 const LEGACY_TEXT_COMMANDS = new Set<string>(["chat", "cell"]);
 const VALUE_OPTIONS = new Set([
   "state-dir", "db", "artifacts", "workspace-root", "workspace",
-  "session", "branch", "cursor", "name", "select", "model", "port", "profile", "sync-url", "replica", "credential-ref", "sync-interval",
+  "session", "branch", "cursor", "name", "select", "model", "goal", "port", "profile", "sync-url", "replica", "credential-ref", "sync-interval",
   "scope", "scope-id", "confirmation", "receipt-dir",
 ]);
 const BOOLEAN_OPTIONS = new Set([

@@ -1,157 +1,350 @@
-import { NotFoundError, ValidationError, newId, projectEvents, type JsonValue } from "../domain/index.ts";
-import { requireRecursiveStorage, type AgentStorage, type GoalGateRecord, type GoalRecord } from "../storage/index.ts";
-import type { ModelLoop } from "./model-loop.ts";
+import {
+  NotFoundError,
+  ValidationError,
+  gateDefinitionHash,
+  newId,
+  projectEvents,
+  workspaceMaterialPin,
+  type AgentEvent,
+  type JsonValue,
+  type NewAgentEvent,
+} from "../domain/index.ts";
+import {
+  requireRecursiveStorage,
+  type AgentStorage,
+  type GoalGateEvaluationRecord,
+  type GoalGateRecord,
+  type GoalRecord,
+} from "../storage/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
 
-export interface CompletionGateInput { readonly name: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotent?: boolean; readonly required?: boolean; }
-export interface CreateGoalInput { readonly description?: string; readonly goal?: string; readonly completionCriteria?: string; readonly maxTurns?: number; readonly gates?: readonly CompletionGateInput[]; readonly completionGates?: readonly CompletionGateInput[]; }
-export interface GoalHandle extends GoalRecord { readonly gates: readonly GoalGateRecord[]; }
+export interface CompletionGateInput {
+  readonly name: string;
+  readonly executor: string;
+  readonly operation: string;
+  readonly input: JsonValue;
+  readonly idempotent?: boolean;
+  readonly required?: boolean;
+}
+export interface CreateGoalInput {
+  readonly description?: string;
+  readonly goal?: string;
+  readonly completionCriteria?: string;
+  readonly maxTurns?: number;
+  readonly gates?: readonly CompletionGateInput[];
+  readonly completionGates?: readonly CompletionGateInput[];
+}
+export interface GoalGateHandle extends GoalGateRecord {
+  readonly evaluations: readonly GoalGateEvaluationRecord[];
+  readonly currentStale: boolean;
+  readonly currentStaleReason?: string;
+}
+export interface GoalHandle extends GoalRecord { readonly gates: readonly GoalGateHandle[]; }
 export interface RunContinuationInput { readonly maxTurns?: number; }
 
+interface MaterialPin {
+  readonly workspaceId: string;
+  readonly cursor: string | null;
+  readonly version: string;
+  readonly eventIds: string[];
+}
+
+/** User-authoritative durable goals and completion-gate evaluation. */
 export class GoalService {
   readonly #recursive;
-  constructor(readonly storage: AgentStorage, readonly outbox: OutboxRunner, readonly modelLoop: ModelLoop) { this.#recursive = requireRecursiveStorage(storage); }
+  constructor(readonly storage: AgentStorage, readonly outbox: OutboxRunner) {
+    this.#recursive = requireRecursiveStorage(storage);
+  }
 
   async create(sessionId: string, branchId: string, rawInput: CreateGoalInput | string): Promise<GoalHandle> {
-    const input: CreateGoalInput = typeof rawInput === "string" ? { description: rawInput } : rawInput;
-    const description = input.description ?? input.goal;
-    if (!description?.trim()) throw new ValidationError("Goal description cannot be empty");
-    if (!(await this.#recursive.getSession(sessionId))) throw new NotFoundError("session", sessionId);
-    const goalId = newId(); const gates = input.gates ?? input.completionGates ?? [];
-    await this.storage.appendEvents([{
-      sessionId, branchId, type: "GoalCreated", producer: "client", idempotencyKey: `goal:${goalId}`,
-      payload: { goalId, description, ...(input.completionCriteria === undefined ? {} : { completionCriteria: input.completionCriteria }), ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }) },
-    }, ...gates.map((gate) => ({
-      sessionId, branchId, type: "GoalGateAdded" as const, producer: "client", idempotencyKey: `goal-gate:${goalId}:${newId()}`,
-      payload: { goalId, gateId: newId(), name: gate.name, executor: gate.executor, operation: gate.operation, input: gate.input, idempotent: gate.idempotent ?? false, required: gate.required ?? true },
-    }))]);
+    const goalId = newId();
+    const events = await this.prepareCreateEvents(sessionId, branchId, rawInput, goalId, "client");
+    await this.storage.appendEvents(events);
     return this.#load(goalId);
   }
 
+  /** Builds stable goal events so a product run can commit goal+run atomically. */
+  async prepareCreateEvents(
+    sessionId: string,
+    branchId: string,
+    rawInput: CreateGoalInput | string,
+    goalId: string,
+    producer: string = "client",
+  ): Promise<NewAgentEvent[]> {
+    const input: CreateGoalInput = typeof rawInput === "string" ? { description: rawInput } : rawInput;
+    const description = input.description ?? input.goal;
+    if (!description?.trim()) throw new ValidationError("Goal description cannot be empty");
+    if (input.maxTurns !== undefined && (!Number.isSafeInteger(input.maxTurns) || input.maxTurns < 1)) {
+      throw new ValidationError("Goal maxTurns must be a positive integer");
+    }
+    if (!(await this.#recursive.getSession(sessionId))) throw new NotFoundError("session", sessionId);
+    const gates = input.gates ?? input.completionGates ?? [];
+    return [{
+      sessionId, branchId, type: "GoalCreated", producer, idempotencyKey: `goal:${goalId}`,
+      payload: {
+        goalId, description: description.trim(), owner: "user",
+        ...(input.completionCriteria === undefined ? {} : { completionCriteria: input.completionCriteria }),
+        ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
+      },
+    }, ...gates.map((gate, index) => {
+      if (!gate.name?.trim() || !gate.executor?.trim() || !gate.operation?.trim()) {
+        throw new ValidationError("Completion gates require name, executor, and operation");
+      }
+      const gateId = `${goalId}-gate-${index + 1}`;
+      return {
+        sessionId, branchId, type: "GoalGateAdded" as const, producer,
+        idempotencyKey: `goal-gate:${goalId}:${index + 1}`,
+        payload: {
+          goalId, gateId, name: gate.name.trim(), executor: gate.executor, operation: gate.operation,
+          input: gate.input, idempotent: gate.idempotent ?? false, required: gate.required ?? true,
+        },
+      };
+    })];
+  }
+
+  async current(sessionId: string, branchId: string): Promise<GoalHandle | null> {
+    const state = projectEvents(await this.storage.loadEvents(sessionId, { branchId }));
+    const goal = Object.values(state.goals).find((item) => !["completed", "failed", "cancelled"].includes(item.status));
+    return goal ? this.#load(goal.id) : null;
+  }
+
+  async list(sessionId: string, branchId: string): Promise<GoalHandle[]> {
+    const state = projectEvents(await this.storage.loadEvents(sessionId, { branchId }));
+    return Promise.all(Object.values(state.goals).map((goal) => this.#load(goal.id)));
+  }
+
+  async get(sessionId: string, branchId: string, goalId: string): Promise<GoalHandle> {
+    const goal = await this.#load(goalId);
+    this.#assertScope(goal, sessionId, branchId);
+    return goal;
+  }
+
   async requestCompletion(sessionId: string, branchId: string, goalId: string): Promise<GoalHandle> {
-    let goal = await this.#recursive.getGoal(goalId); if (!goal) throw new NotFoundError("goal", goalId);
-    if (goal.sessionId !== sessionId || goal.branchId !== branchId) throw new ValidationError("Goal does not belong to the supplied session branch");
+    let goal = await this.#recursive.getGoal(goalId);
+    if (!goal) throw new NotFoundError("goal", goalId);
+    this.#assertScope(goal, sessionId, branchId);
     if (["completed", "failed", "cancelled"].includes(goal.status)) return this.#load(goalId);
+    if (goal.status === "paused") throw new ValidationError("Paused goal must be resumed before completion is requested");
+    if (goal.status === "blocked") throw new ValidationError("Blocked goal must be continued before completion is requested again");
+
     if (goal.status === "active") {
       const requestId = newId();
       const pin = await this.#workspacePin(sessionId, branchId);
-      await this.storage.appendEvents([{ sessionId, branchId, type: "GoalCompletionRequested", producer: "client", idempotencyKey: `goal-completion:${goalId}:${requestId}`, payload: { goalId, requestId, workspaceId: pin.workspaceId, workspaceCursor: pin.cursor } }]);
+      await this.storage.appendEvents([{
+        sessionId, branchId, type: "GoalCompletionRequested", producer: "supervisor",
+        idempotencyKey: `goal-completion:${goalId}:${requestId}`,
+        payload: {
+          goalId, requestId, workspaceId: pin.workspaceId, workspaceCursor: pin.cursor,
+          materialVersion: pin.version, materialEventIds: pin.eventIds,
+        },
+      }]);
       goal = (await this.#recursive.getGoal(goalId))!;
     }
-    if (goal.status === "blocked") throw new ValidationError("Blocked goal must be continued before completion is requested again");
+
     const requestId = goal.completionRequestId;
     if (!requestId) throw new ValidationError("Goal completion request is missing its durable ID");
-    if (!goal.completionPinRecorded || !goal.completionWorkspaceId) throw new ValidationError("Goal completion request is missing its durable workspace pin");
-    const gates = await this.#recursive.listGoalGates(goalId);
+    const requestPin = await this.#requestPin(goal);
+    let gates = await this.#recursive.listGoalGates(goalId);
     for (const gate of gates) {
-      // Every completion request re-evaluates every gate. A result from an older
-      // workspace version is evidence, not authorization for the current one.
-      const key = `goal-gate-effect:${goalId}:${gate.gateId}:${requestId}`;
-      const effectId = await this.outbox.request({ sessionId, branchId, executor: gate.executor, operation: gate.operation, input: gate.input, idempotencyKey: key, idempotent: gate.idempotent });
-      await this.storage.appendEvents([{ sessionId, branchId, type: "GoalGateStatusChanged", producer: "supervisor", idempotencyKey: `goal-gate-running:${gate.gateId}:${requestId}`, payload: { goalId, gateId: gate.gateId, status: "running", effectId } }]);
+      const evaluations = await this.#recursive.listGoalGateEvaluations(goalId, gate.gateId);
+      if (evaluations.some((evaluation) => evaluation.requestId === requestId)) continue;
+      const definitionHash = gateDefinitionHash(gate);
+      const cached = [...evaluations].reverse().find((evaluation) =>
+        evaluation.definitionHash === definitionHash && evaluation.materialVersion === requestPin.version);
+      const evaluationId = `goal-gate-evaluation:${goalId}:${gate.gateId}:${requestId}`;
+      if (cached) {
+        await this.storage.appendEvents([{
+          sessionId, branchId, type: "GoalGateEvaluationRecorded", producer: "supervisor",
+          idempotencyKey: `goal-gate-evaluation:${evaluationId}`,
+          payload: {
+            evaluationId, goalId, gateId: gate.gateId, requestId, definitionHash,
+            materialVersion: requestPin.version, materialEventIds: requestPin.eventIds,
+            status: cached.status, cachedFromEvaluationId: cached.evaluationId,
+            ...(cached.effectId === undefined ? {} : { effectId: cached.effectId }),
+            ...(cached.output === undefined ? {} : { output: cached.output }),
+            ...(cached.error === undefined ? {} : { error: cached.error }),
+          },
+        }]);
+        continue;
+      }
+
+      let effectId = gate.status === "running" ? gate.effectId : undefined;
+      if (!effectId) {
+        const key = `goal-gate-effect:${goalId}:${gate.gateId}:${requestId}`;
+        effectId = await this.outbox.request({
+          sessionId, branchId, executor: gate.executor, operation: gate.operation, input: gate.input,
+          idempotencyKey: key, idempotent: gate.idempotent,
+        });
+        await this.storage.appendEvents([{
+          sessionId, branchId, type: "GoalGateStatusChanged", producer: "supervisor",
+          idempotencyKey: `goal-gate-running:${gate.gateId}:${requestId}`,
+          payload: { goalId, gateId: gate.gateId, status: "running", effectId },
+        }]);
+      }
       const execution = await this.outbox.run(effectId);
       const currentPin = await this.#workspacePin(sessionId, branchId);
-      const staleError = this.#stalePinError(goal, currentPin);
-      const status = staleError ? "failed" as const : execution.outcome === "succeeded" ? "passed" as const : execution.outcome === "cancelled" ? "cancelled" as const : execution.outcome === "unknown" ? "unknown" as const : "failed" as const;
-      const error = staleError ?? execution.error;
-      await this.storage.appendEvents([{ sessionId, branchId, type: "GoalGateStatusChanged", producer: "supervisor", idempotencyKey: `goal-gate-terminal:${gate.gateId}:${requestId}`, payload: { goalId, gateId: gate.gateId, status, effectId, ...(execution.output === undefined ? {} : { output: execution.output }), ...(error === undefined ? {} : { error }) } }]);
+      const staleError = currentPin.version === requestPin.version
+        ? undefined
+        : `Gate result is stale: workspace material changed from ${requestPin.version} to ${currentPin.version}`;
+      const status = staleError ? "failed" as const
+        : execution.outcome === "succeeded" ? "passed" as const
+        : execution.outcome === "cancelled" ? "cancelled" as const
+        : execution.outcome === "unknown" ? "unknown" as const
+        : "failed" as const;
+      const error = staleError ?? (execution.outcome === "unknown" ? `Unknown gate outcome: ${execution.error ?? "executor ownership was lost"}` : execution.error);
+      await this.storage.appendEvents([{
+        sessionId, branchId, type: "GoalGateEvaluationRecorded", producer: "supervisor",
+        idempotencyKey: `goal-gate-evaluation:${evaluationId}`,
+        payload: {
+          evaluationId, goalId, gateId: gate.gateId, requestId, definitionHash,
+          materialVersion: requestPin.version, materialEventIds: requestPin.eventIds, status, effectId,
+          ...(execution.output === undefined ? {} : { output: execution.output }),
+          ...(error === undefined ? {} : { error }),
+        },
+      }]);
     }
-    const evaluated = await this.#recursive.listGoalGates(goalId);
-    const failed = evaluated.filter((gate) => gate.required && gate.status !== "passed");
-    const stale = failed.find((gate) => /stale|cursor|workspace|version/i.test(gate.error ?? ""));
+
+    gates = await this.#recursive.listGoalGates(goalId);
+    const failed = gates.filter((gate) => gate.required && gate.status !== "passed");
+    const unknown = failed.find((gate) => gate.status === "unknown");
+    const currentPin = await this.#workspacePin(sessionId, branchId);
+    const materialMoved = currentPin.version !== requestPin.version;
+    const cachedIds = new Set((await this.#recursive.listGoalGateEvaluations(goalId))
+      .filter((evaluation) => evaluation.requestId === requestId && evaluation.cachedFromEvaluationId)
+      .map((evaluation) => evaluation.gateId));
+    const reason = unknown
+      ? `Required completion gate outcome is unknown: ${unknown.error ?? unknown.name}`
+      : materialMoved
+        ? `Required completion evidence is stale because workspace material changed from ${requestPin.version} to ${currentPin.version}`
+        : failed.length
+          ? `Required completion gates did not pass${failed.some((gate) => cachedIds.has(gate.gateId)) ? " on unchanged workspace material (cached)" : ""}: ${failed.map((gate) => gate.name).join(", ")}`
+          : undefined;
     await this.storage.appendEvents([{
-      sessionId, branchId, type: "GoalStatusChanged", producer: "supervisor", idempotencyKey: `goal-completion-outcome:${goalId}:${requestId}`,
-      payload: failed.length ? { goalId, status: "blocked", reason: stale?.error ?? `Required completion gates did not pass: ${failed.map((gate) => gate.name).join(", ")}` } : { goalId, status: "completed" },
+      sessionId, branchId, type: "GoalStatusChanged", producer: "supervisor",
+      idempotencyKey: `goal-completion-outcome:${goalId}:${requestId}`,
+      payload: failed.length || materialMoved
+        ? { goalId, status: "blocked", reason: reason! }
+        : { goalId, status: "completed" },
     }]);
     return this.#load(goalId);
   }
 
-  async runContinuation(sessionId: string, branchId: string, goalId: string, options: RunContinuationInput | number = {}): Promise<GoalHandle> {
-    const goal = await this.#recursive.getGoal(goalId); if (!goal) throw new NotFoundError("goal", goalId);
-    if (goal.sessionId !== sessionId || goal.branchId !== branchId) throw new ValidationError("Goal does not belong to the supplied session branch");
-    const requested = typeof options === "number" ? options : options.maxTurns;
-    const maxTurns = requested ?? goal.maxTurns ?? 1;
-    if (!Number.isInteger(maxTurns) || maxTurns < 1) throw new ValidationError("Continuation maxTurns must be positive");
-    for (let index = 0; index < maxTurns; index++) {
-      const current = await this.#recursive.getGoal(goalId);
-      if (!current || ["completed", "failed", "cancelled", "completion_requested"].includes(current.status)) break;
-      if (current.status === "blocked") {
-        const resumeId = newId();
-        await this.storage.appendEvents([{ sessionId, branchId, type: "GoalStatusChanged", producer: "client", idempotencyKey: `goal-resume:${goalId}:${resumeId}`, payload: { goalId, status: "active", reason: "Continuation requested after a failed gate" } }]);
-      }
-      const turn = await this.modelLoop.turn(sessionId, branchId);
-      if (turn.outcome !== "succeeded") break;
+  /** Legacy name retained as a user-authoritative unblock; it never starts a second model loop. */
+  async runContinuation(sessionId: string, branchId: string, goalId: string, _options: RunContinuationInput | number = {}): Promise<GoalHandle> {
+    const goal = await this.#recursive.getGoal(goalId);
+    if (!goal) throw new NotFoundError("goal", goalId);
+    this.#assertScope(goal, sessionId, branchId);
+    if (goal.status === "blocked") {
+      await this.storage.appendEvents([{
+        sessionId, branchId, type: "GoalStatusChanged", producer: "client",
+        idempotencyKey: `goal-resume:${goalId}:${newId()}`,
+        payload: { goalId, status: "active", reason: "User continued goal after completion gates did not pass" },
+      }]);
     }
     return this.#load(goalId);
   }
 
-  /** Reconciles gate effects and resumes active autonomous goals at startup. */
+  async pause(sessionId: string, branchId: string, goalId: string, reason?: string): Promise<GoalHandle> {
+    const goal = await this.get(sessionId, branchId, goalId);
+    if (goal.status === "paused") return goal;
+    if (!["active", "blocked"].includes(goal.status)) throw new ValidationError(`Cannot pause a ${goal.status} goal`);
+    await this.storage.appendEvents([{ sessionId, branchId, type: "GoalStatusChanged", producer: "client", idempotencyKey: `goal-pause:${goalId}:${newId()}`, payload: { goalId, status: "paused", ...(reason === undefined ? {} : { reason }) } }]);
+    return this.#load(goalId);
+  }
+
+  async resume(sessionId: string, branchId: string, goalId: string, reason?: string): Promise<GoalHandle> {
+    const goal = await this.get(sessionId, branchId, goalId);
+    if (goal.status === "active") return goal;
+    if (!["paused", "blocked"].includes(goal.status)) throw new ValidationError(`Cannot resume a ${goal.status} goal`);
+    await this.storage.appendEvents([{ sessionId, branchId, type: "GoalStatusChanged", producer: "client", idempotencyKey: `goal-resume:${goalId}:${newId()}`, payload: { goalId, status: "active", ...(reason === undefined ? {} : { reason }) } }]);
+    return this.#load(goalId);
+  }
+
+  async clear(sessionId: string, branchId: string, goalId: string, reason?: string): Promise<GoalHandle> {
+    const goal = await this.get(sessionId, branchId, goalId);
+    if (goal.status === "cancelled") return goal;
+    if (["completed", "failed"].includes(goal.status)) throw new ValidationError(`Cannot clear a ${goal.status} goal`);
+    await this.storage.appendEvents([{ sessionId, branchId, type: "GoalStatusChanged", producer: "client", idempotencyKey: `goal-clear:${goalId}`, payload: { goalId, status: "cancelled", reason: reason ?? "User cleared goal" } }]);
+    return this.#load(goalId);
+  }
+
+  /** Reconciles completion requests only. Active goals are owned by AgentRunService. */
   async recoverIncomplete(): Promise<number> {
     let recovered = 0;
-    const reconciledGoals = new Set<string>();
-    for (const branch of await this.storage.listBranches()) {
-      const state = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
-      if (!state.length) continue;
-      const projected = projectEvents(state);
-      for (const candidate of Object.values(projected.goals)) {
-        if (reconciledGoals.has(candidate.id)) continue;
-        reconciledGoals.add(candidate.id);
-        const goal = await this.#recursive.getGoal(candidate.id); if (!goal) continue;
-        if (goal.status === "completion_requested") {
-          let gates = await this.#recursive.listGoalGates(goal.goalId);
-          const currentPin = await this.#workspacePin(goal.sessionId, goal.branchId);
-          const staleError = this.#stalePinError(goal, currentPin);
-          for (const gate of gates.filter((item) => item.status === "running")) {
-            const effect = gate.effectId ? await this.storage.getOutbox(gate.effectId) : null;
-            const status = effect?.status === "succeeded" ? (staleError ? "failed" as const : "passed" as const) : effect?.status === "cancelled" ? "cancelled" as const : effect?.status === "failed" ? "failed" as const : "unknown" as const;
-            const error = effect?.status === "succeeded" ? staleError : status === "unknown" ? "Gate outcome is unknown because executor ownership was lost before a durable result" : undefined;
-            await this.storage.appendEvents([{ sessionId: goal.sessionId, branchId: goal.branchId, type: "GoalGateStatusChanged", producer: "recovery", idempotencyKey: `goal-gate-recovery:${goal.goalId}:${gate.gateId}:${goal.completionRequestId}`, payload: { goalId: goal.goalId, gateId: gate.gateId, status, ...(gate.effectId === undefined ? {} : { effectId: gate.effectId }), ...(error === undefined ? {} : { error }) } }]);
-          }
-          gates = await this.#recursive.listGoalGates(goal.goalId);
-          const failed = gates.filter((gate) => gate.required && ["failed", "cancelled", "unknown"].includes(gate.status));
-          if (staleError || failed.length) {
-            await this.storage.appendEvents([{ sessionId: goal.sessionId, branchId: goal.branchId, type: "GoalStatusChanged", producer: "recovery", idempotencyKey: `goal-gate-recovery-blocked:${goal.goalId}:${goal.completionRequestId}`, payload: { goalId: goal.goalId, status: "blocked", reason: staleError ?? `Required completion gate outcome is ${failed[0]!.status}: ${failed[0]!.error ?? failed[0]!.name}` } }]);
-          } else if (gates.every((gate) => !gate.required || gate.status === "passed")) {
-            await this.storage.appendEvents([{ sessionId: goal.sessionId, branchId: goal.branchId, type: "GoalStatusChanged", producer: "recovery", idempotencyKey: `goal-gate-recovery-completed:${goal.goalId}:${goal.completionRequestId}`, payload: { goalId: goal.goalId, status: "completed" } }]);
-          } else {
-            await this.requestCompletion(goal.sessionId, goal.branchId, goal.goalId);
-          }
-          recovered++;
-        }
-      }
-    }
-    // Re-read after gate reconciliation. Running continuations are awaited so a
-    // caller never observes startup recovery racing storage shutdown.
-    const resumedGoals = new Set<string>();
+    const seen = new Set<string>();
     for (const branch of await this.storage.listBranches()) {
       const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
       if (!events.length) continue;
-      const projected = projectEvents(events);
-      for (const candidate of Object.values(projected.goals)) {
-        if (resumedGoals.has(candidate.id)) continue;
-        resumedGoals.add(candidate.id);
+      for (const candidate of Object.values(projectEvents(events).goals)) {
+        if (seen.has(candidate.id)) continue;
+        seen.add(candidate.id);
         const goal = await this.#recursive.getGoal(candidate.id);
-        const ownedByAgentRun = Object.values(projected.agentRuns).some((run) => run.goalId === candidate.id && !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
-        if (goal?.status === "active" && !ownedByAgentRun) { await this.runContinuation(goal.sessionId, goal.branchId, goal.goalId, { maxTurns: goal.maxTurns ?? 1 }); recovered++; }
+        if (goal?.status !== "completion_requested") continue;
+        await this.requestCompletion(goal.sessionId, goal.branchId, goal.goalId);
+        recovered++;
       }
     }
     return recovered;
   }
 
-  async #workspacePin(sessionId: string, branchId: string): Promise<{ workspaceId: string; cursor: string | null }> {
-    const ignored = new Set(["GoalCompletionRequested", "GoalGateStatusChanged", "GoalStatusChanged", "EffectRequested", "EffectAttemptStarted", "EffectOutcomeRecorded", "RecoveryPerformed", "TaskUsageAttributed"]);
+  async completionEvaluationEventIds(goalId: string, requestId: string): Promise<string[]> {
+    return (await this.#recursive.listGoalGateEvaluations(goalId))
+      .filter((evaluation) => evaluation.requestId === requestId)
+      .map((evaluation) => evaluation.eventId);
+  }
+
+  async #requestPin(goal: GoalRecord): Promise<MaterialPin> {
+    if (goal.completionMaterialVersion) {
+      return {
+        workspaceId: goal.completionWorkspaceId ?? "legacy",
+        cursor: goal.completionWorkspaceCursor,
+        version: goal.completionMaterialVersion,
+        eventIds: [...goal.completionMaterialEventIds],
+      };
+    }
+    // Legacy completion requests retained only a workspace cursor. Translate
+    // that historical prefix through the same exhaustive material classifier
+    // so later material changes remain stale during recovery.
+    if (goal.completionPinRecorded && goal.completionWorkspaceId) {
+      const events = await this.storage.loadEvents(goal.sessionId, { branchId: goal.branchId });
+      const prefix = goal.completionWorkspaceCursor === null ? [] : events.filter((event) => BigInt(event.cursor) <= BigInt(goal.completionWorkspaceCursor!));
+      const pin = workspaceMaterialPin(prefix);
+      return { workspaceId: goal.completionWorkspaceId, cursor: goal.completionWorkspaceCursor, version: pin.version, eventIds: pin.eventIds };
+    }
+    return this.#workspacePin(goal.sessionId, goal.branchId);
+  }
+
+  async #workspacePin(sessionId: string, branchId: string): Promise<MaterialPin> {
     const events = await this.storage.loadEvents(sessionId, { branchId });
     if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
     const state = projectEvents(events);
-    return { workspaceId: state.workspaceId, cursor: [...events].reverse().find((event) => !ignored.has(event.type))?.cursor ?? null };
+    const pin = workspaceMaterialPin(events);
+    const cursorById = new Map(events.map((event) => [event.id, event.cursor]));
+    const cursor = pin.eventIds.length ? cursorById.get(pin.eventIds.at(-1)!) ?? null : null;
+    return { workspaceId: state.workspaceId, cursor, version: pin.version, eventIds: pin.eventIds };
   }
 
-  #stalePinError(goal: GoalRecord, current: { workspaceId: string; cursor: string | null }): string | undefined {
-    if (!goal.completionPinRecorded || !goal.completionWorkspaceId) return "Gate result is stale: completion request has no durable workspace pin";
-    if (goal.completionWorkspaceId !== current.workspaceId) return `Gate result is stale: workspace changed from ${goal.completionWorkspaceId} to ${current.workspaceId}`;
-    if (goal.completionWorkspaceCursor !== current.cursor) return `Gate result is stale: workspace cursor changed from ${goal.completionWorkspaceCursor ?? "empty"} to ${current.cursor ?? "empty"}`;
-    return undefined;
+  async #load(goalId: string): Promise<GoalHandle> {
+    const goal = await this.#recursive.getGoal(goalId);
+    if (!goal) throw new NotFoundError("goal", goalId);
+    const currentPin = await this.#workspacePin(goal.sessionId, goal.branchId);
+    const gates = await this.#recursive.listGoalGates(goalId);
+    const evaluations = await this.#recursive.listGoalGateEvaluations(goalId);
+    return {
+      ...goal,
+      gates: gates.map((gate) => {
+        const history = evaluations.filter((evaluation) => evaluation.gateId === gate.gateId);
+        const current = history.find((evaluation) => evaluation.evaluationId === gate.currentEvaluationId) ?? history.at(-1);
+        const currentStale = current !== undefined && current.materialVersion !== currentPin.version;
+        return {
+          ...gate, evaluations: history, currentStale,
+          ...(currentStale ? { currentStaleReason: `Gate evidence is stale: evaluated ${current!.materialVersion}, current workspace material is ${currentPin.version}` } : {}),
+        };
+      }),
+    };
   }
 
-  async #load(goalId: string): Promise<GoalHandle> { const goal = await this.#recursive.getGoal(goalId); if (!goal) throw new NotFoundError("goal", goalId); return { ...goal, gates: await this.#recursive.listGoalGates(goalId) }; }
+  #assertScope(goal: Pick<GoalRecord, "sessionId" | "branchId">, sessionId: string, branchId: string): void {
+    if (goal.sessionId !== sessionId || goal.branchId !== branchId) throw new ValidationError("Goal does not belong to the supplied session branch");
+  }
 }

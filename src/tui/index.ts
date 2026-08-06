@@ -16,7 +16,7 @@ export class TerminalUI {
         if (!line) continue;
         if (line === "/quit" || line === "/exit") break;
         if (line === "/help") {
-          output.write("/history /budget /snapshot /tree /agents /mailbox /tasks /goals /heartbeats /memory [query] /skills /refine <json> /rollback <proposal> <reason> /skill-test <entry> [version] /skill <entry> <json-input> /sync /sync-status /conflicts /resolve-conflict <id> <json> /cancel-task <id> [reason] /complete-goal <id> /stop /cell <ts> /branch <cursor> [name] /resume [branch] /compact /quit\n");
+          output.write("/history /budget /snapshot /tree /agents /mailbox /tasks /goals /goal [create DESCRIPTION|pause|resume|clear|complete] /heartbeats /heartbeat [create MS PROMPT|pause N|resume N|clear N] /schedules /schedule [once ISO PROMPT|every MS PROMPT|pause N|resume N|clear N] /memory [query] /skills /stop /cell <ts> /branch <cursor> [name] /resume [branch] /compact /quit\n");
           continue;
         }
         if (line === "/history") { for (const event of await this.supervisor.projections.history(sessionId, branch)) output.write(`${event.cursor} ${event.type} ${JSON.stringify(event.payload)}\n`); continue; }
@@ -26,8 +26,28 @@ export class TerminalUI {
         if (line === "/agents") { output.write(`${JSON.stringify((await this.supervisor.agents.listFamily(sessionId, branch)).items, null, 2)}\n`); continue; }
         if (line === "/mailbox") { const messages = await this.supervisor.agents.messages(sessionId, branch, { limit: 50 }); for (const message of messages.items) output.write(`${message.sentAt} ${message.relationship} ${message.senderName ?? message.fromSessionId} -> ${message.recipientName ?? message.toSessionId} [${message.receiptStatus}] ${message.content}${message.taskId ? ` task=${message.taskId}` : ""}${message.artifactIds.length ? ` artifacts=${message.artifactIds.join(",")}` : ""}\n`); continue; }
         if (line === "/tasks") { output.write(`${JSON.stringify(await this.supervisor.agents.listTasks(sessionId, branch), null, 2)}\n`); continue; }
-        if (line === "/goals") { const { state } = await this.supervisor.projections.getSnapshot(sessionId, branch); output.write(`${JSON.stringify(Object.values(state.goals), null, 2)}\n`); continue; }
-        if (line === "/heartbeats") { const { state } = await this.supervisor.projections.getSnapshot(sessionId, branch); output.write(`${JSON.stringify(Object.values(state.heartbeats), null, 2)}\n`); continue; }
+        if (line === "/goals" || line === "/goal") { output.write(`${JSON.stringify(await this.supervisor.goals.list(sessionId, branch), null, 2)}\n`); continue; }
+        if (line.startsWith("/goal ")) {
+          const command = line.slice(6).trim();
+          if (command.startsWith("create ")) output.write(`${JSON.stringify(await this.supervisor.goals.create(sessionId, branch, command.slice(7)), null, 2)}\n`);
+          else { const current = await this.supervisor.goals.current(sessionId, branch); if (!current) output.write("No current goal.\n"); else if (command === "pause") output.write(`${JSON.stringify(await this.supervisor.goals.pause(sessionId, branch, current.goalId), null, 2)}\n`); else if (command === "resume") output.write(`${JSON.stringify(await this.supervisor.goals.resume(sessionId, branch, current.goalId), null, 2)}\n`); else if (command === "clear") output.write(`${JSON.stringify(await this.supervisor.goals.clear(sessionId, branch, current.goalId), null, 2)}\n`); else if (command === "complete") output.write(`${JSON.stringify(await this.supervisor.goals.requestCompletion(sessionId, branch, current.goalId), null, 2)}\n`); }
+          continue;
+        }
+        if (line === "/heartbeats") { const items = await this.supervisor.heartbeats.list(sessionId, branch); items.forEach((item, index) => output.write(`${index + 1}) ${item.status} every ${item.intervalMs}ms next=${item.nextTickAt} owner=${item.owner} ${item.prompt ?? JSON.stringify(item.payload ?? "")}\n`)); continue; }
+        if (line.startsWith("/heartbeat ")) {
+          const command = line.slice(11).trim(); const create = /^create\s+(\d+)(?:\s+([\s\S]+))?$/.exec(command); const change = /^(pause|resume|clear)\s+(\d+)$/.exec(command);
+          if (create) output.write(`${JSON.stringify(await this.supervisor.heartbeats.create(sessionId, branch, { intervalMs: Number(create[1]), ...(create[2] ? { prompt: create[2] } : {}) }), null, 2)}\n`);
+          else if (change) { const item = (await this.supervisor.heartbeats.list(sessionId, branch))[Number(change[2]) - 1]; if (!item) output.write("Heartbeat number not found.\n"); else output.write(`${JSON.stringify(change[1] === "pause" ? await this.supervisor.heartbeats.pause(item.heartbeatId) : change[1] === "resume" ? await this.supervisor.heartbeats.resume(item.heartbeatId) : await this.supervisor.heartbeats.cancel(item.heartbeatId), null, 2)}\n`); }
+          continue;
+        }
+        if (line === "/schedules") { const items = await this.supervisor.schedules.list(sessionId, branch); items.forEach((item, index) => output.write(`${index + 1}) ${item.status} ${item.kind}${item.intervalMs ? ` ${item.intervalMs}ms` : ""} next=${item.nextTickAt} owner=${item.owner} ${item.prompt}\n`)); continue; }
+        if (line.startsWith("/schedule ")) {
+          const command = line.slice(10).trim(); const once = /^once\s+(\S+)\s+([\s\S]+)$/.exec(command); const every = /^every\s+(\d+)\s+([\s\S]+)$/.exec(command); const change = /^(pause|resume|clear)\s+(\d+)$/.exec(command);
+          if (once) output.write(`${JSON.stringify(await this.supervisor.schedules.create(sessionId, branch, { at: once[1]!, prompt: once[2]! }), null, 2)}\n`);
+          else if (every) output.write(`${JSON.stringify(await this.supervisor.schedules.create(sessionId, branch, { intervalMs: Number(every[1]), prompt: every[2]! }), null, 2)}\n`);
+          else if (change) { const item = (await this.supervisor.schedules.list(sessionId, branch))[Number(change[2]) - 1]; if (!item) output.write("Schedule number not found.\n"); else output.write(`${JSON.stringify(change[1] === "pause" ? await this.supervisor.schedules.pause(item.scheduleId) : change[1] === "resume" ? await this.supervisor.schedules.resume(item.scheduleId) : await this.supervisor.schedules.clear(item.scheduleId), null, 2)}\n`); }
+          continue;
+        }
         if (line === "/memory" || line.startsWith("/memory ")) { const query=line.slice(7).trim(); output.write(`${JSON.stringify(query ? await this.supervisor.memory.search(sessionId,branch,query) : await this.supervisor.memory.list(sessionId,branch),null,2)}\n`); continue; }
         if (line === "/skills") { output.write(`${JSON.stringify(await this.supervisor.harness.list({kind:"skill"}),null,2)}\n`); continue; }
         if (line === "/sync") { output.write(`${JSON.stringify(await this.supervisor.sync.sync("manual"),null,2)}\n`); continue; }
@@ -39,7 +59,6 @@ export class TerminalUI {
         if (line.startsWith("/skill-test ")) { const [,entryId,versionId]=line.split(/\s+/); if(entryId) output.write(`${JSON.stringify(await this.supervisor.skills.test(sessionId,branch,entryId,versionId),null,2)}\n`); continue; }
         if (line.startsWith("/skill ")) { const match=line.match(/^\/skill\s+(\S+)\s+([\s\S]+)$/); if(match) output.write(`${JSON.stringify(await this.supervisor.skills.invoke(sessionId,branch,match[1]!,JSON.parse(match[2]!)),null,2)}\n`); continue; }
         if (line.startsWith("/cancel-task ")) { const [, taskId, ...reason] = line.split(/\s+/); if (taskId) output.write(`${JSON.stringify(await this.supervisor.agents.cancel(sessionId, branch, taskId, reason.join(" ") || undefined), null, 2)}\n`); continue; }
-        if (line.startsWith("/complete-goal ")) { const goalId = line.slice(15).trim(); if (goalId) output.write(`${JSON.stringify(await this.supervisor.goals.requestCompletion(sessionId, branch, goalId), null, 2)}\n`); continue; }
         if (line === "/stop") {
           const snapshot = await this.supervisor.projections.getSnapshot(sessionId, branch);
           const active = Object.values(snapshot.state.agentRuns).find(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
@@ -66,7 +85,7 @@ export class TerminalUI {
           output.write(`Run ${active.id} is already ${active.status}; use /stop or wait for its durable boundary.\n`);
           continue;
         } else {
-          result = await this.supervisor.runs.start(sessionId, branch, line);
+          result = await this.supervisor.runs.start(sessionId, branch, { task: line, goalMode: "auto" });
         }
         if (result.status === "succeeded") output.write(`${result.final ?? ""}\n`);
         else if (result.status === "waiting_for_user") output.write(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}\n`);

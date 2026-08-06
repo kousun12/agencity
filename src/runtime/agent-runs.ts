@@ -9,6 +9,7 @@ import {
   ValidationError,
   type AgentAction,
   type AgentEvent,
+  type AgentRunGoalMode,
   type AgentRunInputRequestState,
   type AgentRunState,
   type AgentRunStatus,
@@ -21,7 +22,7 @@ import {
 import type { AgentStorage } from "../storage/index.ts";
 import type { ContextMaterializer } from "./context.ts";
 import { stableEffectId, type OutboxRunner } from "./outbox.ts";
-import type { GoalService } from "./goals.ts";
+import type { CreateGoalInput, GoalHandle, GoalService } from "./goals.ts";
 
 interface ModelOutput { readonly text: string; readonly finishReason: string; readonly usage: Usage }
 
@@ -29,7 +30,14 @@ export interface StartAgentRunInput {
   readonly task: string;
   /** Stable caller intent. Reusing it returns the same durable run. */
   readonly requestKey?: string;
+  /** Explicit goal selection; product tasks use auto/current/create, never prose inference. */
+  readonly goalMode?: AgentRunGoalMode;
+  /** Goal definition used only when goalMode creates a goal. Defaults to the task. */
+  readonly goal?: CreateGoalInput;
+  /** Legacy/internal exact goal attachment. Mutually exclusive with create. */
   readonly goalId?: string;
+  /** Durable wake provenance for scheduled AgentRun delivery. */
+  readonly wakeId?: string;
   /** Internal stable run identity used by retained family delivery recovery. */
   readonly requestedRunId?: string;
   /** Internal: the task is already a provenance-rich mailbox/session message. */
@@ -78,8 +86,8 @@ const OBSERVATION_TYPES = new Set([
   "TaskStatusChanged", "MailboxMessageSent", "MailboxMessageDelivered",
   "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged", "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered",
   "RecursiveModelStarted", "RecursiveModelStatusChanged", "SkillInvocationRecorded",
-  "SubagentSpecInvoked", "AgentRunUserInputReceived", "GoalGateStatusChanged",
-  "GoalStatusChanged", "RefinementObservationRecorded", "RefinementDecided",
+  "SubagentSpecInvoked", "AgentRunUserInputReceived", "AgentRunGoalCheckRecorded",
+  "RefinementObservationRecorded", "RefinementDecided",
 ]);
 
 const SDK_GUIDE = [
@@ -87,7 +95,7 @@ const SDK_GUIDE = [
   "Cell globals: sdk, sql, session, console, state, artifacts, tools, inspect, cells, rlm.",
   "Use tools.readFile(path), tools.writeFile(path, content, expectedSha256?), and tools.shell(command, options?) for repository work.",
   "Use sql`SELECT ... ${value}` only for read-only relational queries; use state.get/set/list for durable JSON and artifacts.put/get for larger content.",
-  "Use cells.list/get for retained notebook history; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
+  "Use cells.list/get for retained notebook history; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
   "A cell's final expression or explicit return is its bounded observation. Values in lexical bindings or globalThis disappear after the committed cell boundary.",
   "Inspect first, make focused changes, run verification, and return a final action only when the task is actually complete.",
 ].join("\n");
@@ -130,38 +138,69 @@ export class AgentRunService {
     if (typeof input !== "string" && (!input || typeof input !== "object" || Array.isArray(input))) {
       throw new ValidationError("Agent run input must be a task string or object");
     }
-    const normalized = typeof input === "string" ? { task: input } : input;
+    const normalized: StartAgentRunInput = typeof input === "string" ? { task: input, goalMode: "none" } : input;
     if (typeof normalized.task !== "string") throw new ValidationError("Agent run task must be a string");
     const task = normalized.task.trim();
     if (!task) throw new ValidationError("Agent run task cannot be empty");
-    if (normalized.requestKey !== undefined && (typeof normalized.requestKey !== "string" || !normalized.requestKey.trim())) {
-      throw new ValidationError("Agent run requestKey must be a non-empty string");
-    }
-    if (normalized.goalId !== undefined && (typeof normalized.goalId !== "string" || !normalized.goalId.trim())) {
-      throw new ValidationError("Agent run goalId must be a non-empty string");
-    }
+    if (normalized.requestKey !== undefined && (typeof normalized.requestKey !== "string" || !normalized.requestKey.trim())) throw new ValidationError("Agent run requestKey must be a non-empty string");
+    if (normalized.goalId !== undefined && (typeof normalized.goalId !== "string" || !normalized.goalId.trim())) throw new ValidationError("Agent run goalId must be a non-empty string");
+    if (normalized.goalMode !== undefined && !["none", "auto", "current", "create"].includes(normalized.goalMode)) throw new ValidationError("Agent run goalMode must be none, auto, current, or create");
+    if (normalized.goalId && normalized.goalMode === "create") throw new ValidationError("Agent run cannot create and attach an exact goal simultaneously");
+    if (normalized.goal && normalized.goalMode !== "auto" && normalized.goalMode !== "create") throw new ValidationError("Agent run goal definition requires goalMode auto or create");
+    if (normalized.wakeId !== undefined && (typeof normalized.wakeId !== "string" || !normalized.wakeId.trim())) throw new ValidationError("Agent run wakeId must be a non-empty string");
     if (normalized.requestedRunId !== undefined && (typeof normalized.requestedRunId !== "string" || !normalized.requestedRunId.trim())) throw new ValidationError("Agent run requestedRunId must be a non-empty string");
     if (normalized.suppressTaskMessage !== undefined && typeof normalized.suppressTaskMessage !== "boolean") throw new ValidationError("Agent run suppressTaskMessage must be boolean");
+    const requestedGoalMode: AgentRunGoalMode = normalized.goalId ? "current" : normalized.goalMode ?? "none";
     const requestKey = normalized.requestKey ?? `agent-run-request:${newId()}`;
     const result = await this.#runs.run(`${sessionId}/${branchId}`, async () => {
       let state = await this.#state(sessionId, branchId);
       const existing = Object.values(state.agentRuns).find((run) => run.requestKey === requestKey);
       if (existing) {
-        if (existing.task !== task || existing.goalId !== (normalized.goalId ?? null)) {
+        if (existing.task !== task || existing.goalMode !== requestedGoalMode || existing.wakeId !== (normalized.wakeId ?? null) || (normalized.goalId !== undefined && existing.goalId !== normalized.goalId)) {
           throw new ValidationError("Agent run requestKey was reused with different durable meaning");
         }
         return this.#advance(sessionId, branchId, existing.id);
       }
       const active = Object.values(state.agentRuns).find((run) => !isTerminal(run.status));
       if (active) throw new ValidationError(`Agent run ${active.id} is already ${active.status}`);
-      if (normalized.goalId && !state.goals[normalized.goalId]) throw new NotFoundError("goal", normalized.goalId);
       const runId = normalized.requestedRunId ?? newId();
-      const requested = { sessionId, branchId, type: "AgentRunRequested" as const, producer: "client", idempotencyKey: `agent-run-request:${runId}`, payload: { runId, task, requestKey, ...(normalized.goalId === undefined ? {} : { goalId: normalized.goalId }) } };
-      await this.storage.appendEvents(normalized.suppressTaskMessage ? [requested] : [{
+      const currentGoal = Object.values(state.goals).find((goal) => !["completed", "failed", "cancelled"].includes(goal.status));
+      let goalId = normalized.goalId;
+      const atomic: any[] = [];
+      if (goalId) {
+        const exact = state.goals[goalId];
+        if (!exact) throw new NotFoundError("goal", goalId);
+        if (["completed", "failed", "cancelled", "paused"].includes(exact.status)) throw new ValidationError(`Cannot attach a ${exact.status} goal`);
+      } else if (requestedGoalMode === "current") {
+        if (!currentGoal || currentGoal.status === "paused") throw new ValidationError("goalMode current requires an active current goal");
+        goalId = currentGoal.id;
+      } else if (requestedGoalMode === "auto" && currentGoal && currentGoal.status !== "paused") {
+        goalId = currentGoal.id;
+      } else if (requestedGoalMode === "create" || requestedGoalMode === "auto") {
+        if (currentGoal) throw new ValidationError(`Cannot create a goal while current goal ${currentGoal.id} is ${currentGoal.status}`);
+        goalId = `agent-run-goal:${runId}`;
+        atomic.push(...await this.goals.prepareCreateEvents(sessionId, branchId, normalized.goal ?? { description: task }, goalId, "client"));
+      }
+      const selected = goalId ? state.goals[goalId] : undefined;
+      if (selected?.status === "blocked") {
+        atomic.push({ sessionId, branchId, type: "GoalStatusChanged", producer: "client", idempotencyKey: `goal-run-resume:${goalId}:${runId}`, payload: { goalId, status: "active", reason: "Product run continued current goal" } });
+      }
+      const requested = {
+        sessionId, branchId, type: "AgentRunRequested" as const, producer: "client",
+        idempotencyKey: `agent-run-request:${runId}`,
+        payload: {
+          runId, task, requestKey, goalMode: requestedGoalMode,
+          ...(goalId === undefined ? {} : { goalId }),
+          ...(normalized.wakeId === undefined ? {} : { wakeId: normalized.wakeId }),
+        },
+      };
+      if (!normalized.suppressTaskMessage) atomic.push({
         sessionId, branchId, type: "MessageAppended", producer: "client",
         idempotencyKey: `agent-run-task-message:${runId}`,
         payload: { messageId: `agent-run-task-${runId}`, role: "user", content: task },
-      }, requested]);
+      });
+      atomic.push(requested);
+      await this.storage.appendEvents(atomic);
       state = await this.#state(sessionId, branchId);
       if (!state.agentRuns[runId]) throw new Error("Agent run request was not committed");
       return this.#advance(sessionId, branchId, runId);
@@ -268,6 +307,24 @@ export class AgentRunService {
     return recovered;
   }
 
+  /** Migrates orphan legacy active goals onto the single typed AgentRun loop. */
+  async recoverOrphanGoals(): Promise<number> {
+    let recovered = 0;
+    for (const branch of await this.storage.listBranches()) {
+      if (!await this.#isExecutionOwner(branch.sessionId)) continue;
+      const state = await this.#state(branch.sessionId, branch.branchId).catch(() => null);
+      if (!state || Object.values(state.agentRuns).some((run) => !isTerminal(run.status))) continue;
+      const orphan = Object.values(state.goals).find((goal) => goal.status === "active" && !Object.values(state.agentRuns).some((run) => run.goalId === goal.id));
+      if (!orphan) continue;
+      await this.start(branch.sessionId, branch.branchId, {
+        task: orphan.description, goalId: orphan.id, goalMode: "current",
+        requestKey: `legacy-goal-run:${orphan.id}`, requestedRunId: `legacy-goal-run:${orphan.id}`,
+      });
+      recovered++;
+    }
+    return recovered;
+  }
+
   async #advance(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> {
     await this.#assertExecutionOwner(sessionId);
     while (true) {
@@ -341,7 +398,8 @@ export class AgentRunService {
       if (isTerminal(run.status) || run.status === "waiting_for_user") continue;
       if (run.cancellationRequested) continue;
       if (step.rejection) {
-        await this.#terminal(sessionId, branchId, run, "failed", `Rejected model action: ${step.rejection}`);
+        const failedCheck = Object.values(run.goalChecks).at(-1);
+        await this.#terminal(sessionId, branchId, run, failedCheck?.status === "failed" ? "blocked" : "failed", failedCheck?.status === "failed" ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}` : `Rejected model action: ${step.rejection}`);
         continue;
       }
       const action = step.action!;
@@ -440,7 +498,8 @@ export class AgentRunService {
     }
     if (call.status !== "succeeded") {
       const runNow = current.agentRuns[run.id]!;
-      const status = call.status === "unknown" ? "unknown" : call.status === "cancelled" || runNow.cancellationRequested ? "cancelled" : "failed";
+      const failedCheck = Object.values(runNow.goalChecks).at(-1);
+      const status = call.status === "unknown" ? "unknown" : call.status === "cancelled" || runNow.cancellationRequested ? "cancelled" : failedCheck?.status === "failed" ? "blocked" : "failed";
       if (status === "cancelled" && !runNow.cancellationRequested) {
         await this.storage.appendEvents([{
           sessionId, branchId, type: "AgentRunCancellationRequested", producer: "supervisor",
@@ -449,6 +508,7 @@ export class AgentRunService {
       }
       const terminalReason = status === "cancelled"
         ? runNow.cancellationReason ?? call.error ?? "Cancellation requested"
+        : status === "blocked" ? `Goal repair stopped after a failed required gate: ${failedCheck!.summary}`
         : call.error ?? `Model call ${call.status}`;
       await this.#terminal(sessionId, branchId, (await this.#state(sessionId, branchId)).agentRuns[run.id]!, status, terminalReason);
       return;
@@ -485,7 +545,9 @@ export class AgentRunService {
     if (action.type === "final") {
       const messageId = `agent-run-final-${run.id}`;
       const message = state.messages.find((candidate) => candidate.id === messageId);
-      return run.status === "succeeded" && run.finalMessageId === messageId && message?.role === "assistant" && message.content === action.content;
+      if (run.status === "succeeded" && run.finalMessageId === messageId && message?.role === "assistant" && message.content === action.content) return true;
+      const check = run.goalChecks[actionId];
+      return check?.status === "failed" || (check?.status === "unknown" && run.status === "unknown");
     }
     if (action.type === "blocked") return run.status === "blocked" && run.reason === action.reason;
     return run.status === "failed" && run.reason === action.error;
@@ -546,18 +608,58 @@ export class AgentRunService {
     }
 
     // A final response with an attached goal is provisional until every
-    // required gate passes against the current attributable workspace pin.
+    // required gate passes against the attributable workspace material pin.
     if (run.goalId) {
-      const goal = await this.goals.requestCompletion(sessionId, branchId, run.goalId);
-      const unknown = goal.gates.find((gate) => gate.required && gate.status === "unknown");
-      if (unknown) {
-        await this.#terminal(sessionId, branchId, run, "unknown", unknown.error ?? `Required completion gate ${unknown.name} is unknown`);
+      const prior = run.goalChecks[actionId];
+      if (!prior) {
+        const goal = await this.goals.requestCompletion(sessionId, branchId, run.goalId);
+        const requestId = goal.completionRequestId;
+        if (!requestId) throw new ValidationError("Gate-checked goal is missing its completion request ID");
+        const unknown = goal.gates.find((gate) => gate.required && gate.status === "unknown");
+        const status = unknown ? "unknown" as const : goal.status === "completed" ? "passed" as const : "failed" as const;
+        const summary = boundedGoalSummary(goal, status);
+        const gateEvaluationEventIds = await this.goals.completionEvaluationEventIds(goal.goalId, requestId);
+        const check = {
+          sessionId, branchId, type: "AgentRunGoalCheckRecorded" as const, producer: "supervisor",
+          idempotencyKey: `agent-run-goal-check:${run.id}:${actionId}`,
+          payload: { runId: run.id, actionId, goalId: goal.goalId, requestId, status, summary, gateEvaluationEventIds },
+        };
+        if (status === "failed") {
+          // The bounded check record is the one exact-once next-step
+          // observation; raw gate/effect chatter remains queryable history.
+          await this.storage.appendEvents([check, {
+            sessionId, branchId, type: "GoalStatusChanged", producer: "supervisor",
+            idempotencyKey: `agent-run-goal-repair:${run.id}:${actionId}`,
+            payload: { goalId: goal.goalId, status: "active", reason: "Agent run continuing after required completion gates did not pass" },
+          }]);
+          return true;
+        }
+        if (status === "unknown") {
+          await this.storage.appendEvents([check, {
+            sessionId, branchId, type: "AgentRunStatusChanged", producer: "supervisor",
+            idempotencyKey: `agent-run-terminal:${run.id}`,
+            payload: { runId: run.id, status: "unknown", reason: summary },
+          }]);
+          return true;
+        }
+        const messageId = `agent-run-final-${run.id}`;
+        await this.storage.appendEvents([check, {
+          sessionId, branchId, type: "MessageAppended", producer: "supervisor",
+          idempotencyKey: `agent-run-final-message:${run.id}`,
+          payload: { messageId, role: "assistant", content: action.content },
+        }, {
+          sessionId, branchId, type: "AgentRunStatusChanged", producer: "supervisor",
+          idempotencyKey: `agent-run-succeeded:${run.id}`,
+          payload: { runId: run.id, status: "succeeded", finalMessageId: messageId },
+        }]);
         return true;
       }
-      if (goal.status !== "completed") {
-        await this.#terminal(sessionId, branchId, run, goal.status === "failed" ? "failed" : "blocked", goal.reason ?? "Required completion gates did not pass");
+      if (prior.status === "failed") return true;
+      if (prior.status === "unknown") {
+        await this.#terminal(sessionId, branchId, run, "unknown", prior.summary);
         return true;
       }
+      // Recovery after a retained passed check but before terminal commit.
     }
     const messageId = `agent-run-final-${run.id}`;
     await this.storage.appendEvents([{
@@ -579,16 +681,26 @@ export class AgentRunService {
     status: Exclude<AgentRunStatus, "queued" | "running" | "waiting_for_user" | "succeeded">,
     reason: string,
   ): Promise<void> {
-    const current = (await this.#state(sessionId, branchId)).agentRuns[run.id];
+    const state = await this.#state(sessionId, branchId);
+    const current = state.agentRuns[run.id];
     if (!current || isTerminal(current.status)) return;
     if (status === "cancelled" && !current.cancellationRequested) {
       throw new ValidationError("An agent run must record cancellation intent before becoming cancelled");
     }
-    await this.storage.appendEvents([{
+    const events: any[] = [];
+    const goal = current.goalId ? state.goals[current.goalId] : undefined;
+    const failedCheck = Object.values(current.goalChecks).at(-1);
+    const effectiveStatus = status === "failed" && failedCheck?.status === "failed" ? "blocked" : status;
+    const effectiveReason = effectiveStatus === "blocked" && failedCheck?.status === "failed" ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}` : reason;
+    if (effectiveStatus === "blocked" && goal?.status === "active" && failedCheck?.status === "failed") {
+      events.push({ sessionId, branchId, type: "GoalStatusChanged", producer: "supervisor", idempotencyKey: `agent-run-goal-bounded:${run.id}`, payload: { goalId: goal.id, status: "blocked", reason: effectiveReason } });
+    }
+    events.push({
       sessionId, branchId, type: "AgentRunStatusChanged", producer: "supervisor",
       idempotencyKey: `agent-run-terminal:${run.id}`,
-      payload: { runId: run.id, status, reason },
-    }]);
+      payload: { runId: run.id, status: effectiveStatus, reason: effectiveReason },
+    });
+    await this.storage.appendEvents(events);
   }
 
   async #finalizeTerminated(
@@ -650,10 +762,11 @@ export class AgentRunService {
   #unobserved(events: readonly AgentEvent[], run: AgentRunState): string[] {
     const observed = new Set(run.steps.flatMap((step) => step.observationEventIds));
     const modelEffects = new Set(run.steps.map((step) => step.effectId));
+    const gateEffects = new Set(events.filter((event) => event.type === "GoalGateEvaluationRecorded").map((event) => (event.payload as EventPayloads["GoalGateEvaluationRecorded"]).effectId).filter((id): id is string => id !== undefined));
     const requestIndex = events.findIndex((event) => event.id === run.requestEventId);
     return events.slice(requestIndex + 1).filter((event) => {
       if (!OBSERVATION_TYPES.has(event.type) || observed.has(event.id)) return false;
-      if (event.type === "EffectOutcomeRecorded" && modelEffects.has((event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId)) return false;
+      if (event.type === "EffectOutcomeRecorded" && (modelEffects.has((event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId) || gateEffects.has((event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId))) return false;
       return true;
     }).map((event) => event.id);
   }
@@ -787,6 +900,18 @@ function budgetReached(
   if (limits.turnLimit !== undefined && spent.turns >= limits.turnLimit) return { dimension: "turns", limit: limits.turnLimit, spent: spent.turns };
   if (limits.wallTimeLimitMs !== undefined && spent.wallTimeMs >= limits.wallTimeLimitMs) return { dimension: "wallTime", limit: limits.wallTimeLimitMs, spent: spent.wallTimeMs };
   return null;
+}
+
+function boundedGoalSummary(goal: GoalHandle, status: "passed" | "failed" | "unknown"): string {
+  const gates = goal.gates.filter((gate) => gate.required).map((gate) => ({
+    gateId: gate.gateId, name: gate.name, status: gate.status,
+    currentStale: gate.currentStale,
+    ...(gate.output === undefined ? {} : { output: gate.output }),
+    ...(gate.error === undefined ? {} : { error: gate.error }),
+    ...(gate.currentStaleReason === undefined ? {} : { staleReason: gate.currentStaleReason }),
+  }));
+  const encoded = JSON.stringify({ status, goalId: goal.goalId, reason: goal.reason ?? null, gates });
+  return encoded.length <= 16_384 ? encoded : `${encoded.slice(0, 16_383)}…`;
 }
 
 function isTerminal(status: AgentRunStatus): boolean { return TERMINAL_RUN_STATUSES.includes(status); }

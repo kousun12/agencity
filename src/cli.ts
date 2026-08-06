@@ -22,7 +22,7 @@ import { ProtocolServer } from "./protocol/index.ts";
 import { Supervisor } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "doctor", "config"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config"]);
 
 try {
   await main(parseCliArgs(Bun.argv.slice(2)));
@@ -48,6 +48,8 @@ async function main(parsed: ParsedCliArgs): Promise<void> {
 async function runProduct(parsed: ParsedCliArgs): Promise<void> {
   const option = (name: string): string | undefined => parsed.values.get(name);
   if (option("workspace") && option("workspace-root")) throw new ValidationError("Use either --workspace or --workspace-root, not both");
+  const goalMode = option("goal") ?? "auto";
+  if (!["auto", "current", "create"].includes(goalMode)) throw new ValidationError("--goal must be auto, current, or create");
   const workspaceOverride = option("workspace") ?? option("workspace-root");
   const configuredStateDirectory = option("state-dir");
   const configuredDatabase = option("db");
@@ -101,13 +103,17 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
 
     const availability = modelAvailability(supervisor, summary.model);
     printStartup(workspace, summary, availability.usable, availability.remediation);
+    if (["goals", "heartbeats", "schedules"].includes(parsed.command)) {
+      await manageAutonomy(supervisor, selection.sessionId, selection.branchId, parsed);
+      return;
+    }
     if (task) {
       if (!availability.usable) {
         const reason = availability.remediation ?? `provider ${summary.model.provider} is unavailable`;
         if (parsed.command === "run") throw new ValidationError(`Run blocked: ${reason}`);
         console.error(`Run blocked: ${reason}`);
       } else {
-        const result = await supervisor.runs.start(selection.sessionId, selection.branchId, task);
+        const result = await supervisor.runs.start(selection.sessionId, selection.branchId, { task, goalMode: goalMode as "auto" | "current" | "create" });
         if (result.status === "succeeded") console.log(result.final ?? "");
         else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
         else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
@@ -120,6 +126,42 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     prompter.close();
     await supervisor.close();
   }
+}
+
+async function manageAutonomy(supervisor: Supervisor, sessionId: string, branchId: string, parsed: ParsedCliArgs): Promise<void> {
+  const [action, ...rest] = parsed.positionals;
+  const print = (value: unknown): void => console.log(JSON.stringify(value, null, 2));
+  if (parsed.command === "goals") {
+    if (!action) { print(await supervisor.goals.list(sessionId, branchId)); return; }
+    if (action === "create") { const description = rest.join(" ").trim(); if (!description) throw new ValidationError("goals create requires DESCRIPTION"); print(await supervisor.goals.create(sessionId, branchId, description)); return; }
+    const current = await supervisor.goals.current(sessionId, branchId); if (!current) throw new ValidationError("No current goal");
+    if (action === "pause") print(await supervisor.goals.pause(sessionId, branchId, current.goalId));
+    else if (action === "resume") print(await supervisor.goals.resume(sessionId, branchId, current.goalId));
+    else if (action === "clear") print(await supervisor.goals.clear(sessionId, branchId, current.goalId));
+    else if (action === "complete") print(await supervisor.goals.requestCompletion(sessionId, branchId, current.goalId));
+    else throw new ValidationError("goals action must be create, pause, resume, clear, or complete");
+    return;
+  }
+  if (parsed.command === "heartbeats") {
+    const items = await supervisor.heartbeats.list(sessionId, branchId);
+    if (!action) { print(items.map((item, index) => ({ number: index + 1, ...item }))); return; }
+    if (action === "create") { const intervalMs = Number(rest.shift()); if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) throw new ValidationError("heartbeats create requires positive INTERVAL_MS"); print(await supervisor.heartbeats.create(sessionId, branchId, { intervalMs, ...(rest.length ? { prompt: rest.join(" ") } : {}) })); return; }
+    const number = Number(rest[0]); const item = items[number - 1]; if (!item) throw new ValidationError("Heartbeat number not found");
+    if (action === "pause") print(await supervisor.heartbeats.pause(item.heartbeatId));
+    else if (action === "resume") print(await supervisor.heartbeats.resume(item.heartbeatId));
+    else if (action === "clear") print(await supervisor.heartbeats.cancel(item.heartbeatId));
+    else throw new ValidationError("heartbeats action must be create, pause, resume, or clear");
+    return;
+  }
+  const items = await supervisor.schedules.list(sessionId, branchId);
+  if (!action) { print(items.map((item, index) => ({ number: index + 1, ...item }))); return; }
+  if (action === "once") { const at = rest.shift(); const prompt = rest.join(" ").trim(); if (!at || !prompt) throw new ValidationError("schedules once requires ISO_TIME PROMPT"); print(await supervisor.schedules.create(sessionId, branchId, { at, prompt })); return; }
+  if (action === "every") { const intervalMs = Number(rest.shift()); const prompt = rest.join(" ").trim(); if (!Number.isSafeInteger(intervalMs) || intervalMs < 1 || !prompt) throw new ValidationError("schedules every requires INTERVAL_MS PROMPT"); print(await supervisor.schedules.create(sessionId, branchId, { intervalMs, prompt })); return; }
+  const number = Number(rest[0]); const item = items[number - 1]; if (!item) throw new ValidationError("Schedule number not found");
+  if (action === "pause") print(await supervisor.schedules.pause(item.scheduleId));
+  else if (action === "resume") print(await supervisor.schedules.resume(item.scheduleId));
+  else if (action === "clear") print(await supervisor.schedules.clear(item.scheduleId));
+  else throw new ValidationError("schedules action must be once, every, pause, resume, or clear");
 }
 
 async function selectExisting(
@@ -289,7 +331,7 @@ async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspac
 }
 
 function taskFor(parsed: ParsedCliArgs): string | undefined {
-  if (parsed.command === "resume") return undefined;
+  if (["resume", "goals", "heartbeats", "schedules"].includes(parsed.command)) return undefined;
   const task = parsed.positionals.join(" ").trim();
   if (parsed.command === "run" && !task) throw new ValidationError("run requires TASK");
   return task || undefined;
@@ -335,9 +377,13 @@ Product commands:
   agencity new [TASK]             Create a distinct root session
   agencity resume [NAME|ID]       Resume durable work (no IDs required)
   agencity sessions               List named workspace sessions and branches
+  agencity goals [ACTION]         List/create/pause/resume/clear/complete the current goal
+  agencity heartbeats [ACTION]    List/create or manage a numbered user heartbeat
+  agencity schedules [ACTION]     List/create or manage a numbered once/interval schedule
   agencity sessions --select NAME Persist an explicit recent selection
   agencity sessions --session ID --name NAME [--branch ID]
   agencity run TASK               Run the typed autonomous TypeScript loop and exit
+  --goal auto|current|create      Explicit goal selection (default: auto; never inferred from prose)
   agencity doctor [--json]        Check runtime, providers, recovery, and sync
   agencity config [--json]        Inspect non-secret preferences/references
   agencity config set-model PROVIDER/MODEL

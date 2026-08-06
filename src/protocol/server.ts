@@ -45,7 +45,15 @@ export class ProtocolServer {
         const body = await jsonBody(request);
         if (parts[2] === "tick") return Response.json(await this.supervisor.heartbeats.tick(parts[1], typeof body.at === "string" ? body.at : new Date()));
         if (parts[2] === "pause") return Response.json(await this.supervisor.heartbeats.pause(parts[1], typeof body.reason === "string" ? body.reason : undefined));
-        if (parts[2] === "cancel") return Response.json(await this.supervisor.heartbeats.cancel(parts[1], typeof body.reason === "string" ? body.reason : undefined));
+        if (parts[2] === "resume") return Response.json(await this.supervisor.heartbeats.resume(parts[1], typeof body.nextTickAt === "string" ? body.nextTickAt : undefined));
+        if (parts[2] === "clear" || parts[2] === "cancel") return Response.json(await this.supervisor.heartbeats.cancel(parts[1], typeof body.reason === "string" ? body.reason : undefined));
+      }
+      if (parts[0] === "schedules" && parts[1] && request.method === "POST") {
+        const body = await jsonBody(request);
+        if (parts[2] === "tick") return Response.json(await this.supervisor.schedules.tick(parts[1], typeof body.at === "string" ? body.at : new Date()));
+        if (parts[2] === "pause") return Response.json(await this.supervisor.schedules.pause(parts[1], typeof body.reason === "string" ? body.reason : undefined));
+        if (parts[2] === "resume") return Response.json(await this.supervisor.schedules.resume(parts[1], typeof body.nextTickAt === "string" ? body.nextTickAt : undefined));
+        if (parts[2] === "clear") return Response.json(await this.supervisor.schedules.clear(parts[1], typeof body.reason === "string" ? body.reason : undefined));
       }
       if (parts[0] === "harness") {
         if (request.method === "GET" && parts[1] === "refinements") return Response.json(await this.supervisor.harness.proposals(url.searchParams.get("status") as any ?? undefined));
@@ -119,11 +127,26 @@ export class ProtocolServer {
         if (parts[2] === "input-sets" && branchId && request.method === "POST") return Response.json(await this.supervisor.documents.createInputSet(sessionId, branchId, await jsonBody(request) as any));
         if (parts[2] === "models" && branchId && request.method === "POST") return Response.json(await this.supervisor.models.start(sessionId, branchId, await jsonBody(request) as any));
         if (parts[2] === "goals" && branchId) {
+          if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.goals.list(sessionId, branchId));
+          if (request.method === "GET" && parts[3] === "current") return Response.json(await this.supervisor.goals.current(sessionId, branchId));
+          if (request.method === "GET" && parts[3] && parts[4] === "evaluations") { await this.supervisor.goals.get(sessionId, branchId, parts[3]); return Response.json(await this.supervisor.storage.listGoalGateEvaluations!(parts[3], url.searchParams.get("gate") ?? undefined)); }
+          if (request.method === "GET" && parts[3] && parts.length === 4) return Response.json(await this.supervisor.goals.get(sessionId, branchId, parts[3]));
           if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.goals.create(sessionId, branchId, await jsonBody(request) as any));
           if (request.method === "POST" && parts[3] && parts[4] === "completion") return Response.json(await this.supervisor.goals.requestCompletion(sessionId, branchId, parts[3]));
           if (request.method === "POST" && parts[3] && parts[4] === "continue") return Response.json(await this.supervisor.goals.runContinuation(sessionId, branchId, parts[3], await jsonBody(request) as any));
+          if (request.method === "POST" && parts[3] && parts[4] === "pause") { const body = await jsonBody(request); return Response.json(await this.supervisor.goals.pause(sessionId, branchId, parts[3], typeof body.reason === "string" ? body.reason : undefined)); }
+          if (request.method === "POST" && parts[3] && parts[4] === "resume") { const body = await jsonBody(request); return Response.json(await this.supervisor.goals.resume(sessionId, branchId, parts[3], typeof body.reason === "string" ? body.reason : undefined)); }
+          if (request.method === "POST" && parts[3] && parts[4] === "clear") { const body = await jsonBody(request); return Response.json(await this.supervisor.goals.clear(sessionId, branchId, parts[3], typeof body.reason === "string" ? body.reason : undefined)); }
         }
-        if (parts[2] === "heartbeats" && branchId && request.method === "POST") return Response.json(await this.supervisor.heartbeats.create(sessionId, branchId, await jsonBody(request) as any));
+        if (parts[2] === "heartbeats" && branchId) {
+          if (request.method === "GET") return Response.json(await this.supervisor.heartbeats.list(sessionId, branchId));
+          if (request.method === "POST") return Response.json(await this.supervisor.heartbeats.create(sessionId, branchId, await jsonBody(request) as any));
+        }
+        if (parts[2] === "schedules" && branchId) {
+          if (request.method === "GET" && parts[3] === "wakes") return Response.json(await this.supervisor.schedules.wakes(sessionId, branchId, url.searchParams.get("status")?.split(",") as any));
+          if (request.method === "GET") return Response.json(await this.supervisor.schedules.list(sessionId, branchId));
+          if (request.method === "POST") return Response.json(await this.supervisor.schedules.create(sessionId, branchId, await jsonBody(request) as any));
+        }
       }
       return Response.json({ error: { code: "NOT_FOUND", message: "Route not found" } }, { status: 404 });
     } catch (error) {

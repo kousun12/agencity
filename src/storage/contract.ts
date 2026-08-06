@@ -1,7 +1,7 @@
 import type {
-  AgentEvent, AgentState, BudgetLimits, EffectOutcome, GoalGateStatus, GoalStatus,
+  AgentEvent, AgentRunGoalMode, AgentState, AutonomyOwner, BudgetLimits, EffectOutcome, GoalGateStatus, GoalStatus,
   HeartbeatStatus, MailboxMessageKind, ModelConfiguration, NewAgentEvent,
-  RecursiveModelOutcome, RecursiveModelStatus, TaskStatus,
+  RecursiveModelOutcome, RecursiveModelStatus, ScheduleStatus, TaskStatus, WakeStatus,
 } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 export interface StorageCapabilities {
@@ -68,9 +68,12 @@ export interface MailboxRecord { readonly mailboxMessageId: string; readonly fro
 export interface DocumentRecord { readonly documentId: string; readonly sessionId: string; readonly branchId: string; readonly name: string; readonly mediaType: string; readonly size: number; readonly digest: string; readonly chunkCount: number; readonly createdAt: string; }
 export interface DocumentChunkRecord { readonly chunkId: string; readonly documentId: string; readonly ordinal: number; readonly content: string; readonly size: number; readonly digest: string; }
 export interface InputSetRecord { readonly inputSetId: string; readonly sessionId: string; readonly branchId: string; readonly name: string | null; readonly chunkIds: string[]; readonly metadata?: JsonValue; readonly createdAt: string; }
-export interface GoalRecord { readonly goalId: string; readonly sessionId: string; readonly branchId: string; readonly description: string; readonly completionCriteria: string | null; readonly maxTurns: number | null; readonly status: GoalStatus; readonly completionRequestId: string | null; readonly completionWorkspaceId: string | null; readonly completionWorkspaceCursor: string | null; readonly completionPinRecorded: boolean; readonly reason?: string; readonly createdAt: string; readonly updatedAt: string; }
-export interface GoalGateRecord { readonly gateId: string; readonly goalId: string; readonly name: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotent: boolean; readonly required: boolean; readonly status: GoalGateStatus; readonly effectId?: string; readonly output?: JsonValue; readonly error?: string; }
-export interface HeartbeatRecord { readonly heartbeatId: string; readonly sessionId: string; readonly branchId: string; readonly intervalMs: number; readonly nextTickAt: string; readonly goalId: string | null; readonly payload?: JsonValue; readonly status: HeartbeatStatus; readonly tick: number; readonly lastFiredAt: string | null; }
+export interface GoalRecord { readonly goalId: string; readonly sessionId: string; readonly branchId: string; readonly description: string; readonly completionCriteria: string | null; readonly maxTurns: number | null; readonly status: GoalStatus; readonly completionRequestId: string | null; readonly completionWorkspaceId: string | null; readonly completionWorkspaceCursor: string | null; readonly completionMaterialVersion: string | null; readonly completionMaterialEventIds: string[]; readonly completionPinRecorded: boolean; readonly reason?: string; readonly createdAt: string; readonly updatedAt: string; }
+export interface GoalGateEvaluationRecord { readonly evaluationId: string; readonly goalId: string; readonly gateId: string; readonly requestId: string; readonly definitionHash: string; readonly materialVersion: string; readonly materialEventIds: string[]; readonly status: Exclude<GoalGateStatus, "pending" | "running">; readonly effectId?: string; readonly output?: JsonValue; readonly error?: string; readonly cachedFromEvaluationId?: string; readonly eventId: string; readonly createdAt: string; }
+export interface GoalGateRecord { readonly gateId: string; readonly goalId: string; readonly name: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotent: boolean; readonly required: boolean; readonly status: GoalGateStatus; readonly effectId?: string; readonly output?: JsonValue; readonly error?: string; readonly currentEvaluationId?: string; }
+export interface HeartbeatRecord { readonly heartbeatId: string; readonly sessionId: string; readonly branchId: string; readonly intervalMs: number; readonly nextTickAt: string; readonly goalId: string | null; readonly prompt: string | null; readonly payload?: JsonValue; readonly owner: AutonomyOwner; readonly status: HeartbeatStatus; readonly tick: number; readonly lastFiredAt: string | null; }
+export interface ScheduleRecord { readonly scheduleId: string; readonly sessionId: string; readonly branchId: string; readonly kind: "once" | "interval"; readonly prompt: string; readonly intervalMs: number | null; readonly nextTickAt: string; readonly owner: AutonomyOwner; readonly goalMode: Exclude<AgentRunGoalMode, "none">; readonly status: ScheduleStatus; readonly tick: number; readonly lastFiredAt: string | null; readonly reason?: string; readonly createdAt: string; readonly updatedAt: string; }
+export interface WakeRecord { readonly wakeId: string; readonly sessionId: string; readonly branchId: string; readonly sourceType: "heartbeat" | "schedule"; readonly sourceId: string; readonly tick: number; readonly scheduledAt: string; readonly firedAt: string; readonly prompt: string; readonly goalId: string | null; readonly goalMode: AgentRunGoalMode; readonly status: WakeStatus; readonly claimId: string | null; readonly claimedAt: string | null; readonly runId: string | null; readonly deliveredAt: string | null; readonly reason?: string; readonly createdAt: string; readonly updatedAt: string; }
 export interface RecursiveModelRecord { readonly handleId: string; readonly taskId: string; readonly parentSessionId: string; readonly parentBranchId: string; readonly childSessionId: string; readonly childBranchId: string; readonly model: ModelConfiguration; readonly inputSetId: string | null; readonly input?: JsonValue; readonly inputProvenance?: JsonValue; readonly inputHash?: string; readonly status: RecursiveModelStatus; readonly outcome?: RecursiveModelOutcome; readonly resultMessageId?: string; readonly result?: JsonValue; readonly resultArtifactId?: string; readonly error?: string; readonly createdAt: string; readonly updatedAt: string; }
 
 /** Rebuildable Slice 2 projection reads. Optional for pre-Slice-2 third-party adapters. */
@@ -88,8 +91,15 @@ export interface RecursiveStorageOperations {
   getInputSet(inputSetId: string): Promise<InputSetRecord | null>;
   getGoal(goalId: string): Promise<GoalRecord | null>;
   listGoalGates(goalId: string): Promise<GoalGateRecord[]>;
+  listGoalGateEvaluations(goalId: string, gateId?: string): Promise<GoalGateEvaluationRecord[]>;
   getHeartbeat(heartbeatId: string): Promise<HeartbeatRecord | null>;
+  listHeartbeats(sessionId: string, branchId?: string): Promise<HeartbeatRecord[]>;
   listDueHeartbeats(at: string): Promise<HeartbeatRecord[]>;
+  getSchedule(scheduleId: string): Promise<ScheduleRecord | null>;
+  listSchedules(sessionId: string, branchId?: string): Promise<ScheduleRecord[]>;
+  listDueSchedules(at: string): Promise<ScheduleRecord[]>;
+  getWake(wakeId: string): Promise<WakeRecord | null>;
+  listWakes(sessionId: string, branchId?: string, statuses?: readonly WakeStatus[]): Promise<WakeRecord[]>;
   getRecursiveModel(handleId: string): Promise<RecursiveModelRecord | null>;
   listRecursiveModels(statuses?: readonly RecursiveModelStatus[]): Promise<RecursiveModelRecord[]>;
   rebuildOperationalProjections(): Promise<void>;
@@ -238,8 +248,15 @@ export interface AgentStorage {
  getInputSet?: RecursiveStorageOperations["getInputSet"];
  getGoal?: RecursiveStorageOperations["getGoal"];
  listGoalGates?: RecursiveStorageOperations["listGoalGates"];
+ listGoalGateEvaluations?: RecursiveStorageOperations["listGoalGateEvaluations"];
  getHeartbeat?: RecursiveStorageOperations["getHeartbeat"];
+ listHeartbeats?: RecursiveStorageOperations["listHeartbeats"];
  listDueHeartbeats?: RecursiveStorageOperations["listDueHeartbeats"];
+ getSchedule?: RecursiveStorageOperations["getSchedule"];
+ listSchedules?: RecursiveStorageOperations["listSchedules"];
+ listDueSchedules?: RecursiveStorageOperations["listDueSchedules"];
+ getWake?: RecursiveStorageOperations["getWake"];
+ listWakes?: RecursiveStorageOperations["listWakes"];
  getRecursiveModel?: RecursiveStorageOperations["getRecursiveModel"];
  listRecursiveModels?: RecursiveStorageOperations["listRecursiveModels"];
  rebuildOperationalProjections?: RecursiveStorageOperations["rebuildOperationalProjections"];
@@ -251,7 +268,7 @@ export interface AgentStorage {
 }
 
 export function requireRecursiveStorage(storage: AgentStorage): AgentStorage & RecursiveStorageOperations {
-  const required: Array<keyof RecursiveStorageOperations> = ["getSession", "listChildren", "getTask", "findTaskByChild", "listTasks", "getMailboxMessage", "listMailboxMessages", "getDocument", "getDocumentChunk", "readDocumentChunks", "getInputSet", "getGoal", "listGoalGates", "getHeartbeat", "listDueHeartbeats", "getRecursiveModel", "listRecursiveModels", "rebuildOperationalProjections"];
+  const required: Array<keyof RecursiveStorageOperations> = ["getSession", "listChildren", "getTask", "findTaskByChild", "listTasks", "getMailboxMessage", "listMailboxMessages", "getDocument", "getDocumentChunk", "readDocumentChunks", "getInputSet", "getGoal", "listGoalGates", "listGoalGateEvaluations", "getHeartbeat", "listHeartbeats", "listDueHeartbeats", "getSchedule", "listSchedules", "listDueSchedules", "getWake", "listWakes", "getRecursiveModel", "listRecursiveModels", "rebuildOperationalProjections"];
   for (const method of required) if (typeof storage[method] !== "function") throw new Error(`${storage.name} does not implement recursive session storage operation ${method}`);
   return storage as AgentStorage & RecursiveStorageOperations;
 }

@@ -1,15 +1,15 @@
 import type { AgentEvent, AgentState } from "../domain/index.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
-  CreateGoalInput, CreateHeartbeatInput, CreateInputSetInput, DocumentHandle, GoalHandle,
-  HeartbeatHandle, ImportDocumentInput, InputSetHandle, RecursiveModelHandle, SendMessageInput,
+  CreateGoalInput, CreateHeartbeatInput, CreateScheduleInput, CreateInputSetInput, DocumentHandle, GoalHandle,
+  HeartbeatHandle, ImportDocumentInput, InputSetHandle, RecursiveModelHandle, ScheduleHandle, SendMessageInput,
   SpawnAgentInput, StartRecursiveModelInput, SubagentHandle, CreateMemoryInput,
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
   StartAgentRunInput, AgentRunResult, AgentRunUserResponse, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
-import type { DataManifestRecord, SyncConflictRecord, TaskRecord } from "../storage/index.ts";
+import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
 import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
 
 export interface AgentStreamHandlers {
@@ -83,12 +83,28 @@ export class AgentClient {
   cancelModel(handleId: string, reason?: string): Promise<RecursiveModelHandle> { return this.#post(`/models/${handleId}/cancel`, reason === undefined ? {} : { reason }); }
 
   createGoal(sessionId: string, branchId: string, input: CreateGoalInput | string): Promise<GoalHandle> { return this.#post(`/sessions/${sessionId}/goals?branch=${branchId}`, typeof input === "string" ? { description: input } : input); }
+  goals(sessionId: string, branchId: string): Promise<GoalHandle[]> { return this.#json(`/sessions/${sessionId}/goals?branch=${branchId}`); }
+  currentGoal(sessionId: string, branchId: string): Promise<GoalHandle | null> { return this.#json(`/sessions/${sessionId}/goals/current?branch=${branchId}`); }
+  goal(sessionId: string, branchId: string, goalId: string): Promise<GoalHandle> { return this.#json(`/sessions/${sessionId}/goals/${goalId}?branch=${branchId}`); }
+  goalEvaluations(sessionId: string, branchId: string, goalId: string, gateId?: string): Promise<GoalGateEvaluationRecord[]> { return this.#json(`/sessions/${sessionId}/goals/${goalId}/evaluations?branch=${branchId}${gateId ? `&gate=${encodeURIComponent(gateId)}` : ""}`); }
   requestGoalCompletion(sessionId: string, branchId: string, goalId: string): Promise<GoalHandle> { return this.#post(`/sessions/${sessionId}/goals/${goalId}/completion?branch=${branchId}`); }
   continueGoal(sessionId: string, branchId: string, goalId: string, maxTurns?: number): Promise<GoalHandle> { return this.#post(`/sessions/${sessionId}/goals/${goalId}/continue?branch=${branchId}`, maxTurns === undefined ? {} : { maxTurns }); }
+  pauseGoal(sessionId: string, branchId: string, goalId: string, reason?: string): Promise<GoalHandle> { return this.#post(`/sessions/${sessionId}/goals/${goalId}/pause?branch=${branchId}`, reason === undefined ? {} : { reason }); }
+  resumeGoal(sessionId: string, branchId: string, goalId: string, reason?: string): Promise<GoalHandle> { return this.#post(`/sessions/${sessionId}/goals/${goalId}/resume?branch=${branchId}`, reason === undefined ? {} : { reason }); }
+  clearGoal(sessionId: string, branchId: string, goalId: string, reason?: string): Promise<GoalHandle> { return this.#post(`/sessions/${sessionId}/goals/${goalId}/clear?branch=${branchId}`, reason === undefined ? {} : { reason }); }
   createHeartbeat(sessionId: string, branchId: string, input: CreateHeartbeatInput | number): Promise<HeartbeatHandle> { return this.#post(`/sessions/${sessionId}/heartbeats?branch=${branchId}`, typeof input === "number" ? { intervalMs: input } : input); }
+  heartbeats(sessionId: string, branchId: string): Promise<HeartbeatRecord[]> { return this.#json(`/sessions/${sessionId}/heartbeats?branch=${branchId}`); }
   tickHeartbeat(heartbeatId: string, at?: string): Promise<HeartbeatHandle> { return this.#post(`/heartbeats/${heartbeatId}/tick`, at === undefined ? {} : { at }); }
   pauseHeartbeat(heartbeatId: string, reason?: string): Promise<HeartbeatHandle> { return this.#post(`/heartbeats/${heartbeatId}/pause`, reason === undefined ? {} : { reason }); }
-  cancelHeartbeat(heartbeatId: string, reason?: string): Promise<HeartbeatHandle> { return this.#post(`/heartbeats/${heartbeatId}/cancel`, reason === undefined ? {} : { reason }); }
+  resumeHeartbeat(heartbeatId: string, nextTickAt?: string): Promise<HeartbeatHandle> { return this.#post(`/heartbeats/${heartbeatId}/resume`, nextTickAt === undefined ? {} : { nextTickAt }); }
+  cancelHeartbeat(heartbeatId: string, reason?: string): Promise<HeartbeatHandle> { return this.#post(`/heartbeats/${heartbeatId}/clear`, reason === undefined ? {} : { reason }); }
+  createSchedule(sessionId: string, branchId: string, input: CreateScheduleInput): Promise<ScheduleHandle> { return this.#post(`/sessions/${sessionId}/schedules?branch=${branchId}`, input); }
+  schedules(sessionId: string, branchId: string): Promise<ScheduleRecord[]> { return this.#json(`/sessions/${sessionId}/schedules?branch=${branchId}`); }
+  wakes(sessionId: string, branchId: string, statuses?: readonly WakeRecord["status"][]): Promise<WakeRecord[]> { return this.#json(`/sessions/${sessionId}/schedules/wakes?branch=${branchId}${statuses?.length ? `&status=${statuses.join(",")}` : ""}`); }
+  tickSchedule(scheduleId: string, at?: string): Promise<ScheduleHandle> { return this.#post(`/schedules/${scheduleId}/tick`, at === undefined ? {} : { at }); }
+  pauseSchedule(scheduleId: string, reason?: string): Promise<ScheduleHandle> { return this.#post(`/schedules/${scheduleId}/pause`, reason === undefined ? {} : { reason }); }
+  resumeSchedule(scheduleId: string, nextTickAt?: string): Promise<ScheduleHandle> { return this.#post(`/schedules/${scheduleId}/resume`, nextTickAt === undefined ? {} : { nextTickAt }); }
+  clearSchedule(scheduleId: string, reason?: string): Promise<ScheduleHandle> { return this.#post(`/schedules/${scheduleId}/clear`, reason === undefined ? {} : { reason }); }
 
   memoryCreate(sessionId: string, branchId: string, input: CreateMemoryInput | string): Promise<HarnessRecord> { return this.#post(`/sessions/${sessionId}/memory?branch=${branchId}`, typeof input === "string" ? { text: input } : input); }
   memorySearch(sessionId: string, branchId: string, query: string, options: MemorySearchOptions = {}): Promise<MemorySearchResult> { const params = new URLSearchParams({ branch: branchId, query, ...(options.limit === undefined ? {} : { limit: String(options.limit) }), ...(options.scopes === undefined ? {} : { scopes: options.scopes.join(",") }), ...(options.statuses === undefined ? {} : { statuses: options.statuses.join(",") }), ...(options.tags === undefined ? {} : { tags: options.tags.join(",") }), ...(options.linkedEntryIds === undefined ? {} : { linkedEntryIds: options.linkedEntryIds.join(",") }), ...(options.since === undefined ? {} : { since: options.since }) }); return this.#json(`/sessions/${sessionId}/memory?${params}`); }

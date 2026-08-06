@@ -45,11 +45,15 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 | `POST /sessions/:session/input-sets?branch=:branch` | `CreateInputSetInput` | exact ordered input-set handle |
 | `POST /sessions/:session/models?branch=:branch` | `StartRecursiveModelInput` (`idempotencyKey` recommended for retry) | stable recursive model handle |
 | `GET /models/:handle` / `POST /models/:handle/cancel` | none or `{ reason? }` | current/terminal model handle |
-| `POST /sessions/:session/goals?branch=:branch` | `CreateGoalInput` | goal plus gates |
-| `POST /sessions/:session/goals/:goal/completion?branch=:branch` | none | current-version completion result |
-| `POST /sessions/:session/goals/:goal/continue?branch=:branch` | `{ maxTurns? }` | continued goal handle |
-| `POST /sessions/:session/heartbeats?branch=:branch` | `CreateHeartbeatInput` | heartbeat handle |
-| `POST /heartbeats/:id/(tick|pause|cancel)` | `{ at? }` or `{ reason? }` | updated schedule handle |
+| `GET/POST /sessions/:session/goals?branch=:branch` | none or `CreateGoalInput` | goal list or created goal plus gates |
+| `GET /sessions/:session/goals/current?branch=:branch` | none | current user-authoritative goal or null |
+| `GET /sessions/:session/goals/:goal[/evaluations]?branch=:branch` | optional `gate` query | scoped goal or retained gate-evaluation history |
+| `POST /sessions/:session/goals/:goal/(completion|continue|pause|resume|clear)?branch=:branch` | operation-specific optional reason/bound | gate-checked or lifecycle-updated goal |
+| `GET/POST /sessions/:session/heartbeats?branch=:branch` | none or `CreateHeartbeatInput` | scoped heartbeat list or created user heartbeat |
+| `POST /heartbeats/:id/(tick|pause|resume|clear)` | `{ at? }`, `{ nextTickAt? }`, or `{ reason? }` | updated heartbeat handle |
+| `GET/POST /sessions/:session/schedules?branch=:branch` | none or `CreateScheduleInput` | scoped one-time/interval schedules or created user schedule |
+| `GET /sessions/:session/schedules/wakes?branch=:branch&status=...` | none | durable queued/claimed/delivered/unknown wake records |
+| `POST /schedules/:id/(tick|pause|resume|clear)` | operation-specific time/reason | updated schedule handle |
 | `GET /sync/status` | none | capabilities, persisted replica lifecycle, unresolved conflicts, quarantine count |
 | `POST /sync` / `POST /sync/reconnect` | none | manual/reconnect cycle (`stage → push → pull → ingest → checkpoint` for the official adapter) |
 | `POST /sync/push` | none | staged count, official post-push stats, and status |

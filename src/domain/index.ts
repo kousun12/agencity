@@ -6,3 +6,4 @@ export * from "./state.ts";
 export * from "./reducer.ts";
 
 export * from "./harness.ts";
+export * from "./workspace-material.ts";

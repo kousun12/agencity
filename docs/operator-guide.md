@@ -82,6 +82,14 @@ Product state defaults to `<root>/.agencity`, while profile/device preferences d
 
 Session and branch labels derive from the first retained task without changing it. Rename a session with `sessions --session ID --name NAME`, or add `--branch ID` to rename one branch. `sessions` shows name, time, model, state, task summary, active goals, unresolved work, and diagnostic IDs.
 
+### Goals, gates, heartbeats, and schedules
+
+Normal product tasks always carry an explicit goal selection policy. `--goal auto` (the default) attaches the current active goal or creates one atomically with the run; `--goal current` refuses when no current goal exists; `--goal create` requires a new goal. Task prose is never inspected to infer this choice. A model `final` action is provisional until required gates pass. Failed or stale gate evidence is delivered once as a bounded repair observation; unknown gate effects terminate visibly.
+
+Inside the TUI, `/goal` and `/goals` show the current/history view, while `/goal create DESCRIPTION`, `/goal pause`, `/goal resume`, `/goal clear`, and `/goal complete` operate without copied IDs. `/heartbeats`, `/heartbeat create MS PROMPT`, and index-based pause/resume/clear commands manage user wakes. `/schedules`, `/schedule once ISO PROMPT`, `/schedule every MS PROMPT`, and index-based lifecycle commands manage one-time and interval prompts. Missed recurring ticks coalesce.
+
+Heartbeats and schedules queue durable wakes and deliver them through the ordinary typed `AgentRunService` with stable IDs. This embedded supervisor provides crash recovery while it is running, but FU-015 background-service ownership is not complete: closing the product process does **not** claim that future due work will execute detached. The records survive and are recovered on the next supervisor start.
+
 ### Provider and model onboarding
 
 ```sh

@@ -218,16 +218,35 @@ const goal = await supervisor.goals.create(parentSessionId, parentBranchId, {
   gates: [{ name: "tests", executor: "shell", operation: "run",
     input: { command: "bun test" }, required: true }],
 });
-await supervisor.goals.runContinuation(parentSessionId, parentBranchId, goal.goalId, { maxTurns: 3 });
+// Product runs select goals explicitly; auto attaches the current goal or
+// atomically creates one with AgentRunRequested. No prose inference occurs.
+await supervisor.runs.start(parentSessionId, parentBranchId, {
+  task: "Ship a passing patch", goalMode: "current",
+});
 await supervisor.goals.requestCompletion(parentSessionId, parentBranchId, goal.goalId);
+await supervisor.goals.pause(parentSessionId, parentBranchId, goal.goalId);
+await supervisor.goals.resume(parentSessionId, parentBranchId, goal.goalId);
 
 const heartbeat = await supervisor.heartbeats.create(parentSessionId, parentBranchId, {
-  intervalMs: 60_000, goalId: goal.goalId,
+  intervalMs: 60_000, goalId: goal.goalId, prompt: "Recheck the release",
 });
-await supervisor.heartbeats.tick(heartbeat.heartbeatId);
+await supervisor.heartbeats.tick(heartbeat.heartbeatId); // queues a durable wake
 await supervisor.heartbeats.pause(heartbeat.heartbeatId);
+await supervisor.heartbeats.resume(heartbeat.heartbeatId);
 await supervisor.heartbeats.cancel(heartbeat.heartbeatId);
+
+const once = await supervisor.schedules.create(parentSessionId, parentBranchId, {
+  at: "2026-08-07T09:00:00Z", prompt: "Prepare the daily report", goalMode: "auto",
+});
+const recurring = await supervisor.schedules.create(parentSessionId, parentBranchId, {
+  intervalMs: 60_000, prompt: "Check the queue", goalMode: "current",
+});
+await supervisor.schedules.pause(recurring.scheduleId);
+await supervisor.schedules.resume(recurring.scheduleId);
+await supervisor.schedules.clear(once.scheduleId);
 ```
+
+The console SDK exposes `sdk.goals.current/list/get/evaluations` as read-only operations. `sdk.heartbeats` and `sdk.schedules` can create and manage only agent-owned records in the executing session branch; user-owned goals and wakes remain authoritative. Gate evaluation output delivered to a repair step is bounded in one exact-once `AgentRunGoalCheckRecorded` observation.
 
 `AgentStorage` retains the original mandatory Slice 1 contract and advertises the Slice 2 query/rebuild methods as optional for compatibility with existing third-party adapters. `requireRecursiveStorage` fails composition explicitly when one of these operations is unavailable. `LibSqlStorage` implements all of them, including `getSession`, child/task/mailbox/document/input-set/goal/heartbeat/model lookups and `rebuildOperationalProjections`.
 

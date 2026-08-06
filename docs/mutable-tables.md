@@ -25,7 +25,10 @@ Do not change the first three columns or class tokens without updating the archi
 | `input_set_chunks` | `rebuildable-projection` | `mutable` | Normalized ordered membership projection derived entirely from `InputSetCreated.chunkIds`. |
 | `goals` | `rebuildable-projection` | `mutable` | Current autonomous goal/request/status and completion workspace-pin projection; all transitions, pins, and reasons are canonical goal events. |
 | `goal_gates` | `rebuildable-projection` | `mutable` | Current completion-gate request/outcome projection. Gate effects also use the canonical effect/outbox protocol. |
-| `heartbeats` | `rebuildable-projection` | `mutable` | Due-time/tick/status projection of heartbeat events. Scheduler ownership is not durable identity. |
+| `goal_gate_evaluations` | `rebuildable-projection` | `mutable` | Full gate-evaluation history keyed by canonical definition hash and attributable workspace-material version; canonical evaluation events retain cache and pin provenance. |
+| `heartbeats` | `rebuildable-projection` | `mutable` | Due-time/tick/status/owner projection of heartbeat events. Scheduler ownership is not durable identity. |
+| `schedules` | `rebuildable-projection` | `mutable` | Current one-time/interval schedule definition, owner, tick, and lifecycle projection rebuilt from schedule events. |
+| `wake_queue` | `rebuildable-projection` | `mutable` | Durable queued/claimed/delivered/unknown wake projection; stable AgentRun identity and canonical wake events own recovery semantics. |
 | `recursive_model_handles` | `rebuildable-projection` | `mutable` | Current recursive-call lookup/status projection; task, child session, model, and terminal transitions are events. |
 | `harness_entries` | `rebuildable-projection` | `mutable` | Current harness entry/latest/active-version routing derived from canonical harness events. |
 | `harness_versions` | `rebuildable-projection` | `mutable` | Query projection of immutable version identity/content and canonical status transitions; rebuilt from harness events. |

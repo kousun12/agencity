@@ -48,6 +48,7 @@ import { AgentService } from "./agents.ts";
 import { DocumentService } from "./documents.ts";
 import { GoalService } from "./goals.ts";
 import { HeartbeatService } from "./heartbeats.ts";
+import { ScheduleService } from "./schedules.ts";
 import { RecursiveModelService } from "./models.ts";
 import { MemoryService } from "./memory.ts";
 import { HarnessService } from "./harness.ts";
@@ -247,6 +248,7 @@ export class Supervisor {
   readonly models: RecursiveModelService;
   readonly goals: GoalService;
   readonly heartbeats: HeartbeatService;
+  readonly schedules: ScheduleService;
   readonly memory: MemoryService;
   readonly harness: HarnessService;
   readonly skills: SkillService;
@@ -290,11 +292,13 @@ export class Supervisor {
     this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
     this.modelLoop = new ModelLoop(storage, this.contexts, outbox);
     this.documents = new DocumentService(storage);
-    this.goals = new GoalService(storage, outbox, this.modelLoop);
-    this.heartbeats = new HeartbeatService(storage, this.goals);
+    this.goals = new GoalService(storage, outbox);
+    this.heartbeats = new HeartbeatService(storage);
+    this.schedules = new ScheduleService(storage);
     this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox, artifacts, this.memory);
     this.restartConsoleAfterCell = restartConsoleAfterCell;
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this));
+    this.schedules.attachRunService(this.runs);
     this.agents.attachRunService(this.runs);
     this.runs.setBoundaryObserver((sessionId, branchId, runId) => this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId).then(() => {}));
   }
@@ -379,13 +383,16 @@ export class Supervisor {
       await supervisor.outbox.drain();
       await supervisor.modelLoop.recoverIncomplete();
       await supervisor.modelLoop.reconcileRunningSessions();
-      await supervisor.heartbeats.recoverDue();
       await supervisor.goals.recoverIncomplete();
       await supervisor.models.recoverIncomplete();
       await supervisor.agents.recoverDeliveries();
       await supervisor.runs.recoverIncomplete();
+      await supervisor.runs.recoverOrphanGoals();
+      await supervisor.heartbeats.recoverDue();
+      await supervisor.schedules.recover();
     }
     supervisor.heartbeats.startScheduler(options.heartbeatPollIntervalMs ?? 100);
+    supervisor.schedules.startScheduler(options.heartbeatPollIntervalMs ?? 100);
     return supervisor;
   }
 
@@ -396,6 +403,7 @@ export class Supervisor {
     if (this.#closed) return;
     this.#closed = true;
     await this.heartbeats.close();
+    await this.schedules.close();
     await this.console.stop();
     await this.models.close();
     await this.sync.stop();
@@ -407,6 +415,7 @@ export class Supervisor {
   async deleteOwnedData(input: DeleteOwnedDataInput): Promise<PhysicalDeletionReceipt> {
     if (this.#closed) throw new ValidationError("Supervisor is closed");
     await this.heartbeats.close();
+    await this.schedules.close();
     await this.console.stop();
     await this.models.close();
     await this.outbox.quiesceForDeletion();
@@ -671,6 +680,30 @@ export class Supervisor {
         });
         return this.storage.readonlyQuery({ sql, args: sqlArgs });
       }
+      if (method === "goals.current") return this.goals.current(sessionId, branchId);
+      if (method === "goals.list") return this.goals.list(sessionId, branchId);
+      if (method === "goals.get") return this.goals.get(sessionId, branchId, String(args[0] ?? ""));
+      if (method === "goals.evaluations") {
+        const goal = await this.goals.get(sessionId, branchId, String(args[0] ?? ""));
+        const gateId = typeof args[1] === "string" ? args[1] : undefined;
+        if (gateId && !goal.gates.some((gate) => gate.gateId === gateId)) throw new ValidationError("Goal gate is outside the calling session branch scope");
+        return this.storage.listGoalGateEvaluations!(goal.goalId, gateId);
+      }
+      if (method === "heartbeats.create") return this.heartbeats.createAgent(sessionId, branchId, args[0] as any);
+      if (method === "heartbeats.list") return (await this.heartbeats.list(sessionId, branchId)).filter((heartbeat) => heartbeat.owner === "agent");
+      if (method === "heartbeats.pause") return this.heartbeats.pauseAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
+      if (method === "heartbeats.resume") return this.heartbeats.resumeAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
+      if (method === "heartbeats.clear") return this.heartbeats.cancelAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
+      if (method === "schedules.create") return this.schedules.createAgent(sessionId, branchId, args[0] as any);
+      if (method === "schedules.list") return (await this.schedules.list(sessionId, branchId)).filter((schedule) => schedule.owner === "agent");
+      if (method === "schedules.wakes") {
+        const statuses = Array.isArray(args[0]) ? args[0] as any : undefined;
+        const owned = new Set((await this.schedules.list(sessionId, branchId)).filter((schedule) => schedule.owner === "agent").map((schedule) => schedule.scheduleId));
+        return (await this.schedules.wakes(sessionId, branchId, statuses)).filter((wake) => wake.sourceType === "schedule" ? owned.has(wake.sourceId) : false);
+      }
+      if (method === "schedules.pause") return this.schedules.pauseAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
+      if (method === "schedules.resume") return this.schedules.resumeAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
+      if (method === "schedules.clear") return this.schedules.clearAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
       if (method === "memory.search") return this.memory.search(sessionId,branchId,String(args[0] ?? ""),(args[1] ?? {}) as any);
       if (method === "memory.create") return this.memory.create(sessionId,branchId,args[0] as any,"agent");
       if (method === "memory.list") return this.memory.list(sessionId,branchId,(args[0] ?? {}) as any);
@@ -686,9 +719,8 @@ export class Supervisor {
         const raw = args[0]; const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.spawn requires a task string or object");
         const idempotencyKey = typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method);
-        const handle = await this.agents.spawn(sessionId, branchId, { ...input, idempotencyKey } as any);
-        if (input.run !== false) this.agents.scheduleSpawn(handle, String(input.task ?? ""));
-        return handle;
+        if (input.run !== false) return this.agents.spawnRunnable(sessionId, branchId, { ...input, idempotencyKey } as any);
+        return this.agents.spawn(sessionId, branchId, { ...input, idempotencyKey } as any);
       }
       if (method === "agents.list") return this.agents.listFamily(sessionId, branchId);
       if (method === "agents.send") {

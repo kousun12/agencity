@@ -1,6 +1,6 @@
 import type { AgentEvent, AgentState, BudgetLimits, JsonValue, ModelConfiguration } from "../domain/index.ts";
 import type { ResolveConflictInput } from "../sync/index.ts";
-import type { CreateGoalInput, CreateHeartbeatInput, CreateInputSetInput, ImportDocumentInput, SendMessageInput, SpawnAgentInput, StartRecursiveModelInput, CreateMemoryInput, ProposeRefinementInput, ActivateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput, InvokeSkillOptions, SpawnSpecInput } from "../runtime/index.ts";
+import type { CreateGoalInput, CreateHeartbeatInput, CreateScheduleInput, CreateInputSetInput, ImportDocumentInput, SendMessageInput, SpawnAgentInput, StartRecursiveModelInput, CreateMemoryInput, ProposeRefinementInput, ActivateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput, InvokeSkillOptions, SpawnSpecInput } from "../runtime/index.ts";
 
 export type ProtocolRequest =
   | { type: "createSession"; workspaceId: string; model?: ModelConfiguration; budget?: BudgetLimits }
@@ -16,6 +16,7 @@ export type ProtocolRequest =
   | { type: "startRecursiveModel"; sessionId: string; branchId: string; input: StartRecursiveModelInput }
   | { type: "createGoal"; sessionId: string; branchId: string; input: CreateGoalInput }
   | { type: "createHeartbeat"; sessionId: string; branchId: string; input: CreateHeartbeatInput }
+  | { type: "createSchedule"; sessionId: string; branchId: string; input: CreateScheduleInput }
   | { type: "memoryCreate"; sessionId: string; branchId: string; input: CreateMemoryInput }
   | { type: "memorySearch"; sessionId: string; branchId: string; query: string }
   | { type: "refine"; sessionId: string; branchId: string; input: ProposeRefinementInput }

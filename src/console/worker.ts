@@ -173,6 +173,27 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     cancel: (target: string, reason?: string) => call("agents.cancel", [target, reason]),
     followUp: (target: string, content: string, options: Record<string, unknown> = {}) => call("agents.followUp", [target, content, options]),
   };
+  const goals = {
+    current: () => call("goals.current", []),
+    list: () => call("goals.list", []),
+    get: (goalId: string) => call("goals.get", [goalId]),
+    evaluations: (goalId: string, gateId?: string) => call("goals.evaluations", [goalId, gateId]),
+  };
+  const heartbeats = {
+    create: (input: unknown) => call("heartbeats.create", [input]),
+    list: () => call("heartbeats.list", []),
+    pause: (heartbeatId: string, reason?: string) => call("heartbeats.pause", [heartbeatId, reason]),
+    resume: (heartbeatId: string, nextTickAt?: string) => call("heartbeats.resume", [heartbeatId, nextTickAt]),
+    clear: (heartbeatId: string, reason?: string) => call("heartbeats.clear", [heartbeatId, reason]),
+  };
+  const schedules = {
+    create: (input: unknown) => call("schedules.create", [input]),
+    list: () => call("schedules.list", []),
+    wakes: (statuses?: string[]) => call("schedules.wakes", [statuses]),
+    pause: (scheduleId: string, reason?: string) => call("schedules.pause", [scheduleId, reason]),
+    resume: (scheduleId: string, nextTickAt?: string) => call("schedules.resume", [scheduleId, nextTickAt]),
+    clear: (scheduleId: string, reason?: string) => call("schedules.clear", [scheduleId, reason]),
+  };
   const rlmId = (handle: string | { handleId?: unknown }): string => {
     const id = typeof handle === "string" ? handle : handle?.handleId;
     if (typeof id !== "string" || !id) throw new Error("Recursive model handle must contain a non-empty handleId");
@@ -221,7 +242,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       cells: unknown,
       rlm: unknown,
     ) => Promise<unknown>;
-    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, rlm, inspect } as unknown as ConsoleSdk;
+    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, rlm, inspect } as unknown as ConsoleSdk;
     const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm);
     response = { type: "result", executionId: message.executionId, ok: true, observation: encodeObservation(value) };
   } catch (error) {

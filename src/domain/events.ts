@@ -16,15 +16,16 @@ export const eventTypes = [
   "MailboxMessageSent", "MailboxMessageDelivered", "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged",
   "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered",
   "DocumentImported", "DocumentChunkAdded", "InputSetCreated",
-  "GoalCreated", "GoalCompletionRequested", "GoalGateAdded", "GoalGateStatusChanged", "GoalStatusChanged",
+  "GoalCreated", "GoalCompletionRequested", "GoalGateAdded", "GoalGateStatusChanged", "GoalGateEvaluationRecorded", "GoalStatusChanged",
   "HeartbeatCreated", "HeartbeatTicked", "HeartbeatStatusChanged",
+  "ScheduleCreated", "ScheduleTicked", "ScheduleStatusChanged", "WakeQueued", "WakeClaimed", "WakeDelivered", "WakeDeliveryUnknown",
   "RecursiveModelStarted", "RecursiveModelStatusChanged",
   "HarnessVersionCreated", "HarnessVersionStatusChanged",
   "RefinementProposed", "RefinementValidated", "RefinementCandidateActivated",
   "RefinementCandidateAllocated", "RefinementCandidateExposed", "RefinementObservationRecorded",
   "RefinementDecided", "RefinementApproved", "RefinementRollbackApproved", "RefinementRolledBack",
   "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
-  "AgentRunRequested", "AgentRunStepStarted", "AgentRunActionCommitted", "AgentRunActionRejected",
+  "AgentRunRequested", "AgentRunStepStarted", "AgentRunActionCommitted", "AgentRunActionRejected", "AgentRunGoalCheckRecorded",
   "AgentRunUserInputRequested", "AgentRunUserInputReceived", "AgentRunCancellationRequested", "AgentRunStatusChanged",
 ] as const;
 export type EventType = (typeof eventTypes)[number];
@@ -36,9 +37,14 @@ export type TaskStatus = "pending" | "admitted" | "running" | "completed" | "fai
 export type MailboxMessageKind = "message" | "task_completed" | "task_failed" | "task_cancelled";
 export type MailboxReceiptStatus = "queued" | "delivered_to_context" | "acknowledged" | "rejected" | "failed";
 export type FamilyRelationship = "parent" | "child" | "sibling";
-export type GoalStatus = "active" | "completion_requested" | "completed" | "blocked" | "failed" | "cancelled";
+export type GoalStatus = "active" | "paused" | "completion_requested" | "completed" | "blocked" | "failed" | "cancelled";
 export type GoalGateStatus = "pending" | "running" | "passed" | "failed" | "cancelled" | "unknown";
+export type GoalGateTerminalStatus = Exclude<GoalGateStatus, "pending" | "running">;
 export type HeartbeatStatus = "active" | "paused" | "cancelled";
+export type AutonomyOwner = "user" | "agent";
+export type ScheduleStatus = "active" | "paused" | "completed" | "cancelled";
+export type WakeStatus = "queued" | "claimed" | "delivered" | "unknown";
+export type AgentRunGoalMode = "none" | "auto" | "current" | "create";
 export type RecursiveModelStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type RecursiveModelOutcome = "succeeded" | "failed" | "cancelled" | "budget-exceeded" | "unknown";
 export type AgentRunStatus = "queued" | "running" | "waiting_for_user" | "succeeded" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown";
@@ -91,14 +97,22 @@ export interface EventPayloads {
   DocumentImported: { documentId: string; name: string; mediaType: string; size: number; digest: string; chunkCount: number };
   DocumentChunkAdded: { documentId: string; chunkId: string; ordinal: number; content: string; size: number; digest: string };
   InputSetCreated: { inputSetId: string; name?: string; chunkIds: string[]; metadata?: JsonValue };
-  GoalCreated: { goalId: string; description: string; completionCriteria?: string; maxTurns?: number };
-  GoalCompletionRequested: { goalId: string; requestId: string; workspaceId?: string; workspaceCursor?: string | null };
+  GoalCreated: { goalId: string; description: string; completionCriteria?: string; maxTurns?: number; owner?: "user" };
+  GoalCompletionRequested: { goalId: string; requestId: string; workspaceId?: string; workspaceCursor?: string | null; materialVersion?: string; materialEventIds?: string[] };
   GoalGateAdded: { goalId: string; gateId: string; name: string; executor: string; operation: string; input: JsonValue; idempotent: boolean; required: boolean };
   GoalGateStatusChanged: { goalId: string; gateId: string; status: GoalGateStatus; effectId?: string; output?: JsonValue; error?: string };
+  GoalGateEvaluationRecorded: { evaluationId: string; goalId: string; gateId: string; requestId: string; definitionHash: string; materialVersion: string; materialEventIds: string[]; status: GoalGateTerminalStatus; effectId?: string; output?: JsonValue; error?: string; cachedFromEvaluationId?: string };
   GoalStatusChanged: { goalId: string; status: GoalStatus; reason?: string };
-  HeartbeatCreated: { heartbeatId: string; intervalMs: number; nextTickAt: string; goalId?: string; payload?: JsonValue };
-  HeartbeatTicked: { heartbeatId: string; tick: number; scheduledAt: string; firedAt: string; nextTickAt: string };
+  HeartbeatCreated: { heartbeatId: string; intervalMs: number; nextTickAt: string; goalId?: string; prompt?: string; payload?: JsonValue; owner?: AutonomyOwner };
+  HeartbeatTicked: { heartbeatId: string; tick: number; scheduledAt: string; firedAt: string; nextTickAt: string; missedIntervals?: number; wakeId?: string };
   HeartbeatStatusChanged: { heartbeatId: string; status: HeartbeatStatus; nextTickAt?: string; reason?: string };
+  ScheduleCreated: { scheduleId: string; kind: "once" | "interval"; prompt: string; nextTickAt: string; intervalMs?: number; owner: AutonomyOwner; goalMode: Exclude<AgentRunGoalMode, "none"> };
+  ScheduleTicked: { scheduleId: string; tick: number; scheduledAt: string; firedAt: string; nextTickAt: string | null; missedIntervals: number; wakeId: string };
+  ScheduleStatusChanged: { scheduleId: string; status: ScheduleStatus; nextTickAt?: string; reason?: string };
+  WakeQueued: { wakeId: string; sourceType: "heartbeat" | "schedule"; sourceId: string; tick: number; scheduledAt: string; firedAt: string; prompt: string; goalId?: string; goalMode: AgentRunGoalMode };
+  WakeClaimed: { wakeId: string; claimId: string; claimedAt: string };
+  WakeDelivered: { wakeId: string; claimId: string; runId: string; deliveredAt: string };
+  WakeDeliveryUnknown: { wakeId: string; claimId: string; reason: string; observedAt: string };
   RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; inputSetId?: string; input?: JsonValue; inputProvenance?: JsonValue; inputHash?: string };
   RecursiveModelStatusChanged: { handleId: string; status: Exclude<RecursiveModelStatus, "pending">; outcome?: RecursiveModelOutcome; resultMessageId?: string; result?: JsonValue; resultArtifactId?: string; error?: string };
   HarnessVersionCreated: { entryId: string; versionId: string; version: number; kind: "memory" | "prompt_note" | "skill" | "subagent_spec"; scope: "local" | "workspace" | "user" | "global"; scopeKey: string; name: string; content: JsonValue; tags: string[]; confidence: number; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; evidenceEventIds: string[]; conflictEntryIds: string[]; supersedesVersionId?: string; proposalId?: string; createdBy: string; lastConfirmedAt: string };
@@ -117,10 +131,11 @@ export interface EventPayloads {
   SkillTestRecorded: { entryId: string; versionId: string; effectId: string; passed: boolean; report: JsonValue };
   SubagentSpecInvoked: { entryId: string; versionId: string; taskId: string; childSessionId: string; childBranchId: string };
   SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
-  AgentRunRequested: { runId: string; task: string; requestKey: string; goalId?: string };
+  AgentRunRequested: { runId: string; task: string; requestKey: string; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
   AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; callId: string; raw: string; action: AgentAction };
   AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; callId: string; raw: string; error: string };
+  AgentRunGoalCheckRecorded: { runId: string; actionId: string; goalId: string; requestId: string; status: "passed" | "failed" | "unknown"; summary: string; gateEvaluationEventIds: string[] };
   AgentRunUserInputRequested: { runId: string; requestId: string; actionId: string; kind: AgentRunInputKind; question: string; permission?: string };
   AgentRunUserInputReceived: { runId: string; requestId: string; response: string; approved?: boolean };
   AgentRunCancellationRequested: { runId: string; reason?: string };
@@ -202,14 +217,22 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   DocumentImported: z.object({ documentId: id, name: z.string().min(1), mediaType: id, size: nonnegative, digest, chunkCount: z.number().int().nonnegative() }),
   DocumentChunkAdded: z.object({ documentId: id, chunkId: id, ordinal: z.number().int().nonnegative(), content: z.string(), size: nonnegative, digest }),
   InputSetCreated: z.object({ inputSetId: id, name: z.string().optional(), chunkIds: z.array(id), metadata: jsonValueSchema.optional() }),
-  GoalCreated: z.object({ goalId: id, description: z.string().min(1), completionCriteria: z.string().optional(), maxTurns: positiveInteger.optional() }),
-  GoalCompletionRequested: z.object({ goalId: id, requestId: id, workspaceId: id.optional(), workspaceCursor: z.string().regex(/^\d+$/).nullable().optional() }),
+  GoalCreated: z.object({ goalId: id, description: z.string().min(1), completionCriteria: z.string().optional(), maxTurns: positiveInteger.optional(), owner: z.literal("user").optional() }),
+  GoalCompletionRequested: z.object({ goalId: id, requestId: id, workspaceId: id.optional(), workspaceCursor: z.string().regex(/^\d+$/).nullable().optional(), materialVersion: digest.optional(), materialEventIds: z.array(id).optional() }),
   GoalGateAdded: z.object({ goalId: id, gateId: id, name: z.string().min(1), executor: id, operation: id, input: jsonValueSchema, idempotent: z.boolean(), required: z.boolean() }),
   GoalGateStatusChanged: z.object({ goalId: id, gateId: id, status: z.enum(["pending", "running", "passed", "failed", "cancelled", "unknown"]), effectId: id.optional(), output: jsonValueSchema.optional(), error: z.string().optional() }),
-  GoalStatusChanged: z.object({ goalId: id, status: z.enum(["active", "completion_requested", "completed", "blocked", "failed", "cancelled"]), reason: z.string().optional() }),
-  HeartbeatCreated: z.object({ heartbeatId: id, intervalMs: positiveInteger, nextTickAt: dateTime, goalId: id.optional(), payload: jsonValueSchema.optional() }),
-  HeartbeatTicked: z.object({ heartbeatId: id, tick: positiveInteger, scheduledAt: dateTime, firedAt: dateTime, nextTickAt: dateTime }),
+  GoalGateEvaluationRecorded: z.object({ evaluationId: id, goalId: id, gateId: id, requestId: id, definitionHash: digest, materialVersion: digest, materialEventIds: z.array(id), status: z.enum(["passed", "failed", "cancelled", "unknown"]), effectId: id.optional(), output: jsonValueSchema.optional(), error: z.string().optional(), cachedFromEvaluationId: id.optional() }).strict(),
+  GoalStatusChanged: z.object({ goalId: id, status: z.enum(["active", "paused", "completion_requested", "completed", "blocked", "failed", "cancelled"]), reason: z.string().optional() }),
+  HeartbeatCreated: z.object({ heartbeatId: id, intervalMs: positiveInteger, nextTickAt: dateTime, goalId: id.optional(), prompt: z.string().min(1).optional(), payload: jsonValueSchema.optional(), owner: z.enum(["user", "agent"]).optional() }),
+  HeartbeatTicked: z.object({ heartbeatId: id, tick: positiveInteger, scheduledAt: dateTime, firedAt: dateTime, nextTickAt: dateTime, missedIntervals: z.number().int().nonnegative().optional(), wakeId: id.optional() }),
   HeartbeatStatusChanged: z.object({ heartbeatId: id, status: z.enum(["active", "paused", "cancelled"]), nextTickAt: dateTime.optional(), reason: z.string().optional() }),
+  ScheduleCreated: z.object({ scheduleId: id, kind: z.enum(["once", "interval"]), prompt: z.string().min(1), nextTickAt: dateTime, intervalMs: positiveInteger.optional(), owner: z.enum(["user", "agent"]), goalMode: z.enum(["auto", "current", "create"]) }).strict(),
+  ScheduleTicked: z.object({ scheduleId: id, tick: positiveInteger, scheduledAt: dateTime, firedAt: dateTime, nextTickAt: dateTime.nullable(), missedIntervals: z.number().int().nonnegative(), wakeId: id }).strict(),
+  ScheduleStatusChanged: z.object({ scheduleId: id, status: z.enum(["active", "paused", "completed", "cancelled"]), nextTickAt: dateTime.optional(), reason: z.string().optional() }).strict(),
+  WakeQueued: z.object({ wakeId: id, sourceType: z.enum(["heartbeat", "schedule"]), sourceId: id, tick: positiveInteger, scheduledAt: dateTime, firedAt: dateTime, prompt: z.string().min(1), goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]) }).strict(),
+  WakeClaimed: z.object({ wakeId: id, claimId: id, claimedAt: dateTime }).strict(),
+  WakeDelivered: z.object({ wakeId: id, claimId: id, runId: id, deliveredAt: dateTime }).strict(),
+  WakeDeliveryUnknown: z.object({ wakeId: id, claimId: id, reason: z.string().min(1), observedAt: dateTime }).strict(),
   RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, inputSetId: id.optional(), input: jsonValueSchema.optional(), inputProvenance: jsonValueSchema.optional(), inputHash: digest.optional() }),
   RecursiveModelStatusChanged: z.object({ handleId: id, status: z.enum(["running", "completed", "failed", "cancelled"]), outcome: z.enum(["succeeded", "failed", "cancelled", "budget-exceeded", "unknown"]).optional(), resultMessageId: id.optional(), result: jsonValueSchema.optional(), resultArtifactId: id.optional(), error: z.string().optional() }),
   HarnessVersionCreated: z.object({ entryId: id, versionId: id, version: positiveInteger, kind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]), scope: z.enum(["local", "workspace", "user", "global"]), scopeKey: id, name: z.string().min(1), content: jsonValueSchema, tags: z.array(z.string()), confidence: z.number().finite().min(0).max(1), status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), evidenceEventIds: z.array(id), conflictEntryIds: z.array(id), supersedesVersionId: id.optional(), proposalId: id.optional(), createdBy: id, lastConfirmedAt: dateTime }),
@@ -228,10 +251,11 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SkillTestRecorded: z.object({ entryId: id, versionId: id, effectId: id, passed: z.boolean(), report: jsonValueSchema }),
   SubagentSpecInvoked: z.object({ entryId: id, versionId: id, taskId: id, childSessionId: id, childBranchId: id }),
   SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
-  AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, goalId: id.optional() }).strict(),
+  AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
   AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
   AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, callId: id, raw: z.string(), action: agentActionSchema }).strict(),
   AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, callId: id, raw: z.string(), error: z.string().min(1) }).strict(),
+  AgentRunGoalCheckRecorded: z.object({ runId: id, actionId: id, goalId: id, requestId: id, status: z.enum(["passed", "failed", "unknown"]), summary: z.string().min(1).max(65536), gateEvaluationEventIds: z.array(id) }).strict(),
   AgentRunUserInputRequested: z.object({ runId: id, requestId: id, actionId: id, kind: z.enum(["clarification", "permission"]), question: z.string().min(1), permission: z.string().min(1).optional() }).strict(),
   AgentRunUserInputReceived: z.object({ runId: id, requestId: id, response: z.string(), approved: z.boolean().optional() }).strict(),
   AgentRunCancellationRequested: z.object({ runId: id, reason: z.string().optional() }).strict(),

@@ -162,6 +162,30 @@ export interface RlmSdk {
   result(handle: string | Pick<ConsoleRlmHandle, "handleId">, options?: { readonly wait?: boolean; readonly timeoutMs?: number }): Promise<ConsoleRlmResult>;
   cancel(handle: string | Pick<ConsoleRlmHandle, "handleId">, reason?: string): Promise<ConsoleRlmHandle>;
 }
+export interface GoalsSdk {
+  current(): Promise<JsonValue>;
+  list(): Promise<JsonValue>;
+  get(goalId: string): Promise<JsonValue>;
+  evaluations(goalId: string, gateId?: string): Promise<JsonValue>;
+}
+export interface ConsoleHeartbeatInput { readonly intervalMs: number; readonly nextTickAt?: string; readonly goalId?: string; readonly prompt?: string; readonly payload?: JsonValue; }
+export interface HeartbeatsSdk {
+  create(input: ConsoleHeartbeatInput | number): Promise<JsonValue>;
+  list(): Promise<JsonValue>;
+  pause(heartbeatId: string, reason?: string): Promise<JsonValue>;
+  resume(heartbeatId: string, nextTickAt?: string): Promise<JsonValue>;
+  clear(heartbeatId: string, reason?: string): Promise<JsonValue>;
+}
+export interface ConsoleScheduleInput { readonly prompt: string; readonly at?: string; readonly nextTickAt?: string; readonly intervalMs?: number; readonly goalMode?: "auto" | "current" | "create"; }
+export interface SchedulesSdk {
+  create(input: ConsoleScheduleInput): Promise<JsonValue>;
+  list(): Promise<JsonValue>;
+  wakes(statuses?: readonly ("queued" | "claimed" | "delivered" | "unknown")[]): Promise<JsonValue>;
+  pause(scheduleId: string, reason?: string): Promise<JsonValue>;
+  resume(scheduleId: string, nextTickAt?: string): Promise<JsonValue>;
+  clear(scheduleId: string, reason?: string): Promise<JsonValue>;
+}
+
 export interface ConsoleSdk {
   readonly state: StateSdk;
   readonly cells: CellsSdk;
@@ -172,6 +196,9 @@ export interface ConsoleSdk {
   readonly skills: SkillsSdk;
   readonly specs: SpecsSdk;
   readonly agents: AgentsSdk;
+  readonly goals: GoalsSdk;
+  readonly heartbeats: HeartbeatsSdk;
+  readonly schedules: SchedulesSdk;
   readonly rlm: RlmSdk;
   inspect(value: unknown, options?: InspectOptions): InspectPreview;
 }
