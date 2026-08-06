@@ -15,6 +15,7 @@ Do not change the first three columns or class tokens without updating the archi
 | `snapshots` | `rebuildable-projection` | `mutable` | Disposable cached `AgentState` keyed by session/branch. Upsert/delete is expected. `rebuild` discards it and reduces canonical history. A current-cursor cache has no integrity hash in Slice 1 and must never be treated as authority. |
 | `context_records` | `immutable-derived` | `immutable` | Exact derived model-context/provenance copy, tied one-to-one to `ContextMaterialized.event_id`. `context_no_update`/`context_no_delete` prevent drift; it can be reconstructed from retained context events, but a retained row is never rewritten. |
 | `outbox` | `operational-projection` | `mutable` | Execution queue/status/attempt projection plus disposable owner/lease. Intent and terminal truth are `Effect*` events. Rebuild status from them; lost lease ownership is reconciled as safe retry or canonical unknown, never treated as success. |
+| `process_execution_leases` | `operational-projection` | `mutable` | Retained local process-owner/fence rows for workspace or root scope. Transactional claim/takeover monotonically increments the fence token; renew/release require the exact owner and token. Rows are never sync envelopes and provide no cross-device lease or automatic failover. |
 | `tasks` | `rebuildable-projection` | `mutable` | Current task admission/status/result projection of `Task*` and `Subagent*` events. Parent/child identity and terminal truth remain canonical events. |
 | `mailbox_messages` | `rebuildable-projection` | `mutable` | Delivery/ack query projection of paired mailbox events. It can be deleted and replayed without losing a message or acknowledgement. |
 | `terminal_notices` | `rebuildable-projection` | `mutable` | Parent-visible terminal delivery projection of paired `TaskTerminalNotice*` events. |
@@ -88,6 +89,12 @@ The same append transaction that stores `ContextMaterialized` inserts its contex
 ### `outbox`
 
 The adapter creates it from `EffectRequested`, marks running during a serialized local claim/attempt, and applies terminal outcome. The row may transiently carry `owner` and `lease_expires_at`; those fields are never durable identity. A competing local claimant waits for the winner's durable outcome through that lease instead of reporting a race as unknown. If ownership disappears, recovery checks the canonical request's idempotence assertion: idempotent work returns pending, while running non-idempotent work appends an unknown outcome. A normal pending first attempt is safe to drain because no local claim occurred; a pending non-idempotent row with a retained attempt is conservatively marked unknown. Direct outbox edits are not a supported reconciliation API, and the table is private to model-visible SQL.
+
+### `process_execution_leases`
+
+These rows fence competing processes that share one local canonical workspace database. Release marks a row rather than deleting it; an expired or released takeover increments `fence_token`, so an older process cannot renew or release after losing ownership. A workspace lease conflicts with every active root lease in that workspace, while a root lease conflicts with the workspace lease and permits independent roots to have distinct owners. Root claims also check the projected device execution owner and refuse a different device because distributed ownership transfer is unavailable.
+
+The table is not canonical agent history and is not rebuilt from events. It intentionally survives projection rebuild and database reopen because forgetting the last token would allow a stale process proof to become current again. Whole-workspace physical deletion removes the database; narrow independent-root erasure removes only that root's lease row after the existing ownership/quiescence checks. The table is private to model-visible analytical SQL and is never staged into synchronization envelopes.
 
 ### Slice 2 recursive projections
 

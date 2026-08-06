@@ -3,6 +3,7 @@ export * from "./projection.ts";
 export * from "./context.ts";
 export * from "./model-loop.ts";
 export * from "./outbox.ts";
+export * from "./execution-leases.ts";
 export * from "./agents.ts";
 export * from "./documents.ts";
 export * from "./models.ts";

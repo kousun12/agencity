@@ -4,9 +4,62 @@ import type {
   RecursiveModelOutcome, RecursiveModelStatus, TaskStatus,
 } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
-export interface StorageCapabilities { readonly offlineWrites: boolean; readonly distributedLeases: boolean; readonly analyticalSql: boolean; readonly notifications: boolean; }
+export interface StorageCapabilities {
+  readonly offlineWrites: boolean;
+  /** Fences competing processes against one local canonical workspace store. */
+  readonly sameDeviceProcessFencing: boolean;
+  /** Coordinates owners across devices/placements. Local LibSQL truthfully reports false. */
+  readonly distributedLeases: boolean;
+  readonly analyticalSql: boolean;
+  readonly notifications: boolean;
+}
 export interface EventQuery { readonly branchId?: string; readonly afterCursor?: string; readonly untilCursor?: string; }
 export interface OutboxRecord { readonly effectId: string; readonly sessionId: string; readonly branchId: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotencyKey: string; readonly idempotent: boolean; readonly status: "pending"|"running"|EffectOutcome; readonly attempt: number; readonly owner: string | null; readonly leaseExpiresAt: string | null; }
+
+export type ProcessExecutionLeaseScope =
+  | { readonly kind: "workspace"; readonly workspaceId: string }
+  | { readonly kind: "root"; readonly rootSessionId: string };
+
+/** Retained operational row. A new acquisition increments fenceToken; renewals do not. */
+export interface ProcessExecutionLeaseRecord {
+  readonly scope: ProcessExecutionLeaseScope;
+  readonly workspaceId: string;
+  readonly ownerDeviceId: string;
+  readonly ownerProcessId: string;
+  readonly fenceToken: number;
+  readonly acquiredAt: string;
+  readonly renewedAt: string;
+  readonly leaseExpiresAt: string;
+  readonly releasedAt: string | null;
+}
+
+export interface ProcessExecutionLeaseClaim {
+  readonly scope: ProcessExecutionLeaseScope;
+  readonly ownerDeviceId: string;
+  readonly ownerProcessId: string;
+  /** Caller-supplied time makes expiry decisions deterministic in tests and services. */
+  readonly now: string;
+  readonly leaseMs: number;
+}
+
+export interface ProcessExecutionLeaseProof {
+  readonly scope: ProcessExecutionLeaseScope;
+  readonly ownerDeviceId: string;
+  readonly ownerProcessId: string;
+  readonly fenceToken: number;
+  readonly now: string;
+}
+
+export interface ProcessExecutionLeaseRenewal extends ProcessExecutionLeaseProof {
+  readonly leaseMs: number;
+}
+
+export interface ProcessExecutionLeaseStorageOperations {
+  getProcessExecutionLease(scope: ProcessExecutionLeaseScope): Promise<ProcessExecutionLeaseRecord | null>;
+  claimProcessExecutionLease(input: ProcessExecutionLeaseClaim): Promise<ProcessExecutionLeaseRecord>;
+  renewProcessExecutionLease(input: ProcessExecutionLeaseRenewal): Promise<ProcessExecutionLeaseRecord>;
+  releaseProcessExecutionLease(input: ProcessExecutionLeaseProof): Promise<ProcessExecutionLeaseRecord>;
+}
 export interface ReadonlyStatement { readonly sql: string; readonly args: readonly (string|number|bigint|null|Uint8Array)[]; }
 
 export interface SessionRecord { readonly sessionId: string; readonly workspaceId: string; readonly initialBranchId: string; readonly parentSessionId: string | null; readonly parentBranchId: string | null; readonly rootSessionId: string; readonly depth: number; readonly taskId: string | null; readonly status: TaskStatus | null; readonly executionOwnerDeviceId: string | null; }
@@ -168,6 +221,10 @@ export interface AgentStorage {
  resetOutbox(effectId: string): Promise<void>;
  readonlyQuery(statement: ReadonlyStatement): Promise<JsonValue[]>;
  onCommitted(listener: (events: readonly AgentEvent[]) => void): () => void;
+ getProcessExecutionLease?: ProcessExecutionLeaseStorageOperations["getProcessExecutionLease"];
+ claimProcessExecutionLease?: ProcessExecutionLeaseStorageOperations["claimProcessExecutionLease"];
+ renewProcessExecutionLease?: ProcessExecutionLeaseStorageOperations["renewProcessExecutionLease"];
+ releaseProcessExecutionLease?: ProcessExecutionLeaseStorageOperations["releaseProcessExecutionLease"];
  getSession?: RecursiveStorageOperations["getSession"];
  listChildren?: RecursiveStorageOperations["listChildren"];
  getTask?: RecursiveStorageOperations["getTask"];

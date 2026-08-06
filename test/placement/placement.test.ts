@@ -66,13 +66,13 @@ describe("relational placement conformance", () => {
   test("the same suite passes process-local LibSQL and a real HTTP/RPC server-owned store", async () => {
     const localStore = await database(await temp("placement-relational-local-"));
     const local = localRelationalState(localStore);
-    expect(local.descriptor).toMatchObject({ placement: "local", transport: "in-process", capabilities: { offlineWrites: true, analyticalSql: true } });
+    expect(local.descriptor).toMatchObject({ placement: "local", transport: "in-process", capabilities: { offlineWrites: true, sameDeviceProcessFencing: true, distributedLeases: false, analyticalSql: true } });
     await relationalStateConformance(local.storage, "local");
 
     const serverStore = await database(await temp("placement-relational-server-"));
     const { endpoint } = serve(createRelationalStateRpcHandler(serverStore, { analyticalSql: true }));
     const remote = await HttpRelationalStateStore.connect({ endpoint });
-    expect(remote.placement).toMatchObject({ placement: "remote", transport: "http", protocol: "agencity-relational-rpc-v1", capabilities: { offlineWrites: false, notifications: false } });
+    expect(remote.placement).toMatchObject({ placement: "remote", transport: "http", protocol: "agencity-relational-rpc-v1", capabilities: { offlineWrites: false, sameDeviceProcessFencing: false, distributedLeases: false, notifications: false } });
     await relationalStateConformance(remote, "remote");
     expect(() => remote.onCommitted(() => {})).toThrow(expect.objectContaining({ code: "CAPABILITY_UNAVAILABLE" }));
     await expect(remote.migrate()).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });

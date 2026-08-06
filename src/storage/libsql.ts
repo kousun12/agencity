@@ -1,11 +1,13 @@
 import { createClient, type Client, type InValue, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, NotFoundError, ValidationError, newId, projectEvents, reduceAgentState, validateNewEvent } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, ExecutionOwnershipConflictError, NotFoundError, ValidationError, newId, projectEvents, reduceAgentState, validateNewEvent } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateRecord, GoalRecord,
   HeartbeatRecord, InputSetRecord, MailboxRecord, OutboxRecord, ReadonlyStatement,
   RecursiveModelRecord, SessionRecord, StorageCapabilities, TaskRecord,
+  ProcessExecutionLeaseClaim, ProcessExecutionLeaseProof, ProcessExecutionLeaseRecord,
+  ProcessExecutionLeaseRenewal, ProcessExecutionLeaseScope,
   DataManifestRecord, SessionErasureResult, SyncBranchMappingRecord, SyncConflictRecord, SyncIngestReceiptRecord,
   SyncOriginWatermarkRecord, SyncQuarantineRecord, WorkspaceReplicaStatusRecord,
 } from "./contract.ts";
@@ -37,6 +39,47 @@ function rowToEvent(row: Row): AgentEvent {
   };
 }
 function rowToOutbox(row: Row): OutboxRecord { return { effectId: String(row.effect_id), sessionId: String(row.session_id), branchId: String(row.branch_id), executor: String(row.executor), operation: String(row.operation), input: JSON.parse(String(row.input_json)) as JsonValue, idempotencyKey: String(row.idempotency_key), idempotent: Number(row.idempotent) === 1, status: String(row.status) as OutboxRecord["status"], attempt: Number(row.attempt), owner: row.owner === null ? null : String(row.owner), leaseExpiresAt: row.lease_expires_at === null ? null : String(row.lease_expires_at) }; }
+function leaseScopeParts(scope: ProcessExecutionLeaseScope): { scopeKind: "workspace" | "root"; scopeId: string } {
+  const scopeKind = scope.kind;
+  const scopeId = scopeKind === "workspace" ? scope.workspaceId : scope.rootSessionId;
+  if (!scopeId.trim()) throw new ValidationError(`Execution lease ${scopeKind} scope ID is required`);
+  return { scopeKind, scopeId };
+}
+function canonicalLeaseTime(value: string): string {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new ValidationError("Execution lease time must be a valid timestamp");
+  return parsed.toISOString();
+}
+function assertLeaseOwner(ownerDeviceId: string, ownerProcessId: string): void {
+  if (!ownerDeviceId.trim()) throw new ValidationError("Execution lease owner device ID is required");
+  if (!ownerProcessId.trim()) throw new ValidationError("Execution lease owner process ID is required");
+}
+function assertLeaseMs(leaseMs: number): void {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) {
+    throw new ValidationError("Execution lease duration must be a positive safe integer");
+  }
+}
+function assertFenceToken(fenceToken: number): void {
+  if (!Number.isSafeInteger(fenceToken) || fenceToken < 1) {
+    throw new ValidationError("Execution lease fence token must be a positive safe integer");
+  }
+}
+function rowToProcessExecutionLease(row: Row): ProcessExecutionLeaseRecord {
+  const scope = String(row.scope_kind) === "workspace"
+    ? { kind: "workspace" as const, workspaceId: String(row.scope_id) }
+    : { kind: "root" as const, rootSessionId: String(row.scope_id) };
+  return {
+    scope,
+    workspaceId: String(row.workspace_id),
+    ownerDeviceId: String(row.owner_device_id),
+    ownerProcessId: String(row.owner_process_id),
+    fenceToken: Number(row.fence_token),
+    acquiredAt: String(row.acquired_at),
+    renewedAt: String(row.renewed_at),
+    leaseExpiresAt: String(row.lease_expires_at),
+    releasedAt: row.released_at === null ? null : String(row.released_at),
+  };
+}
 function optionalJson(row: Row, key: string): JsonValue | undefined { const value = row[key]; return value === null || value === undefined ? undefined : JSON.parse(String(value)) as JsonValue; }
 function rowToSession(row: Row): SessionRecord { return { sessionId: String(row.session_id), workspaceId: String(row.workspace_id), initialBranchId: String(row.initial_branch_id), parentSessionId: row.parent_session_id === null ? null : String(row.parent_session_id), parentBranchId: row.parent_branch_id === null ? null : String(row.parent_branch_id), rootSessionId: row.root_session_id === null ? String(row.session_id) : String(row.root_session_id), depth: Number(row.depth), taskId: row.task_id === null ? null : String(row.task_id), status: row.task_status === null || row.task_status === undefined ? null : String(row.task_status) as SessionRecord["status"], executionOwnerDeviceId: row.execution_owner_device_id === null || row.execution_owner_device_id === undefined ? null : String(row.execution_owner_device_id) }; }
 function rowToTask(row: Row): TaskRecord { const result = optionalJson(row, "result_json"); return { taskId: String(row.task_id), parentSessionId: String(row.parent_session_id), parentBranchId: String(row.parent_branch_id), childSessionId: String(row.child_session_id), childBranchId: String(row.child_branch_id), task: String(row.task_text), completionCriteria: row.completion_criteria === null ? null : String(row.completion_criteria), model: JSON.parse(String(row.model_json)), budget: JSON.parse(String(row.budget_json)), status: String(row.status) as TaskRecord["status"], cancellationRequested: Number(row.cancellation_requested) === 1, ...(result === undefined ? {} : { result }), artifactIds: JSON.parse(String(row.artifact_ids_json)) as string[], ...(row.error === null ? {} : { error: String(row.error) }), ...(row.reason === null ? {} : { reason: String(row.reason) }), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
@@ -83,7 +126,7 @@ export interface LibSqlStorageOptions {
 }
 export class LibSqlStorage implements AgentStorage {
   readonly name = "libsql";
-  readonly capabilities: StorageCapabilities = { offlineWrites: true, distributedLeases: false, analyticalSql: true, notifications: true };
+  readonly capabilities: StorageCapabilities = { offlineWrites: true, sameDeviceProcessFencing: true, distributedLeases: false, analyticalSql: true, notifications: true };
   readonly #client: Client;
   readonly #config: { readonly url:string };
   readonly #listeners = new Set<(events: readonly AgentEvent[]) => void>();
@@ -112,6 +155,7 @@ export class LibSqlStorage implements AgentStorage {
       { version: 5, name: "turso-cloud-sync", url: new URL("./migrations/005_turso_cloud_sync.sql", import.meta.url) },
       { version: 6, name: "data-control-evidence", url: new URL("./migrations/006_data_control_evidence.sql", import.meta.url) },
       { version: 7, name: "recursive-model-input-results", url: new URL("./migrations/007_recursive_model_input_results.sql", import.meta.url) },
+      { version: 8, name: "process-execution-leases", url: new URL("./migrations/008_process_execution_leases.sql", import.meta.url) },
     ];
     for (const migration of migrations) {
       const applied = await this.#client.execute({ sql: "SELECT version FROM schema_migrations WHERE version=?", args: [migration.version] });
@@ -623,6 +667,233 @@ export class LibSqlStorage implements AgentStorage {
   async saveSnapshot(state: AgentState): Promise<void> { await this.#client.execute({sql:"INSERT INTO snapshots(session_id,branch_id,cursor,reducer_version,state_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(session_id,branch_id) DO UPDATE SET cursor=excluded.cursor,reducer_version=excluded.reducer_version,state_json=excluded.state_json,updated_at=excluded.updated_at",args:[state.sessionId,state.branch.id,state.cursor,state.reducerVersion,json(state),new Date().toISOString()]}); }
   async loadSnapshot(sessionId:string,branchId:string):Promise<AgentState|null>{const r=await this.#client.execute({sql:"SELECT reducer_version,state_json FROM snapshots WHERE session_id=? AND branch_id=?",args:[sessionId,branchId]});if(!r.rows[0]||Number(r.rows[0].reducer_version)!==3)return null;return JSON.parse(String(r.rows[0].state_json)) as AgentState;}
   async deleteSnapshots(sessionId?:string):Promise<void>{if(sessionId)await this.#client.execute({sql:"DELETE FROM snapshots WHERE session_id=?",args:[sessionId]});else await this.#client.execute("DELETE FROM snapshots");}
+
+  async getProcessExecutionLease(scope: ProcessExecutionLeaseScope): Promise<ProcessExecutionLeaseRecord | null> {
+    const { scopeKind, scopeId } = leaseScopeParts(scope);
+    const result = await this.#client.execute({
+      sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
+      args: [scopeKind, scopeId],
+    });
+    return result.rows[0] ? rowToProcessExecutionLease(result.rows[0]) : null;
+  }
+
+  async claimProcessExecutionLease(input: ProcessExecutionLeaseClaim): Promise<ProcessExecutionLeaseRecord> {
+    const parts = leaseScopeParts(input.scope);
+    assertLeaseOwner(input.ownerDeviceId, input.ownerProcessId);
+    assertLeaseMs(input.leaseMs);
+    const now = canonicalLeaseTime(input.now);
+    const leaseExpiresAt = this.#leaseExpiry(now, input.leaseMs);
+    return this.#writes.run(() => this.#withLeaseTransaction(async (tx) => {
+      const workspaceId = await this.#leaseWorkspace(tx, input.scope, input.ownerDeviceId);
+      const blocker = parts.scopeKind === "workspace"
+        ? await tx.execute({
+          sql: `SELECT * FROM process_execution_leases
+            WHERE workspace_id=? AND NOT(scope_kind=? AND scope_id=?)
+              AND released_at IS NULL AND lease_expires_at>?
+            ORDER BY scope_kind,scope_id LIMIT 1`,
+          args: [workspaceId, parts.scopeKind, parts.scopeId, now],
+        })
+        : await tx.execute({
+          sql: `SELECT * FROM process_execution_leases
+            WHERE workspace_id=? AND scope_kind='workspace'
+              AND released_at IS NULL AND lease_expires_at>?
+            LIMIT 1`,
+          args: [workspaceId, now],
+        });
+      if (blocker.rows[0]) {
+        this.#throwLeaseConflict("claim", parts, "overlapping_scope_owned", blocker.rows[0]);
+      }
+
+      const selected = await tx.execute({
+        sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
+        args: [parts.scopeKind, parts.scopeId],
+      });
+      const current = selected.rows[0];
+      if (current && current.released_at === null && String(current.lease_expires_at) > now) {
+        if (String(current.owner_device_id) === input.ownerDeviceId &&
+            String(current.owner_process_id) === input.ownerProcessId) {
+          return rowToProcessExecutionLease(current);
+        }
+        this.#throwLeaseConflict("claim", parts, "active_owner", current);
+      }
+
+      if (!current) {
+        await tx.execute({
+          sql: `INSERT INTO process_execution_leases(
+            scope_kind,scope_id,workspace_id,owner_device_id,owner_process_id,fence_token,
+            acquired_at,renewed_at,lease_expires_at,released_at
+          ) VALUES(?,?,?,?,?,1,?,?,?,NULL)`,
+          args: [parts.scopeKind, parts.scopeId, workspaceId, input.ownerDeviceId, input.ownerProcessId, now, now, leaseExpiresAt],
+        });
+      } else {
+        const fenceToken = Number(current.fence_token);
+        if (!Number.isSafeInteger(fenceToken) || fenceToken >= Number.MAX_SAFE_INTEGER) {
+          throw new ValidationError("Execution lease fence token is exhausted", {
+            scopeKind: parts.scopeKind, scopeId: parts.scopeId,
+          });
+        }
+        const changed = await tx.execute({
+          sql: `UPDATE process_execution_leases SET
+            workspace_id=?,owner_device_id=?,owner_process_id=?,fence_token=fence_token+1,
+            acquired_at=?,renewed_at=?,lease_expires_at=?,released_at=NULL
+            WHERE scope_kind=? AND scope_id=? AND fence_token=?
+              AND (released_at IS NOT NULL OR lease_expires_at<=?)`,
+          args: [workspaceId, input.ownerDeviceId, input.ownerProcessId, now, now, leaseExpiresAt,
+            parts.scopeKind, parts.scopeId, fenceToken, now],
+        });
+        if (changed.rowsAffected !== 1) {
+          const raced = await tx.execute({
+            sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
+            args: [parts.scopeKind, parts.scopeId],
+          });
+          this.#throwLeaseConflict("claim", parts, "compare_and_swap_lost", raced.rows[0]);
+        }
+      }
+      const claimed = await tx.execute({
+        sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
+        args: [parts.scopeKind, parts.scopeId],
+      });
+      return rowToProcessExecutionLease(claimed.rows[0]!);
+    }));
+  }
+
+  async renewProcessExecutionLease(input: ProcessExecutionLeaseRenewal): Promise<ProcessExecutionLeaseRecord> {
+    const parts = leaseScopeParts(input.scope);
+    assertLeaseOwner(input.ownerDeviceId, input.ownerProcessId);
+    assertFenceToken(input.fenceToken);
+    assertLeaseMs(input.leaseMs);
+    const now = canonicalLeaseTime(input.now);
+    const leaseExpiresAt = this.#leaseExpiry(now, input.leaseMs);
+    return this.#writes.run(() => this.#withLeaseTransaction(async (tx) => {
+      await this.#leaseWorkspace(tx, input.scope, input.ownerDeviceId);
+      const changed = await tx.execute({
+        sql: `UPDATE process_execution_leases SET renewed_at=?,lease_expires_at=?
+          WHERE scope_kind=? AND scope_id=? AND owner_device_id=? AND owner_process_id=?
+            AND fence_token=? AND released_at IS NULL AND lease_expires_at>?`,
+        args: [now, leaseExpiresAt, parts.scopeKind, parts.scopeId, input.ownerDeviceId,
+          input.ownerProcessId, input.fenceToken, now],
+      });
+      if (changed.rowsAffected !== 1) {
+        const selected = await tx.execute({
+          sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
+          args: [parts.scopeKind, parts.scopeId],
+        });
+        this.#throwLeaseConflict("renew", parts, "stale_fence_owner_or_expiry", selected.rows[0]);
+      }
+      const renewed = await tx.execute({
+        sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
+        args: [parts.scopeKind, parts.scopeId],
+      });
+      return rowToProcessExecutionLease(renewed.rows[0]!);
+    }));
+  }
+
+  async releaseProcessExecutionLease(input: ProcessExecutionLeaseProof): Promise<ProcessExecutionLeaseRecord> {
+    const parts = leaseScopeParts(input.scope);
+    assertLeaseOwner(input.ownerDeviceId, input.ownerProcessId);
+    assertFenceToken(input.fenceToken);
+    const now = canonicalLeaseTime(input.now);
+    return this.#writes.run(() => this.#withLeaseTransaction(async (tx) => {
+      await this.#leaseWorkspace(tx, input.scope, input.ownerDeviceId);
+      const changed = await tx.execute({
+        sql: `UPDATE process_execution_leases SET released_at=?
+          WHERE scope_kind=? AND scope_id=? AND owner_device_id=? AND owner_process_id=?
+            AND fence_token=? AND released_at IS NULL AND lease_expires_at>?`,
+        args: [now, parts.scopeKind, parts.scopeId, input.ownerDeviceId, input.ownerProcessId,
+          input.fenceToken, now],
+      });
+      if (changed.rowsAffected !== 1) {
+        const selected = await tx.execute({
+          sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
+          args: [parts.scopeKind, parts.scopeId],
+        });
+        this.#throwLeaseConflict("release", parts, "stale_fence_owner_or_expiry", selected.rows[0]);
+      }
+      const released = await tx.execute({
+        sql: "SELECT * FROM process_execution_leases WHERE scope_kind=? AND scope_id=?",
+        args: [parts.scopeKind, parts.scopeId],
+      });
+      return rowToProcessExecutionLease(released.rows[0]!);
+    }));
+  }
+
+  #leaseExpiry(now: string, leaseMs: number): string {
+    const expires = new Date(new Date(now).getTime() + leaseMs);
+    if (!Number.isFinite(expires.getTime())) throw new ValidationError("Execution lease expiry is outside the supported date range");
+    return expires.toISOString();
+  }
+
+  async #leaseWorkspace(tx: Transaction, scope: ProcessExecutionLeaseScope, ownerDeviceId: string): Promise<string> {
+    if (scope.kind === "workspace") return scope.workspaceId;
+    const selected = await tx.execute({
+      sql: "SELECT session_id,root_session_id,workspace_id,execution_owner_device_id FROM sessions WHERE session_id=?",
+      args: [scope.rootSessionId],
+    });
+    const root = selected.rows[0];
+    if (!root) throw new NotFoundError("root session", scope.rootSessionId);
+    if (String(root.root_session_id ?? root.session_id) !== scope.rootSessionId) {
+      throw new ValidationError("Execution lease root scope must identify a root session", {
+        rootSessionId: scope.rootSessionId,
+        actualRootSessionId: String(root.root_session_id),
+      });
+    }
+    const executionOwner = root.execution_owner_device_id;
+    if (executionOwner !== null && executionOwner !== undefined && String(executionOwner) !== "legacy" &&
+        String(executionOwner) !== ownerDeviceId) {
+      throw new ExecutionOwnershipConflictError(
+        "Root session belongs to another device and automatic ownership failover is unavailable",
+        {
+          reason: "device_owner_mismatch",
+          scopeKind: "root",
+          scopeId: scope.rootSessionId,
+          requestedOwnerDeviceId: ownerDeviceId,
+          currentOwnerDeviceId: String(executionOwner),
+          distributedLeases: false,
+        },
+      );
+    }
+    return String(root.workspace_id);
+  }
+
+  #throwLeaseConflict(
+    action: "claim" | "renew" | "release",
+    scope: { readonly scopeKind: "workspace" | "root"; readonly scopeId: string },
+    reason: string,
+    row?: Row,
+  ): never {
+    throw new ExecutionOwnershipConflictError(`Cannot ${action} process execution lease: ownership conflict`, {
+      reason,
+      action,
+      scopeKind: scope.scopeKind,
+      scopeId: scope.scopeId,
+      ...(row === undefined ? {} : {
+        currentOwnerDeviceId: String(row.owner_device_id),
+        currentOwnerProcessId: String(row.owner_process_id),
+        currentFenceToken: Number(row.fence_token),
+        currentLeaseExpiresAt: String(row.lease_expires_at),
+        currentReleasedAt: row.released_at === null ? null : String(row.released_at),
+      }),
+    });
+  }
+
+  async #withLeaseTransaction<T>(operation: (tx: Transaction) => Promise<T>): Promise<T> {
+    for (let retry = 0; ; retry++) {
+      let tx: Transaction | undefined;
+      try {
+        tx = await this.#client.transaction("write");
+        const result = await operation(tx);
+        await tx.commit();
+        return result;
+      } catch (error) {
+        if (tx && !tx.closed) await tx.rollback();
+        if (!isSqliteBusy(error) || retry >= 100) throw error;
+        await Bun.sleep(Math.min(10, retry + 1));
+      } finally {
+        tx?.close();
+      }
+    }
+  }
+
   async claimOutbox(owner: string, limit = 1, leaseMs = 30_000): Promise<OutboxRecord[]> {
     return this.#writes.run(async () => {
       const tx = await this.#client.transaction("write");
@@ -904,6 +1175,7 @@ export class LibSqlStorage implements AgentStorage {
         await remove("input_set_chunks", "DELETE FROM input_set_chunks WHERE input_set_id IN (SELECT input_set_id FROM input_sets WHERE session_id=?)", [sessionId]);
         await remove("document_chunks", "DELETE FROM document_chunks WHERE document_id IN (SELECT document_id FROM documents WHERE session_id=?)", [sessionId]);
         await remove("sync_quarantine", "DELETE FROM sync_quarantine WHERE json_extract(envelope_json,'$.body.sessionId')=?", [sessionId]);
+        await remove("process_execution_leases", "DELETE FROM process_execution_leases WHERE scope_kind='root' AND scope_id=?", [sessionId]);
         for (const table of ["heartbeats", "goals", "input_sets", "documents", "outbox", "snapshots", "context_records", "branches"]) {
           await remove(table, `DELETE FROM ${table} WHERE session_id=?`, [sessionId]);
         }
@@ -957,7 +1229,7 @@ export const MAX_ANALYTICAL_ROWS = 1_000;
 export const MAX_ANALYTICAL_QUERY_MS = 2_000;
 const MAX_ANALYTICAL_SQL_BYTES = 64 * 1024;
 const forbidden = /\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|ATTACH|DETACH|VACUUM|REINDEX|ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b/i;
-const privateTables = /\b(schema_migrations|outbox|snapshots|device_clocks|workspace_replica_status|sync_ingest_receipts|sync_origin_watermarks|sync_quarantine|sync_branch_mappings|sync_reconciliations|data_manifests|sqlite_(?:schema|master|temp_schema|temp_master|sequence))\b/i;
+const privateTables = /\b(schema_migrations|outbox|snapshots|process_execution_leases|device_clocks|workspace_replica_status|sync_ingest_receipts|sync_origin_watermarks|sync_quarantine|sync_branch_mappings|sync_reconciliations|data_manifests|sqlite_(?:schema|master|temp_schema|temp_master|sequence))\b/i;
 const dangerousFunctions = /\b(load_extension|writefile|readfile)\s*\(/i;
 
 export function assertReadonlySql(sql: string): void {

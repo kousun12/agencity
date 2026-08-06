@@ -100,10 +100,18 @@ Not guaranteed:
 - exactly once in an external system;
 - recovery of heap objects or uncheckpointed cell variables;
 - reconstruction of independently changed workspace/services;
-- automatic process-owner failover or distributed leases;
+- automatic supervisor/background-service process-owner failover or distributed leases (the local CAS/fence primitive is implemented but not yet wired into run advancement);
 - crash-atomicity across database and artifact/filesystem placement;
 - cleanup of unreferenced CAS bytes;
 - complete operating-system kill tests for every crash instruction boundary (tests simulate the durable boundary states).
+
+## Process execution leases and fencing
+
+Migration 008 and `ExecutionLeaseService` provide the local ownership primitive used by the FU-015 background-service work. A claim is a transactional compare-and-swap against a workspace or root scope. An active competing owner receives `EXECUTION_OWNERSHIP_CONFLICT`; expiry or explicit release permits takeover and increments the retained fence token. Renewal and release require the exact device ID, process ID, and fence token while the lease is still live, so a stale owner cannot regain authority after takeover. Time is supplied by the service clock and persisted as canonical ISO timestamps for deterministic expiry tests.
+
+Workspace and root scopes overlap deliberately: an active workspace lease excludes every root lease in that workspace, an active root lease excludes a workspace lease, and separate root leases can run independently. A root claim refuses a projected execution owner from another device. Process fencing therefore does not weaken the existing single-device rule: local LibSQL advertises `sameDeviceProcessFencing: true` and `distributedLeases: false`; the current relational HTTP placement advertises process fencing as unavailable because its version-1 call contract does not authenticate a caller device or expose these operations. Lease rows are operational local state and never synchronization envelopes.
+
+The row and its last fence token survive normal release, process death, projection rebuild, and database reopen. A service restart may take over only after expiry (or an attributable prior release), then must carry the new token into the execution path. This tranche does **not** yet wire lease acquisition or renewal into the supervisor/autonomous run loop, start a background daemon, or provide cross-device failover; FU-004/FU-015 integration must do that before detached execution is claimed as complete.
 
 ## Synchronization recovery
 

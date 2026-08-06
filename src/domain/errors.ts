@@ -28,6 +28,13 @@ export class NotFoundError extends AgentRuntimeError {
   }
 }
 
+/** A process/device no longer owns the fenced execution scope it attempted to use. */
+export class ExecutionOwnershipConflictError extends AgentRuntimeError {
+  constructor(message: string, details?: Readonly<Record<string, unknown>>) {
+    super("EXECUTION_OWNERSHIP_CONFLICT", message, details);
+  }
+}
+
 export class CapabilityUnavailableError extends AgentRuntimeError {
   constructor(capability: string, adapter: string) {
     super("CAPABILITY_UNAVAILABLE", `${adapter} does not provide ${capability}`, {

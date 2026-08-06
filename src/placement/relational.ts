@@ -73,6 +73,9 @@ function serverDescriptor(storage: AgentStorage, options: RelationalRpcServerOpt
     protocol: "agencity-relational-rpc-v1",
     capabilities: {
       offlineWrites: false,
+      // Process fencing is a local placement contract. This RPC version does not
+      // carry a verified caller device identity or expose lease operations.
+      sameDeviceProcessFencing: false,
       distributedLeases: storage.capabilities.distributedLeases,
       analyticalSql: options.analyticalSql ?? storage.capabilities.analyticalSql,
       notifications: false,
@@ -128,7 +131,7 @@ function isRelationalDescriptor(value: unknown): value is RelationalPlacementDes
   const item = value as Record<string, unknown>, capabilities = item.capabilities;
   if (typeof item.name !== "string" || item.protocol !== "agencity-relational-rpc-v1" || item.transport !== "http" || item.placement !== "remote" || !capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) return false;
   const flags = capabilities as Record<string, unknown>;
-  return ["offlineWrites", "distributedLeases", "analyticalSql", "notifications", "administrativeMigrations", "recursiveOperations", "memoryCandidateIndexRebuild"].every((key) => typeof flags[key] === "boolean");
+  return ["offlineWrites", "sameDeviceProcessFencing", "distributedLeases", "analyticalSql", "notifications", "administrativeMigrations", "recursiveOperations", "memoryCandidateIndexRebuild"].every((key) => typeof flags[key] === "boolean");
 }
 
 export interface HttpRelationalStateOptions {
@@ -154,6 +157,7 @@ export class HttpRelationalStateStore implements AgentStorage {
     this.placement = descriptor;
     this.capabilities = {
       offlineWrites: descriptor.capabilities.offlineWrites,
+      sameDeviceProcessFencing: descriptor.capabilities.sameDeviceProcessFencing,
       distributedLeases: descriptor.capabilities.distributedLeases,
       analyticalSql: descriptor.capabilities.analyticalSql,
       notifications: descriptor.capabilities.notifications,

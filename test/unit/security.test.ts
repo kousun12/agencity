@@ -100,7 +100,7 @@ describe("read-only analytical SQL", () => {
     temps.push(temp);
     const storage: LibSqlStorage = await openTempStorage(temp);
     await seedSession(storage);
-    for (const table of ["outbox", "snapshots", "sync_quarantine", "sync_reconciliations", "workspace_replica_status", "data_manifests", "schema_migrations"]) {
+    for (const table of ["outbox", "snapshots", "process_execution_leases", "sync_quarantine", "sync_reconciliations", "workspace_replica_status", "data_manifests", "schema_migrations"]) {
       await expect(storage.readonlyQuery({ sql: `SELECT * FROM ${table}`, args: [] }))
         .rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     }
