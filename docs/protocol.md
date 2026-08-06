@@ -141,3 +141,33 @@ The file executor rejects lexical and resolved symlink escapes from its configur
 Supervisor and worker exchange structured messages over Bun's dedicated IPC channel. Stdout and stderr are not protocol: ordinary `console.*` and `process.stdout`/`process.stderr` writes become cell logs capped at 64 KiB/1,000 entries, so arbitrary or protocol-shaped output cannot spoof RPC. Cells are serialized within a worker because output streams are process-wide. Each cell has an `executionId`; every SDK call gets a separate `requestId`, so concurrent SDK calls inside the cell are routed correctly. Only the supervisor touches storage, artifacts, and executors through the RPC handler. A worker process exit rejects pending cells, and startup recovery appends branch-scoped `CellAbandoned` events where no terminal cell event committed.
 
 This framing is private implementation detail, not a versioned external extension interface. External clients should use the HTTP/event protocol or TypeScript API.
+
+
+## Slice 3 HTTP/AgentClient routes
+
+All session mutation routes require `?branch=:branch` and return durable JSON records.
+
+| Method and path | Meaning |
+|---|---|
+| `POST /sessions/:session/memory` | Create scoped semantic memory (`CreateMemoryInput`). |
+| `GET /sessions/:session/memory?query=...&scopes=...&statuses=...&tags=...&limit=...` | Deterministic results plus full retrieval provenance. |
+| `GET /sessions/:session/memory/list` | Visible memory list. |
+| `POST /sessions/:session/refinements` | Propose typed edits/evidence/evaluation. |
+| `POST .../refinements/:proposal/validate` | Validate shapes, evidence, authority, conflicts, and CAS. |
+| `POST .../refinements/:proposal/activate` | Create/test candidates and set bounded allocation/exposure. |
+| `POST .../refinements/:proposal/allocate` | Allocate candidate to a session/branch/task. |
+| `POST .../refinements/:proposal/observations` | Record objective or supported observation. |
+| `POST .../refinements/:proposal/approve` | Record explicit user/global promotion approval. |
+| `POST .../refinements/:proposal/decide` | Promote, revise, or reject under scope policy. |
+| `POST .../refinements/:proposal/approve-rollback` | Separately authorize user/global rollback as owner/admin. |
+| `POST .../refinements/:proposal/rollback` | Roll back exact promoted versions after any required separate approval. |
+| `GET /harness` | Current harness entries. |
+| `GET /harness/:entry/history` | Immutable version history. |
+| `GET /harness/refinements?status=...` | Proposal lifecycle records. |
+| `POST /sessions/:session/skills/:entry/test` | Durable compile/runtime tests, optionally exact `versionId`. |
+| `POST /sessions/:session/skills/:entry/invoke` | Durable exact-version skill invocation. |
+| `POST /sessions/:session/specs/:entry/spawn` | Version-pinned normal subagent admission. |
+
+`AgentClient` supplies the corresponding `memoryCreate`, `memorySearch`, `memoryList`, `refine`, `validateRefinement`, `activateRefinement`, `allocateRefinement`, `observeRefinement`, `approveRefinement`, `decideRefinement`, `approveRollback`, `rollback`, `harnessList/history`, `invokeSkill/testSkill`, and `spawnSpec` methods.
+
+The private console RPC injects `sdk.memory`, `sdk.harness`, `sdk.skills`, and `sdk.specs`. Those facades call the same supervisor services; they do not expose SQL writes or evaluator/user-owned validation, activation, allocation, observation, decision, approval, or rollback. `sdk.harness.list/history` are scope-filtered model views: active authorized entries plus only an exact exposed candidate allocation. The raw `sql` tag remains a shared trusted-local, non-confidential diagnostic read and can inspect non-private cross-workspace/candidate projections; exposure is behavioral isolation, not secrecy. Agent direct-memory creation is local-only with source-trajectory evidence. The TUI adds `/memory`, `/skills`, `/refine`, `/rollback`, `/skill-test`, and `/skill` commands. JSON arguments preserve the same typed lifecycle instead of creating a TUI-only mutation path.

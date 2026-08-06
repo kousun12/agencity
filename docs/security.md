@@ -2,13 +2,13 @@
 
 ## Supported trust model
 
-Delivery Slice 1 assumes the model-generated program, its workspace, and its operator are trusted to hold the operating-system authority of the Agencity process. The recommended remote deployment places the **entire** runtime inside an independently managed sandbox (container/microVM/host policy) with explicit filesystem, network, resource, and secret controls.
+The runtime assumes the model-generated program, its workspace, and its operator are trusted to hold the operating-system authority of the Agencity process. The recommended remote deployment places the **entire** runtime inside an independently managed sandbox (container/microVM/host policy) with explicit filesystem, network, resource, and secret controls.
 
 The Bun console worker is a crash/lifecycle boundary only. It is **not** a security sandbox. Generated TypeScript can use ambient Bun/JavaScript capabilities; a shell command can access anything its OS user can access. `workspaceRoot` narrows typed file operations and initial shell cwd but does not confine arbitrary code or a shell command.
 
 ## Explicit non-claims
 
-Slice 1 does not provide:
+The current runtime does not provide:
 
 - hostile-code isolation, syscall filtering, a microVM, or network policy;
 - authenticated/authorized HTTP, workspace tenancy, or TLS;
@@ -25,6 +25,8 @@ Do not expose `ProtocolServer` directly to an untrusted network. CLI `serve` bin
 ### Generated SQL
 
 The injected `sql` template binds interpolations and accepts only a narrow single-statement read grammar. DDL/DML/transactions, dangerous file/extension functions, mutation-capable pragmas, private operational tables, and SQLite schema/engine tables are rejected. Results are capped at 1,000 rows, statements at 64 KiB, and execution at 2 seconds. A dedicated analytical LibSQL client additionally enables `PRAGMA query_only=ON` and is closed after each query. This protects the intended SDK path from accidental canonical mutation or unbounded reads; it does not turn arbitrary generated TypeScript with OS authority into untrusted code.
+
+Raw SQL is a **trusted diagnostic channel over the shared local database**, not a workspace-confidential model view. It can inspect non-private relational projections across sessions/workspaces, including candidate rows that have not been allocated or exposed. Candidate allocation/exposure guarantees behavioral isolation in materialized context, memory retrieval, and the scope-filtered `sdk.harness.list/history` facades; it is explicitly **not a confidentiality boundary** against raw SQL or other ambient trusted-local process capabilities. Deployments requiring tenant or candidate secrecy must use separate databases/process sandboxes (or remove model SQL) rather than rely on Slice 3 scope filters.
 
 ### Credential exposure reduction
 
@@ -61,3 +63,8 @@ If a secret is found in retained data, stop the runtime, rotate the secret, dete
 6. Treat shell and dynamic module use as full local code execution.
 7. Inspect `unknown` effects before any manual retry.
 8. Back up database and referenced artifacts together, and protect both as potentially sensitive trajectory data.
+
+
+### Generated skills
+
+Slice 3 TypeScript skills compile and execute in disposable Bun child processes with credential-shaped environment variables removed and bounded captured output/time. Compile, test, and invocation are durable outbox effects pinned to an immutable version. `Supervisor.open({ skillPermissionAllowlist })` supplies the exact permission-name allowlist (empty by default); validation reports disallowed names and activation plus invocation recheck the configured boundary. Reopening with a narrower allowlist therefore blocks an already-active version from invocation. This is recovery/lifecycle isolation only: skill source retains the OS authority of the trusted-local runtime and may use ambient Bun APIs. Permission declarations are an enforced admission/invocation policy, not an OS capability sandbox, so operators must still sandbox the whole trusted-local runtime.

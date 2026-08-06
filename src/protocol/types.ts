@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentState, BudgetLimits, JsonValue, ModelConfiguration } from "../domain/index.ts";
-import type { CreateGoalInput, CreateHeartbeatInput, CreateInputSetInput, ImportDocumentInput, SendMessageInput, SpawnAgentInput, StartRecursiveModelInput } from "../runtime/index.ts";
+import type { CreateGoalInput, CreateHeartbeatInput, CreateInputSetInput, ImportDocumentInput, SendMessageInput, SpawnAgentInput, StartRecursiveModelInput, CreateMemoryInput, ProposeRefinementInput, ActivateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput, InvokeSkillOptions, SpawnSpecInput } from "../runtime/index.ts";
 
 export type ProtocolRequest =
   | { type: "createSession"; workspaceId: string; model?: ModelConfiguration; budget?: BudgetLimits }
@@ -14,7 +14,16 @@ export type ProtocolRequest =
   | { type: "createInputSet"; sessionId: string; branchId: string; input: CreateInputSetInput }
   | { type: "startRecursiveModel"; sessionId: string; branchId: string; input: StartRecursiveModelInput }
   | { type: "createGoal"; sessionId: string; branchId: string; input: CreateGoalInput }
-  | { type: "createHeartbeat"; sessionId: string; branchId: string; input: CreateHeartbeatInput };
+  | { type: "createHeartbeat"; sessionId: string; branchId: string; input: CreateHeartbeatInput }
+  | { type: "memoryCreate"; sessionId: string; branchId: string; input: CreateMemoryInput }
+  | { type: "memorySearch"; sessionId: string; branchId: string; query: string }
+  | { type: "refine"; sessionId: string; branchId: string; input: ProposeRefinementInput }
+  | { type: "refineActivate"; sessionId: string; branchId: string; proposalId: string; input?: ActivateCandidateInput }
+  | { type: "refineObserve"; sessionId: string; branchId: string; proposalId: string; input: RecordObservationInput }
+  | { type: "refineDecide"; sessionId: string; branchId: string; proposalId: string; input?: DecideRefinementInput }
+  | { type: "refineApproveRollback"; sessionId: string; branchId: string; proposalId: string; input?: ApproveRollbackInput }
+  | { type: "skillInvoke"; sessionId: string; branchId: string; entryId: string; input: JsonValue; options?: InvokeSkillOptions }
+  | { type: "specSpawn"; sessionId: string; branchId: string; entryId: string; input?: SpawnSpecInput };
 export type ProtocolResponse = { ok: true; value: JsonValue } | { ok: false; error: { code: string; message: string } };
 export interface SnapshotEnvelope { cursor: string; state: AgentState }
 export interface EventEnvelope { cursor: string; event: AgentEvent }

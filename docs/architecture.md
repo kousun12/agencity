@@ -117,7 +117,7 @@ Historical projection (`atCursor`) and branch forks replay state transitions onl
 
 ## Security placement
 
-Process separation improves lifecycle control, not privilege isolation. The console, shell, file adapter, supervisor, and unauthenticated protocol all operate inside the trusted-local boundary. Environment filtering, secret redaction, read-only SQL, path checks, and validation are defense-in-depth against accidents. See [Security](./security.md) for threat/non-threat claims.
+Process separation improves lifecycle control, not privilege isolation. The console, shell, file adapter, supervisor, and unauthenticated protocol all operate inside the trusted-local boundary. `sdk.harness.list/history` are model-facing policy views restricted to active local/workspace/user/global records plus an exact exposed candidate allocation; they never return another workspace or an unexposed candidate. Raw SQL is different: it is a shared, non-confidential diagnostic surface and may read non-private cross-workspace/candidate projections. Candidate exposure is behavioral isolation, not secrecy. Environment filtering, secret redaction, read-only SQL, path checks, and validation are defense-in-depth against accidents. See [Security](./security.md) for threat/non-threat claims.
 
 ## Public replacement rules
 
@@ -132,3 +132,34 @@ A replacement component may add capabilities but must preserve:
 - explicit `CAPABILITY_UNAVAILABLE` behavior instead of silent downgrade.
 
 Only the local implementations are tested today. A future adapter is not supported merely because it structurally implements the interface; it needs the shared conformance suite planned by the PRD.
+
+
+## Slice 3 relational memory and refinement boundary
+
+Harness ownership is split between immutable canonical history and rebuildable current/query state:
+
+```text
+Harness*/Refinement*/Skill*/SubagentSpec* events (authority)
+                         |
+                         v
+ harness_entries + harness_versions + refinement/evaluation projections
+                         |
+                         +--> disposable FTS5 candidate index
+                         |
+                         v
+ deterministic policy filter --> ContextMaterialized exact provenance
+```
+
+`entryId` names a durable memory/prompt-note/skill/spec; `versionId` names immutable content. An entry keeps a latest candidate pointer independently from its active-version pointer, so a candidate replacement never hides the active baseline outside allocated sessions. Candidate allocation and actual context exposure are separate bounded events. Rejection/rollback restores an exact superseded version rather than editing content.
+
+FTS5 is only a candidate generator. The runtime then authoritatively applies session/workspace scope keys, requested scope/status, tags, recency, explicit links, and a stable tie-break. Conflict edges are evaluated symmetrically: either side may declare the edge, while an explicit user/global user preference suppresses a conflicting inferred workspace/local result; provenance records the declaration side, winner, and suppressed version. Context persists normalized query, filters, candidate source, rejection reasons, conflicts, final ranks, exact entry/version IDs, and source events. Deleting/rebuilding `memory_fts` cannot change ownership or status. Embeddings can later supply another candidate source without changing the policy or provenance contract.
+
+The base runtime policy is a frozen runtime constant with ID/version/digest and is serialized separately from `context.harness`. Harness edits have no base-policy kind, reserved policy names are rejected, and generated skill permissions cannot expand permission/safety policy.
+
+Refinement uses proposal validation and activation CAS, including a repeated local/workspace ownership check and transaction-visible duplicate-name guard. A revise/reject decision rejects every candidate version so create names and active baselines are never stranded. Objective observations bind evidence to the exact allocated session/branch/task and to the predeclared metric/test command when structurally available. User/global rollback has its own owner/admin approval event and projection; promotion approval is deliberately insufficient.
+
+Generated skills are the additional hard gate: a candidate version is created for attribution, then Bun compilation and every declared runtime case execute in a separate process through the ordinary durable outbox. Only a passing report permits bounded candidate activation. The configured permission-name allowlist is checked at validation, activation, testing, and invocation. Invocation repeats compilation for the exact pinned immutable source and records both effect and skill-version linkage. This is trusted-local process isolation, not a new sandbox.
+
+Subagent specs contain role, invocation criteria, expected artifact, prompt, optional model/budget, and completion criteria. Invocation resolves one active exact version and extends `AgentService.spawnManyWithEvents`; all existing ancestry, child-count, model, budget, idempotency, and atomic admission rules remain authoritative.
+
+Promotion policy is deliberately scope sensitive: one durable supported success can promote local state; workspace promotion needs objective successes in distinct allocations; user/global state requires an explicit named approval event. Decisions always retain evaluator, baseline, observation IDs, and rule. Reject/revise and post-promotion rollback are first-class outcomes.

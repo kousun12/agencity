@@ -1,14 +1,14 @@
 # Agencity — recoverable Bun/LibSQL agent runtime
 
-Agencity implements Delivery Slices 1 and 2 of the [Prime Agent TypeScript/Turso rewrite PRD](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md). It runs durable root and recursive child agents against a local LibSQL database. Canonical events, explicitly checkpointed working values, task/mailbox/model handles, schedules, and content-addressed artifacts survive supervisor and console-worker restarts; the Bun heap does not.
+Agencity implements Delivery Slices 1–3 of the [Prime Agent TypeScript/Turso rewrite PRD](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md). It runs durable root and recursive child agents against a local LibSQL database. Canonical events, explicitly checkpointed working values, task/mailbox/model handles, schedules, and content-addressed artifacts survive supervisor and console-worker restarts; the Bun heap does not.
 
-> **Security boundary:** Slice 1 is **trusted-local only**. Model-generated TypeScript and shell commands have the operating-system authority of the runtime. The separate Bun console worker provides crash isolation, **not a security sandbox**. The HTTP server has no authentication. Run only trusted workloads, keep it loopback-only, or put the entire runtime inside an independently managed sandbox. See [Security](./docs/security.md).
+> **Security boundary:** The runtime is **trusted-local only**. Model-generated TypeScript and shell commands have the operating-system authority of the runtime. The separate Bun console worker provides crash isolation, **not a security sandbox**. Read-only raw SQL is a shared, non-confidential diagnostic channel; candidate/workspace scope filters provide behavioral context isolation, not secrecy from SQL. The HTTP server has no authentication. Run only trusted workloads, keep it loopback-only, or put the entire runtime inside an independently managed sandbox. See [Security](./docs/security.md).
 
-## Delivery Slice 2 status
+## Delivery Slice 3 status
 
-The Slice 1 recovery foundation is complete. Slice 2 adds transactional recursive-session admission, spent-and-reserved tree budgets with terminal ancestor attribution, family-scoped durable mailboxes, crash-recoverable cascading cancellation, deterministic document chunks/input sets, atomic idempotent recursive model handles with configurable provider concurrency, persistent goals and durably pinned current-version completion gates, live database-driven heartbeats, restart recovery, and rebuildable operational projections. The TypeScript API, HTTP protocol, and TUI expose these handles without making heap objects durable identity.
+Slices 1–2 provide the recovery foundation and recursive-session runtime. Slice 3 adds versioned local/workspace/user/global semantic memory, prompt notes, generated TypeScript skills, reusable subagent specifications, deterministic FTS5 retrieval with exact context provenance, and a measured propose/validate/candidate/evaluate/decide/rollback lifecycle. Stable entry/version IDs, evidence, symmetric conflicts, confidence, authority, bounded allocation/exposure, allocation-bound objective observations, promotion and separate rollback approval, and every promotion rule remain canonical events; current tables and the FTS index are rebuildable. Generated skills compile and run tests through durable effects before candidate exposure, enforce a configured permission-name allowlist at activation/invocation, pin the exact invoked version, and reusable subagent specifications pin their version to a normal durable child task.
 
-This is not the whole PRD. Relational memory and harness refinement, Turso Cloud synchronization, PostgreSQL, semantic retrieval, remote artifacts/executors, and a hostile-code sandbox remain later slices. [Slice 1 verification](./docs/slice-1-verification.md) still records the original foundation evidence; Slice 2 behavior is covered by the recursive integration and adversarial suites run by `bun run verify`.
+This is not the whole PRD. Turso Cloud synchronization, PostgreSQL, semantic/embedding retrieval, remote artifacts/executors, and a hostile-code sandbox remain later slices. Full behavior is covered by the Slice 1/2 suites plus `test/slice3` and the end-to-end tests run by `bun run verify`.
 
 ## Requirements and install
 
@@ -58,7 +58,7 @@ bun run src/cli.ts serve --port 3131
 curl http://127.0.0.1:3131/health
 ```
 
-The protocol supports session creation, user messages, model turns, console cells, forks, snapshots, history, and resumable server-sent events. A consumer loads a snapshot, remembers its cursor, then connects to the stream with `?after=<cursor>` and deduplicates by event ID. Notifications are at-least-once hints over the durable database stream. See [Protocol and console SDK](./docs/protocol.md).
+The protocol supports session creation, user messages, model turns, console cells, forks, snapshots, history, resumable server-sent events, scoped memory, refinement/approval/rollback, exact-version skill execution, and specification-pinned subagents. A consumer loads a snapshot, remembers its cursor, then connects to the stream with `?after=<cursor>` and deduplicates by event ID. Notifications are at-least-once hints over the durable database stream. See [Protocol and console SDK](./docs/protocol.md).
 
 ## TypeScript API
 
@@ -81,6 +81,12 @@ const supervisor = await Supervisor.open({
 
 const session = await supervisor.createSession({ workspaceId: "demo" });
 await supervisor.appendMessage(session.sessionId, session.branchId, "user", "Hello");
+await supervisor.memory.create(session.sessionId, session.branchId, {
+  text: "This workspace verifies releases with bun run verify",
+  scope: "workspace",
+  tags: ["release"],
+});
+console.log(await supervisor.memory.search(session.sessionId, session.branchId, "release verify"));
 console.log(await supervisor.modelLoop.turn(session.sessionId, session.branchId));
 await supervisor.close();
 ```
@@ -120,4 +126,5 @@ The architecture check validates package entrypoints, domain dependency directio
 - [Event schemas](./docs/events.md)
 - [Mutable table registry](./docs/mutable-tables.md)
 - [Consequential decisions and unsupported capabilities](./docs/decisions/0001-slice-1-boundaries.md)
+- [Slice 3 relational memory and refinement decision](./docs/decisions/0002-relational-memory-refinement.md)
 - [Slice 1 acceptance mapping and verification](./docs/slice-1-verification.md)

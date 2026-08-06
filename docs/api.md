@@ -32,6 +32,7 @@ async function usingRuntime() {
     // modelProviders: [customProvider],
     providerConcurrency: { openai: 2, echo: 4 },
     heartbeatPollIntervalMs: 100,
+    userScopeKey: "profile-user-id",
   });
   try {
     const { sessionId, branchId } = await supervisor.createSession({
@@ -179,3 +180,90 @@ await supervisor.heartbeats.cancel(heartbeat.heartbeatId);
 - A heartbeat rejects an early tick, coalesces all missed intervals into one aligned advancement, and atomically appends `HeartbeatTicked` plus its wake-up `MessageAppended`. Startup and the live database poller fire due active schedules; paused and cancelled rows are excluded, and `close()` stops polling.
 
 `Supervisor.close()` waits for locally queued recursive runners before closing storage. With recovery enabled, startup reconciles outbox/model outcomes, due heartbeats, completion gates and autonomous goals, then resumes pending recursive handles. Operational rebuild and historical projection never execute those effects.
+
+
+## Delivery Slice 3: relational memory and continual harness
+
+The composition root exposes four new services. Every mutation appends validated canonical events; callers never write projection tables.
+
+```ts
+const source = await supervisor.appendMessage(sessionId, branchId, "user", "Use canary releases");
+const memory = await supervisor.memory.create(sessionId, branchId, {
+  name: "release-policy",
+  text: "Use a canary before production rollout",
+  memoryKind: "constraint",
+  scope: "workspace",
+  tags: ["release"],
+  confidence: 0.9,
+  evidenceEventIds: [source.id],
+});
+const result = await supervisor.memory.search(sessionId, branchId, "production rollout", {
+  scopes: ["local", "workspace", "user", "global"],
+  statuses: ["active"],
+  tags: ["release"],
+  limit: 20,
+});
+```
+
+`MemorySearchResult` contains ranked records and `provenance`: normalized query, index name, filters, every candidate/source, every authoritative rejection, and every selection/reason. `memory.list` uses the same deterministic policy. `Fts5MemoryCandidateIndex.rebuild()` deletes and reconstructs the disposable candidate index without changing entry/version identity.
+
+Refinement is intentionally staged:
+
+```ts
+let proposal = await supervisor.harness.propose(sessionId, branchId, {
+  trigger: "Repeated release gate failure",
+  predictedEffect: "Use the verified release ordering",
+  evidenceEventIds: [source.id],
+  evaluation: { kind: "objective", name: "release gate", metric: "pass", target: true },
+  edits: [{
+    operation: "create",
+    kind: "prompt_note",
+    scope: "workspace",
+    name: "release-order",
+    content: { kind: "prompt_note", text: "Run canary and then the release gate." },
+  }],
+});
+proposal = await supervisor.harness.validate(sessionId, branchId, proposal.proposalId);
+proposal = await supervisor.harness.activate(sessionId, branchId, proposal.proposalId, {
+  allocationLimit: 3,
+  exposureLimit: 3,
+});
+const allocation = await supervisor.harness.allocate(sessionId, branchId, proposal.proposalId);
+// Context materialization durably records the actual exposure.
+await supervisor.contexts.materialize(sessionId, branchId);
+await supervisor.harness.recordObservation(sessionId, branchId, proposal.proposalId, {
+  allocationId: allocation.allocationId,
+  evaluator: "release-gate-v1",
+  objective: true,
+  success: true,
+  metric: { pass: true },
+  // gateOutcome is a successful EffectOutcomeRecorded event from this exact
+  // allocation session/branch (and matches evaluation.testCommand, if set).
+  evidenceEventIds: [gateOutcome.id],
+});
+await supervisor.harness.decide(sessionId, branchId, proposal.proposalId);
+await supervisor.harness.rollback(sessionId, branchId, proposal.proposalId, "Later regression");
+```
+
+Edits are discriminated `create`, `replace`, or `retire` values. Replacement/retirement requires `expectedVersionId`; validation records the observed version and activation repeats both CAS and scope authority. Duplicate activation names fail with a typed `CONFLICT`/`VALIDATION_ERROR` and the event batch rolls back atomically. Allocations beyond `exposureLimit` are valid controls: context materialization skips them without error and does not expose candidate content or provenance. Objective evidence must be committed after the allocation's durable exposure, come from the exact allocation session/branch/task, and report the predeclared metric (plus the exact `testCommand` when supplied). A `revise` decision rejects old candidate versions and frees create names.
+
+`harness.approve(..., "user" | "global", approvedBy)` supplies explicit promotion authority. Automatic promotion requires one supported local success, repeated objective workspace successes in distinct allocations, and explicit approval at user/global scope. Rolling back user/global content additionally requires the separate `harness.approveRollback(..., { approvedBy, role: "owner" | "admin" })`; promotion approval never authorizes rollback. Other methods are `harness.list`, `history`, `proposals`, `allocate`, `expose`, `recordObservation`, `decide` (`promote | revise | reject`), and `rollback`.
+
+Generated skills and reusable delegation use exact immutable versions:
+
+```ts
+const tested = await supervisor.skills.test(sessionId, branchId, skillEntryId, skillVersionId);
+const invoked = await supervisor.skills.invoke(sessionId, branchId, skillEntryId, input, {
+  versionId: skillVersionId,
+  idempotencyKey: "release-skill:run-17",
+});
+const child = await supervisor.specs.spawn(sessionId, branchId, specEntryId, {
+  versionId: specVersionId,
+  task: "Review release 17",
+  idempotencyKey: "release-review:17",
+});
+```
+
+A skill must export a default function or named `run` function. `Supervisor.open({ skillPermissionAllowlist: [...] })` configures exact allowed permission names (none by default); validation, activation/testing, and invocation enforce it, including after reopen/configuration changes. Activation requires at least one declared runtime test; compile and runtime test requests use executor `skill` in the durable outbox. Both `EffectRequested` and `Skill*Recorded` pin `entryId`/`versionId`. A spec spawn is normal atomic child admission extended by `SubagentSpecInvoked`, and `subagent_spec_invocations.task_id` makes the pin queryable after restart/rebuild.
+
+The console SDK exposes policy-bounded `sdk.memory`, `sdk.harness`, `sdk.skills`, and `sdk.specs` RPC facades. `sdk.harness.list/history` return only active entries authorized for the calling local/workspace/user/global scope plus candidate versions from that branch's exact exposed allocation; unexposed or cross-workspace candidate content is never returned by these views. Agent-created memory is local-only and requires source-trajectory evidence; broader changes use `sdk.harness.propose`. Validation, activation/allocation, observations, decisions, approval, and rollback are deliberately evaluator/user-owned and absent from the model/console facade. The `sql` template is intentionally different: it is trusted-local, shared, read-only diagnostics and can inspect non-private cross-workspace/candidate projections. Scope/exposure is behavioral isolation, not SQL confidentiality. The HTTP `AgentClient` exposes `memoryCreate/Search/List`, `refine`, lifecycle methods, separate rollback approval, `rollback`, `invokeSkill/testSkill`, and `spawnSpec`.

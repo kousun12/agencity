@@ -18,6 +18,11 @@ export const eventTypes = [
   "GoalCreated", "GoalCompletionRequested", "GoalGateAdded", "GoalGateStatusChanged", "GoalStatusChanged",
   "HeartbeatCreated", "HeartbeatTicked", "HeartbeatStatusChanged",
   "RecursiveModelStarted", "RecursiveModelStatusChanged",
+  "HarnessVersionCreated", "HarnessVersionStatusChanged",
+  "RefinementProposed", "RefinementValidated", "RefinementCandidateActivated",
+  "RefinementCandidateAllocated", "RefinementCandidateExposed", "RefinementObservationRecorded",
+  "RefinementDecided", "RefinementApproved", "RefinementRollbackApproved", "RefinementRolledBack",
+  "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked",
 ] as const;
 export type EventType = (typeof eventTypes)[number];
 export type Producer = "supervisor" | "console" | "model" | "executor" | "client" | "recovery" | "scheduler" | string;
@@ -53,7 +58,7 @@ export interface EventPayloads {
   EffectRequested: { effectId: string; executor: string; operation: string; input: JsonValue; idempotencyKey: string; idempotent: boolean };
   EffectAttemptStarted: { effectId: string; attempt: number };
   EffectOutcomeRecorded: { effectId: string; attempt: number; outcome: EffectOutcome; output?: JsonValue; error?: string; observedAt: string };
-  ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue };
+  ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue };
   ModelCallRequested: { callId: string; contextId: string; effectId: string; provider: string; model: string };
   ModelOutputChunk: { callId: string; sequence: number; text: string };
   ModelCallCompleted: { callId: string; responseMessageId: string; finishReason: string; usage: Usage };
@@ -84,6 +89,21 @@ export interface EventPayloads {
   HeartbeatStatusChanged: { heartbeatId: string; status: HeartbeatStatus; nextTickAt?: string; reason?: string };
   RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; inputSetId?: string };
   RecursiveModelStatusChanged: { handleId: string; status: Exclude<RecursiveModelStatus, "pending">; resultMessageId?: string; error?: string };
+  HarnessVersionCreated: { entryId: string; versionId: string; version: number; kind: "memory" | "prompt_note" | "skill" | "subagent_spec"; scope: "local" | "workspace" | "user" | "global"; scopeKey: string; name: string; content: JsonValue; tags: string[]; confidence: number; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; evidenceEventIds: string[]; conflictEntryIds: string[]; supersedesVersionId?: string; proposalId?: string; createdBy: string; lastConfirmedAt: string };
+  HarnessVersionStatusChanged: { entryId: string; versionId: string; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; reason: string; proposalId?: string };
+  RefinementProposed: { proposalId: string; trigger: string; predictedEffect: string; edits: JsonValue; evidenceEventIds: string[]; evaluation: JsonValue; authority: "agent" | "user" | "system" };
+  RefinementValidated: { proposalId: string; valid: boolean; validation: JsonValue; expectedProposalStatus: "proposed" };
+  RefinementCandidateActivated: { proposalId: string; candidateId: string; versionIds: string[]; allocationLimit: number; exposureLimit: number };
+  RefinementCandidateAllocated: { proposalId: string; candidateId: string; allocationId: string; targetSessionId: string; targetBranchId: string; taskId?: string; ordinal: number };
+  RefinementCandidateExposed: { proposalId: string; candidateId: string; allocationId: string; exposedVersionIds: string[] };
+  RefinementObservationRecorded: { proposalId: string; candidateId: string; allocationId: string; observationId: string; evaluator: string; objective: boolean; success: boolean; metric: JsonValue; baseline?: JsonValue; evidenceEventIds: string[]; notes?: string };
+  RefinementDecided: { proposalId: string; candidateId: string; decisionId: string; decision: "promote" | "revise" | "reject"; rule: string; evaluator: string; baseline?: JsonValue; observationIds: string[] };
+  RefinementApproved: { proposalId: string; approvedBy: string; scope: "user" | "global"; note?: string };
+  RefinementRollbackApproved: { proposalId: string; approvedBy: string; role: "owner" | "admin"; note?: string };
+  RefinementRolledBack: { proposalId: string; candidateId: string; rollbackId: string; versionIds: string[]; restoredVersionIds: string[]; reason: string };
+  SkillInvocationRecorded: { entryId: string; versionId: string; effectId: string; input: JsonValue };
+  SkillTestRecorded: { entryId: string; versionId: string; effectId: string; passed: boolean; report: JsonValue };
+  SubagentSpecInvoked: { entryId: string; versionId: string; taskId: string; childSessionId: string; childBranchId: string };
 }
 
 export interface AgentEvent<T extends EventType = EventType> {
@@ -127,7 +147,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   EffectRequested: z.object({ effectId: id, executor: id, operation: id, input: jsonValueSchema, idempotencyKey: id, idempotent: z.boolean() }),
   EffectAttemptStarted: z.object({ effectId: id, attempt: positiveInteger }),
   EffectOutcomeRecorded: z.object({ effectId: id, attempt: positiveInteger, outcome: z.enum(["succeeded", "failed", "cancelled", "unknown"]), output: jsonValueSchema.optional(), error: z.string().optional(), observedAt: dateTime }),
-  ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema }),
+  ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional() }),
   ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, provider: id, model: id }),
   ModelOutputChunk: z.object({ callId: id, sequence: z.number().int().nonnegative(), text: z.string() }),
   ModelCallCompleted: z.object({ callId: id, responseMessageId: id, finishReason: z.string(), usage: usageSchema }),
@@ -158,6 +178,21 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   HeartbeatStatusChanged: z.object({ heartbeatId: id, status: z.enum(["active", "paused", "cancelled"]), nextTickAt: dateTime.optional(), reason: z.string().optional() }),
   RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, inputSetId: id.optional() }),
   RecursiveModelStatusChanged: z.object({ handleId: id, status: z.enum(["running", "completed", "failed", "cancelled"]), resultMessageId: id.optional(), error: z.string().optional() }),
+  HarnessVersionCreated: z.object({ entryId: id, versionId: id, version: positiveInteger, kind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]), scope: z.enum(["local", "workspace", "user", "global"]), scopeKey: id, name: z.string().min(1), content: jsonValueSchema, tags: z.array(z.string()), confidence: z.number().finite().min(0).max(1), status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), evidenceEventIds: z.array(id), conflictEntryIds: z.array(id), supersedesVersionId: id.optional(), proposalId: id.optional(), createdBy: id, lastConfirmedAt: dateTime }),
+  HarnessVersionStatusChanged: z.object({ entryId: id, versionId: id, status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), reason: z.string().min(1), proposalId: id.optional() }),
+  RefinementProposed: z.object({ proposalId: id, trigger: z.string().min(1), predictedEffect: z.string().min(1), edits: jsonValueSchema, evidenceEventIds: z.array(id), evaluation: jsonValueSchema, authority: z.enum(["agent", "user", "system"]) }),
+  RefinementValidated: z.object({ proposalId: id, valid: z.boolean(), validation: jsonValueSchema, expectedProposalStatus: z.literal("proposed") }),
+  RefinementCandidateActivated: z.object({ proposalId: id, candidateId: id, versionIds: z.array(id), allocationLimit: positiveInteger, exposureLimit: positiveInteger }),
+  RefinementCandidateAllocated: z.object({ proposalId: id, candidateId: id, allocationId: id, targetSessionId: id, targetBranchId: id, taskId: id.optional(), ordinal: positiveInteger }),
+  RefinementCandidateExposed: z.object({ proposalId: id, candidateId: id, allocationId: id, exposedVersionIds: z.array(id) }),
+  RefinementObservationRecorded: z.object({ proposalId: id, candidateId: id, allocationId: id, observationId: id, evaluator: id, objective: z.boolean(), success: z.boolean(), metric: jsonValueSchema, baseline: jsonValueSchema.optional(), evidenceEventIds: z.array(id), notes: z.string().optional() }),
+  RefinementDecided: z.object({ proposalId: id, candidateId: id, decisionId: id, decision: z.enum(["promote", "revise", "reject"]), rule: z.string().min(1), evaluator: id, baseline: jsonValueSchema.optional(), observationIds: z.array(id) }),
+  RefinementApproved: z.object({ proposalId: id, approvedBy: id, scope: z.enum(["user", "global"]), note: z.string().optional() }),
+  RefinementRollbackApproved: z.object({ proposalId: id, approvedBy: id, role: z.enum(["owner", "admin"]), note: z.string().optional() }),
+  RefinementRolledBack: z.object({ proposalId: id, candidateId: id, rollbackId: id, versionIds: z.array(id), restoredVersionIds: z.array(id), reason: z.string().min(1) }),
+  SkillInvocationRecorded: z.object({ entryId: id, versionId: id, effectId: id, input: jsonValueSchema }),
+  SkillTestRecorded: z.object({ entryId: id, versionId: id, effectId: id, passed: z.boolean(), report: jsonValueSchema }),
+  SubagentSpecInvoked: z.object({ entryId: id, versionId: id, taskId: id, childSessionId: id, childBranchId: id }),
 };
 
 export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): void {

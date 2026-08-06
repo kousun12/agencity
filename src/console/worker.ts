@@ -145,6 +145,18 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       return response.output;
     },
   };
+  const memory = {
+    search: (query: string, options: JsonValue = {}) => call("memory.search", [query, options]),
+    create: (input: JsonValue | string) => call("memory.create", [input]),
+    list: (options: JsonValue = {}) => call("memory.list", [options]),
+  };
+  const harness = {
+    propose: (input: JsonValue) => call("harness.propose", [input]),
+    list: (options: JsonValue = {}) => call("harness.list", [options]),
+    history: (entryId: string) => call("harness.history", [entryId]),
+  };
+  const skills = { invoke: (entryId:string,input:JsonValue,options:JsonValue={}) => call("skills.invoke",[entryId,input,options]), test: (entryId:string,versionId?:string) => call("skills.test",[entryId,versionId]) };
+  const specs = { spawn: (entryId:string,input:JsonValue={}) => call("specs.spawn",[entryId,input]) };
   const sql: SqlTag = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     let text = strings[0] ?? "";
     for (let index = 0; index < values.length; index++) text += `?${strings[index + 1] ?? ""}`;
@@ -165,7 +177,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       artifacts: unknown,
       tools: unknown,
     ) => Promise<unknown>;
-    const sdk = { state, artifacts, tools } as unknown as ConsoleSdk;
+    const sdk = { state, artifacts, tools, memory, harness, skills, specs } as unknown as ConsoleSdk;
     const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools);
     const result = value === undefined ? null : value;
     assertJsonValue(result);

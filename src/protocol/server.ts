@@ -30,6 +30,11 @@ export class ProtocolServer {
         if (parts[2] === "pause") return Response.json(await this.supervisor.heartbeats.pause(parts[1], typeof body.reason === "string" ? body.reason : undefined));
         if (parts[2] === "cancel") return Response.json(await this.supervisor.heartbeats.cancel(parts[1], typeof body.reason === "string" ? body.reason : undefined));
       }
+      if (parts[0] === "harness") {
+        if (request.method === "GET" && parts[1] === "refinements") return Response.json(await this.supervisor.harness.proposals(url.searchParams.get("status") as any ?? undefined));
+        if (request.method === "GET" && parts[1] && parts[2] === "history") return Response.json(await this.supervisor.harness.history(parts[1]));
+        if (request.method === "GET" && parts.length === 1) return Response.json(await this.supervisor.harness.list());
+      }
       if (parts[0] === "sessions" && parts[1]) {
         const sessionId = parts[1]; const branchId = url.searchParams.get("branch") ?? parts[3];
         if (request.method === "GET" && parts[2] === "snapshot" && branchId) return Response.json(await this.supervisor.projections.getSnapshot(sessionId, branchId));
@@ -39,6 +44,34 @@ export class ProtocolServer {
         if (request.method === "POST" && parts[2] === "turns" && branchId) return Response.json(await this.supervisor.modelLoop.turn(sessionId, branchId));
         if (request.method === "POST" && parts[2] === "cells" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.executeCell(sessionId, branchId, String(body.code ?? ""))); }
         if (request.method === "POST" && parts[2] === "branches" && branchId) { const body = await jsonBody(request); return Response.json({ branchId: await this.supervisor.fork(sessionId, branchId, String(body.cursor), typeof body.name === "string" ? body.name : undefined) }); }
+
+        // Slice 3 relational memory, measured harness refinement, exact skill
+        // versions, and pinned reusable subagent specifications.
+        if (parts[2] === "memory" && branchId) {
+          if (request.method === "POST") return Response.json(await this.supervisor.memory.create(sessionId, branchId, await jsonBody(request) as any));
+          if (request.method === "GET" && parts[3] === "list") return Response.json(await this.supervisor.memory.list(sessionId, branchId));
+          if (request.method === "GET") {
+            const split = (name: string) => url.searchParams.get(name)?.split(",").filter(Boolean);
+            return Response.json(await this.supervisor.memory.search(sessionId, branchId, url.searchParams.get("query") ?? "", { ...(split("scopes") ? { scopes: split("scopes") as any } : {}), ...(split("statuses") ? { statuses: split("statuses") as any } : {}), ...(split("tags") ? { tags: split("tags")! } : {}), ...(split("linkedEntryIds") ? { linkedEntryIds: split("linkedEntryIds")! } : {}), ...(url.searchParams.has("since") ? { since: url.searchParams.get("since")! } : {}), ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}) }));
+          }
+        }
+        if (parts[2] === "refinements" && branchId) {
+          if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.harness.propose(sessionId, branchId, await jsonBody(request) as any));
+          if (request.method === "POST" && parts[3] && parts[4] === "validate") return Response.json(await this.supervisor.harness.validate(sessionId, branchId, parts[3]));
+          if (request.method === "POST" && parts[3] && parts[4] === "activate") return Response.json(await this.supervisor.harness.activate(sessionId, branchId, parts[3], await jsonBody(request) as any));
+          if (request.method === "POST" && parts[3] && parts[4] === "allocate") return Response.json(await this.supervisor.harness.allocate(sessionId, branchId, parts[3], await jsonBody(request) as any));
+          if (request.method === "POST" && parts[3] && parts[4] === "observations") return Response.json(await this.supervisor.harness.recordObservation(sessionId, branchId, parts[3], await jsonBody(request) as any));
+          if (request.method === "POST" && parts[3] && parts[4] === "decide") return Response.json(await this.supervisor.harness.decide(sessionId, branchId, parts[3], await jsonBody(request) as any));
+          if (request.method === "POST" && parts[3] && parts[4] === "approve") { const body=await jsonBody(request); return Response.json(await this.supervisor.harness.approve(sessionId,branchId,parts[3],String(body.scope) as any,String(body.approvedBy ?? "user"),typeof body.note === "string" ? body.note : undefined)); }
+          if (request.method === "POST" && parts[3] && parts[4] === "approve-rollback") { const body=await jsonBody(request); return Response.json(await this.supervisor.harness.approveRollback(sessionId,branchId,parts[3],{ ...(typeof body.approvedBy === "string" ? { approvedBy: body.approvedBy } : {}), role: body.role === "admin" ? "admin" : "owner", ...(typeof body.note === "string" ? { note: body.note } : {}) })); }
+          if (request.method === "POST" && parts[3] && parts[4] === "rollback") { const body=await jsonBody(request); return Response.json(await this.supervisor.harness.rollback(sessionId,branchId,parts[3],String(body.reason ?? ""))); }
+        }
+        if (parts[2] === "skills" && parts[3] && branchId && request.method === "POST") {
+          const body=await jsonBody(request);
+          if (parts[4] === "invoke") return Response.json(await this.supervisor.skills.invoke(sessionId,branchId,parts[3],body.input as any,(body.options ?? {}) as any));
+          if (parts[4] === "test") return Response.json(await this.supervisor.skills.test(sessionId,branchId,parts[3],typeof body.versionId === "string" ? body.versionId : undefined));
+        }
+        if (parts[2] === "specs" && parts[3] && parts[4] === "spawn" && branchId && request.method === "POST") return Response.json(await this.supervisor.specs.spawn(sessionId,branchId,parts[3],await jsonBody(request) as any));
 
         // Slice 2 commands remain branch-scoped and return durable JSON handles.
         if (parts[2] === "agents" && branchId) {

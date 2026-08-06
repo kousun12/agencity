@@ -13,7 +13,7 @@ export class TerminalUI {
         if (!line) continue;
         if (line === "/quit" || line === "/exit") break;
         if (line === "/help") {
-          output.write("/history /budget /snapshot /tree /tasks /goals /heartbeats /cancel-task <id> [reason] /complete-goal <id> /cell <ts> /branch <cursor> [name] /quit\n");
+          output.write("/history /budget /snapshot /tree /tasks /goals /heartbeats /memory [query] /skills /refine <json> /rollback <proposal> <reason> /skill-test <entry> [version] /skill <entry> <json-input> /cancel-task <id> [reason] /complete-goal <id> /cell <ts> /branch <cursor> [name] /quit\n");
           continue;
         }
         if (line === "/history") { for (const event of await this.supervisor.projections.history(sessionId, branch)) output.write(`${event.cursor} ${event.type} ${JSON.stringify(event.payload)}\n`); continue; }
@@ -23,6 +23,12 @@ export class TerminalUI {
         if (line === "/tasks") { output.write(`${JSON.stringify(await this.supervisor.agents.listTasks(sessionId, branch), null, 2)}\n`); continue; }
         if (line === "/goals") { const { state } = await this.supervisor.projections.getSnapshot(sessionId, branch); output.write(`${JSON.stringify(Object.values(state.goals), null, 2)}\n`); continue; }
         if (line === "/heartbeats") { const { state } = await this.supervisor.projections.getSnapshot(sessionId, branch); output.write(`${JSON.stringify(Object.values(state.heartbeats), null, 2)}\n`); continue; }
+        if (line === "/memory" || line.startsWith("/memory ")) { const query=line.slice(7).trim(); output.write(`${JSON.stringify(query ? await this.supervisor.memory.search(sessionId,branch,query) : await this.supervisor.memory.list(sessionId,branch),null,2)}\n`); continue; }
+        if (line === "/skills") { output.write(`${JSON.stringify(await this.supervisor.harness.list({kind:"skill"}),null,2)}\n`); continue; }
+        if (line.startsWith("/refine ")) { const proposal=await this.supervisor.harness.propose(sessionId,branch,JSON.parse(line.slice(8))); output.write(`${JSON.stringify(await this.supervisor.harness.validate(sessionId,branch,proposal.proposalId),null,2)}\n`); continue; }
+        if (line.startsWith("/rollback ")) { const [,proposalId,...reason]=line.split(/\s+/); if(proposalId) output.write(`${JSON.stringify(await this.supervisor.harness.rollback(sessionId,branch,proposalId,reason.join(" ")),null,2)}\n`); continue; }
+        if (line.startsWith("/skill-test ")) { const [,entryId,versionId]=line.split(/\s+/); if(entryId) output.write(`${JSON.stringify(await this.supervisor.skills.test(sessionId,branch,entryId,versionId),null,2)}\n`); continue; }
+        if (line.startsWith("/skill ")) { const match=line.match(/^\/skill\s+(\S+)\s+([\s\S]+)$/); if(match) output.write(`${JSON.stringify(await this.supervisor.skills.invoke(sessionId,branch,match[1]!,JSON.parse(match[2]!)),null,2)}\n`); continue; }
         if (line.startsWith("/cancel-task ")) { const [, taskId, ...reason] = line.split(/\s+/); if (taskId) output.write(`${JSON.stringify(await this.supervisor.agents.cancel(sessionId, branch, taskId, reason.join(" ") || undefined), null, 2)}\n`); continue; }
         if (line.startsWith("/complete-goal ")) { const goalId = line.slice(15).trim(); if (goalId) output.write(`${JSON.stringify(await this.supervisor.goals.requestCompletion(sessionId, branch, goalId), null, 2)}\n`); continue; }
         if (line.startsWith("/cell ")) { const result = await this.supervisor.executeCell(sessionId, branch, line.slice(6)); output.write(`${JSON.stringify(result, null, 2)}\n`); continue; }

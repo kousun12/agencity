@@ -78,6 +78,8 @@ export interface AgentStorage {
  getRecursiveModel?: RecursiveStorageOperations["getRecursiveModel"];
  listRecursiveModels?: RecursiveStorageOperations["listRecursiveModels"];
  rebuildOperationalProjections?: RecursiveStorageOperations["rebuildOperationalProjections"];
+ /** Rebuilds the disposable FTS5 candidate index from harness projections. */
+ rebuildMemoryCandidateIndex?: () => Promise<void>;
 }
 
 export function requireRecursiveStorage(storage: AgentStorage): AgentStorage & RecursiveStorageOperations {

@@ -105,6 +105,12 @@ Plain text is committed as a user message and followed by one model turn. Comman
 | `/tasks` | Print durable tasks owned by the current session/branch. |
 | `/goals` | Print projected autonomous goals and completion gates. |
 | `/heartbeats` | Print projected heartbeat schedules. |
+| `/memory [query]` | List visible scoped memory or run deterministic FTS retrieval with provenance. |
+| `/skills` | List current versioned TypeScript skills. |
+| `/refine <json>` | Propose and validate typed refinement edits; activation/evaluation stays explicit through SDK/protocol. |
+| `/rollback <proposal> <reason>` | Roll back an exact promoted candidate. User/global proposals first require separate owner/admin approval through the supervisor/protocol `approve-rollback` command; promotion approval does not count. |
+| `/skill-test <entry> [version]` | Run durable compile/runtime tests for an exact skill. |
+| `/skill <entry> <json-input>` | Invoke the active exact skill version through the outbox. |
 | `/cancel-task <id> [reason]` | Cascade cancellation through a task's descendants. |
 | `/complete-goal <id>` | Run current-version completion gates for a goal. |
 | `/cell <typescript>` | Execute one disposable-console cell and print its result. |
@@ -112,7 +118,7 @@ Plain text is committed as a user message and followed by one model turn. Comman
 | `/help` | Print command help. |
 | `/quit`, `/exit` | Close the TUI. |
 
-The current TUI is a basic in-process supervisor client. It does not yet consume the HTTP/SSE transport, render live token streaming, expose unknown-effect reconciliation, or implement the richer PRD commands (`resume`, `compact`, `refine`, `rollback`, sync/conflict views). Those limitations are intentional and visible rather than implied capabilities.
+The current TUI is a basic in-process supervisor client. It does not yet consume the HTTP/SSE transport, render live token streaming, expose unknown-effect reconciliation, or implement the remaining richer PRD commands (`resume`, `compact`, sync/conflict views). Those limitations are intentional and visible rather than implied capabilities.
 
 ## Providers
 

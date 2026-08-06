@@ -23,6 +23,7 @@ import {
   ModelExecutor,
   OpenAICompatibleProvider,
   ShellExecutor,
+  SkillExecutor,
   type ModelProvider,
   type ProviderConcurrency,
 } from "../executors/index.ts";
@@ -37,6 +38,10 @@ import { DocumentService } from "./documents.ts";
 import { GoalService } from "./goals.ts";
 import { HeartbeatService } from "./heartbeats.ts";
 import { RecursiveModelService } from "./models.ts";
+import { MemoryService } from "./memory.ts";
+import { HarnessService } from "./harness.ts";
+import { SkillService } from "./skills.ts";
+import { SubagentSpecService } from "./specs.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -51,6 +56,10 @@ export interface SupervisorOptions {
   readonly providerConcurrency?: ProviderConcurrency;
   /** Poll interval for the live database-driven heartbeat scheduler (default 100ms). */
   readonly heartbeatPollIntervalMs?: number;
+  /** Runtime-owned authority key for the profile/user scope. */
+  readonly userScopeKey?: string;
+  /** Exact generated-skill permission names allowed at activation and invocation (default: none). */
+  readonly skillPermissionAllowlist?: readonly string[];
 }
 
 export interface CreateSessionOptions {
@@ -94,6 +103,10 @@ export class Supervisor {
   readonly models: RecursiveModelService;
   readonly goals: GoalService;
   readonly heartbeats: HeartbeatService;
+  readonly memory: MemoryService;
+  readonly harness: HarnessService;
+  readonly skills: SkillService;
+  readonly specs: SubagentSpecService;
   readonly restartConsoleAfterCell: boolean;
   readonly #cells = new BranchQueue();
 
@@ -105,15 +118,21 @@ export class Supervisor {
     restartConsoleAfterCell: boolean,
     maxSessionDepth: number,
     maxChildrenPerSession: number,
+    userScopeKey: string,
+    skillPermissionAllowlist: readonly string[],
   ) {
     this.storage = storage;
     this.artifacts = artifacts;
     this.console = consoleProcess;
     this.outbox = outbox;
     this.projections = new ProjectionService(storage);
-    this.contexts = new ContextMaterializer(storage);
-    this.modelLoop = new ModelLoop(storage, this.contexts, outbox);
     this.agents = new AgentService(storage, outbox, maxSessionDepth, maxChildrenPerSession);
+    this.skills = new SkillService(storage, outbox, skillPermissionAllowlist, userScopeKey);
+    this.harness = new HarnessService(storage, this.skills, userScopeKey);
+    this.memory = new MemoryService(storage, undefined, userScopeKey);
+    this.specs = new SubagentSpecService(storage, this.agents, userScopeKey);
+    this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey);
+    this.modelLoop = new ModelLoop(storage, this.contexts, outbox);
     this.documents = new DocumentService(storage);
     this.goals = new GoalService(storage, outbox, this.modelLoop);
     this.heartbeats = new HeartbeatService(storage, this.goals);
@@ -138,6 +157,7 @@ export class Supervisor {
     const executors = [
       new ShellExecutor(workspaceRoot),
       new FileExecutor(workspaceRoot),
+      new SkillExecutor(),
       new ModelExecutor(providers, options.providerConcurrency ?? 1),
     ];
     const supervisor = new Supervisor(
@@ -148,6 +168,8 @@ export class Supervisor {
       options.restartConsoleAfterCell ?? false,
       options.maxSessionDepth ?? 8,
       options.maxChildrenPerSession ?? 32,
+      options.userScopeKey ?? "default-user",
+      options.skillPermissionAllowlist ?? [],
     );
     if (options.recover !== false) {
       await supervisor.outbox.recover();
@@ -192,7 +214,7 @@ export class Supervisor {
     branchId: string,
     role: "system" | "user" | "assistant" | "tool",
     content: string,
-  ): Promise<AgentEvent> {
+  ): Promise<AgentEvent<"MessageAppended">> {
     if (containsBrokeredSecret(content)) {
       throw new ValidationError("Brokered credentials cannot enter messages");
     }
@@ -205,7 +227,7 @@ export class Supervisor {
       payload: { messageId: newId(), role, content },
     }]);
     if (!event) throw new Error("Message not committed");
-    return event;
+    return event as AgentEvent<"MessageAppended">;
   }
 
   async fork(sessionId: string, parentBranchId: string, forkCursor: string, name?: string): Promise<string> {
@@ -318,6 +340,15 @@ export class Supervisor {
         });
         return this.storage.readonlyQuery({ sql, args: sqlArgs });
       }
+      if (method === "memory.search") return this.memory.search(sessionId,branchId,String(args[0] ?? ""),(args[1] ?? {}) as any);
+      if (method === "memory.create") return this.memory.create(sessionId,branchId,args[0] as any,"agent");
+      if (method === "memory.list") return this.memory.list(sessionId,branchId,(args[0] ?? {}) as any);
+      if (method === "harness.propose") return this.harness.propose(sessionId,branchId,{...(args[0] as any),authority:"agent"});
+      if (method === "harness.list") return this.harness.modelList(sessionId,branchId,(args[0] ?? {}) as any);
+      if (method === "harness.history") return this.harness.modelHistory(sessionId,branchId,String(args[0]));
+      if (method === "skills.invoke") return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,(args[2] ?? {}) as any);
+      if (method === "skills.test") return this.skills.testModelVisible(sessionId,branchId,String(args[0]),typeof args[1] === "string" ? args[1] : undefined);
+      if (method === "specs.spawn") return this.specs.spawn(sessionId,branchId,String(args[0]),(args[1] ?? {}) as any);
       if (method === "tools.request") {
         const [executor, operation, input, rawOptions] = args;
         if (typeof executor !== "string" || typeof operation !== "string") throw new ValidationError("Invalid tool request");

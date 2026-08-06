@@ -14,7 +14,7 @@ function knownSecrets(): string[] {
 export function environmentWithoutSecrets(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (value !== undefined && !SENSITIVE_KEY.test(key)) result[key] = value;
+    if (value !== undefined && !SENSITIVE_KEY.test(key) && !key.startsWith("AGENCITY_")) result[key] = value;
   }
   return result;
 }

@@ -8,3 +8,7 @@ export * from "./documents.ts";
 export * from "./models.ts";
 export * from "./goals.ts";
 export * from "./heartbeats.ts";
+export * from "./memory.ts";
+export * from "./harness.ts";
+export * from "./skills.ts";
+export * from "./specs.ts";

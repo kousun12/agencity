@@ -1,0 +1,20 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import type { Supervisor } from "../../src/index.ts";
+import { closeSlice3, evidence, openSlice3 } from "./helpers.ts";
+import type { TempRuntime } from "../helpers.ts";
+let current:{supervisor:Supervisor;temp:TempRuntime}|undefined; afterEach(async()=>{if(current)await closeSlice3(current);current=undefined;});
+describe("Slice 3 relational memory and context provenance",()=>{
+ test("retrieves deterministically by scope, status, tags, recency, and FTS5 with full provenance",async()=>{current=await openSlice3();const s=current.supervisor;const a=await s.createSession({workspaceId:"w1"});const b=await s.createSession({workspaceId:"w1"});const c=await s.createSession({workspaceId:"w2"});
+  const local=await s.memory.create(a.sessionId,a.branchId,{text:"phoenix deployment uses canary",scope:"local",tags:["release"]});
+  const workspace=await s.memory.create(a.sessionId,a.branchId,{text:"phoenix rollback uses checkpoint",scope:"workspace",tags:["release"]});
+  const global=await s.memory.create(a.sessionId,a.branchId,{text:"phoenix incidents require evidence",scope:"global",tags:["release"]});
+  await s.memory.create(a.sessionId,a.branchId,{text:"phoenix unrelated tag",scope:"workspace",tags:["other"]});
+  const own=await s.memory.search(a.sessionId,a.branchId,"phoenix",{tags:["release"]});expect(own.items.map(x=>x.record.entryId)).toEqual([local.entryId,workspace.entryId,global.entryId]);expect(own.provenance.rejections.some(x=>x.reasons.includes("tag_mismatch"))).toBe(true);expect(own.provenance.candidates.length).toBe(4);
+  const sibling=await s.memory.search(b.sessionId,b.branchId,"phoenix",{tags:["release"]});expect(sibling.items.map(x=>x.record.entryId)).toEqual([workspace.entryId,global.entryId]);expect(sibling.provenance.rejections.some(x=>x.entryId===local.entryId&&x.reasons.includes("scope_mismatch"))).toBe(true);
+  const other=await s.memory.search(c.sessionId,c.branchId,"phoenix",{tags:["release"]});expect(other.items.map(x=>x.record.entryId)).toEqual([global.entryId]);
+ });
+ test("records exact selected harness versions and complete retrieval provenance in ContextMaterialized while base policy stays separate",async()=>{current=await openSlice3();const s=current.supervisor;const x=await s.createSession({workspaceId:"w"});const e=await evidence(s,x.sessionId,x.branchId,"phoenix release");const memory=await s.memory.create(x.sessionId,x.branchId,{text:"phoenix release uses canary",scope:"workspace",evidenceEventIds:[e.id]});const materialized=await s.contexts.materialize(x.sessionId,x.branchId);const context=materialized.context as any;expect(context.basePolicyRecord.mutable).toBe(false);expect(context.harness.memories[0].versionId).toBe(memory.current.versionId);const payload=materialized.event.payload as any;expect(payload.harnessProvenance.retrieval.query).toBe("phoenix release");expect(payload.harnessProvenance.retrieval.selections[0].versionId).toBe(memory.current.versionId);expect(payload.harnessProvenance.basePolicy.mutable).toBe(false);expect(payload.records.some((r:any)=>r.eventId===memory.current.createdEventId)).toBe(true);
+ });
+ test("the disposable candidate index can be rebuilt without changing memory identity",async()=>{current=await openSlice3();const s=current.supervisor;const x=await s.createSession({workspaceId:"w"});const m=await s.memory.create(x.sessionId,x.branchId,{text:"ultraviolet unique retrieval",scope:"local"});await s.storage.readonlyQuery({sql:"SELECT version_id FROM memory_fts",args:[]});await s.memory.index.rebuild();const found=await s.memory.search(x.sessionId,x.branchId,"ultraviolet");expect(found.items[0]?.record.current.versionId).toBe(m.current.versionId);
+ });
+});

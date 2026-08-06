@@ -148,3 +148,28 @@ Events are made visible to subscribers only after database commit. Notifications
 ## Current evolution limitations
 
 Slice 1 validates one uniform `EVENT_SCHEMA_VERSION = 1`. There is no per-event version registry, persisted reducer package hash, or upcaster. Before changing any released payload, introduce a new accepted version, an explicit deterministic projection path, fixtures for old history, and protocol compatibility tests.
+
+
+## Slice 3 harness, evaluation, and exact-version events
+
+All Slice 3 payloads use schema version 1 and retain stable entry/version/proposal/candidate/allocation/observation/decision identifiers. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
+
+| Event | Durable meaning |
+|---|---|
+| `HarnessVersionCreated` | Creates one immutable `versionId` for an `entryId`, with monotonic version, kind, scope/key, name/content, tags, confidence, status, evidence/conflict IDs, optional superseded version/proposal, creator, and last-confirmed time. Storage enforces content-kind consistency, evidence existence, conflict existence, and replacement CAS. |
+| `HarnessVersionStatusChanged` | Candidate activation, retirement, rejection, or rollback transition for an exact current entry/version, with reason and optional proposal. |
+| `RefinementProposed` | Typed create/replace/retire edit set, trigger, predicted effect, evidence, objective evaluation, and proposing authority. |
+| `RefinementValidated` | Validation result and complete CAS/evidence/authority diagnostics against the `proposed` status. |
+| `RefinementCandidateActivated` | Candidate ID, exact candidate version IDs, and bounded allocation/exposure limits. |
+| `RefinementCandidateAllocated` | One numbered target session/branch/task allocation within the candidate bound. |
+| `RefinementCandidateExposed` | Proof that a specific allocation actually entered materialized context, including exact exposed versions. |
+| `RefinementObservationRecorded` | Objective flag, success, evaluator, metric, baseline, evidence, and notes linked to an exposed allocation. |
+| `RefinementApproved` | Explicit named user authority for user/global promotion. |
+| `RefinementRollbackApproved` | Separate explicit owner/admin authority for user/global rollback; promotion approval never satisfies it. |
+| `RefinementDecided` | Promote/revise/reject decision with evaluator, baseline, observation IDs, and the scope-sensitive rule applied. |
+| `RefinementRolledBack` | Exact candidate versions invalidated and exact superseded versions restored, with reason. |
+| `SkillInvocationRecorded` | Exact skill entry/version and durable effect ID/input for an invocation. |
+| `SkillTestRecorded` | Exact skill entry/version/effect and compile/runtime test report. The associated `Effect*` events own execution outcome. |
+| `SubagentSpecInvoked` | Exact spec entry/version pinned to a normally admitted durable task and child session/branch. |
+
+`ContextMaterialized.harnessProvenance` records the immutable base-policy ID/version/digest separately from editable harness state, complete FTS query/candidate/rejection/selection provenance, candidate allocation/exposure provenance, and every selected entry/version/source event. Its `records` array also references selected `HarnessVersionCreated` event IDs.

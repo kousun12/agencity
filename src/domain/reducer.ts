@@ -185,6 +185,25 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const updated: RecursiveModelState = { ...old, status: p.status, eventId: event.id, ...(p.resultMessageId === undefined ? {} : { resultMessageId: p.resultMessageId }), ...(p.error === undefined ? {} : { error: p.error }) };
       return { ...next, recursiveModels: { ...state.recursiveModels, [p.handleId]: updated } };
     }
+    // Harness history is canonical and has dedicated rebuildable relational
+    // projections. Session projection still advances its cursor so snapshot
+    // recovery retains the exact committed boundary.
+    case "HarnessVersionCreated":
+    case "HarnessVersionStatusChanged":
+    case "RefinementProposed":
+    case "RefinementValidated":
+    case "RefinementCandidateActivated":
+    case "RefinementCandidateAllocated":
+    case "RefinementCandidateExposed":
+    case "RefinementObservationRecorded":
+    case "RefinementDecided":
+    case "RefinementApproved":
+    case "RefinementRollbackApproved":
+    case "RefinementRolledBack":
+    case "SkillInvocationRecorded":
+    case "SkillTestRecorded":
+    case "SubagentSpecInvoked":
+      return next;
   }
 }
 

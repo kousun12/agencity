@@ -26,6 +26,18 @@ Do not change the first three columns or class tokens without updating the archi
 | `goal_gates` | `rebuildable-projection` | `mutable` | Current completion-gate request/outcome projection. Gate effects also use the canonical effect/outbox protocol. |
 | `heartbeats` | `rebuildable-projection` | `mutable` | Due-time/tick/status projection of heartbeat events. Scheduler ownership is not durable identity. |
 | `recursive_model_handles` | `rebuildable-projection` | `mutable` | Current recursive-call lookup/status projection; task, child session, model, and terminal transitions are events. |
+| `harness_entries` | `rebuildable-projection` | `mutable` | Current harness entry/latest/active-version routing derived from canonical harness events. |
+| `harness_versions` | `rebuildable-projection` | `mutable` | Query projection of immutable version identity/content and canonical status transitions; rebuilt from harness events. |
+| `refinement_proposals` | `rebuildable-projection` | `mutable` | Current proposal lifecycle, bounds, validation, and approval summary derived from refinement events. |
+| `candidate_allocations` | `rebuildable-projection` | `mutable` | Bounded allocation/exposure projection; allocation and exposure events are canonical. |
+| `refinement_observations` | `rebuildable-projection` | `mutable` | Objective evaluation observation projection retaining event/evidence linkage. |
+| `refinement_decisions` | `rebuildable-projection` | `mutable` | Promotion/revise/reject decision projection; evaluator, baseline, observations, and rule remain canonical. |
+| `refinement_approvals` | `rebuildable-projection` | `mutable` | Explicit user/global promotion authority approval projection. |
+| `refinement_rollback_approvals` | `rebuildable-projection` | `mutable` | Separate explicit owner/admin authorization for user/global rollback; promotion approval never satisfies it. |
+| `refinement_rollbacks` | `rebuildable-projection` | `mutable` | Reversible decision/restore mapping derived from rollback events. |
+| `skill_executions` | `rebuildable-projection` | `mutable` | Exact skill-version invocation/test linkage; execution request/outcome remains in canonical effect events. |
+| `subagent_spec_invocations` | `rebuildable-projection` | `mutable` | Exact specification-version pin for a normally admitted durable child task. |
+| `memory_fts` | `operational-projection` | `mutable` | Disposable FTS5 candidate index; it may be deleted/rebuilt from harness versions and never decides scope/status policy. |
 | `sqlite_sequence` | `engine-metadata` | `mutable` | SQLite-owned allocator created by `events.sequence INTEGER PRIMARY KEY AUTOINCREMENT`. It preserves increasing local cursors and is recoverable from the greatest retained sequence under SQLite rules. Application/model code must not mutate it directly. |
 
 ### Allowed classification vocabulary
@@ -72,6 +84,10 @@ The adapter creates it from `EffectRequested`, marks running during a serialized
 ### Slice 2 recursive projections
 
 `tasks`, mailbox/terminal delivery rows, document/chunk/input-set rows, goals/gates (including the completion workspace pin added by migration 003), heartbeats, and recursive model handles are updated in the same transaction as their canonical event. `rebuildOperationalProjections()` deletes these mutable rows and replays only their source events; it never re-executes a model, gate, tool, heartbeat callback, or subagent. Document content is duplicated in a query-friendly table for the Slice 2 foundation, but the `DocumentChunkAdded` event remains authoritative.
+
+### Slice 3 harness and retrieval projections
+
+Harness entry/version rows, refinement proposals, allocations/exposures, observations, approvals, decisions, rollbacks, skill execution links, and subagent-spec pins are updated only while appending their canonical events. `rebuildOperationalProjections()` replays all Slice 3 event types in cursor order. Stable entry/version identifiers belong to events; a current pointer or projected status is never authority. `memory_fts` implements only the candidate-index contract: delete/rebuild is explicitly supported, while deterministic scope/status/tag/recency filters and every rejection/selection are recorded by `ContextMaterialized`.
 
 ### `sqlite_sequence`
 

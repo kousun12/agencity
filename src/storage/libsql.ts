@@ -71,6 +71,7 @@ export class LibSqlStorage implements AgentStorage {
       { version: 1, name: "initial", url: new URL("./migrations/001_initial.sql", import.meta.url) },
       { version: 2, name: "recursive-sessions", url: new URL("./migrations/002_recursive_sessions.sql", import.meta.url) },
       { version: 3, name: "slice2-review-hardening", url: new URL("./migrations/003_slice2_review_hardening.sql", import.meta.url) },
+      { version: 4, name: "relational-memory-refinement", url: new URL("./migrations/004_relational_memory_refinement.sql", import.meta.url) },
     ];
     for (const migration of migrations) {
       const applied = await this.#client.execute({ sql: "SELECT version FROM schema_migrations WHERE version=?", args: [migration.version] });
@@ -269,6 +270,56 @@ export class LibSqlStorage implements AgentStorage {
       const inputSet = payload.inputSetId === undefined ? { rows: [{}] } : await tx.execute({ sql: "SELECT input_set_id FROM input_sets WHERE input_set_id=?", args: [payload.inputSetId] });
       if (!taskRow || String(taskRow.child_session_id) !== payload.childSessionId || String(taskRow.child_branch_id) !== payload.childBranchId || String(taskRow.parent_branch_id) !== payload.parentBranchId || payload.parentSessionId !== event.sessionId || !Bun.deepEquals(JSON.parse(String(taskRow.model_json)), payload.model) || !inputSet.rows.length) throw new ValidationError("Recursive model handle does not match its child task and input set");
     }
+    if (event.type === "HarnessVersionCreated") {
+      const payload = event.payload as EventPayloads["HarnessVersionCreated"];
+      const content = payload.content as { kind?: string };
+      if (content.kind !== payload.kind) throw new ValidationError("Harness content kind must match the entry kind");
+      const existingVersion = await tx.execute({ sql: "SELECT version_id FROM harness_versions WHERE version_id=?", args: [payload.versionId] });
+      if (existingVersion.rows.length) throw new ConflictError("Harness version ID already exists", { versionId: payload.versionId });
+      const entry = await tx.execute({ sql: "SELECT * FROM harness_entries WHERE entry_id=?", args: [payload.entryId] });
+      const row = entry.rows[0];
+      const conflictingName = await tx.execute({
+        sql: "SELECT entry_id FROM harness_entries WHERE kind=? AND scope=? AND scope_key=? AND name=? AND status IN ('active','candidate') AND entry_id<>?",
+        args: [payload.kind,payload.scope,payload.scopeKey,payload.name,payload.entryId],
+      });
+      if (conflictingName.rows.length) throw new ConflictError("Harness name is already active in this scope", {
+        kind: payload.kind, scope: payload.scope, scopeKey: payload.scopeKey, name: payload.name,
+        conflictingEntryId: String(conflictingName.rows[0]!.entry_id),
+      });
+      if (payload.version === 1) {
+        if (row || payload.supersedesVersionId !== undefined) throw new ConflictError("First harness version cannot replace an existing entry", { entryId: payload.entryId });
+      } else {
+        if (!row || payload.supersedesVersionId !== String(row.current_version_id) || payload.version !== Number((await tx.execute({ sql: "SELECT max(version) AS version FROM harness_versions WHERE entry_id=?", args: [payload.entryId] })).rows[0]?.version ?? 0) + 1) {
+          throw new ConflictError("Harness replacement failed compare-and-swap", { entryId: payload.entryId, expectedVersionId: payload.supersedesVersionId ?? null });
+        }
+        if (payload.kind !== String(row.kind) || payload.scope !== String(row.scope) || payload.scopeKey !== String(row.scope_key)) throw new ValidationError("A harness replacement cannot change kind or scope");
+      }
+      for (const evidenceId of payload.evidenceEventIds) {
+        if (!(await tx.execute({ sql: "SELECT id FROM events WHERE id=?", args: [evidenceId] })).rows.length) throw new ValidationError(`Harness evidence event does not exist: ${evidenceId}`);
+      }
+      for (const conflictId of payload.conflictEntryIds) {
+        if (!(await tx.execute({ sql: "SELECT entry_id FROM harness_entries WHERE entry_id=?", args: [conflictId] })).rows.length) throw new ValidationError(`Conflicting harness entry does not exist: ${conflictId}`);
+      }
+    }
+    if (event.type === "HarnessVersionStatusChanged") {
+      const payload = event.payload as EventPayloads["HarnessVersionStatusChanged"];
+      const found = await tx.execute({ sql: "SELECT v.status,e.current_version_id FROM harness_versions v JOIN harness_entries e ON e.entry_id=v.entry_id WHERE v.version_id=? AND v.entry_id=?", args: [payload.versionId,payload.entryId] });
+      const row = found.rows[0];
+      if (!row || String(row.current_version_id) !== payload.versionId) throw new ConflictError("Harness status change requires the current version", { entryId: payload.entryId, versionId: payload.versionId });
+      const from = String(row.status);
+      const allowed = from !== payload.status && !["rejected","rolled_back"].includes(from) && !(from === "retired" && payload.status !== "active");
+      if (!allowed) throw new ValidationError(`Invalid harness status transition: ${from} -> ${payload.status}`);
+    }
+    if (event.type === "RefinementValidated" || event.type === "RefinementCandidateActivated" || event.type === "RefinementCandidateAllocated" || event.type === "RefinementCandidateExposed" || event.type === "RefinementObservationRecorded" || event.type === "RefinementDecided" || event.type === "RefinementApproved" || event.type === "RefinementRollbackApproved" || event.type === "RefinementRolledBack") {
+      const payload = event.payload as { proposalId: string };
+      if (!(await tx.execute({ sql: "SELECT proposal_id FROM refinement_proposals WHERE proposal_id=?", args: [payload.proposalId] })).rows.length) throw new ValidationError("Refinement event references a missing proposal");
+    }
+    if (event.type === "SubagentSpecInvoked") {
+      const payload = event.payload as EventPayloads["SubagentSpecInvoked"];
+      const version = await tx.execute({ sql: "SELECT kind FROM harness_versions WHERE version_id=? AND entry_id=?", args: [payload.versionId,payload.entryId] });
+      const task = await tx.execute({ sql: "SELECT child_session_id,child_branch_id FROM tasks WHERE task_id=?", args: [payload.taskId] });
+      if (String(version.rows[0]?.kind) !== "subagent_spec" || String(task.rows[0]?.child_session_id) !== payload.childSessionId || String(task.rows[0]?.child_branch_id) !== payload.childBranchId) throw new ValidationError("Subagent specification invocation is not pinned to its admitted task");
+    }
     const history = await this.#loadBranchEvents(tx, event.sessionId, event.branchId);
     if (!history.length) throw new NotFoundError("session branch", `${event.sessionId}/${event.branchId}`);
     reduceAgentState(projectEvents(history), event);
@@ -281,7 +332,7 @@ export class LibSqlStorage implements AgentStorage {
       await tx.execute({ sql: "INSERT OR IGNORE INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,NULL,NULL,NULL,?)", args: [event.sessionId,p.initialBranchId,event.id] });
     }
     if (event.type === "BranchCreated") { const p = event.payload as EventPayloads["BranchCreated"]; await tx.execute({ sql: "INSERT INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,?,?,?,?)", args: [event.sessionId,p.branchId,p.parentBranchId,p.forkCursor,p.name ?? null,event.id] }); }
-    if (event.type === "ContextMaterialized") { const p = event.payload as EventPayloads["ContextMaterialized"]; await tx.execute({ sql: "INSERT INTO context_records(context_id,session_id,branch_id,event_id,content_hash,records_json,context_json,created_at) VALUES(?,?,?,?,?,?,?,?)", args: [p.contextId,event.sessionId,event.branchId,event.id,p.contentHash,json(p.records),json(p.context),event.committedAt] }); }
+    if (event.type === "ContextMaterialized") { const p = event.payload as EventPayloads["ContextMaterialized"]; await tx.execute({ sql: "INSERT INTO context_records(context_id,session_id,branch_id,event_id,content_hash,records_json,context_json,created_at,harness_provenance_json) VALUES(?,?,?,?,?,?,?,?,?)", args: [p.contextId,event.sessionId,event.branchId,event.id,p.contentHash,json(p.records),json(p.context),event.committedAt,p.harnessProvenance === undefined ? null : json(p.harnessProvenance)] }); }
     if (event.type === "EffectRequested") { const p = event.payload as EventPayloads["EffectRequested"]; await tx.execute({ sql: "INSERT INTO outbox(effect_id,session_id,branch_id,executor,operation,input_json,idempotency_key,idempotent,status,requested_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.effectId,event.sessionId,event.branchId,p.executor,p.operation,json(p.input),p.idempotencyKey,p.idempotent ? 1 : 0,"pending",event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "EffectAttemptStarted") { const p = event.payload as EventPayloads["EffectAttemptStarted"]; await tx.execute({ sql: "UPDATE outbox SET status='running',attempt=?,updated_at=? WHERE effect_id=? AND status IN ('pending','running')", args: [p.attempt,event.committedAt,p.effectId] }); }
     if (event.type === "EffectOutcomeRecorded") { const p = event.payload as EventPayloads["EffectOutcomeRecorded"]; await tx.execute({ sql: "UPDATE outbox SET status=?,attempt=?,owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=?", args: [p.outcome,p.attempt,event.committedAt,p.effectId] }); }
@@ -339,6 +390,51 @@ export class LibSqlStorage implements AgentStorage {
     }
     if (event.type === "RecursiveModelStarted") { const p = event.payload as EventPayloads["RecursiveModelStarted"]; await tx.execute({ sql: "INSERT INTO recursive_model_handles(handle_id,task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,model_json,input_set_id,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", args: [p.handleId,p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,json(p.model),p.inputSetId ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "RecursiveModelStatusChanged") { const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; await tx.execute({ sql: "UPDATE recursive_model_handles SET status=?,result_message_id=COALESCE(?,result_message_id),error=COALESCE(?,error),last_event_id=?,updated_at=? WHERE handle_id=?", args: [p.status,p.resultMessageId ?? null,p.error ?? null,event.id,event.committedAt,p.handleId] }); }
+    if (event.type === "HarnessVersionCreated") {
+      const p = event.payload as EventPayloads["HarnessVersionCreated"];
+      await tx.execute({ sql: "INSERT INTO harness_versions(version_id,entry_id,version,kind,scope,scope_key,name,content_json,tags_json,confidence,status,evidence_event_ids_json,conflict_entry_ids_json,supersedes_version_id,proposal_id,created_by,created_event_id,last_event_id,created_at,last_confirmed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.versionId,p.entryId,p.version,p.kind,p.scope,p.scopeKey,p.name,json(p.content),json(p.tags),p.confidence,p.status,json(p.evidenceEventIds),json(p.conflictEntryIds),p.supersedesVersionId ?? null,p.proposalId ?? null,p.createdBy,event.id,event.id,event.committedAt,p.lastConfirmedAt] });
+      if (p.version === 1) await tx.execute({ sql: "INSERT INTO harness_entries(entry_id,kind,scope,scope_key,name,current_version_id,active_version_id,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.entryId,p.kind,p.scope,p.scopeKey,p.name,p.versionId,p.status === "active" ? p.versionId : null,p.status,event.id,event.id,event.committedAt,event.committedAt] });
+      else await tx.execute({ sql: "UPDATE harness_entries SET name=?,current_version_id=?,active_version_id=CASE WHEN ?='active' THEN ? ELSE active_version_id END,status=?,last_event_id=?,updated_at=? WHERE entry_id=?", args: [p.name,p.versionId,p.status,p.versionId,p.status,event.id,event.committedAt,p.entryId] });
+      if (p.kind === "memory") {
+        const content = p.content as { text?: string };
+        await tx.execute({ sql: "INSERT INTO memory_fts(version_id,entry_id,content,tags) VALUES(?,?,?,?)", args: [p.versionId,p.entryId,content.text ?? "",p.tags.join(" ")] });
+      }
+    }
+    if (event.type === "HarnessVersionStatusChanged") {
+      const p = event.payload as EventPayloads["HarnessVersionStatusChanged"];
+      await tx.execute({ sql: "UPDATE harness_versions SET status=?,last_event_id=? WHERE version_id=? AND entry_id=?", args: [p.status,event.id,p.versionId,p.entryId] });
+      if (p.status === "active") {
+        const old = await tx.execute({ sql: "SELECT active_version_id FROM harness_entries WHERE entry_id=?", args: [p.entryId] });
+        const oldVersion = old.rows[0]?.active_version_id;
+        if (oldVersion !== null && oldVersion !== undefined && String(oldVersion) !== p.versionId) await tx.execute({ sql: "UPDATE harness_versions SET status='retired',last_event_id=? WHERE version_id=?", args: [event.id,String(oldVersion)] });
+        await tx.execute({ sql: "UPDATE harness_entries SET current_version_id=?,active_version_id=?,status='active',last_event_id=?,updated_at=? WHERE entry_id=?", args: [p.versionId,p.versionId,event.id,event.committedAt,p.entryId] });
+      } else if (p.status === "rolled_back") {
+        const previous = await tx.execute({ sql: "SELECT supersedes_version_id FROM harness_versions WHERE version_id=?", args: [p.versionId] });
+        const restored = previous.rows[0]?.supersedes_version_id;
+        if (restored) {
+          await tx.execute({ sql: "UPDATE harness_versions SET status='active',last_event_id=? WHERE version_id=?", args: [event.id,String(restored)] });
+          await tx.execute({ sql: "UPDATE harness_entries SET current_version_id=?,active_version_id=?,status='active',last_event_id=?,updated_at=? WHERE entry_id=?", args: [String(restored),String(restored),event.id,event.committedAt,p.entryId] });
+        } else await tx.execute({ sql: "UPDATE harness_entries SET status='rolled_back',active_version_id=NULL,last_event_id=?,updated_at=? WHERE entry_id=?", args: [event.id,event.committedAt,p.entryId] });
+      } else if (p.status === "rejected") {
+        const previous = await tx.execute({ sql: "SELECT supersedes_version_id FROM harness_versions WHERE version_id=?", args: [p.versionId] });
+        const restored = previous.rows[0]?.supersedes_version_id;
+        if (restored) await tx.execute({ sql: "UPDATE harness_entries SET current_version_id=?,active_version_id=?,status='active',last_event_id=?,updated_at=? WHERE entry_id=?", args: [String(restored),String(restored),event.id,event.committedAt,p.entryId] });
+        else await tx.execute({ sql: "UPDATE harness_entries SET status='rejected',active_version_id=NULL,last_event_id=?,updated_at=? WHERE entry_id=?", args: [event.id,event.committedAt,p.entryId] });
+      } else await tx.execute({ sql: "UPDATE harness_entries SET status=?,active_version_id=CASE WHEN ?='retired' THEN NULL ELSE active_version_id END,last_event_id=?,updated_at=? WHERE entry_id=?", args: [p.status,p.status,event.id,event.committedAt,p.entryId] });
+    }
+    if (event.type === "RefinementProposed") { const p = event.payload as EventPayloads["RefinementProposed"]; await tx.execute({ sql: "INSERT INTO refinement_proposals(proposal_id,session_id,branch_id,status,trigger_text,predicted_effect,edits_json,evidence_event_ids_json,evaluation_json,authority,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,'proposed',?,?,?,?,?,?,?,?,?,?)", args: [p.proposalId,event.sessionId,event.branchId,p.trigger,p.predictedEffect,json(p.edits),json(p.evidenceEventIds),json(p.evaluation),p.authority,event.id,event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "RefinementValidated") { const p = event.payload as EventPayloads["RefinementValidated"]; await tx.execute({ sql: "UPDATE refinement_proposals SET status=?,validation_json=?,last_event_id=?,updated_at=? WHERE proposal_id=? AND status='proposed'", args: [p.valid ? "validated" : "revision_required",json(p.validation),event.id,event.committedAt,p.proposalId] }); }
+    if (event.type === "RefinementCandidateActivated") { const p = event.payload as EventPayloads["RefinementCandidateActivated"]; await tx.execute({ sql: "UPDATE refinement_proposals SET status='candidate',candidate_id=?,allocation_limit=?,exposure_limit=?,last_event_id=?,updated_at=? WHERE proposal_id=?", args: [p.candidateId,p.allocationLimit,p.exposureLimit,event.id,event.committedAt,p.proposalId] }); }
+    if (event.type === "RefinementCandidateAllocated") { const p = event.payload as EventPayloads["RefinementCandidateAllocated"]; await tx.execute({ sql: "INSERT INTO candidate_allocations(allocation_id,candidate_id,proposal_id,session_id,branch_id,task_id,ordinal,created_event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)", args: [p.allocationId,p.candidateId,p.proposalId,p.targetSessionId,p.targetBranchId,p.taskId ?? null,p.ordinal,event.id,event.committedAt] }); }
+    if (event.type === "RefinementCandidateExposed") { const p = event.payload as EventPayloads["RefinementCandidateExposed"]; await tx.execute({ sql: "UPDATE candidate_allocations SET exposed_at=?,exposed_event_id=? WHERE allocation_id=? AND candidate_id=?", args: [event.committedAt,event.id,p.allocationId,p.candidateId] }); }
+    if (event.type === "RefinementObservationRecorded") { const p = event.payload as EventPayloads["RefinementObservationRecorded"]; await tx.execute({ sql: "INSERT INTO refinement_observations(observation_id,candidate_id,proposal_id,allocation_id,evaluator,objective,success,metric_json,baseline_json,evidence_event_ids_json,notes,event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.observationId,p.candidateId,p.proposalId,p.allocationId,p.evaluator,p.objective ? 1 : 0,p.success ? 1 : 0,json(p.metric),p.baseline === undefined ? null : json(p.baseline),json(p.evidenceEventIds),p.notes ?? null,event.id,event.committedAt] }); }
+    if (event.type === "RefinementDecided") { const p = event.payload as EventPayloads["RefinementDecided"]; await tx.execute({ sql: "INSERT INTO refinement_decisions(decision_id,proposal_id,candidate_id,decision,rule,evaluator,baseline_json,observation_ids_json,event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", args: [p.decisionId,p.proposalId,p.candidateId,p.decision,p.rule,p.evaluator,p.baseline === undefined ? null : json(p.baseline),json(p.observationIds),event.id,event.committedAt] }); await tx.execute({ sql: "UPDATE refinement_proposals SET status=?,last_event_id=?,updated_at=? WHERE proposal_id=?", args: [p.decision === "promote" ? "promoted" : p.decision === "reject" ? "rejected" : "revision_required",event.id,event.committedAt,p.proposalId] }); }
+    if (event.type === "RefinementApproved") { const p = event.payload as EventPayloads["RefinementApproved"]; await tx.execute({ sql: "INSERT INTO refinement_approvals(event_id,proposal_id,approved_by,scope,note,created_at) VALUES(?,?,?,?,?,?)", args: [event.id,p.proposalId,p.approvedBy,p.scope,p.note ?? null,event.committedAt] }); const scopes = await tx.execute({ sql: "SELECT scope FROM refinement_approvals WHERE proposal_id=? ORDER BY scope", args: [p.proposalId] }); await tx.execute({ sql: "UPDATE refinement_proposals SET approved_scopes_json=?,last_event_id=?,updated_at=? WHERE proposal_id=?", args: [json(scopes.rows.map((row) => String(row.scope))),event.id,event.committedAt,p.proposalId] }); }
+    if (event.type === "RefinementRollbackApproved") { const p = event.payload as EventPayloads["RefinementRollbackApproved"]; await tx.execute({ sql: "INSERT INTO refinement_rollback_approvals(event_id,proposal_id,approved_by,role,note,created_at) VALUES(?,?,?,?,?,?)", args: [event.id,p.proposalId,p.approvedBy,p.role,p.note ?? null,event.committedAt] }); }
+    if (event.type === "RefinementRolledBack") { const p = event.payload as EventPayloads["RefinementRolledBack"]; await tx.execute({ sql: "INSERT INTO refinement_rollbacks(rollback_id,proposal_id,candidate_id,version_ids_json,restored_version_ids_json,reason,event_id,created_at) VALUES(?,?,?,?,?,?,?,?)", args: [p.rollbackId,p.proposalId,p.candidateId,json(p.versionIds),json(p.restoredVersionIds),p.reason,event.id,event.committedAt] }); await tx.execute({ sql: "UPDATE refinement_proposals SET status='rolled_back',last_event_id=?,updated_at=? WHERE proposal_id=?", args: [event.id,event.committedAt,p.proposalId] }); }
+    if (event.type === "SkillInvocationRecorded") { const p = event.payload as EventPayloads["SkillInvocationRecorded"]; await tx.execute({ sql: "INSERT INTO skill_executions(event_id,entry_id,version_id,effect_id,execution_kind,created_at) VALUES(?,?,?,?,'invoke',?)", args: [event.id,p.entryId,p.versionId,p.effectId,event.committedAt] }); }
+    if (event.type === "SkillTestRecorded") { const p = event.payload as EventPayloads["SkillTestRecorded"]; await tx.execute({ sql: "INSERT INTO skill_executions(event_id,entry_id,version_id,effect_id,execution_kind,passed,report_json,created_at) VALUES(?,?,?,?,'test',?,?,?)", args: [event.id,p.entryId,p.versionId,p.effectId,p.passed ? 1 : 0,json(p.report),event.committedAt] }); }
+    if (event.type === "SubagentSpecInvoked") { const p = event.payload as EventPayloads["SubagentSpecInvoked"]; await tx.execute({ sql: "INSERT INTO subagent_spec_invocations(event_id,entry_id,version_id,task_id,child_session_id,child_branch_id,created_at) VALUES(?,?,?,?,?,?,?)", args: [event.id,p.entryId,p.versionId,p.taskId,p.childSessionId,p.childBranchId,event.committedAt] }); }
   }
 
   async #lineage(
@@ -547,13 +643,29 @@ export class LibSqlStorage implements AgentStorage {
     const result = await this.#client.execute({ sql: `${sql} ORDER BY created_at,handle_id`, args }); return result.rows.map(rowToRecursiveModel);
   }
 
+  async rebuildMemoryCandidateIndex(): Promise<void> {
+    await this.#writes.run(async () => {
+      const tx = await this.#client.transaction("write");
+      try {
+        await tx.execute("DELETE FROM memory_fts");
+        const rows = await tx.execute("SELECT version_id,entry_id,content_json,tags_json FROM harness_versions WHERE kind='memory' ORDER BY version_id");
+        for (const row of rows.rows) {
+          const content = JSON.parse(String(row.content_json)) as { text?: string };
+          const tags = JSON.parse(String(row.tags_json)) as string[];
+          await tx.execute({ sql: "INSERT INTO memory_fts(version_id,entry_id,content,tags) VALUES(?,?,?,?)", args: [String(row.version_id),String(row.entry_id),content.text ?? "",tags.join(" ")] });
+        }
+        await tx.commit();
+      } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
+    });
+  }
+
   async rebuildOperationalProjections(): Promise<void> {
     await this.#writes.run(async () => {
       const tx = await this.#client.transaction("write");
       try {
-        for (const table of ["input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gates","goals","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
+        for (const table of ["memory_fts","subagent_spec_invocations","skill_executions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gates","goals","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
         const rows = await tx.execute("SELECT * FROM events ORDER BY sequence");
-        const selected = new Set(["SessionCreated","BranchCreated","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","RecursiveModelStarted","RecursiveModelStatusChanged"]);
+        const selected = new Set(["SessionCreated","BranchCreated","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","RecursiveModelStarted","RecursiveModelStatusChanged","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked"]);
         for (const row of rows.rows) { const event = rowToEvent(row); if (selected.has(event.type)) await this.#applyOperationalRows(tx,event); }
         await tx.commit();
       } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
