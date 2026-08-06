@@ -84,7 +84,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
 | FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Done | FU-004 |
 | FU-015 | Keep detached sessions executing in a background service | Done | FU-001, FU-004 |
-| FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | In progress | FU-003, FU-004 |
+| FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | Done | FU-003, FU-004 |
 | FU-017 | Add skill creation, installation, and management as a product surface | In progress | FU-004 |
 | FU-018 | Stream provider output incrementally to attached clients | Done | FU-003 |
 | FU-019 | Add automatic and agent-directed context compaction | In progress | FU-003, FU-004 |
@@ -887,7 +887,7 @@ Runs, goals, heartbeats, schedules, and child sessions continue while no client 
 
 ## FU-016 — Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -927,6 +927,14 @@ A user runs `/refine`, optionally with instructions, and a refiner model call re
 
 - Model-weight training.
 - Changes to promotion policy; existing evaluator and authority rules are unchanged.
+
+
+### Completion evidence
+
+- Commits: `6e3f0a0`, `7a7fef5`, `0047eba`, `7c732ef`, `11cb70d`, and `c647f1a`.
+- Implementation: strict `agencity.refinement-review` v1 contract; frozen attributable trajectory snapshot; durable retained-RLM review lifecycle; governed no-change/proposal/candidate allocation; profile-opt-in local automatic failure/gate/correction triggers; recovery, protocol/SDK/CLI/TUI surfaces, and migrations 011/012.
+- Verification: full verify before hardening passed 576 tests with 2 external skips; focused final refiner suite 18/18. Independent review found rebuild omission, boundary-scan poisoning, and protocol frontier smuggling; all were fixed with replay, non-throwing fixed-shape observations, and strict whitelisting. Adversarial re-review passed.
+- Remaining limitations: automatic refinement is deliberately off by default and local-only; repeated-success, stale-memory, and delegation-quality detectors are not yet automatic triggers.
 
 ---
 
