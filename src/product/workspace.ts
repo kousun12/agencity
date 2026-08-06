@@ -12,6 +12,34 @@ export interface ResolvedWorkspace {
   readonly stateDirectory: string;
 }
 
+export interface ObservedWorkspace {
+  readonly root: string;
+  readonly workspaceId: string | null;
+  readonly name: string;
+  readonly stateDirectory: string;
+}
+
+/** Read-only workspace discovery for doctor/status observers. */
+export async function observeWorkspace(input: {
+  readonly override?: string;
+  readonly startDirectory?: string;
+  readonly stateDirectory?: string;
+} = {}): Promise<ObservedWorkspace> {
+  const start = resolve(input.override ?? input.startDirectory ?? process.cwd());
+  let canonical: string;
+  try {
+    if (!(await stat(start)).isDirectory()) throw new ValidationError(`Workspace path is not a directory: ${start}`);
+    canonical = await realpath(start);
+  } catch (error) {
+    if (error instanceof ValidationError) throw error;
+    throw new ValidationError(`Workspace path is unavailable: ${start}`);
+  }
+  const root = input.override ? canonical : await discoverRoot(canonical);
+  const stateDirectory = resolve(input.stateDirectory ?? join(root, ".agencity"));
+  const marker = join(root, ".agencity", "workspace-id");
+  return { root, workspaceId: await readWorkspaceMarker(marker), name: basename(root) || "workspace", stateDirectory };
+}
+
 /**
  * Resolves path aliases and loads the owner-only durable identity marker.
  *

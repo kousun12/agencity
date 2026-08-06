@@ -15,6 +15,7 @@ import {
   providerStatuses,
   parseModel,
   resolveWorkspace,
+  observeWorkspace,
   workspacePreferenceKey,
   type ProductBranchSummary,
   type ResolvedWorkspace,
@@ -80,6 +81,16 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
   const workspaceOverride = option("workspace") ?? option("workspace-root");
   const configuredStateDirectory = option("state-dir");
   const configuredDatabase = option("db");
+  if (parsed.command === "doctor") {
+    const observed = await observeWorkspace({
+      ...(workspaceOverride === undefined ? {} : { override: workspaceOverride }),
+      ...(configuredStateDirectory === undefined ? {} : { stateDirectory: configuredStateDirectory }),
+    });
+    if (observed.workspaceId === null) { await doctorUninitialized(observed, parsed.flags.has("json")); return; }
+    const readOnlyWorkspace: ResolvedWorkspace = { ...observed, workspaceId: observed.workspaceId };
+    await doctorObserver(managedConfiguration(parsed, readOnlyWorkspace), parsed.flags.has("json"));
+    return;
+  }
   const workspace = await resolveWorkspace({
     ...(workspaceOverride === undefined ? {} : { override: workspaceOverride }),
     ...(configuredStateDirectory === undefined ? {} : { stateDirectory: configuredStateDirectory }),
@@ -89,7 +100,6 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
   const prompter = new ProductPrompter(interactive);
   try {
-    if (parsed.command === "doctor") { await doctorObserver(configuration, parsed.flags.has("json")); return; }
     if (parsed.command === "service") { await serviceCommand(configuration, parsed); return; }
 
     const connection = await connectManagedService(configuration);
@@ -186,6 +196,20 @@ async function serviceCommand(configuration: ManagedServiceConfiguration, parsed
   }
   const client = new AgentClient(observed.manifest.url, observed.manifest.bearerToken);
   printValue(action === "shutdown" ? await client.shutdownService() : await client.serviceStatus(), parsed.flags.has("json"));
+}
+
+async function doctorUninitialized(workspace: { root: string; workspaceId: string | null; name: string; stateDirectory: string }, json: boolean): Promise<void> {
+  const report = {
+    application: await applicationVersion(),
+    bun: { version: Bun.version, required: ">=1.2.0", compatible: runtimeCompatible() },
+    mode: "trusted-local (not a hostile-code sandbox)",
+    observer: "read-only (no workspace initialization, recovery, wake ticks, migrations, or canonical writes)",
+    workspace,
+    service: { state: "stopped", onDemand: true },
+    providers: [{ provider: "echo", usable: true, demo: true }, { provider: "openai", usable: Boolean(process.env.OPENAI_API_KEY), demo: false }],
+  };
+  if (json) console.log(JSON.stringify(report, null, 2));
+  else console.log([`Agencity ${report.application} · Bun ${report.bun.version}`, `Workspace: ${workspace.name} (${workspace.root}) [not initialized]`, `Mode: ${report.mode}`, "Service: stopped (started on demand; not an OS boot service)", `Observer: ${report.observer}`].join("\n"));
 }
 
 async function doctorObserver(configuration: ManagedServiceConfiguration, json: boolean): Promise<void> {

@@ -257,6 +257,44 @@ export class LibSqlStorage implements AgentStorage {
     }
   }
 
+  async #assertNoActiveManagedLease(tx: Transaction, workspaceId: string): Promise<void> {
+    const active = await tx.execute({
+      sql: `SELECT scope_kind,scope_id,owner_device_id,owner_process_id,fence_token,lease_expires_at
+        FROM process_execution_leases WHERE workspace_id=? AND released_at IS NULL
+          AND lease_expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        ORDER BY scope_kind,scope_id LIMIT 1`,
+      args: [workspaceId],
+    });
+    if (active.rows[0]) {
+      const row = active.rows[0];
+      throw new ExecutionOwnershipConflictError("Unfenced execution write was rejected while a managed owner is active", {
+        reason: "managed_fence_required", workspaceId, scopeKind: String(row.scope_kind), scopeId: String(row.scope_id),
+        currentOwnerDeviceId: String(row.owner_device_id), currentOwnerProcessId: String(row.owner_process_id),
+        currentFenceToken: Number(row.fence_token), currentLeaseExpiresAt: String(row.lease_expires_at),
+      });
+    }
+  }
+
+  async #assertUnfencedEventWriteAllowed(tx: Transaction, events: readonly NewAgentEvent[]): Promise<void> {
+    const workspaceIds = new Set<string>();
+    for (const event of events) {
+      if (event.type === "SessionCreated") workspaceIds.add((event.payload as EventPayloads["SessionCreated"]).workspaceId);
+      else {
+        const selected = await tx.execute({ sql: "SELECT workspace_id FROM sessions WHERE session_id=?", args: [event.sessionId] });
+        if (selected.rows[0]) workspaceIds.add(String(selected.rows[0].workspace_id));
+      }
+    }
+    for (const workspaceId of workspaceIds) await this.#assertNoActiveManagedLease(tx, workspaceId);
+  }
+
+  async #assertUnfencedOutboxWriteAllowed(tx: Transaction, effectId: string): Promise<void> {
+    const selected = await tx.execute({
+      sql: "SELECT s.workspace_id FROM outbox o JOIN sessions s ON s.session_id=o.session_id WHERE o.effect_id=?",
+      args: [effectId],
+    });
+    if (selected.rows[0]) await this.#assertNoActiveManagedLease(tx, String(selected.rows[0].workspace_id));
+  }
+
   async #assertOutboxWriteFence(tx: Transaction, effectId: string, fence: ProcessExecutionWriteFence): Promise<void> {
     const selected = await tx.execute({ sql: "SELECT session_id FROM outbox WHERE effect_id=?", args: [effectId] });
     const row = selected.rows[0];
@@ -282,6 +320,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const tx = await this.#client.transaction("write"); const committed: AgentEvent[] = [];
       try {
         if (fence) await this.#assertEventWriteFence(tx, rawEvents, fence);
+        else await this.#assertUnfencedEventWriteAllowed(tx, rawEvents);
         for (const candidate of rawEvents) committed.push(await this.#appendOne(tx, candidate));
         await tx.commit();
       } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
@@ -1036,6 +1075,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         });
         for (const row of result.rows) {
           if (fence) await this.#assertOutboxWriteFence(tx, String(row.effect_id), fence);
+          else await this.#assertUnfencedOutboxWriteAllowed(tx, String(row.effect_id));
           const updated = await tx.execute({
             sql: "UPDATE outbox SET status='running',owner=?,lease_expires_at=?,updated_at=? WHERE effect_id=? AND status='pending'",
             args: [owner, leaseExpiresAt, now.toISOString(), String(row.effect_id)],
@@ -1069,6 +1109,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         const row = result.rows[0];
         if (!row) { await tx.commit(); return null; }
         if (fence) await this.#assertOutboxWriteFence(tx, effectId, fence);
+        else await this.#assertUnfencedOutboxWriteAllowed(tx, effectId);
         const updated = await tx.execute({
           sql: "UPDATE outbox SET status='running',owner=?,lease_expires_at=?,updated_at=? WHERE effect_id=? AND status='pending'",
           args: [owner, leaseExpiresAt, now.toISOString(), effectId],
@@ -1090,21 +1131,16 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
   async listOutbox(statuses?:readonly OutboxRecord["status"][]):Promise<OutboxRecord[]>{let sql="SELECT * FROM outbox",args:InValue[]=[];if(statuses?.length){sql+=` WHERE status IN (${statuses.map(()=>"?").join(",")})`;args=[...statuses];}const r=await this.#client.execute({sql:sql+" ORDER BY created_at",args});return r.rows.map(rowToOutbox);}
   async resetOutbox(effectId: string, fence?: ProcessExecutionWriteFence): Promise<void> {
     await this.#writes.run(async () => {
-      if (fence) {
-        const tx = await this.#client.transaction("write");
-        try {
-          await this.#assertOutboxWriteFence(tx, effectId, fence);
-          await tx.execute({ sql: "UPDATE outbox SET status='pending',owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=? AND status='running'", args: [new Date().toISOString(), effectId] });
-          await tx.commit();
-        } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
-        return;
-      }
-      await this.#client.execute({
-        sql: "UPDATE outbox SET status='pending',owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=? AND status='running'",
-        args: [new Date().toISOString(), effectId],
-      });
+      const tx = await this.#client.transaction("write");
+      try {
+        if (fence) await this.#assertOutboxWriteFence(tx, effectId, fence);
+        else await this.#assertUnfencedOutboxWriteAllowed(tx, effectId);
+        await tx.execute({ sql: "UPDATE outbox SET status='pending',owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=? AND status='running'", args: [new Date().toISOString(), effectId] });
+        await tx.commit();
+      } catch (error) { if (!tx.closed) await tx.rollback(); throw error; } finally { tx.close(); }
     });
   }
+
   async getSession(sessionId: string): Promise<SessionRecord | null> { const result = await this.#client.execute({ sql: "SELECT s.*,t.status AS task_status FROM sessions s LEFT JOIN tasks t ON t.task_id=s.task_id WHERE s.session_id=?", args: [sessionId] }); return result.rows[0] ? rowToSession(result.rows[0]) : null; }
   async listChildren(parentSessionId: string): Promise<SessionRecord[]> { const result = await this.#client.execute({ sql: "SELECT s.*,t.status AS task_status FROM sessions s LEFT JOIN tasks t ON t.task_id=s.task_id WHERE s.parent_session_id=? ORDER BY s.depth,s.session_id", args: [parentSessionId] }); return result.rows.map(rowToSession); }
   async getTask(taskId: string): Promise<TaskRecord | null> { const result = await this.#client.execute({ sql: "SELECT * FROM tasks WHERE task_id=?", args: [taskId] }); return result.rows[0] ? rowToTask(result.rows[0]) : null; }

@@ -242,6 +242,19 @@ describe("product CLI", () => {
     expect(rows[0]!.model).toEqual({ provider: "openai", model: "test-model" });
   });
 
+  test("doctor is a read-only observer and does not initialize a fresh workspace", async () => {
+    const value = await fixture();
+    const before = await readdir(value.workspace);
+    const checked = await cli(["doctor", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(checked).toMatchObject({ code: 0, stderr: "" });
+    const report = JSON.parse(checked.stdout) as { workspace: { workspaceId: string | null }; observer: string; service: { state: string } };
+    expect(report.workspace.workspaceId).toBeNull();
+    expect(report.observer).toContain("no workspace initialization");
+    expect(report.service.state).toBe("stopped");
+    expect(await readdir(value.workspace)).toEqual(before);
+    expect(await Bun.file(join(value.home, ".agencity", "profile.db")).exists()).toBe(false);
+  });
+
   test("doctor discovers OpenAI-compatible configuration without outputting or persisting its raw secret", async () => {
     const value = await fixture(); const secret = "sk-test-NEVER-PERSIST-0123456789";
     const checked = await cli(["doctor", "--workspace", value.workspace, "--json"], { home: value.home, extraEnv: { OPENAI_API_KEY: secret, OPENAI_BASE_URL: "https://example.invalid/v1" } });

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { LibSqlStorage } from "../../src/storage/index.ts";
+import { Supervisor } from "../../src/runtime/index.ts";
 import { ManagedWorkspaceService, connectManagedService, managedServiceConfigurationHash, resolveWorkspace, serviceStatePaths, type ManagedServiceConfiguration } from "../../src/product/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
@@ -102,18 +103,44 @@ describe("managed workspace service", () => {
     expect(service.supervisor.executionLeases?.lost).toBe(false);
   });
 
+
+  test("a same-device embedded supervisor may observe but cannot advance a managed root without fences", async () => {
+    const config = await configuration("agencity-managed-second-supervisor-");
+    const service = await opened(config);
+    const client = (await connectManagedService(config, { spawn: false })).client;
+    const session = await client.createSession(config.workspace.workspaceId, { model: { provider: "echo", model: "echo-1" } });
+    await client.message(session.sessionId, session.branchId, "managed owner established root fence");
+    const observer = await Supervisor.open({
+      databaseUrl: `file:${config.databasePath}`, artifactDirectory: config.artifactDirectory,
+      workspaceRoot: config.workspace.root, profileDatabaseUrl: `file:${config.profileDatabasePath}`,
+      recover: false, startWakeSchedulers: false,
+      sync: { workspaceId: config.workspace.workspaceId },
+    });
+    try {
+      expect((await observer.resume(session.sessionId, session.branchId)).sessionId).toBe(session.sessionId);
+      await expect(observer.runs.start(session.sessionId, session.branchId, { task: "competing advancement" })).rejects.toMatchObject({ code: "EXECUTION_OWNERSHIP_CONFLICT" });
+      expect((await service.status()).lifecycle).toBe("running");
+    } finally { await observer.close(); }
+  });
+
   test("crash restart fences the dead owner and reconciles lost non-idempotent work to unknown without retry", async () => {
     const config = { ...(await configuration("agencity-managed-crash-")), leaseMs: 500 };
     const first = await connectManagedService(config);
     const session = await first.client.createSession(config.workspace.workspaceId, { model: { provider: "echo", model: "echo-1" } });
     const raw = new LibSqlStorage({ url: `file:${config.databasePath}`, deviceId: first.manifest.deviceId });
     try {
+      await first.client.message(session.sessionId, session.branchId, "establish crash-test root ownership");
+      const workspaceLease = await raw.getProcessExecutionLease({ kind: "workspace", workspaceId: config.workspace.workspaceId });
+      const rootLease = await raw.getProcessExecutionLease({ kind: "root", rootSessionId: session.sessionId });
+      if (!workspaceLease || !rootLease) throw new Error("Managed service did not retain both write fences");
+      const asProof = (lease: typeof workspaceLease) => ({ scope: lease.scope, ownerDeviceId: lease.ownerDeviceId, ownerProcessId: lease.ownerProcessId, fenceToken: lease.fenceToken, now: new Date().toISOString() });
+      const fence = { workspace: asProof(workspaceLease), root: asProof(rootLease) };
       const effectId = "crash-non-idempotent";
       await raw.appendEvents([{
         sessionId: session.sessionId, branchId: session.branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "crash:effect",
         payload: { effectId, executor: "model", operation: "complete", input: {}, idempotencyKey: "crash:effect", idempotent: false },
-      }]);
-      expect((await raw.claimEffect(effectId, "dead-service"))?.status).toBe("running");
+      }], fence);
+      expect((await raw.claimEffect(effectId, "dead-service", undefined, fence))?.status).toBe("running");
       process.kill(first.manifest.pidHint, "SIGKILL");
       await Bun.sleep(800);
       const restarted = await connectManagedService(config, { timeoutMs: 5_000 });
