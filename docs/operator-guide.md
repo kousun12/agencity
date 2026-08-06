@@ -39,13 +39,13 @@ Local-only is the default and needs no Cloud credentials. For one workspace repl
 ```sh
 export TURSO_DATABASE_URL='libsql://database-organization.turso.io'
 export TURSO_AUTH_TOKEN='...'
-bun run src/cli.ts sync --workspace example --state-dir .agencity
-bun run src/cli.ts sync-push --workspace example --state-dir .agencity
-bun run src/cli.ts sync-pull --workspace example --state-dir .agencity
-bun run src/cli.ts sync-checkpoint --workspace example --state-dir .agencity
-bun run src/cli.ts sync-stats --workspace example --state-dir .agencity
-bun run src/cli.ts sync-status --workspace example --state-dir .agencity
-bun run src/cli.ts conflicts --workspace example --state-dir .agencity
+bun run src/cli.ts sync now --workspace example --state-dir .agencity
+bun run src/cli.ts sync push --workspace example --state-dir .agencity
+bun run src/cli.ts sync pull --workspace example --state-dir .agencity
+bun run src/cli.ts sync checkpoint --workspace example --state-dir .agencity
+bun run src/cli.ts sync stats --workspace example --state-dir .agencity
+bun run src/cli.ts sync status --workspace example --state-dir .agencity
+bun run src/cli.ts sync conflicts --workspace example --state-dir .agencity
 ```
 
 The auth token stays in process memory and is not written to workspace/profile/replica metadata by Agencity. Create any named credential reference through `ProfileStore` before passing `--credential-ref`. The pinned `@tursodatabase/sync@0.7.2` adapter connects with a deferred URL callback that is `null` outside network calls, so initialization and local staging never contact Cloud. A normal cycle stages immutable event envelopes, optionally pre-pulls an established revision, invokes the official `push()`, invokes the official `pull()`, validates/ingests, then checkpoints. A brand-new replica pushes its local CDC before pulling. `error` means a network phase did not complete; local reads/writes and unsent CDC remain available.
@@ -103,7 +103,9 @@ The real-provider path persists only `provider/model`; raw credentials never ent
 
 Programmatically supplied `SupervisorOptions.modelProviders` appear in the same secret-free provider catalog. Providers may expose streaming capability, but model choice still requires a model identifier (an environment `<PROVIDER>_MODEL`, persisted preference, `--model`, or interactive input).
 
-### Advanced compatibility commands
+### Advanced command groups and compatibility aliases
+
+Canonical low-level routes are `debug session-create|turn|cell|snapshot|history|rebuild|branch|tui|protocol-serve`, `sync status|now|push|pull|checkpoint|stats|conflicts|resolve`, and `data export|delete`. Canonical `--json` output is one compact `agencity.cli-output` version-1 envelope on stdout for success or stderr for failure; the envelope carries the canonical command and stable exit code. The former spellings remain exact, silent aliases with historical output during the compatibility window.
 
 The parser still distinguishes boolean flags from value options, accepts `--name=value`, and rejects missing, duplicate, or unknown options. Disambiguation is deterministic:
 
@@ -113,11 +115,20 @@ The parser still distinguishes boolean flags from value options, accepts `--name
 - a quoted multi-word first argument is a task; and
 - `--` before the task is the authoritative escape for any ambiguous exact spelling, for example `agencity -- run the benchmark` or `agencity -- create --demo`.
 
-Low-level commands keep their prior ID-oriented contracts.
+Grouped commands keep the low-level ID-oriented contracts; aliases map without a migration warning:
 
 ```sh
+agencity debug session-create --workspace <WORKSPACE_ID>
+agencity debug history --session <SESSION_ID> --branch <BRANCH_ID> --json
+agencity sync status
+agencity data export --scope session --scope-id <SESSION_ID> --destination ./export
+agencity data delete --scope session --scope-id <SESSION_ID> --confirmation 'DELETE session <SESSION_ID>'
+
+# exact compatibility alias
 agencity create --workspace <WORKSPACE_ID>
 ```
+
+Deletion has no `--force`: its scope ID and case-sensitive, untrimmed confirmation phrase are checked before workspace state is opened, followed by the existing ownership, quiescence, remote-administration, receipt, and retry guards.
 
 This legacy diagnostic command still creates `{ provider: "echo", model: "echo-1" }` for compatibility. It is not the product onboarding path; use `--demo` through `new`, `run`, or the default route when fixture behavior is intended.
 
@@ -187,7 +198,7 @@ The cursor must occur in the parent branch lineage. The child sees parent events
 ### Serve
 
 ```sh
-bun run src/cli.ts serve --port 3131
+bun run src/cli.ts debug protocol-serve --port 3131
 ```
 
 The product-managed service binds an ephemeral `127.0.0.1` port and authenticates every request with the random bearer in its 0600 discovery manifest. Discovery accepts it only when authenticated health identity, protocol/config compatibility, and the matching live workspace lease all agree. The advanced `serve --port` diagnostic is separate and unauthenticated. Neither surface is supported beyond loopback without an independently administered boundary.
@@ -199,14 +210,14 @@ The product-managed service binds an ephemeral `127.0.0.1` port and authenticate
 The normal TUI path is simply `agencity` or `agencity [TASK]`; the product bootstrap selects durable work and prints a workspace/session/model/run/trusted-local header. The existing explicit-ID route remains available for diagnostics:
 
 ```sh
-agencity tui --session <SESSION_ID> --branch <BRANCH_ID>
+agencity debug tui --session <SESSION_ID> --branch <BRANCH_ID>
 ```
 
 Plain text starts a typed autonomous run, or answers the pending clarification/permission request for the active run. Commands:
 
 | Command | Behavior |
 |---|---|
-| `/history` | Print projected branch history as cursor, event type, and payload. |
+| `/history [CURSOR]` / `/live` | Print canonical history, or inspect a read-only historical projection and return to the live cursor. |
 | `/budget` | Print current token, cost, turn, and wall-time counters/limits. |
 | `/snapshot` | Print the entire current `AgentState`. |
 | `/tree` | Print the recursive child-session tree and task status. |
@@ -232,9 +243,13 @@ Plain text starts a typed autonomous run, or answers the pending clarification/p
 | `/conflicts` | List unresolved divergence/claim/intent reconciliation. |
 | `/resolve-conflict <id> <json>` | Record an explicit typed conflict resolution. |
 | `/help` | Print command help. |
-| `/quit`, `/exit` | Close the TUI. |
+| `/unknown [effect]` | List or inspect unknown effects and their append-only assessments. |
+| `/reconcile <effect> <assessment> <summary>` | Append attributable evidence; effect status remains unknown and no retry occurs. |
+| `/quit`, `/exit` | Detach without cancelling durable work. |
 
-The legacy diagnostic TUI is a basic in-process client of the same supervisor services. Ordinary product attach uses the authenticated snapshot/cursor/SSE client and never owns or closes session lifecycle. It supports detach and cursor catch-up; source-preserving compaction remains available through the protocol. Provider streaming remains available as bounded cursorless protocol progress, but the TUI deliberately does not render raw autonomous action JSON as conversation text; it prints only a validated final or a typed waiting/terminal state. Echo and other non-streaming providers report that live output is unavailable. The TUI does not yet use the HTTP/SSE transport or expose unknown-effect reconciliation; those limitations are visible rather than implied capabilities.
+The product and diagnostic TUI both use `AgentClient` and the public protocol contract. Product attach uses authenticated loopback HTTP; diagnostic `debug tui`/`tui` uses `InProcessProtocolTransport`, which calls the exact same `ProtocolServer.handle` router rather than private supervisor services. The client snapshots then watches after the last successfully applied committed cursor, deduplicates on reconnect, and clears cursorless progress on commit or disconnect. `/history CURSOR` creates a read-only historical projection while live state continues observationally; `/live` returns to the latest committed state without replaying an effect.
+
+Streaming-capable providers render bounded temporary deltas; the committed model response remains authoritative, and failed/disconnected prefixes are labeled discarded rather than persisted. Echo and other non-streaming providers truthfully report committed responses only. `/unknown` and `/reconcile` inspect and append assessments without retrying or rewriting the unknown outcome. First Ctrl-C requests durable cancellation for an active run; a second Ctrl-C or `/quit` detaches with an explicit warning that external/durable work may outlive the client.
 
 ## Providers
 
@@ -269,11 +284,11 @@ command with an exact confirmation string:
 
 ```sh
 # Independent, unreplicated session (shared artifact bytes are retained):
-bun run src/cli.ts delete-data --workspace demo --scope session --scope-id "$SESSION" \
+bun run src/cli.ts data delete --workspace demo --scope session --scope-id "$SESSION" \
   --confirmation "DELETE session $SESSION" --receipt-dir .agencity/deletion-receipts
 
 # Whole local workspace. The CAS-root ownership assertion is mandatory:
-bun run src/cli.ts delete-data --workspace demo --scope workspace --scope-id demo \
+bun run src/cli.ts data delete --workspace demo --scope workspace --scope-id demo \
   --confirmation "DELETE workspace demo" --receipt-dir .agencity/deletion-receipts \
   --exclusive-artifacts
 ```

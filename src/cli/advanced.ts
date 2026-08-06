@@ -119,6 +119,8 @@ export const LEGACY_CLI_VALUE_OPTIONS = Object.freeze([
   "scope-id",
   "confirmation",
   "receipt-dir",
+  "destination",
+  "requested-by",
 ] as const);
 
 /** Exact boolean option spellings understood by the compatibility parser today. */
@@ -305,6 +307,9 @@ export const CLI_HELP_GROUPS: readonly CliHelpGroup[] = Object.freeze([
       productHelp("agencity resume [NAME|ID]", "Resume durable work."),
       productHelp("agencity sessions", "List and select named sessions and branches."),
       productHelp("agencity run TASK", "Run a task and exit at a typed terminal outcome."),
+      productHelp("agencity attach [NAME|ID]", "Open the protocol-backed terminal client."),
+      productHelp("agencity unknown [EFFECT_ID]", "Inspect unknown external effects without retrying them."),
+      productHelp("agencity reconcile EFFECT_ID ASSESSMENT SUMMARY", "Append operator evidence without rewriting effect status."),
       productHelp("agencity doctor", "Check providers, recovery, placement, and sync."),
       productHelp("agencity config", "Manage non-secret preferences and credential references."),
     ]),

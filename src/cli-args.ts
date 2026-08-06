@@ -1,17 +1,26 @@
-export const CLI_COMMANDS = [
-  "product", "help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop",
+import {
+  ADVANCED_COMMAND_PATHS,
+  parseAdvancedArgv,
+  type CanonicalAdvancedInvocation,
+  type LegacyAdvancedAlias,
+} from "./cli/advanced.ts";
+
+export const PRODUCT_CLI_COMMANDS = [
+  "product", "help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules",
+  "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile",
+] as const;
+export const LEGACY_CLI_COMMANDS = [
   "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve",
   "sync", "sync-push", "sync-pull", "sync-checkpoint", "sync-stats", "sync-status", "conflicts", "delete-data",
-] as const;
+] as const satisfies readonly LegacyAdvancedAlias[];
+export const CLI_COMMANDS = [...PRODUCT_CLI_COMMANDS, ...LEGACY_CLI_COMMANDS, ...ADVANCED_COMMAND_PATHS] as const;
 export type CliCommand = (typeof CLI_COMMANDS)[number];
 
-const KNOWN_COMMANDS = new Set<string>(CLI_COMMANDS);
-const PRODUCT_ROUTE_COMMANDS = new Set<string>(["help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop"]);
-const LEGACY_TEXT_COMMANDS = new Set<string>(["chat", "cell"]);
+const PRODUCT_ROUTE_COMMANDS = new Set<string>(PRODUCT_CLI_COMMANDS.filter((item) => item !== "product"));
 const VALUE_OPTIONS = new Set([
   "state-dir", "db", "artifacts", "workspace-root", "workspace",
   "session", "branch", "cursor", "name", "select", "model", "goal", "port", "profile", "sync-url", "replica", "credential-ref", "sync-interval",
-  "scope", "scope-id", "confirmation", "receipt-dir",
+  "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by", "reconciliation-id", "evidence",
 ]);
 const BOOLEAN_OPTIONS = new Set([
   "help", "version", "new", "demo", "json", "detach", "restart-console-after-cell", "exclusive-artifacts",
@@ -22,19 +31,39 @@ export interface ParsedCliArgs {
   readonly values: ReadonlyMap<string, string>;
   readonly flags: ReadonlySet<string>;
   readonly positionals: readonly string[];
+  /** Canonical identity and alias provenance for grouped advanced dispatch. */
+  readonly advanced?: CanonicalAdvancedInvocation;
 }
 
-/** Parses both the product-first `agencity [TASK]` route and retained diagnostic commands. */
+/** Parses product-first argv plus canonical grouped and exact legacy advanced aliases. */
 export function parseCliArgs(args: readonly string[]): ParsedCliArgs {
-  const first = args[0];
-  const exactCommand = first !== undefined && !first.startsWith("--") && KNOWN_COMMANDS.has(first) && first !== "product";
-  const hasCommand = exactCommand && (PRODUCT_ROUTE_COMMANDS.has(first!) || legacyInvocationRequested(first!, args.slice(1)));
-  let command: CliCommand = hasCommand ? first as CliCommand : "product";
+  const recognized = parseAdvancedArgv(args);
+  if (recognized.kind === "advanced") {
+    const command = (recognized.source === "legacy" ? recognized.legacyAlias! : recognized.path) as CliCommand;
+    return parseOptions(command, recognized.args, recognized);
+  }
+  if (recognized.escaped) {
+    return { command: "product", values: new Map(), flags: new Set(), positionals: recognized.args };
+  }
+
+  const argv = recognized.args;
+  const first = argv[0];
+  const hasCommand = first !== undefined && !first.startsWith("--") && PRODUCT_ROUTE_COMMANDS.has(first);
+  const command: CliCommand = hasCommand ? first as CliCommand : "product";
+  return parseOptions(command, argv.slice(hasCommand ? 1 : 0));
+}
+
+function parseOptions(
+  initialCommand: CliCommand,
+  args: readonly string[],
+  advanced?: CanonicalAdvancedInvocation,
+): ParsedCliArgs {
+  let command = initialCommand;
   const values = new Map<string, string>();
   const flags = new Set<string>();
   const positionals: string[] = [];
   let positionalOnly = false;
-  for (let index = hasCommand ? 1 : 0; index < args.length; index++) {
+  for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
     if (positionalOnly) { positionals.push(argument); continue; }
     if (argument === "--") { positionalOnly = true; continue; }
@@ -56,30 +85,5 @@ export function parseCliArgs(args: readonly string[]): ParsedCliArgs {
   }
   if (flags.has("help")) command = "help";
   else if (flags.has("version")) command = "version";
-  return { command, values, flags, positionals };
-}
-
-/**
- * Direct legacy commands remain available, but command-like natural-language
- * tasks are not silently consumed. `chat` and `cell` are legacy only when an
- * ID option is present; other legacy words followed by positional text are a
- * product task. A quoted multi-word first argument never equals a command, and
- * `--` remains the explicit escape for every ambiguous spelling.
- */
-function legacyInvocationRequested(command: string, rest: readonly string[]): boolean {
-  if (rest.length === 0) return true;
-  if (LEGACY_TEXT_COMMANDS.has(command)) {
-    return rest.some(argument => argument === "--session" || argument.startsWith("--session=") || argument === "--branch" || argument.startsWith("--branch="));
-  }
-  let positionalOnly = false;
-  for (let index = 0; index < rest.length; index++) {
-    const argument = rest[index]!;
-    if (positionalOnly) return false;
-    if (argument === "--") { positionalOnly = true; continue; }
-    if (!argument.startsWith("--")) return false;
-    const equals = argument.indexOf("=");
-    const name = argument.slice(2, equals < 0 ? undefined : equals);
-    if (equals < 0 && VALUE_OPTIONS.has(name)) index++;
-  }
-  return !positionalOnly;
+  return { command, values, flags, positionals, ...(advanced === undefined ? {} : { advanced }) };
 }

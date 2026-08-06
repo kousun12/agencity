@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { parseCliArgs, type ParsedCliArgs } from "./cli-args.ts";
-import { AgentRuntimeError, ValidationError, type ModelConfiguration } from "./domain/index.ts";
+import { CLI_HELP_GROUPS, buildDataDeleteConfirmation, parseAdvancedArgv, type AdvancedCommandPath } from "./cli/advanced.ts";
+import { createCliErrorEnvelope, createCliSuccessEnvelope, planCliOutput, type CliJsonValue } from "./cli/output.ts";
+import { AgentRuntimeError, ValidationError, type JsonValue, type ModelConfiguration } from "./domain/index.ts";
 import { containsCredentialMaterial, scrubText } from "./security/index.ts";
 import {
   ProductCatalog,
@@ -26,20 +28,38 @@ import {
   observeManagedService,
   type ManagedServiceConfiguration,
 } from "./product/index.ts";
-import { AgentClient, ProtocolServer } from "./protocol/index.ts";
+import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./protocol/index.ts";
 import { Supervisor, type AgentRunResult } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile"]);
 
+let activeParsed: ParsedCliArgs | null = null;
+let canonicalHint: { path: AdvancedCommandPath; json: boolean } | null = null;
 try {
   if (Bun.argv[2] === "__service-child") await runServiceChild();
-  else await main(parseCliArgs(Bun.argv.slice(2)));
+  else {
+    const argv = Bun.argv.slice(2);
+    const recognized = parseAdvancedArgv(argv);
+    if (recognized.kind === "advanced" && recognized.source === "canonical") canonicalHint = { path: recognized.path, json: recognized.args.some((argument) => argument === "--json" || argument.startsWith("--json=")) };
+    activeParsed = parseCliArgs(argv);
+    await main(activeParsed);
+  }
 } catch (error) {
-  const code = error instanceof AgentRuntimeError ? error.code : "CLI_ERROR";
+  const canonical = activeParsed?.advanced?.source === "canonical"
+    ? { path: activeParsed.advanced.path, json: activeParsed.flags.has("json") }
+    : canonicalHint;
+  const code = error instanceof AgentRuntimeError ? error.code : canonical ? "VALIDATION_ERROR" : "CLI_ERROR";
   const message = scrubText(error instanceof Error ? error.message : String(error));
-  console.error(`Agencity error [${code}]: ${message}`);
-  process.exitCode = 1;
+  if (canonical) {
+    const plan = planCliOutput(createCliErrorEnvelope({ command: canonical.path, code, message }), canonical.json ? "json" : "human");
+    if (plan.stdout !== null) process.stdout.write(`${plan.stdout}\n`);
+    if (plan.stderr !== null) process.stderr.write(`${plan.stderr}\n`);
+    process.exitCode = plan.exitCode;
+  } else {
+    console.error(`Agencity error [${code}]: ${message}`);
+    process.exitCode = 1;
+  }
 }
 
 async function runServiceChild(): Promise<void> {
@@ -71,8 +91,9 @@ async function main(parsed: ParsedCliArgs): Promise<void> {
   if (credentialReference && containsCredentialMaterial(credentialReference)) {
     throw new ValidationError("Credential references must be non-secret opaque handles");
   }
-  if (PRODUCT_COMMANDS.has(parsed.command)) await runProduct(parsed);
-  else await runLegacy(parsed);
+  if (parsed.advanced) await runAdvanced(parsed);
+  else if (PRODUCT_COMMANDS.has(parsed.command)) await runProduct(parsed);
+  else throw new ValidationError(`Unknown CLI command: ${parsed.command}`);
 }
 
 async function runProduct(parsed: ParsedCliArgs): Promise<void> {
@@ -113,6 +134,8 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
 
     const task = taskFor(parsed);
     const existing = await client.productSessions() as ProductBranchSummary[];
+    const reconciliationCommand = parsed.command === "unknown" || parsed.command === "reconcile";
+    if (reconciliationCommand && existing.length === 0) throw new ValidationError("No retained session is available for effect reconciliation");
     const forceNew = parsed.command === "new" || parsed.flags.has("new");
     let selection: { sessionId: string; branchId: string };
     let summary: ProductBranchSummary;
@@ -139,7 +162,31 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const providers = await client.modelProviders();
     const available = providers.some(provider => provider.name === summary.model.provider);
     const remediation = available ? null : `Install or configure provider ${summary.model.provider}, then restart the managed service.`;
-    printStartup(workspace, summary, available, remediation);
+    if (!(reconciliationCommand && parsed.flags.has("json"))) printStartup(workspace, summary, available, remediation);
+    if (parsed.command === "unknown") {
+      const effectId = parsed.positionals.join(" ").trim();
+      printValue(effectId
+        ? await client.inspectUnknownEffect(selection.sessionId, selection.branchId, effectId)
+        : await client.unknownEffects(selection.sessionId, selection.branchId), parsed.flags.has("json"));
+      return;
+    }
+    if (parsed.command === "reconcile") {
+      const [effectId, assessment, ...summaryParts] = parsed.positionals;
+      const summaryText = summaryParts.join(" ").trim();
+      if (!effectId || !assessment || !summaryText || !["succeeded", "failed", "no_effect", "still_unknown"].includes(assessment)) {
+        throw new ValidationError("reconcile requires EFFECT_ID succeeded|failed|no_effect|still_unknown SUMMARY");
+      }
+      const result = await client.reconcileUnknownEffect(selection.sessionId, selection.branchId, effectId, {
+        assessment: assessment as "succeeded" | "failed" | "no_effect" | "still_unknown",
+        summary: summaryText,
+        recordedBy: option("requested-by") ?? "cli-owner",
+        ...(option("reconciliation-id") ? { reconciliationId: option("reconciliation-id")! } : {}),
+        ...(option("evidence") ? { evidence: parseJsonValue(option("evidence")!, "reconciliation evidence") } : {}),
+      });
+      printValue(result, parsed.flags.has("json"));
+      if (!parsed.flags.has("json")) console.log("Assessment appended as evidence; the effect remains unknown and was not retried.");
+      return;
+    }
     if (["goals", "heartbeats", "schedules"].includes(parsed.command)) {
       await manageAutonomyClient(client, selection.sessionId, selection.branchId, parsed);
       return;
@@ -353,19 +400,7 @@ async function waitForRun(client: AgentClient, sessionId: string, branchId: stri
 }
 
 async function attachManagedClient(client: AgentClient, sessionId: string, branchId: string): Promise<void> {
-  const snapshot = await client.snapshot(sessionId, branchId);
-  console.log("Agencity trusted-local TUI (managed protocol client)");
-  console.log(`Attached at cursor ${snapshot.cursor}. Ctrl-C or /quit detaches; it does not stop durable work.`);
-  if (!(process.stdin.isTTY === true && process.stdout.isTTY === true)) {
-    await Bun.stdin.text();
-    return;
-  }
-  const controller = new AbortController();
-  const detach = (): void => controller.abort();
-  process.once("SIGINT", detach);
-  try {
-    await client.stream(sessionId, branchId, snapshot.cursor, { onEvent: event => console.log(`[${event.type}] ${JSON.stringify(event.payload)}`) }, controller.signal);
-  } finally { process.off("SIGINT", detach); }
+  await new TerminalUI(client, { interactive: process.stdin.isTTY === true && process.stdout.isTTY === true }).run(sessionId, branchId);
 }
 
 async function manageAutonomyClient(client: AgentClient, sessionId: string, branchId: string, parsed: ParsedCliArgs): Promise<void> {
@@ -533,32 +568,141 @@ async function doctor(supervisor: Supervisor, workspace: ResolvedWorkspace, json
   ].join("\n"));
 }
 
-async function runLegacy(parsed: ParsedCliArgs): Promise<void> {
+async function runAdvanced(parsed: ParsedCliArgs): Promise<void> {
+  const invocation = parsed.advanced;
+  if (!invocation) throw new ValidationError("Advanced command identity is missing");
+  const path = invocation.path;
+  if (path === "debug tui" && invocation.source === "canonical" && parsed.flags.has("json")) {
+    throw new ValidationError("debug tui is interactive and does not support --json");
+  }
   const option = (name: string, fallback?: string): string | undefined => parsed.values.get(name) ?? fallback;
+
+  // Validate the destructive phrase before opening or mutating a workspace.
+  let guardedDeletion: ReturnType<typeof buildDataDeleteConfirmation> | null = null;
+  if (path === "data delete") {
+    try {
+      guardedDeletion = buildDataDeleteConfirmation(
+        required(option("scope"), "scope") as "workspace" | "session" | "profile",
+        required(option("scope-id"), "scope-id"),
+        required(option("confirmation"), "confirmation"),
+      );
+    } catch (error) {
+      if (error instanceof AgentRuntimeError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ValidationError(invocation.source === "legacy"
+        ? message.replace(/^Data deletion requires/, "Physical deletion requires")
+        : message);
+    }
+  }
+
   const stateDir = resolve(option("state-dir", ".agencity")!);
   await mkdir(stateDir, { recursive: true });
-  const workspace: ResolvedWorkspace = { root: resolve(option("workspace-root", process.cwd())!), workspaceId: option("workspace", "default")!, name: option("workspace", "default")!, stateDirectory: stateDir };
+  const workspace: ResolvedWorkspace = {
+    root: resolve(option("workspace-root", process.cwd())!),
+    workspaceId: option("workspace", "default")!,
+    name: option("workspace", "default")!,
+    stateDirectory: stateDir,
+  };
   const supervisor = await openSupervisor(parsed, workspace, true);
-  const sessionId = option("session"); const branchId = option("branch"); const command = parsed.command;
+  const sessionId = option("session");
+  const branchId = option("branch");
+  const serving = path === "debug protocol-serve";
   try {
-    if (command === "create") console.log(JSON.stringify(await supervisor.createSession({ workspaceId: workspace.workspaceId }), null, 2));
-    else if (command === "chat") { required(sessionId, "session"); required(branchId, "branch"); await supervisor.appendMessage(sessionId!, branchId!, "user", parsed.positionals.join(" ")); console.log(JSON.stringify(await supervisor.modelLoop.turn(sessionId!, branchId!), null, 2)); }
-    else if (command === "cell") { required(sessionId, "session"); required(branchId, "branch"); console.log(JSON.stringify(await supervisor.executeCell(sessionId!, branchId!, parsed.positionals.join(" ")), null, 2)); }
-    else if (command === "snapshot") { required(sessionId, "session"); required(branchId, "branch"); console.log(JSON.stringify(await supervisor.projections.getSnapshot(sessionId!, branchId!), null, 2)); }
-    else if (command === "history") { required(sessionId, "session"); required(branchId, "branch"); for (const event of await supervisor.projections.history(sessionId!, branchId!)) console.log(JSON.stringify(event)); }
-    else if (command === "rebuild") { required(sessionId, "session"); required(branchId, "branch"); console.log(JSON.stringify(await supervisor.projections.rebuild(sessionId!, branchId!), null, 2)); }
-    else if (command === "branch") { required(sessionId, "session"); required(branchId, "branch"); console.log(await supervisor.fork(sessionId!, branchId!, required(option("cursor"), "cursor"), option("name"))); }
-    else if (command === "sync") console.log(JSON.stringify(await supervisor.sync.sync("manual"), null, 2));
-    else if (command === "sync-push") console.log(JSON.stringify(await supervisor.sync.push(), null, 2));
-    else if (command === "sync-pull") console.log(JSON.stringify(await supervisor.sync.pull(), null, 2));
-    else if (command === "sync-checkpoint") console.log(JSON.stringify(await supervisor.sync.checkpoint(), null, 2));
-    else if (command === "sync-stats") console.log(JSON.stringify(await supervisor.sync.stats(), null, 2));
-    else if (command === "sync-status") console.log(JSON.stringify(await supervisor.sync.status(), null, 2));
-    else if (command === "conflicts") console.log(JSON.stringify(await supervisor.sync.conflicts("unresolved"), null, 2));
-    else if (command === "delete-data") { const scope = required(option("scope"), "scope") as "workspace"|"session"|"profile"; const scopeId = required(option("scope-id"), "scope-id"); console.log(JSON.stringify(await supervisor.deleteOwnedData({ scopeKind: scope, scopeId, requestedBy: "cli-owner", confirmation: required(option("confirmation"), "confirmation"), ...(option("receipt-dir") ? { receiptDirectory: resolve(option("receipt-dir")!) } : {}) }), null, 2)); }
-    else if (command === "tui") { required(sessionId, "session"); required(branchId, "branch"); await new TerminalUI(supervisor).run(sessionId!, branchId!); }
-    else if (command === "serve") { const server = new ProtocolServer(supervisor).listen(Number(option("port", "3131"))); console.log(`Agencity protocol listening on http://${server.hostname}:${server.port} (trusted-local mode)`); await new Promise(() => {}); }
-  } finally { if (command !== "serve") await supervisor.close(); }
+    if (path === "debug session-create") {
+      emitAdvanced(parsed, path, await supervisor.createSession({ workspaceId: workspace.workspaceId }));
+    } else if (path === "debug turn") {
+      required(sessionId, "session"); required(branchId, "branch");
+      await supervisor.appendMessage(sessionId!, branchId!, "user", parsed.positionals.join(" "));
+      emitAdvanced(parsed, path, await supervisor.modelLoop.turn(sessionId!, branchId!));
+    } else if (path === "debug cell") {
+      required(sessionId, "session"); required(branchId, "branch");
+      emitAdvanced(parsed, path, await supervisor.executeCell(sessionId!, branchId!, parsed.positionals.join(" ")));
+    } else if (path === "debug snapshot") {
+      required(sessionId, "session"); required(branchId, "branch");
+      emitAdvanced(parsed, path, await supervisor.projections.getSnapshot(sessionId!, branchId!));
+    } else if (path === "debug history") {
+      required(sessionId, "session"); required(branchId, "branch");
+      const events = await supervisor.projections.history(sessionId!, branchId!);
+      emitAdvanced(parsed, path, events, events.map((event) => JSON.stringify(event)).join("\n"));
+    } else if (path === "debug rebuild") {
+      required(sessionId, "session"); required(branchId, "branch");
+      emitAdvanced(parsed, path, await supervisor.projections.rebuild(sessionId!, branchId!));
+    } else if (path === "debug branch") {
+      required(sessionId, "session"); required(branchId, "branch");
+      const forked = await supervisor.fork(sessionId!, branchId!, required(option("cursor"), "cursor"), option("name"));
+      emitAdvanced(parsed, path, forked, forked);
+    } else if (path === "debug tui") {
+      required(sessionId, "session"); required(branchId, "branch");
+      const protocol = new ProtocolServer(supervisor);
+      const client = new AgentClient(new InProcessProtocolTransport(protocol));
+      await new TerminalUI(client).run(sessionId!, branchId!);
+    } else if (path === "debug protocol-serve") {
+      const server = new ProtocolServer(supervisor).listen(Number(option("port", "3131")));
+      const message = `Agencity protocol listening on http://${server.hostname}:${server.port} (trusted-local mode)`;
+      emitAdvanced(parsed, path, { hostname: server.hostname, port: server.port, mode: "trusted-local" }, message);
+      await new Promise(() => {});
+    } else if (path === "sync status") emitAdvanced(parsed, path, await supervisor.sync.status());
+    else if (path === "sync now") emitAdvanced(parsed, path, await supervisor.sync.sync("manual"));
+    else if (path === "sync push") emitAdvanced(parsed, path, await supervisor.sync.push());
+    else if (path === "sync pull") emitAdvanced(parsed, path, await supervisor.sync.pull());
+    else if (path === "sync checkpoint") emitAdvanced(parsed, path, await supervisor.sync.checkpoint());
+    else if (path === "sync stats") emitAdvanced(parsed, path, await supervisor.sync.stats());
+    else if (path === "sync conflicts") emitAdvanced(parsed, path, await supervisor.sync.conflicts("unresolved"));
+    else if (path === "sync resolve") {
+      const conflictId = parsed.positionals[0]; const encoded = parsed.positionals.slice(1).join(" ");
+      if (!conflictId || !encoded) throw new ValidationError("sync resolve requires CONFLICT_ID JSON_RESOLUTION");
+      emitAdvanced(parsed, path, await supervisor.sync.resolveConflict(conflictId, parseJsonObject(encoded, "sync resolution") as any));
+    } else if (path === "data export") {
+      const scopeKind = required(option("scope"), "scope") as "workspace" | "session" | "profile";
+      const scopeId = required(option("scope-id"), "scope-id");
+      const destination = resolve(required(option("destination"), "destination"));
+      emitAdvanced(parsed, path, await supervisor.sync.exportBundle(destination, scopeKind, scopeId, option("requested-by", "cli-owner")!));
+    } else if (path === "data delete") {
+      if (!guardedDeletion) throw new ValidationError("Guarded deletion input is missing");
+      emitAdvanced(parsed, path, await supervisor.deleteOwnedData({
+        ...guardedDeletion,
+        requestedBy: option("requested-by", "cli-owner")!,
+        ...(option("receipt-dir") ? { receiptDirectory: resolve(option("receipt-dir")!) } : {}),
+      }));
+    } else throw new ValidationError(`Unsupported advanced command: ${path}`);
+  } finally {
+    if (!serving) await supervisor.close();
+  }
+}
+
+function emitAdvanced(parsed: ParsedCliArgs, path: AdvancedCommandPath, value: unknown, human?: string): void {
+  if (parsed.advanced?.source === "canonical" && parsed.flags.has("json")) {
+    const envelope = createCliSuccessEnvelope({
+      command: path,
+      message: `${path} completed`,
+      data: cliJson(value),
+    });
+    const plan = planCliOutput(envelope, "json");
+    if (plan.stdout !== null) process.stdout.write(`${plan.stdout}\n`);
+    process.exitCode = plan.exitCode;
+    return;
+  }
+  console.log(human ?? (typeof value === "string" ? value : JSON.stringify(value, null, 2)));
+}
+
+function cliJson(value: unknown): CliJsonValue {
+  if (value === undefined) return null;
+  return JSON.parse(JSON.stringify(value)) as CliJsonValue;
+}
+
+function parseJsonValue(text: string, label: string): JsonValue {
+  try { return JSON.parse(text) as JsonValue; }
+  catch { throw new ValidationError(`${label} must be valid JSON`); }
+}
+
+function parseJsonObject(text: string, label: string): Record<string, unknown> {
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("not an object");
+    return value as Record<string, unknown>;
+  } catch {
+    throw new ValidationError(`${label} must be one JSON object`);
+  }
 }
 
 async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspace, legacy: boolean): Promise<Supervisor> {
@@ -588,7 +732,7 @@ async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspac
 }
 
 function taskFor(parsed: ParsedCliArgs): string | undefined {
-  if (["resume", "attach", "goals", "heartbeats", "schedules"].includes(parsed.command)) return undefined;
+  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile"].includes(parsed.command)) return undefined;
   const task = parsed.positionals.join(" ").trim();
   if (parsed.command === "run" && !task) throw new ValidationError("run requires TASK");
   return task || undefined;
@@ -626,50 +770,29 @@ async function printVersion(): Promise<void> { console.log(`agencity ${await app
 Bun ${Bun.version} (supported: >=1.2.0)`); }
 
 function printHelp(): void {
-  console.log(`agencity - terminal-first durable agent runtime (trusted-local mode)
-
-Product commands:
-  agencity [TASK]                 Create/resume and open the product
-  agencity --new [TASK]           Create a distinct root session
-  agencity new [TASK]             Create a distinct root session
-  agencity resume [NAME|ID]       Resume durable work (no IDs required)
-  agencity sessions               List named workspace sessions and branches
-  agencity goals [ACTION]         List/create/pause/resume/clear/complete the current goal
-  agencity heartbeats [ACTION]    List/create or manage a numbered user heartbeat
-  agencity schedules [ACTION]     List/create or manage a numbered once/interval schedule
-  agencity sessions --select NAME Persist an explicit recent selection
-  agencity sessions --session ID --name NAME [--branch ID]
-  agencity run TASK               Run through the resident service and wait
-  agencity run --detach TASK      Return after durable acceptance; work continues
-  agencity agents                List resident root agents and worker state
-  agencity status [NAME|ID]       Inspect all or one managed agent
-  agencity attach [NAME|ID]       Attach through snapshot/cursor events; Ctrl-C detaches
-  agencity send NAME|ID MESSAGE   Commit user steering to a named session
-  agencity stop NAME|ID           Durably request run cancellation
-  agencity service status        Inspect the on-demand workspace service
-  agencity service shutdown      Gracefully drain; sessions remain durable
-  --goal auto|current|create      Explicit goal selection (default: auto; never inferred from prose)
-  agencity doctor [--json]        Check runtime, providers, recovery, and sync
-  agencity config [--json]        Inspect non-secret preferences/references
-  agencity config set-model PROVIDER/MODEL
-  agencity config credential-ref PROVIDER HANDLE LABEL
-
-Product options:
-  --workspace PATH                Override discovered repository root
-  --model PROVIDER/MODEL          Select a configured real provider for a new root
-  --demo                          Explicitly use the Echo demo/test fixture
-  --state-dir PATH --profile PATH --new --detach --json --version --help
-  The service starts on demand; it is not installed as an OS boot service.
-
-Advanced compatibility commands:
-  create, chat, cell, snapshot, history, rebuild, branch, tui, serve
-  sync, sync-push, sync-pull, sync-checkpoint, sync-stats, sync-status, conflicts
-  delete-data --scope workspace|session|profile --scope-id ID --confirmation 'DELETE <scope> <id>'
-
-Advanced options retain --session, --branch, --db, --artifacts, --workspace-root,
---sync-url, --replica, --credential-ref, --sync-interval, and recovery flags.
-Use agencity -- TASK to force command-like text (for example: -- run tests)
-through the product task route. Echo is never selected by the product route unless
---demo or a visibly labeled interactive choice is used. Provider credentials
-remain supervisor-side.`);
+  const sections = CLI_HELP_GROUPS.map((group) => [
+    `${group.title}:`,
+    `  ${group.description}`,
+    ...group.commands.map((command) => {
+      const aliases = command.legacyAliases.length ? ` (legacy: ${command.legacyAliases.join(", ")})` : "";
+      const destructive = command.destructive ? " [DESTRUCTIVE: exact confirmation required]" : "";
+      return `  ${command.invocation}\n      ${command.summary}${aliases}${destructive}`;
+    }),
+  ].join("\n"));
+  console.log([
+    "agencity - terminal-first durable agent runtime (trusted-local mode)",
+    "",
+    ...sections.flatMap((section) => [section, ""]),
+    "Common product options:",
+    "  --workspace PATH --model PROVIDER/MODEL --demo --new --detach --json --version --help",
+    "Advanced options:",
+    "  --session ID --branch ID --cursor N --db PATH --artifacts PATH --workspace-root PATH",
+    "  --sync-url URL --replica PATH --scope KIND --scope-id ID --destination PATH",
+    "  --confirmation 'DELETE <scope> <id>' --receipt-dir PATH --requested-by ID",
+    "  reconciliation: --reconciliation-id ID --evidence JSON",
+    "Canonical advanced --json output is the stable agencity.cli-output v1 envelope.",
+    "Exact legacy aliases remain silent and preserve their historical output during the compatibility window.",
+    "Use agencity -- TASK to force command-like text through the product route.",
+    "Echo is selected only with --demo or a visibly labeled interactive choice. Provider credentials remain supervisor-side.",
+  ].join("\n"));
 }

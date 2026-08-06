@@ -129,7 +129,7 @@ describe("advanced CLI command recognition", () => {
     expect(new Set(LEGACY_CLI_VALUE_OPTIONS)).toEqual(new Set([
       "state-dir", "db", "artifacts", "workspace-root", "workspace", "session", "branch", "cursor",
       "name", "select", "model", "port", "profile", "sync-url", "replica", "credential-ref",
-      "sync-interval", "scope", "scope-id", "confirmation", "receipt-dir",
+      "sync-interval", "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by",
     ]));
     expect(new Set(LEGACY_CLI_BOOLEAN_OPTIONS)).toEqual(new Set([
       "help", "version", "new", "demo", "json", "restart-console-after-cell", "exclusive-artifacts",

@@ -59,29 +59,33 @@ The startup header identifies the workspace, named session/branch, model, run st
 
 Command-like task text is deterministic. Multi-word text such as `agencity create a parser` is treated as a task, while exact product commands such as `run`, `new`, and `resume` keep their command meaning. Quote the whole first argument or place `--` before the task to force an ambiguous spelling: `agencity -- run the benchmark`. ID-bearing `chat` and `cell` invocations remain advanced commands.
 
-### Advanced compatibility CLI
+### Advanced CLI and compatibility aliases
 
-The low-level ID-oriented commands remain available for diagnostics and scripts:
+Low-level operations are grouped behind explicit diagnostic, sync, and data-control paths:
 
 ```sh
-agencity create --workspace diagnostic
-agencity snapshot --session <SESSION_ID> --branch <BRANCH_ID>
-agencity history  --session <SESSION_ID> --branch <BRANCH_ID>
-agencity cell     --session <SESSION_ID> --branch <BRANCH_ID> 'return { ok: true };'
+agencity debug session-create --workspace diagnostic
+agencity debug snapshot --session <SESSION_ID> --branch <BRANCH_ID>
+agencity debug history  --session <SESSION_ID> --branch <BRANCH_ID> --json
+agencity debug cell     --session <SESSION_ID> --branch <BRANCH_ID> 'return { ok: true };'
+agencity sync status
+agencity data export --scope session --scope-id <SESSION_ID> --destination ./export
 ```
+
+Canonical grouped commands with `--json` emit one compact, versioned `agencity.cli-output` v1 envelope and use stable typed exit classes. The exact former spellings (`create`, `chat`, `cell`, `snapshot`, `history`, `rebuild`, `branch`, `tui`, `serve`, `sync*`, `conflicts`, and `delete-data`) remain silent compatibility aliases and retain their historical output during the compatibility window. `data delete` and `delete-data` both require the exact `DELETE <scope> <id>` phrase; there is no force bypass, and the guard runs before workspace state is opened.
 
 Use `--restart-console-after-cell` to exercise the recovery invariant continuously. Product placement defaults to `<workspace>/.agencity`; `--state-dir`, `--db`, `--artifacts`, and `--profile` override it. Full CLI/TUI instructions are in the [operator guide](./docs/operator-guide.md).
 
 ## HTTP and event protocol
 
 ```sh
-bun run src/cli.ts serve --port 3131
+bun run src/cli.ts debug protocol-serve --port 3131
 curl http://127.0.0.1:3131/health
 ```
 
 The managed product service authenticates every route, including health and SSE, with the owner-only discovery bearer; clients also verify workspace identity, protocol range, configuration hash, authenticated health, and the matching live process lease before accepting it. The advanced `serve` command below is a deliberately separate embedded diagnostic and does not acquire this managed authority.
 
-The protocol supports autonomous run start/inspect/resume/respond/cancel, session creation, diagnostic one-turn chat, console cells, forks, snapshots, history, resumable server-sent events, scoped memory, refinement/approval/rollback, exact-version skill execution, and specification-pinned subagents. A consumer loads a snapshot, remembers its cursor, then connects to the stream with `?after=<cursor>` and deduplicates by event ID. Notifications are at-least-once hints over the durable database stream. See [Protocol and console SDK](./docs/protocol.md).
+The protocol supports autonomous run start/inspect/resume/respond/cancel, session creation, diagnostic one-turn chat, console cells, forks, snapshots, history, append-only unknown-effect assessment, resumable server-sent events, scoped memory, refinement/approval/rollback, exact-version skill execution, and specification-pinned subagents. A consumer loads a snapshot, remembers its cursor, then connects to the stream with `?after=<cursor>` and deduplicates by event ID. Notifications are at-least-once hints over the durable database stream. See [Protocol and console SDK](./docs/protocol.md).
 
 ## TypeScript API
 
