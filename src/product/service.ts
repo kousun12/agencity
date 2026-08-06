@@ -254,6 +254,7 @@ export class ManagedWorkspaceService {
         protocolMax: MANAGED_SERVICE_PROTOCOL_VERSION,
         configHash: managedServiceConfigurationHash(normalized),
       },
+      ready: () => service?.ready ?? false,
       status: () => service!.status(),
       shutdown: () => service!.requestShutdown(),
       agents: () => service!.agents(),
@@ -301,11 +302,18 @@ export class ManagedWorkspaceService {
       throw error;
     }
     service = new ManagedWorkspaceService(supervisor, catalog, protocol, manifest, normalized);
-    service.#lifecycle = "running";
-    supervisor.startWakeSchedulers();
     service.#startRecovery();
+    await service.#recoveryPromise;
+    if (service.#recovery !== "complete") {
+      await service.close();
+      throw new ValidationError(`Managed service recovery failed${service.#recoveryError ? `: ${service.#recoveryError}` : ""}`);
+    }
+    supervisor.startWakeSchedulers();
+    service.#lifecycle = "running";
     return service;
   }
+
+  get ready(): boolean { return this.#lifecycle === "running"; }
 
   async status(): Promise<ManagedServiceStatus> {
     const summaries = await this.catalog.list();
@@ -408,6 +416,7 @@ async function probeManifest(manifest: ServiceManifestV1): Promise<ServiceHealth
     if (!response.ok) return { status: "unreachable" };
     const body = await response.json() as Record<string, unknown>;
     if (body.workspaceId !== manifest.workspaceId || body.instanceId !== manifest.instanceId) return { status: "identity-mismatch" };
+    if (body.ready === false) return { status: "unreachable" };
     return { status: "healthy", authenticated: body.authenticated === true, workspaceId: String(body.workspaceId), instanceId: String(body.instanceId) };
   } catch { return { status: "unreachable" }; }
   finally { clearTimeout(timeout); }

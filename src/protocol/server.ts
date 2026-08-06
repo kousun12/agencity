@@ -13,6 +13,7 @@ export interface ProtocolServiceHooks {
     readonly protocolMax: number;
     readonly configHash: string;
   };
+  readonly ready?: () => boolean;
   readonly status: () => Promise<unknown>;
   readonly shutdown: () => Promise<unknown>;
   readonly agents: () => Promise<unknown>;
@@ -52,6 +53,7 @@ export class ProtocolServer {
       if (request.method === "GET" && url.pathname === "/health") return Response.json({
         ok: true, mode: "trusted-local", authenticated: Boolean(this.options.bearerToken),
         ...(this.options.service?.health ?? {}),
+        ...(this.options.service ? { ready: this.options.service.ready?.() ?? true } : {}),
       }, { headers: { "cache-control": "no-store" } });
       if (this.options.service) {
         if (request.method === "GET" && url.pathname === "/service/status") return Response.json(await this.options.service.status());
