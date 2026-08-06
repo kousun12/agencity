@@ -2,7 +2,7 @@
 
 Agencity implements Delivery Slices 1–4 of the [Prime Agent TypeScript/Turso rewrite PRD](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md). It runs durable root and recursive child agents against a local LibSQL database. Canonical events, explicitly checkpointed working values, task/mailbox/model handles, schedules, and content-addressed artifacts survive supervisor and console-worker restarts; the Bun heap does not.
 
-> **Security boundary:** The runtime is **trusted-local only**. Model-generated TypeScript and shell commands have the operating-system authority of the runtime. The separate Bun console worker provides crash isolation, **not a security sandbox**. Read-only raw SQL is a shared, non-confidential diagnostic channel; candidate/workspace scope filters provide behavioral context isolation, not secrecy from SQL. The HTTP server has no authentication. Run only trusted workloads, keep it loopback-only, or put the entire runtime inside an independently managed sandbox. See [Security](./docs/security.md).
+> **Security boundary:** The runtime is **trusted-local only**. Model-generated TypeScript and shell commands have the operating-system authority of the runtime. The separate Bun console worker provides crash isolation, **not a security sandbox**. Read-only raw SQL is a shared, non-confidential diagnostic channel; candidate/workspace scope filters provide behavioral context isolation, not secrecy from SQL. The product-managed loopback service requires a random owner-only bearer token from `.agencity/service/manifest.json`; the advanced manually started `serve` diagnostic remains unauthenticated. Neither is a remote authorization boundary. Run only trusted workloads, keep either surface loopback-only, or put the entire runtime inside an independently managed sandbox. See [Security](./docs/security.md).
 
 ## Delivery Slice 4 status
 
@@ -43,11 +43,17 @@ agencity sessions
 agencity resume "inspect this repository"
 agencity doctor
 agencity config
+agencity run --detach "continue while this terminal is closed"
+agencity agents
+agencity service status
+agencity service shutdown
 ```
 
 `--workspace PATH` overrides discovery. The canonical root contains an owner-only `.agencity/workspace-id` marker. That opaque identity moves with the repository and makes real paths and symlinked entry paths converge; concurrent first opens atomically choose one marker. A pre-marker `.agencity/agent.db` is migrated once to its legacy path-derived identity. Agencity refuses symlinked, insecure, or malformed markers rather than silently creating a different workspace.
 
 A workspace-scoped recent branch and non-secret model preference live in the separate profile store. If selection is ambiguous the interactive command asks instead of choosing by row order; scripts receive a typed nonzero error and can use `sessions --select NAME`. A retained branch never changes model silently, and remains inspectable when its provider is unavailable.
+
+The product entrypoint discovers or starts one authenticated loopback background service per workspace on demand; it is not installed as an OS boot/login service. Closing or interrupting a client only detaches. `stop TARGET` durably requests run cancellation, while `service shutdown` stops admission, drains resident workers, releases leases, and leaves sessions intact. `attach`, `send`, `status`, and `agents` use names or IDs without making the client the execution owner.
 
 The startup header identifies the workspace, named session/branch, model, run state, and trusted-local authority; Echo is rendered as `[DEMO FIXTURE]`. Product tasks now use the strict `agencity.agent-action` version-1 loop: each model step chooses a typed final, TypeScript cell, clarification/permission request, blocked outcome, or failure. Cells use the injected SDK for all SQL, file, shell, model, subagent, memory, skill, and artifact work. Raw action JSON is retained as attributable internal history, never appended as an assistant conversation message; only a validated `final` becomes the user-visible assistant message.
 
@@ -72,6 +78,8 @@ Use `--restart-console-after-cell` to exercise the recovery invariant continuous
 bun run src/cli.ts serve --port 3131
 curl http://127.0.0.1:3131/health
 ```
+
+The managed product service authenticates every route, including health and SSE, with the owner-only discovery bearer; clients also verify workspace identity, protocol range, configuration hash, authenticated health, and the matching live process lease before accepting it. The advanced `serve` command below is a deliberately separate embedded diagnostic and does not acquire this managed authority.
 
 The protocol supports autonomous run start/inspect/resume/respond/cancel, session creation, diagnostic one-turn chat, console cells, forks, snapshots, history, resumable server-sent events, scoped memory, refinement/approval/rollback, exact-version skill execution, and specification-pinned subagents. A consumer loads a snapshot, remembers its cursor, then connects to the stream with `?after=<cursor>` and deduplicates by event ID. Notifications are at-least-once hints over the durable database stream. See [Protocol and console SDK](./docs/protocol.md).
 

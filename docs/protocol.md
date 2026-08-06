@@ -9,7 +9,9 @@ Neither protocol is an authentication or sandbox boundary.
 
 ## HTTP server
 
-Start with `bun run src/cli.ts serve --port 3131`. CLI startup binds `127.0.0.1`; `ProtocolServer.listen` can accept a different hostname programmatically, but exposing it without an independent authenticated proxy is unsupported.
+Ordinary product commands discover or start a per-workspace `ManagedWorkspaceService` on demand. It binds an ephemeral `127.0.0.1` port, publishes an owner-only manifest, and requires `Authorization: Bearer …` on every route, including `/health` and SSE. The token is read from the 0600 manifest and is never passed in argv or printed. Authenticated health returns workspace/service identity, application and protocol versions, and the secret-free configuration hash used during discovery.
+
+`bun run src/cli.ts serve --port 3131` remains an advanced embedded diagnostic. It binds `127.0.0.1` but intentionally has no bearer/discovery/process-lease lifecycle. Exposing either server beyond loopback is unsupported without an independently authenticated boundary.
 
 All successful non-streaming responses are JSON. Domain errors use HTTP 400 and `{ "error": { "code", "message" } }`; unexpected failures use HTTP 500 and code `INTERNAL`; unknown routes use HTTP 404.
 
@@ -17,14 +19,18 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 
 | Method and path | Input | Result |
 |---|---|---|
-| `GET /health` | none | `{ ok: true, mode: "trusted-local" }` |
+| `GET /health` | none | authenticated managed identity/version/config health (or basic embedded health) |
+| `GET /service/status` | none | managed lifecycle, recovery, and resident-root worker states |
+| `POST /service/shutdown` | none | accepted graceful drain; it does not cancel sessions |
+| `GET /service/agents` | none | named root sessions and running/idle/detached state |
+| `POST /sessions/:session/stop?branch=:branch` | `{ reason? }` | durable user-requested active-run cancellation |
 | `GET /model-providers` | none | secret-free provider descriptors with truthful `capabilities.streaming` |
 | `POST /sessions` | `{ workspaceId?, model?, budget? }` | `{ sessionId, branchId }` |
 | `GET /sessions/:session/snapshot?branch=:branch` | none | `{ cursor, state }` |
 | `GET /sessions/:session/history?branch=:branch` | none | ordered `AgentEvent[]` including branch lineage |
 | `GET /sessions/:session/stream?branch=:branch&after=:cursor` | none | `text/event-stream` committed events plus cursorless ephemeral progress |
 | `POST /sessions/:session/messages?branch=:branch` | `{ content }` | committed user `AgentEvent` |
-| `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalId? }` | typed `AgentRunResult`; advances through terminal or waiting boundary |
+| `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalMode?, goalId? }` | managed: durable `202 accepted` with run ID/cursor and resident advancement; embedded: advances through terminal or waiting boundary |
 | `GET /sessions/:session/runs/:run?branch=:branch` | none | current durable `AgentRunResult` |
 | `POST /sessions/:session/runs/:run/resume?branch=:branch` | none | resumed `AgentRunResult` |
 | `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | `{ response, approved? }` | continued result; permission requires explicit boolean `approved` |
@@ -85,7 +91,7 @@ A committed SSE item uses the cursor as `id:` and the full event JSON as `data:`
 
 Streaming model output uses a distinct `event: progress` frame whose JSON data is an `EffectProgressNotification`. It deliberately has no `id:` or durable cursor. It is delivered only to currently attached clients, is not replayed during catch-up, and may be bounded or dropped. For a diagnostic text turn, a client may display `model-output-delta` text provisionally and reconcile it with the committed assistant message. For an autonomous run, those deltas are raw action encoding and must not be rendered as ordinary assistant conversation; clients wait for typed action/run events and show only a validated `final` as assistant text. On failure, cancellation, unknown recovery, or disconnect, clients discard partial text. A non-streaming provider emits no progress.
 
-The endpoint does not emit the initial snapshot, heartbeat frames, or an explicit end marker. It also does not yet authenticate, authorize per workspace, negotiate schema versions, or expose a WebSocket transport.
+The endpoint does not emit the initial snapshot, heartbeat frames, or an explicit end marker. Managed service discovery authenticates the local client and checks one version range/configuration; there is still no multi-tenant authorization, non-loopback authentication claim, in-place upgrade negotiation, or WebSocket transport. The advanced embedded server is unauthenticated.
 
 ### Minimal client example
 

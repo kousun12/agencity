@@ -102,7 +102,7 @@ Not guaranteed:
 - exactly once in an external system;
 - recovery of heap objects or uncheckpointed cell variables;
 - reconstruction of independently changed workspace/services;
-- automatic supervisor/background-service process-owner failover or distributed leases (the local CAS/fence primitive is implemented but not yet wired into run advancement);
+- cross-device automatic execution-owner failover or distributed leases; local same-device managed-service takeover waits for the retained process lease to expire;
 - crash-atomicity across database and artifact/filesystem placement;
 - cleanup of unreferenced CAS bytes;
 - complete operating-system kill tests for every crash instruction boundary (tests simulate the durable boundary states).
@@ -113,7 +113,7 @@ Migration 008 and `ExecutionLeaseService` provide the local ownership primitive 
 
 Workspace and root scopes overlap deliberately: an active workspace lease excludes every root lease in that workspace, an active root lease excludes a workspace lease, and separate root leases can run independently. A root claim refuses a projected execution owner from another device. Process fencing therefore does not weaken the existing single-device rule: local LibSQL advertises `sameDeviceProcessFencing: true` and `distributedLeases: false`; the current relational HTTP placement advertises process fencing as unavailable because its version-1 call contract does not authenticate a caller device or expose these operations. Lease rows are operational local state and never synchronization envelopes.
 
-The row and its last fence token survive normal release, process death, projection rebuild, and database reopen. A service restart may take over only after expiry (or an attributable prior release), then must carry the new token into the execution path. This tranche does **not** yet wire lease acquisition or renewal into the supervisor/autonomous run loop, start a background daemon, or provide cross-device failover; FU-004/FU-015 integration must do that before detached execution is claimed as complete.
+The row and its last fence token survive normal release, process death, projection rebuild, and database reopen. The managed per-workspace service holds one workspace lease and lazily holds one root lease for each resident tree under the same process identity. Both proofs are checked inside the same LibSQL transaction as every existing-session canonical append and outbox claim/reset; a new root uses the workspace proof until its root row exists. A stale owner therefore cannot commit after takeover even if old code continues running. Service restart takes over only after expiry (or attributable release), reconciles retained outbox/cell/run state before dependent continuation, makes lost non-idempotent work `unknown`, and never retries it. This remains same-device/local coordination, not cross-device failover.
 
 ## Synchronization recovery
 
@@ -121,4 +121,4 @@ When configured, startup opens the modern replica locally with a deferred `null`
 
 ## FU-014 wake recovery
 
-Heartbeat and schedule ticks atomically advance their definition and append one `WakeQueued`. A coordinator commits `WakeClaimed` before calling `AgentRunService` with a stable wake-derived run/request ID, then commits `WakeDelivered`. Restart re-enters the same stable run request; an outcome that cannot be safely reconciled becomes `WakeDeliveryUnknown` and is not blindly replayed. Missed intervals coalesce at tick creation. Process/distributed execution ownership remains the existing capability seam; detached execution is not claimed before FU-015.
+Heartbeat and schedule ticks atomically advance their definition and append one `WakeQueued`. The managed service starts this coordinator only after workspace lease publication; each session write then requires its root fence. It commits `WakeClaimed` before calling `AgentRunService` with a stable wake-derived run/request ID, then commits `WakeDelivered`. Restart re-enters the same stable run request; an outcome that cannot be safely reconciled becomes `WakeDeliveryUnknown` and is not blindly replayed. Missed intervals coalesce at tick creation.

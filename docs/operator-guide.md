@@ -88,7 +88,7 @@ Normal product tasks always carry an explicit goal selection policy. `--goal aut
 
 Inside the TUI, `/goal` and `/goals` show the current/history view, while `/goal create DESCRIPTION`, `/goal pause`, `/goal resume`, `/goal clear`, and `/goal complete` operate without copied IDs. `/heartbeats`, `/heartbeat create MS PROMPT`, and index-based pause/resume/clear commands manage user wakes. `/schedules`, `/schedule once ISO PROMPT`, `/schedule every MS PROMPT`, and index-based lifecycle commands manage one-time and interval prompts. Missed recurring ticks coalesce.
 
-Heartbeats and schedules queue durable wakes and deliver them through the ordinary typed `AgentRunService` with stable IDs. This embedded supervisor provides crash recovery while it is running, but FU-015 background-service ownership is not complete: closing the product process does **not** claim that future due work will execute detached. The records survive and are recovered on the next supervisor start.
+Heartbeats and schedules queue durable wakes and deliver them through the ordinary typed `AgentRunService` with stable IDs. Ordinary product commands start or discover the per-workspace resident service; its wake pollers run only after lease admission, so future due work continues while no terminal client is attached. An explicit `service shutdown` stops those pollers and leaves the durable schedules resumable on the next on-demand start.
 
 ### Provider and model onboarding
 
@@ -190,7 +190,9 @@ The cursor must occur in the parent branch lineage. The child sees parent events
 bun run src/cli.ts serve --port 3131
 ```
 
-The CLI binds to `127.0.0.1`. The server is unauthenticated and must not be exposed directly to an untrusted network. Shutdown currently relies on process termination; the supervisor opens and recovers before listening.
+The product-managed service binds an ephemeral `127.0.0.1` port and authenticates every request with the random bearer in its 0600 discovery manifest. Discovery accepts it only when authenticated health identity, protocol/config compatibility, and the matching live workspace lease all agree. The advanced `serve --port` diagnostic is separate and unauthenticated. Neither surface is supported beyond loopback without an independently administered boundary.
+
+`agencity service status` observes lifecycle and resident roots; `service shutdown` stops admission and drains without cancelling or deleting sessions. `agencity agents`, `status TARGET`, `attach TARGET`, `send TARGET MESSAGE`, and `stop TARGET` use the managed service. `agencity run --detach TASK` returns after durable acceptance. Ctrl-C or normal client exit detaches only; `stop` is the explicit durable cancellation operation. The service starts on demand and is not registered as an OS boot/login daemon.
 
 ## TUI
 
@@ -232,7 +234,7 @@ Plain text starts a typed autonomous run, or answers the pending clarification/p
 | `/help` | Print command help. |
 | `/quit`, `/exit` | Close the TUI. |
 
-The TUI is a basic in-process client of the same supervisor services; it never owns or closes session lifecycle. It supports resume and source-preserving compaction. Provider streaming remains available as bounded cursorless protocol progress, but the TUI deliberately does not render raw autonomous action JSON as conversation text; it prints only a validated final or a typed waiting/terminal state. Echo and other non-streaming providers report that live output is unavailable. The TUI does not yet use the HTTP/SSE transport or expose unknown-effect reconciliation; those limitations are visible rather than implied capabilities.
+The legacy diagnostic TUI is a basic in-process client of the same supervisor services. Ordinary product attach uses the authenticated snapshot/cursor/SSE client and never owns or closes session lifecycle. It supports detach and cursor catch-up; source-preserving compaction remains available through the protocol. Provider streaming remains available as bounded cursorless protocol progress, but the TUI deliberately does not render raw autonomous action JSON as conversation text; it prints only a validated final or a typed waiting/terminal state. Echo and other non-streaming providers report that live output is unavailable. The TUI does not yet use the HTTP/SSE transport or expose unknown-effect reconciliation; those limitations are visible rather than implied capabilities.
 
 ## Providers
 
