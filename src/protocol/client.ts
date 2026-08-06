@@ -39,7 +39,7 @@ export class ProtocolClientError extends Error {
     message: string,
     readonly status: number,
     readonly details: unknown = null,
-  ) { super(message); }
+  ) { super(`[${code}] ${message}`); }
 }
 
 export interface BranchWatchHandlers {
