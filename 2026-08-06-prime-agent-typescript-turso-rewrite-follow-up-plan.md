@@ -83,7 +83,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Proposed | FU-004 |
 | FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
 | FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Proposed | FU-004 |
-| FU-015 | Keep detached sessions executing in a background service | Proposed | FU-001, FU-004 |
+| FU-015 | Keep detached sessions executing in a background service | In progress | FU-001, FU-004 |
 | FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | Proposed | FU-003, FU-004 |
 | FU-017 | Add skill creation, installation, and management as a product surface | Proposed | FU-004 |
 | FU-018 | Stream provider output incrementally to attached clients | Done | FU-003 |
@@ -784,7 +784,7 @@ A normal run with a goal continues until its required completion gates pass agai
 
 ## FU-015 — Keep detached sessions executing in a background service
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
