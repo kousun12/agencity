@@ -1,13 +1,15 @@
 import type { AgentEvent, AgentState, BudgetLimits, JsonValue, ModelConfiguration } from "../domain/index.ts";
 import type { ResolveConflictInput } from "../sync/index.ts";
-import type { CreateGoalInput, CreateHeartbeatInput, CreateScheduleInput, CreateInputSetInput, ImportDocumentInput, SendMessageInput, SpawnAgentInput, StartRecursiveModelInput, CreateMemoryInput, ProposeRefinementInput, ActivateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput, StartRefinementReviewInput, InvokeSkillOptions, SpawnSpecInput } from "../runtime/index.ts";
+import type { CompactContextInput, CreateGoalInput, CreateHeartbeatInput, CreateScheduleInput, CreateInputSetInput, ImportDocumentInput, SendMessageInput, SpawnAgentInput, StartRecursiveModelInput, CreateMemoryInput, ProposeRefinementInput, ActivateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput, StartRefinementReviewInput, InvokeSkillOptions, SpawnSpecInput } from "../runtime/index.ts";
 
 export type ProtocolRequest =
   | { type: "createSession"; workspaceId: string; model?: ModelConfiguration; budget?: BudgetLimits }
   | { type: "message"; sessionId: string; branchId: string; content: string }
   | { type: "turn"; sessionId: string; branchId: string }
   | { type: "cell"; sessionId: string; branchId: string; code: string }
-  | { type: "fork"; sessionId: string; branchId: string; cursor: string; name?: string }
+  | { type: "fork"; sessionId: string; branchId: string; cursor: string; name?: string; compactionStrategy?: "deterministic-extractive-v1" | "model-summary-v1" }
+  | { type: "contextInspect"; sessionId: string; branchId: string }
+  | { type: "contextCompact"; sessionId: string; branchId: string; input?: CompactContextInput }
   | { type: "spawn"; sessionId: string; branchId: string; input: SpawnAgentInput }
   | { type: "spawnMany"; sessionId: string; branchId: string; inputs: SpawnAgentInput[] }
   | { type: "mailbox"; sessionId: string; branchId: string; input: SendMessageInput }

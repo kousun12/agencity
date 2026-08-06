@@ -147,9 +147,13 @@ export class ProtocolServer {
         // Retained diagnostic chat route; product tasks use /runs.
         if (request.method === "POST" && parts[2] === "turns" && branchId) return Response.json(await this.supervisor.modelLoop.turn(sessionId, branchId));
         if (request.method === "POST" && parts[2] === "cells" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.executeCell(sessionId, branchId, String(body.code ?? ""))); }
-        if (request.method === "POST" && parts[2] === "branches" && branchId) { const body = await jsonBody(request); return Response.json({ branchId: await this.supervisor.fork(sessionId, branchId, String(body.cursor), typeof body.name === "string" ? body.name : undefined) }); }
+        if (request.method === "POST" && parts[2] === "branches" && branchId) { const body = await jsonBody(request); const strategy = body.compactionStrategy === "deterministic-extractive-v1" || body.compactionStrategy === "model-summary-v1" ? body.compactionStrategy : undefined; return Response.json({ branchId: await this.supervisor.fork(sessionId, branchId, String(body.cursor), typeof body.name === "string" ? body.name : undefined, strategy) }); }
         if (request.method === "POST" && parts[2] === "resume" && branchId) return Response.json(await this.supervisor.resume(sessionId,branchId));
-        if (request.method === "POST" && parts[2] === "compact" && branchId) return Response.json(await this.supervisor.compact(sessionId,branchId));
+        if (request.method === "GET" && parts[2] === "context" && branchId) return Response.json(await this.supervisor.inspectContext(sessionId,branchId));
+        if (request.method === "POST" && parts[2] === "compact" && branchId) {
+          const body = await jsonBody(request);
+          return Response.json(await this.supervisor.compact(sessionId,branchId,{ ...(body as any), reason: "user-request", requestedBy: "user" }));
+        }
         if (request.method === "GET" && parts[2] === "recovery-summary" && branchId) return Response.json(await this.supervisor.effectReconciliation.recoverySummary(sessionId, branchId));
         if (parts[2] === "effects" && branchId) {
           if (request.method === "GET" && parts[3] === "unknown") return Response.json(await this.supervisor.effectReconciliation.listUnknown(sessionId, branchId));

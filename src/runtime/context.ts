@@ -1,5 +1,5 @@
 import {
-  newId, NotFoundError, projectEvents, type AgentEvent, type ContextRecordReference, type EventType,
+  newId, NotFoundError, projectEvents, type AgentEvent, type ContextRecordReference, type EventPayloads, type EventType,
   type HarnessRecord, type JsonValue,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
@@ -8,6 +8,7 @@ import type { HarnessService } from "./harness.ts";
 import type { ProfileDatabase } from "../sync/index.ts";
 import { rowToHarness } from "./harness.ts";
 import type { SkillManagementService, SkillManagementView } from "./skill-management.ts";
+import { effectiveCompaction } from "./context-compaction.ts";
 
 export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. Persist every value needed after a cell boundary. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
 export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 1, text: BASE_POLICY });
@@ -52,14 +53,26 @@ export class ContextMaterializer {
       if (newlyExposed) { events = await this.storage.loadEvents(sessionId,{branchId}); state = projectEvents(events); }
     }
 
-    const messages = state.messages.slice(-20);
-    const compactions=events.filter(event=>event.type==="ContextMaterialized"&&(event.payload as any).context?.kind==="compaction").slice(-3).map(event=>({eventId:event.id,...((event.payload as any).context as Record<string,JsonValue>)}));
+    const effective = effectiveCompaction(state, events);
+    const effectiveContext = effective?.contextId ? state.contexts[effective.contextId] : undefined;
+    const legacyEvent = effective ? undefined : [...events].reverse().find((event) => event.type === "ContextMaterialized" && (event.payload as EventPayloads["ContextMaterialized"]).context && typeof (event.payload as EventPayloads["ContextMaterialized"]).context === "object" && !Array.isArray((event.payload as EventPayloads["ContextMaterialized"]).context) && ((event.payload as EventPayloads["ContextMaterialized"]).context as Record<string,JsonValue>).kind === "compaction");
+    const legacyContext = legacyEvent ? (legacyEvent.payload as EventPayloads["ContextMaterialized"]).context as Record<string,JsonValue> : undefined;
+    const coveredMessageIds = new Set<string>(effective?.sourceEventIds ?? (Array.isArray(legacyContext?.sourceEventIds) ? legacyContext.sourceEventIds.filter((value): value is string => typeof value === "string") : []));
+    const messages = state.messages.filter((message) => !coveredMessageIds.has(message.eventId));
+    const compactions: JsonValue[] = effective && effectiveContext?.derivation
+      ? [{ eventId: effectiveContext.eventId, contextId: effectiveContext.id, ...effectiveContext.derivation } as unknown as JsonValue]
+      : legacyEvent && legacyContext ? [{ eventId: legacyEvent.id, ...legacyContext } as JsonValue] : [];
     const selected = new Map<string, { event: AgentEvent; reason: string }>();
     const add = (event: AgentEvent | undefined | null, reason: string) => { if (event) selected.set(event.id,{event,reason}); };
     add(events.find((event) => event.type === "SessionCreated"), "session model, workspace, and budget policy");
     add([...events].reverse().find((event) => event.type === "BranchCreated"), "active branch ancestry");
     add([...events].reverse().find((event) => event.type === "SessionStatusChanged"), "current session status");
-    for (const message of messages) add(events.find((event) => event.id === message.eventId), "recent conversation");
+    if (effective && effectiveContext?.derivation) {
+      add(events.find((event) => event.id === effectiveContext.eventId), `effective context compaction ${effective.strategy}`);
+      add(events.find((event) => event.id === effective.requestEventId), "typed compaction request and exact frozen source manifest");
+      for (const eventId of effective.sourceEventIds) add(events.find((event) => event.id === eventId), `narrative source covered by effective ${effective.strategy} summary`);
+    } else if (legacyEvent) add(legacyEvent, "legacy version-1 compaction derivation");
+    for (const message of messages) add(events.find((event) => event.id === message.eventId), "uncovered conversation narrative");
     for (const value of Object.values(state.workingValues)) add(events.find((event) => event.id === value.eventId), "active working value");
     for (const artifact of Object.values(state.artifacts)) add([...events].reverse().find((event) => event.type === "ArtifactRegistered" && (event.payload as {artifactId?:string}).artifactId === artifact.artifactId), "active artifact reference");
     for (const event of events) if (["BudgetDebited","TaskUsageAttributed","BudgetExceeded"].includes(event.type)) add(event,"current budget projection");
@@ -68,6 +81,9 @@ export class ContextMaterializer {
     for (const notice of Object.values(state.terminalNotices)) add(events.find((event) => event.id === notice.eventId),"child terminal notice");
     for (const goal of Object.values(state.goals)) add(events.find((event) => event.id === goal.eventId),"current autonomous goal");
     for (const heartbeat of Object.values(state.heartbeats)) add(events.find((event) => event.id === heartbeat.eventId),"scheduled heartbeat");
+    for (const schedule of Object.values(state.schedules)) add(events.find((event) => event.id === schedule.eventId),"scheduled autonomous work");
+    for (const wake of Object.values(state.wakes)) add(events.find((event) => event.id === wake.eventId),"durable wake delivery state");
+    for (const run of Object.values(state.agentRuns)) if (!["succeeded","blocked","failed","cancelled","budget_exceeded","unknown"].includes(run.status)) add(events.find((event) => event.id === run.eventId),"active agent run control state");
     for (const handle of Object.values(state.recursiveModels)) add(events.find((event) => event.id === handle.eventId),"recursive model handle");
     const activity = events.filter((event) => ["EffectOutcomeRecorded","EffectReconciliationRecorded","CellCommitted","CellFailed","TaskStatusChanged","GoalGateStatusChanged","RefinementObservationRecorded","RefinementDecided"].includes(event.type)).slice(-this.maxRecentRecords);
     for (const event of activity) add(event,"recent durable activity");
@@ -126,7 +142,8 @@ export class ContextMaterializer {
       tasks:Object.values(state.tasks),mailbox:Object.values(state.mailbox),terminalNotices:Object.values(state.terminalNotices),recursiveModels:Object.values(state.recursiveModels),
       unknownEffectReconciliations:Object.values(state.effectReconciliations),
       documents:Object.values(state.documents).map((document)=>({id:document.id,name:document.name,mediaType:document.mediaType,size:document.size,digest:document.digest,chunkCount:document.chunkCount})),
-      inputSets:Object.values(state.inputSets),heartbeats:Object.values(state.heartbeats),
+      inputSets:Object.values(state.inputSets),heartbeats:Object.values(state.heartbeats),schedules:Object.values(state.schedules),wakes:Object.values(state.wakes),
+      activeRuns:Object.values(state.agentRuns).filter((run)=>!["succeeded","blocked","failed","cancelled","budget_exceeded","unknown"].includes(run.status)),
       harness: {
         promptNotes: promptNotes.map(publicHarness),
         memories: memories.map(publicHarness),

@@ -6,6 +6,7 @@ import {
   projectEvents,
   type AgentState,
   type BudgetLimits,
+  type ContextCapacityProvenance,
   type EffectOutcome,
   type EventPayloads,
   type JsonValue,
@@ -14,6 +15,17 @@ import {
 import type { AgentStorage } from "../storage/index.ts";
 import { ContextMaterializer } from "./context.ts";
 import { OutboxRunner } from "./outbox.ts";
+import type { ModelExecutor } from "../executors/index.ts";
+import { CompactionService, AUTOMATIC_COMPACTION_RECENT_MESSAGES } from "./context-compaction.ts";
+import {
+  ModelContextCapacitySource,
+  ProviderModelErrorCode,
+  admitContextWindow,
+  planContextWindowOverflowRetry,
+  type ModelContextWindowConfiguration,
+  type ProviderModelErrorClassification,
+} from "./context-window.ts";
+import { estimateContextWindow } from "./compaction-core.ts";
 
 interface ModelOutput { text: string; finishReason: string; usage: Usage }
 
@@ -52,6 +64,8 @@ export class ModelLoop {
     readonly storage: AgentStorage,
     readonly contexts: ContextMaterializer,
     readonly outbox: OutboxRunner,
+    readonly compactions?: CompactionService,
+    readonly modelExecutor?: ModelExecutor,
   ) {}
 
   async turn(
@@ -83,49 +97,79 @@ export class ModelLoop {
       payload: { status: "running" },
     }]);
     const started = performance.now();
-    const materialized = await this.contexts.materialize(sessionId, branchId);
-    const callId = newId();
-    const effectId = newId();
-    const effectKey = `model:${callId}`;
-    await this.storage.appendEvents([{
-      sessionId,
-      branchId,
-      type: "ModelCallRequested",
-      producer: "supervisor",
-      idempotencyKey: `model-call:${callId}`,
-      payload: {
-        callId,
-        contextId: materialized.contextId,
-        effectId,
-        provider: state.model.provider,
-        model: state.model.model,
-      },
-    }, {
-      sessionId,
-      branchId,
-      type: "EffectRequested",
-      producer: "supervisor",
-      idempotencyKey: effectKey,
-      payload: {
-        effectId,
-        executor: "model",
-        operation: "complete",
-        input: { callId, context: materialized.context, configuration: state.model as unknown as JsonValue },
+    const window = this.#windowConfiguration(state);
+    let materialized;
+    if (this.compactions) {
+      const admission = await admitContextWindow(window.configuration, {
+        buildCandidate: ({ completedCompactions }) => this.contexts.materialize(sessionId, branchId, {
+          contextId: `legacy-turn-${turnId}-context-${completedCompactions}`,
+          idempotencyKey: `legacy-turn-context:${turnId}:${completedCompactions}`,
+        }),
+        estimate: (candidate) => estimateContextWindow(candidate.context).estimatedTokens,
+        compact: async ({ iteration }) => {
+          const compacted = await this.compactions!.compact(sessionId, branchId, {
+            strategy: "deterministic-extractive-v1", reason: "automatic-threshold", requestedBy: "supervisor",
+            idempotencyKey: `legacy-turn-threshold:${turnId}:${iteration}`,
+            retainRecentMessages: Math.max(1, AUTOMATIC_COMPACTION_RECENT_MESSAGES - iteration + 1), capacity: window.provenance,
+          });
+          return compacted.status === "completed"
+            ? { outcome: "compacted" as const, provenance: { compactionId: compacted.compactionId, contextId: compacted.contextId, sourceDigest: compacted.sourceDigest } }
+            : { outcome: "protected-only" as const, protectedSourceCount: Math.max(0, history.length - compacted.sourceEventIds.length) };
+        },
+      });
+      materialized = admission.candidate;
+    } else materialized = await this.contexts.materialize(sessionId, branchId);
+
+    let rejectedEstimate = estimateContextWindow(materialized.context).estimatedTokens;
+    let priorCallId: string | undefined;
+    for (let attempt = 1; attempt <= 1 + 2; attempt++) {
+      const callId = `legacy-turn-${turnId}-call-${attempt}`;
+      const effectId = `legacy-turn-${turnId}-effect-${attempt}`;
+      const effectKey = `model:${callId}`;
+      await this.storage.appendEvents([{
+        sessionId, branchId, type: "SessionStatusChanged", producer: "supervisor",
+        idempotencyKey: `turn-running:${turnId}:${attempt}`, payload: { status: "running" },
+      }, {
+        sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
+        idempotencyKey: `model-call:${callId}`,
+        payload: {
+          callId, contextId: materialized.contextId, effectId, provider: state.model.provider, model: state.model.model,
+          attempt, ...(priorCallId === undefined ? {} : { retryOfCallId: priorCallId }), contextWindow: window.provenance,
+        },
+      }, {
+        sessionId, branchId, type: "EffectRequested", producer: "supervisor",
         idempotencyKey: effectKey,
-        idempotent: false,
-      },
-    }]);
-    const execution = await this.outbox.run(effectId);
-    if (execution.outcome !== "succeeded") {
+        payload: { effectId, executor: "model", operation: "complete", input: { callId, context: materialized.context, configuration: state.model as unknown as JsonValue }, idempotencyKey: effectKey, idempotent: false },
+      }]);
+      const execution = await this.outbox.run(effectId);
+      if (execution.outcome === "succeeded") {
+        const output = parseOutput(execution.output);
+        await this.#finalizeSucceeded(sessionId, branchId, callId, output, Math.round(performance.now() - started));
+        return { outcome: "succeeded", message: output.text };
+      }
       await this.#finalizeTerminated(sessionId, branchId, callId, execution.outcome, execution.error);
-      return {
-        outcome: execution.outcome,
-        ...(execution.error === undefined ? {} : { error: execution.error }),
-      };
+      const classification = providerClassification(execution.output, state.model.provider, state.model.model, execution.outcome);
+      if (!this.compactions || classification.code !== ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) {
+        return { outcome: execution.outcome, ...(execution.error === undefined ? {} : { error: execution.error }) };
+      }
+      const compacted = await this.compactions.compact(sessionId, branchId, {
+        strategy: "deterministic-extractive-v1", reason: "provider-overflow", requestedBy: "supervisor",
+        idempotencyKey: `legacy-turn-overflow:${turnId}:${attempt}`,
+        retainRecentMessages: Math.max(1, AUTOMATIC_COMPACTION_RECENT_MESSAGES - attempt), capacity: window.provenance,
+      });
+      if (compacted.status !== "completed") return { outcome: execution.outcome, error: compacted.error ?? execution.error ?? "Provider overflow compaction failed" };
+      const next = await this.contexts.materialize(sessionId, branchId, {
+        contextId: `legacy-turn-${turnId}-overflow-context-${attempt}`,
+        idempotencyKey: `legacy-turn-overflow-context:${turnId}:${attempt}`,
+      });
+      const nextEstimate = estimateContextWindow(next.context).estimatedTokens;
+      const retry = planContextWindowOverflowRetry({ classification, retriesAlreadyAttempted: attempt - 1, rejectedEstimatedInputTokens: rejectedEstimate, nextEstimatedInputTokens: nextEstimate });
+      if (!retry.retry) return { outcome: execution.outcome, error: execution.error ?? `Provider overflow retry refused: ${retry.reason}` };
+      materialized = next;
+      rejectedEstimate = nextEstimate;
+      priorCallId = callId;
     }
-    const output = parseOutput(execution.output);
-    await this.#finalizeSucceeded(sessionId, branchId, callId, output, Math.round(performance.now() - started));
-    return { outcome: "succeeded", message: output.text };
+    return { outcome: "failed", error: "Provider context-window overflow retry limit reached" };
   }
 
   async run(sessionId: string, branchId: string, maxTurns = 1): Promise<void> {
@@ -185,6 +229,23 @@ export class ModelLoop {
       reconciled++;
     }
     return reconciled;
+  }
+
+  #windowConfiguration(state: AgentState): { configuration: ModelContextWindowConfiguration; provenance: ContextCapacityProvenance } {
+    const resolved = this.modelExecutor?.contextCapacity(state.model) ?? { provider: state.model.provider, model: state.model.model, source: "unknown" as const, contextWindowTokens: null };
+    const outputReserveTokens = resolved.contextWindowTokens === null
+      ? Math.max(0, state.model.maxOutputTokens ?? 0)
+      : Math.min(resolved.contextWindowTokens - 1, Math.max(1, state.model.maxOutputTokens ?? Math.min(4_096, Math.floor(resolved.contextWindowTokens * 0.1))));
+    const source = resolved.source === "provider-metadata" ? ModelContextCapacitySource.ProviderMetadata
+      : resolved.source === "model-catalog" ? ModelContextCapacitySource.ModelCatalog
+      : resolved.source === "operator-configuration" ? ModelContextCapacitySource.OperatorConfiguration
+      : ModelContextCapacitySource.Unknown;
+    const configuration: ModelContextWindowConfiguration = {
+      provenance: { provider: resolved.provider, model: resolved.model, source },
+      contextWindowTokens: resolved.contextWindowTokens, maxOutputReserveTokens: outputReserveTokens,
+      estimatorId: "utf8-bytes-per-token-v1", triggerRatio: 0.8, targetRatio: 0.6,
+    };
+    return { configuration, provenance: { provider: resolved.provider, model: resolved.model, source, contextWindowTokens: resolved.contextWindowTokens, outputReserveTokens, estimatorId: configuration.estimatorId, triggerRatio: configuration.triggerRatio, targetRatio: configuration.targetRatio } };
   }
 
   async #finalizeTerminated(
@@ -278,6 +339,20 @@ export class ModelLoop {
     });
     await this.storage.appendEvents(completionEvents);
   }
+}
+
+function providerClassification(
+  output: JsonValue | undefined,
+  provider: string,
+  model: string,
+  outcome: Exclude<EffectOutcome, "succeeded">,
+): ProviderModelErrorClassification {
+  if (outcome === "unknown") return { provider, model, code: ProviderModelErrorCode.Unknown };
+  if (output && typeof output === "object" && !Array.isArray(output) && output.errorClassification && typeof output.errorClassification === "object" && !Array.isArray(output.errorClassification)) {
+    const value = output.errorClassification;
+    if (value.provider === provider && value.model === model && value.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) return { provider, model, code: ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow };
+  }
+  return { provider, model, code: ProviderModelErrorCode.Generic };
 }
 
 function assertBudgetAvailable(state: AgentState): void {

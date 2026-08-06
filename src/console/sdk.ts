@@ -1,4 +1,4 @@
-import type { ArtifactReference, BudgetLimits, ModelConfiguration, WorkingValue } from "../domain/index.ts";
+import type { ArtifactReference, BudgetLimits, ContextCompactionStrategy, ModelConfiguration, WorkingValue } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { InspectOptions, InspectPreview } from "./inspect.ts";
 
@@ -192,6 +192,11 @@ export interface SchedulesSdk {
   clear(scheduleId: string, reason?: string): Promise<JsonValue>;
 }
 
+export interface ContextSdk {
+  inspect(): Promise<JsonValue>;
+  compact(options?: { readonly strategy?: ContextCompactionStrategy; readonly instructions?: string; readonly idempotencyKey?: string; readonly rematerializeFromContextId?: string }): Promise<JsonValue>;
+}
+
 export interface ConsoleSdk {
   readonly state: StateSdk;
   readonly cells: CellsSdk;
@@ -205,6 +210,7 @@ export interface ConsoleSdk {
   readonly goals: GoalsSdk;
   readonly heartbeats: HeartbeatsSdk;
   readonly schedules: SchedulesSdk;
+  readonly context: ContextSdk;
   readonly rlm: RlmSdk;
   inspect(value: unknown, options?: InspectOptions): InspectPreview;
 }

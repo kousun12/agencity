@@ -59,6 +59,7 @@ import { ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "./ex
 import { EffectReconciliationService } from "./effect-reconciliation.ts";
 import { RefinerService } from "./refiner.ts";
 import { SkillManagementService } from "./skill-management.ts";
+import { CompactionService, type CompactContextInput, type ContextCompactionView, type ContextInspection } from "./context-compaction.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -256,6 +257,7 @@ export class Supervisor {
   readonly outbox: OutboxRunner;
   readonly projections: ProjectionService;
   readonly contexts: ContextMaterializer;
+  readonly compactions: CompactionService;
   readonly modelLoop: ModelLoop;
   readonly agents: AgentService;
   readonly documents: DocumentService;
@@ -310,14 +312,15 @@ export class Supervisor {
     this.modelExecutor = modelExecutor;
     this.executionLeases = executionLeases;
     this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
-    this.modelLoop = new ModelLoop(storage, this.contexts, outbox);
+    this.compactions = new CompactionService(storage, outbox);
+    this.modelLoop = new ModelLoop(storage, this.contexts, outbox, this.compactions, modelExecutor);
     this.documents = new DocumentService(storage);
     this.goals = new GoalService(storage, outbox);
     this.heartbeats = new HeartbeatService(storage);
     this.schedules = new ScheduleService(storage);
     this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox, artifacts, this.memory);
     this.restartConsoleAfterCell = restartConsoleAfterCell;
-    this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this));
+    this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), 128, this.compactions, modelExecutor);
     this.effectReconciliation = new EffectReconciliationService(storage);
     this.refiner = new RefinerService(storage, this.models, this.harness, profile, userScopeKey);
     this.skillManagement = new SkillManagementService(storage, profile, this.harness, this.skills, this.refiner, userScopeKey, device.profileId);
@@ -428,6 +431,7 @@ export class Supervisor {
     await this.outbox.recover();
     await this.agents.recoverCancellations();
     if (options.drainPending !== false) await this.outbox.drain();
+    await this.compactions.recoverIncomplete();
     await this.modelLoop.recoverIncomplete();
     await this.modelLoop.reconcileRunningSessions();
     await this.goals.recoverIncomplete();
@@ -553,19 +557,16 @@ export class Supervisor {
   /** Rebuilds and reattaches to a durable branch without changing execution ownership. */
   async resume(sessionId:string,branchId:string):Promise<{sessionId:string;branchId:string;cursor:string}>{const events=await this.storage.loadEvents(sessionId,{branchId});if(!events.length)throw new NotFoundError("session branch",`${sessionId}/${branchId}`);const state=await this.projections.rebuild(sessionId,branchId);return{sessionId,branchId,cursor:state.cursor};}
 
-  /** Creates an immutable, source-linked deterministic extractive summary; source messages remain canonical. */
-  async compact(sessionId: string, branchId: string): Promise<{ contextId: string; sourceEventIds: string[]; summary: string }> {
-    const events=await this.storage.loadEvents(sessionId,{branchId});if(!events.length)throw new NotFoundError("session branch",`${sessionId}/${branchId}`);
-    const messages=events.filter(event=>event.type==="MessageAppended");const source=messages.slice(0,Math.max(0,messages.length-20));
-    if(!source.length)throw new CapabilityUnavailableError("compaction before more than 20 retained messages exist","deterministic-extractive-v1");
-    const summary=source.map(event=>{const payload=event.payload as {role:string;content:string};return `[${payload.role}] ${payload.content.slice(0,500)}`;}).join("\n").slice(0,64*1024);
-    const contextId=newId();const context=JSON.parse(JSON.stringify({kind:"compaction",strategy:"deterministic-extractive-v1",summary,sourceEventIds:source.map(event=>event.id),sourceCount:source.length})) as JsonValue;
-    const encoded=JSON.stringify(context);const hasher=new Bun.CryptoHasher("sha256");hasher.update(encoded);const contentHash=hasher.digest("hex");
-    await this.storage.appendEvents([{sessionId,branchId,type:"ContextMaterialized",producer:"supervisor",idempotencyKey:`compaction:${contextId}`,payload:{contextId,records:source.map(event=>({eventId:event.id,type:event.type,schemaVersion:event.schemaVersion,reason:"compaction source retained"})),contentHash,context}}]);
-    return{contextId,sourceEventIds:source.map(event=>event.id),summary};
+  /** Creates an immutable source-linked derived view; canonical history is retained. */
+  compact(sessionId: string, branchId: string, input: CompactContextInput = {}): Promise<ContextCompactionView> {
+    return this.compactions.compact(sessionId, branchId, input);
   }
 
-  async fork(sessionId: string, parentBranchId: string, forkCursor: string, name?: string): Promise<string> {
+  inspectContext(sessionId: string, branchId: string): Promise<ContextInspection> {
+    return this.compactions.inspect(sessionId, branchId);
+  }
+
+  async fork(sessionId: string, parentBranchId: string, forkCursor: string, name?: string, compactionStrategy?: "deterministic-extractive-v1" | "model-summary-v1"): Promise<string> {
     const completeHistory = await this.storage.loadEvents(sessionId, { branchId: parentBranchId });
     if (!completeHistory.length) throw new NotFoundError("session branch", `${sessionId}/${parentBranchId}`);
     if (!completeHistory.some((event) => event.cursor === forkCursor)) {
@@ -580,6 +581,14 @@ export class Supervisor {
       idempotencyKey: `branch:${branchId}`,
       payload: { branchId, parentBranchId, forkCursor, ...(name === undefined ? {} : { name }) },
     }]);
+    if (compactionStrategy) {
+      const inherited = await this.compactions.inspect(sessionId, branchId);
+      if (inherited.effective?.contextId) await this.compactions.compact(sessionId, branchId, {
+        strategy: compactionStrategy, reason: "rematerialize", requestedBy: "user",
+        idempotencyKey: `branch-compaction-strategy:${branchId}:${compactionStrategy}`,
+        rematerializeFromContextId: inherited.effective.contextId,
+      });
+    }
     return branchId;
   }
 
@@ -732,6 +741,8 @@ export class Supervisor {
         });
         return this.storage.readonlyQuery({ sql, args: sqlArgs });
       }
+      if (method === "context.inspect") return this.inspectContext(sessionId, branchId);
+      if (method === "context.compact") return this.compact(sessionId, branchId, { ...((args[0] ?? {}) as CompactContextInput), reason: "agent-request", requestedBy: "agent" });
       if (method === "goals.current") return this.goals.current(sessionId, branchId);
       if (method === "goals.list") return this.goals.list(sessionId, branchId);
       if (method === "goals.get") return this.goals.get(sessionId, branchId, String(args[0] ?? ""));

@@ -100,7 +100,7 @@ export class AgentClient {
   /** Retained diagnostic one-turn chat. Product tasks use startRun. */
   turn(sessionId: string, branchId: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/turns?branch=${branchId}`); }
   cell(sessionId: string, branchId: string, code: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/cells?branch=${branchId}`, { code }); }
-  fork(sessionId: string, branchId: string, cursor: string, name?: string): Promise<{ branchId: string }> { return this.#post(`/sessions/${sessionId}/branches?branch=${branchId}`, { cursor, ...(name === undefined ? {} : { name }) }); }
+  fork(sessionId: string, branchId: string, cursor: string, name?: string, compactionStrategy?: "deterministic-extractive-v1" | "model-summary-v1"): Promise<{ branchId: string }> { return this.#post(`/sessions/${sessionId}/branches?branch=${branchId}`, { cursor, ...(name === undefined ? {} : { name }), ...(compactionStrategy === undefined ? {} : { compactionStrategy }) }); }
   history(sessionId: string, branchId: string): Promise<AgentEvent[]> { return this.#json(`/sessions/${sessionId}/history?branch=${branchId}`); }
   async stream(
     sessionId: string,
@@ -191,7 +191,8 @@ export class AgentClient {
   }
 
   resume(sessionId:string,branchId:string):Promise<{sessionId:string;branchId:string;cursor:string}>{return this.#post(`/sessions/${sessionId}/resume?branch=${branchId}`);}
-  compact(sessionId:string,branchId:string):Promise<{contextId:string;sourceEventIds:string[];summary:string}>{return this.#post(`/sessions/${sessionId}/compact?branch=${branchId}`);}
+  inspectContext(sessionId:string,branchId:string):Promise<import("../runtime/index.ts").ContextInspection>{return this.#json(`/sessions/${sessionId}/context?branch=${branchId}`);}
+  compact(sessionId:string,branchId:string,input:import("../runtime/index.ts").CompactContextInput={}):Promise<import("../runtime/index.ts").ContextCompactionView>{return this.#post(`/sessions/${sessionId}/compact?branch=${branchId}`,input);}
   recoverySummary(sessionId: string, branchId: string): Promise<RecoverySummaryView> { return this.#json(`/sessions/${sessionId}/recovery-summary?branch=${branchId}`); }
   unknownEffects(sessionId: string, branchId: string): Promise<UnknownEffectView[]> { return this.#json(`/sessions/${sessionId}/effects/unknown?branch=${branchId}`); }
   inspectUnknownEffect(sessionId: string, branchId: string, effectId: string): Promise<UnknownEffectView> { return this.#json(`/sessions/${sessionId}/effects/${encodeURIComponent(effectId)}/reconciliation?branch=${branchId}`); }

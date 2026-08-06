@@ -313,6 +313,8 @@ export const CLI_HELP_GROUPS: readonly CliHelpGroup[] = Object.freeze([
       productHelp("agencity reconcile EFFECT_ID ASSESSMENT SUMMARY", "Append operator evidence without rewriting effect status."),
       productHelp("agencity refine [INSTRUCTIONS]", "Run an attributable trajectory review; use `refine propose-json` only for advanced diagnostics."),
       productHelp("agencity skills [list|show|install|propose|test|enable|disable|remove]", "Manage tested workspace and profile skills; local code installation requires an exact digest confirmation."),
+      productHelp("agencity context", "Inspect effective context, capacity, and compaction provenance."),
+      productHelp("agencity compact [GUIDANCE] [--strategy extractive|summary]", "Compact retained narrative without deleting canonical history."),
       productHelp("agencity doctor", "Check providers, recovery, placement, and sync."),
       productHelp("agencity config", "Manage non-secret preferences and credential references."),
     ]),

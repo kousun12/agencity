@@ -25,11 +25,11 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     const parentBranchId = p.parentBranchId ?? null;
     if ((parentSessionId === null) !== (parentBranchId === null)) throw new ValidationError("Session ancestry requires both parent IDs");
     return {
-      reducerVersion: 5, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
+      reducerVersion: 6, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
       parentSessionId, parentBranchId, rootSessionId: p.rootSessionId ?? event.sessionId,
       depth: p.depth ?? 0, taskId: p.taskId ?? null,
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
-      status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, contexts: {}, modelCalls: {},
+      status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, contexts: {}, compactions: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
       tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, agentRuns: {}, userCorrections: {}, refinementReviews: {}, refinementTriggerConsumptions: {},
     };
@@ -64,12 +64,47 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         recordedAt: p.recordedAt, eventId: event.id,
       } } };
     }
-    case "ContextMaterialized": { const p = event.payload as EventPayloads["ContextMaterialized"]; if (state.contexts[p.contextId]) throw new InvalidTransitionError("context", "materialized", "materialized"); return { ...next, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records, contentHash: p.contentHash, eventId: event.id } } }; }
-    case "ModelCallRequested": { const p = event.payload as EventPayloads["ModelCallRequested"]; if (!state.contexts[p.contextId] || state.modelCalls[p.callId]) throw new InvalidTransitionError("modelCall", state.modelCalls[p.callId]?.status ?? "missing-context", "requested"); const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, provider: p.provider, model: p.model, chunks: [], status: "requested", eventId: event.id }; return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } }; }
+    case "ContextCompactionRequested": {
+      const p = event.payload as EventPayloads["ContextCompactionRequested"];
+      if (state.compactions[p.compactionId]) throw new InvalidTransitionError("contextCompaction", state.compactions[p.compactionId]!.status, "requested");
+      const sourceIds = new Set(p.sourceEventIds);
+      if (sourceIds.size !== p.sourceEventIds.length || p.frozenSources.some((source, index) => source.eventId !== p.sourceEventIds[index] || !state.appliedEventIds.includes(source.eventId) || BigInt(source.cursor) > BigInt(p.throughCursor))) {
+        throw new ValidationError("Context compaction sources must be unique retained prior events at or before throughCursor");
+      }
+      return { ...next, compactions: { ...state.compactions, [p.compactionId]: {
+        id: p.compactionId, strategy: p.strategy, reason: p.reason, requestedBy: p.requestedBy,
+        ...(p.instructions === undefined ? {} : { instructions: p.instructions }), throughCursor: p.throughCursor,
+        sourceEventIds: [...p.sourceEventIds], sourceDigest: p.sourceDigest,
+        frozenSources: p.frozenSources.map((source) => ({ ...source })),
+        ...(p.capacity === undefined ? {} : { capacity: { ...p.capacity } }),
+        ...(p.ancestorContextId === undefined ? {} : { ancestorContextId: p.ancestorContextId }),
+        ...(p.rematerializedFromContextId === undefined ? {} : { rematerializedFromContextId: p.rematerializedFromContextId }),
+        status: "requested", requestEventId: event.id, eventId: event.id,
+      } } };
+    }
+    case "ContextCompactionFailed": {
+      const p = event.payload as EventPayloads["ContextCompactionFailed"]; const old = state.compactions[p.compactionId];
+      if (!old || old.status !== "requested" || old.requestEventId !== p.requestEventId || old.strategy !== p.strategy) throw new InvalidTransitionError("contextCompaction", old?.status ?? "missing", p.outcome);
+      return { ...next, compactions: { ...state.compactions, [p.compactionId]: { ...old, status: p.outcome, error: p.error, ...(p.effectId === undefined ? {} : { effectIds: [p.effectId] }), eventId: event.id } } };
+    }
+    case "ContextMaterialized": {
+      const p = event.payload as EventPayloads["ContextMaterialized"];
+      if (state.contexts[p.contextId]) throw new InvalidTransitionError("context", "materialized", "materialized");
+      let compactions = state.compactions;
+      if (p.derivation) {
+        const request = state.compactions[p.derivation.compactionId];
+        if (!request || request.status !== "requested" || request.requestEventId !== p.derivation.requestEventId || request.strategy !== p.derivation.strategy || request.sourceDigest !== p.derivation.sourceDigest || !sameStrings(request.sourceEventIds, p.derivation.sourceEventIds)) {
+          throw new InvalidTransitionError("contextCompaction", request?.status ?? "missing", "completed");
+        }
+        compactions = { ...state.compactions, [request.id]: { ...request, status: "completed", contextId: p.contextId, ...(p.derivation.effectIds === undefined ? {} : { effectIds: [...p.derivation.effectIds] }), eventId: event.id } };
+      }
+      return { ...next, compactions, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records.map((record) => ({ ...record })), contentHash: p.contentHash, ...(p.derivation === undefined ? {} : { derivation: p.derivation }), eventId: event.id } } };
+    }
+    case "ModelCallRequested": { const p = event.payload as EventPayloads["ModelCallRequested"]; if (!state.contexts[p.contextId] || state.modelCalls[p.callId]) throw new InvalidTransitionError("modelCall", state.modelCalls[p.callId]?.status ?? "missing-context", "requested"); const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, provider: p.provider, model: p.model, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id }; return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } }; }
     case "ModelOutputChunk": { const p = event.payload as EventPayloads["ModelOutputChunk"]; const old = state.modelCalls[p.callId]; if (!old || old.status !== "requested" || p.sequence !== old.chunks.length) throw new InvalidTransitionError("modelCall", old?.status ?? "missing", "streaming"); return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, chunks: [...old.chunks, p.text], eventId: event.id } } }; }
     case "ModelCallCompleted": {
       const p = event.payload as EventPayloads["ModelCallCompleted"]; const old = state.modelCalls[p.callId];
-      const agentRunOwned = Object.values(state.agentRuns).some((run) => run.steps.some((step) => step.callId === p.callId));
+      const agentRunOwned = Object.values(state.agentRuns).some((run) => run.steps.some((step) => step.callId === p.callId || step.modelAttempts.some((attempt) => attempt.callId === p.callId)));
       const response = p.responseMessageId === undefined ? undefined : state.messages.find((message) => message.id === p.responseMessageId);
       if (!old || old.status !== "requested" ||
           (agentRunOwned && p.responseMessageId !== undefined) ||
@@ -288,15 +323,28 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
           (prior !== undefined && prior.action === undefined && prior.rejection === undefined)) {
         throw new InvalidTransitionError("agentRunStep", run?.status ?? "missing-run", "started");
       }
-      const step: AgentRunStepState = { id: p.stepId, ordinal: p.ordinal, contextId: p.contextId, callId: p.callId, effectId: p.effectId, actionId: p.actionId, observationEventIds: [...p.observationEventIds], eventId: event.id };
+      const step: AgentRunStepState = { id: p.stepId, ordinal: p.ordinal, contextId: p.contextId, callId: p.callId, effectId: p.effectId, actionId: p.actionId, observationEventIds: [...p.observationEventIds], modelAttempts: [], eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, status: "running", steps: [...run.steps, step], eventId: event.id } } };
+    }
+    case "AgentRunModelAttemptStarted": {
+      const p = event.payload as EventPayloads["AgentRunModelAttemptStarted"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
+      const expectedAttempt = (step?.modelAttempts.length ?? 0) + 1;
+      const prior = step?.modelAttempts.at(-1);
+      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || p.attempt !== expectedAttempt ||
+          (p.attempt === 1 && (p.callId !== step.callId || p.effectId !== step.effectId)) ||
+          (p.attempt > 1 && p.retryOfCallId !== prior?.callId) || step.action !== undefined || step.rejection !== undefined) {
+        throw new InvalidTransitionError("agentRunModelAttempt", run?.status ?? "missing-run", "started");
+      }
+      const attempt = { attempt: p.attempt, contextId: p.contextId, callId: p.callId, effectId: p.effectId, reason: p.reason, estimatedInputTokens: p.estimatedInputTokens, contextWindow: p.contextWindow, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), eventId: event.id };
+      const updated = { ...step, modelAttempts: [...step.modelAttempts, attempt], eventId: event.id };
+      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
     }
     case "AgentRunActionCommitted": {
       const p = event.payload as EventPayloads["AgentRunActionCommitted"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1); const call = state.modelCalls[p.callId];
       let rawMatches = false;
       try { rawMatches = sameAgentAction(parseAgentAction(p.raw), p.action); }
       catch { rawMatches = false; }
-      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId || step.callId !== p.callId || call?.status !== "succeeded" || call.chunks.join("") !== p.raw || step.action !== undefined || step.rejection !== undefined || !rawMatches) {
+      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId || (step.modelAttempts.at(-1)?.callId ?? step.callId) !== p.callId || call?.status !== "succeeded" || call.chunks.join("") !== p.raw || step.action !== undefined || step.rejection !== undefined || !rawMatches) {
         throw new InvalidTransitionError("agentRunAction", step?.action ? "committed" : run?.status ?? "missing-run", "committed");
       }
       const updated = { ...step, action: p.action, rawAction: p.raw, eventId: event.id };
@@ -307,7 +355,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       let rawIsInvalid = false;
       try { parseAgentAction(p.raw); }
       catch { rawIsInvalid = true; }
-      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId || step.callId !== p.callId || call?.status !== "succeeded" || call.chunks.join("") !== p.raw || step.action !== undefined || step.rejection !== undefined || !rawIsInvalid) {
+      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId || (step.modelAttempts.at(-1)?.callId ?? step.callId) !== p.callId || call?.status !== "succeeded" || call.chunks.join("") !== p.raw || step.action !== undefined || step.rejection !== undefined || !rawIsInvalid) {
         throw new InvalidTransitionError("agentRunAction", step?.rejection ? "rejected" : run?.status ?? "missing-run", "rejected");
       }
       const updated = { ...step, rejection: p.error, rawAction: p.raw, eventId: event.id };
@@ -421,6 +469,10 @@ function sameAgentAction(left: AgentAction, right: AgentAction): boolean {
   if (left.type === "blocked" && right.type === "blocked") return left.reason === right.reason;
   if (left.type === "failed" && right.type === "failed") return left.error === right.error;
   return false;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 export function projectEvents(events: readonly AgentEvent[]): AgentState {

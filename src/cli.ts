@@ -33,7 +33,7 @@ import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./proto
 import { Supervisor, type AgentRunResult } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills", "context", "compact"]);
 
 let activeParsed: ParsedCliArgs | null = null;
 let canonicalHint: { path: AdvancedCommandPath; json: boolean } | null = null;
@@ -139,6 +139,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     if (reconciliationCommand && existing.length === 0) throw new ValidationError("No retained session is available for effect reconciliation");
     if (parsed.command === "refine" && existing.length === 0) throw new ValidationError("No retained session is available for trajectory refinement");
     if (parsed.command === "skills" && existing.length === 0) throw new ValidationError("No retained session is available for skill management");
+    if ((parsed.command === "context" || parsed.command === "compact") && existing.length === 0) throw new ValidationError("No retained session is available for context management");
     const forceNew = parsed.command === "new" || parsed.flags.has("new");
     let selection: { sessionId: string; branchId: string };
     let summary: ProductBranchSummary;
@@ -192,6 +193,22 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     }
     if (["goals", "heartbeats", "schedules"].includes(parsed.command)) {
       await manageAutonomyClient(client, selection.sessionId, selection.branchId, parsed);
+      return;
+    }
+    if (parsed.command === "context") {
+      if (parsed.positionals.length) throw new ValidationError("context accepts no positional arguments");
+      printValue(await client.inspectContext(selection.sessionId, selection.branchId), parsed.flags.has("json"));
+      return;
+    }
+    if (parsed.command === "compact") {
+      const strategyName = option("strategy") ?? "extractive";
+      if (!["extractive", "summary", "deterministic-extractive-v1", "model-summary-v1"].includes(strategyName)) throw new ValidationError("--strategy must be extractive or summary");
+      const strategy = strategyName === "summary" || strategyName === "model-summary-v1" ? "model-summary-v1" : "deterministic-extractive-v1";
+      const instructions = parsed.positionals.join(" ").trim();
+      printValue(await client.compact(selection.sessionId, selection.branchId, {
+        strategy, ...(instructions ? { instructions } : {}),
+        ...(option("from-context") ? { rematerializeFromContextId: option("from-context")! } : {}),
+      }), parsed.flags.has("json"));
       return;
     }
     if (parsed.command === "refine") {
@@ -745,7 +762,10 @@ async function runAdvanced(parsed: ParsedCliArgs): Promise<void> {
       emitAdvanced(parsed, path, await supervisor.projections.rebuild(sessionId!, branchId!));
     } else if (path === "debug branch") {
       required(sessionId, "session"); required(branchId, "branch");
-      const forked = await supervisor.fork(sessionId!, branchId!, required(option("cursor"), "cursor"), option("name"));
+      const strategyName = option("strategy");
+      const branchStrategy = strategyName === "summary" || strategyName === "model-summary-v1" ? "model-summary-v1" : strategyName === "extractive" || strategyName === "deterministic-extractive-v1" ? "deterministic-extractive-v1" : undefined;
+      if (strategyName && !branchStrategy) throw new ValidationError("--strategy must be extractive or summary");
+      const forked = await supervisor.fork(sessionId!, branchId!, required(option("cursor"), "cursor"), option("name"), branchStrategy);
       emitAdvanced(parsed, path, forked, forked);
     } else if (path === "debug tui") {
       required(sessionId, "session"); required(branchId, "branch");
@@ -848,7 +868,7 @@ async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspac
 }
 
 function taskFor(parsed: ParsedCliArgs): string | undefined {
-  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile", "refine", "skills"].includes(parsed.command)) return undefined;
+  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile", "refine", "skills", "context", "compact"].includes(parsed.command)) return undefined;
   const task = parsed.positionals.join(" ").trim();
   if (parsed.command === "run" && !task) throw new ValidationError("run requires TASK");
   return task || undefined;

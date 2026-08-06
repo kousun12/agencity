@@ -15,6 +15,7 @@ import {
   type AgentRunStatus,
   type AgentState,
   type BudgetLimits,
+  type ContextCapacityProvenance,
   type EventPayloads,
   type JsonValue,
   type Usage,
@@ -23,6 +24,13 @@ import type { AgentStorage } from "../storage/index.ts";
 import type { ContextMaterializer } from "./context.ts";
 import { stableEffectId, type OutboxRunner } from "./outbox.ts";
 import type { CreateGoalInput, GoalHandle, GoalService } from "./goals.ts";
+import type { ModelExecutor } from "../executors/index.ts";
+import { CompactionService, AUTOMATIC_COMPACTION_RECENT_MESSAGES } from "./context-compaction.ts";
+import { estimateContextWindow } from "./compaction-core.ts";
+import {
+  ModelContextCapacitySource, ProviderModelErrorCode, admitContextWindow, planContextWindowOverflowRetry,
+  type ModelContextWindowConfiguration, type ProviderModelErrorClassification,
+} from "./context-window.ts";
 
 interface ModelOutput { readonly text: string; readonly finishReason: string; readonly usage: Usage }
 
@@ -95,7 +103,7 @@ const SDK_GUIDE = [
   "Cell globals: sdk, sql, session, console, state, artifacts, tools, inspect, cells, rlm.",
   "Use tools.readFile(path), tools.writeFile(path, content, expectedSha256?), and tools.shell(command, options?) for repository work.",
   "Use sql`SELECT ... ${value}` only for read-only relational queries; use state.get/set/list for durable JSON and artifacts.put/get for larger content.",
-  "Use cells.list/get for retained notebook history; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
+  "Use cells.list/get for retained notebook history; use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
   "A cell's final expression or explicit return is its bounded observation. Values in lexical bindings or globalThis disappear after the committed cell boundary.",
   "Inspect first, make focused changes, run verification, and return a final action only when the task is actually complete.",
 ].join("\n");
@@ -130,6 +138,8 @@ export class AgentRunService {
     readonly goals: GoalService,
     readonly executeCell: ExecuteCell,
     readonly maxSteps = 128,
+    readonly compactions?: CompactionService,
+    readonly modelExecutor?: ModelExecutor,
   ) {
     if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) throw new ValidationError("Agent run maxSteps must be positive");
   }
@@ -290,7 +300,7 @@ export class AgentRunService {
       }]);
     }
     state = await this.#state(sessionId, branchId);
-    const runEffectIds = new Set(state.agentRuns[runId]?.steps.map((step) => step.effectId) ?? []);
+    const runEffectIds = new Set(state.agentRuns[runId]?.steps.flatMap((step) => [step.effectId, ...step.modelAttempts.map((attempt) => attempt.effectId)]) ?? []);
     for (const effectId of runEffectIds) {
       const effect = state.effects[effectId];
       if (effect?.status === "requested" || effect?.status === "started") this.outbox.cancel(effect.id);
@@ -428,94 +438,183 @@ export class AgentRunService {
     run: AgentRunState,
     step: AgentRunState["steps"][number],
   ): Promise<void> {
-    let contextEvent = events.find((event) => event.type === "ContextMaterialized" &&
-      (event.payload as EventPayloads["ContextMaterialized"]).contextId === step.contextId) as AgentEvent<"ContextMaterialized"> | undefined;
-    if (!contextEvent) {
-      const observations = step.observationEventIds.map((eventId) => {
-        const event = events.find((candidate) => candidate.id === eventId);
-        if (!event) throw new ValidationError(`Agent run observation event is missing: ${eventId}`);
-        return { eventId: event.id, type: event.type, payload: JSON.parse(JSON.stringify(event.payload)) as JsonValue };
-      });
-      const materialized = await this.contexts.materialize(sessionId, branchId, {
-        contextId: step.contextId,
-        idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}`,
-        additionalRecordIds: step.observationEventIds,
-        transform: (base) => agentProviderContext(base, run, step.ordinal, observations),
-      });
-      contextEvent = materialized.event;
+    const observations = step.observationEventIds.map((eventId) => {
+      const event = events.find((candidate) => candidate.id === eventId);
+      if (!event) throw new ValidationError(`Agent run observation event is missing: ${eventId}`);
+      return { eventId: event.id, type: event.type, payload: JSON.parse(JSON.stringify(event.payload)) as JsonValue };
+    });
+    const window = this.#windowConfiguration(state);
+    let attempt = step.modelAttempts.at(-1);
+    if (!attempt && state.contexts[step.contextId]) {
+      const retainedContextEvent = events.find((event) => event.type === "ContextMaterialized" && (event.payload as EventPayloads["ContextMaterialized"]).contextId === step.contextId) as AgentEvent<"ContextMaterialized"> | undefined;
+      if (!retainedContextEvent) throw new ValidationError(`Agent run retained context is unavailable: ${step.contextId}`);
+      await this.storage.appendEvents([{
+        sessionId, branchId, type: "AgentRunModelAttemptStarted", producer: "recovery",
+        idempotencyKey: `agent-run-model-attempt:${run.id}:${step.ordinal}:1`,
+        payload: {
+          runId: run.id, stepId: step.id, ordinal: step.ordinal, attempt: 1,
+          contextId: step.contextId, callId: step.callId, effectId: step.effectId, reason: "initial",
+          estimatedInputTokens: estimateContextWindow(retainedContextEvent.payload.context).estimatedTokens, contextWindow: window.provenance,
+        },
+      }]);
+      const loaded = await this.#load(sessionId, branchId, run.id);
+      return this.#completeStepModel(sessionId, branchId, loaded.state, loaded.events, loaded.run, loaded.run.steps.at(-1)!);
     }
+    if (!attempt) {
+      let materialized;
+      let proactiveCompactions = 0;
+      if (this.compactions) {
+        const admission = await admitContextWindow(window.configuration, {
+          buildCandidate: ({ completedCompactions }) => this.contexts.materialize(sessionId, branchId, {
+            contextId: completedCompactions === 0 ? step.contextId : `${step.contextId}-window-${completedCompactions}`,
+            idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}:window:${completedCompactions}`,
+            additionalRecordIds: step.observationEventIds,
+            transform: (base) => agentProviderContext(base, run, step.ordinal, observations),
+          }),
+          estimate: (candidate) => estimateContextWindow(candidate.context).estimatedTokens,
+          compact: async ({ iteration }) => {
+            const compacted = await this.compactions!.compact(sessionId, branchId, {
+              strategy: "deterministic-extractive-v1", reason: "automatic-threshold", requestedBy: "supervisor",
+              idempotencyKey: `agent-run-threshold:${run.id}:${step.ordinal}:${iteration}`,
+              retainRecentMessages: Math.max(1, AUTOMATIC_COMPACTION_RECENT_MESSAGES - iteration + 1), capacity: window.provenance,
+            });
+            if (compacted.status === "completed") {
+              proactiveCompactions++;
+              return { outcome: "compacted" as const, provenance: { compactionId: compacted.compactionId, contextId: compacted.contextId, sourceDigest: compacted.sourceDigest } };
+            }
+            return { outcome: "protected-only" as const, protectedSourceCount: Math.max(0, events.length - compacted.sourceEventIds.length) };
+          },
+        });
+        materialized = admission.candidate;
+      } else {
+        let contextEvent = events.find((event) => event.type === "ContextMaterialized" && (event.payload as EventPayloads["ContextMaterialized"]).contextId === step.contextId) as AgentEvent<"ContextMaterialized"> | undefined;
+        if (!contextEvent) contextEvent = (await this.contexts.materialize(sessionId, branchId, {
+          contextId: step.contextId, idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}`,
+          additionalRecordIds: step.observationEventIds,
+          transform: (base) => agentProviderContext(base, run, step.ordinal, observations),
+        })).event;
+        materialized = { contextId: step.contextId, context: contextEvent.payload.context, event: contextEvent };
+      }
+      await this.storage.appendEvents([{
+        sessionId, branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor",
+        idempotencyKey: `agent-run-model-attempt:${run.id}:${step.ordinal}:1`,
+        payload: {
+          runId: run.id, stepId: step.id, ordinal: step.ordinal, attempt: 1,
+          contextId: materialized.contextId, callId: step.callId, effectId: step.effectId,
+          reason: proactiveCompactions ? "proactive-compaction" : "initial",
+          estimatedInputTokens: estimateContextWindow(materialized.context).estimatedTokens,
+          contextWindow: window.provenance,
+        },
+      }]);
+      const loaded = await this.#load(sessionId, branchId, run.id);
+      return this.#completeStepModel(sessionId, branchId, loaded.state, loaded.events, loaded.run, loaded.run.steps.at(-1)!);
+    }
+
+    const contextEvent = events.find((event) => event.type === "ContextMaterialized" &&
+      (event.payload as EventPayloads["ContextMaterialized"]).contextId === attempt!.contextId) as AgentEvent<"ContextMaterialized"> | undefined;
+    if (!contextEvent) throw new ValidationError(`Agent run attempt context is unavailable: ${attempt.contextId}`);
     const context = contextEvent.payload.context;
     let current = await this.#state(sessionId, branchId);
-    const effectKey = `agent-run-model:${run.id}:${step.ordinal}`;
-    if (!current.modelCalls[step.callId]) {
+    const effectKey = attempt.attempt === 1
+      ? `agent-run-model:${run.id}:${step.ordinal}`
+      : `agent-run-model:${run.id}:${step.ordinal}:attempt:${attempt.attempt}`;
+    if (!current.modelCalls[attempt.callId]) {
       await this.storage.appendEvents([{
         sessionId, branchId, type: "SessionStatusChanged", producer: "supervisor",
-        idempotencyKey: `agent-run-session-running:${step.callId}`, payload: { status: "running" },
+        idempotencyKey: `agent-run-session-running:${attempt.callId}`, payload: { status: "running" },
       }, {
         sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
-        idempotencyKey: `agent-run-model-call:${step.callId}`,
-        payload: { callId: step.callId, contextId: step.contextId, effectId: step.effectId, provider: state.model.provider, model: state.model.model },
+        idempotencyKey: `agent-run-model-call:${attempt.callId}`,
+        payload: {
+          callId: attempt.callId, contextId: attempt.contextId, effectId: attempt.effectId,
+          provider: state.model.provider, model: state.model.model, attempt: attempt.attempt,
+          ...(attempt.retryOfCallId === undefined ? {} : { retryOfCallId: attempt.retryOfCallId }),
+          contextWindow: attempt.contextWindow,
+        },
       }]);
       current = await this.#state(sessionId, branchId);
     }
-    if (!current.effects[step.effectId]) {
+    if (!current.effects[attempt.effectId]) {
       const requestedEffectId = await this.outbox.request({
         sessionId, branchId, executor: "model", operation: "complete",
-        input: { callId: step.callId, context, configuration: state.model as unknown as JsonValue },
+        input: { callId: attempt.callId, context, configuration: state.model as unknown as JsonValue },
         idempotencyKey: effectKey, idempotent: false,
       });
-      if (requestedEffectId !== step.effectId) throw new ValidationError("Agent run model effect identity is not stable");
+      if (requestedEffectId !== attempt.effectId) throw new ValidationError("Agent run model effect identity is not stable");
       current = await this.#state(sessionId, branchId);
     }
-    let call = current.modelCalls[step.callId]!;
+    let call = current.modelCalls[attempt.callId]!;
     if (call.status === "requested") {
-      const effect = current.effects[step.effectId];
+      const effect = current.effects[attempt.effectId];
       const execution = effect && !["requested", "started"].includes(effect.status)
         ? { outcome: effect.status, output: effect.output, error: effect.error }
-        : await this.outbox.run(step.effectId);
+        : await this.outbox.run(attempt.effectId);
       if (execution.outcome === "succeeded") {
         let output: ModelOutput | undefined;
         try { output = parseOutput(execution.output); }
         catch (error) {
-          await this.#finalizeTerminated(
-            sessionId,
-            branchId,
-            step.callId,
-            "failed",
-            error instanceof Error ? error.message : String(error),
-          );
+          await this.#finalizeTerminated(sessionId, branchId, attempt.callId, "failed", error instanceof Error ? error.message : String(error));
         }
         if (output) {
           const terminalEvents = await this.storage.loadEvents(sessionId, { branchId });
-          await this.#finalizeSucceeded(
-            sessionId,
-            branchId,
-            step.callId,
-            output,
-            effectElapsedMs(terminalEvents, step.effectId),
-          );
+          await this.#finalizeSucceeded(sessionId, branchId, attempt.callId, output, effectElapsedMs(terminalEvents, attempt.effectId));
         }
       } else {
         if (execution.outcome === "requested" || execution.outcome === "started") throw new ValidationError("Model effect remained non-terminal");
-        await this.#finalizeTerminated(sessionId, branchId, step.callId, execution.outcome, execution.error);
+        await this.#finalizeTerminated(sessionId, branchId, attempt.callId, execution.outcome, execution.error);
       }
       current = await this.#state(sessionId, branchId);
-      call = current.modelCalls[step.callId]!;
+      call = current.modelCalls[attempt.callId]!;
     }
     if (call.status !== "succeeded") {
+      const effect = current.effects[attempt.effectId];
+      const classification = providerClassification(effect?.output, state.model.provider, state.model.model, call.status);
+      if (this.compactions && classification.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) {
+        const compacted = await this.compactions.compact(sessionId, branchId, {
+          strategy: "deterministic-extractive-v1", reason: "provider-overflow", requestedBy: "supervisor",
+          idempotencyKey: `agent-run-overflow:${run.id}:${step.ordinal}:${attempt.attempt}`,
+          retainRecentMessages: Math.max(1, AUTOMATIC_COMPACTION_RECENT_MESSAGES - attempt.attempt), capacity: window.provenance,
+        });
+        if (compacted.status === "completed") {
+          const nextAttempt = attempt.attempt + 1;
+          const nextContext = await this.contexts.materialize(sessionId, branchId, {
+            contextId: `${step.contextId}-overflow-${nextAttempt}`,
+            idempotencyKey: `agent-run-overflow-context:${run.id}:${step.ordinal}:${nextAttempt}`,
+            additionalRecordIds: step.observationEventIds,
+            transform: (base) => agentProviderContext(base, run, step.ordinal, observations),
+          });
+          const nextEstimate = estimateContextWindow(nextContext.context).estimatedTokens;
+          const retry = planContextWindowOverflowRetry({
+            classification, retriesAlreadyAttempted: attempt.attempt - 1,
+            rejectedEstimatedInputTokens: attempt.estimatedInputTokens, nextEstimatedInputTokens: nextEstimate,
+          });
+          if (retry.retry) {
+            const callId = `${step.id}-call-attempt-${nextAttempt}`;
+            const retryEffectKey = `agent-run-model:${run.id}:${step.ordinal}:attempt:${nextAttempt}`;
+            await this.storage.appendEvents([{
+              sessionId, branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor",
+              idempotencyKey: `agent-run-model-attempt:${run.id}:${step.ordinal}:${nextAttempt}`,
+              payload: {
+                runId: run.id, stepId: step.id, ordinal: step.ordinal, attempt: nextAttempt,
+                contextId: nextContext.contextId, callId, effectId: stableEffectId(sessionId, retryEffectKey),
+                reason: "provider-overflow", estimatedInputTokens: nextEstimate, contextWindow: window.provenance,
+                retryOfCallId: attempt.callId,
+              },
+            }]);
+            const loaded = await this.#load(sessionId, branchId, run.id);
+            return this.#completeStepModel(sessionId, branchId, loaded.state, loaded.events, loaded.run, loaded.run.steps.at(-1)!);
+          }
+        }
+      }
       const runNow = current.agentRuns[run.id]!;
       const failedCheck = Object.values(runNow.goalChecks).at(-1);
       const status = call.status === "unknown" ? "unknown" : call.status === "cancelled" || runNow.cancellationRequested ? "cancelled" : failedCheck?.status === "failed" ? "blocked" : "failed";
-      if (status === "cancelled" && !runNow.cancellationRequested) {
-        await this.storage.appendEvents([{
-          sessionId, branchId, type: "AgentRunCancellationRequested", producer: "supervisor",
-          idempotencyKey: `agent-run-effect-cancel:${run.id}`, payload: { runId: run.id, reason: call.error ?? "Model call cancelled" },
-        }]);
-      }
-      const terminalReason = status === "cancelled"
-        ? runNow.cancellationReason ?? call.error ?? "Cancellation requested"
-        : status === "blocked" ? `Goal repair stopped after a failed required gate: ${failedCheck!.summary}`
-        : call.error ?? `Model call ${call.status}`;
+      if (status === "cancelled" && !runNow.cancellationRequested) await this.storage.appendEvents([{
+        sessionId, branchId, type: "AgentRunCancellationRequested", producer: "supervisor",
+        idempotencyKey: `agent-run-effect-cancel:${run.id}`, payload: { runId: run.id, reason: call.error ?? "Model call cancelled" },
+      }]);
+      const terminalReason = status === "cancelled" ? runNow.cancellationReason ?? call.error ?? "Cancellation requested"
+        : status === "blocked" ? `Goal repair stopped after a failed required gate: ${failedCheck!.summary}` : call.error ?? `Model call ${call.status}`;
       await this.#terminal(sessionId, branchId, (await this.#state(sessionId, branchId)).agentRuns[run.id]!, status, terminalReason);
       return;
     }
@@ -527,14 +626,14 @@ export class AgentRunService {
       await this.storage.appendEvents([{
         sessionId, branchId, type: "AgentRunActionRejected", producer: "supervisor",
         idempotencyKey: `agent-run-action-rejected:${step.actionId}`,
-        payload: { runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId, callId: step.callId, raw, error: message },
+        payload: { runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId, callId: attempt.callId, raw, error: message },
       }]);
       return;
     }
     await this.storage.appendEvents([{
       sessionId, branchId, type: "AgentRunActionCommitted", producer: "supervisor",
       idempotencyKey: `agent-run-action:${step.actionId}`,
-      payload: { runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId, callId: step.callId, raw, action },
+      payload: { runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId, callId: attempt.callId, raw, action },
     }]);
   }
 
@@ -680,6 +779,17 @@ export class AgentRunService {
     return true;
   }
 
+  #windowConfiguration(state: AgentState): { configuration: ModelContextWindowConfiguration; provenance: ContextCapacityProvenance } {
+    const resolved = this.modelExecutor?.contextCapacity(state.model) ?? { provider: state.model.provider, model: state.model.model, source: "unknown" as const, contextWindowTokens: null };
+    const outputReserveTokens = resolved.contextWindowTokens === null ? Math.max(0, state.model.maxOutputTokens ?? 0)
+      : Math.min(resolved.contextWindowTokens - 1, Math.max(1, state.model.maxOutputTokens ?? Math.min(4_096, Math.floor(resolved.contextWindowTokens * 0.1))));
+    const source = resolved.source === "provider-metadata" ? ModelContextCapacitySource.ProviderMetadata
+      : resolved.source === "model-catalog" ? ModelContextCapacitySource.ModelCatalog
+      : resolved.source === "operator-configuration" ? ModelContextCapacitySource.OperatorConfiguration : ModelContextCapacitySource.Unknown;
+    const configuration: ModelContextWindowConfiguration = { provenance: { provider: resolved.provider, model: resolved.model, source }, contextWindowTokens: resolved.contextWindowTokens, maxOutputReserveTokens: outputReserveTokens, estimatorId: "utf8-bytes-per-token-v1", triggerRatio: 0.8, targetRatio: 0.6 };
+    return { configuration, provenance: { provider: resolved.provider, model: resolved.model, source, contextWindowTokens: resolved.contextWindowTokens, outputReserveTokens, estimatorId: configuration.estimatorId, triggerRatio: configuration.triggerRatio, targetRatio: configuration.targetRatio } };
+  }
+
   async #terminal(
     sessionId: string,
     branchId: string,
@@ -767,7 +877,7 @@ export class AgentRunService {
 
   #unobserved(events: readonly AgentEvent[], run: AgentRunState): string[] {
     const observed = new Set(run.steps.flatMap((step) => step.observationEventIds));
-    const modelEffects = new Set(run.steps.map((step) => step.effectId));
+    const modelEffects = new Set(run.steps.flatMap((step) => [step.effectId, ...step.modelAttempts.map((attempt) => attempt.effectId)]));
     const gateEffects = new Set(events.filter((event) => event.type === "GoalGateEvaluationRecorded").map((event) => (event.payload as EventPayloads["GoalGateEvaluationRecorded"]).effectId).filter((id): id is string => id !== undefined));
     const requestIndex = events.findIndex((event) => event.id === run.requestEventId);
     return events.slice(requestIndex + 1).filter((event) => {
@@ -846,7 +956,7 @@ function agentProviderContext(
     : [];
   const durableContext = Object.fromEntries([
     "runtime", "profile", "session", "budget", "goal", "tasks", "mailbox",
-    "terminalNotices", "recursiveModels", "documents", "inputSets", "heartbeats",
+    "terminalNotices", "recursiveModels", "documents", "inputSets", "heartbeats", "schedules", "wakes", "activeRuns",
     "harness", "compactions", "workingValues", "artifacts", "queryHints",
   ].filter((key) => durable[key] !== undefined).map((key) => [key, durable[key]]));
   const stepInput = {
@@ -885,6 +995,20 @@ function parseOutput(value: JsonValue | undefined): ModelOutput {
     throw new ValidationError("Model usage is invalid");
   }
   return { text: value.text, finishReason: value.finishReason, usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd } };
+}
+
+function providerClassification(
+  output: JsonValue | undefined,
+  provider: string,
+  model: string,
+  outcome: "requested" | "succeeded" | "failed" | "cancelled" | "unknown",
+): ProviderModelErrorClassification {
+  if (outcome === "unknown") return { provider, model, code: ProviderModelErrorCode.Unknown };
+  if (output && typeof output === "object" && !Array.isArray(output) && output.errorClassification && typeof output.errorClassification === "object" && !Array.isArray(output.errorClassification)) {
+    const value = output.errorClassification;
+    if (value.provider === provider && value.model === model && value.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) return { provider, model, code: ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow };
+  }
+  return { provider, model, code: ProviderModelErrorCode.Generic };
 }
 
 function effectElapsedMs(events: readonly AgentEvent[], effectId: string): number {

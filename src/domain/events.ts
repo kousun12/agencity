@@ -10,7 +10,8 @@ export const eventTypes = [
   "SessionCreated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
   "WorkingValueSet", "ArtifactRegistered", "EffectRequested", "EffectAttemptStarted",
-  "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ContextMaterialized", "ModelCallRequested", "ModelOutputChunk",
+  "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ContextCompactionRequested", "ContextCompactionFailed",
+  "ContextMaterialized", "ModelCallRequested", "ModelOutputChunk",
   "ModelCallCompleted", "ModelCallTerminated", "BudgetDebited", "BudgetExceeded", "RecoveryPerformed",
   "TaskCreated", "SubagentAdmitted", "TaskStatusChanged", "SubagentCancellationRequested", "TaskUsageAttributed",
   "MailboxMessageSent", "MailboxMessageDelivered", "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged",
@@ -26,7 +27,7 @@ export const eventTypes = [
   "RefinementCandidateAllocated", "RefinementCandidateExposed", "RefinementObservationRecorded",
   "RefinementDecided", "RefinementApproved", "RefinementRollbackApproved", "RefinementRolledBack",
   "SkillImported", "SkillAvailabilityChanged", "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
-  "AgentRunRequested", "AgentRunStepStarted", "AgentRunActionCommitted", "AgentRunActionRejected", "AgentRunGoalCheckRecorded",
+  "AgentRunRequested", "AgentRunStepStarted", "AgentRunModelAttemptStarted", "AgentRunActionCommitted", "AgentRunActionRejected", "AgentRunGoalCheckRecorded",
   "AgentRunUserInputRequested", "AgentRunUserInputReceived", "AgentRunCancellationRequested", "AgentRunStatusChanged",
 ] as const;
 export type EventType = (typeof eventTypes)[number];
@@ -51,6 +52,10 @@ export type RecursiveModelOutcome = "succeeded" | "failed" | "cancelled" | "budg
 export type AgentRunStatus = "queued" | "running" | "waiting_for_user" | "succeeded" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown";
 export type AgentRunInputKind = "clarification" | "permission";
 export type RefinementReviewLifecycleStatus = "requested" | "running" | "no_change" | "candidate" | "revision_required" | "failed" | "cancelled" | "unknown";
+export type ContextCompactionStrategy = "deterministic-extractive-v1" | "model-summary-v1";
+export type ContextCompactionReason = "user-request" | "agent-request" | "automatic-threshold" | "provider-overflow" | "rematerialize";
+export type ContextCompactionRequester = "user" | "agent" | "supervisor";
+export type ContextCapacitySource = "provider-metadata" | "model-catalog" | "operator-configuration" | "unknown";
 
 export interface BudgetLimits { readonly tokenLimit?: number; readonly costLimitUsd?: number; readonly turnLimit?: number; readonly wallTimeLimitMs?: number; }
 export interface ModelConfiguration { readonly provider: string; readonly model: string; readonly temperature?: number; readonly maxOutputTokens?: number; }
@@ -58,6 +63,25 @@ export interface Usage { readonly inputTokens: number; readonly outputTokens: nu
 export interface ArtifactReference { readonly artifactId: string; readonly digest: string; readonly mediaType: string; readonly size: number; }
 export type WorkingValue = { readonly kind: "json"; readonly value: JsonValue } | { readonly kind: "artifact"; readonly artifactId: string };
 export interface ContextRecordReference { readonly eventId: string; readonly type: EventType; readonly schemaVersion: number; readonly reason?: string; }
+export interface ContextCapacityProvenance {
+  readonly provider: string; readonly model: string; readonly source: ContextCapacitySource;
+  readonly contextWindowTokens: number | null; readonly outputReserveTokens: number;
+  readonly estimatorId: string; readonly triggerRatio: number; readonly targetRatio: number;
+}
+export interface FrozenContextCompactionSource {
+  readonly eventId: string; readonly sessionId: string; readonly branchId: string; readonly cursor: string; readonly type: EventType; readonly schemaVersion: number;
+  readonly payload: JsonValue; readonly disposition: "compactable"; readonly classificationReason: string;
+  readonly payloadUtf8Bytes: number;
+}
+export interface ContextCompactionDerivation {
+  readonly kind: "compaction"; readonly compactionId: string; readonly requestEventId: string;
+  readonly strategy: ContextCompactionStrategy; readonly reason: ContextCompactionReason;
+  readonly requestedBy: ContextCompactionRequester; readonly instructions?: string;
+  readonly throughCursor: string; readonly sourceEventIds: string[]; readonly sourceDigest: string;
+  readonly leafEventIds: string[]; readonly leafDigest: string; readonly generation: number;
+  readonly summary: string; readonly effectIds?: string[]; readonly usage?: Usage;
+  readonly capacity?: ContextCapacityProvenance; readonly rematerializedFromContextId?: string;
+}
 
 export interface EventPayloads {
   SessionCreated: { workspaceId: string; initialBranchId: string; model: ModelConfiguration; budget: BudgetLimits; sessionName?: string; initialBranchName?: string; parentSessionId?: string; parentBranchId?: string; rootSessionId?: string; depth?: number; taskId?: string };
@@ -77,8 +101,18 @@ export interface EventPayloads {
   EffectAttemptStarted: { effectId: string; attempt: number };
   EffectOutcomeRecorded: { effectId: string; attempt: number; outcome: EffectOutcome; output?: JsonValue; error?: string; observedAt: string };
   EffectReconciliationRecorded: { reconciliationId: string; effectId: string; assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; summary: string; evidence?: JsonValue; recordedBy: string; recordedAt: string };
-  ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue };
-  ModelCallRequested: { callId: string; contextId: string; effectId: string; provider: string; model: string };
+  ContextCompactionRequested: {
+    compactionId: string; strategy: ContextCompactionStrategy; reason: ContextCompactionReason;
+    requestedBy: ContextCompactionRequester; instructions?: string; throughCursor: string;
+    sourceEventIds: string[]; sourceDigest: string; frozenSources: FrozenContextCompactionSource[];
+    capacity?: ContextCapacityProvenance; ancestorContextId?: string; rematerializedFromContextId?: string;
+  };
+  ContextCompactionFailed: {
+    compactionId: string; requestEventId: string; strategy: ContextCompactionStrategy;
+    outcome: "failed" | "unknown" | "protected-only" | "no-progress"; error: string; effectId?: string;
+  };
+  ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue; derivation?: ContextCompactionDerivation };
+  ModelCallRequested: { callId: string; contextId: string; effectId: string; provider: string; model: string; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
   ModelOutputChunk: { callId: string; sequence: number; text: string };
   ModelCallCompleted: { callId: string; responseMessageId?: string; finishReason: string; usage: Usage };
   ModelCallTerminated: { callId: string; outcome: Exclude<EffectOutcome, "succeeded">; error?: string };
@@ -143,6 +177,7 @@ export interface EventPayloads {
   SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
   AgentRunRequested: { runId: string; task: string; requestKey: string; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
+  AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; retryOfCallId?: string };
   AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; callId: string; raw: string; action: AgentAction };
   AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; callId: string; raw: string; error: string };
   AgentRunGoalCheckRecorded: { runId: string; actionId: string; goalId: string; requestId: string; status: "passed" | "failed" | "unknown"; summary: string; gateEvaluationEventIds: string[] };
@@ -188,6 +223,26 @@ const artifactSchema = z.object({ artifactId: id, digest, mediaType: id, size: n
 const workingValueSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("json"), value: jsonValueSchema }), z.object({ kind: z.literal("artifact"), artifactId: id })]);
 const taskTerminalSchema = z.object({ noticeId: id, taskId: id, parentSessionId: id, childSessionId: id, status: z.enum(["completed", "failed", "cancelled"]), result: jsonValueSchema.optional(), artifactIds: z.array(id).optional(), error: z.string().optional(), reason: z.string().optional() });
 const mailboxBaseSchema = z.object({ mailboxMessageId: id, fromSessionId: id, fromBranchId: id, toSessionId: id, toBranchId: id, kind: z.enum(["message", "task_completed", "task_failed", "task_cancelled"]), content: z.string(), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), intentKey: id.optional(), followUp: z.boolean().optional(), replyToMessageId: id.optional() });
+const compactionStrategySchema = z.enum(["deterministic-extractive-v1", "model-summary-v1"]);
+const compactionReasonSchema = z.enum(["user-request", "agent-request", "automatic-threshold", "provider-overflow", "rematerialize"]);
+const capacityProvenanceSchema = z.object({
+  provider: id, model: id, source: z.enum(["provider-metadata", "model-catalog", "operator-configuration", "unknown"]),
+  contextWindowTokens: positiveInteger.nullable(), outputReserveTokens: z.number().int().nonnegative(),
+  estimatorId: id, triggerRatio: z.number().finite().positive().max(1), targetRatio: z.number().finite().nonnegative().max(1),
+}).strict().refine((value) => value.targetRatio < value.triggerRatio, "targetRatio must be below triggerRatio")
+  .refine((value) => value.contextWindowTokens === null || value.outputReserveTokens < value.contextWindowTokens, "output reserve must be below capacity");
+const frozenCompactionSourceSchema = z.object({
+  eventId: id, sessionId: id, branchId: id, cursor: z.string().regex(/^\d+$/), type: z.enum(eventTypes), schemaVersion: positiveInteger,
+  payload: jsonValueSchema, disposition: z.literal("compactable"), classificationReason: z.string().min(1),
+  payloadUtf8Bytes: z.number().int().nonnegative(),
+}).strict();
+const compactionDerivationSchema = z.object({
+  kind: z.literal("compaction"), compactionId: id, requestEventId: id, strategy: compactionStrategySchema,
+  reason: compactionReasonSchema, requestedBy: z.enum(["user", "agent", "supervisor"]), instructions: z.string().max(8192).optional(),
+  throughCursor: z.string().regex(/^\d+$/), sourceEventIds: z.array(id).min(1), sourceDigest: digest,
+  leafEventIds: z.array(id).min(1), leafDigest: digest, generation: positiveInteger, summary: z.string().min(1).max(1048576),
+  effectIds: z.array(id).optional(), usage: usageSchema.optional(), capacity: capacityProvenanceSchema.optional(), rematerializedFromContextId: id.optional(),
+}).strict();
 const payloadSchemas: Record<EventType, z.ZodType> = {
   SessionCreated: z.object({ workspaceId: id, initialBranchId: id, model: modelSchema, budget: budgetSchema, sessionName: z.string().min(1).optional(), initialBranchName: z.string().min(1).optional(), parentSessionId: id.optional(), parentBranchId: id.optional(), rootSessionId: id.optional(), depth: z.number().int().nonnegative().optional(), taskId: id.optional() }),
   BranchCreated: z.object({ branchId: id, parentBranchId: id, forkCursor: z.string().regex(/^\d+$/), name: z.string().optional() }),
@@ -206,8 +261,23 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   EffectAttemptStarted: z.object({ effectId: id, attempt: positiveInteger }),
   EffectOutcomeRecorded: z.object({ effectId: id, attempt: positiveInteger, outcome: z.enum(["succeeded", "failed", "cancelled", "unknown"]), output: jsonValueSchema.optional(), error: z.string().optional(), observedAt: dateTime }),
   EffectReconciliationRecorded: z.object({ reconciliationId: id, effectId: id, assessment: z.enum(["succeeded", "failed", "no_effect", "still_unknown"]), summary: z.string().min(1).max(16384), evidence: jsonValueSchema.optional(), recordedBy: id, recordedAt: dateTime }).strict(),
-  ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional() }),
-  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, provider: id, model: id }),
+  ContextCompactionRequested: z.object({
+    compactionId: id, strategy: compactionStrategySchema, reason: compactionReasonSchema,
+    requestedBy: z.enum(["user", "agent", "supervisor"]), instructions: z.string().max(8192).optional(), throughCursor: z.string().regex(/^\d+$/),
+    sourceEventIds: z.array(id), sourceDigest: digest, frozenSources: z.array(frozenCompactionSourceSchema),
+    capacity: capacityProvenanceSchema.optional(), ancestorContextId: id.optional(), rematerializedFromContextId: id.optional(),
+  }).strict().superRefine((value, context) => {
+    const frozenIds = value.frozenSources.map((source) => source.eventId);
+    if (new Set(frozenIds).size !== frozenIds.length || frozenIds.length !== value.sourceEventIds.length || frozenIds.some((sourceId, index) => sourceId !== value.sourceEventIds[index])) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "frozen sources must exactly match sourceEventIds" });
+    }
+  }),
+  ContextCompactionFailed: z.object({
+    compactionId: id, requestEventId: id, strategy: compactionStrategySchema,
+    outcome: z.enum(["failed", "unknown", "protected-only", "no-progress"]), error: z.string().min(1), effectId: id.optional(),
+  }).strict(),
+  ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional(), derivation: compactionDerivationSchema.optional() }),
+  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, provider: id, model: id, attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }),
   ModelOutputChunk: z.object({ callId: id, sequence: z.number().int().nonnegative(), text: z.string() }),
   ModelCallCompleted: z.object({ callId: id, responseMessageId: id.optional(), finishReason: z.string(), usage: usageSchema }),
   ModelCallTerminated: z.object({ callId: id, outcome: z.enum(["failed", "cancelled", "unknown"]), error: z.string().optional() }),
@@ -272,6 +342,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
   AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
   AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
+  AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, retryOfCallId: id.optional() }).strict(),
   AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, callId: id, raw: z.string(), action: agentActionSchema }).strict(),
   AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, callId: id, raw: z.string(), error: z.string().min(1) }).strict(),
   AgentRunGoalCheckRecorded: z.object({ runId: id, actionId: id, goalId: id, requestId: id, status: z.enum(["passed", "failed", "unknown"]), summary: z.string().min(1).max(65536), gateEvaluationEventIds: z.array(id) }).strict(),

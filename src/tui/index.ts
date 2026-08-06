@@ -11,7 +11,7 @@ import { scrubText } from "../security/index.ts";
 export type TerminalAgentClient = Pick<AgentClient,
   "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
   "createSession" | "modelProviders" | "startRun" | "run" | "respondToRun" | "cancelRun" |
-  "cell" | "fork" | "resume" | "compact" | "agents" | "tasks" | "mailbox" | "cancelTask" |
+  "cell" | "fork" | "resume" | "inspectContext" | "compact" | "agents" | "tasks" | "mailbox" | "cancelTask" |
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
   "heartbeats" | "createHeartbeat" | "pauseHeartbeat" | "resumeHeartbeat" | "cancelHeartbeat" |
   "schedules" | "createSchedule" | "pauseSchedule" | "resumeSchedule" | "clearSchedule" |
@@ -61,7 +61,8 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/cell", aliases: [], category: "notebook", usage: "/cell TYPESCRIPT", summary: "Execute a diagnostic TypeScript cell." },
   { name: "/branch", aliases: [], category: "notebook", usage: "/branch CURSOR [NAME]", summary: "Fork without replaying effects." },
   { name: "/resume", aliases: [], category: "notebook", usage: "/resume [BRANCH]", summary: "Resume a retained branch." },
-  { name: "/compact", aliases: [], category: "notebook", usage: "/compact", summary: "Commit a source-linked context derivation." },
+  { name: "/context", aliases: [], category: "notebook", usage: "/context", summary: "Inspect context capacity and effective compaction provenance." },
+  { name: "/compact", aliases: [], category: "notebook", usage: "/compact [extractive|summary] [PRESERVE...]", summary: "Commit a guided source-linked context derivation." },
   { name: "/memory", aliases: [], category: "status", usage: "/memory [QUERY]", summary: "Inspect scoped memory." },
   { name: "/skills", aliases: [], category: "status", usage: "/skills [show|preview|install|test|enable|disable|remove|propose]", summary: "Inspect and manage the unified workspace/profile skill catalog." },
   { name: "/skill", aliases: [], category: "status", usage: "/skill ENTRY_ID JSON", summary: "Invoke a retained skill version." },
@@ -267,7 +268,13 @@ Confirmation digest: ${preview.confirmationDigest}
     if (line.startsWith("/rollback ")) { const [proposalId,...reason]=line.slice(10).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/rollback requires PROPOSAL_ID REASON");this.#json(await this.client.rollback(this.#sessionId,this.#branchId,proposalId,reason.join(" ")));return "continue"; }
     if (line.startsWith("/branch ")) { const [,cursor,...name]=line.split(/\s+/);if(!cursor)throw new Error("/branch requires CURSOR [NAME]");const fork=await this.client.fork(this.#sessionId,this.#branchId,cursor,name.join(" ")||undefined);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,fork.branchId);await this.#switch(this.#sessionId,fork.branchId);return "continue"; }
     if (line === "/resume" || line.startsWith("/resume ")) { const branch=line.slice(7).trim()||this.#branchId;await this.client.resume(this.#sessionId,branch);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,branch);await this.#switch(this.#sessionId,branch);return "continue"; }
-    if (line === "/compact") { this.#json(await this.client.compact(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/context") { this.#json(await this.client.inspectContext(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/compact" || line.startsWith("/compact ")) {
+      const [, strategyName, ...guidance] = line.split(/\s+/);
+      const strategy = strategyName === "summary" ? "model-summary-v1" : "deterministic-extractive-v1";
+      const instructions = strategyName === "summary" || strategyName === "extractive" ? guidance.join(" ") : [strategyName,...guidance].filter(Boolean).join(" ");
+      this.#json(await this.client.compact(this.#sessionId,this.#branchId,{strategy,...(instructions ? {instructions}: {})}));return "continue";
+    }
     if (line === "/sync") { this.#json(await this.client.syncNow());return "continue"; }
     if (line === "/sync-status") { this.#json(await this.client.syncStatus());return "continue"; }
     if (line === "/conflicts") { this.#json(await this.client.syncConflicts("unresolved"));return "continue"; }

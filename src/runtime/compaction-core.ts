@@ -67,6 +67,8 @@ export interface PlanCompactionSourcesOptions {
   readonly sessionId: string;
   readonly branchId: string;
   readonly throughCursor: string;
+  /** Explicit branch-lineage mode retains original source branch envelopes. */
+  readonly allowLineageBranches?: boolean;
 }
 
 export type CompactionPlanningErrorCode = "protected-only" | "no-progress";
@@ -182,8 +184,8 @@ export function planCompactionSources(
   const records: FrozenCompactionSourceRecord[] = [];
   for (const source of sources) {
     validateSourceShape(source);
-    if (source.sessionId !== options.sessionId || source.branchId !== options.branchId) {
-      throw new TypeError("Compaction sources must all belong to the requested session and branch");
+    if (source.sessionId !== options.sessionId || (!options.allowLineageBranches && source.branchId !== options.branchId)) {
+      throw new TypeError("Compaction sources must all belong to the requested session and branch unless lineage mode is explicit");
     }
     if (seenIds.has(source.id)) throw new TypeError(`Duplicate compaction source event ID: ${source.id}`);
     seenIds.add(source.id);
@@ -239,6 +241,7 @@ export interface ExactCompactionSourceManifest {
   readonly throughCursor: string;
   readonly sourceEventIds: readonly string[];
   readonly sourceDigest: string;
+  readonly allowLineageBranches?: boolean;
 }
 
 /** Captures the exact source set required to reproduce a derived summary. */
@@ -251,8 +254,8 @@ export function createExactSourceManifest(
   validateCursor(options.throughCursor, "manifest throughCursor");
   const ordered = canonicalOrderedSources(sources);
   for (const source of ordered) {
-    if (source.sessionId !== options.sessionId || source.branchId !== options.branchId) {
-      throw new CompactionRematerializationError("invalid-manifest", "Manifest sources cross a session or branch boundary");
+    if (source.sessionId !== options.sessionId || (!options.allowLineageBranches && source.branchId !== options.branchId)) {
+      throw new CompactionRematerializationError("invalid-manifest", "Manifest sources cross a session or branch boundary without explicit lineage mode");
     }
     if (compareCursors(source.cursor, options.throughCursor) > 0) {
       throw new CompactionRematerializationError("source-after-cursor", `Source ${source.eventId} is after the manifest cursor`);
@@ -265,6 +268,7 @@ export function createExactSourceManifest(
     throughCursor: options.throughCursor,
     sourceEventIds: Object.freeze(ordered.map((source) => source.eventId)),
     sourceDigest: canonicalSourceDigest(ordered),
+    ...(options.allowLineageBranches ? { allowLineageBranches: true } : {}),
   });
 }
 
@@ -281,7 +285,7 @@ export function validateRematerializedSources(
   const retainedById = new Map<string, CompactionSourceInput>();
   for (const source of retainedSources) {
     validateSourceShape(source);
-    if (source.sessionId !== manifest.sessionId || source.branchId !== manifest.branchId) continue;
+    if (source.sessionId !== manifest.sessionId) continue;
     if (retainedById.has(source.id)) {
       throw new CompactionRematerializationError("duplicate-source", `Retained source ${source.id} appears more than once`);
     }

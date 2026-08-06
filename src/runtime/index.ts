@@ -21,3 +21,5 @@ export * from "./effect-reconciliation.ts";
 export * from "./refiner.ts";
 export * from "./refinement-context.ts";
 export * from "./refinement-triggers.ts";
+export * from "./context-compaction.ts";
+export * from "./context-window.ts";

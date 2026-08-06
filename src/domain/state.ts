@@ -1,5 +1,5 @@
 import type {
-  AgentRunGoalMode, AgentRunInputKind, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextRecordReference, EffectOutcome, GoalGateStatus,
+  AgentRunGoalMode, AgentRunInputKind, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
   FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, ModelConfiguration, RecursiveModelOutcome, RecursiveModelStatus,
   RefinementReviewLifecycleStatus, ScheduleStatus, SessionStatus, TaskStatus, Usage, WakeStatus, WorkingValue,
 } from "./events.ts";
@@ -12,8 +12,16 @@ export interface CellState { readonly id: string; readonly code: string; readonl
 export interface WorkingValueState { readonly name: string; readonly version: number; readonly value: WorkingValue; readonly eventId: string; }
 export interface EffectState { readonly id: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotencyKey: string; readonly idempotent: boolean; readonly attempts: number; readonly status: "requested" | "started" | EffectOutcome; readonly output?: JsonValue; readonly error?: string; readonly eventId: string; }
 export interface EffectReconciliationState { readonly id: string; readonly effectId: string; readonly assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; readonly summary: string; readonly evidence?: JsonValue; readonly recordedBy: string; readonly recordedAt: string; readonly eventId: string; }
-export interface ModelCallState { readonly id: string; readonly contextId: string; readonly effectId: string; readonly provider: string; readonly model: string; readonly chunks: string[]; readonly status: "requested" | EffectOutcome; readonly responseMessageId?: string; readonly finishReason?: string; readonly usage?: Usage; readonly error?: string; readonly eventId: string; }
-export interface ContextState { readonly id: string; readonly records: ContextRecordReference[]; readonly contentHash: string; readonly eventId: string; }
+export interface ModelCallState { readonly id: string; readonly contextId: string; readonly effectId: string; readonly provider: string; readonly model: string; readonly attempt: number; readonly retryOfCallId?: string; readonly contextWindow?: ContextCapacityProvenance; readonly chunks: string[]; readonly status: "requested" | EffectOutcome; readonly responseMessageId?: string; readonly finishReason?: string; readonly usage?: Usage; readonly error?: string; readonly eventId: string; }
+export interface ContextState { readonly id: string; readonly records: ContextRecordReference[]; readonly contentHash: string; readonly derivation?: ContextCompactionDerivation; readonly eventId: string; }
+export interface ContextCompactionState {
+  readonly id: string; readonly strategy: ContextCompactionStrategy; readonly reason: ContextCompactionReason;
+  readonly requestedBy: ContextCompactionRequester; readonly instructions?: string; readonly throughCursor: string;
+  readonly sourceEventIds: string[]; readonly sourceDigest: string; readonly frozenSources: FrozenContextCompactionSource[];
+  readonly capacity?: ContextCapacityProvenance; readonly ancestorContextId?: string; readonly rematerializedFromContextId?: string;
+  readonly status: "requested" | "completed" | "failed" | "unknown" | "protected-only" | "no-progress";
+  readonly requestEventId: string; readonly contextId?: string; readonly effectIds?: string[]; readonly error?: string; readonly eventId: string;
+}
 export interface BudgetState { readonly limits: BudgetLimits; readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number; readonly exceeded: boolean; }
 
 export interface TaskState {
@@ -64,9 +72,14 @@ export interface RefinementReviewState {
 }
 export interface RefinementTriggerConsumptionState { readonly triggerKey: string; readonly lastConsumedEvidenceCursor: string; readonly reviewId: string; readonly eventId: string; }
 
+export interface AgentRunModelAttemptState {
+  readonly attempt: number; readonly contextId: string; readonly callId: string; readonly effectId: string;
+  readonly reason: "initial" | "proactive-compaction" | "provider-overflow"; readonly estimatedInputTokens: number;
+  readonly contextWindow: ContextCapacityProvenance; readonly retryOfCallId?: string; readonly eventId: string;
+}
 export interface AgentRunStepState {
   readonly id: string; readonly ordinal: number; readonly contextId: string; readonly callId: string;
-  readonly effectId: string; readonly actionId: string; readonly observationEventIds: string[];
+  readonly effectId: string; readonly actionId: string; readonly observationEventIds: string[]; readonly modelAttempts: AgentRunModelAttemptState[];
   readonly action?: AgentAction; readonly rawAction?: string; readonly rejection?: string; readonly eventId: string;
 }
 export interface AgentRunInputRequestState {
@@ -83,12 +96,12 @@ export interface AgentRunState {
 }
 
 export interface AgentState {
-  readonly reducerVersion: 5; readonly sessionId: string; readonly workspaceId: string; readonly sessionName?: string | null; readonly branch: BranchState;
+  readonly reducerVersion: 6; readonly sessionId: string; readonly workspaceId: string; readonly sessionName?: string | null; readonly branch: BranchState;
   readonly parentSessionId: string | null; readonly parentBranchId: string | null; readonly rootSessionId: string;
   readonly depth: number; readonly taskId: string | null;
   readonly model: ModelConfiguration; readonly status: SessionStatus; readonly cursor: string; readonly appliedEventIds: string[];
   readonly messages: MessageState[]; readonly cells: Record<string, CellState>; readonly workingValues: Record<string, WorkingValueState>;
-  readonly artifacts: Record<string, ArtifactReference>; readonly effects: Record<string, EffectState>; readonly effectReconciliations: Record<string, EffectReconciliationState>; readonly contexts: Record<string, ContextState>;
+  readonly artifacts: Record<string, ArtifactReference>; readonly effects: Record<string, EffectState>; readonly effectReconciliations: Record<string, EffectReconciliationState>; readonly contexts: Record<string, ContextState>; readonly compactions: Record<string, ContextCompactionState>;
   readonly modelCalls: Record<string, ModelCallState>; readonly budget: BudgetState;
   readonly tasks: Record<string, TaskState>; readonly mailbox: Record<string, MailboxMessageState>;
   readonly terminalNotices: Record<string, TerminalNoticeState>; readonly documents: Record<string, DocumentState>;

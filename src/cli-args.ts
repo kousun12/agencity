@@ -7,7 +7,7 @@ import {
 
 export const PRODUCT_CLI_COMMANDS = [
   "product", "help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules",
-  "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills",
+  "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills", "context", "compact",
 ] as const;
 export const LEGACY_CLI_COMMANDS = [
   "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve",
@@ -20,7 +20,7 @@ const PRODUCT_ROUTE_COMMANDS = new Set<string>(PRODUCT_CLI_COMMANDS.filter((item
 const VALUE_OPTIONS = new Set([
   "state-dir", "db", "artifacts", "workspace-root", "workspace",
   "session", "branch", "cursor", "name", "select", "model", "goal", "port", "profile", "sync-url", "replica", "credential-ref", "sync-interval",
-  "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by", "reconciliation-id", "evidence",
+  "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by", "reconciliation-id", "evidence", "strategy", "from-context",
 ]);
 const BOOLEAN_OPTIONS = new Set([
   "help", "version", "new", "demo", "json", "detach", "restart-console-after-cell", "exclusive-artifacts",

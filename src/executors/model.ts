@@ -5,7 +5,11 @@ import { result } from "./contract.ts";
 
 export interface ModelResponse { readonly text: string; readonly finishReason: string; readonly usage: Usage; }
 export interface ModelOutputDelta { readonly text: string; }
-export interface ModelProviderCapabilities { readonly streaming: boolean; }
+export interface ModelProviderCapabilities {
+  readonly streaming: boolean;
+  readonly contextWindowTokens?: number;
+  readonly contextCapacitySource?: "provider-metadata" | "model-catalog" | "operator-configuration";
+}
 export interface ModelProviderDescriptor {
   readonly name: string;
   readonly displayName: string;
@@ -32,7 +36,7 @@ export interface ModelProvider {
 export class EchoModelProvider implements ModelProvider {
   readonly name = "echo";
   readonly displayName = "Echo (demo fixture; non-streaming)";
-  readonly capabilities = { streaming: false } as const;
+  readonly capabilities = { streaming: false, contextWindowTokens: 128_000, contextCapacitySource: "model-catalog" } as const;
   async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     let text = "";
@@ -58,7 +62,7 @@ export class EchoModelProvider implements ModelProvider {
 export class ScriptedAgentActionProvider implements ModelProvider {
   readonly name: string;
   readonly displayName: string;
-  readonly capabilities = { streaming: false } as const;
+  readonly capabilities = { streaming: false, contextWindowTokens: 128_000, contextCapacitySource: "model-catalog" } as const;
   constructor(
     readonly script: Readonly<Record<number, AgentAction | string>> | readonly (AgentAction | string)[],
     name = "structured-action",
@@ -75,6 +79,14 @@ export class ScriptedAgentActionProvider implements ModelProvider {
   }
 }
 
+export class ModelProviderContextWindowOverflowError extends Error {
+  readonly code = "provider-confirmed-context-window-overflow" as const;
+  constructor(readonly provider: string, readonly model: string) {
+    super(`Provider ${provider}/${model} confirmed that the context window overflowed`);
+    this.name = "ModelProviderContextWindowOverflowError";
+  }
+}
+
 export interface OpenAICompatibleOptions {
   readonly baseUrl: string;
   readonly apiKey: () => string | undefined;
@@ -85,6 +97,9 @@ export interface OpenAICompatibleOptions {
    * non-streaming request because that could duplicate a non-idempotent call.
    */
   readonly streaming?: boolean;
+  /** Exact operator/provider metadata only; unknown capacity is represented by omission. */
+  readonly contextWindowTokens?: number;
+  readonly contextCapacitySource?: "provider-metadata" | "model-catalog" | "operator-configuration";
 }
 export class OpenAICompatibleProvider implements ModelProvider {
   readonly name: string;
@@ -93,7 +108,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
   constructor(readonly options: OpenAICompatibleOptions) {
     this.name = options.providerName ?? "openai";
     const streaming = options.streaming ?? true;
-    this.capabilities = { streaming };
+    this.capabilities = {
+      streaming,
+      ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens, contextCapacitySource: options.contextCapacitySource ?? "operator-configuration" }),
+    };
     this.displayName = `${this.name} (OpenAI-compatible; ${streaming ? "streaming" : "non-streaming"})`;
   }
   async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
@@ -104,7 +122,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
       method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
       body: JSON.stringify({ model: configuration.model, messages, temperature: configuration.temperature, max_tokens: configuration.maxOutputTokens }), signal,
     });
-    if (!response.ok) throw new Error(`Model HTTP ${response.status}: ${await response.text()}`);
+    if (!response.ok) {
+      const body = await response.text();
+      if ((response.status === 400 || response.status === 413 || response.status === 422) && /context(?:_| )?(?:length|window)|maximum context|too many tokens|token limit/i.test(body)) throw new ModelProviderContextWindowOverflowError(this.name, configuration.model);
+      throw new Error(`Model HTTP ${response.status}: ${body}`);
+    }
     const body = await response.json() as { choices?: Array<{ message?: { content?: string }; finish_reason?: string }>; usage?: { prompt_tokens?: number; completion_tokens?: number }; cost_usd?: number };
     const choice = body.choices?.[0];
     return { text: choice?.message?.content ?? "", finishReason: choice?.finish_reason ?? "stop", usage: { inputTokens: body.usage?.prompt_tokens ?? 0, outputTokens: body.usage?.completion_tokens ?? 0, costUsd: body.cost_usd ?? 0 } };
@@ -136,7 +158,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
       }),
       signal,
     });
-    if (!response.ok) throw new Error(`Model HTTP ${response.status}: ${await response.text()}`);
+    if (!response.ok) {
+      const body = await response.text();
+      if ((response.status === 400 || response.status === 413 || response.status === 422) && /context(?:_| )?(?:length|window)|maximum context|too many tokens|token limit/i.test(body)) throw new ModelProviderContextWindowOverflowError(this.name, configuration.model);
+      throw new Error(`Model HTTP ${response.status}: ${body}`);
+    }
     if (!response.body) throw new Error("Model streaming response has no body");
 
     let text = "";
@@ -291,8 +317,25 @@ export class ModelExecutor implements EffectExecutor {
     return [...this.#providers.values()].map((provider) => ({
       name: provider.name,
       displayName: provider.displayName ?? provider.name,
-      capabilities: { streaming: provider.capabilities?.streaming === true },
+      capabilities: {
+        streaming: provider.capabilities?.streaming === true,
+        ...(provider.capabilities?.contextWindowTokens === undefined ? {} : {
+          contextWindowTokens: provider.capabilities.contextWindowTokens,
+          contextCapacitySource: provider.capabilities.contextCapacitySource ?? "provider-metadata",
+        }),
+      },
     }));
+  }
+
+  contextCapacity(configuration: ModelConfiguration): Readonly<{ provider: string; model: string; source: "provider-metadata" | "model-catalog" | "operator-configuration" | "unknown"; contextWindowTokens: number | null }> {
+    const provider = this.#providers.get(configuration.provider);
+    const capacity = provider?.capabilities?.contextWindowTokens;
+    return Object.freeze({
+      provider: configuration.provider,
+      model: configuration.model,
+      source: capacity === undefined ? "unknown" : provider?.capabilities?.contextCapacitySource ?? "provider-metadata",
+      contextWindowTokens: capacity ?? null,
+    });
   }
 
   async execute(request: Parameters<EffectExecutor["execute"]>[0], context: Parameters<EffectExecutor["execute"]>[1]): Promise<ExecutionResult> {
@@ -325,7 +368,10 @@ export class ModelExecutor implements EffectExecutor {
       } finally { release(); }
     } catch (error) {
       if (context.signal.aborted || error instanceof DOMException && error.name === "AbortError") return result("cancelled", undefined, "Model call cancelled");
-      return result("failed", undefined, error instanceof Error ? error.message : String(error));
+      const classification = error instanceof ModelProviderContextWindowOverflowError
+        ? { provider: error.provider, model: error.model, code: "provider-confirmed-context-window-overflow" }
+        : { provider: request.input && typeof request.input === "object" && !Array.isArray(request.input) && request.input.configuration && typeof request.input.configuration === "object" && !Array.isArray(request.input.configuration) && typeof request.input.configuration.provider === "string" ? request.input.configuration.provider : "unknown", model: request.input && typeof request.input === "object" && !Array.isArray(request.input) && request.input.configuration && typeof request.input.configuration === "object" && !Array.isArray(request.input.configuration) && typeof request.input.configuration.model === "string" ? request.input.configuration.model : "unknown", code: "generic" };
+      return result("failed", { errorClassification: classification }, error instanceof Error ? error.message : String(error));
     }
   }
 }

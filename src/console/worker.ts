@@ -202,6 +202,10 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     resume: (scheduleId: string, nextTickAt?: string) => call("schedules.resume", [scheduleId, nextTickAt]),
     clear: (scheduleId: string, reason?: string) => call("schedules.clear", [scheduleId, reason]),
   };
+  const context = {
+    inspect: () => call("context.inspect", []),
+    compact: (options: Record<string, unknown> = {}) => call("context.compact", [options]),
+  };
   const rlmId = (handle: string | { handleId?: unknown }): string => {
     const id = typeof handle === "string" ? handle : handle?.handleId;
     if (typeof id !== "string" || !id) throw new Error("Recursive model handle must contain a non-empty handleId");
@@ -250,7 +254,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       cells: unknown,
       rlm: unknown,
     ) => Promise<unknown>;
-    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, rlm, inspect } as unknown as ConsoleSdk;
+    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, rlm, inspect } as unknown as ConsoleSdk;
     const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm);
     response = { type: "result", executionId: message.executionId, ok: true, observation: encodeObservation(value) };
   } catch (error) {
