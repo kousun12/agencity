@@ -82,7 +82,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
 | FU-012 | Expose durable family messaging and retained subagent follow-up to the model | In progress | FU-004 |
 | FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
-| FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Proposed | FU-004 |
+| FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | In progress | FU-004 |
 | FU-015 | Keep detached sessions executing in a background service | In progress | FU-001, FU-004 |
 | FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | In progress | FU-003, FU-004 |
 | FU-017 | Add skill creation, installation, and management as a product surface | In progress | FU-004 |
@@ -737,7 +737,7 @@ The ergonomic `rlm` API is backed by the ordinary recursive-agent and outbox ser
 
 ## FU-014 — Drive goals, completion gates, heartbeats, and schedules through product runs
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
