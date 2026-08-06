@@ -1,22 +1,40 @@
-# Local skill bundles
+# Local skills and the unified catalog
 
-**Status:** FU-017 first tranche (parser and import validation only)
+**Status:** FU-017 product surface implemented
+**Trust boundary:** trusted-local; executable skills are not an OS sandbox
 
-**Trust boundary:** trusted-local
+Agencity exposes one catalog spanning workspace harness skills and separately
+owned profile/global skills. Each product record has a human name, immutable
+entry/version identity, canonical definition digest, scope, provenance, latest
+test summary, and availability. Removed versions and prior invocations remain
+retained and attributable.
 
-Agencity has a native, deliberately small local bundle format for moving one
-TypeScript skill into a later installation flow. It is not compatible with
-Prime Agent skills or another harness's packages.
+## Product commands
 
-This tranche only reads and validates a directory. It does **not** install,
-activate, compile, test, import, or execute the TypeScript, and it is not yet
-wired to `agencity skills`, the TUI, or the public runtime barrel. Those product
-surfaces, explicit confirmation, durable provenance, enable/disable/remove,
-and scope selection remain follow-up FU-017 work.
+```sh
+agencity skills list
+agencity skills show NAME_OR_ID
+agencity skills test NAME_OR_ID
+agencity skills disable NAME_OR_ID
+agencity skills enable NAME_OR_ID
+agencity skills remove NAME_OR_ID
+agencity skills propose "package the repeated formatter workflow"
+```
 
-## Directory format
+The TUI exposes the same catalog with `/skills` and
+`/skills show|test|enable|disable|remove|propose`. Console code uses
+`sdk.skills.list()`, `get(nameOrId)`, `invoke(nameOrId, input)`, `test(nameOrId)`,
+and `propose(instructions, scope)`.
 
-A bundle is a local directory containing exactly two ordinary files:
+Resolution is deterministic: an exactly exposed candidate wins, followed by
+session-local, workspace, user/global harness, and profile/global scope. A tie
+at one precedence is a typed ambiguity rather than an incidental row-order
+choice. Disabled and removed skills are omitted from normal model context and
+name resolution, and exact-ID invocation is rejected too.
+
+## Installing a local directory
+
+A native bundle contains exactly two ordinary, non-symlink files:
 
 ```text
 my-skill/
@@ -24,22 +42,31 @@ my-skill/
 └── skill.ts
 ```
 
-No other file or directory is accepted. In particular, bundles cannot contain
-`package.json`, package-manager metadata, install/postinstall hooks, vendored
-dependencies, source maps, or assets. The bundle directory, manifest, and
-source cannot be symlinks. The manifest entry must be exactly `skill.ts`; an
-absolute path, traversal, alternate filename, URL, npm specifier, or other
-remote source is rejected. Resolved manifest and source paths must remain
-inside the real bundle directory.
+Preview the directory and copy the exact source digest printed by the CLI:
 
-The source is UTF-8, non-empty, and at most 512 KiB. A later skill test/install
-flow is responsible for compiling it and checking that it exports the runtime
-entrypoint expected by the existing skill executor.
+```sh
+agencity skills install ./my-skill --scope workspace   --confirmation <64-character-source-sha256>
+agencity skills install ./my-skill --scope profile   --confirmation <64-character-source-sha256>
+```
+
+An interactive CLI prints the trusted-local warning and asks the user to type
+the complete digest. Non-interactive installation fails unless
+`--confirmation` exactly matches the bytes that were inspected. The parser
+re-reads the bundle when installing, so a change after preview changes the
+required digest. Directory, manifest, and source provenance plus both byte
+digests are retained.
+
+Workspace installation uses the ordinary governed harness lifecycle: proposal,
+validation, pre-exposure test, bounded allocations, exact-branch exposure,
+post-exposure same-version retests, objective observations, and promotion.
+Workspace promotion still requires two distinct allocations and distinct
+durable evidence. Profile installation tests the staged immutable definition
+through the same skill outbox before `ProfileStore.stageGlobalSkill`; a failed
+test can only produce a disabled row.
 
 ## Manifest schema version 1
 
-Unknown fields are errors at every defined manifest, test-case, and input-schema
-level. A minimal example is:
+Unknown fields are errors. A minimal manifest is:
 
 ```json
 {
@@ -50,77 +77,53 @@ level. A minimal example is:
   "runtime": "bun",
   "inputSchema": {
     "type": "object",
-    "properties": {
-      "value": { "type": "number" }
-    },
+    "properties": { "value": { "type": "number" } },
     "required": ["value"],
     "additionalProperties": false
   },
   "permissions": [],
   "tests": [
-    {
-      "name": "doubles two",
-      "input": { "value": 2 },
-      "expected": { "doubled": 4 }
-    }
+    { "name": "doubles two", "input": { "value": 2 }, "expected": { "doubled": 4 } }
   ]
 }
 ```
 
-Rules and bounds:
+Names use bounded lower-kebab-case. Source is non-empty UTF-8 up to 512 KiB;
+the manifest is at most 64 KiB. There must be 1–64 uniquely named tests. Input
+schemas use the bounded subset `type`, `properties`, `required`,
+`additionalProperties`, `items`, `enum`, `minLength`, `maxLength`, `pattern`,
+`minimum`, and `maximum`. Permissions must be unique members of the runtime's
+configured allowlist. Wildcards and authority/policy permissions are always
+forbidden.
 
-- `schemaVersion` is exactly `1`.
-- `name` is a trimmed, lower-kebab name of 1–64 characters.
-- `description` is trimmed, non-empty, and at most 2 KiB.
-- `entry` is exactly `skill.ts`; `runtime` is exactly `bun`.
-- `inputSchema` is required and uses the subset enforced by the current skill
-  runtime: `type`, `properties`, `required`, `additionalProperties`, `items`,
-  `enum`, `minLength`, `maxLength`, `pattern`, `minimum`, and `maximum`.
-  Schema nesting and collection sizes are bounded.
-- `permissions` contains at most 32 unique, trimmed strings. The parser accepts
-  a permission only when it appears in the caller-supplied runtime allowlist.
-  The default allowlist is empty. Wildcard and immutable policy/authority names
-  remain forbidden even if a caller mistakenly lists them.
-- `tests` contains 1–64 uniquely named cases. Every case has `input` and exactly
-  one of `expected` or a non-empty `expectedError`. Inputs and expected values
-  must be finite JSON values.
-- The manifest is valid UTF-8 and at most 64 KiB.
+Absolute/traversing entries, URLs, package metadata, install hooks, assets,
+directories, and symlinks are rejected. The format is Agencity-native and is
+not compatible with Prime Agent or package registries.
 
-These constraints are intentionally stricter than, and produce a
-`TypeScriptSkillDefinition` compatible with, existing harness validation. An
-import cannot weaken the runtime permission allowlist or replace the governed
-harness activation and test lifecycle.
+## Execution and credentials
 
-## Read-only parser result
+Every test and invocation goes through the existing durable `skill` outbox,
+uses the same strict input schema and runtime permission allowlist, and runs
+with the secret-stripped executor environment. Known brokered secret values and
+recognizable raw credentials are rejected from manifests, source, provenance,
+context, profile rows, and events. A credential reference is not permission.
 
-`parseSkillImportBundle` is defined in `src/runtime/skill-import.ts`. Its
-`SkillImportBundle` result contains:
+These controls do **not** make skill TypeScript safe against hostile code.
+Skills execute as trusted-local code with the OS authority of the Agencity
+process. The worker is process/protocol isolation, not an OS sandbox. Inspect
+source before confirming its digest, and run the entire runtime in an external
+sandbox when hostile-code isolation is required.
 
-- schema version, bounded name, and a native `TypeScriptSkillDefinition`;
-- canonical local-directory provenance;
-- byte lengths and lowercase 64-character SHA-256 values for the exact
-  manifest and source bytes read from disk; and
-- trusted-local warning metadata with `requiresExplicitConfirmation: true`.
+## Lifecycle and compatibility
 
-Hashes are computed over original bytes. Whitespace and line-ending changes
-therefore change the relevant digest; JSON normalization is not involved. The
-parser supplies evidence for a later durable import record, not authenticity
-or a signature.
+Disable and re-enable change only availability; identity, version, definition
+digest, provenance, test evidence, and invocation history remain unchanged.
+Removal is terminal for that installed version but does not delete history.
+Workspace actions are canonical `SkillAvailabilityChanged` events whose table
+projection is rebuilt during recovery. Profile actions and versions remain
+append-only in the profile store.
 
-The parser has no subprocess, compiler, package-manager, dynamic import, or
-skill invocation path. It performs only bounded filesystem reads, strict
-validation, hashing, and construction of the return value.
-
-## Credentials and authority
-
-Both exact currently brokered secret values and recognizable raw credential
-material are rejected from the manifest and source by Agencity's existing
-security helpers. Credentials must never be embedded in a bundle. A reference
-name is not authority, and importing a skill cannot add a permission.
-
-Even after those checks, a skill is executable trusted-local TypeScript, **not
-sandboxed code**. When a later product flow executes it, it has the OS authority
-of the Agencity process, subject to the existing effect/environment handling.
-A UI or CLI must display the returned warning, require explicit user
-confirmation, and carry the runtime permission allowlist forward before it
-creates any durable proposal or installation record.
+Legacy profile skill rows are migrated without rewriting their original JSON.
+They appear only in management views as quarantined legacy records; they do not
+enter normal context or invocation. Reinstall them as a native, tested bundle
+to make them executable.

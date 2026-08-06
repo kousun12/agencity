@@ -184,10 +184,23 @@ export class ProtocolServer {
           if (request.method === "POST" && parts[3] && parts[4] === "approve-rollback") { const body=await jsonBody(request); return Response.json(await this.supervisor.harness.approveRollback(sessionId,branchId,parts[3],{ ...(typeof body.approvedBy === "string" ? { approvedBy: body.approvedBy } : {}), role: body.role === "admin" ? "admin" : "owner", ...(typeof body.note === "string" ? { note: body.note } : {}) })); }
           if (request.method === "POST" && parts[3] && parts[4] === "rollback") { const body=await jsonBody(request); return Response.json(await this.supervisor.harness.rollback(sessionId,branchId,parts[3],String(body.reason ?? ""))); }
         }
-        if (parts[2] === "skills" && parts[3] && branchId && request.method === "POST") {
-          const body=await jsonBody(request);
-          if (parts[4] === "invoke") return Response.json(await this.supervisor.skills.invoke(sessionId,branchId,parts[3],body.input as any,(body.options ?? {}) as any));
-          if (parts[4] === "test") return Response.json(await this.supervisor.skills.test(sessionId,branchId,parts[3],typeof body.versionId === "string" ? body.versionId : undefined));
+        if (parts[2] === "skills" && branchId) {
+          if (request.method === "GET" && !parts[3]) return Response.json(await this.supervisor.skillManagement.list(sessionId,branchId,{includeUnavailable:url.searchParams.get("includeUnavailable")==="true"}));
+          if (request.method === "POST" && parts[3] === "import") return Response.json(await this.supervisor.skillManagement.installLocal(sessionId,branchId,await jsonBody(request) as any));
+          if (request.method === "POST" && parts[3] === "preview-import") { const body=await jsonBody(request); return Response.json(await this.supervisor.skillManagement.previewImport(String(body.directory ?? ""))); }
+          if (request.method === "POST" && parts[3] === "propose") { const body=await jsonBody(request); return Response.json(await this.supervisor.skillManagement.propose(sessionId,branchId,String(body.instructions ?? ""),body.scope === "local" ? "local" : "workspace")); }
+          if (parts[3]) {
+            const reference=decodeURIComponent(parts[3]);
+            if (request.method === "GET" && !parts[4]) return Response.json(await this.supervisor.skillManagement.get(sessionId,branchId,reference));
+            if (request.method === "POST") {
+              const body=await jsonBody(request);
+              if (parts[4] === "invoke") return Response.json(await this.supervisor.skills.invoke(sessionId,branchId,reference,body.input as any,(body.options ?? {}) as any));
+              if (parts[4] === "test") return Response.json(await this.supervisor.skillManagement.test(sessionId,branchId,reference));
+              if (parts[4] === "enable") return Response.json(await this.supervisor.skillManagement.enable(sessionId,branchId,reference));
+              if (parts[4] === "disable") return Response.json(await this.supervisor.skillManagement.disable(sessionId,branchId,reference));
+              if (parts[4] === "remove") return Response.json(await this.supervisor.skillManagement.remove(sessionId,branchId,reference));
+            }
+          }
         }
         if (parts[2] === "specs" && parts[3] && parts[4] === "spawn" && branchId && request.method === "POST") return Response.json(await this.supervisor.specs.spawn(sessionId,branchId,parts[3],await jsonBody(request) as any));
 

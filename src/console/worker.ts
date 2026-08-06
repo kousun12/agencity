@@ -164,7 +164,13 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     list: (options: JsonValue = {}) => call("harness.list", [options]),
     history: (entryId: string) => call("harness.history", [entryId]),
   };
-  const skills = { invoke: (entryId:string,input:JsonValue,options:JsonValue={}) => call("skills.invoke",[entryId,input,options]), test: (entryId:string,versionId?:string) => call("skills.test",[entryId,versionId]) };
+  const skills = {
+    list: (options:JsonValue={}) => call("skills.list",[options]),
+    get: (nameOrId:string) => call("skills.get",[nameOrId]),
+    invoke: (nameOrId:string,input:JsonValue,options:JsonValue={}) => call("skills.invoke",[nameOrId,input,options]),
+    test: (nameOrId:string) => call("skills.test",[nameOrId]),
+    propose: (instructions:string,scope:"local"|"workspace"="workspace") => call("skills.propose",[instructions,scope]),
+  };
   const specs = { spawn: (entryId:string,input:JsonValue={}) => call("specs.spawn",[entryId,input]) };
   const agents = {
     spawn: (input: unknown) => call("agents.spawn", [input]),

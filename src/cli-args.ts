@@ -7,7 +7,7 @@ import {
 
 export const PRODUCT_CLI_COMMANDS = [
   "product", "help", "version", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules",
-  "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine",
+  "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills",
 ] as const;
 export const LEGACY_CLI_COMMANDS = [
   "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve",

@@ -15,7 +15,7 @@ export type TerminalAgentClient = Pick<AgentClient,
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
   "heartbeats" | "createHeartbeat" | "pauseHeartbeat" | "resumeHeartbeat" | "cancelHeartbeat" |
   "schedules" | "createSchedule" | "pauseSchedule" | "resumeSchedule" | "clearSchedule" |
-  "memoryList" | "memorySearch" | "harnessList" | "refinements" | "requestRefinement" | "refinementReviews" | "refinementPolicy" | "setAutomaticRefinement" | "userCorrection" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
+  "memoryList" | "memorySearch" | "harnessList" | "listSkills" | "getSkill" | "previewSkillImport" | "installSkill" | "enableSkill" | "disableSkill" | "removeSkill" | "proposeSkill" | "refinements" | "requestRefinement" | "refinementReviews" | "refinementPolicy" | "setAutomaticRefinement" | "userCorrection" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
   "syncStatus" | "syncNow" | "syncConflicts" | "resolveSyncConflict" | "recoverySummary" | "unknownEffects" |
   "inspectUnknownEffect" | "reconcileUnknownEffect"
 >;
@@ -63,7 +63,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/resume", aliases: [], category: "notebook", usage: "/resume [BRANCH]", summary: "Resume a retained branch." },
   { name: "/compact", aliases: [], category: "notebook", usage: "/compact", summary: "Commit a source-linked context derivation." },
   { name: "/memory", aliases: [], category: "status", usage: "/memory [QUERY]", summary: "Inspect scoped memory." },
-  { name: "/skills", aliases: [], category: "status", usage: "/skills", summary: "Inspect active skills." },
+  { name: "/skills", aliases: [], category: "status", usage: "/skills [show|preview|install|test|enable|disable|remove|propose]", summary: "Inspect and manage the unified workspace/profile skill catalog." },
   { name: "/skill", aliases: [], category: "status", usage: "/skill ENTRY_ID JSON", summary: "Invoke a retained skill version." },
   { name: "/skill-test", aliases: [], category: "status", usage: "/skill-test ENTRY_ID [VERSION_ID]", summary: "Run a retained skill test." },
   { name: "/refine", aliases: [], category: "status", usage: "/refine [INSTRUCTIONS|status|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Run a trajectory review; raw proposal JSON is an advanced diagnostic." },
@@ -250,8 +250,12 @@ export class TerminalUI {
     if (line === "/schedules" || line === "/schedule") { this.#json(await this.client.schedules(this.#sessionId,this.#branchId)); return "continue"; }
     if (line.startsWith("/schedule ")) { await this.#schedule(line.slice(10).trim()); return "continue"; }
     if (line === "/memory" || line.startsWith("/memory ")) { const q=line.slice(7).trim();this.#json(q?await this.client.memorySearch(this.#sessionId,this.#branchId,q):await this.client.memoryList(this.#sessionId,this.#branchId));return "continue"; }
-    if (line === "/skills") { this.#json((await this.client.harnessList()).filter((item)=>item.kind==="skill"));return "continue"; }
-    if (line.startsWith("/skill-test ")) { const [entryId,versionId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires ENTRY_ID [VERSION_ID]");this.#json(await this.client.testSkill(this.#sessionId,this.#branchId,entryId,versionId));return "continue"; }
+    if (line === "/skills") { this.#json(await this.client.listSkills(this.#sessionId,this.#branchId,true));return "continue"; }
+    if (line.startsWith("/skills ")) { const [action,reference,...rest]=line.slice(8).trim().split(/\s+/);if(action==="show"&&reference)this.#json(await this.client.getSkill(this.#sessionId,this.#branchId,reference));else if(action==="preview"&&reference){const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);this.#write(`${preview.bundle.warning.message}
+Confirmation digest: ${preview.confirmationDigest}
+`);}else if(action==="install"&&reference){const [scope,digest]=rest;if((scope!=="workspace"&&scope!=="profile")||!digest)throw new Error("/skills install requires DIRECTORY workspace|profile CONFIRMATION_DIGEST");const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);this.#write(`${preview.bundle.warning.message}
+`);if(digest!==preview.confirmationDigest)throw new Error(`Confirmation digest must equal ${preview.confirmationDigest}`);this.#json(await this.client.installSkill(this.#sessionId,this.#branchId,{directory:reference,scope,confirmationDigest:digest,installedBy:"tui-owner"}));}else if(action==="test"&&reference)this.#json(await this.client.testSkill(this.#sessionId,this.#branchId,reference));else if(action==="enable"&&reference)this.#json(await this.client.enableSkill(this.#sessionId,this.#branchId,reference));else if(action==="disable"&&reference)this.#json(await this.client.disableSkill(this.#sessionId,this.#branchId,reference));else if(action==="remove"&&reference)this.#json(await this.client.removeSkill(this.#sessionId,this.#branchId,reference));else if(action==="propose"&&reference)this.#json(await this.client.proposeSkill(this.#sessionId,this.#branchId,[reference,...rest].join(" ")));else throw new Error("/skills requires show|preview|install|test|enable|disable|remove or propose");return "continue"; }
+    if (line.startsWith("/skill-test ")) { const [entryId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires NAME_OR_ID");this.#json(await this.client.testSkill(this.#sessionId,this.#branchId,entryId));return "continue"; }
     if (line.startsWith("/skill ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(7));if(!match)throw new Error("/skill requires ENTRY_ID JSON");this.#json(await this.client.invokeSkill(this.#sessionId,this.#branchId,match[1]!,JSON.parse(match[2]!)));return "continue"; }
     if (line === "/refine") { this.#json(await this.client.requestRefinement(this.#sessionId,this.#branchId));return "continue"; }
     if (line === "/refine status" || line === "/refine history") { this.#json({ reviews: await this.client.refinementReviews(this.#sessionId,this.#branchId), proposals: (await this.client.refinements()).filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId) });return "continue"; }

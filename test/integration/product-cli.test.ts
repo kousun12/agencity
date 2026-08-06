@@ -134,6 +134,7 @@ describe("product CLI", () => {
 
     expect(parseCliArgs(["run", "fix", "it", "--model", "openai/gpt-test"])).toMatchObject({ command: "run", positionals: ["fix", "it"] });
     expect(parseCliArgs(["new", "write", "docs"])).toMatchObject({ command: "new", positionals: ["write", "docs"] });
+    expect(parseCliArgs(["skills", "install", "./bundle", "--scope", "profile", "--confirmation", "abc"])).toMatchObject({ command: "skills", positionals: ["install", "./bundle"] });
     expect(parseCliArgs(["--", "run", "the", "benchmark"])).toMatchObject({ command: "product", positionals: ["run", "the", "benchmark"] });
     expect(parseCliArgs(["run the benchmark"])).toMatchObject({ command: "product", positionals: ["run the benchmark"] });
 

@@ -78,7 +78,13 @@ export interface ToolsSdk {
 }
 export interface MemorySdk { search(query: string, options?: JsonValue): Promise<JsonValue>; create(input: JsonValue | string): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue> }
 export interface HarnessSdk { review(instructions?: string): Promise<JsonValue>; reviews(options?: JsonValue): Promise<JsonValue>; propose(input: JsonValue): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue>; history(entryId: string): Promise<JsonValue> }
-export interface SkillsSdk { invoke(entryId: string, input: JsonValue, options?: JsonValue): Promise<JsonValue>; test(entryId: string, versionId?: string): Promise<JsonValue> }
+export interface SkillsSdk {
+  list(options?: { readonly includeUnavailable?: boolean }): Promise<JsonValue>;
+  get(nameOrId: string): Promise<JsonValue>;
+  invoke(nameOrId: string, input: JsonValue, options?: JsonValue): Promise<JsonValue>;
+  test(nameOrId: string): Promise<JsonValue>;
+  propose(instructions: string, scope?: "local" | "workspace"): Promise<JsonValue>;
+}
 export interface SpecsSdk { spawn(entryId: string, input?: JsonValue): Promise<JsonValue> }
 
 export interface ConsoleAgentSpawnInput {

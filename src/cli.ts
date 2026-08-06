@@ -33,7 +33,7 @@ import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./proto
 import { Supervisor, type AgentRunResult } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills"]);
 
 let activeParsed: ParsedCliArgs | null = null;
 let canonicalHint: { path: AdvancedCommandPath; json: boolean } | null = null;
@@ -138,6 +138,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const reconciliationCommand = parsed.command === "unknown" || parsed.command === "reconcile";
     if (reconciliationCommand && existing.length === 0) throw new ValidationError("No retained session is available for effect reconciliation");
     if (parsed.command === "refine" && existing.length === 0) throw new ValidationError("No retained session is available for trajectory refinement");
+    if (parsed.command === "skills" && existing.length === 0) throw new ValidationError("No retained session is available for skill management");
     const forceNew = parsed.command === "new" || parsed.flags.has("new");
     let selection: { sessionId: string; branchId: string };
     let summary: ProductBranchSummary;
@@ -205,6 +206,10 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       else printValue(await client.requestRefinement(selection.sessionId, selection.branchId, { ...(parsed.positionals.length ? { instructions: parsed.positionals.join(" ") } : {}) }), parsed.flags.has("json"));
       return;
     }
+    if (parsed.command === "skills") {
+      await manageSkillsClient(client,selection.sessionId,selection.branchId,parsed,prompter,interactive);
+      return;
+    }
     if (task) {
       if (!available) throw new ValidationError(`Run blocked: ${remediation}`);
       const goalMode = option("goal") ?? "auto";
@@ -230,6 +235,30 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     // Closing a client is detach-only. The resident service owns durable work.
     prompter.close();
   }
+}
+
+async function manageSkillsClient(client:AgentClient,sessionId:string,branchId:string,parsed:ParsedCliArgs,prompter:ProductPrompter,interactive:boolean):Promise<void>{
+  const [action="list",reference,...rest]=parsed.positionals;
+  if(action==="list"){printValue(await client.listSkills(sessionId,branchId,true),parsed.flags.has("json"));return;}
+  if(action==="show"){if(!reference)throw new ValidationError("skills show requires NAME_OR_ID");printValue(await client.getSkill(sessionId,branchId,reference),parsed.flags.has("json"));return;}
+  if(action==="test"){if(!reference)throw new ValidationError("skills test requires NAME_OR_ID");printValue(await client.testSkill(sessionId,branchId,reference),parsed.flags.has("json"));return;}
+  if(action==="enable"||action==="disable"||action==="remove"){
+    if(!reference)throw new ValidationError(`skills ${action} requires NAME_OR_ID`);
+    const result=action==="enable"?await client.enableSkill(sessionId,branchId,reference):action==="disable"?await client.disableSkill(sessionId,branchId,reference):await client.removeSkill(sessionId,branchId,reference);
+    printValue(result,parsed.flags.has("json"));return;
+  }
+  if(action==="propose"){const instructions=[reference,...rest].filter(Boolean).join(" ").trim();if(!instructions)throw new ValidationError("skills propose requires instructions");const scope=parsed.values.get("scope")==="local"?"local":"workspace";printValue(await client.proposeSkill(sessionId,branchId,instructions,scope),parsed.flags.has("json"));return;}
+  if(action==="install"){
+    if(!reference||rest.length)throw new ValidationError("skills install requires one local DIRECTORY");const scope=parsed.values.get("scope")??"workspace";if(scope!=="workspace"&&scope!=="profile")throw new ValidationError("skills install --scope must be workspace or profile");
+    const preview=await client.previewSkillImport(sessionId,branchId,reference);let confirmation=parsed.values.get("confirmation");
+    console.error(preview.bundle.warning.message);console.error(`Inspected source SHA-256: ${preview.confirmationDigest}`);
+    if(!confirmation){
+      if(!interactive)throw new ValidationError(`Skill installation requires --confirmation ${preview.confirmationDigest}`);
+      confirmation=(await prompter.question("Type the complete source digest to confirm trusted-local installation: ")).trim();
+    }
+    printValue(await client.installSkill(sessionId,branchId,{directory:reference,scope,confirmationDigest:confirmation,installedBy:"cli-owner"}),parsed.flags.has("json"));return;
+  }
+  throw new ValidationError("skills action must be list, show, install, propose, test, enable, disable, or remove");
 }
 
 function managedConfiguration(parsed: ParsedCliArgs, workspace: ResolvedWorkspace): ManagedServiceConfiguration {
@@ -819,7 +848,7 @@ async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspac
 }
 
 function taskFor(parsed: ParsedCliArgs): string | undefined {
-  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile", "refine"].includes(parsed.command)) return undefined;
+  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile", "refine", "skills"].includes(parsed.command)) return undefined;
   const task = parsed.positionals.join(" ").trim();
   if (parsed.command === "run" && !task) throw new ValidationError("run requires TASK");
   return task || undefined;

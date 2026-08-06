@@ -10,6 +10,7 @@ import type {
   StartAgentRunInput, AgentRunResult, AgentRunUserResponse, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
   RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
   StartRefinementReviewInput, RefinementReviewRecord, RefinementTriggerPolicyV1,
+  SkillManagementView, SkillImportPreview, InstallLocalSkillInput,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
@@ -259,8 +260,16 @@ export class AgentClient {
   refinements(status?: string): Promise<RefinementProposalRecord[]> { return this.#json(`/harness/refinements${status ? `?status=${encodeURIComponent(status)}` : ""}`); }
   harnessList(): Promise<HarnessRecord[]> { return this.#json("/harness"); }
   harnessHistory(entryId: string): Promise<HarnessVersionRecord[]> { return this.#json(`/harness/${entryId}/history`); }
-  invokeSkill(sessionId: string, branchId: string, entryId: string, input: JsonValue, options: InvokeSkillOptions = {}): Promise<SkillInvocationResult> { return this.#post(`/sessions/${sessionId}/skills/${entryId}/invoke?branch=${branchId}`, { input, options }); }
-  testSkill(sessionId: string, branchId: string, entryId: string, versionId?: string): Promise<SkillTestReport> { return this.#post(`/sessions/${sessionId}/skills/${entryId}/test?branch=${branchId}`, versionId === undefined ? {} : { versionId }); }
+  listSkills(sessionId:string,branchId:string,includeUnavailable=false):Promise<SkillManagementView[]>{return this.#json(`/sessions/${sessionId}/skills?branch=${branchId}&includeUnavailable=${includeUnavailable}`);}
+  getSkill(sessionId:string,branchId:string,reference:string):Promise<SkillManagementView>{return this.#json(`/sessions/${sessionId}/skills/${encodeURIComponent(reference)}?branch=${branchId}`);}
+  previewSkillImport(sessionId:string,branchId:string,directory:string):Promise<SkillImportPreview>{return this.#post(`/sessions/${sessionId}/skills/preview-import?branch=${branchId}`,{directory});}
+  installSkill(sessionId:string,branchId:string,input:InstallLocalSkillInput):Promise<SkillManagementView>{return this.#post(`/sessions/${sessionId}/skills/import?branch=${branchId}`,input);}
+  proposeSkill(sessionId:string,branchId:string,instructions:string,scope:"local"|"workspace"="workspace"):Promise<RefinementReviewRecord>{return this.#post(`/sessions/${sessionId}/skills/propose?branch=${branchId}`,{instructions,scope});}
+  enableSkill(sessionId:string,branchId:string,reference:string):Promise<SkillManagementView>{return this.#post(`/sessions/${sessionId}/skills/${encodeURIComponent(reference)}/enable?branch=${branchId}`,{});}
+  disableSkill(sessionId:string,branchId:string,reference:string):Promise<SkillManagementView>{return this.#post(`/sessions/${sessionId}/skills/${encodeURIComponent(reference)}/disable?branch=${branchId}`,{});}
+  removeSkill(sessionId:string,branchId:string,reference:string):Promise<SkillManagementView>{return this.#post(`/sessions/${sessionId}/skills/${encodeURIComponent(reference)}/remove?branch=${branchId}`,{});}
+  invokeSkill(sessionId: string, branchId: string, entryId: string, input: JsonValue, options: InvokeSkillOptions = {}): Promise<SkillInvocationResult> { return this.#post(`/sessions/${sessionId}/skills/${encodeURIComponent(entryId)}/invoke?branch=${branchId}`, { input, options }); }
+  testSkill(sessionId: string, branchId: string, entryId: string): Promise<SkillTestReport> { return this.#post(`/sessions/${sessionId}/skills/${encodeURIComponent(entryId)}/test?branch=${branchId}`, {}); }
   spawnSpec(sessionId: string, branchId: string, entryId: string, input: SpawnSpecInput = {}): Promise<SpecSubagentHandle> { return this.#post(`/sessions/${sessionId}/specs/${entryId}/spawn?branch=${branchId}`, input); }
 
   syncStatus(): Promise<SyncStatusView> { return this.#json("/sync/status"); }
