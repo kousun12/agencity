@@ -35,6 +35,13 @@ export class ExecutionOwnershipConflictError extends AgentRuntimeError {
   }
 }
 
+/** A generated agent attempted to address a session outside its nuclear family. */
+export class FamilyReachError extends AgentRuntimeError {
+  constructor(message: string, details?: Readonly<Record<string, unknown>>) {
+    super("FAMILY_REACH_DENIED", message, details);
+  }
+}
+
 export class CapabilityUnavailableError extends AgentRuntimeError {
   constructor(capability: string, adapter: string) {
     super("CAPABILITY_UNAVAILABLE", `${adapter} does not provide ${capability}`, {

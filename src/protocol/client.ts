@@ -6,7 +6,7 @@ import type {
   SpawnAgentInput, StartRecursiveModelInput, SubagentHandle, CreateMemoryInput,
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
-  StartAgentRunInput, AgentRunResult, AgentRunUserResponse,
+  StartAgentRunInput, AgentRunResult, AgentRunUserResponse, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, SyncConflictRecord, TaskRecord } from "../storage/index.ts";
@@ -69,8 +69,12 @@ export class AgentClient {
   spawnMany(sessionId: string, branchId: string, inputs: readonly (SpawnAgentInput | string)[]): Promise<SubagentHandle[]> { return this.#post(`/sessions/${sessionId}/agents/batch?branch=${branchId}`, { inputs }); }
   tasks(sessionId: string, branchId: string): Promise<TaskRecord[]> { return this.#json(`/sessions/${sessionId}/tasks?branch=${branchId}`); }
   cancelTask(sessionId: string, branchId: string, taskId: string, reason?: string): Promise<TaskRecord> { return this.#post(`/sessions/${sessionId}/tasks/${taskId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }
-  sendMailbox(sessionId: string, branchId: string, input: SendMessageInput): Promise<unknown> { return this.#post(`/sessions/${sessionId}/mailbox?branch=${branchId}`, input); }
+  agents(sessionId: string, branchId: string): Promise<FamilyListResult> { return this.#json(`/sessions/${sessionId}/agents?branch=${branchId}`); }
+  sendMailbox(sessionId: string, branchId: string, input: SendMessageInput): Promise<MailboxMessageHandle> { return this.#post(`/sessions/${sessionId}/mailbox?branch=${branchId}`, input); }
+  mailbox(sessionId: string, branchId: string, options: MailboxListOptions = {}): Promise<MailboxListResult> { const params = new URLSearchParams({ branch: branchId, ...(options.direction === undefined ? {} : { direction: options.direction }), ...(options.limit === undefined ? {} : { limit: String(options.limit) }), ...(options.before === undefined ? {} : { before: options.before }), ...(options.pendingOnly ? { pending: "1" } : {}) }); return this.#json(`/sessions/${sessionId}/mailbox?${params}`); }
   acknowledgeMailbox(sessionId: string, branchId: string, messageId: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/mailbox/${messageId}/ack?branch=${branchId}`); }
+  followUpAgent(sessionId: string, branchId: string, target: string, content: string, options: Omit<SendMessageInput, "target" | "content" | "followUp"> = {}): Promise<MailboxMessageHandle> { return this.#post(`/sessions/${sessionId}/agents/${encodeURIComponent(target)}/follow-up?branch=${branchId}`, { ...options, content }); }
+  cancelAgent(sessionId: string, branchId: string, target: string, reason?: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/agents/${encodeURIComponent(target)}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }
 
   importDocument(sessionId: string, branchId: string, input: ImportDocumentInput): Promise<DocumentHandle> { return this.#post(`/sessions/${sessionId}/documents?branch=${branchId}`, input); }
   createInputSet(sessionId: string, branchId: string, input: CreateInputSetInput): Promise<InputSetHandle> { return this.#post(`/sessions/${sessionId}/input-sets?branch=${branchId}`, input); }

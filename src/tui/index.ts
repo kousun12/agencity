@@ -16,13 +16,15 @@ export class TerminalUI {
         if (!line) continue;
         if (line === "/quit" || line === "/exit") break;
         if (line === "/help") {
-          output.write("/history /budget /snapshot /tree /tasks /goals /heartbeats /memory [query] /skills /refine <json> /rollback <proposal> <reason> /skill-test <entry> [version] /skill <entry> <json-input> /sync /sync-status /conflicts /resolve-conflict <id> <json> /cancel-task <id> [reason] /complete-goal <id> /stop /cell <ts> /branch <cursor> [name] /resume [branch] /compact /quit\n");
+          output.write("/history /budget /snapshot /tree /agents /mailbox /tasks /goals /heartbeats /memory [query] /skills /refine <json> /rollback <proposal> <reason> /skill-test <entry> [version] /skill <entry> <json-input> /sync /sync-status /conflicts /resolve-conflict <id> <json> /cancel-task <id> [reason] /complete-goal <id> /stop /cell <ts> /branch <cursor> [name] /resume [branch] /compact /quit\n");
           continue;
         }
         if (line === "/history") { for (const event of await this.supervisor.projections.history(sessionId, branch)) output.write(`${event.cursor} ${event.type} ${JSON.stringify(event.payload)}\n`); continue; }
         if (line === "/budget") { const { state } = await this.supervisor.projections.getSnapshot(sessionId, branch); output.write(`${JSON.stringify(state.budget, null, 2)}\n`); continue; }
         if (line === "/snapshot") { const snapshot = await this.supervisor.projections.getSnapshot(sessionId, branch); output.write(`${JSON.stringify(snapshot.state, null, 2)}\n`); continue; }
         if (line === "/tree") { await this.#writeTree(sessionId, ""); continue; }
+        if (line === "/agents") { output.write(`${JSON.stringify((await this.supervisor.agents.listFamily(sessionId, branch)).items, null, 2)}\n`); continue; }
+        if (line === "/mailbox") { const messages = await this.supervisor.agents.messages(sessionId, branch, { limit: 50 }); for (const message of messages.items) output.write(`${message.sentAt} ${message.relationship} ${message.senderName ?? message.fromSessionId} -> ${message.recipientName ?? message.toSessionId} [${message.receiptStatus}] ${message.content}${message.taskId ? ` task=${message.taskId}` : ""}${message.artifactIds.length ? ` artifacts=${message.artifactIds.join(",")}` : ""}\n`); continue; }
         if (line === "/tasks") { output.write(`${JSON.stringify(await this.supervisor.agents.listTasks(sessionId, branch), null, 2)}\n`); continue; }
         if (line === "/goals") { const { state } = await this.supervisor.projections.getSnapshot(sessionId, branch); output.write(`${JSON.stringify(Object.values(state.goals), null, 2)}\n`); continue; }
         if (line === "/heartbeats") { const { state } = await this.supervisor.projections.getSnapshot(sessionId, branch); output.write(`${JSON.stringify(Object.values(state.heartbeats), null, 2)}\n`); continue; }

@@ -1,11 +1,12 @@
 import {
-  NotFoundError, ValidationError, assertJsonValue, newId, projectEvents,
-  type BudgetLimits, type EventPayloads, type JsonValue, type ModelConfiguration, type NewAgentEvent, type TaskStatus,
+  FamilyReachError, NotFoundError, ValidationError, assertJsonValue, newId, projectEvents,
+  type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type NewAgentEvent, type TaskStatus,
 } from "../domain/index.ts";
 import {
   requireRecursiveStorage, type AgentStorage, type MailboxRecord, type SessionRecord, type TaskRecord,
 } from "../storage/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
+import type { AgentRunResult, AgentRunService } from "./agent-runs.ts";
 
 export interface SpawnAgentInput {
   readonly task: string;
@@ -16,17 +17,58 @@ export interface SpawnAgentInput {
   readonly idempotencyKey?: string;
   readonly sessionId?: string;
   readonly branchId?: string;
+  /** Stable, human-readable family address. Names need not be unique. */
+  readonly name?: string;
+  /** Model-facing spawns normally run autonomously; raw admissions may opt out. */
+  readonly run?: boolean;
 }
 export interface SubagentHandle {
   readonly taskId: string; readonly sessionId: string; readonly branchId: string;
   readonly parentSessionId: string; readonly parentBranchId: string; readonly rootSessionId: string;
-  readonly depth: number; readonly status: TaskStatus;
+  readonly depth: number; readonly status: TaskStatus; readonly name?: string;
 }
 export interface SpawnAdmissionItem { readonly input: SpawnAgentInput; readonly handle: SubagentHandle; readonly existing: boolean; }
-export type SendMessageInput =
-  | { readonly toSessionId: string; readonly toBranchId?: string; readonly content: string; readonly taskId?: string }
-  | { readonly recipientSessionId: string; readonly recipientBranchId?: string; readonly message: string; readonly taskId?: string };
-export interface MailboxMessageHandle { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly fromBranchId: string; readonly toSessionId: string; readonly toBranchId: string; readonly delivered: true; }
+export interface SendMessageInput {
+  /** Model-facing target: session ID, exact family name, or the literal "parent". */
+  readonly target?: string;
+  /** Retained diagnostic compatibility aliases. */
+  readonly toSessionId?: string;
+  readonly toBranchId?: string;
+  readonly recipientSessionId?: string;
+  readonly recipientBranchId?: string;
+  readonly content?: string;
+  readonly message?: string;
+  readonly taskId?: string;
+  readonly artifactIds?: readonly string[];
+  readonly intentKey?: string;
+  readonly idempotencyKey?: string;
+  readonly followUp?: boolean;
+  readonly replyToMessageId?: string;
+}
+export interface MailboxMessageHandle {
+  readonly mailboxMessageId: string; readonly fromSessionId: string; readonly fromBranchId: string;
+  readonly toSessionId: string; readonly toBranchId: string; readonly delivered: boolean;
+  readonly receiptStatus: MailboxReceiptStatus; readonly queued: boolean; readonly existing: boolean;
+  readonly error?: string;
+}
+export interface FamilyAgentRecord {
+  readonly sessionId: string; readonly branchId: string; readonly name: string | null;
+  readonly relationship: FamilyRelationship; readonly depth: number; readonly status: string;
+  readonly taskId: string | null; readonly taskStatus: TaskStatus | null;
+}
+export interface FamilyListResult { readonly items: FamilyAgentRecord[]; }
+export interface MailboxListOptions {
+  readonly direction?: "inbound" | "outbound" | "all";
+  readonly limit?: number;
+  readonly before?: string;
+  readonly pendingOnly?: boolean;
+}
+export interface FamilyMessageRecord extends MailboxRecord {
+  readonly relationship: FamilyRelationship;
+  readonly senderName: string | null;
+  readonly recipientName: string | null;
+}
+export interface MailboxListResult { readonly items: FamilyMessageRecord[]; readonly nextCursor: string | null; }
 export interface CompleteTaskInput { readonly taskId?: string; readonly result?: JsonValue; readonly artifactIds?: readonly string[]; }
 export interface FailTaskInput { readonly taskId?: string; readonly error: string; readonly artifactIds?: readonly string[]; }
 
@@ -42,8 +84,18 @@ class AdmissionQueue {
 export class AgentService {
   readonly #recursive;
   readonly #admissions = new AdmissionQueue();
+  readonly #deliveries = new AdmissionQueue();
+  #runs: AgentRunService | null = null;
+  readonly maxMessageBytes = 32 * 1024;
+  readonly maxPendingMessages = 100;
+  readonly maxMessagesPerMinute = 60;
   constructor(readonly storage: AgentStorage, readonly outbox?: OutboxRunner, readonly maxDepth = 8, readonly maxChildren = 32) {
     this.#recursive = requireRecursiveStorage(storage);
+  }
+
+  attachRunService(runs: AgentRunService): void {
+    this.#runs = runs;
+    runs.setTerminalObserver((result) => this.onRunTerminal(result));
   }
 
   spawn(parentSessionId: string, parentBranchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> {
@@ -71,6 +123,7 @@ export class AgentService {
       for (const input of inputs) {
         if (!input.task.trim()) throw new ValidationError("Subagent task cannot be empty");
         if (input.idempotencyKey !== undefined && !input.idempotencyKey.trim()) throw new ValidationError("Subagent idempotencyKey cannot be empty");
+        if (input.name !== undefined && (!input.name.trim() || new TextEncoder().encode(input.name).byteLength > 128)) throw new ValidationError("Subagent name must be 1 to 128 UTF-8 bytes");
       }
       const parent = await this.#recursive.getSession(parentSessionId);
       if (!parent) throw new NotFoundError("parent session", parentSessionId);
@@ -112,6 +165,16 @@ export class AgentService {
           throw new ValidationError("Subagent idempotency key was reused with a different request");
         }
       }
+      for (let index = 0; index < existing.length; index++) {
+        if (!existing[index]) continue;
+        const item = prepared[index]!;
+        const childEvents = await this.storage.loadEvents(item.childSessionId, { branchId: item.childBranchId });
+        const created = childEvents.find((event) => event.type === "SessionCreated");
+        const originalName = (created?.payload as EventPayloads["SessionCreated"] | undefined)?.sessionName;
+        if ((originalName ?? undefined) !== (item.input.name?.trim() || undefined)) {
+          throw new ValidationError("Subagent idempotency key was reused with a different name");
+        }
+      }
       const novel = prepared.filter((_item, index) => !existing[index]);
       const directTasks = await this.#recursive.listTasks(parentSessionId);
       const activeDirect = directTasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status));
@@ -126,6 +189,7 @@ export class AgentService {
       const handles = prepared.map((item, index): SubagentHandle => ({
         taskId: item.taskId, sessionId: item.childSessionId, branchId: item.childBranchId,
         parentSessionId, parentBranchId, rootSessionId, depth, status: existing[index]?.status ?? "admitted",
+        ...(prepared[index]!.input.name === undefined ? {} : { name: prepared[index]!.input.name!.trim() }),
       }));
       const admissionItems = prepared.map((item, index): SpawnAdmissionItem => ({ input: item.input, handle: handles[index]!, existing: existing[index] !== null }));
       const now = new Date().toISOString(); const events: NewAgentEvent[] = [];
@@ -138,7 +202,7 @@ export class AgentService {
           idempotencyKey: `task:${taskId}`, payload: { taskId, parentSessionId, parentBranchId, childSessionId, childBranchId, task: input.task, ...(input.completionCriteria === undefined ? {} : { completionCriteria: input.completionCriteria }), model, budget },
         }, {
           sessionId: childSessionId, branchId: childBranchId, type: "SessionCreated", producer: "supervisor",
-          idempotencyKey: `session:${childSessionId}`, payload: { workspaceId: parent.workspaceId, initialBranchId: childBranchId, model, budget, parentSessionId, parentBranchId, rootSessionId, depth, taskId },
+          idempotencyKey: `session:${childSessionId}`, payload: { workspaceId: parent.workspaceId, initialBranchId: childBranchId, model, budget, parentSessionId, parentBranchId, rootSessionId, depth, taskId, ...(input.name === undefined ? {} : { sessionName: input.name.trim() }) },
         }, {
           sessionId: childSessionId, branchId: childBranchId, type: "MessageAppended", producer: "supervisor",
           idempotencyKey: `task-prompt:${taskId}`, payload: { messageId: `prompt-${taskId}`, role: "user", content: input.task },
@@ -159,38 +223,369 @@ export class AgentService {
   async sendMessage(fromSessionId: string, fromBranchId: string, toSessionId: string, content: string): Promise<MailboxMessageHandle>;
   async sendMessage(fromSessionId: string, fromBranchId: string, inputOrTarget: SendMessageInput | string, rawContent?: string): Promise<MailboxMessageHandle> {
     const input: SendMessageInput = typeof inputOrTarget === "string" ? { toSessionId: inputOrTarget, content: rawContent ?? "" } : inputOrTarget;
-    const toSessionId = "toSessionId" in input ? input.toSessionId : input.recipientSessionId;
-    const requestedBranch = "toSessionId" in input ? input.toBranchId : input.recipientBranchId;
-    const content = "toSessionId" in input ? input.content : input.message;
-    const source = await this.#recursive.getSession(fromSessionId); if (!source) throw new NotFoundError("sender session", fromSessionId);
-    const target = await this.#recursive.getSession(toSessionId); if (!target) throw new NotFoundError("recipient session", toSessionId);
-    const toBranchId = requestedBranch ?? target.initialBranchId;
-    if (source.sessionId === target.sessionId) throw new ValidationError("Use conversation messages for communication within one session");
-    if (source.rootSessionId !== target.rootSessionId) throw new ValidationError("Mailbox communication is restricted to one related session family");
-    if (!(await this.storage.loadEvents(fromSessionId, { branchId: fromBranchId })).length ||
-        !(await this.storage.loadEvents(toSessionId, { branchId: toBranchId })).length) {
-      throw new NotFoundError("mailbox branch", `${fromSessionId}/${fromBranchId} -> ${toSessionId}/${toBranchId}`);
-    }
-    if (input.taskId !== undefined) {
-      const task = await this.#recursive.getTask(input.taskId);
-      if (!task) throw new ValidationError("Mailbox taskId does not name a durable family task");
-      const taskParent = await this.#recursive.getSession(task.parentSessionId);
-      const taskChild = await this.#recursive.getSession(task.childSessionId);
-      if (taskParent?.rootSessionId !== source.rootSessionId || taskChild?.rootSessionId !== source.rootSessionId) {
-        throw new ValidationError("Mailbox taskId cannot spoof an unrelated task family");
+    return this.#deliveries.run(`${fromSessionId}/${fromBranchId}`, async () => {
+      const source = await this.#recursive.getSession(fromSessionId);
+      if (!source) throw new NotFoundError("sender session", fromSessionId);
+      if (!(await this.storage.loadEvents(fromSessionId, { branchId: fromBranchId })).length) {
+        throw new NotFoundError("sender branch", `${fromSessionId}/${fromBranchId}`);
       }
-      if (![fromSessionId, target.sessionId].includes(task.parentSessionId) && ![fromSessionId, target.sessionId].includes(task.childSessionId)) {
-        throw new ValidationError("Mailbox taskId is not authorized for either endpoint");
+      const targetAliases = [input.target, input.toSessionId, input.recipientSessionId].filter((value): value is string => value !== undefined);
+      if (!targetAliases.length || targetAliases.some((value) => typeof value !== "string" || !value.trim())) throw new ValidationError("Family message target must be a non-empty session ID or name");
+      if (new Set(targetAliases).size !== 1) throw new ValidationError("Family message target aliases disagree");
+      const rawTarget = targetAliases[0]!;
+      const resolved = await this.#resolveFamilyTarget(source, rawTarget.trim());
+      const branchAliases = [input.toBranchId, input.recipientBranchId].filter((value): value is string => value !== undefined);
+      if (branchAliases.some((value) => typeof value !== "string" || !value.trim()) || new Set(branchAliases).size > 1) throw new ValidationError("Family message target branch aliases disagree or are empty");
+      const toBranchId = branchAliases[0] ?? resolved.branchId;
+      if (!(await this.storage.loadEvents(resolved.session.sessionId, { branchId: toBranchId })).length) {
+        throw new NotFoundError("mailbox target branch", `${resolved.session.sessionId}/${toBranchId}`);
+      }
+      if (input.content !== undefined && input.message !== undefined && input.content !== input.message) throw new ValidationError("Family message content aliases disagree");
+      const content = input.content ?? input.message;
+      if (typeof content !== "string" || !content.trim()) throw new ValidationError("Family message content cannot be empty");
+      if (input.taskId !== undefined && (typeof input.taskId !== "string" || !input.taskId.trim())) throw new ValidationError("Family message taskId must be a non-empty string");
+      if (input.replyToMessageId !== undefined && (typeof input.replyToMessageId !== "string" || !input.replyToMessageId.trim())) throw new ValidationError("Family message replyToMessageId must be a non-empty string");
+      if (input.followUp !== undefined && typeof input.followUp !== "boolean") throw new ValidationError("Family message followUp must be boolean");
+      const contentBytes = new TextEncoder().encode(content).byteLength;
+      if (contentBytes > this.maxMessageBytes) throw new ValidationError(`Family message exceeds ${this.maxMessageBytes} UTF-8 bytes`);
+      const artifactIds = input.artifactIds === undefined ? [] : [...input.artifactIds];
+      if (artifactIds.length > 8 || new Set(artifactIds).size !== artifactIds.length || artifactIds.some((id) => typeof id !== "string" || !id.trim())) {
+        throw new ValidationError("Family messages may link at most 8 distinct artifact IDs");
+      }
+      const sourceState = projectEvents(await this.storage.loadEvents(fromSessionId, { branchId: fromBranchId }));
+      for (const artifactId of artifactIds) if (!sourceState.artifacts[artifactId]) {
+        throw new ValidationError(`Family message artifact is not registered on the sender branch: ${artifactId}`);
+      }
+      if (input.taskId !== undefined) await this.#assertTaskLink(input.taskId, source, resolved.session);
+      if (input.replyToMessageId !== undefined) {
+        const original = await this.#recursive.getMailboxMessage(input.replyToMessageId);
+        if (!original || original.fromSessionId !== resolved.session.sessionId || original.toSessionId !== fromSessionId) {
+          throw new ValidationError("Family message replyToMessageId does not name an inbound message from the target");
+        }
+      }
+      if (input.intentKey !== undefined && input.idempotencyKey !== undefined && input.intentKey !== input.idempotencyKey) throw new ValidationError("Family message intent aliases disagree");
+      const intentKey = input.intentKey ?? input.idempotencyKey ?? `message-${newId()}`;
+      if (typeof intentKey !== "string" || !intentKey.trim() || new TextEncoder().encode(intentKey).byteLength > 256) {
+        throw new ValidationError("Family message intentKey must be 1 to 256 UTF-8 bytes");
+      }
+      const mailboxMessageId = `mailbox-${stableId(`${fromSessionId}/${fromBranchId}/${intentKey}`)}`;
+      const existing = await this.#recursive.getMailboxMessage(mailboxMessageId);
+      const common = {
+        mailboxMessageId, fromSessionId, fromBranchId, toSessionId: resolved.session.sessionId, toBranchId,
+        kind: "message" as const, content,
+        ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+        ...(artifactIds.length ? { artifactIds } : {}),
+        intentKey,
+        ...(input.followUp ? { followUp: true } : {}),
+        ...(input.replyToMessageId === undefined ? {} : { replyToMessageId: input.replyToMessageId }),
+      };
+      if (existing) {
+        if (!sameMailboxMeaning(existing, common)) throw new ValidationError("Family message intentKey was reused with different durable meaning");
+        let recovered = existing;
+        if (existing.receiptStatus === "queued" && !existing.delivered) recovered = await this.#recoverAcceptedDelivery(existing);
+        if (recovered.receiptStatus === "queued") await this.#routeAcceptedMessage(recovered);
+        const updated = await this.#recursive.getMailboxMessage(mailboxMessageId);
+        return this.#messageHandle(updated ?? recovered, true);
+      }
+      const outbound = await this.#recursive.listMailboxMessages(fromSessionId, "outbound");
+      const minuteAgo = Date.now() - 60_000;
+      if (outbound.filter((message) => Date.parse(message.sentAt) >= minuteAgo).length >= this.maxMessagesPerMinute) {
+        throw new ValidationError(`Family message rate limit of ${this.maxMessagesPerMinute} per minute exceeded`);
+      }
+      const targetMessages = await this.#recursive.listMailboxMessages(resolved.session.sessionId, "inbound");
+      if (targetMessages.filter((message) => message.receiptStatus === "queued").length >= this.maxPendingMessages) {
+        throw new ValidationError(`Family target pending queue limit of ${this.maxPendingMessages} exceeded`);
+      }
+      const sentEventId = `mailbox-sent-${stableId(mailboxMessageId)}`;
+      const targetState = projectEvents(await this.storage.loadEvents(resolved.session.sessionId, { branchId: toBranchId }));
+      if (["archived", "failed"].includes(targetState.status)) {
+        const error = `Target session is ${targetState.status} and unavailable for family delivery`;
+        await this.storage.appendEvents([{
+          id: sentEventId, sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageSent", producer: "client",
+          idempotencyKey: `mailbox-sent:${mailboxMessageId}`, payload: common,
+        }, {
+          sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageDeliveryFailed", producer: "supervisor",
+          idempotencyKey: `mailbox-failed:${mailboxMessageId}`, payload: { mailboxMessageId, failedAt: new Date().toISOString(), error },
+        }]);
+        const failed = await this.#recursive.getMailboxMessage(mailboxMessageId);
+        if (!failed) throw new Error("Failed family delivery receipt was not projected");
+        return this.#messageHandle(failed, false);
+      }
+      await this.storage.appendEvents([{
+        id: sentEventId, sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageSent", producer: "client",
+        idempotencyKey: `mailbox-sent:${mailboxMessageId}`, payload: common,
+      }, {
+        sessionId: resolved.session.sessionId, branchId: toBranchId, type: "MailboxMessageDelivered", producer: "supervisor",
+        idempotencyKey: `mailbox-delivered:${mailboxMessageId}`, payload: { ...common, sentEventId, senderRelationship: inverseRelationship(resolved.relationship) },
+      }]);
+      const accepted = await this.#recursive.getMailboxMessage(mailboxMessageId);
+      if (!accepted) throw new Error("Accepted family message was not projected");
+      await this.#routeAcceptedMessage(accepted);
+      const updated = await this.#recursive.getMailboxMessage(mailboxMessageId);
+      return this.#messageHandle(updated ?? accepted, false);
+    });
+  }
+
+  /** Explicit retained-child follow-up. The send returns at the durable queue boundary. */
+  followUp(sessionId: string, branchId: string, target: string, content: string, options: Omit<SendMessageInput, "target" | "content" | "followUp"> = {}): Promise<MailboxMessageHandle> {
+    return this.sendMessage(sessionId, branchId, { ...options, target, content, followUp: true });
+  }
+
+  async listFamily(sessionId: string, branchId: string): Promise<FamilyListResult> {
+    const source = await this.#recursive.getSession(sessionId);
+    if (!source) throw new NotFoundError("session", sessionId);
+    if (!(await this.storage.loadEvents(sessionId, { branchId })).length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
+    const candidates: Array<{ session: SessionRecord; branchId: string; relationship: FamilyRelationship }> = [];
+    if (source.parentSessionId && source.parentBranchId) {
+      const parent = await this.#recursive.getSession(source.parentSessionId);
+      if (parent) candidates.push({ session: parent, branchId: source.parentBranchId, relationship: "parent" });
+      for (const sibling of await this.#recursive.listChildren(source.parentSessionId)) {
+        if (sibling.sessionId !== source.sessionId) candidates.push({ session: sibling, branchId: sibling.initialBranchId, relationship: "sibling" });
       }
     }
-    const mailboxMessageId = newId(); const sentEventId = newId();
-    const common = { mailboxMessageId, fromSessionId, fromBranchId, toSessionId: target.sessionId, toBranchId, kind: "message" as const, content, ...(input.taskId === undefined ? {} : { taskId: input.taskId }) };
-    await this.storage.appendEvents([{
-      id: sentEventId, sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageSent", producer: "client", idempotencyKey: `mailbox-sent:${mailboxMessageId}`, payload: common,
+    for (const child of await this.#recursive.listChildren(source.sessionId)) {
+      candidates.push({ session: child, branchId: child.initialBranchId, relationship: "child" });
+    }
+    const items = await Promise.all(candidates.map(async ({ session, branchId: targetBranch, relationship }): Promise<FamilyAgentRecord> => {
+      const state = projectEvents(await this.storage.loadEvents(session.sessionId, { branchId: targetBranch }));
+      const task = session.taskId ? await this.#recursive.getTask(session.taskId) : null;
+      return { sessionId: session.sessionId, branchId: targetBranch, name: state.sessionName ?? null, relationship, depth: session.depth, status: state.status, taskId: session.taskId, taskStatus: task?.status ?? null };
+    }));
+    items.sort((left, right) => relationshipRank(left.relationship) - relationshipRank(right.relationship) || (left.name ?? left.sessionId).localeCompare(right.name ?? right.sessionId) || left.sessionId.localeCompare(right.sessionId));
+    return { items };
+  }
+
+  async messages(sessionId: string, branchId: string, rawOptions: MailboxListOptions = {}): Promise<MailboxListResult> {
+    if (!(await this.storage.loadEvents(sessionId, { branchId })).length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
+    const direction = rawOptions.direction ?? "all";
+    if (!["inbound", "outbound", "all"].includes(direction)) throw new ValidationError("Invalid family message direction");
+    const limit = rawOptions.limit ?? 20;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ValidationError("Family message limit must be an integer from 1 to 100");
+    let records = await this.#recursive.listMailboxMessages(sessionId, direction);
+    if (rawOptions.pendingOnly) records = records.filter((message) => message.receiptStatus === "queued");
+    records.sort((left, right) => right.sentAt.localeCompare(left.sentAt) || right.mailboxMessageId.localeCompare(left.mailboxMessageId));
+    if (rawOptions.before !== undefined) {
+      const before = decodeMessageCursor(rawOptions.before);
+      records = records.filter((message) => message.sentAt < before.sentAt || message.sentAt === before.sentAt && message.mailboxMessageId < before.id);
+    }
+    const page = records.slice(0, limit);
+    const items = await Promise.all(page.map((message) => this.#publicMessage(sessionId, message)));
+    return { items, nextCursor: records.length > page.length && page.length ? encodeMessageCursor(page.at(-1)!) : null };
+  }
+
+  /** Delivers queued steering inputs at an AgentRun durable step boundary. */
+  async deliverQueuedAtBoundary(sessionId: string, branchId: string, runId: string): Promise<number> {
+    const messages = (await this.#recursive.listMailboxMessages(sessionId, "inbound"))
+      .filter((message) => message.toBranchId === branchId && message.receiptStatus === "queued");
+    for (const message of messages) await this.#deliverToContext(message, runId);
+    return messages.length;
+  }
+
+  /** Completes crash prefixes between durable acceptance, context delivery, and follow-up run admission. */
+  async recoverDeliveries(): Promise<number> {
+    const seen = new Set<string>(); let recovered = 0;
+    for (const branch of await this.storage.listBranches()) {
+      for (const message of await this.#recursive.listMailboxMessages(branch.sessionId, "inbound")) {
+        if (seen.has(message.mailboxMessageId)) continue;
+        seen.add(message.mailboxMessageId);
+        if (message.receiptStatus === "queued") {
+          const accepted = message.delivered ? message : await this.#recoverAcceptedDelivery(message);
+          if (accepted.receiptStatus === "queued") await this.#routeAcceptedMessage(accepted);
+          recovered++;
+          continue;
+        }
+        if (message.followUp && message.deliveredToContext && message.followUpRunId) {
+          const state = projectEvents(await this.storage.loadEvents(message.toSessionId, { branchId: message.toBranchId }));
+          if (!state.agentRuns[message.followUpRunId]) { this.#scheduleRetainedRun(message, message.followUpRunId); recovered++; }
+        }
+      }
+    }
+    if (this.#runs) {
+      for (const branch of await this.storage.listBranches()) {
+        const state = projectEvents(await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId }));
+        for (const run of Object.values(state.agentRuns)) {
+          if (!["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status)) continue;
+          await this.onRunTerminal(await this.#runs.get(branch.sessionId, branch.branchId, run.id));
+        }
+      }
+    }
+    return recovered;
+  }
+
+  async onRunTerminal(result: AgentRunResult): Promise<void> {
+    if (!["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(result.status)) return;
+    const state = projectEvents(await this.storage.loadEvents(result.sessionId, { branchId: result.branchId }));
+    const run = state.agentRuns[result.runId];
+    if (!run) return;
+    const task = await this.#recursive.findTaskByChild(result.sessionId);
+    if (task && run.requestKey === `agent-spawn:${task.taskId}`) {
+      if (!["completed", "failed", "cancelled"].includes(task.status)) {
+        if (result.status === "succeeded") await this.completeTask(task.taskId, { result: result.final ?? "" });
+        else if (result.status === "cancelled") await this.cancel(task.taskId, result.reason);
+        else await this.failTask(task.taskId, result.reason ?? `Child run ${result.status}`);
+      }
+      const reply = result.status === "succeeded" ? result.final ?? "Child task completed." : `Child task ${result.status}: ${result.reason ?? "no reason supplied"}`;
+      await this.sendMessage(result.sessionId, result.branchId, { toSessionId: task.parentSessionId, toBranchId: task.parentBranchId, content: reply, taskId: task.taskId, intentKey: `automatic-task-reply:${task.taskId}:${result.runId}` });
+    }
+    const inbound = (await this.#recursive.listMailboxMessages(result.sessionId, "inbound"))
+      .filter((message) => message.followUpRunId === result.runId && message.followUp && !message.replyToMessageId);
+    for (const message of inbound) {
+      const outbound = await this.#recursive.listMailboxMessages(result.sessionId, "outbound");
+      if (outbound.some((candidate) => candidate.replyToMessageId === message.mailboxMessageId)) continue;
+      const content = result.status === "succeeded" ? result.final ?? "Follow-up completed." : `Follow-up ${result.status}: ${result.reason ?? "no reason supplied"}`;
+      await this.sendMessage(result.sessionId, result.branchId, {
+        toSessionId: message.fromSessionId, toBranchId: message.fromBranchId, content,
+        ...(message.taskId === null ? {} : { taskId: message.taskId }),
+        intentKey: `automatic-reply:${message.mailboxMessageId}:${result.runId}`, replyToMessageId: message.mailboxMessageId,
+      });
+    }
+    // Messages accepted while the provider was busy become context at this
+    // terminal boundary. Follow-ups then create a new retained run; ordinary
+    // steering remains available in the next future context.
+    const queued = (await this.#recursive.listMailboxMessages(result.sessionId, "inbound"))
+      .filter((message) => message.toBranchId === result.branchId && message.receiptStatus === "queued");
+    for (const message of queued) await this.#routeAcceptedMessage(message);
+  }
+
+  /** Starts a newly admitted child through the ordinary autonomous run engine. */
+  scheduleSpawn(handle: SubagentHandle, task: string): void {
+    if (!this.#runs) throw new ValidationError("Agent run service is unavailable");
+    const runs = this.#runs;
+    queueMicrotask(() => { void runs.start(handle.sessionId, handle.branchId, { task, requestKey: `agent-spawn:${handle.taskId}`, requestedRunId: `agent-spawn-run-${stableId(handle.taskId)}`, suppressTaskMessage: true }).catch(() => {}); });
+  }
+
+  async cancelFamilyTarget(sessionId: string, branchId: string, target: string, reason?: string): Promise<TaskRecord | AgentRunResult> {
+    const source = await this.#recursive.getSession(sessionId); if (!source) throw new NotFoundError("session", sessionId);
+    const resolved = await this.#resolveFamilyTarget(source, target);
+    if (resolved.relationship !== "child") throw new FamilyReachError("Only a direct child can be cancelled", { sessionId, targetSessionId: resolved.session.sessionId });
+    const task = await this.#recursive.findTaskByChild(resolved.session.sessionId);
+    if (task && !["completed", "failed", "cancelled"].includes(task.status)) return this.cancel(sessionId, branchId, task.taskId, reason);
+    const childState = projectEvents(await this.storage.loadEvents(resolved.session.sessionId, { branchId: resolved.branchId }));
+    const active = Object.values(childState.agentRuns).find((run) => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
+    if (!active || !this.#runs) throw new ValidationError("Direct child has no cancellable task or follow-up run");
+    return this.#runs.cancel(resolved.session.sessionId, resolved.branchId, active.id, reason);
+  }
+
+  async #recoverAcceptedDelivery(message: MailboxRecord): Promise<MailboxRecord> {
+    const targetState = projectEvents(await this.storage.loadEvents(message.toSessionId, { branchId: message.toBranchId }));
+    if (["archived", "failed"].includes(targetState.status)) {
+      const error = `Target session is ${targetState.status} and unavailable for family delivery`;
+      await this.storage.appendEvents([{
+        sessionId: message.fromSessionId, branchId: message.fromBranchId, type: "MailboxMessageDeliveryFailed", producer: "recovery",
+        idempotencyKey: `mailbox-failed:${message.mailboxMessageId}`, payload: { mailboxMessageId: message.mailboxMessageId, failedAt: new Date().toISOString(), error },
+      }]);
+    } else {
+      const sent = (await this.storage.loadEvents(message.fromSessionId, { branchId: message.fromBranchId }))
+        .find((event) => event.type === "MailboxMessageSent" && (event.payload as EventPayloads["MailboxMessageSent"]).mailboxMessageId === message.mailboxMessageId);
+      if (!sent) throw new ValidationError(`Queued family message ${message.mailboxMessageId} has no canonical send event`);
+      const common = sent.payload as EventPayloads["MailboxMessageSent"];
+      if (!sameMailboxMeaning(message, common)) throw new ValidationError(`Queued family message ${message.mailboxMessageId} disagrees with its canonical send event`);
+      const relationship = await this.#relationshipFromTarget(message);
+      await this.storage.appendEvents([{
+        sessionId: message.toSessionId, branchId: message.toBranchId, type: "MailboxMessageDelivered", producer: "recovery",
+        idempotencyKey: `mailbox-delivered:${message.mailboxMessageId}`, payload: { ...common, sentEventId: sent.id, senderRelationship: relationship },
+      }]);
+    }
+    const updated = await this.#recursive.getMailboxMessage(message.mailboxMessageId);
+    if (!updated) throw new NotFoundError("mailbox message", message.mailboxMessageId);
+    return updated;
+  }
+
+  async #routeAcceptedMessage(message: MailboxRecord): Promise<void> {
+    const state = projectEvents(await this.storage.loadEvents(message.toSessionId, { branchId: message.toBranchId }));
+    const active = Object.values(state.agentRuns).find((run) => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
+    if (active) return; // AgentRunService claims it at its next durable step boundary.
+    const runId = message.followUp ? `agent-follow-up-run-${stableId(message.mailboxMessageId)}` : undefined;
+    await this.#deliverToContext(message, runId);
+    if (message.followUp && runId) this.#scheduleRetainedRun(message, runId);
+  }
+
+  async #deliverToContext(message: MailboxRecord, runId?: string): Promise<void> {
+    const current = await this.#recursive.getMailboxMessage(message.mailboxMessageId);
+    if (!current || current.receiptStatus !== "queued") return;
+    const relationship = current.senderRelationship ?? await this.#relationshipFromTarget(current);
+    const messageEventId = `family-context-message-${stableId(current.mailboxMessageId)}`;
+    const deliveredAt = new Date().toISOString();
+    const payload = { mailboxMessageId: current.mailboxMessageId, messageEventId, deliveredAt, relationship, ...(runId === undefined ? {} : { runId }) };
+    const senderState = projectEvents(await this.storage.loadEvents(current.fromSessionId, { branchId: current.fromBranchId }));
+    const targetState = projectEvents(await this.storage.loadEvents(current.toSessionId, { branchId: current.toBranchId }));
+    const artifactEvents: NewAgentEvent[] = current.artifactIds.flatMap((artifactId) => {
+      const artifact = senderState.artifacts[artifactId];
+      if (!artifact) throw new ValidationError(`Family message artifact disappeared from the sender branch: ${artifactId}`);
+      const alreadyLinked = targetState.artifacts[artifactId];
+      if (alreadyLinked) {
+        if (!Bun.deepEquals(alreadyLinked, artifact)) throw new ValidationError(`Family message artifact identity conflicts on the target branch: ${artifactId}`);
+        return [];
+      }
+      return [{
+        sessionId: current.toSessionId, branchId: current.toBranchId, type: "ArtifactRegistered" as const, producer: "supervisor" as const,
+        idempotencyKey: `family-artifact:${current.mailboxMessageId}:${artifactId}`,
+        payload: { artifactId: artifact.artifactId, digest: artifact.digest, mediaType: artifact.mediaType, size: artifact.size },
+      }];
+    });
+    await this.storage.appendEvents([...artifactEvents, {
+      id: messageEventId, sessionId: current.toSessionId, branchId: current.toBranchId, type: "MessageAppended", producer: "supervisor",
+      idempotencyKey: `family-context-message:${current.mailboxMessageId}`, payload: {
+        messageId: `family-${current.mailboxMessageId}`, role: "user", content: current.content,
+        mailbox: { mailboxMessageId: current.mailboxMessageId, fromSessionId: current.fromSessionId, relationship, ...(current.taskId === null ? {} : { taskId: current.taskId }), ...(current.artifactIds.length ? { artifactIds: current.artifactIds } : {}), receiptEventId: `family-context-target-${stableId(current.mailboxMessageId)}` },
+      },
     }, {
-      sessionId: target.sessionId, branchId: toBranchId, type: "MailboxMessageDelivered", producer: "supervisor", idempotencyKey: `mailbox-delivered:${mailboxMessageId}`, payload: { ...common, sentEventId },
+      id: `family-context-target-${stableId(current.mailboxMessageId)}`, sessionId: current.toSessionId, branchId: current.toBranchId, type: "MailboxMessageContextDelivered", producer: "supervisor",
+      idempotencyKey: `mailbox-context-target:${current.mailboxMessageId}`, payload,
+    }, {
+      sessionId: current.fromSessionId, branchId: current.fromBranchId, type: "MailboxMessageContextDelivered", producer: "supervisor",
+      idempotencyKey: `mailbox-context-sender:${current.mailboxMessageId}`, payload,
     }]);
-    return { mailboxMessageId, fromSessionId, fromBranchId, toSessionId: target.sessionId, toBranchId, delivered: true };
+  }
+
+  #scheduleRetainedRun(message: MailboxRecord, runId: string): void {
+    if (!this.#runs) return;
+    const runs = this.#runs;
+    queueMicrotask(() => { void runs.start(message.toSessionId, message.toBranchId, { task: message.content, requestKey: `agent-follow-up:${message.mailboxMessageId}`, requestedRunId: runId, suppressTaskMessage: true }).catch(() => {}); });
+  }
+
+  async #resolveFamilyTarget(source: SessionRecord, rawTarget: string): Promise<{ session: SessionRecord; branchId: string; relationship: FamilyRelationship }> {
+    const family = await this.listFamily(source.sessionId, source.initialBranchId);
+    let matches = family.items.filter((item) => item.sessionId === rawTarget);
+    if (rawTarget === "parent") matches = family.items.filter((item) => item.relationship === "parent");
+    if (!matches.length) matches = family.items.filter((item) => item.name === rawTarget);
+    if (matches.length > 1) throw new ValidationError(`Ambiguous family target name: ${rawTarget}`, { candidates: matches.map((item) => item.sessionId) });
+    const match = matches[0];
+    if (!match) throw new FamilyReachError("Nuclear family target is not the parent, a direct child, or a sibling of the executing session", { sourceSessionId: source.sessionId, target: rawTarget });
+    const session = await this.#recursive.getSession(match.sessionId);
+    if (!session) throw new NotFoundError("family session", match.sessionId);
+    return { session, branchId: match.branchId, relationship: match.relationship };
+  }
+
+  async #assertTaskLink(taskId: string, source: SessionRecord, target: SessionRecord): Promise<void> {
+    const task = await this.#recursive.getTask(taskId);
+    if (!task) throw new ValidationError("Family message taskId does not name a durable task");
+    const endpoints = new Set([source.sessionId, target.sessionId]);
+    if (!endpoints.has(task.parentSessionId) && !endpoints.has(task.childSessionId)) throw new ValidationError("Family message taskId is not authorized for either endpoint");
+    const taskParent = await this.#recursive.getSession(task.parentSessionId);
+    if (taskParent?.rootSessionId !== source.rootSessionId) throw new ValidationError("Family message taskId cannot link another family");
+  }
+
+  async #relationshipFromTarget(message: MailboxRecord): Promise<FamilyRelationship> {
+    const target = await this.#recursive.getSession(message.toSessionId);
+    if (!target) throw new NotFoundError("family target", message.toSessionId);
+    const sender = await this.#resolveFamilyTarget(target, message.fromSessionId);
+    return sender.relationship;
+  }
+
+  #messageHandle(message: MailboxRecord, existing: boolean): MailboxMessageHandle {
+    return { mailboxMessageId: message.mailboxMessageId, fromSessionId: message.fromSessionId, fromBranchId: message.fromBranchId, toSessionId: message.toSessionId, toBranchId: message.toBranchId, delivered: message.delivered, receiptStatus: message.receiptStatus, queued: message.receiptStatus === "queued", existing, ...(message.error === null ? {} : { error: message.error }) };
+  }
+
+  async #publicMessage(viewerSessionId: string, message: MailboxRecord): Promise<FamilyMessageRecord> {
+    const sender = await this.#recursive.getSession(message.fromSessionId); const recipient = await this.#recursive.getSession(message.toSessionId);
+    if (!sender || !recipient) throw new ValidationError("Family message endpoint projection is missing");
+    const relationship = viewerSessionId === message.fromSessionId
+      ? (await this.#resolveFamilyTarget(sender, recipient.sessionId)).relationship
+      : (await this.#resolveFamilyTarget(recipient, sender.sessionId)).relationship;
+    const senderEvents = await this.storage.loadEvents(sender.sessionId, { branchId: sender.initialBranchId });
+    const recipientEvents = await this.storage.loadEvents(recipient.sessionId, { branchId: recipient.initialBranchId });
+    return { ...message, relationship, senderName: senderEvents.length ? projectEvents(senderEvents).sessionName ?? null : null, recipientName: recipientEvents.length ? projectEvents(recipientEvents).sessionName ?? null : null };
   }
 
   async acknowledgeMessage(sessionId: string, branchId: string, messageId: string): Promise<MailboxRecord>;
@@ -200,6 +595,7 @@ export class AgentService {
     const message = await this.#recursive.getMailboxMessage(messageId); if (!message) throw new NotFoundError("mailbox message", messageId);
     const branchId = rawMessageId === undefined ? message.toBranchId : branchOrMessageId;
     if (message.toSessionId !== sessionId || message.toBranchId !== branchId) throw new ValidationError("Only the mailbox recipient can acknowledge a message");
+    if (!message.deliveredToContext) throw new ValidationError("A family message cannot be acknowledged before context delivery");
     if (message.acknowledged) return message;
     const acknowledgedAt = new Date().toISOString(); const common = { mailboxMessageId: messageId, acknowledgedBySessionId: sessionId, acknowledgedAt };
     await this.storage.appendEvents([{
@@ -273,6 +669,11 @@ export class AgentService {
           sessionId: current.parentSessionId, branchId: current.parentBranchId, type: "SubagentCancellationRequested", producer: "client",
           idempotencyKey: `task-cancel-request:${current.taskId}`, payload: { taskId: current.taskId, childSessionId: current.childSessionId, ...(cascadeReason === undefined ? {} : { reason: cascadeReason }) },
         }]);
+      }
+      if (this.#runs) {
+        const child = projectEvents(await this.storage.loadEvents(current.childSessionId, { branchId: current.childBranchId }));
+        const activeRun = Object.values(child.agentRuns).find((run) => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
+        if (activeRun) await this.#runs.cancel(current.childSessionId, current.childBranchId, activeRun.id, cascadeReason);
       }
       if (this.outbox) {
         const child = projectEvents(await this.storage.loadEvents(current.childSessionId, { branchId: current.childBranchId }));
@@ -420,6 +821,29 @@ export class AgentService {
 
 }
 
+
+function sameMailboxMeaning(record: MailboxRecord, value: EventPayloads["MailboxMessageSent"]): boolean {
+  return record.fromSessionId === value.fromSessionId && record.fromBranchId === value.fromBranchId &&
+    record.toSessionId === value.toSessionId && record.toBranchId === value.toBranchId &&
+    record.kind === value.kind && record.content === value.content && record.taskId === (value.taskId ?? null) &&
+    Bun.deepEquals(record.artifactIds, value.artifactIds ?? []) && record.intentKey === (value.intentKey ?? null) &&
+    record.followUp === (value.followUp ?? false) && record.replyToMessageId === (value.replyToMessageId ?? null);
+}
+
+function inverseRelationship(relationship: FamilyRelationship): FamilyRelationship {
+  return relationship === "parent" ? "child" : relationship === "child" ? "parent" : "sibling";
+}
+function relationshipRank(relationship: FamilyRelationship): number { return relationship === "parent" ? 0 : relationship === "child" ? 1 : 2; }
+function encodeMessageCursor(message: Pick<MailboxRecord, "sentAt" | "mailboxMessageId">): string {
+  return Buffer.from(JSON.stringify({ sentAt: message.sentAt, id: message.mailboxMessageId }), "utf8").toString("base64url");
+}
+function decodeMessageCursor(cursor: string): { sentAt: string; id: string } {
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (typeof value.sentAt !== "string" || !Number.isFinite(Date.parse(value.sentAt)) || typeof value.id !== "string" || !value.id) throw new Error();
+    return { sentAt: value.sentAt, id: value.id };
+  } catch { throw new ValidationError("Invalid family message pagination cursor"); }
+}
 
 function stableId(value: string): string {
   const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex").slice(0, 32);

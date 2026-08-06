@@ -164,6 +164,15 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   };
   const skills = { invoke: (entryId:string,input:JsonValue,options:JsonValue={}) => call("skills.invoke",[entryId,input,options]), test: (entryId:string,versionId?:string) => call("skills.test",[entryId,versionId]) };
   const specs = { spawn: (entryId:string,input:JsonValue={}) => call("specs.spawn",[entryId,input]) };
+  const agents = {
+    spawn: (input: unknown) => call("agents.spawn", [input]),
+    list: () => call("agents.list", []),
+    send: (input: unknown, content?: string) => call("agents.send", [input, content]),
+    messages: (options: Record<string, unknown> = {}) => call("agents.messages", [options]),
+    acknowledge: (messageId: string) => call("agents.acknowledge", [messageId]),
+    cancel: (target: string, reason?: string) => call("agents.cancel", [target, reason]),
+    followUp: (target: string, content: string, options: Record<string, unknown> = {}) => call("agents.followUp", [target, content, options]),
+  };
   const rlmId = (handle: string | { handleId?: unknown }): string => {
     const id = typeof handle === "string" ? handle : handle?.handleId;
     if (typeof id !== "string" || !id) throw new Error("Recursive model handle must contain a non-empty handleId");
@@ -212,7 +221,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       cells: unknown,
       rlm: unknown,
     ) => Promise<unknown>;
-    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, rlm, inspect } as unknown as ConsoleSdk;
+    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, rlm, inspect } as unknown as ConsoleSdk;
     const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm);
     response = { type: "result", executionId: message.executionId, ok: true, observation: encodeObservation(value) };
   } catch (error) {

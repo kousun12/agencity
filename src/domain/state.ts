@@ -1,13 +1,13 @@
 import type {
   AgentRunInputKind, AgentRunStatus, ArtifactReference, BudgetLimits, ContextRecordReference, EffectOutcome, GoalGateStatus,
-  GoalStatus, HeartbeatStatus, MailboxMessageKind, ModelConfiguration, RecursiveModelOutcome, RecursiveModelStatus,
+  FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, ModelConfiguration, RecursiveModelOutcome, RecursiveModelStatus,
   SessionStatus, TaskStatus, Usage, WorkingValue,
 } from "./events.ts";
 import type { AgentAction } from "./agent-action.ts";
 import type { JsonValue } from "./json.ts";
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
-export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly modelCallId: string | null; }
+export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
 export interface CellState { readonly id: string; readonly code: string; readonly status: "proposed" | "running" | "committed" | "failed" | "abandoned"; readonly attempts: number; readonly result?: JsonValue; readonly logs: string[]; readonly error?: string; readonly eventId: string; }
 export interface WorkingValueState { readonly name: string; readonly version: number; readonly value: WorkingValue; readonly eventId: string; }
 export interface EffectState { readonly id: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotencyKey: string; readonly idempotent: boolean; readonly attempts: number; readonly status: "requested" | "started" | EffectOutcome; readonly output?: JsonValue; readonly error?: string; readonly eventId: string; }
@@ -25,8 +25,11 @@ export interface TaskState {
 export interface MailboxMessageState {
   readonly id: string; readonly fromSessionId: string; readonly fromBranchId: string;
   readonly toSessionId: string; readonly toBranchId: string; readonly kind: MailboxMessageKind;
-  readonly content: string; readonly taskId: string | null; readonly direction: "inbound" | "outbound";
-  readonly delivered: boolean; readonly acknowledged: boolean; readonly eventId: string;
+  readonly content: string; readonly taskId: string | null; readonly artifactIds: string[]; readonly direction: "inbound" | "outbound";
+  readonly intentKey: string | null; readonly followUp: boolean; readonly replyToMessageId: string | null;
+  readonly senderRelationship: FamilyRelationship | null; readonly receiptStatus: MailboxReceiptStatus;
+  readonly delivered: boolean; readonly deliveredToContext: boolean; readonly acknowledged: boolean;
+  readonly followUpRunId: string | null; readonly error: string | null; readonly eventId: string;
 }
 export interface TerminalNoticeState {
   readonly id: string; readonly taskId: string; readonly parentSessionId: string; readonly childSessionId: string;

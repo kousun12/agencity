@@ -102,8 +102,10 @@ export class ProtocolServer {
 
         // Slice 2 commands remain branch-scoped and return durable JSON handles.
         if (parts[2] === "agents" && branchId) {
-          if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.agents.listChildren(sessionId));
+          if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.agents.listFamily(sessionId, branchId));
           if (request.method === "POST" && parts[3] === "batch") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.spawnMany(sessionId, branchId, Array.isArray(body.inputs) ? body.inputs as any[] : [])); }
+          if (request.method === "POST" && parts[3] && parts[4] === "follow-up") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.followUp(sessionId, branchId, decodeURIComponent(parts[3]), String(body.content ?? ""), body as any)); }
+          if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.cancelFamilyTarget(sessionId, branchId, decodeURIComponent(parts[3]), typeof body.reason === "string" ? body.reason : undefined)); }
           if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.agents.spawn(sessionId, branchId, await jsonBody(request) as any));
         }
         if (parts[2] === "tasks" && branchId) {
@@ -111,6 +113,7 @@ export class ProtocolServer {
           if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.cancel(sessionId, branchId, parts[3], typeof body.reason === "string" ? body.reason : undefined)); }
         }
         if (parts[2] === "mailbox" && parts[3] && parts[4] === "ack" && branchId && request.method === "POST") return Response.json(await this.supervisor.agents.acknowledgeMessage(sessionId, branchId, parts[3]));
+        if (parts[2] === "mailbox" && branchId && request.method === "GET") return Response.json(await this.supervisor.agents.messages(sessionId, branchId, { direction: (url.searchParams.get("direction") ?? "all") as any, ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}), ...(url.searchParams.has("before") ? { before: url.searchParams.get("before")! } : {}), ...(url.searchParams.get("pending") === "1" ? { pendingOnly: true } : {}) }));
         if (parts[2] === "mailbox" && branchId && request.method === "POST") return Response.json(await this.supervisor.agents.sendMessage(sessionId, branchId, await jsonBody(request) as any));
         if (parts[2] === "documents" && branchId && request.method === "POST") return Response.json(await this.supervisor.documents.import(sessionId, branchId, await jsonBody(request) as any));
         if (parts[2] === "input-sets" && branchId && request.method === "POST") return Response.json(await this.supervisor.documents.createInputSet(sessionId, branchId, await jsonBody(request) as any));

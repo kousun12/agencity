@@ -140,6 +140,20 @@ Structured JSON observations at or below 128 KiB are committed directly. Larger 
 
 Ordinary `const`/`let` bindings are cell-local, even when a worker happens to be reused. Use `state.set` for typed cross-cell state, `state.list()` to discover it, and `cells.list()`/`cells.get(cellId)` to inspect retained cell source, observation, logs, status, dependencies, and event provenance. Static top-level module syntax is not a supported cell interface; use the injected SDK and, only in trusted code, normal Bun dynamic imports.
 
+### Retained family messaging
+
+Generated cells use `sdk.agents` rather than supplying internal sender identity:
+
+```ts
+const child = await sdk.agents.spawn({ task: "Review the patch", name: "reviewer" });
+await sdk.agents.send({ target: "reviewer", content: "Focus on cancellation", taskId: child.taskId });
+const receipt = await sdk.agents.followUp("reviewer", "Recheck the revised patch");
+const inbox = await sdk.agents.messages({ direction: "inbound", limit: 20 });
+await sdk.agents.acknowledge(inbox.items[0].mailboxMessageId);
+```
+
+Only the unique parent, direct children, and siblings are addressable. Busy targets retain messages as queued steering until a durable run boundary; explicit follow-up to an idle/stopped child schedules work in the same child session. Receipt and reply state survives supervisor and console-worker restart. Limits are 32 KiB per UTF-8 message, eight artifact links, 60 sends per sender/minute, 100 pending target messages, and 100 rows per page. Failed/unavailable delivery and an unknown follow-up result remain visible rather than being retried as success.
+
 ### Inspect and rebuild
 
 ```sh
@@ -186,6 +200,8 @@ Plain text starts a typed autonomous run, or answers the pending clarification/p
 | `/budget` | Print current token, cost, turn, and wall-time counters/limits. |
 | `/snapshot` | Print the entire current `AgentState`. |
 | `/tree` | Print the recursive child-session tree and task status. |
+| `/agents` | Print the nuclear-family roster with names, relationships, session/task status, and retained IDs. |
+| `/mailbox` | Print receipt-rich family messages with relationship, sender/recipient, task/artifact links, and text. |
 | `/tasks` | Print durable tasks owned by the current session/branch. |
 | `/goals` | Print projected autonomous goals and completion gates. |
 | `/heartbeats` | Print projected heartbeat schedules. |

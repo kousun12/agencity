@@ -122,7 +122,7 @@ export class ContextMaterializer {
         subagentSpecs: specs.map(publicSpec),
       },
       compactions,
-      messages:messages.map((message)=>({role:message.role,content:message.content,eventId:message.eventId})),
+      messages:messages.map((message)=>({role:message.role,content:message.content,eventId:message.eventId,...(message.mailbox === undefined ? {} : { mailbox: message.mailbox })})),
       workingValues:Object.values(state.workingValues).map((value)=>({name:value.name,version:value.version,value:value.value,eventId:value.eventId})),artifacts:Object.values(state.artifacts),
       recentActivity:activity.map((event)=>({eventId:event.id,type:event.type,payload:event.payload})),
       queryHints:{history:"SELECT type, committed_at, payload_json FROM events WHERE session_id = ? ORDER BY sequence",largeRecords:"Resolve artifact references through sdk.artifacts.get",documents:"SELECT chunk_id, ordinal, content FROM document_chunks WHERE document_id = ? ORDER BY ordinal",mailbox:"SELECT * FROM mailbox_messages WHERE to_session_id = ? ORDER BY sent_at",memory:"Use Supervisor.memory.search; candidate generation is FTS5 and scope/status policy remains authoritative"},

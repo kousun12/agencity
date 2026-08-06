@@ -89,6 +89,23 @@ function providerObservations(context: JsonValue): Array<{ eventId: string; type
   return context.run.observations as Array<{ eventId: string; type: string; payload: JsonValue }>;
 }
 
+function crashAfterNextActionCommit(supervisor: Supervisor): () => void {
+  const appendEvents = supervisor.storage.appendEvents.bind(supervisor.storage);
+  let crashed = false;
+  Object.defineProperty(supervisor.storage, "appendEvents", {
+    configurable: true,
+    value: async (events: Parameters<typeof appendEvents>[0]) => {
+      const appended = await appendEvents(events);
+      if (!crashed && events.some(event => event.type === "AgentRunActionCommitted")) {
+        crashed = true;
+        throw new Error("simulated crash after AgentRunActionCommitted");
+      }
+      return appended;
+    },
+  });
+  return () => Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: appendEvents });
+}
+
 describe("autonomous durable agent runs", () => {
   test("executes typed TypeScript actions and delivers every cell observation once to the dependent context", async () => {
     const value = await fixture([
@@ -299,6 +316,151 @@ describe("autonomous durable agent runs", () => {
       expect(state.goals[goal.goalId]?.status).toBe("blocked");
       expect(state.agentRuns[result.runId]?.finalMessageId).toBeUndefined();
     } finally { await value.supervisor.close(); }
+  });
+
+  test("reconciles an unapplied TypeScript action committed before a crash without dropping or duplicating its stable cell", async () => {
+    const temp = await makeTempRuntime("agencity-agent-action-recovery-"); temps.push(temp);
+    const provider = new RecordingActions([
+      action({ type: "typescript", code: `return await tools.writeFile("recovered-action.txt", "applied-once");` }),
+      action({ type: "final", content: "Recovered the retained action." }),
+    ], "action-recover-actions");
+    let supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
+    const session = await supervisor.createSession({ workspaceId: "action-recovery", model: { provider: provider.name, model: "v1" } });
+    const restore = crashAfterNextActionCommit(supervisor);
+    try {
+      await expect(supervisor.runs.start(session.sessionId, session.branchId, {
+        task: "Apply the retained TypeScript action", requestKey: "recover-retained-typescript",
+      })).rejects.toThrow("simulated crash after AgentRunActionCommitted");
+      restore();
+      expect(provider.calls).toBe(1);
+      const crashed = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
+      expect(Object.values(crashed.cells)).toHaveLength(0);
+      expect(Object.values(crashed.agentRuns)[0]?.steps[0]?.action?.type).toBe("typescript");
+      await supervisor.close();
+
+      supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: true });
+      const recovered = Object.values((await supervisor.projections.getSnapshot(session.sessionId, session.branchId)).state.agentRuns)[0]!;
+      expect(await supervisor.runs.get(session.sessionId, session.branchId, recovered.id))
+        .toMatchObject({ status: "succeeded", steps: 2, final: "Recovered the retained action." });
+      expect(provider.calls).toBe(2);
+      expect(await Bun.file(`${temp.workspaceRoot}/recovered-action.txt`).text()).toBe("applied-once");
+      const history = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      expect(history.filter(event => event.type === "CellProposed")).toHaveLength(1);
+      expect(history.filter(event => event.type === "CellCommitted")).toHaveLength(1);
+      expect(projectEvents(history).cells[Object.keys(projectEvents(history).cells)[0]!]!.attempts).toBe(1);
+    } finally { restore(); await supervisor.close(); }
+  });
+
+  test("applies a retained final action whose step consumed a prior CellCommitted observation without another provider call", async () => {
+    const temp = await makeTempRuntime("agencity-agent-observed-action-recovery-"); temps.push(temp);
+    const provider = new RecordingActions([
+      action({ type: "final", content: "Used the committed observation." }),
+    ], "observed-action-recover-actions");
+    let supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
+    const session = await supervisor.createSession({ workspaceId: "observed-action-recovery", model: { provider: provider.name, model: "v1" } });
+    const runId = newId();
+    await supervisor.storage.appendEvents([{
+      sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
+      payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Use the prior observation" },
+    }, {
+      sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
+      payload: { runId, task: "Use the prior observation", requestKey: "observed-action-recovery" },
+    }]);
+    const priorCell = await supervisor.executeCell(session.sessionId, session.branchId, `return { retained: true };`, [], "prior-observation-cell");
+    const before = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+    const observation = before.find(event => event.type === "CellCommitted" && (event.payload as { cellId: string }).cellId === priorCell.cellId)!;
+    const restore = crashAfterNextActionCommit(supervisor);
+    try {
+      await expect(supervisor.runs.advance(session.sessionId, session.branchId, runId))
+        .rejects.toThrow("simulated crash after AgentRunActionCommitted");
+      restore();
+      expect(provider.calls).toBe(1);
+      const crashed = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
+      expect(crashed.agentRuns[runId]?.steps).toHaveLength(1);
+      expect(crashed.agentRuns[runId]?.steps[0]?.observationEventIds).toContain(observation.id);
+      expect(crashed.agentRuns[runId]?.steps[0]?.action).toMatchObject({ type: "final", content: "Used the committed observation." });
+      expect(crashed.agentRuns[runId]?.status).toBe("running");
+      await supervisor.close();
+
+      supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: true });
+      expect(await supervisor.runs.get(session.sessionId, session.branchId, runId))
+        .toMatchObject({ status: "succeeded", steps: 1, final: "Used the committed observation." });
+      expect(provider.calls).toBe(1);
+      const history = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      expect(history.filter(event => event.type === "AgentRunActionCommitted")).toHaveLength(1);
+      expect(history.filter(event => event.type === "MessageAppended" && event.producer === "supervisor")).toHaveLength(1);
+    } finally { restore(); await supervisor.close(); }
+  });
+
+  test("recovers a committed clarification action by its deterministic input request without another provider call", async () => {
+    const temp = await makeTempRuntime("agencity-agent-input-action-recovery-"); temps.push(temp);
+    const provider = new RecordingActions([
+      action({ type: "clarification", question: "Which retained choice?" }),
+    ], "input-action-recover-actions");
+    let supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
+    const session = await supervisor.createSession({ workspaceId: "input-action-recovery", model: { provider: provider.name, model: "v1" } });
+    const restore = crashAfterNextActionCommit(supervisor);
+    let runId = "";
+    try {
+      await expect(supervisor.runs.start(session.sessionId, session.branchId, "Ask the retained question"))
+        .rejects.toThrow("simulated crash after AgentRunActionCommitted");
+      restore();
+      const crashed = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
+      runId = Object.values(crashed.agentRuns)[0]!.id;
+      expect(Object.values(crashed.agentRuns[runId]!.inputRequests)).toHaveLength(0);
+      expect(provider.calls).toBe(1);
+      await supervisor.close();
+
+      supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: true });
+      expect(await supervisor.runs.get(session.sessionId, session.branchId, runId))
+        .toMatchObject({ status: "waiting_for_user", steps: 1, pendingInput: { kind: "clarification", question: "Which retained choice?" } });
+      expect(provider.calls).toBe(1);
+      const recovered = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId })).agentRuns[runId]!;
+      expect(Object.values(recovered.inputRequests)).toHaveLength(1);
+    } finally { restore(); await supervisor.close(); }
+  });
+
+  test("marks a stable cell interrupted after action commit as unknown and never replays it or calls the provider", async () => {
+    const temp = await makeTempRuntime("agencity-agent-cell-interruption-"); temps.push(temp);
+    const code = `return await tools.writeFile("must-not-replay.txt", "unsafe");`;
+    const provider = new RecordingActions([
+      action({ type: "typescript", code }),
+      action({ type: "final", content: "must not be requested" }),
+    ], "cell-interruption-actions");
+    let supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
+    const session = await supervisor.createSession({ workspaceId: "cell-interruption", model: { provider: provider.name, model: "v1" } });
+    const restore = crashAfterNextActionCommit(supervisor);
+    let runId = "";
+    let cellId = "";
+    try {
+      await expect(supervisor.runs.start(session.sessionId, session.branchId, "Do not replay an interrupted action"))
+        .rejects.toThrow("simulated crash after AgentRunActionCommitted");
+      restore();
+      const crashed = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
+      const run = Object.values(crashed.agentRuns)[0]!;
+      runId = run.id;
+      cellId = `agent-run-cell-${run.steps[0]!.actionId}`;
+      await supervisor.storage.appendEvents([{
+        sessionId: session.sessionId, branchId: session.branchId, type: "CellProposed", producer: "console",
+        idempotencyKey: `cell-proposed:${cellId}`, payload: { cellId, code, dependencies: [] },
+      }, {
+        sessionId: session.sessionId, branchId: session.branchId, type: "CellStarted", producer: "console",
+        idempotencyKey: `cell-started:${cellId}:1`, payload: { cellId, attempt: 1 },
+      }]);
+      expect(provider.calls).toBe(1);
+      await supervisor.close();
+
+      supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: true });
+      expect(await supervisor.runs.get(session.sessionId, session.branchId, runId))
+        .toMatchObject({ status: "unknown", steps: 1, reason: expect.stringContaining("did not reach a committed terminal boundary") });
+      expect(provider.calls).toBe(1);
+      expect(await Bun.file(`${temp.workspaceRoot}/must-not-replay.txt`).exists()).toBe(false);
+      const history = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      expect(history.filter(event => event.type === "CellProposed" && (event.payload as { cellId: string }).cellId === cellId)).toHaveLength(1);
+      expect(history.filter(event => event.type === "CellStarted" && (event.payload as { cellId: string }).cellId === cellId)).toHaveLength(1);
+      expect(history.filter(event => event.type === "CellAbandoned" && (event.payload as { cellId: string }).cellId === cellId)).toHaveLength(1);
+      expect(history.some(event => ["CellCommitted", "CellFailed"].includes(event.type) && (event.payload as { cellId: string }).cellId === cellId)).toBe(false);
+    } finally { restore(); await supervisor.close(); }
   });
 
   test("recovers a succeeded stable model effect without calling the provider twice", async () => {

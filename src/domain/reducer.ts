@@ -42,7 +42,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "SessionNamed": return { ...next, sessionName: (event.payload as EventPayloads["SessionNamed"]).name };
     case "BranchNamed": return { ...next, branch: { ...state.branch, name: (event.payload as EventPayloads["BranchNamed"]).name } };
     case "SessionStatusChanged": return { ...next, status: (event.payload as EventPayloads["SessionStatusChanged"]).status };
-    case "MessageAppended": { const p = event.payload as EventPayloads["MessageAppended"]; return { ...next, messages: [...state.messages, { id: p.messageId, role: p.role, content: p.content, eventId: event.id, modelCallId: p.modelCallId ?? null }] }; }
+    case "MessageAppended": { const p = event.payload as EventPayloads["MessageAppended"]; return { ...next, messages: [...state.messages, { id: p.messageId, role: p.role, content: p.content, eventId: event.id, modelCallId: p.modelCallId ?? null, ...(p.mailbox === undefined ? {} : { mailbox: { ...p.mailbox, ...(p.mailbox.artifactIds === undefined ? {} : { artifactIds: [...p.mailbox.artifactIds] }) } }) }] }; }
     case "CellProposed": { const p = event.payload as EventPayloads["CellProposed"]; if (state.cells[p.cellId]) throw new InvalidTransitionError("cell", state.cells[p.cellId]!.status, "proposed"); const cell: CellState = { id: p.cellId, code: p.code, status: "proposed", attempts: 0, logs: [], eventId: event.id }; return { ...next, cells: { ...state.cells, [p.cellId]: cell } }; }
     case "CellStarted": { const p = event.payload as EventPayloads["CellStarted"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("cell", old?.status ?? "missing", "running"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "running", attempts: p.attempt, eventId: event.id } } }; }
     case "CellCommitted": { const p = event.payload as EventPayloads["CellCommitted"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "committed"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "committed", result: p.result, logs: p.logs, eventId: event.id } } }; }
@@ -100,18 +100,31 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     }
     case "MailboxMessageSent": {
       const p = event.payload as EventPayloads["MailboxMessageSent"]; if (state.mailbox[p.mailboxMessageId]) throw new InvalidTransitionError("mailboxMessage", "existing", "sent");
-      const message: MailboxMessageState = { id: p.mailboxMessageId, fromSessionId: p.fromSessionId, fromBranchId: p.fromBranchId, toSessionId: p.toSessionId, toBranchId: p.toBranchId, kind: p.kind, content: p.content, taskId: p.taskId ?? null, direction: "outbound", delivered: false, acknowledged: false, eventId: event.id };
+      const legacyDelivered = p.intentKey === undefined;
+      const message: MailboxMessageState = { id: p.mailboxMessageId, fromSessionId: p.fromSessionId, fromBranchId: p.fromBranchId, toSessionId: p.toSessionId, toBranchId: p.toBranchId, kind: p.kind, content: p.content, taskId: p.taskId ?? null, artifactIds: [...(p.artifactIds ?? [])], direction: "outbound", intentKey: p.intentKey ?? null, followUp: p.followUp ?? false, replyToMessageId: p.replyToMessageId ?? null, senderRelationship: null, receiptStatus: legacyDelivered ? "delivered_to_context" : "queued", delivered: legacyDelivered, deliveredToContext: legacyDelivered, acknowledged: false, followUpRunId: null, error: null, eventId: event.id };
       return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: message } };
     }
     case "MailboxMessageDelivered": {
       const p = event.payload as EventPayloads["MailboxMessageDelivered"]; if (state.mailbox[p.mailboxMessageId]) throw new InvalidTransitionError("mailboxMessage", "existing", "delivered");
-      const message: MailboxMessageState = { id: p.mailboxMessageId, fromSessionId: p.fromSessionId, fromBranchId: p.fromBranchId, toSessionId: p.toSessionId, toBranchId: p.toBranchId, kind: p.kind, content: p.content, taskId: p.taskId ?? null, direction: "inbound", delivered: true, acknowledged: false, eventId: event.id };
+      const legacyDelivered = p.intentKey === undefined;
+      const message: MailboxMessageState = { id: p.mailboxMessageId, fromSessionId: p.fromSessionId, fromBranchId: p.fromBranchId, toSessionId: p.toSessionId, toBranchId: p.toBranchId, kind: p.kind, content: p.content, taskId: p.taskId ?? null, artifactIds: [...(p.artifactIds ?? [])], direction: "inbound", intentKey: p.intentKey ?? null, followUp: p.followUp ?? false, replyToMessageId: p.replyToMessageId ?? null, senderRelationship: p.senderRelationship ?? null, receiptStatus: legacyDelivered ? "delivered_to_context" : "queued", delivered: true, deliveredToContext: legacyDelivered, acknowledged: false, followUpRunId: null, error: null, eventId: event.id };
       return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: message } };
+    }
+    case "MailboxMessageContextDelivered": {
+      const p = event.payload as EventPayloads["MailboxMessageContextDelivered"]; const old = state.mailbox[p.mailboxMessageId];
+      if (!old) throw new InvalidTransitionError("mailboxMessage", "missing", "delivered_to_context");
+      if (old.receiptStatus === "failed") throw new InvalidTransitionError("mailboxMessage", "failed", "delivered_to_context");
+      return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: { ...old, delivered: true, deliveredToContext: true, senderRelationship: old.senderRelationship ?? p.relationship, receiptStatus: old.acknowledged ? "acknowledged" : "delivered_to_context", followUpRunId: p.runId ?? old.followUpRunId, eventId: event.id } } };
+    }
+    case "MailboxMessageDeliveryFailed": {
+      const p = event.payload as EventPayloads["MailboxMessageDeliveryFailed"]; const old = state.mailbox[p.mailboxMessageId];
+      if (!old || old.acknowledged || old.deliveredToContext) throw new InvalidTransitionError("mailboxMessage", old?.receiptStatus ?? "missing", "failed");
+      return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: { ...old, receiptStatus: "failed", error: p.error, eventId: event.id } } };
     }
     case "MailboxMessageAcknowledged": {
       const p = event.payload as EventPayloads["MailboxMessageAcknowledged"]; const old = state.mailbox[p.mailboxMessageId];
       if (!old || old.acknowledged) throw new InvalidTransitionError("mailboxMessage", old ? "acknowledged" : "missing", "acknowledged");
-      return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: { ...old, acknowledged: true, eventId: event.id } } };
+      return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: { ...old, acknowledged: true, receiptStatus: "acknowledged", eventId: event.id } } };
     }
     case "TaskTerminalNoticeSent":
     case "TaskTerminalNoticeDelivered": {

@@ -83,7 +83,8 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `TaskCreated` / `SubagentAdmitted` | Durable parent/task/child/model/budget intent, followed by matching admitted child IDs/time. | Creates a pending task then admits the already-created normal child session. |
 | `TaskStatusChanged` / `SubagentCancellationRequested` | Task ID plus validated status/result/artifacts/error/reason or child cancellation intent. | Projects current task lifecycle without hiding cancellation intent; startup finishes recorded nonterminal cascades leaf-first and the first recorded reason wins retries. |
 | `TaskUsageAttributed` | `{ taskId, childSessionId, tokens, costUsd, turns, wallTimeMs, conservative }` | Attributes a terminal child’s direct usage to each ancestor exactly once; unknown model usage consumes the unaccounted reservation conservatively. |
-| `MailboxMessageSent` / `MailboxMessageDelivered` / `MailboxMessageAcknowledged` | Stable message and endpoint IDs, kind/content/task; delivery links `sentEventId`; ack names recipient/time. | Paired sender/recipient events project durable at-least-once mailbox delivery and acknowledgement. |
+| `MailboxMessageSent` / `MailboxMessageDelivered` | Stable message/endpoints, bounded content, optional task/artifacts/intent/follow-up/reply link; delivery links `sentEventId` and derived sender relationship. | Commits one sender intent and accepted recipient mailbox row; same sender/branch intent is idempotent only when all durable meaning agrees. |
+| `MailboxMessageContextDelivered` / `MailboxMessageDeliveryFailed` / `MailboxMessageAcknowledged` | Stable message/context event IDs, relationship, optional follow-up run, failure, or recipient acknowledgement/time. | Advances the shared receipt through queued, context-delivered, failed, or acknowledged without inferring success; context delivery also links the provenance-bearing user message. |
 | `TaskTerminalNoticeSent` / `TaskTerminalNoticeDelivered` | Stable notice/task/parent/child IDs, terminal status and optional result/artifacts/error/reason; delivery links send. | Makes child termination visible in both session histories. |
 | `DocumentImported` / `DocumentChunkAdded` | Document metadata/digest/count and ordered chunk ID/content/size/digest. | Imports exact large-input rows without injecting all content into model context. |
 | `InputSetCreated` | `{ inputSetId, name?, chunkIds, metadata? }` | Freezes an ordered set of exact chunk row IDs for delegation/model input. |
@@ -99,6 +100,8 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `AgentRunStatusChanged` | `{ runId, status, reason?, finalMessageId? }` | Projects waiting or distinct succeeded/blocked/failed/cancelled/budget-exceeded/unknown terminal state. Only succeeded links the separately appended validated-final assistant message. |
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
+
+Version-1 mailbox payload additions are optional so retained pre-FU-012 `MailboxMessageSent`/`Delivered` events remain valid. Replay treats those old paired events as already context-delivered, with no intent/artifact/follow-up metadata; migration 009 initializes the rebuilt row accordingly. New messages always carry an intent and require an explicit context-delivery event before acknowledgement.
 
 ## Lifecycle groupings
 

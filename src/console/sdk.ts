@@ -81,6 +81,25 @@ export interface HarnessSdk { propose(input: JsonValue): Promise<JsonValue>; lis
 export interface SkillsSdk { invoke(entryId: string, input: JsonValue, options?: JsonValue): Promise<JsonValue>; test(entryId: string, versionId?: string): Promise<JsonValue> }
 export interface SpecsSdk { spawn(entryId: string, input?: JsonValue): Promise<JsonValue> }
 
+export interface ConsoleAgentSpawnInput {
+  readonly task: string; readonly completionCriteria?: string; readonly name?: string;
+  readonly model?: ModelConfiguration; readonly budget?: BudgetLimits; readonly run?: boolean; readonly idempotencyKey?: string;
+}
+export interface ConsoleAgentSendInput {
+  readonly target: string; readonly content: string; readonly taskId?: string; readonly artifactIds?: readonly string[];
+  readonly intentKey?: string; readonly replyToMessageId?: string;
+}
+export interface ConsoleAgentMessageOptions { readonly direction?: "inbound" | "outbound" | "all"; readonly limit?: number; readonly before?: string; readonly pendingOnly?: boolean; }
+export interface AgentsSdk {
+  spawn(input: ConsoleAgentSpawnInput | string): Promise<JsonValue>;
+  list(): Promise<JsonValue>;
+  send(input: ConsoleAgentSendInput | string, content?: string): Promise<JsonValue>;
+  messages(options?: ConsoleAgentMessageOptions): Promise<JsonValue>;
+  acknowledge(messageId: string): Promise<JsonValue>;
+  cancel(target: string, reason?: string): Promise<JsonValue>;
+  followUp(target: string, content: string, options?: Omit<ConsoleAgentSendInput, "target" | "content">): Promise<JsonValue>;
+}
+
 export type ConsoleRlmInputReference =
   | { readonly kind: "artifact"; readonly artifactId: string; readonly start?: number; readonly end?: number }
   | { readonly kind: "document-range"; readonly documentId: string; readonly start?: number; readonly limit?: number; readonly chunkIds?: readonly string[] }
@@ -152,6 +171,7 @@ export interface ConsoleSdk {
   readonly harness: HarnessSdk;
   readonly skills: SkillsSdk;
   readonly specs: SpecsSdk;
+  readonly agents: AgentsSdk;
   readonly rlm: RlmSdk;
   inspect(value: unknown, options?: InspectOptions): InspectPreview;
 }

@@ -32,11 +32,14 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 | `POST /sessions/:session/turns?branch=:branch` | none | advanced diagnostic `{ outcome, message? or error? }` |
 | `POST /sessions/:session/cells?branch=:branch` | `{ code }` | `{ cellId, result, logs }` |
 | `POST /sessions/:session/branches?branch=:parent` | `{ cursor, name? }` | `{ branchId }` |
-| `GET/POST /sessions/:session/agents?branch=:branch` | none or `SpawnAgentInput` | child list or durable child handle |
+| `GET/POST /sessions/:session/agents?branch=:branch` | none or `SpawnAgentInput` | nuclear-family roster or durable child handle |
 | `POST /sessions/:session/agents/batch?branch=:branch` | `{ inputs: SpawnAgentInput[] }` | atomically admitted child handles |
+| `POST /sessions/:session/agents/:target/follow-up?branch=:branch` | `{ content, taskId?, artifactIds?, intentKey? }` | retained same-session follow-up receipt |
+| `POST /sessions/:session/agents/:target/cancel?branch=:branch` | `{ reason? }` | direct-child task or active-run cancellation result |
 | `GET /sessions/:session/tasks?branch=:branch` | none | durable branch task records |
 | `POST /sessions/:session/tasks/:task/cancel?branch=:branch` | `{ reason? }` | cascaded terminal task record |
-| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` | durable delivery handle |
+| `GET /sessions/:session/mailbox?branch=:branch&direction=all&limit=20&before=:cursor&pending=1` | none | bounded receipt-rich page and next cursor |
+| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` | stable durable delivery receipt |
 | `POST /sessions/:session/mailbox/:message/ack?branch=:branch` | none | acknowledged mailbox record |
 | `POST /sessions/:session/documents?branch=:branch` | `ImportDocumentInput` | document handle |
 | `POST /sessions/:session/input-sets?branch=:branch` | `CreateInputSetInput` | exact ordered input-set handle |
@@ -59,7 +62,9 @@ All successful non-streaming responses are JSON. Domain errors use HTTP 400 and 
 | `POST /sync/manifests` | `{ operation, scopeKind, scopeId, requestedBy }` | ownership-aware resource/replica manifest |
 | `POST /sync/export` | `{ destination, scopeKind, scopeId, requestedBy }` | inspectable events/profile/replica-envelope/artifact bundle plus completed/partial manifest |
 
-For snapshot/history/stream, the branch may alternatively occupy the fourth path segment, but the query parameter is the documented form. Slice 2 commands require `?branch=`. Mailbox family/task authorization, document scope, spent-plus-active tree budgets, recoverable cancellation propagation, durable goal workspace pins, shared provider concurrency, and early-heartbeat rejection are enforced by the same domain services used in-process; transport routing does not weaken them. Request validation is currently minimal at the transport boundary; domain/storage validation remains authoritative.
+For snapshot/history/stream, the branch may alternatively occupy the fourth path segment, but the query parameter is the documented form. Slice 2 commands require `?branch=`. Family targets are URL-decoded and resolve only within the caller's parent/direct-child/sibling roster; sender identity is the path session/branch and body aliases cannot replace it. Mailbox pages sort newest-first by committed send time plus stable ID, use opaque base64url cursors, and report `queued`, `delivered_to_context`, `acknowledged`, or `failed` receipts with relationship/name/task/artifact/reply provenance. A rejected request returns the ordinary typed protocol error and commits no mailbox row.
+
+Mailbox family/task/artifact authorization, UTF-8/rate/pending bounds, document scope, spent-plus-active tree budgets, recoverable cancellation propagation, durable goal workspace pins, shared provider concurrency, and early-heartbeat rejection are enforced by the same domain services used in-process; transport routing does not weaken them. Domain/storage validation remains authoritative.
 
 ### Snapshot then SSE
 

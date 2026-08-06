@@ -178,12 +178,21 @@ const child = await supervisor.agents.spawn(parentSessionId, parentBranchId, {
 const children = await supervisor.agents.spawnMany(parentSessionId, parentBranchId, [
   { task: "Inspect logs" }, { task: "Find the regression" },
 ]);
+const family = await supervisor.agents.listFamily(parentSessionId, parentBranchId);
 const mail = await supervisor.agents.sendMessage(parentSessionId, parentBranchId, {
-  toSessionId: child.sessionId, content: "Prioritize the first failure",
+  target: child.sessionId, content: "Prioritize the first failure",
+  taskId: child.taskId, artifactIds: [evidenceArtifactId], intentKey: "priority-v1",
+});
+const followUp = await supervisor.agents.followUp(
+  parentSessionId, parentBranchId, child.sessionId, "Recheck after the patch",
+  { taskId: child.taskId, intentKey: "recheck-v1" },
+);
+const page = await supervisor.agents.messages(parentSessionId, parentBranchId, {
+  direction: "all", limit: 20, before: previousCursor,
 });
 await supervisor.agents.acknowledgeMessage(child.sessionId, child.branchId, mail.mailboxMessageId);
 await supervisor.agents.completeTask(child.sessionId, child.branchId, { result: { summary: "..." } });
-// failTask, cancel, listTasks, and listChildren use the same durable task IDs.
+// cancelFamilyTarget, failTask, cancel, listTasks, and listChildren use durable IDs.
 
 const document = await supervisor.documents.import(parentSessionId, parentBranchId, {
   name: "build.log", content: veryLargeText, chunkBytes: 32 * 1024,
@@ -319,6 +328,10 @@ const child = await supervisor.specs.spawn(sessionId, branchId, specEntryId, {
 A skill must export a default function or named `run` function. `Supervisor.open({ skillPermissionAllowlist: [...] })` configures exact allowed permission names (none by default); validation, activation/testing, and invocation enforce it, including after reopen/configuration changes. Activation requires at least one declared runtime test; compile and runtime test requests use executor `skill` in the durable outbox. Both `EffectRequested` and `Skill*Recorded` pin `entryId`/`versionId`. A spec spawn is normal atomic child admission extended by `SubagentSpecInvoked`, and `subagent_spec_invocations.task_id` makes the pin queryable after restart/rebuild.
 
 The console SDK exposes policy-bounded `sdk.memory`, `sdk.harness`, `sdk.skills`, `sdk.specs`, and `sdk.rlm` RPC facades. `rlm` is also a cell global. `rlm.start`, `startMany`, `get`, `result`, and `cancel` route to `Supervisor.models`; returned handles contain durable IDs plus non-enumerable convenience methods, so saving/returning a handle serializes only JSON identity and a later fresh worker can call `rlm.get(handleId)`. A child inherits the parent model unless the existing parent policy authorizes a narrower override; generated TypeScript cannot select another provider/model.
+
+The console also exposes `sdk.agents.spawn/list/send/messages/acknowledge/cancel/followUp`. Sender session and branch always come from the executing cell; input fields cannot spoof them. Targets resolve only to the unique parent, direct children, or siblings by exact session ID/name (the literal `parent` selects the unique parent), and ambiguous names or deeper/cross-root targets fail with a typed error. Messages are non-empty UTF-8 strings capped at 32 KiB, may carry one authorized task reference and up to eight sender-registered artifact IDs, and use an optional intent key for stable deduplication. Linked immutable artifacts are registered into the recipient branch when the message enters context.
+
+A receipt distinguishes `queued`, `delivered_to_context`, `acknowledged`, and `failed`; validation/reach rejection is a typed rejected call and creates no mailbox record. Busy-session sends return at the durable queued boundary and enter the next committed run step. An explicit idle/stopped-child `followUp` enters that same retained session and schedules one normal run; terminal success/failure/cancellation/budget/unknown is returned as a retained reply linked by `replyToMessageId`. Per sender the runtime enforces 60 messages/minute, each target accepts at most 100 queued messages, pages are bounded to 100 records, and exact retries with the same intent and meaning return the same receipt.
 
 The console SDK exposes policy-bounded `sdk.memory`, `sdk.harness`, `sdk.skills`, and `sdk.specs` RPC facades. `sdk.harness.list/history` return only active entries authorized for the calling local/workspace/user/global scope plus candidate versions from that branch's exact exposed allocation; unexposed or cross-workspace candidate content is never returned by these views. Agent-created memory is local-only and requires source-trajectory evidence; broader changes use `sdk.harness.propose`. Validation, activation/allocation, observations, decisions, approval, and rollback are deliberately evaluator/user-owned and absent from the model/console facade. The `sql` template is intentionally different: it is trusted-local, shared, read-only diagnostics and can inspect non-private cross-workspace/candidate projections. Scope/exposure is behavioral isolation, not SQL confidentiality. The HTTP `AgentClient` exposes `memoryCreate/Search/List`, `refine`, lifecycle methods, separate rollback approval, `rollback`, `invokeSkill/testSkill`, and `spawnSpec`.
 

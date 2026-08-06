@@ -13,7 +13,7 @@ export const eventTypes = [
   "EffectOutcomeRecorded", "ContextMaterialized", "ModelCallRequested", "ModelOutputChunk",
   "ModelCallCompleted", "ModelCallTerminated", "BudgetDebited", "BudgetExceeded", "RecoveryPerformed",
   "TaskCreated", "SubagentAdmitted", "TaskStatusChanged", "SubagentCancellationRequested", "TaskUsageAttributed",
-  "MailboxMessageSent", "MailboxMessageDelivered", "MailboxMessageAcknowledged",
+  "MailboxMessageSent", "MailboxMessageDelivered", "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged",
   "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered",
   "DocumentImported", "DocumentChunkAdded", "InputSetCreated",
   "GoalCreated", "GoalCompletionRequested", "GoalGateAdded", "GoalGateStatusChanged", "GoalStatusChanged",
@@ -34,6 +34,8 @@ export type MessageRole = "system" | "user" | "assistant" | "tool";
 export type EffectOutcome = "succeeded" | "failed" | "cancelled" | "unknown";
 export type TaskStatus = "pending" | "admitted" | "running" | "completed" | "failed" | "cancelled";
 export type MailboxMessageKind = "message" | "task_completed" | "task_failed" | "task_cancelled";
+export type MailboxReceiptStatus = "queued" | "delivered_to_context" | "acknowledged" | "rejected" | "failed";
+export type FamilyRelationship = "parent" | "child" | "sibling";
 export type GoalStatus = "active" | "completion_requested" | "completed" | "blocked" | "failed" | "cancelled";
 export type GoalGateStatus = "pending" | "running" | "passed" | "failed" | "cancelled" | "unknown";
 export type HeartbeatStatus = "active" | "paused" | "cancelled";
@@ -55,7 +57,7 @@ export interface EventPayloads {
   SessionNamed: { name: string };
   BranchNamed: { name: string };
   SessionStatusChanged: { status: SessionStatus; reason?: string };
-  MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string };
+  MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string; mailbox?: { mailboxMessageId: string; fromSessionId: string; relationship: FamilyRelationship; taskId?: string; artifactIds?: string[]; receiptEventId: string } };
   CellProposed: { cellId: string; code: string; dependencies: string[] };
   CellStarted: { cellId: string; attempt: number };
   CellCommitted: { cellId: string; result: JsonValue; logs: string[]; durationMs: number; exports: string[] };
@@ -79,8 +81,10 @@ export interface EventPayloads {
   TaskStatusChanged: { taskId: string; status: Exclude<TaskStatus, "pending">; result?: JsonValue; artifactIds?: string[]; error?: string; reason?: string };
   SubagentCancellationRequested: { taskId: string; childSessionId: string; reason?: string };
   TaskUsageAttributed: { taskId: string; childSessionId: string; tokens: number; costUsd: number; turns: number; wallTimeMs: number; conservative: boolean };
-  MailboxMessageSent: { mailboxMessageId: string; fromSessionId: string; fromBranchId: string; toSessionId: string; toBranchId: string; kind: MailboxMessageKind; content: string; taskId?: string };
-  MailboxMessageDelivered: { mailboxMessageId: string; sentEventId: string; fromSessionId: string; fromBranchId: string; toSessionId: string; toBranchId: string; kind: MailboxMessageKind; content: string; taskId?: string };
+  MailboxMessageSent: { mailboxMessageId: string; fromSessionId: string; fromBranchId: string; toSessionId: string; toBranchId: string; kind: MailboxMessageKind; content: string; taskId?: string; artifactIds?: string[]; intentKey?: string; followUp?: boolean; replyToMessageId?: string };
+  MailboxMessageDelivered: { mailboxMessageId: string; sentEventId: string; fromSessionId: string; fromBranchId: string; toSessionId: string; toBranchId: string; kind: MailboxMessageKind; content: string; taskId?: string; artifactIds?: string[]; intentKey?: string; followUp?: boolean; replyToMessageId?: string; senderRelationship?: FamilyRelationship };
+  MailboxMessageContextDelivered: { mailboxMessageId: string; messageEventId: string; deliveredAt: string; relationship: FamilyRelationship; runId?: string };
+  MailboxMessageDeliveryFailed: { mailboxMessageId: string; failedAt: string; error: string };
   MailboxMessageAcknowledged: { mailboxMessageId: string; acknowledgedBySessionId: string; acknowledgedAt: string };
   TaskTerminalNoticeSent: { noticeId: string; taskId: string; parentSessionId: string; childSessionId: string; status: "completed" | "failed" | "cancelled"; result?: JsonValue; artifactIds?: string[]; error?: string; reason?: string };
   TaskTerminalNoticeDelivered: { noticeId: string; sentEventId: string; taskId: string; parentSessionId: string; childSessionId: string; status: "completed" | "failed" | "cancelled"; result?: JsonValue; artifactIds?: string[]; error?: string; reason?: string };
@@ -157,14 +161,14 @@ const usageSchema = z.object({ inputTokens: nonnegative, outputTokens: nonnegati
 const artifactSchema = z.object({ artifactId: id, digest, mediaType: id, size: nonnegative });
 const workingValueSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("json"), value: jsonValueSchema }), z.object({ kind: z.literal("artifact"), artifactId: id })]);
 const taskTerminalSchema = z.object({ noticeId: id, taskId: id, parentSessionId: id, childSessionId: id, status: z.enum(["completed", "failed", "cancelled"]), result: jsonValueSchema.optional(), artifactIds: z.array(id).optional(), error: z.string().optional(), reason: z.string().optional() });
-const mailboxBaseSchema = z.object({ mailboxMessageId: id, fromSessionId: id, fromBranchId: id, toSessionId: id, toBranchId: id, kind: z.enum(["message", "task_completed", "task_failed", "task_cancelled"]), content: z.string(), taskId: id.optional() });
+const mailboxBaseSchema = z.object({ mailboxMessageId: id, fromSessionId: id, fromBranchId: id, toSessionId: id, toBranchId: id, kind: z.enum(["message", "task_completed", "task_failed", "task_cancelled"]), content: z.string(), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), intentKey: id.optional(), followUp: z.boolean().optional(), replyToMessageId: id.optional() });
 const payloadSchemas: Record<EventType, z.ZodType> = {
   SessionCreated: z.object({ workspaceId: id, initialBranchId: id, model: modelSchema, budget: budgetSchema, sessionName: z.string().min(1).optional(), initialBranchName: z.string().min(1).optional(), parentSessionId: id.optional(), parentBranchId: id.optional(), rootSessionId: id.optional(), depth: z.number().int().nonnegative().optional(), taskId: id.optional() }),
   BranchCreated: z.object({ branchId: id, parentBranchId: id, forkCursor: z.string().regex(/^\d+$/), name: z.string().optional() }),
   SessionNamed: z.object({ name: z.string().min(1) }),
   BranchNamed: z.object({ name: z.string().min(1) }),
   SessionStatusChanged: z.object({ status: z.enum(["idle", "running", "stopped", "failed", "archived"]), reason: z.string().optional() }),
-  MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional() }),
+  MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional(), mailbox: z.object({ mailboxMessageId: id, fromSessionId: id, relationship: z.enum(["parent", "child", "sibling"]), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), receiptEventId: id }).optional() }),
   CellProposed: z.object({ cellId: id, code: z.string(), dependencies: z.array(id) }),
   CellStarted: z.object({ cellId: id, attempt: positiveInteger }),
   CellCommitted: z.object({ cellId: id, result: jsonValueSchema, logs: z.array(z.string()), durationMs: nonnegative, exports: z.array(z.string()) }),
@@ -189,7 +193,9 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SubagentCancellationRequested: z.object({ taskId: id, childSessionId: id, reason: z.string().optional() }),
   TaskUsageAttributed: z.object({ taskId: id, childSessionId: id, tokens: nonnegative, costUsd: nonnegative, turns: nonnegative, wallTimeMs: nonnegative, conservative: z.boolean() }),
   MailboxMessageSent: mailboxBaseSchema,
-  MailboxMessageDelivered: mailboxBaseSchema.extend({ sentEventId: id }),
+  MailboxMessageDelivered: mailboxBaseSchema.extend({ sentEventId: id, senderRelationship: z.enum(["parent", "child", "sibling"]).optional() }),
+  MailboxMessageContextDelivered: z.object({ mailboxMessageId: id, messageEventId: id, deliveredAt: dateTime, relationship: z.enum(["parent", "child", "sibling"]), runId: id.optional() }),
+  MailboxMessageDeliveryFailed: z.object({ mailboxMessageId: id, failedAt: dateTime, error: z.string().min(1) }),
   MailboxMessageAcknowledged: z.object({ mailboxMessageId: id, acknowledgedBySessionId: id, acknowledgedAt: dateTime }),
   TaskTerminalNoticeSent: taskTerminalSchema,
   TaskTerminalNoticeDelivered: taskTerminalSchema.extend({ sentEventId: id }),

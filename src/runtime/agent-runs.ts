@@ -30,6 +30,10 @@ export interface StartAgentRunInput {
   /** Stable caller intent. Reusing it returns the same durable run. */
   readonly requestKey?: string;
   readonly goalId?: string;
+  /** Internal stable run identity used by retained family delivery recovery. */
+  readonly requestedRunId?: string;
+  /** Internal: the task is already a provenance-rich mailbox/session message. */
+  readonly suppressTaskMessage?: boolean;
 }
 
 export interface AgentRunResult {
@@ -72,8 +76,8 @@ const OBSERVATION_TYPES = new Set([
   "CellCommitted", "CellFailed", "CellAbandoned", "EffectOutcomeRecorded",
   "WorkingValueSet", "ArtifactRegistered", "TaskCreated", "SubagentAdmitted",
   "TaskStatusChanged", "MailboxMessageSent", "MailboxMessageDelivered",
-  "MailboxMessageAcknowledged", "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered",
-  "RecursiveModelRequested", "RecursiveModelStatusChanged", "SkillInvocationRecorded",
+  "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged", "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered",
+  "RecursiveModelStarted", "RecursiveModelStatusChanged", "SkillInvocationRecorded",
   "SubagentSpecInvoked", "AgentRunUserInputReceived", "GoalGateStatusChanged",
   "GoalStatusChanged", "RefinementObservationRecorded", "RefinementDecided",
 ]);
@@ -83,7 +87,7 @@ const SDK_GUIDE = [
   "Cell globals: sdk, sql, session, console, state, artifacts, tools, inspect, cells, rlm.",
   "Use tools.readFile(path), tools.writeFile(path, content, expectedSha256?), and tools.shell(command, options?) for repository work.",
   "Use sql`SELECT ... ${value}` only for read-only relational queries; use state.get/set/list for durable JSON and artifacts.put/get for larger content.",
-  "Use cells.list/get for retained notebook history; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel for durable adaptation and delegation.",
+  "Use cells.list/get for retained notebook history; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
   "A cell's final expression or explicit return is its bounded observation. Values in lexical bindings or globalThis disappear after the committed cell boundary.",
   "Inspect first, make focused changes, run verification, and return a final action only when the task is actually complete.",
 ].join("\n");
@@ -105,6 +109,11 @@ class RunQueue {
 /** Autonomous typed model-to-TypeScript loop over canonical run events. */
 export class AgentRunService {
   readonly #runs = new RunQueue();
+  #terminalObserver: ((result: AgentRunResult) => Promise<void>) | null = null;
+  #boundaryObserver: ((sessionId: string, branchId: string, runId: string) => Promise<void>) | null = null;
+
+  setTerminalObserver(observer: (result: AgentRunResult) => Promise<void>): void { this.#terminalObserver = observer; }
+  setBoundaryObserver(observer: (sessionId: string, branchId: string, runId: string) => Promise<void>): void { this.#boundaryObserver = observer; }
 
   constructor(
     readonly storage: AgentStorage,
@@ -131,8 +140,10 @@ export class AgentRunService {
     if (normalized.goalId !== undefined && (typeof normalized.goalId !== "string" || !normalized.goalId.trim())) {
       throw new ValidationError("Agent run goalId must be a non-empty string");
     }
+    if (normalized.requestedRunId !== undefined && (typeof normalized.requestedRunId !== "string" || !normalized.requestedRunId.trim())) throw new ValidationError("Agent run requestedRunId must be a non-empty string");
+    if (normalized.suppressTaskMessage !== undefined && typeof normalized.suppressTaskMessage !== "boolean") throw new ValidationError("Agent run suppressTaskMessage must be boolean");
     const requestKey = normalized.requestKey ?? `agent-run-request:${newId()}`;
-    return this.#runs.run(`${sessionId}/${branchId}`, async () => {
+    const result = await this.#runs.run(`${sessionId}/${branchId}`, async () => {
       let state = await this.#state(sessionId, branchId);
       const existing = Object.values(state.agentRuns).find((run) => run.requestKey === requestKey);
       if (existing) {
@@ -144,24 +155,25 @@ export class AgentRunService {
       const active = Object.values(state.agentRuns).find((run) => !isTerminal(run.status));
       if (active) throw new ValidationError(`Agent run ${active.id} is already ${active.status}`);
       if (normalized.goalId && !state.goals[normalized.goalId]) throw new NotFoundError("goal", normalized.goalId);
-      const runId = newId();
-      await this.storage.appendEvents([{
+      const runId = normalized.requestedRunId ?? newId();
+      const requested = { sessionId, branchId, type: "AgentRunRequested" as const, producer: "client", idempotencyKey: `agent-run-request:${runId}`, payload: { runId, task, requestKey, ...(normalized.goalId === undefined ? {} : { goalId: normalized.goalId }) } };
+      await this.storage.appendEvents(normalized.suppressTaskMessage ? [requested] : [{
         sessionId, branchId, type: "MessageAppended", producer: "client",
         idempotencyKey: `agent-run-task-message:${runId}`,
         payload: { messageId: `agent-run-task-${runId}`, role: "user", content: task },
-      }, {
-        sessionId, branchId, type: "AgentRunRequested", producer: "client",
-        idempotencyKey: `agent-run-request:${runId}`,
-        payload: { runId, task, requestKey, ...(normalized.goalId === undefined ? {} : { goalId: normalized.goalId }) },
-      }]);
+      }, requested]);
       state = await this.#state(sessionId, branchId);
       if (!state.agentRuns[runId]) throw new Error("Agent run request was not committed");
       return this.#advance(sessionId, branchId, runId);
     });
+    await this.#notifyTerminal(result);
+    return result;
   }
 
   async advance(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> {
-    return this.#runs.run(`${sessionId}/${branchId}`, () => this.#advance(sessionId, branchId, runId));
+    const result = await this.#runs.run(`${sessionId}/${branchId}`, () => this.#advance(sessionId, branchId, runId));
+    await this.#notifyTerminal(result);
+    return result;
   }
 
   async get(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> {
@@ -186,7 +198,7 @@ export class AgentRunService {
     if (normalized.approved !== undefined && typeof normalized.approved !== "boolean") {
       throw new ValidationError("Agent run approved value must be boolean");
     }
-    return this.#runs.run(`${sessionId}/${branchId}`, async () => {
+    const result = await this.#runs.run(`${sessionId}/${branchId}`, async () => {
       const state = await this.#state(sessionId, branchId);
       const run = state.agentRuns[runId];
       if (!run) throw new NotFoundError("agent run", runId);
@@ -215,6 +227,8 @@ export class AgentRunService {
       }]);
       return this.#advance(sessionId, branchId, runId);
     });
+    await this.#notifyTerminal(result);
+    return result;
   }
 
   /** Cancellation intent is committed outside the run queue so it can abort an admitted effect. */
@@ -263,6 +277,25 @@ export class AgentRunService {
         await this.#terminal(sessionId, branchId, run, "cancelled", run.cancellationReason ?? "Cancellation requested");
         continue;
       }
+      let step = run.steps.at(-1);
+      if (step?.action && !this.#actionApplied(state, run, step.actionId, step.action)) {
+        const action = step.action;
+        const cell = action.type === "typescript" ? state.cells[`agent-run-cell-${step.actionId}`] : undefined;
+        const interruptedCell = cell && ["proposed", "running", "abandoned"].includes(cell.status);
+        // A retained action is already admitted model output. Reconcile it before
+        // admitting another model call. Effectful/user-input actions still honor
+        // a budget reached by the call that produced them, while an interrupted
+        // stable cell is an explicit unknown outcome rather than a budget result.
+        if (!interruptedCell &&
+            (state.budget.exceeded || budgetReached(state.budget.limits, state.budget)) &&
+            ["typescript", "clarification", "permission"].includes(action.type)) {
+          await this.#terminal(sessionId, branchId, run, "budget_exceeded", "Session budget boundary reached before action execution");
+          continue;
+        }
+        const progressed = await this.#applyAction(sessionId, branchId, state, run, step.actionId, action);
+        if (!progressed) return this.get(sessionId, branchId, runId);
+        continue;
+      }
       if (state.budget.exceeded || budgetReached(state.budget.limits, state.budget)) {
         await this.#terminal(sessionId, branchId, run, "budget_exceeded", "Session budget is exhausted");
         continue;
@@ -277,8 +310,11 @@ export class AgentRunService {
         continue;
       }
 
-      let step = run.steps.at(-1);
       if (!step || step.action !== undefined || step.rejection !== undefined) {
+        if (this.#boundaryObserver) {
+          await this.#boundaryObserver(sessionId, branchId, run.id);
+          ({ state, events, run } = await this.#load(sessionId, branchId, runId));
+        }
         const ordinal = (step?.ordinal ?? 0) + 1;
         const observationEventIds = this.#unobserved(events, run);
         const stepId = `agent-run-${run.id}-step-${ordinal}`;
@@ -418,21 +454,41 @@ export class AgentRunService {
       return;
     }
     const raw = call.chunks.join("");
-    try {
-      const action = parseAgentAction(raw);
-      await this.storage.appendEvents([{
-        sessionId, branchId, type: "AgentRunActionCommitted", producer: "supervisor",
-        idempotencyKey: `agent-run-action:${step.actionId}`,
-        payload: { runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId, callId: step.callId, raw, action },
-      }]);
-    } catch (error) {
+    let action: AgentAction;
+    try { action = parseAgentAction(raw); }
+    catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.storage.appendEvents([{
         sessionId, branchId, type: "AgentRunActionRejected", producer: "supervisor",
         idempotencyKey: `agent-run-action-rejected:${step.actionId}`,
         payload: { runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId, callId: step.callId, raw, error: message },
       }]);
+      return;
     }
+    await this.storage.appendEvents([{
+      sessionId, branchId, type: "AgentRunActionCommitted", producer: "supervisor",
+      idempotencyKey: `agent-run-action:${step.actionId}`,
+      payload: { runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId, callId: step.callId, raw, action },
+    }]);
+  }
+
+  #actionApplied(state: AgentState, run: AgentRunState, actionId: string, action: AgentAction): boolean {
+    if (action.type === "typescript") {
+      const status = state.cells[`agent-run-cell-${actionId}`]?.status;
+      return status === "committed" || status === "failed";
+    }
+    if (action.type === "clarification" || action.type === "permission") {
+      const request = run.inputRequests[`agent-run-input-${actionId}`];
+      return request?.actionId === actionId && request.kind === action.type && request.question === action.question &&
+        (action.type === "clarification" || request.permission === action.permission);
+    }
+    if (action.type === "final") {
+      const messageId = `agent-run-final-${run.id}`;
+      const message = state.messages.find((candidate) => candidate.id === messageId);
+      return run.status === "succeeded" && run.finalMessageId === messageId && message?.role === "assistant" && message.content === action.content;
+    }
+    if (action.type === "blocked") return run.status === "blocked" && run.reason === action.reason;
+    return run.status === "failed" && run.reason === action.error;
   }
 
   async #applyAction(
@@ -636,6 +692,10 @@ export class AgentRunService {
     const run = state.agentRuns[runId];
     if (!run) throw new NotFoundError("agent run", runId);
     return { state, events, run };
+  }
+
+  async #notifyTerminal(result: AgentRunResult): Promise<void> {
+    if (this.#terminalObserver && isTerminal(result.status)) await this.#terminalObserver(result);
   }
 
   #result(state: AgentState, run: AgentRunState): AgentRunResult {

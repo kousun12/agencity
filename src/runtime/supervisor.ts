@@ -295,6 +295,8 @@ export class Supervisor {
     this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox, artifacts, this.memory);
     this.restartConsoleAfterCell = restartConsoleAfterCell;
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this));
+    this.agents.attachRunService(this.runs);
+    this.runs.setBoundaryObserver((sessionId, branchId, runId) => this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId).then(() => {}));
   }
 
   static async open(options: SupervisorOptions): Promise<Supervisor> {
@@ -380,6 +382,7 @@ export class Supervisor {
       await supervisor.heartbeats.recoverDue();
       await supervisor.goals.recoverIncomplete();
       await supervisor.models.recoverIncomplete();
+      await supervisor.agents.recoverDeliveries();
       await supervisor.runs.recoverIncomplete();
     }
     supervisor.heartbeats.startScheduler(options.heartbeatPollIntervalMs ?? 100);
@@ -679,6 +682,36 @@ export class Supervisor {
         return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: typeof options.idempotencyKey === "string" ? options.idempotencyKey : nextRpcKey(method) } as any);
       }
       if (method === "skills.test") return this.skills.testModelVisible(sessionId,branchId,String(args[0]),typeof args[1] === "string" ? args[1] : undefined);
+      if (method === "agents.spawn") {
+        const raw = args[0]; const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
+        if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.spawn requires a task string or object");
+        const idempotencyKey = typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method);
+        const handle = await this.agents.spawn(sessionId, branchId, { ...input, idempotencyKey } as any);
+        if (input.run !== false) this.agents.scheduleSpawn(handle, String(input.task ?? ""));
+        return handle;
+      }
+      if (method === "agents.list") return this.agents.listFamily(sessionId, branchId);
+      if (method === "agents.send") {
+        const raw = args[0];
+        const input = typeof raw === "string" ? { target: raw, content: args[1] } : raw as Record<string, unknown>;
+        if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.send requires a target/content object");
+        return this.agents.sendMessage(sessionId, branchId, { ...input, intentKey: typeof input.intentKey === "string" ? input.intentKey : nextRpcKey(method) } as any);
+      }
+      if (method === "agents.messages") return this.agents.messages(sessionId, branchId, (args[0] ?? {}) as any);
+      if (method === "agents.acknowledge") {
+        if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("agents.acknowledge requires a message ID");
+        return this.agents.acknowledgeMessage(sessionId, branchId, args[0]);
+      }
+      if (method === "agents.cancel") {
+        if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("agents.cancel requires a direct-child target");
+        if (args[1] !== undefined && typeof args[1] !== "string") throw new ValidationError("agents.cancel reason must be a string");
+        return this.agents.cancelFamilyTarget(sessionId, branchId, args[0], args[1] as string | undefined);
+      }
+      if (method === "agents.followUp") {
+        if (typeof args[0] !== "string" || !args[0] || typeof args[1] !== "string") throw new ValidationError("agents.followUp requires target and content strings");
+        const options = args[2] && typeof args[2] === "object" && !Array.isArray(args[2]) ? args[2] as Record<string, unknown> : {};
+        return this.agents.followUp(sessionId, branchId, args[0], args[1], { ...options, intentKey: typeof options.intentKey === "string" ? options.intentKey : nextRpcKey(method) } as any);
+      }
       if (method === "specs.spawn") {
         const input = (args[1] ?? {}) as Record<string, unknown>;
         return this.specs.spawn(sessionId,branchId,String(args[0]),{ ...input, idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method) } as any);
