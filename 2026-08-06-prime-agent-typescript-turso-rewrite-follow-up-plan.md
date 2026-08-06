@@ -87,7 +87,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-016 | Implement the trajectory-reviewing refiner behind `/refine` and adaptation triggers | Done | FU-003, FU-004 |
 | FU-017 | Add skill creation, installation, and management as a product surface | Done | FU-004 |
 | FU-018 | Stream provider output incrementally to attached clients | Done | FU-003 |
-| FU-019 | Add automatic and agent-directed context compaction | In progress | FU-003, FU-004 |
+| FU-019 | Add automatic and agent-directed context compaction | Done | FU-003, FU-004 |
 
 ---
 
@@ -1041,7 +1041,7 @@ Providers that support token streaming deliver incremental assistant output to a
 
 ## FU-019 — Add automatic and agent-directed context compaction
 
-**Status:** In progress
+**Status:** Done
 
 ### Gap
 
@@ -1080,6 +1080,14 @@ Long runs continue past context limits. Compaction happens automatically when ma
 
 - Destructive history pruning; owned-scope deletion remains a separate guarded operation.
 - Cross-session or workspace-level summarization.
+
+
+### Completion evidence
+
+- Commits: `2962db5`, `b0afdde`, `fc31d02`, `5ce2581`, `ce74df7`, `6398322`, and `8da8225`.
+- Implementation: immutable exact-source compaction requests/derivations; deterministic and hierarchical model-summary strategies through the outbox; capacity/threshold controller in legacy and typed run paths; typed overflow attempts; automatic and directed SDK/protocol/CLI/TUI surfaces; branch rematerialization; migration 014 and recovery.
+- Verification: full verify passed 592 tests with 2 external skips. Independent review ran 16 adversarial provenance/cursor/digest/strategy/overflow probes plus full/focused suites; all passed, including no history deletion, active goal/child/schedule preservation, unknown no retry, and same-step retry attribution.
+- Remaining limitations: unknown provider capacity disables proactive thresholding; model-specific token estimates are attributable conservative estimates rather than claimed exact tokenizers.
 
 ---
 
