@@ -80,7 +80,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-009 | Add product-level end-to-end acceptance coverage | Proposed | FU-001–FU-008, FU-011–FU-019 |
 | FU-010 | Add repository-level purpose and implementation guidance | Done | — |
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
-| FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Proposed | FU-004 |
+| FU-012 | Expose durable family messaging and retained subagent follow-up to the model | In progress | FU-004 |
 | FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
 | FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Proposed | FU-004 |
 | FU-015 | Keep detached sessions executing in a background service | In progress | FU-001, FU-004 |
@@ -612,7 +612,7 @@ TypeScript cells provide explicit, bounded notebook semantics. A model can assig
 
 ## FU-012 — Expose durable family messaging and retained subagent follow-up to the model
 
-**Status:** Proposed
+**Status:** In progress
 
 ### Gap
 
