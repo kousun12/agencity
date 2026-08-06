@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+*.db
+*.db-*
+.prime-agent/
+.env
+.DS_Store

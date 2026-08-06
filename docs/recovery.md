@@ -1,0 +1,100 @@
+# Crash recovery and unknown effects
+
+## Committed boundary
+
+A cell has durable lifecycle events:
+
+1. `CellProposed` records code and declared dependencies;
+2. `CellStarted` records its attempt;
+3. the disposable worker runs, using durable outbox requests for SDK effects;
+4. success atomically appends staged `ArtifactRegistered`, `WorkingValueSet`, and `CellCommitted` events, or failure appends `CellFailed`.
+
+Only a committed terminal event and its committed exports become later state. The worker heap is never replayed. Arbitrary replay could repeat a file edit, command, network call, or model generation.
+
+## Startup sequence
+
+Unless `recover: false`, `Supervisor.open` performs:
+
+1. **Outbox reconciliation.** Each mutable `running` row whose owner disappeared is inspected.
+2. **Safe requeue.** An effect declared idempotent returns to `pending` with its attempt count retained.
+3. **Visible uncertainty.** A non-idempotent running effect gets a canonical `EffectOutcomeRecorded { outcome: "unknown" }`; it is not requeued. An anomalous pending non-idempotent row with a retained prior attempt is treated the same way; a normal pending first attempt remains safe to drain because it was never claimed.
+4. **Cell abandonment.** Every branch projection with a `proposed`/`running` cell gets a branch-scoped idempotent `CellAbandoned` event. This includes a child fork that inherited an incomplete ancestor cell, without reusing the ancestor's idempotency key.
+5. **Recovery evidence.** Affected branches get `RecoveryPerformed` with abandoned, unknown, and retried IDs.
+6. **Drain.** Pending/requeued effects execute and commit attempt/outcome events.
+7. **Model finalization.** If a requested model call already has a durable terminal effect, the runtime records model/message/budget completion or termination without calling the model again.
+8. **Status reconciliation.** A branch left `running` by a crash before model-request/finalization commits is returned to `idle` with a recovery event.
+
+Recovery commands use stable branch-scoped idempotency keys, so repeating startup does not duplicate terminal state.
+
+## Effect state machine
+
+```text
+EffectRequested -> pending outbox
+                -> EffectAttemptStarted -> running
+                -> EffectOutcomeRecorded(succeeded | failed | cancelled | unknown)
+```
+
+The request commits before execution. A terminal event is authoritative even if its original caller dies before receiving the result. Outbox status is a mutable operational projection of that event history. If two local runners race for a pending row, the loser waits for the winner's durable terminal outcome through the recorded lease instead of reporting a transient `unknown`.
+
+`unknown` means the runtime cannot prove whether an external action happened. It is not failure, cancellation, or success. Examples include process death after a provider/service accepted a request but before the result committed, or after a non-idempotent command may have changed the world.
+
+## Retry rule
+
+Automatic retry requires the executor/caller to establish idempotency for the logical effect. A durable idempotency key deduplicates runtime intent; it does not force an external service to behave idempotently. The `idempotent` request flag is an assertion that must be justified by operation semantics.
+
+Current defaults:
+
+- shell run: non-idempotent;
+- model completion: non-idempotent;
+- file read/write/delete through console helpers/default request policy: idempotent;
+- file exact-text replace: non-idempotent.
+
+File write helps make retry safe by writing atomically, accepting an expected prior digest, and recognizing already-desired content. These mechanisms do not make every filesystem topology or external observer exactly-once.
+
+## Crash matrix
+
+| Crash point | Durable observation after startup | Automatic action |
+|---|---|---|
+| Before `EffectRequested` commit | No effect exists. | None; dependent committed work cannot claim it happened. |
+| After request, before claim | `pending`. | Drain once under a local claim. |
+| After claim/start, before external effect | `running`; actual effect uncertain from the database alone. | Requeue only if declared idempotent; otherwise `unknown`. |
+| After external action, before terminal commit | Same as above; this is the ambiguity window. | Same conservative rule; never infer success. |
+| After terminal outcome commit, before caller receives it | Canonical terminal event. | Return/reconstruct it; do not call executor again. |
+| Cell proposed/started, worker dies before terminal cell event | Incomplete cell plus any separately durable effect events. | Append `CellAbandoned`; reconcile effects independently. |
+| Staged state/artifact reference before cell commit | No `WorkingValueSet`/`ArtifactRegistered` event. | Do not expose it. Unreferenced CAS bytes may remain. |
+| Cell commit succeeds, process dies before notification | Complete canonical batch. | Snapshot/subscriber catch-up reads it from storage. |
+| Model effect terminal, model-call finalization missing | Requested call plus terminal effect. | Finalize once without another provider call. |
+| Status set running, crash before/after model request finalization | Branch remains `running` without live ownership. | Finish any terminal call, then append recovery-to-idle once. |
+| Snapshot write corrupt/missing | Canonical history unaffected. | `rebuild` discards snapshots and reduces events. |
+
+## Manual reconciliation of unknown outcomes
+
+Slice 1 surfaces unknown effects in history/snapshot but has no dedicated reconciliation/approval command. Until one exists:
+
+1. stop automatic/manual attempts for the same logical action;
+2. inspect the effect ID, input, attempts, timestamps, and idempotency key in canonical history;
+3. query the external system using its own stable request/resource identifiers;
+4. obtain user direction if the effect cannot be established;
+5. submit a **new, explicitly chosen** compensating or retry operation with a new logical idempotency key only when safe.
+
+Do not edit the `events` or `outbox` table to turn unknown into success. A future reconciliation API must append attributable evidence/events rather than rewrite retained history.
+
+## Guarantees and limits
+
+Guaranteed by implemented paths:
+
+- canonical appends and their operational projection writes share one local transaction;
+- exact duplicate event idempotency keys return the original event; changed meaning conflicts;
+- non-idempotent lost ownership becomes unknown;
+- projection replay never invokes effects;
+- post-commit notification loss is repaired by cursor catch-up.
+
+Not guaranteed:
+
+- exactly once in an external system;
+- recovery of heap objects or uncheckpointed cell variables;
+- reconstruction of independently changed workspace/services;
+- automatic process-owner failover or distributed leases;
+- crash-atomicity across database and artifact/filesystem placement;
+- cleanup of unreferenced CAS bytes;
+- complete operating-system kill tests for every crash instruction boundary (tests simulate the durable boundary states).

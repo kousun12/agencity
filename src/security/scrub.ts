@@ -1,0 +1,54 @@
+import type { JsonValue } from "../domain/json.ts";
+
+const SENSITIVE_KEY = /(?:^|_)(?:api_?key|token|secret|password|passwd|credential|authorization|auth)(?:_|$)/i;
+const REDACTED = "[REDACTED]";
+
+function knownSecrets(): string[] {
+  return Object.entries(process.env)
+    .filter(([key, value]) => SENSITIVE_KEY.test(key) && typeof value === "string" && value.length >= 4)
+    .map(([, value]) => value as string)
+    .sort((left, right) => right.length - left.length);
+}
+
+/** Removes credential-shaped environment variables before starting generated code or shell tools. */
+export function environmentWithoutSecrets(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined && !SENSITIVE_KEY.test(key)) result[key] = value;
+  }
+  return result;
+}
+
+export function scrubText(text: string): string {
+  let scrubbed = text;
+  for (const secret of knownSecrets()) scrubbed = scrubbed.split(secret).join(REDACTED);
+  return scrubbed;
+}
+
+/**
+ * Redacts occurrences of actual credential values known to the supervisor.
+ *
+ * Key names are deliberately preserved: ordinary domain payloads commonly use
+ * names such as `token`, `auth`, or `password` without containing a credential.
+ * Mutating those values would corrupt canonical application data. Inputs that
+ * contain a known credential are rejected at command/storage boundaries; this
+ * function is for executor outputs, logs, and errors that must remain useful.
+ */
+export function scrubJson(value: JsonValue): JsonValue {
+  if (typeof value === "string") return scrubText(value);
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map(scrubJson);
+  const result: Record<string, JsonValue> = {};
+  for (const [key, item] of Object.entries(value)) result[key] = scrubJson(item);
+  return result;
+}
+
+/** Brokered credentials may be referenced by opaque handles, never copied into durable requests. */
+export function containsBrokeredSecret(value: JsonValue): boolean {
+  const serialized = JSON.stringify(value);
+  return knownSecrets().some((secret) => serialized.includes(secret));
+}
+
+export function isSensitiveEnvironmentKey(key: string): boolean {
+  return SENSITIVE_KEY.test(key);
+}

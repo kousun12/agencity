@@ -1,0 +1,44 @@
+{
+  "name": "@prime-agent/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agencity": "./src/cli.ts",
+    "prime-agent-ts": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./domain": "./src/domain/index.ts",
+    "./storage": "./src/storage/index.ts",
+    "./artifacts": "./src/artifacts/index.ts",
+    "./executors": "./src/executors/index.ts",
+    "./console": "./src/console/index.ts",
+    "./runtime": "./src/runtime/index.ts",
+    "./protocol": "./src/protocol/index.ts",
+    "./security": "./src/security/index.ts",
+    "./tui": "./src/tui/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test test/integration",
+    "test:e2e": "bun test test/e2e",
+    "typecheck": "tsc --noEmit",
+    "verify": "bun run typecheck && bun run check:architecture && bun test",
+    "start": "bun run src/cli.ts",
+    "check:architecture": "bun run scripts/check-architecture.ts"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.15.15",
+    "ulid": "^3.0.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  }
+}
