@@ -481,8 +481,8 @@ function validateAndDescribeTrigger(
     const failures = evidenceEventIds.map((id) => requireEvent(byId, id));
     const gates = failures.map((event) => {
       const payload = recordPayload(event.payload);
-      if (event.type !== "GoalGateStatusChanged" || payload.status !== "failed") {
-        throw new RefinementContextError("invalid-trigger", `Gate failure evidence ${event.eventId} is not a typed failed GoalGateStatusChanged event`);
+      if (!["GoalGateStatusChanged", "GoalGateEvaluationRecorded"].includes(event.type) || payload.status !== "failed") {
+        throw new RefinementContextError("invalid-trigger", `Gate failure evidence ${event.eventId} is not a typed failed gate status/evaluation event`);
       }
       return { goalId: payloadString(payload, "goalId", event.eventId), gateId: payloadString(payload, "gateId", event.eventId) };
     });
@@ -500,6 +500,12 @@ function validateAndDescribeTrigger(
       const userRunInput = event.type === "AgentRunUserInputReceived";
       if (!explicitlyTyped && !retainedUserMessage && !userRunInput) {
         throw new RefinementContextError("invalid-trigger", `Correction evidence ${id} is not an explicitly identified user input event`);
+      }
+      if (explicitlyTyped) {
+        const correctedEventIds = Array.isArray(payload.correctedEventIds) ? payload.correctedEventIds : null;
+        if (!correctedEventIds || correctedEventIds.length === 0 || correctedEventIds.some((correctedId) => typeof correctedId !== "string" || !byId.has(correctedId) || compareCursor(byId.get(correctedId)!.cursor, event.cursor) >= 0)) {
+          throw new RefinementContextError("invalid-trigger", `Typed correction ${id} does not cite existing earlier trajectory events`);
+        }
       }
     }
     cluster = { kind: "explicit_user_correction", correctionCount: evidenceEventIds.length };
@@ -545,10 +551,17 @@ function selectTrajectoryEvents(
     const goalId = payloadString(anchorPayload, "goalId", anchors[0]!.eventId);
     const gateId = payloadString(anchorPayload, "gateId", anchors[0]!.eventId);
     for (const event of events) {
-      if (!["GoalGateAdded", "GoalGateStatusChanged"].includes(event.type)) continue;
+      if (!["GoalGateAdded", "GoalGateStatusChanged", "GoalGateEvaluationRecorded"].includes(event.type)) continue;
       if (optionalPayloadString(event.payload, "goalId") === goalId && optionalPayloadString(event.payload, "gateId") === gateId) {
         add(event, "cluster", false, 1);
       }
+    }
+  } else if (trigger.kind === "explicit_user_correction") {
+    for (const anchor of anchors) {
+      if (anchor.type !== "UserCorrection") continue;
+      const payload = recordPayload(anchor.payload);
+      const correctedEventIds = Array.isArray(payload.correctedEventIds) ? payload.correctedEventIds : [];
+      for (const correctedId of correctedEventIds) if (typeof correctedId === "string") add(requireEvent(byId, correctedId), "cluster", false, 1);
     }
   }
 

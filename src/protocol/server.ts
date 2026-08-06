@@ -115,6 +115,11 @@ export class ProtocolServer {
         if (parts[2] === "resume") return Response.json(await this.supervisor.schedules.resume(parts[1], typeof body.nextTickAt === "string" ? body.nextTickAt : undefined));
         if (parts[2] === "clear") return Response.json(await this.supervisor.schedules.clear(parts[1], typeof body.reason === "string" ? body.reason : undefined));
       }
+      if (parts[0] === "refinement-policy") {
+        if (request.method === "GET") return Response.json(await this.supervisor.refiner.automaticPolicy());
+        if (request.method === "PUT") { const body = await jsonBody(request); return Response.json(await this.supervisor.refiner.setAutomatic(body.enabled as boolean)); }
+      }
+      if (parts[0] === "refinement-reviews" && request.method === "GET") return Response.json(await this.supervisor.refiner.list({ ...(url.searchParams.has("status") ? { status: url.searchParams.get("status") as any } : {}) }));
       if (parts[0] === "harness") {
         if (request.method === "GET" && parts[1] === "refinements") return Response.json(await this.supervisor.harness.proposals(url.searchParams.get("status") as any ?? undefined));
         if (request.method === "GET" && parts[1] && parts[2] === "history") return Response.json(await this.supervisor.harness.history(parts[1]));
@@ -162,6 +167,12 @@ export class ProtocolServer {
             return Response.json(await this.supervisor.memory.search(sessionId, branchId, url.searchParams.get("query") ?? "", { ...(split("scopes") ? { scopes: split("scopes") as any } : {}), ...(split("statuses") ? { statuses: split("statuses") as any } : {}), ...(split("tags") ? { tags: split("tags")! } : {}), ...(split("linkedEntryIds") ? { linkedEntryIds: split("linkedEntryIds")! } : {}), ...(url.searchParams.has("since") ? { since: url.searchParams.get("since")! } : {}), ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}) }));
           }
         }
+        if (parts[2] === "refinement-reviews" && branchId) {
+          if (request.method === "POST") return Response.json(await this.supervisor.refiner.request(sessionId, branchId, await jsonBody(request) as any));
+          if (request.method === "GET" && parts[3]) return Response.json(await this.supervisor.refiner.getForBranch(sessionId, branchId, parts[3]));
+          if (request.method === "GET") return Response.json(await this.supervisor.refiner.list({ sessionId, branchId, ...(url.searchParams.has("status") ? { status: url.searchParams.get("status") as any } : {}) }));
+        }
+        if (parts[2] === "user-corrections" && branchId && request.method === "POST") { const body = await jsonBody(request); return Response.json({ correctionId: await this.supervisor.refiner.correct(sessionId, branchId, String(body.correction ?? ""), Array.isArray(body.correctedEventIds) ? body.correctedEventIds.map(String) : []) }); }
         if (parts[2] === "refinements" && branchId) {
           if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.harness.propose(sessionId, branchId, await jsonBody(request) as any));
           if (request.method === "POST" && parts[3] && parts[4] === "validate") return Response.json(await this.supervisor.harness.validate(sessionId, branchId, parts[3]));
@@ -236,39 +247,58 @@ export class ProtocolServer {
     let active = true;
     let unsubscribeEvents = () => {};
     let unsubscribeProgress = () => {};
+    const unsubscribe = (): void => {
+      const events = unsubscribeEvents;
+      const progress = unsubscribeProgress;
+      unsubscribeEvents = () => {};
+      unsubscribeProgress = () => {};
+      events();
+      progress();
+    };
+    const deactivate = (): void => {
+      if (!active) return;
+      active = false;
+      unsubscribe();
+    };
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
         const enqueue = (frame: string): void => {
           if (!active) return;
-          try { controller.enqueue(encoder.encode(frame)); } catch { active = false; }
+          try { controller.enqueue(encoder.encode(frame)); }
+          catch { deactivate(); }
         };
         // Committed events retain their cursor ID and original data shape for
         // backwards compatibility. Progress is explicitly named and has no ID:
         // EventSource reconnect cursors therefore never advance on progress.
-        unsubscribeEvents = this.supervisor.projections.subscribe(
+        const events = this.supervisor.projections.subscribe(
           sessionId,
           branchId,
           after,
           (event) => enqueue(`id: ${event.cursor}\ndata: ${JSON.stringify(event)}\n\n`),
         );
-        unsubscribeProgress = this.supervisor.outbox.onProgress((progress) => {
-          if (progress.sessionId === sessionId && progress.branchId === branchId) {
-            enqueue(`event: progress\ndata: ${JSON.stringify(progress)}\n\n`);
-          }
-        });
-        signal.addEventListener("abort", () => {
-          active = false;
-          unsubscribeEvents(); unsubscribeProgress();
+        unsubscribeEvents = events;
+        if (!active) { events(); unsubscribeEvents = () => {}; }
+        if (active) {
+          const progress = this.supervisor.outbox.onProgress((notification) => {
+            if (notification.sessionId === sessionId && notification.branchId === branchId) {
+              enqueue(`event: progress\ndata: ${JSON.stringify(notification)}\n\n`);
+            }
+          });
+          unsubscribeProgress = progress;
+          if (!active) { progress(); unsubscribeProgress = () => {}; }
+        }
+        const abort = (): void => {
+          deactivate();
           try { controller.close(); } catch {}
-        }, { once: true });
+        };
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
       },
-      cancel: () => {
-        active = false;
-        unsubscribeEvents(); unsubscribeProgress();
-      },
+      cancel: deactivate,
     });
     return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
   }
+
 }
 
 function authorized(request: Request, expected: string): boolean {

@@ -213,7 +213,9 @@ The normal TUI path is simply `agencity` or `agencity [TASK]`; the product boots
 agencity debug tui --session <SESSION_ID> --branch <BRANCH_ID>
 ```
 
-Plain text starts a typed autonomous run, or answers the pending clarification/permission request for the active run. Commands:
+Plain text starts a typed autonomous run, or answers the pending clarification/permission request for the active run. The non-interactive product surface also supports `agencity refine [INSTRUCTIONS]`, `agencity refine status`, `agencity refine auto on|off`, and the explicitly advanced `agencity refine propose-json JSON` path. Automatic mode is a profile preference, is off by default, and version 1 can trigger only local review.
+
+Commands:
 
 | Command | Behavior |
 |---|---|
@@ -228,7 +230,7 @@ Plain text starts a typed autonomous run, or answers the pending clarification/p
 | `/heartbeats` | Print projected heartbeat schedules. |
 | `/memory [query]` | List visible scoped memory or run deterministic FTS retrieval with provenance. |
 | `/skills` | List current versioned TypeScript skills. |
-| `/refine <json>` | Propose and validate typed refinement edits; activation/evaluation stays explicit through SDK/protocol. |
+| `/refine [instructions]` | Run an attributable retained-trajectory review. Use `status`, `auto on|off`, `correct EVENT_IDS -- TEXT`, or advanced `propose-json JSON` subforms as needed. |
 | `/rollback <proposal> <reason>` | Roll back an exact promoted candidate. User/global proposals first require separate owner/admin approval through the supervisor/protocol `approve-rollback` command; promotion approval does not count. |
 | `/skill-test <entry> [version]` | Run durable compile/runtime tests for an exact skill. |
 | `/skill <entry> <json-input>` | Invoke the active exact skill version through the outbox. |

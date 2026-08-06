@@ -135,9 +135,9 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 - disposable Bun TypeScript cells with final-expression or explicit-return observations, bounded safe inspection/logs, durable working values, retained cell history, read-only analytical SQL, and content-addressed artifacts;
 - outbox-backed model, shell, file, and skill effects with crash recovery and explicit unknown outcomes;
 - durable root and child sessions, nuclear-family mailboxes and retained follow-up, cancellation trees, recursive-model runtime handles, documents/input sets, goals, cached attributable gates, heartbeats, schedules, and wake queues;
-- scoped memory with FTS5 candidate retrieval, versioned prompt notes, skills, subagent specifications, and governed refinement/evaluation/rollback;
+- scoped memory with FTS5 candidate retrieval, versioned prompt notes, skills, subagent specifications, governed refinement/evaluation/rollback, and an attributable trajectory refiner with profile-owned automatic-trigger policy;
 - profile and device identity plus optional offline-first Turso envelope synchronization, divergent-branch preservation, conflict/quarantine records, and single-device session execution ownership;
-- loopback HTTP/JSON and SSE surfaces with cursorless provider progress, a TypeScript API, a no-ID product CLI plus compatible diagnostic commands, and a basic in-process TUI;
+- loopback HTTP/JSON and SSE surfaces with cursorless provider progress, a TypeScript API, a no-ID product CLI plus compatible diagnostic commands, and a protocol-backed terminal TUI;
 - local and HTTP-backed placement contracts for relational state, artifact storage, candidate retrieval, and execution, with explicit capability reporting and conformance coverage.
 
 ### Incomplete product surfaces
@@ -147,10 +147,12 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 - The ordinary task route drives the strict `agencity.agent-action` version-1 autonomous loop. Only validated TypeScript actions execute generated work; final, clarification, permission, blocked, and failed are typed run control. Raw action JSON remains internal attributable history.
 - Console cells support notebook observation, bounded `inspect`, artifact spill, `state.list`, and retained `cells.list/get`; lexical bindings remain deliberately non-durable.
 - The console exposes first-class durable `rlm.start/startMany/get/result/cancel` handles plus `sdk.agents` roster, spawn, bounded direct messaging, receipts, acknowledgement, cancellation, and same-session retained follow-up.
-- The TUI still directly owns a `Supervisor` and advances one model turn from text input. It is not yet the protocol-backed background-service client described above.
+- `/refine`, the public protocol client, and `sdk.harness.review/reviews` run a strict trajectory-to-candidate review through an ordinary durable recursive model child. Frozen bounded sources, decisions, proposal identity, and recovery status remain attributable. Automatic refinement is profile-opt-in, local-only, and scans typed repeated effect failures, distinct-pin gate failures, and explicit `UserCorrection` events only at committed AgentRun boundaries; repeated success, stale-memory, and unproductive-delegation detectors are not implemented.
+- The TUI is a protocol-backed client of the managed workspace service: it loads snapshots, follows cursor-resumable committed SSE events plus cursorless progress, submits typed run commands, and detaches without owning session identity. Its readline loop is still a basic terminal renderer rather than a full-screen interface.
 - Streaming-capable providers emit bounded cursorless progress before an atomic committed response; Echo and explicitly non-streaming providers truthfully report committed-only behavior. Real-provider streaming remains credential-gated.
-- Unknown effects are retained and visible through state/history, but there is no complete user-facing reconciliation workflow.
-- End-to-end coverage proves clean linked invocation, empty-state/no-ID product entry, selection/resume, autonomous notebook coding cells, streaming and action-boundary recovery, durable recursive/family calls, cached completion-gate repair, and schedule/wake recovery. It does not yet prove managed detached execution after the client process exits; that remains FU-015/FU-009.
+- Unknown effects are retained and visible through startup/status plus `unknown` and evidence-only `reconcile` product flows. Reconciliation deliberately does not rewrite the unknown outcome or authorize automatic retry.
+- The on-demand managed workspace service owns detached runs, schedules, and recovery behind the same authenticated loopback protocol, with process fencing and tested client detach/reattach. It is not an OS-login service and has no cross-device execution-owner failover.
+- End-to-end coverage proves clean linked invocation, empty-state/no-ID product entry, selection/resume, autonomous notebook coding cells, streaming and action-boundary recovery, managed detached continuation/reattachment, durable recursive/family calls, cached completion-gate repair, and schedule/wake recovery. The readline TUI remains basic and the broader FU-009 black-box matrix is still incomplete.
 
 ### Deliberately unavailable or deferred
 

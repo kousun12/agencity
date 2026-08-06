@@ -9,6 +9,7 @@ import type {
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
   StartAgentRunInput, AgentRunResult, AgentRunUserResponse, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
   RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
+  StartRefinementReviewInput, RefinementReviewRecord, RefinementTriggerPolicyV1,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
@@ -239,6 +240,13 @@ export class AgentClient {
   memoryCreate(sessionId: string, branchId: string, input: CreateMemoryInput | string): Promise<HarnessRecord> { return this.#post(`/sessions/${sessionId}/memory?branch=${branchId}`, typeof input === "string" ? { text: input } : input); }
   memorySearch(sessionId: string, branchId: string, query: string, options: MemorySearchOptions = {}): Promise<MemorySearchResult> { const params = new URLSearchParams({ branch: branchId, query, ...(options.limit === undefined ? {} : { limit: String(options.limit) }), ...(options.scopes === undefined ? {} : { scopes: options.scopes.join(",") }), ...(options.statuses === undefined ? {} : { statuses: options.statuses.join(",") }), ...(options.tags === undefined ? {} : { tags: options.tags.join(",") }), ...(options.linkedEntryIds === undefined ? {} : { linkedEntryIds: options.linkedEntryIds.join(",") }), ...(options.since === undefined ? {} : { since: options.since }) }); return this.#json(`/sessions/${sessionId}/memory?${params}`); }
   memoryList(sessionId: string, branchId: string): Promise<HarnessRecord[]> { return this.#json(`/sessions/${sessionId}/memory/list?branch=${branchId}`); }
+  requestRefinement(sessionId: string, branchId: string, input: StartRefinementReviewInput = {}): Promise<RefinementReviewRecord> { return this.#post(`/sessions/${sessionId}/refinement-reviews?branch=${branchId}`, input); }
+  refinementReviews(sessionId?: string, branchId?: string, status?: string): Promise<RefinementReviewRecord[]> { const query = new URLSearchParams(); if (branchId) query.set("branch", branchId); if (status) query.set("status", status); return this.#json(sessionId ? `/sessions/${sessionId}/refinement-reviews?${query}` : `/refinement-reviews${status ? `?status=${encodeURIComponent(status)}` : ""}`); }
+  refinementReview(sessionId: string, branchId: string, reviewId: string): Promise<RefinementReviewRecord> { return this.#json(`/sessions/${sessionId}/refinement-reviews/${reviewId}?branch=${branchId}`); }
+  userCorrection(sessionId: string, branchId: string, correction: string, correctedEventIds: readonly string[]): Promise<{ correctionId: string }> { return this.#post(`/sessions/${sessionId}/user-corrections?branch=${branchId}`, { correction, correctedEventIds }); }
+  refinementPolicy(): Promise<RefinementTriggerPolicyV1> { return this.#json("/refinement-policy"); }
+  setAutomaticRefinement(enabled: boolean): Promise<RefinementTriggerPolicyV1> { return this.#put("/refinement-policy", { enabled }); }
+  /** Advanced diagnostic: submit an already-formed governed proposal JSON document. */
   refine(sessionId: string, branchId: string, input: ProposeRefinementInput): Promise<RefinementProposalRecord> { return this.#post(`/sessions/${sessionId}/refinements?branch=${branchId}`, input); }
   validateRefinement(sessionId: string, branchId: string, proposalId: string): Promise<RefinementProposalRecord> { return this.#post(`/sessions/${sessionId}/refinements/${proposalId}/validate?branch=${branchId}`); }
   activateRefinement(sessionId: string, branchId: string, proposalId: string, input: ActivateCandidateInput = {}): Promise<RefinementProposalRecord> { return this.#post(`/sessions/${sessionId}/refinements/${proposalId}/activate?branch=${branchId}`, input); }
@@ -269,6 +277,7 @@ export class AgentClient {
   exportData(destination:string,scopeKind:"workspace"|"session"|"profile",scopeId:string,requestedBy:string):Promise<DataManifestRecord>{return this.#post("/sync/export",{destination,scopeKind,scopeId,requestedBy});}
   deleteOwnedData(input:DeleteOwnedDataInput):Promise<PhysicalDeletionReceipt>{return this.#post("/sync/delete",input);}
 
+  #put<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "PUT", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
   #post<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "POST", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
   async #json<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await this.transport.request(path, init);

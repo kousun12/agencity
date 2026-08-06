@@ -77,7 +77,7 @@ export interface ToolsSdk {
   writeFile(path: string, content: string, expectedSha256?: string): Promise<JsonValue>;
 }
 export interface MemorySdk { search(query: string, options?: JsonValue): Promise<JsonValue>; create(input: JsonValue | string): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue> }
-export interface HarnessSdk { propose(input: JsonValue): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue>; history(entryId: string): Promise<JsonValue> }
+export interface HarnessSdk { review(instructions?: string): Promise<JsonValue>; reviews(options?: JsonValue): Promise<JsonValue>; propose(input: JsonValue): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue>; history(entryId: string): Promise<JsonValue> }
 export interface SkillsSdk { invoke(entryId: string, input: JsonValue, options?: JsonValue): Promise<JsonValue>; test(entryId: string, versionId?: string): Promise<JsonValue> }
 export interface SpecsSdk { spawn(entryId: string, input?: JsonValue): Promise<JsonValue> }
 

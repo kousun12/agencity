@@ -4,7 +4,7 @@ import {
   WORKSPACE_MATERIAL_EVENT_CLASS, projectEvents,
   type AgentEvent, type ProtocolTransport,
 } from "../../src/index.ts";
-import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
+import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
@@ -76,6 +76,59 @@ describe("FU-005 protocol transport contract", () => {
         }));
       }
     } finally { protocol.stop(); await supervisor.close(); }
+  });
+
+  test("an SSE enqueue failure immediately unsubscribes committed-event and progress listeners", async () => {
+    const { supervisor } = await fixture("agencity-sse-enqueue-failure-");
+    const session = await supervisor.createSession({ workspaceId: "sse-enqueue" });
+    const protocol = new ProtocolServer(supervisor);
+    const after = (await supervisor.projections.getSnapshot(session.sessionId, session.branchId)).cursor;
+
+    let eventListeners = 0;
+    let progressListeners = 0;
+    const projectionSource = supervisor.projections;
+    const originalSubscribe = projectionSource.subscribe.bind(projectionSource);
+    projectionSource.subscribe = ((...args: Parameters<typeof originalSubscribe>) => {
+      eventListeners++;
+      const release = originalSubscribe(...args);
+      let active = true;
+      return () => { if (!active) return; active = false; eventListeners--; release(); };
+    }) as typeof projectionSource.subscribe;
+    const outbox = supervisor.outbox;
+    const originalProgress = outbox.onProgress.bind(outbox);
+    outbox.onProgress = ((...args: Parameters<typeof originalProgress>) => {
+      progressListeners++;
+      const release = originalProgress(...args);
+      let active = true;
+      return () => { if (!active) return; active = false; progressListeners--; release(); };
+    }) as typeof outbox.onProgress;
+
+    const controller = new AbortController();
+    const response = await protocol.handle(new Request(
+      `http://agencity.local/sessions/${session.sessionId}/stream?branch=${session.branchId}&after=${after}`,
+      { signal: controller.signal },
+    ));
+    expect(response.status).toBe(200);
+    expect({ eventListeners, progressListeners }).toEqual({ eventListeners: 1, progressListeners: 1 });
+
+    const prototype = ReadableStreamDefaultController.prototype as ReadableStreamDefaultController<Uint8Array>;
+    const originalEnqueue = prototype.enqueue;
+    let rejectNextEnqueue = true;
+    prototype.enqueue = function (chunk: Uint8Array): void {
+      if (rejectNextEnqueue) { rejectNextEnqueue = false; throw new TypeError("forced closed stream"); }
+      return originalEnqueue.call(this, chunk);
+    };
+    try {
+      await supervisor.appendMessage(session.sessionId, session.branchId, "user", "force SSE delivery");
+      await waitFor(() => eventListeners === 0 && progressListeners === 0, "SSE listener cleanup after enqueue failure");
+    } finally {
+      prototype.enqueue = originalEnqueue;
+      controller.abort();
+      await response.body?.cancel().catch(() => {});
+      projectionSource.subscribe = originalSubscribe;
+      outbox.onProgress = originalProgress;
+      await supervisor.close();
+    }
   });
 
   test("watchBranch retries from the last successfully applied cursor, deduplicates, and discards ephemeral progress", async () => {

@@ -57,6 +57,7 @@ import { SubagentSpecService } from "./specs.ts";
 import { AgentRunService } from "./agent-runs.ts";
 import { ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "./execution-leases.ts";
 import { EffectReconciliationService } from "./effect-reconciliation.ts";
+import { RefinerService } from "./refiner.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -267,6 +268,7 @@ export class Supervisor {
   readonly specs: SubagentSpecService;
   readonly runs: AgentRunService;
   readonly effectReconciliation: EffectReconciliationService;
+  readonly refiner: RefinerService;
   /** Process-local executor/provider catalog; descriptors contain no credential material. */
   readonly modelExecutor: ModelExecutor;
   readonly restartConsoleAfterCell: boolean;
@@ -315,9 +317,10 @@ export class Supervisor {
     this.restartConsoleAfterCell = restartConsoleAfterCell;
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this));
     this.effectReconciliation = new EffectReconciliationService(storage);
+    this.refiner = new RefinerService(storage, this.models, this.harness, profile, userScopeKey);
     this.schedules.attachRunService(this.runs);
     this.agents.attachRunService(this.runs);
-    this.runs.setBoundaryObserver((sessionId, branchId, runId) => this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId).then(() => {}));
+    this.runs.setBoundaryObserver(async (sessionId, branchId, runId) => { await this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId); await this.refiner.scanBoundary(sessionId, branchId); });
   }
 
   static async open(options: SupervisorOptions): Promise<Supervisor> {
@@ -424,6 +427,7 @@ export class Supervisor {
     await this.modelLoop.reconcileRunningSessions();
     await this.goals.recoverIncomplete();
     await this.models.recoverIncomplete();
+    await this.refiner.recoverIncomplete();
     await this.agents.recoverDeliveries();
     await this.runs.recoverIncomplete();
     await this.runs.recoverOrphanGoals();
@@ -444,6 +448,7 @@ export class Supervisor {
     await this.heartbeats.close();
     await this.schedules.close();
     await this.console.stop();
+    await this.refiner.close();
     await this.models.close();
     await this.sync.stop();
     await this.executionLeases?.close();
@@ -457,6 +462,7 @@ export class Supervisor {
     await this.heartbeats.close();
     await this.schedules.close();
     await this.console.stop();
+    await this.refiner.close();
     await this.models.close();
     await this.outbox.quiesceForDeletion();
     try { return await this.sync.deleteOwnedData(input); }
@@ -748,6 +754,8 @@ export class Supervisor {
       if (method === "memory.search") return this.memory.search(sessionId,branchId,String(args[0] ?? ""),(args[1] ?? {}) as any);
       if (method === "memory.create") return this.memory.create(sessionId,branchId,args[0] as any,"agent");
       if (method === "memory.list") return this.memory.list(sessionId,branchId,(args[0] ?? {}) as any);
+      if (method === "harness.review") return this.refiner.request(sessionId,branchId,{ ...(typeof args[0] === "string" ? { instructions: args[0] } : {}) });
+      if (method === "harness.reviews") return this.refiner.list({ sessionId, branchId, ...((args[0] ?? {}) as any) });
       if (method === "harness.propose") return this.harness.propose(sessionId,branchId,{...(args[0] as any),authority:"agent"});
       if (method === "harness.list") return this.harness.modelList(sessionId,branchId,(args[0] ?? {}) as any);
       if (method === "harness.history") return this.harness.modelHistory(sessionId,branchId,String(args[0]));

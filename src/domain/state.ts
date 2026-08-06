@@ -56,7 +56,7 @@ export interface RefinementReviewState {
   readonly requestedScope: "local" | "workspace" | "user" | "global"; readonly requestedScopeKey: string;
   readonly allowedKinds: ("memory" | "prompt_note" | "skill" | "subagent_spec")[];
   readonly triggerId: string; readonly triggerKind: string; readonly triggerFingerprint: string;
-  readonly triggerKey?: string; readonly nonterminalKey?: string; readonly evidenceEventIds: string[];
+  readonly triggerKey?: string; readonly nonterminalKey?: string; readonly triggerEvidenceThroughCursor?: string; readonly evidenceEventIds: string[];
   readonly sourceEventIds: string[]; readonly sourceSnapshotHash: string; readonly sourceThroughCursor: string;
   readonly instructions?: string; readonly status: RefinementReviewLifecycleStatus; readonly handleId?: string;
   readonly childSessionId?: string; readonly childBranchId?: string; readonly decisionFingerprint?: string;

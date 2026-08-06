@@ -6,6 +6,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { parseCliArgs, type ParsedCliArgs } from "./cli-args.ts";
 import { CLI_HELP_GROUPS, buildDataDeleteConfirmation, parseAdvancedArgv, type AdvancedCommandPath } from "./cli/advanced.ts";
 import { createCliErrorEnvelope, createCliSuccessEnvelope, planCliOutput, type CliJsonValue } from "./cli/output.ts";
+import { CliRunInterruptCoordinator } from "./cli/run-interrupt.ts";
 import { AgentRuntimeError, ValidationError, type JsonValue, type ModelConfiguration } from "./domain/index.ts";
 import { containsCredentialMaterial, scrubText } from "./security/index.ts";
 import {
@@ -32,7 +33,7 @@ import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./proto
 import { Supervisor, type AgentRunResult } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine"]);
 
 let activeParsed: ParsedCliArgs | null = null;
 let canonicalHint: { path: AdvancedCommandPath; json: boolean } | null = null;
@@ -136,6 +137,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const existing = await client.productSessions() as ProductBranchSummary[];
     const reconciliationCommand = parsed.command === "unknown" || parsed.command === "reconcile";
     if (reconciliationCommand && existing.length === 0) throw new ValidationError("No retained session is available for effect reconciliation");
+    if (parsed.command === "refine" && existing.length === 0) throw new ValidationError("No retained session is available for trajectory refinement");
     const forceNew = parsed.command === "new" || parsed.flags.has("new");
     let selection: { sessionId: string; branchId: string };
     let summary: ProductBranchSummary;
@@ -191,21 +193,38 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       await manageAutonomyClient(client, selection.sessionId, selection.branchId, parsed);
       return;
     }
+    if (parsed.command === "refine") {
+      const [mode, ...rest] = parsed.positionals;
+      if (mode === "status" || mode === "history") {
+        if (rest.length) throw new ValidationError(`refine ${mode} accepts no additional arguments`);
+        printValue({ reviews: await client.refinementReviews(selection.sessionId, selection.branchId), proposals: (await client.refinements()).filter((item) => item.sessionId === selection.sessionId && item.branchId === selection.branchId) }, parsed.flags.has("json"));
+      } else if (mode === "auto") {
+        if (rest.length !== 1 || (rest[0] !== "on" && rest[0] !== "off")) throw new ValidationError("refine auto requires on or off");
+        printValue(await client.setAutomaticRefinement(rest[0] === "on"), parsed.flags.has("json"));
+      } else if (mode === "propose-json") { const proposed = await client.refine(selection.sessionId, selection.branchId, parseJsonValue(rest.join(" "), "refinement proposal") as any); printValue(await client.validateRefinement(selection.sessionId, selection.branchId, proposed.proposalId), parsed.flags.has("json")); }
+      else printValue(await client.requestRefinement(selection.sessionId, selection.branchId, { ...(parsed.positionals.length ? { instructions: parsed.positionals.join(" ") } : {}) }), parsed.flags.has("json"));
+      return;
+    }
     if (task) {
       if (!available) throw new ValidationError(`Run blocked: ${remediation}`);
       const goalMode = option("goal") ?? "auto";
       if (!["auto", "current", "create"].includes(goalMode)) throw new ValidationError("--goal must be auto, current, or create");
-      const accepted = await client.startRun(selection.sessionId, selection.branchId, { task, goalMode: goalMode as "auto" | "current" | "create" }) as AgentRunResult & { accepted?: boolean };
+      const input = { task, goalMode: goalMode as "auto" | "current" | "create" };
       if (parsed.flags.has("detach")) {
+        const accepted = await client.startRun(selection.sessionId, selection.branchId, input) as AgentRunResult & { accepted?: boolean };
         console.log(`Run accepted: ${accepted.runId} (detached; the managed service continues after client exit)`);
         return;
       }
-      const result = await waitForRun(client, selection.sessionId, selection.branchId, accepted.runId);
+      const result = parsed.command === "run"
+        ? await runToTerminalWithInterrupts(client, selection.sessionId, selection.branchId, input)
+        : await startAndWaitForRun(client, selection.sessionId, selection.branchId, input);
+      if (result === null) return;
       if (result.status === "succeeded") console.log(result.final ?? "");
       else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
       else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
       if (parsed.command === "run") return;
     }
+
     if (parsed.command === "attach" || interactive || !task) await attachManagedClient(client, selection.sessionId, selection.branchId);
   } finally {
     // Closing a client is detach-only. The resident service owns durable work.
@@ -391,10 +410,78 @@ function resolveAgentTarget(rows: any[], target: string): any {
   return matches[0];
 }
 
-async function waitForRun(client: AgentClient, sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> {
+type ProductRunInput = { readonly task: string; readonly goalMode: "auto" | "current" | "create" };
+
+type RunOperation<T> =
+  | { readonly kind: "value"; readonly value: T }
+  | { readonly kind: "error"; readonly error: unknown };
+
+function observeRunOperation<T>(operation: Promise<T>): Promise<RunOperation<T>> {
+  return operation.then(
+    (value) => ({ kind: "value", value }),
+    (error: unknown) => ({ kind: "error", error }),
+  );
+}
+
+async function startAndWaitForRun(
+  client: AgentClient,
+  sessionId: string,
+  branchId: string,
+  input: ProductRunInput,
+): Promise<AgentRunResult> {
+  const accepted = await client.startRun(sessionId, branchId, input);
+  return waitForRun(client, sessionId, branchId, accepted.runId);
+}
+
+/** The plain `agencity run` path owns SIGINT only while admitting/waiting. */
+async function runToTerminalWithInterrupts(
+  client: AgentClient,
+  sessionId: string,
+  branchId: string,
+  input: ProductRunInput,
+): Promise<AgentRunResult | null> {
+  const polling = new AbortController();
+  const interrupts = new CliRunInterruptCoordinator(
+    (runId) => client.cancelRun(sessionId, branchId, runId, "User requested cancellation with Ctrl-C"),
+    (message) => console.error(message),
+  );
+  const sigint = (): void => { interrupts.interrupt(); };
+  process.on("SIGINT", sigint);
+  try {
+    const admission = observeRunOperation(client.startRun(sessionId, branchId, input));
+    const admitted = await Promise.race([
+      admission,
+      interrupts.detached.then(() => null),
+    ]);
+    if (admitted === null) return null;
+    if (admitted.kind === "error") throw admitted.error;
+
+    interrupts.admit(admitted.value.runId);
+    const terminal = await Promise.race([
+      observeRunOperation(waitForRun(client, sessionId, branchId, admitted.value.runId, polling.signal)),
+      interrupts.detached.then(() => null),
+    ]);
+    if (terminal === null) return null;
+    if (terminal.kind === "error") throw terminal.error;
+    return terminal.value;
+  } finally {
+    process.off("SIGINT", sigint);
+    polling.abort();
+  }
+}
+
+async function waitForRun(
+  client: AgentClient,
+  sessionId: string,
+  branchId: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<AgentRunResult> {
   while (true) {
+    if (signal?.aborted) throw new DOMException("Run wait detached", "AbortError");
     const result = await client.run(sessionId, branchId, runId);
     if (!["queued", "running"].includes(result.status)) return result;
+    if (signal?.aborted) throw new DOMException("Run wait detached", "AbortError");
     await Bun.sleep(50);
   }
 }
@@ -732,7 +819,7 @@ async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspac
 }
 
 function taskFor(parsed: ParsedCliArgs): string | undefined {
-  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile"].includes(parsed.command)) return undefined;
+  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile", "refine"].includes(parsed.command)) return undefined;
   const task = parsed.positionals.join(" ").trim();
   if (parsed.command === "run" && !task) throw new ValidationError("run requires TASK");
   return task || undefined;

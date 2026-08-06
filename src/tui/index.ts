@@ -1,10 +1,12 @@
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { projectEvents, reduceAgentState, type AgentEvent, type AgentState, type JsonValue } from "../domain/index.ts";
-import type {
-  AgentClient, BranchWatchHandlers, ProtocolCapabilities,
+import { AgentRuntimeError, projectEvents, reduceAgentState, type AgentEvent, type AgentState } from "../domain/index.ts";
+import {
+  ProtocolClientError,
+  type AgentClient, type BranchWatchHandlers, type ProtocolCapabilities,
 } from "../protocol/index.ts";
-import type { EffectProgressNotification, RecoverySummaryView } from "../runtime/index.ts";
+import type { RecoverySummaryView } from "../runtime/index.ts";
+import { scrubText } from "../security/index.ts";
 
 export type TerminalAgentClient = Pick<AgentClient,
   "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
@@ -13,7 +15,7 @@ export type TerminalAgentClient = Pick<AgentClient,
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
   "heartbeats" | "createHeartbeat" | "pauseHeartbeat" | "resumeHeartbeat" | "cancelHeartbeat" |
   "schedules" | "createSchedule" | "pauseSchedule" | "resumeSchedule" | "clearSchedule" |
-  "memoryList" | "memorySearch" | "harnessList" | "refinements" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
+  "memoryList" | "memorySearch" | "harnessList" | "refinements" | "requestRefinement" | "refinementReviews" | "refinementPolicy" | "setAutomaticRefinement" | "userCorrection" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
   "syncStatus" | "syncNow" | "syncConflicts" | "resolveSyncConflict" | "recoverySummary" | "unknownEffects" |
   "inspectUnknownEffect" | "reconcileUnknownEffect"
 >;
@@ -64,7 +66,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/skills", aliases: [], category: "status", usage: "/skills", summary: "Inspect active skills." },
   { name: "/skill", aliases: [], category: "status", usage: "/skill ENTRY_ID JSON", summary: "Invoke a retained skill version." },
   { name: "/skill-test", aliases: [], category: "status", usage: "/skill-test ENTRY_ID [VERSION_ID]", summary: "Run a retained skill test." },
-  { name: "/refine", aliases: [], category: "status", usage: "/refine [JSON]", summary: "Inspect or propose governed refinement." },
+  { name: "/refine", aliases: [], category: "status", usage: "/refine [INSTRUCTIONS|status|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Run a trajectory review; raw proposal JSON is an advanced diagnostic." },
   { name: "/rollback", aliases: [], category: "status", usage: "/rollback PROPOSAL_ID REASON", summary: "Request governed refinement rollback." },
   { name: "/sync", aliases: [], category: "operations", usage: "/sync", summary: "Run explicit synchronization." },
   { name: "/sync-status", aliases: [], category: "operations", usage: "/sync-status", summary: "Inspect sync lifecycle." },
@@ -118,6 +120,20 @@ export function renderStartupStatus(
       ? `Cancellation reconciliation pending: ${recovery.cancellationRequestedRunIds.join(", ")}`
       : "Cancellation reconciliation: none pending",
   ].join("\n");
+}
+
+/** Render only scrubbed, typed command failures; protocol details are intentionally omitted. */
+export function renderTerminalError(error: unknown, context = "command"): string {
+  const code = error instanceof ProtocolClientError
+    ? error.code
+    : error instanceof AgentRuntimeError
+      ? error.code
+      : "VALIDATION_ERROR";
+  const status = error instanceof ProtocolClientError ? ` status=${error.status}` : "";
+  const raw = error instanceof Error ? error.message : String(error);
+  const prefix = `[${code}] `;
+  const message = scrubText(raw.startsWith(prefix) ? raw.slice(prefix.length) : raw);
+  return `[${context} error:${code}${status}] ${message}`;
 }
 
 export function renderEvent(event: AgentEvent): string {
@@ -174,7 +190,11 @@ export class TerminalUI {
     if (recovery.unknownEffects.length) this.#write("Unknown effects require inspection with /unknown and evidence-only /reconcile; resume never retries them.\n");
     this.#write("/help opens the command palette. /quit detaches without cancellation.\n");
     await this.#startWatch();
-    const sigint = (): void => { void this.handleInterrupt(); };
+    const sigint = (): void => {
+      void this.handleInterrupt().catch((error) => {
+        try { this.#renderError(error, "interrupt"); } catch {}
+      });
+    };
     process.on("SIGINT", sigint);
     try {
       if (!this.#interactive) return;
@@ -184,7 +204,11 @@ export class TerminalUI {
         try { line = (await this.#readline.question(this.#prompt())).trim(); }
         catch { break; }
         if (!line) continue;
-        await this.execute(line);
+        try {
+          await this.execute(line);
+        } catch (error) {
+          this.#renderError(error, "command");
+        }
       }
     } finally {
       process.off("SIGINT", sigint);
@@ -229,8 +253,13 @@ export class TerminalUI {
     if (line === "/skills") { this.#json((await this.client.harnessList()).filter((item)=>item.kind==="skill"));return "continue"; }
     if (line.startsWith("/skill-test ")) { const [entryId,versionId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires ENTRY_ID [VERSION_ID]");this.#json(await this.client.testSkill(this.#sessionId,this.#branchId,entryId,versionId));return "continue"; }
     if (line.startsWith("/skill ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(7));if(!match)throw new Error("/skill requires ENTRY_ID JSON");this.#json(await this.client.invokeSkill(this.#sessionId,this.#branchId,match[1]!,JSON.parse(match[2]!)));return "continue"; }
-    if (line === "/refine") { this.#json(await this.client.refinements());return "continue"; }
-    if (line.startsWith("/refine ")) { const proposed=await this.client.refine(this.#sessionId,this.#branchId,JSON.parse(line.slice(8)));this.#json(await this.client.validateRefinement(this.#sessionId,this.#branchId,proposed.proposalId));return "continue"; }
+    if (line === "/refine") { this.#json(await this.client.requestRefinement(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/refine status" || line === "/refine history") { this.#json({ reviews: await this.client.refinementReviews(this.#sessionId,this.#branchId), proposals: (await this.client.refinements()).filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId) });return "continue"; }
+    if (line === "/refine auto on" || line === "/refine auto off") { this.#json(await this.client.setAutomaticRefinement(line.endsWith(" on")));return "continue"; }
+    if (line.startsWith("/refine auto")) throw new Error("/refine auto requires on or off");
+    if (line.startsWith("/refine correct ")) { const match=/^([^ ]+)\s+--\s+([\s\S]+)$/.exec(line.slice(16));if(!match)throw new Error("/refine correct EVENT_ID[,EVENT_ID] -- CORRECTION");this.#json(await this.client.userCorrection(this.#sessionId,this.#branchId,match[2]!,match[1]!.split(",").filter(Boolean)));return "continue"; }
+    if (line.startsWith("/refine propose-json ")) { const proposed=await this.client.refine(this.#sessionId,this.#branchId,JSON.parse(line.slice(21)));this.#json(await this.client.validateRefinement(this.#sessionId,this.#branchId,proposed.proposalId));return "continue"; }
+    if (line.startsWith("/refine ")) { this.#json(await this.client.requestRefinement(this.#sessionId,this.#branchId,{instructions:line.slice(8)}));return "continue"; }
     if (line.startsWith("/rollback ")) { const [proposalId,...reason]=line.slice(10).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/rollback requires PROPOSAL_ID REASON");this.#json(await this.client.rollback(this.#sessionId,this.#branchId,proposalId,reason.join(" ")));return "continue"; }
     if (line.startsWith("/branch ")) { const [,cursor,...name]=line.split(/\s+/);if(!cursor)throw new Error("/branch requires CURSOR [NAME]");const fork=await this.client.fork(this.#sessionId,this.#branchId,cursor,name.join(" ")||undefined);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,fork.branchId);await this.#switch(this.#sessionId,fork.branchId);return "continue"; }
     if (line === "/resume" || line.startsWith("/resume ")) { const branch=line.slice(7).trim()||this.#branchId;await this.client.resume(this.#sessionId,branch);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,branch);await this.#switch(this.#sessionId,branch);return "continue"; }
@@ -253,8 +282,13 @@ export class TerminalUI {
     const active = this.#activeRun();
     const decision = this.#interrupts.decide(active?.id ?? null);
     if (decision.action === "cancel") {
-      await this.client.cancelRun(this.#sessionId,this.#branchId,decision.runId,"User requested cancellation with Ctrl-C");
-      this.#write(`Durable cancellation requested for run ${decision.runId}. Waiting for leaf-first reconciliation; press Ctrl-C again to detach.\n`);
+      try {
+        await this.client.cancelRun(this.#sessionId,this.#branchId,decision.runId,"User requested cancellation with Ctrl-C");
+        this.#write(`Durable cancellation requested for run ${decision.runId}. Waiting for leaf-first reconciliation; press Ctrl-C again to detach.\n`);
+      } catch (error) {
+        this.#renderError(error, "interrupt");
+        this.#write(`Cancellation for run ${decision.runId} was not confirmed. Durable/external work may outlive this client; press Ctrl-C again to detach.\n`);
+      }
     } else {
       this.#write(`${decision.warning}\n`);
       this.#detached = true;
@@ -335,6 +369,7 @@ export class TerminalUI {
   #requireState():AgentState{if(!this.#viewState)throw new Error("No projected state");return this.#viewState;}
   #prompt():string{return `${(this.#liveState?.sessionName??this.#sessionId).slice(-12)}/${(this.#liveState?.branch.name??this.#branchId).slice(-12)}${this.#historicalCursor?`@${this.#historicalCursor}`:""}> `;}
   #write(value:string):void{this.#output.write(value);}
+  #renderError(error:unknown,context:"command"|"interrupt"):void{this.#write(`${renderTerminalError(error,context)}\n`);}
   #json(value:unknown):void{this.#write(`${JSON.stringify(value,null,2)}\n`);}
   #writePalette():void{
     const labels:Record<TerminalCommandCategory,string>={product:"Product",status:"Status",notebook:"Notebook/history",autonomy:"Autonomy",operations:"Operations"};

@@ -158,6 +158,8 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     list: (options: JsonValue = {}) => call("memory.list", [options]),
   };
   const harness = {
+    review: (instructions?: string) => call("harness.review", [instructions]),
+    reviews: (options: JsonValue = {}) => call("harness.reviews", [options]),
     propose: (input: JsonValue) => call("harness.propose", [input]),
     list: (options: JsonValue = {}) => call("harness.list", [options]),
     history: (entryId: string) => call("harness.history", [entryId]),

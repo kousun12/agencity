@@ -235,7 +235,14 @@ All session mutation routes require `?branch=:branch` and return durable JSON re
 | `POST /sessions/:session/memory` | Create scoped semantic memory (`CreateMemoryInput`). |
 | `GET /sessions/:session/memory?query=...&scopes=...&statuses=...&tags=...&limit=...` | Deterministic results plus full retrieval provenance. |
 | `GET /sessions/:session/memory/list` | Visible memory list. |
-| `POST /sessions/:session/refinements` | Propose typed edits/evidence/evaluation. |
+| `POST /sessions/:session/refinement-reviews?branch=...` | Admit a manual attributable trajectory review with optional instructions/scope/kinds/wait. |
+| `GET /sessions/:session/refinement-reviews?branch=...&status=...` | Current branch review lifecycle records. |
+| `GET /sessions/:session/refinement-reviews/:review?branch=...` | One review, with exact session/branch ownership checked. |
+| `GET /refinement-reviews?status=...` | Advanced workspace-wide review diagnostics. |
+| `POST /sessions/:session/user-corrections?branch=...` | Append a typed correction citing distinct earlier branch event IDs. |
+| `GET /refinement-policy` | Versioned profile-owned automatic-trigger policy; default automatic=false and scope=local. |
+| `PUT /refinement-policy` | `{ enabled: boolean }`; malformed values fail rather than being coerced. |
+| `POST /sessions/:session/refinements` | Advanced raw proposal path: propose typed edits/evidence/evaluation. |
 | `POST .../refinements/:proposal/validate` | Validate shapes, evidence, authority, conflicts, and CAS. |
 | `POST .../refinements/:proposal/activate` | Create/test candidates and set bounded allocation/exposure. |
 | `POST .../refinements/:proposal/allocate` | Allocate candidate to a session/branch/task. |
@@ -251,9 +258,9 @@ All session mutation routes require `?branch=:branch` and return durable JSON re
 | `POST /sessions/:session/skills/:entry/invoke` | Durable exact-version skill invocation. |
 | `POST /sessions/:session/specs/:entry/spawn` | Version-pinned normal subagent admission. |
 
-`AgentClient` supplies the corresponding `memoryCreate`, `memorySearch`, `memoryList`, `refine`, `validateRefinement`, `activateRefinement`, `allocateRefinement`, `observeRefinement`, `approveRefinement`, `decideRefinement`, `approveRollback`, `rollback`, `harnessList/history`, `invokeSkill/testSkill`, and `spawnSpec` methods.
+`AgentClient` supplies the corresponding `memoryCreate`, `memorySearch`, `memoryList`, `requestRefinement`, `refinementReviews/refinementReview`, `userCorrection`, `refinementPolicy/setAutomaticRefinement`, advanced raw `refine`, `validateRefinement`, `activateRefinement`, `allocateRefinement`, `observeRefinement`, `approveRefinement`, `decideRefinement`, `approveRollback`, `rollback`, `harnessList/history`, `invokeSkill/testSkill`, and `spawnSpec` methods.
 
-The private console RPC injects `sdk.memory`, `sdk.harness`, `sdk.skills`, and `sdk.specs`. Those facades call the same supervisor services; they do not expose SQL writes or evaluator/user-owned validation, activation, allocation, observation, decision, approval, or rollback. `sdk.harness.list/history` are scope-filtered model views: active authorized entries plus only an exact exposed candidate allocation. The raw `sql` tag remains a shared trusted-local, non-confidential diagnostic read and can inspect non-private cross-workspace/candidate projections; exposure is behavioral isolation, not secrecy. Agent direct-memory creation is local-only with source-trajectory evidence. The TUI adds `/memory`, `/skills`, `/refine`, `/rollback`, `/skill-test`, and `/skill` commands. JSON arguments preserve the same typed lifecycle instead of creating a TUI-only mutation path.
+The private console RPC injects `sdk.memory`, `sdk.harness`, `sdk.skills`, and `sdk.specs`. `sdk.harness.review(instructions?)` and `reviews(options?)` use the same retained review services; `propose` remains the raw advanced proposal call. Typed `UserCorrection` creation stays client/user-owned and is deliberately absent from the model-facing SDK. These facades do not expose SQL writes or evaluator/user-owned validation, activation, allocation, observation, decision, approval, or rollback. `sdk.harness.list/history` are scope-filtered model views: active authorized entries plus only an exact exposed candidate allocation. The raw `sql` tag remains a shared trusted-local, non-confidential diagnostic read and can inspect non-private cross-workspace/candidate projections; exposure is behavioral isolation, not secrecy. Agent direct-memory creation is local-only with source-trajectory evidence. The TUI adds `/memory`, `/skills`, `/refine`, `/rollback`, `/skill-test`, and `/skill` commands. `/refine [instructions]` starts the review, `/refine status` lists branch review/proposal history, `/refine auto on|off` changes the profile preference, `/refine correct IDS -- TEXT` appends a typed correction, and `/refine propose-json JSON` preserves the raw advanced proposal diagnostic. No TUI-only mutation path exists.
 
 
 ## Physical deletion route

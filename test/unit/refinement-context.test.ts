@@ -203,6 +203,16 @@ describe("FU-016 pure refinement trajectory context", () => {
     expect(gates.trigger.cluster).toEqual({ gateId: "gate-1", goalId: "goal-1", kind: "repeated_gate_failure" });
     expect(gates.sourceEventIds).toEqual(["gate-added", "gate-failure-1", "gate-failure-2"]);
 
+    const evaluations = buildRefinementTrajectorySnapshot(base({
+      events: [
+        event("gate-added", "1", "GoalGateAdded", { goalId: "goal-1", gateId: "gate-1", name: "tests" }),
+        event("evaluation-1", "2", "GoalGateEvaluationRecorded", { goalId: "goal-1", gateId: "gate-1", status: "failed", definitionHash: "a", materialVersion: "b", materialEventIds: [] }),
+        event("evaluation-2", "3", "GoalGateEvaluationRecorded", { goalId: "goal-1", gateId: "gate-1", status: "failed", definitionHash: "a", materialVersion: "c", materialEventIds: [] }),
+      ],
+      trigger: { kind: "repeated_gate_failure", failureEventIds: ["evaluation-1", "evaluation-2"] },
+    }), { eventWindowRadius: 0 });
+    expect(evaluations.sourceEventIds).toEqual(["gate-added", "evaluation-1", "evaluation-2"]);
+
     expect(() => buildRefinementTrajectorySnapshot(base({
       events: [event("only", "1", "EffectOutcomeRecorded", { effectId: "effect", outcome: "failed" })],
       trigger: { kind: "repeated_effect_failure", failureEventIds: ["only"] },
@@ -235,10 +245,13 @@ describe("FU-016 pure refinement trajectory context", () => {
     expect(correction.sourceEventIds).toEqual(["correction"]);
 
     const futureTypedCorrection = buildRefinementTrajectorySnapshot(base({
-      events: [event("typed-correction", "1", "UserCorrection", { correction: "use Bun" })],
+      events: [
+        event("corrected-source", "1", "MessageAppended", { role: "assistant", content: "Use npm." }),
+        event("typed-correction", "2", "UserCorrection", { correction: "use Bun", correctedEventIds: ["corrected-source"] }),
+      ],
       trigger: { kind: "explicit_user_correction", correctionEventIds: ["typed-correction"] },
-    }));
-    expect(futureTypedCorrection.sourceEventIds).toEqual(["typed-correction"]);
+    }), { eventWindowRadius: 0 });
+    expect(futureTypedCorrection.sourceEventIds).toEqual(["corrected-source", "typed-correction"]);
   });
 
   test("excludes other scopes/workspaces and unexposed candidates while retaining exact exposed versions", () => {

@@ -192,7 +192,12 @@ All Slice 3 payloads use schema version 1 and retain stable entry/version/propos
 |---|---|
 | `HarnessVersionCreated` | Creates one immutable `versionId` for an `entryId`, with monotonic version, kind, scope/key, name/content, tags, confidence, status, evidence/conflict IDs, optional superseded version/proposal, creator, and last-confirmed time. Storage enforces content-kind consistency, evidence existence, conflict existence, and replacement CAS. |
 | `HarnessVersionStatusChanged` | Candidate activation, retirement, rejection, or rollback transition for an exact current entry/version, with reason and optional proposal. |
-| `RefinementProposed` | Typed create/replace/retire edit set, trigger, predicted effect, evidence, objective evaluation, and proposing authority. |
+| `UserCorrection` | Explicit typed user correction plus 1-64 distinct earlier event IDs in the same branch trajectory. Automatic refinement never infers this meaning from prose. |
+| `RefinementReviewRequested` | Stable review/fingerprint, mode, requested scope/kinds, typed trigger/evidence, exact bounded source IDs/cursor/hash, and the strict request plus frozen trajectory snapshot. |
+| `RefinementReviewChildLinked` | Stable recursive-model handle and child session/branch used for the attributable review call. |
+| `RefinementReviewStatusChanged` | Compare-and-swap lifecycle transition through `requested`, `running`, then `no_change`, `candidate`, `revision_required`, `failed`, `cancelled`, or `unknown`, with decision/proposal identity where applicable. |
+| `RefinementTriggerConsumed` | Exact automatic trigger key and greatest consumed evidence cursor; appended atomically with the review terminal transition so the same tranche cannot refire. |
+| `RefinementProposed` | Typed create/replace/retire edit set, trigger, predicted effect, evidence, objective evaluation, and proposing authority. Refiner-produced proposals also retain `sourceReviewId` and a stable proposal fingerprint. |
 | `RefinementValidated` | Validation result and complete CAS/evidence/authority diagnostics against the `proposed` status. |
 | `RefinementCandidateActivated` | Candidate ID, exact candidate version IDs, and bounded allocation/exposure limits. |
 | `RefinementCandidateAllocated` | One numbered target session/branch/task allocation within the candidate bound. |

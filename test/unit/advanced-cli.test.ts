@@ -15,6 +15,7 @@ import {
   type DataDeleteScope,
   type LegacyAdvancedAlias,
 } from "../../src/cli/advanced.ts";
+import { parseCliArgs } from "../../src/cli-args.ts";
 
 const pathParts = (path: AdvancedCommandPath): [AdvancedCommandGroup, AdvancedSubcommand] =>
   path.split(" ") as [AdvancedCommandGroup, AdvancedSubcommand];
@@ -128,7 +129,7 @@ describe("advanced CLI command recognition", () => {
     }
     expect(new Set(LEGACY_CLI_VALUE_OPTIONS)).toEqual(new Set([
       "state-dir", "db", "artifacts", "workspace-root", "workspace", "session", "branch", "cursor",
-      "name", "select", "model", "port", "profile", "sync-url", "replica", "credential-ref",
+      "name", "select", "model", "goal", "port", "profile", "sync-url", "replica", "credential-ref",
       "sync-interval", "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by",
     ]));
     expect(new Set(LEGACY_CLI_BOOLEAN_OPTIONS)).toEqual(new Set([
@@ -153,6 +154,32 @@ describe("advanced CLI command recognition", () => {
         legacyAlias: alias,
       });
     }
+  });
+
+  test("the former --goal value option keeps legacy aliases distinct from ordinary task text", () => {
+    const aliases = Object.keys(LEGACY_ADVANCED_ALIASES)
+      .filter((alias) => alias !== "chat" && alias !== "cell") as LegacyAdvancedAlias[];
+    for (const alias of aliases) {
+      const split = parseCliArgs([alias, "--goal", "current"]);
+      const inline = parseCliArgs([alias, "--goal=create"]);
+      expect(split).toMatchObject({ command: alias, advanced: { source: "legacy", legacyAlias: alias } });
+      expect(split.values.get("goal")).toBe("current");
+      expect(inline).toMatchObject({ command: alias, advanced: { source: "legacy", legacyAlias: alias } });
+      expect(inline.values.get("goal")).toBe("create");
+
+      const task = parseCliArgs([alias, "ordinary", "task", "--goal", "auto"]);
+      expect(task).toMatchObject({ command: "product", positionals: [alias, "ordinary", "task"] });
+      expect(task.values.get("goal")).toBe("auto");
+    }
+  });
+
+  test("recognizes the public refine product route without treating its instructions as legacy diagnostics", () => {
+    expect(parseCliArgs(["refine"])).toMatchObject({ command: "refine", positionals: [] });
+    expect(parseCliArgs(["refine", "review", "the", "retained", "failures", "--json"])).toMatchObject({
+      command: "refine",
+      positionals: ["review", "the", "retained", "failures"],
+    });
+    expect(parseCliArgs(["refine", "auto", "on"]).advanced).toBeUndefined();
   });
 
   test("maps bare and legacy options-only sync to sync now without stealing sync task text", () => {

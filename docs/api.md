@@ -264,7 +264,7 @@ The console SDK exposes `sdk.goals.current/list/get/evaluations` as read-only op
 
 ## Delivery Slice 3: relational memory and continual harness
 
-The composition root exposes four new services. Every mutation appends validated canonical events; callers never write projection tables.
+The composition root exposes memory, harness, skill/specification, and trajectory-refiner services. Every mutation appends validated canonical events; callers never write projection tables.
 
 ```ts
 const source = await supervisor.appendMessage(sessionId, branchId, "user", "Use canary releases");
@@ -286,6 +286,26 @@ const result = await supervisor.memory.search(sessionId, branchId, "production r
 ```
 
 `MemorySearchResult` contains ranked records and `provenance`: normalized query, index name, filters, every candidate/source, every authoritative rejection, and every selection/reason. `memory.list` uses the same deterministic policy. `Fts5MemoryCandidateIndex.rebuild()` deletes and reconstructs the disposable candidate index without changing entry/version identity.
+
+Trajectory review is the product-facing entry to that staged lifecycle:
+
+```ts
+const correctionId = await supervisor.refiner.correct(
+  sessionId, branchId, "Use the retained Bun command", [source.id],
+);
+const review = await supervisor.refiner.request(sessionId, branchId, {
+  instructions: "Review repeated repository-command failures",
+  requestedScope: "local",
+});
+const history = await supervisor.refiner.list({ sessionId, branchId });
+await supervisor.refiner.setAutomatic(true); // profile preference; default is false
+```
+
+`RefinerService` freezes a bounded, scrubbed trajectory snapshot at one cursor, including authorized current harness versions, memory, and evaluation history. It starts an ordinary durable recursive-model child with a stable idempotency key and strictly parses exactly one `agencity.refinement-review` version-1 JSON decision. A proposal must cite visible durable event IDs, stay inside the requested scope/kinds, and satisfy compare-and-swap target authority. Valid output enters the existing proposal validation and bounded candidate-allocation pipeline; it is never promoted merely because the refiner's prose is persuasive. Local promotion still needs supported observed evidence, workspace promotion needs repeated objective evidence, and user/global promotion still needs explicit approval.
+
+Automatic review is opt-in in the profile database and version 1 is local-only. The committed AgentRun boundary scanner recognizes three typed signals: three matching failed effect outcomes by default, two failed gate evaluations against distinct material pins, or an explicit `UserCorrection`. It never parses user or assistant prose to guess a correction. A consumed evidence cursor and a nonterminal key suppress duplicate work.
+
+`wait: false` admits and runs the review in the background. `requested`/`running` reviews resume from their retained request, child, result, proposal, and allocation boundaries; `unknown` is terminal and is not retried. The raw `harness.propose` API below remains an advanced diagnostic and governance surface.
 
 Refinement is intentionally staged:
 
