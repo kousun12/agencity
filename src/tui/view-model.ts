@@ -1,4 +1,4 @@
-import type { AgentRunState, AgentState, MessageState } from "../domain/index.ts";
+import type { AgentRunState, AgentState, JsonValue, MessageState } from "../domain/index.ts";
 import type { ProtocolCapabilities } from "../protocol/index.ts";
 import type {
   FamilyAgentActivity,
@@ -46,6 +46,18 @@ export interface TerminalStepView {
   readonly label: string;
   readonly detail: string | null;
   readonly attempts: number;
+  readonly cell: TerminalCellView | null;
+}
+
+export interface TerminalCellView {
+  readonly id: string;
+  readonly language: "typescript";
+  readonly code: string;
+  readonly status: "pending" | "proposed" | "running" | "committed" | "failed" | "abandoned" | "missing";
+  readonly attempts: number;
+  readonly logs: readonly string[];
+  readonly result: JsonValue | null;
+  readonly error: string | null;
 }
 
 export interface TerminalRunView {
@@ -233,14 +245,28 @@ function visibleConversation(messages: readonly MessageState[]): TerminalConvers
     .slice(-24);
 }
 
-function stepView(run: AgentRunState, ordinal: number): TerminalStepView {
+function stepView(state: AgentState, run: AgentRunState, ordinal: number): TerminalStepView {
   const step = run.steps[ordinal]!;
   const action = step.action;
   let label = "Model decision";
   let detail: string | null = null;
+  let cell: TerminalCellView | null = null;
   if (action?.type === "typescript") {
     label = "TypeScript cell";
-    detail = oneLine(action.code.split("\n").find(line => line.trim()) ?? action.code);
+    const cellId = `agent-run-cell-${step.actionId}`;
+    const projected = state.cells[cellId];
+    const code = projected?.code ?? action.code;
+    detail = oneLine(code.split("\n").find(line => line.trim()) ?? code);
+    cell = {
+      id: cellId,
+      language: "typescript",
+      code,
+      status: projected?.status ?? (isTerminalRunStatus(run.status) ? "missing" : "pending"),
+      attempts: projected?.attempts ?? 0,
+      logs: projected ? [...projected.logs] : [],
+      result: projected?.result ?? null,
+      error: projected?.error ?? null,
+    };
   } else if (action?.type === "final") {
     const accepted = run.status === "succeeded" && run.finalMessageId !== undefined && run.steps.at(-1)?.id === step.id;
     label = accepted ? "Final response committed" : "Completion proposed";
@@ -267,10 +293,11 @@ function stepView(run: AgentRunState, ordinal: number): TerminalStepView {
     label,
     detail,
     attempts: Math.max(1, step.modelAttempts.length),
+    cell,
   };
 }
 
-function runView(run: AgentRunState, provisionalRunIds: ReadonlySet<string>): TerminalRunView {
+function runView(state: AgentState, run: AgentRunState, provisionalRunIds: ReadonlySet<string>): TerminalRunView {
   const pending = Object.values(run.inputRequests).find(request => request.response === undefined);
   return {
     id: run.id,
@@ -282,7 +309,7 @@ function runView(run: AgentRunState, provisionalRunIds: ReadonlySet<string>): Te
     cancellationRequested: run.cancellationRequested,
     reason: run.reason ?? run.cancellationReason ?? null,
     pendingInput: pending?.question ?? null,
-    steps: run.steps.map((_, index) => stepView(run, index)),
+    steps: run.steps.map((_, index) => stepView(state, run, index)),
   };
 }
 
@@ -290,7 +317,7 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
   const { state, capabilities } = presentation;
   const provider = capabilities.providers.find(item => item.name === state.model.provider);
   const provisionalRunIds = new Set(presentation.provisionalRunIds);
-  const runs = Object.values(state.agentRuns).map(run => runView(run, provisionalRunIds)).slice(-12);
+  const runs = Object.values(state.agentRuns).map(run => runView(state, run, provisionalRunIds)).slice(-12);
   const activeRun = [...runs].reverse().find(run => run.active);
   const familyChildren = buildTerminalFamilyChildren(presentation.family.children);
   const ancestry = presentation.family.ancestry.length
