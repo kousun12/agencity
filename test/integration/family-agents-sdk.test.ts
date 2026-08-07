@@ -77,7 +77,7 @@ describe("FU-012 retained family messaging", () => {
         relationship: "child",
         task: "wait",
         cancellationRequested: false,
-        activity: "working",
+        activity: "idle",
         activityReason: null,
       })]);
 
@@ -133,8 +133,16 @@ describe("FU-012 retained family messaging", () => {
       const family = await value.supervisor.agents.listFamily(value.root.sessionId, value.root.branchId);
       expect(family.items.find(item => item.sessionId === child.sessionId)).toMatchObject({
         branchId: child.branchId,
-        activity: "working",
+        activity: "idle",
       });
+      expect((await value.supervisor.agents.listFamily(child.sessionId, child.branchId)).items
+        .find(item => item.relationship === "parent")).toMatchObject({
+          sessionId: value.root.sessionId,
+          taskId: child.taskId,
+          taskStatus: "admitted",
+          activity: "idle",
+          activityReason: null,
+        });
       expect(family.items.find(item => item.sessionId === "family-missing-session")).toEqual({
         sessionId: "family-missing-session",
         branchId: "family-missing-branch",

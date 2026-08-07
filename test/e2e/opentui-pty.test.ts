@@ -123,7 +123,7 @@ while time.time() < deadline:
         if task_complete:
             break
     time.sleep(0.1)
-family_summary = pump(10, "1 agent: 1 working")
+family_summary = pump(10, "1 agent: 1 idle")
 summary_mark = len(output)
 if family_summary:
     os.write(fd, b"\x1b[B")
@@ -139,7 +139,7 @@ child_open = pump(8, "PTY reviewer / unnamed branch", child_mark)
 parent_mark = len(output)
 if child_open:
     os.write(fd, b"\x1b[D")
-parent_open = pump(8, "1 agent: 1 working", parent_mark)
+parent_open = pump(8, "1 agent: 1 idle", parent_mark)
 if ready:
     os.write(fd, b"/quit\r")
     pump(4, "workspace service will stop automatically")
@@ -163,7 +163,7 @@ if exit_code == 0:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 112, 0, 0))
     os.set_blocking(fd, False)
     resume_mark = len(output)
-    resume_root = pump(10, "1 agent: 1 working", resume_mark)
+    resume_root = pump(10, "1 agent: 1 idle", resume_mark)
     if resume_root:
         os.write(fd, b"/quit\r")
         pump(4, "workspace service will stop automatically", resume_mark)
@@ -260,7 +260,7 @@ print(json.dumps({
       task: childTask,
       taskStatus: "admitted",
       cancellationRequested: false,
-      activity: "working",
+      activity: "idle",
     })]);
   } finally {
     await cli(executable, workspace, home, ["service", "shutdown"]).catch(() => null);

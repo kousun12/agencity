@@ -965,6 +965,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     sessionId: string,
     branchId: string,
     untilCursor?: string,
+    afterCursor?: string,
   ): Promise<AgentEvent[]> {
     const lineage = await this.#lineage(executor, sessionId, branchId);
     const events: AgentEvent[] = [];
@@ -972,12 +973,14 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const args: InValue[] = [sessionId, part.branchId];
       let sql = "SELECT * FROM events WHERE session_id=? AND branch_id=?";
       if (part.upper !== null) { sql += " AND sequence<=?"; args.push(part.upper); }
+      if (afterCursor !== undefined) { sql += " AND sequence>?"; args.push(sequenceOf(afterCursor)); }
       const result = await executor.execute({ sql: `${sql} ORDER BY sequence`, args });
       events.push(...result.rows.map(rowToEvent));
     }
     const until = untilCursor === undefined ? Number.MAX_SAFE_INTEGER : sequenceOf(untilCursor);
+    const after = afterCursor === undefined ? -1 : sequenceOf(afterCursor);
     return events
-      .filter((event) => sequenceOf(event.cursor) <= until)
+      .filter((event) => sequenceOf(event.cursor) > after && sequenceOf(event.cursor) <= until)
       .sort((left, right) => sequenceOf(left.cursor) - sequenceOf(right.cursor));
   }
 
@@ -995,13 +998,30 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     }
     const events = await this.#withSqliteRetry(async () => {
       await this.#prepareClient(this.#client);
-      return this.#loadBranchEvents(this.#client, sessionId, query.branchId!, query.untilCursor);
+      return this.#loadBranchEvents(this.#client, sessionId, query.branchId!, query.untilCursor, query.afterCursor);
     }, { kind: "ordinary", operation: "load branch events" });
-    const after = query.afterCursor ? sequenceOf(query.afterCursor) : -1;
-    return events.filter((event) => sequenceOf(event.cursor) > after);
+    return events;
   }
   async getEvent(eventId: string): Promise<AgentEvent|null> { const r=await this.#execute({sql:"SELECT * FROM events WHERE id=?",args:[eventId]}); return r.rows[0]?rowToEvent(r.rows[0]):null; }
-  async getLatestCursor(sessionId: string, branchId: string): Promise<string|null> { const events=await this.loadEvents(sessionId,{branchId}); return events.at(-1)?.cursor ?? null; }
+  async getLatestCursor(sessionId: string, branchId: string): Promise<string|null> {
+    return this.#withSqliteRetry(async () => {
+      await this.#prepareClient(this.#client);
+      const lineage = await this.#lineage(this.#client, sessionId, branchId);
+      let latest: number | null = null;
+      for (const part of lineage) {
+        const args: InValue[] = [sessionId, part.branchId];
+        let sql = "SELECT MAX(sequence) AS sequence FROM events WHERE session_id=? AND branch_id=?";
+        if (part.upper !== null) { sql += " AND sequence<=?"; args.push(part.upper); }
+        const result = await this.#client.execute({ sql, args });
+        const sequence = result.rows[0]?.sequence;
+        if (sequence !== null && sequence !== undefined) {
+          const value = Number(sequence);
+          latest = latest === null ? value : Math.max(latest, value);
+        }
+      }
+      return latest === null ? null : cursorOf(latest);
+    }, { kind: "ordinary", operation: "load latest branch cursor" });
+  }
   async listBranches():Promise<Array<{sessionId:string;branchId:string}>>{const r=await this.#execute("SELECT session_id,branch_id FROM branches ORDER BY session_id,branch_id");return r.rows.map(row=>({sessionId:String(row.session_id),branchId:String(row.branch_id)}));}
   async saveSnapshot(state: AgentState): Promise<void> { await this.#execute({sql:"INSERT INTO snapshots(session_id,branch_id,cursor,reducer_version,state_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(session_id,branch_id) DO UPDATE SET cursor=excluded.cursor,reducer_version=excluded.reducer_version,state_json=excluded.state_json,updated_at=excluded.updated_at",args:[state.sessionId,state.branch.id,state.cursor,state.reducerVersion,json(state),new Date().toISOString()]}); }
   async loadSnapshot(sessionId:string,branchId:string):Promise<AgentState|null>{const r=await this.#execute({sql:"SELECT reducer_version,state_json FROM snapshots WHERE session_id=? AND branch_id=?",args:[sessionId,branchId]});if(!r.rows[0]||Number(r.rows[0].reducer_version)!==REDUCER_VERSION)return null;return JSON.parse(String(r.rows[0].state_json)) as AgentState;}

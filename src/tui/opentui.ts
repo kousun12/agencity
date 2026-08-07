@@ -893,8 +893,12 @@ export class OpenTuiApp {
     const current = rows.findIndex(row => row.key === this.#familySelectedKey);
     const index = Math.min(rows.length - 1, Math.max(0, (current < 0 ? 0 : current) + delta));
     this.#familySelectedKey = rows[index]!.key;
-    const viewportRows = Math.max(1, Math.floor((this.renderer.terminalHeight - 10) / 3));
-    const scrollTop = Math.max(0, index * 3 - Math.floor(viewportRows / 2) * 3);
+    const rowHeight = (row: TerminalFamilyChildView): number =>
+      2 + Number(row.cancellationRequested) + Number(row.activityReasonLabel !== null);
+    const rowTop = rows.slice(0, index).reduce((lines, row) => lines + rowHeight(row), 0);
+    const viewportLines = Math.max(1, this.renderer.terminalHeight - 10);
+    const selectedHeight = rowHeight(rows[index]!);
+    const scrollTop = Math.max(0, rowTop - Math.floor((viewportLines - selectedHeight) / 2));
     this.#details.stickyScroll = false;
     this.#details.scrollTo({ x: 0, y: scrollTop });
     this.#render();

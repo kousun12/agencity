@@ -74,6 +74,36 @@ afterEach(async () => {
 });
 
 describe("reactive snapshots and resumable subscriptions", () => {
+  test("advances a current-version snapshot from its cursor without replaying retained history", async () => {
+    const temp = await makeTempRuntime("agencity-snapshot-catch-up-");
+    temps.push(temp);
+    const inner = await openTempStorage(temp);
+    const { sessionId, branchId } = await seedSession(inner);
+    const first = await appendMessage(inner, sessionId, branchId, "01", "before snapshot");
+    const queries: EventQuery[] = [];
+    const storage = new Proxy(inner, {
+      get(target, property) {
+        if (property === "loadEvents") return async (targetSessionId: string, query: EventQuery = {}) => {
+          queries.push(query);
+          return target.loadEvents(targetSessionId, query);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as AgentStorage;
+    const projections = new ProjectionService(storage);
+    const initial = await projections.getSnapshot(sessionId, branchId);
+    expect(initial.cursor).toBe(first.cursor);
+
+    queries.length = 0;
+    const second = await appendMessage(inner, sessionId, branchId, "02", "after snapshot");
+    const advanced = await projections.getSnapshot(sessionId, branchId);
+    expect(advanced.cursor).toBe(second.cursor);
+    expect(advanced.state.messages.map(message => message.content)).toEqual(["before snapshot", "after snapshot"]);
+    expect(queries).toEqual([{ branchId, afterCursor: first.cursor }]);
+    storage.close();
+  });
+
   test("closes snapshot/catch-up races, ignores duplicate notifications, disconnects, and resumes", async () => {
     const temp = await makeTempRuntime("agencity-subscribe-");
     temps.push(temp);

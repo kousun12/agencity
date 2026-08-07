@@ -106,5 +106,8 @@ describe("terminal family view model", () => {
     expect(narrow).toContain("long");
     expect(narrow).toContain("… ›");
     expect(narrow).toEndWith("/ main");
+    const longBranch = formatTerminalBreadcrumb(["root", "child"], "feature/with-a-very-long-name", 24);
+    expect(longBranch.length).toBeLessThanOrEqual(24);
+    expect(longBranch).toContain(" / ");
   });
 });

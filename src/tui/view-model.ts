@@ -213,13 +213,20 @@ export function formatTerminalBreadcrumb(ancestry: readonly string[], branchName
   const labels = ancestry.length ? ancestry : ["Unnamed session"];
   const full = `${labels.join(" › ")} / ${branchName}`;
   if (full.length <= maxWidth) return full;
+  if (maxWidth < 1) return "";
+  const maxSuffixWidth = Math.max(4, Math.floor(maxWidth / 2));
+  const suffix = ` / ${truncate(branchName, Math.max(1, maxSuffixWidth - 3))}`;
+  const labelWidth = maxWidth - suffix.length;
+  if (labelWidth < 1) return truncate(suffix, maxWidth);
   const root = labels[0]!;
   const current = labels.at(-1)!;
   const middle = labels.length > 2 ? " › … › " : labels.length === 2 ? " › " : "";
-  const suffix = ` / ${branchName}`;
-  const available = Math.max(2, maxWidth - middle.length - suffix.length);
-  const rootWidth = labels.length === 1 ? available : Math.max(1, Math.floor(available / 2));
-  const currentWidth = labels.length === 1 ? 0 : Math.max(1, available - rootWidth);
+  if (labels.length === 1 || labelWidth <= middle.length + 2) {
+    return `${truncate(current, labelWidth)}${suffix}`;
+  }
+  const available = labelWidth - middle.length;
+  const rootWidth = Math.max(1, Math.floor(available / 2));
+  const currentWidth = Math.max(1, available - rootWidth);
   return truncate(labels.length === 1 ? current : root, rootWidth)
     + middle
     + (labels.length === 1 ? "" : truncate(current, currentWidth))

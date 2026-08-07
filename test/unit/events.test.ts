@@ -135,6 +135,12 @@ describe("canonical event storage", () => {
       branchId: "child",
       untilCursor: fork!.cursor,
     })).at(-1)?.id).toBe(fork!.id);
+    expect((await storage.loadEvents(sessionId, {
+      branchId: "child",
+      afterCursor: fork!.cursor,
+    })).map(event => event.id)).toEqual([childOnly.id]);
+    expect(await storage.getLatestCursor(sessionId, "child")).toBe(childOnly.cursor);
+    expect(await storage.getLatestCursor(sessionId, branchId)).toBe(parentLate.cursor);
     storage.close();
   });
 

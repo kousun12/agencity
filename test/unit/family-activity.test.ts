@@ -87,7 +87,9 @@ describe("family activity projection", () => {
   });
 
   test("derives working, waiting, idle, and ended states", () => {
-    expect(deriveFamilyAgentActivity(state(), task())).toEqual({ activity: "working", activityReason: null });
+    expect(deriveFamilyAgentActivity(state(), task())).toEqual({ activity: "idle", activityReason: null });
+    expect(deriveFamilyAgentActivity(state(), task({ status: "running" })))
+      .toEqual({ activity: "working", activityReason: null });
     expect(deriveFamilyAgentActivity(state({
       appliedEventIds: ["created", "run-event"],
       agentRuns: {
