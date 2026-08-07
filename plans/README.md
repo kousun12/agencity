@@ -7,5 +7,6 @@ This directory contains Agencity's durable implementation plans. `AGENTS.md` is 
 - [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md) — parent product and architecture PRD.
 - [Prime Agent TypeScript/Turso rewrite follow-up plan](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md) — FU-001–FU-019 implementation backlog and evidence.
 - [Lossless context-reference storage plan](./2026-08-07-lossless-context-references-plan.md) — replace repeated expanded contexts with exact content-addressed references.
+- [Ergonomic agent-family navigation plan](./2026-08-07-ergonomic-agent-family-navigation-plan.md) — add a persistent child summary and keyboard parent/child navigation to the protocol-backed TUI.
 
 New implementation plans belong here rather than at the repository root. Keep links relative to their destination and update this index when adding, renaming, or retiring a plan.
