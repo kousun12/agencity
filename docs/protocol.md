@@ -286,6 +286,35 @@ The managed route returns an acceptance shape from the server even though the cu
 
 ## Snapshot then SSE
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Protocol as Protocol server
+    participant Storage
+
+    Client->>Protocol: Request snapshot
+    Protocol->>Storage: Read projected state and cursor C
+    Storage-->>Protocol: State at C
+    Protocol-->>Client: Snapshot with cursor C
+    Client->>Client: Render state and retain C
+
+    Client->>Protocol: Open SSE with after=C
+    Protocol->>Storage: Read committed events after C
+    Storage-->>Protocol: Event at cursor C+1
+    Protocol-->>Client: Committed event with id C+1
+    Client->>Client: Apply event, then advance cursor
+    Protocol-->>Client: Progress event without a cursor
+    Client->>Client: Render progress temporarily
+
+    Protocol--xClient: Connection lost
+    Client->>Client: Discard temporary progress
+    Client->>Protocol: Reconnect after last applied cursor
+    Protocol->>Storage: Read committed catch-up events
+    Storage-->>Protocol: Events, possibly repeated
+    Protocol-->>Client: Committed events in cursor order
+    Client->>Client: Ignore older or duplicate cursors
+```
+
 A correct consumer:
 
 1. calls `snapshot` and renders the returned state;

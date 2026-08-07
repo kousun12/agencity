@@ -66,6 +66,44 @@ PostgreSQL remains unavailable. Optional Turso Cloud exchange uses a **separate 
 
 `ProfileStore` is a separate local LibSQL database containing a restart-stable device/profile identity, cross-workspace preferences, version-pinned globally installed skills, opaque credential references, and a workspace catalog. Credential values are never accepted. Each workspace retains its own canonical database and configured content-addressed artifact placement.
 
+```mermaid
+flowchart LR
+    subgraph deviceA["Device A"]
+        aWorkspace["Workspace DB<br/>local authority"]
+        aArtifacts["Artifact store<br/>bytes remain local"]
+        aReplica["Replica DB<br/>immutable envelopes only"]
+        aIngest{"Validate and<br/>causally order"}
+        aConflict["Derived branch or<br/>reconciliation record"]
+
+        aWorkspace -->|"references"| aArtifacts
+        aWorkspace -->|"stage envelopes"| aReplica
+        aReplica --> aIngest
+        aIngest -->|"accepted"| aWorkspace
+        aIngest -->|"divergence or conflict"| aConflict
+    end
+
+    cloud["Turso Cloud<br/>replica exchange"]
+
+    subgraph deviceB["Device B"]
+        bWorkspace["Workspace DB<br/>local authority"]
+        bArtifacts["Artifact store<br/>bytes remain local"]
+        bReplica["Replica DB<br/>immutable envelopes only"]
+        bIngest{"Validate and<br/>causally order"}
+        bConflict["Derived branch or<br/>reconciliation record"]
+
+        bWorkspace -->|"references"| bArtifacts
+        bWorkspace -->|"stage envelopes"| bReplica
+        bReplica --> bIngest
+        bIngest -->|"accepted"| bWorkspace
+        bIngest -->|"divergence or conflict"| bConflict
+    end
+
+    aReplica <-->|"push and pull"| cloud
+    cloud <-->|"push and pull"| bReplica
+```
+
+Only immutable envelopes cross the cloud boundary. Artifact bytes, workspace snapshots, outbox leases, and other mutable operational projections remain local.
+
 Cloud exchange uses a second local file through `TursoSyncTransport` and pinned `@tursodatabase/sync@0.7.2`. Its `connect()` URL callback returns `null` during initialization, schema creation, staging, queries, checkpointing, and stats, and returns the configured URL only during an explicit official `push()` or `pull()`. This is the installed offline-first equivalent of `bootstrapIfEmpty:false`. Cloud exchange does not use remote schema administration, database-client swapping, frame-replication APIs, or an invented `sync()` wrapper. Rejected network calls leave the same local database and unsent change-data-capture (CDC) operations usable. Capabilities truthfully advertise directional push/pull/checkpoint/stats for this adapter; the deterministic in-process hub remains `bidirectional-only`.
 
 Only immutable, globally keyed `ReplicatedEnvelope` rows travel through the replica database. Turso Sync pushes logical CDC statements with last-push-wins conflict settlement, so physical envelope identity hashes the origin tuple plus event content; logical event ID and origin sequence are indexed claims, not transport primary keys, so colliding raw claims remain available for quarantine and reconciliation. Workspace `events.sequence`, snapshots, outbox leases, and other mutable projections never rely on libSQL's replicated last-write behavior. Envelopes carry device/origin sequence, exact event identity, source-branch parent, dependency IDs, and a stable SHA-256 digest. Ingestion validates schema/integrity, compares duplicate-event content digests, topologically orders causal parents, deterministically orders concurrent envelopes, and quarantines divergent/invalid/incomplete input before canonical append. Durable per-origin staging and terminal-ingest frontiers avoid rescanning settled history; a pending dependency stops frontier advancement and receipts/quarantine remain the correctness boundary. An immutable replica-incarnation marker detects a lost/replaced local sync file and clears only the staging frontier so canonical history is restaged.

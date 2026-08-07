@@ -150,17 +150,38 @@ A normal turn appends status-running, `ContextMaterialized`, `ModelCallRequested
 
 ### Autonomous agent run
 
-```text
-AgentRunRequested -> AgentRunStepStarted -> ModelCallRequested/effect
-                                      -> AgentRunActionRejected -> failed
-                                      -> AgentRunActionCommitted(typescript) -> cell -> next step
-                                      -> AgentRunActionCommitted(clarification|permission) -> waiting_for_user
-                                      -> AgentRunUserInputReceived -> next step
-                                      -> AgentRunActionCommitted(final) -> assistant MessageAppended -> succeeded
-                                      -> blocked | failed
-AgentRunCancellationRequested -> cancelled
-budget boundary               -> budget_exceeded
-unknown effect                -> unknown
+```mermaid
+stateDiagram-v2
+    [*] --> Requested
+    Requested --> StepStarted
+    StepStarted --> ModelCall
+    ModelCall --> ActionValidation
+
+    ActionValidation --> Failed: action rejected
+    ActionValidation --> Cell: typescript
+    Cell --> StepStarted: committed terminal observation
+
+    ActionValidation --> WaitingForUser: clarification or permission
+    WaitingForUser --> StepStarted: user input received
+
+    ActionValidation --> GoalCheck: final with attached goal
+    ActionValidation --> Succeeded: final without attached goal
+    GoalCheck --> StepStarted: required gate failed; repair observation
+    GoalCheck --> Succeeded: required gates passed
+    GoalCheck --> Unknown: gate outcome unknown
+
+    ActionValidation --> Blocked: blocked
+    ActionValidation --> Failed: failed
+    Requested --> Cancelled: cancellation requested
+    StepStarted --> BudgetExceeded: budget boundary
+    ModelCall --> Unknown: effect outcome unknown
+
+    Succeeded --> [*]
+    Blocked --> [*]
+    Failed --> [*]
+    Cancelled --> [*]
+    BudgetExceeded --> [*]
+    Unknown --> [*]
 ```
 
 Every step context records its source events and an exact-once `run.observations` list. The model's authoritative JSON response is retained in `ModelOutputChunk` and the action event, while its `ModelCallCompleted` intentionally has no `responseMessageId`. This internal protocol encoding is not conversation. Only a strict validated final action appends an assistant `MessageAppended`; clarification and permission are typed waiting states. Recovery owns agent-run calls separately from diagnostic model-turn finalization, so a crash after the model effect commits cannot accidentally publish raw action JSON or call the provider again.

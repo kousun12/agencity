@@ -46,6 +46,24 @@ The direct `state`, `cells`, `artifacts`, `tools`, `inspect`, and `rlm` names ar
 
 Durable identity lives in events, typed working values, artifacts, tasks, mailboxes, and model handles. JavaScript heap state does not.
 
+```mermaid
+flowchart TD
+    cell["TypeScript cell<br/>disposable worker"]
+
+    cell --> heap["Lexical bindings and heap"]
+    heap --> discarded["Discarded after failure, commit, or restart"]
+
+    cell --> staged["state.set and artifacts.put<br/>staged for the cell"]
+    staged --> terminal{"Cell terminal outcome"}
+    terminal -->|"CellCommitted"| exposed["Working values and artifact references<br/>become durable together"]
+    terminal -->|"CellFailed or CellAbandoned"| hidden["Staged updates are not exposed"]
+
+    cell --> sdk["Effectful SDK call"]
+    sdk --> request["EffectRequested commits<br/>before execution"]
+    request --> outcome["Independent terminal effect outcome"]
+    outcome --> retained["Retained even if the cell later fails"]
+```
+
 - Lexical bindings, module instances, closures, sockets, subprocess handles, and `globalThis` changes disappear with the worker.
 - `state.set` stages JSON working values for atomic commit with the cell.
 - `artifacts.put` stages an immutable artifact reference for atomic registration with the cell.
