@@ -467,13 +467,14 @@ The existing rule remains: branch model configuration cannot change while model 
 
 Extend existing surfaces:
 
+- `GET /capabilities` advertises `reasoningEffortSelection: true`;
 - `POST /sessions/:session/model?branch=:branch` accepts the complete `ModelConfiguration`, including `reasoningEffort`;
 - `GET /model-catalog?provider=:provider` returns bounded normalized descriptors;
 - `POST /model-catalog/refresh` with `{ provider }` requests a refresh and returns cached fallback plus typed refresh status when the remote request fails;
 - `GET /product/config` includes per-model workspace effort preferences;
 - `POST /product/config/reasoning-effort` sets or clears `{ model: "provider:model", effort }`.
 
-The managed and in-process transports return the same types and errors. These are additive routes and optional fields, so `agencity.protocol` remains version 1; compatibility tests must prove old snapshots/events without effort still decode and new clients handle its absence.
+The managed and in-process transports return the same types and errors. These are additive routes and optional fields, so `agencity.protocol` remains version 1, but explicit effort requires capability negotiation: a new client must refuse to send it when `reasoningEffortSelection` is absent rather than letting an older version-1 server accept and ignore an unknown field. Compatibility tests must prove old snapshots/events without effort still decode and clients connected to an older capability response fail with typed unavailable behavior.
 
 Add corresponding `AgentClient` methods and public API types. Client code does not parse raw provider payloads.
 
@@ -695,6 +696,7 @@ Update `docs/mutable-tables.md` for the cache classification and `docs/security.
 ### Protocol and product UI
 
 - HTTP and in-process clients expose identical catalog, selection, and error behavior;
+- clients refuse explicit effort when the server does not advertise reasoning-effort selection;
 - `/effort` and `/thinking` are exact aliases;
 - selectors show exact, mapped, fixed, unknown, stale, surface-incompatible, and gateway-normalized states;
 - historical mode, active run, modal ownership, resize, compact height, and non-TTY output are covered;
