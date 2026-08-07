@@ -1,6 +1,7 @@
 import {
   NotFoundError,
   projectEvents,
+  reduceAgentState,
   type AgentEvent,
   type AgentState,
 } from "../domain/index.ts";
@@ -18,6 +19,14 @@ export class ProjectionService {
     if (!latest) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
     const cached = await this.storage.loadSnapshot(sessionId, branchId);
     if (cached && cached.cursor === latest) return { cursor: cached.cursor, state: cached };
+    if (cached && BigInt(cached.cursor) < BigInt(latest)) {
+      const events = await this.storage.loadEvents(sessionId, { branchId, afterCursor: cached.cursor });
+      if (events.length) {
+        const state = events.reduce<AgentState>((current, event) => reduceAgentState(current, event), cached);
+        await this.storage.saveSnapshot(state);
+        return { cursor: state.cursor, state };
+      }
+    }
     const events = await this.storage.loadEvents(sessionId, { branchId });
     const state = projectEvents(events);
     await this.storage.saveSnapshot(state);

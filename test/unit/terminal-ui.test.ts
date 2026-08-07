@@ -331,6 +331,228 @@ describe("FU-005 protocol-backed terminal UI", () => {
     await supervisor.close();
   });
 
+  test("navigates exact retained family routes without changing product selection or overlapping watches", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-family-navigation-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const root = await supervisor.createSession({
+      workspaceId: "terminal-family-navigation",
+      sessionName: "Root agent",
+      branchName: "main",
+    });
+    const child = await supervisor.agents.spawn(root.sessionId, root.branchId, {
+      task: "Review the implementation",
+      name: "Reviewer",
+      run: false,
+    });
+    await supervisor.agents.spawn(child.sessionId, child.branchId, {
+      task: "Verify the review",
+      name: "Verifier",
+      run: false,
+    });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    let productSelections = 0;
+    let activeWatches = 0;
+    let maximumActiveWatches = 0;
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "productSelect") return async (...args: Parameters<AgentClient["productSelect"]>) => {
+          productSelections++;
+          return base.productSelect(...args);
+        };
+        if (property === "watchBranch") return async (...args: Parameters<AgentClient["watchBranch"]>) => {
+          activeWatches++;
+          maximumActiveWatches = Math.max(maximumActiveWatches, activeWatches);
+          try {
+            return await base.watchBranch(...args);
+          } finally {
+            activeWatches--;
+          }
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const ui = new TerminalUI(client, { interactive: false, manageSignals: false });
+    try {
+      await ui.attach(root.sessionId, root.branchId, false);
+      expect(ui.presentation.family).toMatchObject({
+        route: { sessionId: root.sessionId, branchId: root.branchId },
+        parent: null,
+        refresh: "current",
+        ancestry: ["Root agent"],
+      });
+      expect(ui.presentation.family.children).toHaveLength(1);
+      expect(ui.presentation.family.children[0]?.sessionId).toBe(child.sessionId);
+      expect(ui.presentation.family.children[0]?.branchId).toBe(child.branchId);
+      expect(ui.presentation.family.children[0]?.relationship).toBe("child");
+      expect(ui.presentation.family.children[0]?.task).toBe("Review the implementation");
+      expect(ui.presentation.family.children[0]?.activity).toBe("idle");
+
+      await ui.openFamilyChild(child.sessionId, child.branchId);
+      expect(ui.presentation.state.sessionName).toBe("Reviewer");
+      expect(ui.presentation.family.route).toEqual({ sessionId: child.sessionId, branchId: child.branchId });
+      expect(ui.presentation.family.parent?.sessionId).toBe(root.sessionId);
+      expect(ui.presentation.family.parent?.branchId).toBe(root.branchId);
+      expect(ui.presentation.family.ancestry).toEqual(["Root agent", "Reviewer"]);
+      expect(ui.presentation.family.children.map(item => [item.name, item.relationship]))
+        .toEqual([["Verifier", "child"]]);
+
+      await ui.openFamilyParent();
+      expect(ui.presentation.state.sessionId).toBe(root.sessionId);
+      expect(ui.presentation.family.route).toEqual({ sessionId: root.sessionId, branchId: root.branchId });
+      expect(productSelections).toBe(0);
+      expect(maximumActiveWatches).toBe(1);
+      expect(activeWatches).toBe(1);
+    } finally {
+      await ui.detach(false);
+      expect(activeWatches).toBe(0);
+      await supervisor.close();
+    }
+  });
+
+  test("keeps the current route attached when family loading fails and rejects historical opening", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-family-failure-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const root = await supervisor.createSession({
+      workspaceId: "terminal-family-failure",
+      sessionName: "Stable root",
+      branchName: "main",
+    });
+    const child = await supervisor.agents.spawn(root.sessionId, root.branchId, {
+      task: "Unreachable child",
+      name: "Child",
+      run: false,
+    });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    let rejectChildSnapshot = false;
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "snapshot") return async (sessionId: string, branchId: string) => {
+          if (rejectChildSnapshot && sessionId === child.sessionId && branchId === child.branchId) {
+            throw new ProtocolClientError("NOT_FOUND", "Child branch unavailable", 404);
+          }
+          return base.snapshot(sessionId, branchId);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const ui = new TerminalUI(client, { interactive: false, manageSignals: false });
+    try {
+      await ui.attach(root.sessionId, root.branchId, false);
+      rejectChildSnapshot = true;
+      await expect(ui.openFamilyChild(child.sessionId, child.branchId)).rejects.toThrow(/unavailable/i);
+      expect(ui.presentation.state.sessionId).toBe(root.sessionId);
+      await supervisor.appendMessage(root.sessionId, root.branchId, "assistant", "Old route still receives events");
+      await waitFor(() => ui.presentation.state.messages.some(message => message.content === "Old route still receives events"), "old route watch");
+
+      const cursor = ui.presentation.state.cursor;
+      await ui.execute(`/history ${cursor}`);
+      await expect(ui.openFamilyChild(child.sessionId, child.branchId)).rejects.toThrow(/Return to live/i);
+      expect(ui.presentation.state.sessionId).toBe(root.sessionId);
+    } finally {
+      await ui.detach(false);
+      await supervisor.close();
+    }
+  });
+
+  test("coalesces injected family refreshes, preserves stale rows, and stops timers on detach", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-family-refresh-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const root = await supervisor.createSession({ workspaceId: "terminal-family-refresh", sessionName: "Refresh root" });
+    await supervisor.agents.spawn(root.sessionId, root.branchId, {
+      task: "Remain refreshable",
+      name: "Refresh child",
+      run: false,
+    });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    let block = false;
+    let fail = false;
+    let calls = 0;
+    let concurrent = 0;
+    let maximumConcurrent = 0;
+    const releases: Array<() => void> = [];
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "agents") return async (sessionId: string, branchId: string) => {
+          calls++;
+          concurrent++;
+          maximumConcurrent = Math.max(maximumConcurrent, concurrent);
+          try {
+            if (block) await new Promise<void>(resolve => { releases.push(resolve); });
+            if (fail) throw new ProtocolClientError("UNAVAILABLE", "Family projection unavailable", 503);
+            return await base.agents(sessionId, branchId);
+          } finally {
+            concurrent--;
+          }
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const timers = new Set<{ callback: () => void; milliseconds: number }>();
+    const scheduler = {
+      setTimeout(callback: () => void, milliseconds: number) {
+        const handle = { callback, milliseconds };
+        timers.add(handle);
+        return handle;
+      },
+      clearTimeout(handle: unknown) {
+        timers.delete(handle as { callback: () => void; milliseconds: number });
+      },
+    };
+    const ui = new TerminalUI(client, {
+      interactive: false,
+      manageSignals: false,
+      familyRefreshIntervalMs: 5_000,
+      familyRefreshScheduler: scheduler,
+    });
+    try {
+      await ui.attach(root.sessionId, root.branchId, false);
+      await waitFor(() => ui.presentation.family.refresh === "current", "initial family refresh");
+      expect(timers.size).toBe(0);
+      const baseline = calls;
+      block = true;
+      ui.setFamilyBrowserOpen(true);
+      ui.setFamilyBrowserOpen(true);
+      ui.setFamilyBrowserOpen(true);
+      await waitFor(() => releases.length === 1, "coalesced refresh start");
+      releases.shift()!();
+      await waitFor(() => releases.length === 1, "single queued refresh");
+      releases.shift()!();
+      block = false;
+      await waitFor(() => ui.presentation.family.refresh === "current" && concurrent === 0, "coalesced refresh completion");
+      expect(calls - baseline).toBe(2);
+      expect(maximumConcurrent).toBe(1);
+      expect([...timers][0]?.milliseconds).toBe(5_000);
+
+      fail = true;
+      ui.setFamilyBrowserOpen(true);
+      await waitFor(() => ui.presentation.family.refresh === "stale", "stale family refresh");
+      expect(ui.presentation.family.children.map(child => child.name)).toEqual(["Refresh child"]);
+      expect(timers.size).toBe(1);
+    } finally {
+      await ui.detach(false);
+      expect(timers.size).toBe(0);
+      await supervisor.close();
+    }
+  });
+
 });
 
 describe("FU-006 terminal interrupt semantics", () => {

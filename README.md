@@ -62,6 +62,8 @@ Agencity:
 - opens a full-screen terminal client on interactive terminals and a readable transcript for non-interactive use; and
 - starts an authenticated local-machine-only workspace service on demand so detached work can continue independently of the client.
 
+When the current agent has retained direct children, the full-screen client keeps a compact family summary above the footer. With an empty composer, press Down to focus it, Enter or Right to open the child browser, and Up or Down to select a child. Enter or Right opens that child's conversation; Left from an empty child composer returns to the exact retained parent branch. Opening another family member is observational: it does not cancel, resume, retry, or change the workspace's remembered root selection.
+
 Useful commands:
 
 ```sh
