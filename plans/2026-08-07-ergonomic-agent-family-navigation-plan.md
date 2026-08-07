@@ -2,6 +2,7 @@
 
 **Status:** Ready for implementation  
 **Date:** August 7, 2026  
+**Readiness reviewed:** August 7, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related backlog:** [FU-005 protocol-backed TUI and FU-012 durable agent families](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md)
 
@@ -90,13 +91,13 @@ When the current route has one or more retained direct children, the TUI renders
 
 The line:
 
-- counts direct non-ended children only;
+- counts all retained direct children;
 - remains visible while conversation and activity content scroll;
 - uses singular or plural wording correctly;
-- excludes cancelled or archived children from the compact count while retaining them in `/agents` and any already-open family browser;
+- groups cancelled and archived children under `ended`, so an ended-only family remains reachable without a command;
 - truncates from the right on narrow terminals while retaining the total and highest-severity count;
 - receives a selected marker and background when focused;
-- disappears when there are no direct non-ended children;
+- disappears only when there are no retained direct children;
 - never claims that an agent is inactive merely because no worker process is resident.
 
 The current passive `AGENTS` block in the timeline is replaced by this summary. Detailed child rows remain available in the family browser and `/agents` inspector, avoiding duplicated and competing default presentations.
@@ -107,7 +108,7 @@ Key handling follows these rules in order:
 
 1. Hidden credential entry, the model picker, command palette, and other active modal inspectors keep their existing key ownership.
 2. When the composer contains text, arrow keys and Enter retain text-editing and submission behavior. Agent navigation never discards, submits, or moves a draft.
-3. When the empty composer is focused, Down or `Alt-A` focuses the family summary if it is selectable.
+3. When the empty composer is focused, Down focuses the family summary if it is selectable.
 4. When the family summary is focused:
    - Enter or Right opens the family browser;
    - Up, Left, or Escape returns focus to the composer;
@@ -121,6 +122,8 @@ Key handling follows these rules in order:
 
 The footer advertises only actions that are currently available. A child route with a parent shows `← parent`; a root route does not.
 
+`Alt-A` may be added as a summary-focus shortcut only after deterministic OpenTUI input tests verify that the supported terminal sequences report it consistently. Until then, the footer advertises Down as the focus action.
+
 ### Family browser
 
 The browser is scoped to the current route. It starts with the current agent as a nonselectable scope header, followed by its direct-child rows. Each child row shows:
@@ -132,14 +135,16 @@ The browser is scoped to the current route. It starts with the current agent as 
 - model when width permits;
 - an attention reason when the child is waiting, blocked, failed, budget-exceeded, unknown, or unavailable.
 
-Rows sort deterministically:
+Rows sort deterministically by exact activity priority:
 
-1. attention required;
-2. working;
-3. idle;
-4. ended;
-5. normalized display name;
-6. session ID as a final stable tie-breaker.
+1. `attention`;
+2. `unavailable`;
+3. `waiting`;
+4. `working`;
+5. `idle`;
+6. `ended`;
+7. normalized display name;
+8. session ID as a final stable tie-breaker.
 
 The browser opens in the contextual side panel on wide terminals. On narrow terminals it replaces the main content while retaining the header, composer, and footer. Closing it restores the same conversation viewport and route.
 
@@ -175,6 +180,17 @@ The family navigation projection uses UI activity labels rather than overloading
 - **attention:** the child is blocked, failed, budget-exceeded, unknown, has a pending cancellation reconciliation, or has another explicit unresolved outcome;
 - **ended:** the readable retained child was cancelled or archived;
 - **unavailable:** required child or branch state cannot be resolved.
+
+Activity derivation applies the first matching rule:
+
+1. Missing required child, branch, or expected task state is `unavailable`.
+2. An unresolved unknown outcome, pending cancellation reconciliation, exceeded budget, failed task or session, or latest blocked, failed, budget-exceeded, or unknown run is `attention`.
+3. A cancelled task or archived session with no stronger unresolved outcome is `ended`.
+4. A latest run waiting for input is `waiting`; an unresolved permission input uses `permission_required`, and other input uses `waiting_for_user`.
+5. A pending, admitted, or running task, or latest queued or running run, is `working`.
+6. Completed retained work or a retained idle or stopped session with no stronger state is `idle`.
+
+The latest run is selected deterministically by canonical event order. A resolved older run does not keep a row in `attention` after later retained work supersedes it.
 
 The compact summary groups `waiting`, `attention`, and `unavailable` under `attention`, but the browser preserves the exact label and reason. Unknown and unavailable never render as idle or successful.
 
@@ -221,7 +237,7 @@ This prevents an apparent parent or child transition from silently discarding th
 
 ### Extend the existing family result
 
-`AgentService.listFamily` already projects each related session. Extend `FamilyAgentRecord` with presentation-neutral derived fields needed by any client:
+`AgentService.listFamily` already projects each related session. The fields from `sessionId` through `taskStatus` already exist. Add `task`, `cancellationRequested`, `activity`, and `activityReason` as presentation-neutral derived fields needed by any client:
 
 ```ts
 interface FamilyAgentRecord {
@@ -244,17 +260,18 @@ interface FamilyAgentRecord {
     | "budget_exceeded"
     | "unknown"
     | "cancellation_pending"
+    | "cancelled"
     | "archived"
     | "missing_state"
     | null;
 }
 ```
 
-These fields are a deterministic read projection. They do not become canonical state and do not change model-facing relationship authorization.
+These fields are a deterministic read projection. They do not become canonical state and do not change model-facing relationship authorization. `cancellationRequested` mirrors the related task record. It is `false` when the family member has no related task; an expected but unreadable task produces `unavailable` with `missing_state`.
 
 The projection derives activity from the related session's latest committed state and task record. `activityReason` is a bounded status code, not raw child messages, provider output, or error text. Cursorless provider progress may improve animation inside the currently opened conversation, but it does not alter family status. The browser never treats ephemeral progress as a durable task transition.
 
-This is a compatible enrichment of the existing `GET /sessions/:session/agents?branch=:branch` result, not a new route or aggregate event stream. `AgentClient.agents` remains the TUI's only family-roster read.
+This is a compatible enrichment of the existing `GET /sessions/:session/agents?branch=:branch` result, not a new route or aggregate event stream. `AgentClient.agents` remains the TUI's only family-roster read. The console's `sdk.agents.list()` returns the same record, so its model-visible JSON receives these additive fields without gaining broader family access or new authorization.
 
 ### TUI presentation state
 
@@ -276,12 +293,14 @@ The controller refreshes the public family result:
 - during initial attach;
 - after a successful route switch;
 - after current-branch events that change tasks, cancellation, terminal notices, session names, or status;
-- on a bounded one-second interval while the family browser is open or a direct child is nonterminal;
+- on an initial bounded one-second interval while the family browser is open or a direct child is nonterminal;
 - once after reconnect.
 
-The interval stops when no refresh condition remains, the client detaches, or the protocol is disconnected. Refreshes are coalesced, tagged with a generation, and discarded when they belong to an older route.
+The interval stops when no refresh condition remains, the client detaches, or the protocol is disconnected. Refreshes are coalesced, tagged with a generation, and discarded when they belong to an older route. The scheduler and interval are injectable in deterministic controller tests.
 
 Polling is supplementary status refresh, not event authority. The selected conversation continues to use the existing snapshot-plus-cursor branch watch. A failed family refresh keeps the last rows visible with a stale marker and cannot manufacture a transition.
+
+Before release, a focused local benchmark measures family refresh with at least 25 related sessions and 5,000 committed events per branch. It records refresh latency and database work and confirms that coalescing prevents overlapping refreshes or backlog at the initial cadence. Any projection-cache or interval optimization follows that evidence rather than being required in advance.
 
 ## Race-safe route switching
 
@@ -398,7 +417,7 @@ Rapid Right/Left input is serialized. At most one branch watch owns the visible 
 - No children produces no summary.
 - Singular and plural summaries are correct.
 - Only exact direct children are counted; siblings and grandchildren are excluded.
-- Cancelled and archived children remain inspectable but do not keep the compact summary visible.
+- Cancelled and archived children remain inspectable as `ended`, including when they are the only children.
 - Working, waiting, idle, attention, ended, and unavailable are exhaustive and deterministic.
 - Waiting, unknown, failed, budget-exceeded, and missing state cannot appear idle.
 - Cancellation requests remain visible before terminal cancellation.
@@ -419,10 +438,12 @@ Rapid Right/Left input is serialized. At most one branch watch owns the visible 
 - Family refresh failure marks rows stale and preserves the last known projection.
 - Detach stops refresh timers and route watches.
 - Historical mode rejects family opening until `/live`.
+- A focused 25-relative, 5,000-events-per-branch benchmark records refresh cost and verifies that refreshes do not overlap or accumulate.
 
 ### OpenTUI
 
-- Down or `Alt-A` from an empty composer focuses the summary.
+- Down from an empty composer focuses the summary.
+- `Alt-A` is enabled and advertised only if supported terminal input sequences pass deterministic compatibility tests.
 - Enter and Right open the family browser from the focused summary.
 - Up, Left, and Escape return summary focus to the composer.
 - Printable input from the focused summary returns to the composer and is retained.
