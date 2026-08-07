@@ -315,11 +315,26 @@ function familyDetail(command: string, value: unknown): TerminalInspectionDetail
   if (command === "/agents" || command === "/tree") {
     sections.push(family.length ? {
       title: `Family · ${family.length}`,
-      rows: family.map(item => ({
-        label: string(item.name, titleCase(string(item.relationship, "agent"))),
-        value: `${displayStatus(item.relationship)} · ${displayStatus(item.taskStatus ?? item.status)}`,
-        tone: markerTone(item.taskStatus ?? item.status),
-      })),
+      rows: family.map(item => {
+        const activity = string(item.activity, string(item.taskStatus, string(item.status, "unknown")));
+        const detail = [
+          item.task ? sentence(item.task, 180) : "",
+          item.activityReason ? displayStatus(item.activityReason) : "",
+          bool(item.cancellationRequested) ? "Cancellation requested" : "",
+        ].filter(Boolean).join("\n");
+        return {
+          label: string(item.name, titleCase(string(item.relationship, "agent"))),
+          value: `${displayStatus(item.relationship)} · ${displayStatus(activity)}`,
+          ...(detail ? { detail } : {}),
+          tone: ["attention", "unavailable"].includes(activity)
+            ? "danger" as const
+            : ["working", "waiting"].includes(activity)
+              ? "warning" as const
+              : activity === "ended"
+                ? "muted" as const
+                : markerTone(activity),
+        };
+      }),
     } : emptySection("Family", "No retained family relationships."));
   }
   if (command !== "/mailbox") sections.push(taskRows.length ? { title: `Tasks · ${taskRows.length}`, rows: taskRows } : emptySection("Tasks", "No child tasks."));

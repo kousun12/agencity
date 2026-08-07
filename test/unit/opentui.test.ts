@@ -136,7 +136,8 @@ describe("OpenTUI interactive terminal", () => {
       frame = await setup.waitForFrame(value => value.includes("Long timeline update 28") && value.includes("draft response"));
       expect(frame).toContain("Long timeline update 28");
 
-      setup.mockInput.pressKey("u", { ctrl: true });
+      setup.mockInput.pressKey("a", { ctrl: true });
+      setup.mockInput.pressKey("k", { ctrl: true });
       await setup.mockInput.typeText("/info");
       setup.mockInput.pressEnter();
       frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS"));
@@ -176,7 +177,8 @@ describe("OpenTUI interactive terminal", () => {
       frame = await setup.waitForFrame(value => value.includes("/help") && value.includes("OpenTUI test / main"));
       expect(frame).toContain("Ctrl-P commands");
       setup.mockInput.pressEscape();
-      setup.mockInput.pressKey("u", { ctrl: true });
+      setup.mockInput.pressKey("a", { ctrl: true });
+      setup.mockInput.pressKey("k", { ctrl: true });
       await setup.mockInput.typeText("/info");
       setup.mockInput.pressEnter();
       frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS"));
@@ -340,6 +342,107 @@ describe("OpenTUI interactive terminal", () => {
       frame = await setup.waitForFrame(value => value.includes("> ○ OpenAI") && value.includes("not configured"));
       expect(submittedKeys).toEqual([secret, null]);
       expect(frame).not.toContain(secret);
+    } finally {
+      app.destroy();
+      setup.renderer.destroy();
+      await terminal.detach(false);
+      await supervisor.close();
+    }
+  });
+
+  test("focuses, browses, and opens exact parent-child routes without overriding drafts", async () => {
+    const temp = await makeTempRuntime("agencity-opentui-family-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const root = await supervisor.createSession({
+      workspaceId: "terminal-family",
+      sessionName: "Root agent",
+      branchName: "main",
+      model: { provider: "echo", model: "echo-1" },
+    });
+    const child = await supervisor.agents.spawn(root.sessionId, root.branchId, {
+      task: "Review the implementation",
+      name: "Reviewer",
+      run: false,
+    });
+    await supervisor.agents.spawn(child.sessionId, child.branchId, {
+      task: "Verify the review",
+      name: "Verifier",
+      run: false,
+    });
+    const branchesBefore = (await supervisor.storage.listBranches()).length;
+    const client = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    let app: OpenTuiApp | null = null;
+    const terminal = new TerminalUI(client, {
+      interactive: false,
+      manageSignals: false,
+      onOutput: value => app?.showOutput(value),
+      onDetail: detail => app?.showDetail(detail),
+    });
+    await terminal.attach(root.sessionId, root.branchId, false);
+    const setup = await createTestRenderer({ width: 112, height: 28 });
+    app = new OpenTuiApp(setup.renderer, terminal);
+    try {
+      let frame = await setup.waitForFrame(value => value.includes("Root agent / main") && value.includes("1 agent: 1 working"));
+      expect(frame).not.toContain("\nAGENTS\n");
+      expect(frame).toContain("↓ agents");
+
+      await setup.mockInput.typeText("draft stays");
+      setup.mockInput.pressKey("\u001b[B");
+      setup.mockInput.pressKey("\u001b[D");
+      frame = await setup.waitForFrame(value => value.includes("draft stays"));
+      expect(frame).toContain("Root agent / main");
+      expect(frame).not.toContain("AGENT FAMILY");
+
+      setup.mockInput.pressKey("a", { ctrl: true });
+      setup.mockInput.pressKey("k", { ctrl: true });
+      setup.mockInput.pressKey("\u001b[B");
+      frame = await setup.waitForFrame(value => value.includes("> 1 agent: 1 working"));
+      expect(frame).toContain("Enter/→ agents");
+      await setup.mockInput.typeText("x");
+      frame = await setup.waitForFrame(value => value.includes("x") && value.includes("↓ agents"));
+      expect(frame).not.toContain("AGENT FAMILY");
+
+      setup.mockInput.pressKey("u", { ctrl: true });
+      setup.mockInput.pressKey("\u001b[B");
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("> ● Reviewer — working"));
+      expect(frame).toContain("Review the implementation");
+
+      setup.resize(72, 16);
+      frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("TRUSTED-LOCAL"));
+      expect(frame).toContain("Reviewer");
+      expect(frame).toContain("Ask Agencity");
+      setup.resize(52, 9);
+      frame = await setup.waitForFrame(value => value.includes("Reviewer") && value.includes("TRUSTED-LOCAL"));
+      expect(frame).toContain("Enter/→ open");
+
+      setup.mockInput.pressKey("\u001b[C");
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("Root agent › Reviewer / unnamed branch"));
+      expect(frame).toContain("1 agent: 1 working");
+      expect(frame).toContain("← parent");
+      expect(frame).not.toContain("AGENT FAMILY");
+
+      await setup.mockInput.typeText("child draft");
+      setup.mockInput.pressKey("\u001b[D");
+      frame = await setup.waitForFrame(value => value.includes("child draft") && value.includes("Root agent › Reviewer"));
+      expect(frame).toContain("Reviewer");
+      setup.mockInput.pressKey("a", { ctrl: true });
+      setup.mockInput.pressKey("k", { ctrl: true });
+      setup.mockInput.pressKey("\u001b[D");
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("Root agent / main") && !value.includes("Root agent › Reviewer"));
+      expect(frame).toContain("↓ agents");
+
+      const task = await supervisor.storage.getTask?.(child.taskId);
+      expect(task?.status).toBe("admitted");
+      expect(task?.cancellationRequested).toBe(false);
+      expect((await supervisor.storage.listBranches()).length).toBe(branchesBefore);
     } finally {
       app.destroy();
       setup.renderer.destroy();
