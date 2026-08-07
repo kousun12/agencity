@@ -99,7 +99,13 @@ Agencity remembers the recent branch for each workspace. If more than one choice
 
 ## Terminal interface basics
 
-The full-screen terminal interface keeps conversation and grouped run activity in the main view, a stable composer at the bottom, and branch, model, connection, recovery, budget, and trust status in persistent chrome.
+The full-screen terminal interface renders committed user and assistant messages as structured Markdown. Supported fenced languages and retained TypeScript cells use syntax-aware rendering; unsupported fenced languages remain readable as plain code. Run activity keeps a compact status row. Expanding it with `Ctrl-O` shows the exact retained TypeScript source, logs, bounded result, and error.
+
+The bottom composer is a fixed raised surface with a visible `›` prompt. A family summary, when present, remains between the composer and footer. The footer keeps the trusted-local boundary and current action visible, then adds connection, attention, recovery, budget, family, and command hints as width permits.
+
+The conversation uses the full main width while no contextual inspector is active. Commands, model setup, provisional output, family browsing, and transient notices open the inspector. Wide terminals show it beside the conversation; narrow terminals temporarily replace the conversation while leaving the header, composer, family summary, and footer available. Closing the inspector restores the conversation without changing the selected session or branch.
+
+Normal, compact, and minimum height modes reduce chrome in a fixed order. The main view always retains usable space, while very short terminals omit the optional family summary and reduce an active inspector to its required control.
 
 - Type plain text to start a task or answer a pending clarification.
 - `Ctrl-P` opens command search.

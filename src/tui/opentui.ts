@@ -27,24 +27,24 @@ import {
   type TerminalPresentation,
   type TerminalScreenView,
 } from "./view-model.ts";
+import { TerminalTranscript } from "./transcript.ts";
+import {
+  TERMINAL_THEME,
+  createTerminalSyntaxStyle,
+  terminalFamilyTone,
+  terminalToneColor,
+} from "./theme.ts";
+import {
+  layoutTerminalFooter,
+  selectTerminalHeightLayout,
+  terminalComposerPaddingX,
+} from "./layout.ts";
 import {
   formatTerminalDetail,
   type TerminalDetail,
   type TerminalModelDetail,
   type TerminalModelProviderDetail,
 } from "./detail-model.ts";
-
-const COLORS = {
-  background: "#0d1117",
-  panel: "#151b23",
-  border: "#30363d",
-  text: "#e6edf3",
-  muted: "#8b949e",
-  accent: "#58a6ff",
-  success: "#3fb950",
-  warning: "#d29922",
-  danger: "#f85149",
-};
 
 export interface OpenTerminalUIOptions {
   readonly workspaceId?: string;
@@ -83,49 +83,6 @@ function isRoutineTranscript(value: string): boolean {
     || trimmed === "Response accepted."
     || trimmed.startsWith("[cell complete]")
     || trimmed.startsWith("assistant:");
-}
-
-function statusColor(status: string): string {
-  if (status === "succeeded" || status === "completed") return COLORS.success;
-  if (status === "failed" || status === "blocked" || status === "unknown") return COLORS.danger;
-  if (status === "waiting for user" || status === "waiting_for_user" || status === "budget exceeded") return COLORS.warning;
-  return COLORS.accent;
-}
-
-function renderTimeline(view: TerminalScreenView, expandedRunIds: ReadonlySet<string>, compactDetails: string): string {
-  const lines: string[] = [];
-  for (const message of view.conversation) {
-    lines.push(message.role === "user" ? "YOU" : "AGENT");
-    lines.push(message.content.trim(), "");
-  }
-
-  if (view.runs.length > 0) {
-    lines.push("ACTIVITY");
-    for (const run of view.runs.slice(-6)) {
-      const marker = run.active ? "●" : run.status === "succeeded" ? "✓" : "!";
-      const cancellation = run.cancellationRequested ? " · cancellation requested" : "";
-      const provisional = run.provisional ? " · working" : "";
-      lines.push(`${marker} ${run.statusLabel}${provisional}${cancellation} — ${run.task}`);
-      if (run.pendingInput) lines.push(`  needs input: ${run.pendingInput}`);
-      if (run.reason) lines.push(`  ${run.reason}`);
-      const expanded = run.active || expandedRunIds.has(run.id);
-      if (expanded) {
-        for (const step of run.steps.slice(-8)) {
-          const attempts = step.attempts > 1 ? ` · ${step.attempts} attempts` : "";
-          lines.push(`  ${step.ordinal}. ${step.label}${attempts}`);
-          if (step.detail) lines.push(`     ${step.detail}`);
-        }
-      } else if (run.steps.length > 0) {
-        lines.push(`  ▸ ${run.steps.length} step${run.steps.length === 1 ? "" : "s"} (Ctrl-O to expand latest)`);
-      }
-      lines.push("");
-    }
-  }
-
-  if (compactDetails) {
-    lines.push("DETAILS", compactDetails, "");
-  }
-  return lines.join("\n").trimEnd();
 }
 
 function familyActivityMarker(activity: TerminalFamilyChildView["activity"]): string {
@@ -245,17 +202,22 @@ export interface OpenTuiController {
 }
 
 export class OpenTuiApp {
+  readonly #syntaxStyle = createTerminalSyntaxStyle();
   readonly #root: BoxRenderable;
   readonly #header: TextRenderable;
   readonly #main: BoxRenderable;
   readonly #timeline: ScrollBoxRenderable;
-  readonly #timelineText: TextRenderable;
+  readonly #transcript: TerminalTranscript;
   readonly #details: ScrollBoxRenderable;
   readonly #detailsText: TextRenderable;
   readonly #composerBox: BoxRenderable;
+  readonly #composerContent: BoxRenderable;
+  readonly #composerPrompt: TextRenderable;
   readonly #composer: InputRenderable;
   readonly #familySummary: TextRenderable;
-  readonly #footer: TextRenderable;
+  readonly #footer: BoxRenderable;
+  readonly #footerLeft: TextRenderable;
+  readonly #footerRight: TextRenderable;
   readonly #expandedRunIds = new Set<string>();
   readonly #provisionalOutput = new Map<string, string>();
   readonly #unsubscribe: () => void;
@@ -287,14 +249,14 @@ export class OpenTuiApp {
       width: "100%",
       height: "100%",
       flexDirection: "column",
-      backgroundColor: COLORS.background,
+      backgroundColor: TERMINAL_THEME.background,
     });
     this.#header = new TextRenderable(renderer, {
       id: "agencity-header",
       height: 2,
       paddingX: 1,
-      fg: COLORS.text,
-      bg: COLORS.panel,
+      fg: TERMINAL_THEME.text,
+      bg: TERMINAL_THEME.raised,
       truncate: true,
       wrapMode: "none",
     });
@@ -303,7 +265,7 @@ export class OpenTuiApp {
       flexGrow: 1,
       minHeight: 3,
       flexDirection: "row",
-      backgroundColor: COLORS.background,
+      backgroundColor: TERMINAL_THEME.background,
     });
     this.#timeline = new ScrollBoxRenderable(renderer, {
       id: "agencity-timeline",
@@ -316,21 +278,14 @@ export class OpenTuiApp {
       padding: 1,
       viewportCulling: true,
     });
-    this.#timelineText = new TextRenderable(renderer, {
-      id: "agencity-timeline-text",
-      width: "100%",
-      height: "auto",
-      fg: COLORS.text,
-      wrapMode: "word",
-      selectable: true,
-    });
+    this.#transcript = new TerminalTranscript(renderer, this.#timeline, this.#syntaxStyle);
     this.#details = new ScrollBoxRenderable(renderer, {
       id: "agencity-details",
       width: 38,
       border: ["left"],
-      borderColor: COLORS.border,
+      borderColor: TERMINAL_THEME.border,
       padding: 1,
-      backgroundColor: COLORS.panel,
+      backgroundColor: TERMINAL_THEME.raised,
       scrollY: true,
       scrollX: false,
       stickyScroll: false,
@@ -339,28 +294,46 @@ export class OpenTuiApp {
       id: "agencity-details-text",
       width: "100%",
       height: "auto",
-      fg: COLORS.muted,
+      fg: TERMINAL_THEME.muted,
       wrapMode: "word",
       selectable: true,
     });
     this.#composerBox = new BoxRenderable(renderer, {
       id: "agencity-composer-box",
       height: 3,
-      border: ["top"],
-      borderColor: COLORS.border,
-      paddingX: 1,
-      paddingTop: 1,
-      backgroundColor: COLORS.panel,
+      flexShrink: 0,
+      paddingX: 2,
+      paddingY: 1,
+      backgroundColor: TERMINAL_THEME.raised,
+    });
+    this.#composerContent = new BoxRenderable(renderer, {
+      id: "agencity-composer-content",
+      width: "100%",
+      height: 1,
+      flexDirection: "row",
+      flexShrink: 0,
+      backgroundColor: TERMINAL_THEME.raised,
+    });
+    this.#composerPrompt = new TextRenderable(renderer, {
+      id: "agencity-composer-prompt",
+      width: 2,
+      height: 1,
+      flexShrink: 0,
+      content: "› ",
+      fg: TERMINAL_THEME.accent,
+      bg: TERMINAL_THEME.raised,
+      wrapMode: "none",
     });
     this.#composer = new InputRenderable(renderer, {
       id: "agencity-composer",
-      width: "100%",
+      flexGrow: 1,
+      minWidth: 1,
       placeholder: this.#view.composerPlaceholder,
-      textColor: COLORS.text,
-      focusedTextColor: COLORS.text,
-      backgroundColor: COLORS.panel,
-      focusedBackgroundColor: COLORS.panel,
-      placeholderColor: COLORS.muted,
+      textColor: TERMINAL_THEME.text,
+      focusedTextColor: TERMINAL_THEME.text,
+      backgroundColor: TERMINAL_THEME.raised,
+      focusedBackgroundColor: TERMINAL_THEME.raised,
+      placeholderColor: TERMINAL_THEME.muted,
       onSubmit: () => { void this.#submit(); },
       onKeyDown: key => {
         if (!this.controller.pendingSecretInput && (key.name === "escape" || key.name === "esc" || key.sequence === "\u001b")) {
@@ -373,27 +346,51 @@ export class OpenTuiApp {
     this.#familySummary = new TextRenderable(renderer, {
       id: "agencity-family-summary",
       height: 1,
+      flexShrink: 0,
       paddingX: 1,
-      fg: COLORS.muted,
-      bg: COLORS.panel,
+      fg: TERMINAL_THEME.muted,
+      bg: TERMINAL_THEME.raised,
       truncate: true,
       wrapMode: "none",
     });
-    this.#footer = new TextRenderable(renderer, {
+    this.#footer = new BoxRenderable(renderer, {
       id: "agencity-footer",
       height: 1,
+      flexShrink: 0,
       paddingX: 1,
-      fg: COLORS.muted,
-      bg: COLORS.panel,
+      flexDirection: "row",
+      justifyContent: "space-between",
+      backgroundColor: TERMINAL_THEME.raised,
+    });
+    this.#footerLeft = new TextRenderable(renderer, {
+      id: "agencity-footer-left",
+      flexGrow: 1,
+      minWidth: 1,
+      height: 1,
+      fg: TERMINAL_THEME.muted,
+      bg: TERMINAL_THEME.raised,
+      truncate: true,
+      wrapMode: "none",
+    });
+    this.#footerRight = new TextRenderable(renderer, {
+      id: "agencity-footer-right",
+      width: 0,
+      height: 1,
+      flexShrink: 0,
+      fg: TERMINAL_THEME.accent,
+      bg: TERMINAL_THEME.raised,
       truncate: true,
       wrapMode: "none",
     });
 
-    this.#timeline.add(this.#timelineText);
     this.#details.add(this.#detailsText);
     this.#main.add(this.#timeline);
     this.#main.add(this.#details);
-    this.#composerBox.add(this.#composer);
+    this.#composerContent.add(this.#composerPrompt);
+    this.#composerContent.add(this.#composer);
+    this.#composerBox.add(this.#composerContent);
+    this.#footer.add(this.#footerLeft);
+    this.#footer.add(this.#footerRight);
     this.#root.add(this.#header);
     this.#root.add(this.#main);
     this.#root.add(this.#composerBox);
@@ -521,6 +518,7 @@ export class OpenTuiApp {
     this.renderer.keyInput.off("paste", this.#onPaste);
     this.renderer.off(CliRenderEvents.RESIZE, this.#onResize);
     this.#root.destroyRecursively();
+    this.#syntaxStyle.destroy();
   }
 
   #onResize = (): void => {
@@ -1037,18 +1035,68 @@ export class OpenTuiApp {
     }
   }
 
+  #familyHint(compact: boolean): string {
+    if (this.#familyFocus === "browser") {
+      return compact ? "↑/↓ · Enter/→ open · ←/Esc close" : "↑/↓ select · Enter/→ open · ←/Esc close";
+    }
+    if (this.#familyFocus === "summary") return "Enter/→ agents · ↑/←/Esc composer";
+    if (this.#view.historicalCursor !== null && (this.#view.familySummary || this.#view.familyParent)) {
+      return "/live before agent navigation";
+    }
+    return [
+      this.#view.familyParent?.activity !== "unavailable" && this.#view.familyParent ? "← parent" : "",
+      this.#view.familySummary ? "↓ agents" : "",
+    ].filter(Boolean).join(" · ");
+  }
+
+  #activeInspectorAction(): string {
+    if (this.controller.pendingSecretInput) return "Enter save · Esc cancel";
+    if (this.#modelEntryProvider) return "Enter save · Esc back";
+    if (this.#activeModelDetail()) return "↑/↓ provider · Enter choose · Esc close";
+    if (this.#paletteQuery) return "Esc close";
+    if (this.#provisionalOutput.size > 0) return "PgUp/PgDn scroll";
+    if (this.#familyFocus === "browser") return "";
+    if (this.#detail || this.#notice) return "Esc close";
+    return "";
+  }
+
+  #minimumInspectorText(details: string): string {
+    if (this.controller.pendingSecretInput) return "PROVIDER LOGIN · Enter save · Esc cancel";
+    if (this.#paletteQuery) return "COMMANDS · type to filter · Esc close";
+    if (this.#provisionalOutput.size > 0) return "PROVISIONAL OUTPUT · PgUp/PgDn scroll";
+    if (this.#familyFocus === "browser") {
+      const selected = this.#view.familyChildren.find(child => child.key === this.#familySelectedKey)
+        ?? this.#view.familyChildren[0];
+      return selected
+        ? `AGENT FAMILY · ${familyActivityMarker(selected.activity)} ${selected.displayName} · Enter/→ open · ←/Esc close`
+        : "AGENT FAMILY · no retained direct children · Esc close";
+    }
+    if (this.#activeModelDetail()) {
+      return this.#modelEntryProvider
+        ? `MODEL · ${this.#modelEntryProvider} ID · Enter save · Esc back`
+        : "MODEL · ↑/↓ provider · Enter choose · Esc close";
+    }
+    const firstLine = details.split("\n").find(line => line.trim()) ?? "DETAILS";
+    return `${firstLine} · Esc close`;
+  }
+
   #render(): void {
     const width = this.renderer.terminalWidth;
     const height = this.renderer.terminalHeight;
     const wide = width >= 96;
-    const veryShort = height <= 10;
+    const layout = selectTerminalHeightLayout(height);
+    const compact = layout.mode !== "normal";
     const activeInspector = this.#activeInspector();
-    this.#main.minHeight = veryShort ? 1 : 3;
-    this.#composerBox.height = veryShort ? 2 : 3;
-    this.#composerBox.paddingTop = veryShort ? 0 : 1;
-    this.#details.padding = veryShort ? 0 : 1;
-    this.#details.visible = wide || activeInspector;
-    this.#timeline.visible = wide || !activeInspector;
+    this.#header.height = layout.headerRows;
+    this.#main.minHeight = 1;
+    this.#composerBox.height = layout.composerRows;
+    this.#composerBox.paddingX = terminalComposerPaddingX(width);
+    this.#composerBox.paddingTop = layout.composerPaddingTop;
+    this.#composerBox.paddingBottom = layout.composerPaddingBottom;
+    this.#details.padding = layout.inspectorPadding;
+    this.#details.border = wide && layout.mode !== "minimum" ? ["left"] : false;
+    this.#details.visible = activeInspector;
+    this.#timeline.visible = !activeInspector || (wide && layout.mode !== "minimum");
     this.#details.width = wide ? Math.min(64, Math.max(40, Math.round(width * 0.4))) : "100%";
     const provisional = [...this.#provisionalOutput.values()].join("");
     const baseDetails = this.controller.pendingSecretInput
@@ -1066,52 +1114,57 @@ export class OpenTuiApp {
       : provisional
         ? `PROVISIONAL OUTPUT\n${provisional}`
         : this.#familyFocus === "browser"
-          ? renderFamilyBrowser(this.#view, this.#familySelectedKey, veryShort, width >= 96)
+          ? renderFamilyBrowser(this.#view, this.#familySelectedKey, compact, width >= 96)
         : this.#detail
           ? this.#detail.kind === "model" && !this.#rawDetail
             ? renderModelInspector(this.#detail, this.#modelProviderIndex, this.#modelEntryProvider)
             : formatTerminalDetail(this.#detail, { raw: this.#rawDetail })
-          : [
-          "SESSION",
-          this.#view.sessionName,
-          "",
-          "RUN",
-          this.#view.runState,
-          "",
-          "BUDGET",
-          this.#view.budgetLabel,
-          "",
-          "RECOVERY",
-          this.#view.recoveryLabel,
-          "",
-          "SHORTCUTS",
-          "Ctrl-P commands",
-          "Ctrl-O activity",
-          "Ctrl-C stop / detach",
-          "Ctrl-D detach",
-          ].join("\n");
+          : "";
     const notice = noticeText(this.#notice);
-    const details = notice ? `${notice}\n${baseDetails ? `\n${baseDetails}` : ""}` : baseDetails;
+    const fullDetails = notice ? `${notice}\n${baseDetails ? `\n${baseDetails}` : ""}` : baseDetails;
+    const details = layout.mode === "minimum" && activeInspector
+      ? this.#minimumInspectorText(fullDetails)
+      : fullDetails;
     const history = this.#view.historicalCursor ? ` · history@${this.#view.historicalCursor}` : "";
     const breadcrumb = formatTerminalBreadcrumb(
       this.#view.ancestry,
       this.#view.branchName,
       Math.max(8, width - history.length - 2),
     );
-    this.#header.content = `${breadcrumb}${history}\n${this.#view.model} · ${this.#view.runState} · ${this.#view.connection}`;
-    this.#header.fg = this.#view.connection === "connected" ? COLORS.text : COLORS.warning;
-    this.#timelineText.content = renderTimeline(this.#view, this.#expandedRunIds, "");
+    const primaryHeader = `${breadcrumb}${history}`;
+    const secondaryHeader = `${this.#view.model} · ${this.#view.runState} · ${this.#view.connection}`;
+    this.#header.content = layout.mode === "normal"
+      ? `${primaryHeader}\n${secondaryHeader}`
+      : primaryHeader;
+    this.#header.fg = this.#view.connection === "connected" ? TERMINAL_THEME.text : TERMINAL_THEME.warning;
+    this.#transcript.reconcile(this.#view, this.#expandedRunIds);
     this.#detailsText.content = details;
+    const selectedFamily = this.#view.familyChildren.find(child => child.key === this.#familySelectedKey);
+    const noticeTone = this.#notice?.tone ?? "normal";
+    this.#detailsText.fg = this.#notice
+      ? terminalToneColor(noticeTone)
+      : provisional
+        ? TERMINAL_THEME.provisional
+        : this.#familyFocus === "browser" && selectedFamily
+          ? terminalToneColor(terminalFamilyTone(selectedFamily.activity))
+          : TERMINAL_THEME.muted;
     const familyRefresh = this.#view.familyRefresh === "current" ? "" : ` · ${this.#view.familyRefresh}`;
-    this.#familySummary.visible = this.#view.familySummary !== null && !(veryShort && this.#familyFocus === "browser");
+    this.#familySummary.visible = layout.showFamilySummary && this.#view.familySummary !== null;
     this.#familySummary.content = this.#view.familySummary
       ? `${this.#familyFocus === "summary" ? ">" : " "} ${formatTerminalFamilySummary(
           this.#view.familySummary,
           Math.max(1, width - familyRefresh.length - 3),
         )}${familyRefresh}`
       : "";
-    this.#familySummary.bg = this.#familyFocus === "summary" ? COLORS.border : COLORS.panel;
-    this.#familySummary.fg = this.#familyFocus === "summary" ? COLORS.text : COLORS.muted;
+    this.#familySummary.bg = this.#familyFocus === "summary" ? TERMINAL_THEME.border : TERMINAL_THEME.raised;
+    const familyTone = this.#view.familySummary?.attention
+      ? "attention"
+      : this.#view.familySummary?.working
+        ? "working"
+        : "idle";
+    this.#familySummary.fg = this.#familyFocus === "summary"
+      ? TERMINAL_THEME.text
+      : terminalToneColor(terminalFamilyTone(familyTone));
     if (this.#resetDetailScroll) {
       this.#resetDetailScroll = false;
       this.#details.stickyScroll = false;
@@ -1135,28 +1188,25 @@ export class OpenTuiApp {
         : this.#modelEntryProvider
           ? `Model ID for ${this.#modelEntryProvider}…`
           : this.#view.composerPlaceholder;
-    const inspectorHint = this.#activeModelDetail() && !this.#modelEntryProvider ? " · ↑/↓ model provider · Enter choose" : "";
-    const familyHint = this.#familyFocus === "browser"
-      ? veryShort ? "↑/↓ · Enter/→ open · ←/Esc close" : "↑/↓ select · Enter/→ open · ←/Esc close"
-      : this.#familyFocus === "summary"
-        ? "Enter/→ agents · ↑/←/Esc composer"
-        : this.#view.historicalCursor !== null && (this.#view.familySummary || this.#view.familyParent)
-          ? "/live before agent navigation"
-          : [
-              this.#view.familyParent?.activity !== "unavailable" && this.#view.familyParent ? "← parent" : "",
-              this.#view.familySummary ? "↓ agents" : "",
-            ].filter(Boolean).join(" · ");
-    this.#footer.content = (veryShort
-      ? [this.#view.trustLabel, familyHint]
-      : [
-          this.#view.trustLabel,
-          familyHint,
-          this.#view.recoveryLabel,
-          `${this.#view.attentionCount} attention`,
-          this.#view.budgetLabel,
-          `Ctrl-P commands${inspectorHint}`,
-        ]).filter(Boolean).join(" · ");
-    this.#footer.fg = this.#view.attentionCount > 0 ? statusColor("waiting for user") : COLORS.muted;
+    const familyHint = this.#familyHint(compact);
+    const footer = layoutTerminalFooter({
+      width: Math.max(1, width - 2),
+      trustLabel: this.#view.trustLabel,
+      connection: this.#view.connection,
+      attentionCount: this.#view.attentionCount,
+      recoveryLabel: this.#view.recoveryLabel,
+      budgetLabel: this.#view.budgetLabel,
+      activeActionHint: this.#activeInspectorAction(),
+      familyHint,
+    });
+    this.#footerLeft.content = footer.left;
+    this.#footerLeft.fg = this.#view.attentionCount > 0
+      || this.#view.connection !== "connected"
+      || this.#view.recoveryLabel !== "recovery healthy"
+      ? TERMINAL_THEME.warning
+      : TERMINAL_THEME.muted;
+    this.#footerRight.content = footer.right;
+    this.#footerRight.width = footer.right.length;
     this.renderer.setTerminalTitle(`Agencity — ${this.#view.sessionName}`);
     this.renderer.requestRender();
   }

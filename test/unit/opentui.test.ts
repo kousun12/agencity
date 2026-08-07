@@ -1,14 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { CodeRenderable, MarkdownRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import {
   AgentClient,
   InProcessProtocolTransport,
   ProtocolServer,
   Supervisor,
+  type AgentRunState,
 } from "../../src/index.ts";
 import { OpenTuiApp, formatManagedDetach, type OpenTuiController } from "../../src/tui/opentui.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
-import { buildTerminalScreen } from "../../src/tui/view-model.ts";
+import { TerminalTranscript } from "../../src/tui/transcript.ts";
+import { createTerminalSyntaxStyle } from "../../src/tui/theme.ts";
+import { buildTerminalScreen, type TerminalScreenView } from "../../src/tui/view-model.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -74,6 +78,88 @@ describe("OpenTUI interactive terminal", () => {
       },
     });
     expect(proposedFinal.runs[0]?.steps[0]).toMatchObject({ label: "Completion proposed", detail: null });
+    const typescriptCode = "const rows = await sql.query('select 1');\nreturn rows;";
+    const typescriptRun: AgentRunState = {
+      id: "typescript-run",
+      task: "Inspect with TypeScript",
+      requestKey: "typescript-run",
+      goalId: null,
+      goalMode: "none",
+      wakeId: null,
+      status: "running",
+      steps: [{
+        id: "typescript-step",
+        ordinal: 1,
+        contextId: "context",
+        callId: "call",
+        effectId: "effect",
+        actionId: "typescript-action",
+        observationEventIds: [],
+        modelAttempts: [],
+        action: {
+          protocol: "agencity.agent-action",
+          version: 1,
+          type: "typescript",
+          code: typescriptCode,
+        },
+        eventId: "event",
+      }],
+      inputRequests: {},
+      goalChecks: {},
+      cancellationRequested: false,
+      requestEventId: "request",
+      eventId: "event",
+    };
+    const projectedCell = buildTerminalScreen({
+      ...controller.presentation,
+      state: {
+        ...controller.presentation.state,
+        agentRuns: { [typescriptRun.id]: typescriptRun },
+        cells: {
+          "agent-run-cell-typescript-action": {
+            id: "agent-run-cell-typescript-action",
+            code: typescriptCode,
+            status: "running",
+            attempts: 2,
+            logs: ["first", "second"],
+            eventId: "cell-event",
+          },
+          "agent-run-cell-another-action": {
+            id: "agent-run-cell-another-action",
+            code: "throw new Error('wrong cell')",
+            status: "failed",
+            attempts: 1,
+            logs: [],
+            error: "wrong",
+            eventId: "other-cell-event",
+          },
+        },
+      },
+    });
+    expect(projectedCell.runs[0]?.steps[0]?.cell).toEqual({
+      id: "agent-run-cell-typescript-action",
+      language: "typescript",
+      code: typescriptCode,
+      status: "running",
+      attempts: 2,
+      logs: ["first", "second"],
+      result: null,
+      error: null,
+    });
+    const absentActiveCell = buildTerminalScreen({
+      ...controller.presentation,
+      state: { ...controller.presentation.state, agentRuns: { [typescriptRun.id]: typescriptRun }, cells: {} },
+    });
+    expect(absentActiveCell.runs[0]?.steps[0]?.cell?.status).toBe("pending");
+    const absentTerminalCell = buildTerminalScreen({
+      ...controller.presentation,
+      state: {
+        ...controller.presentation.state,
+        agentRuns: { [typescriptRun.id]: { ...typescriptRun, status: "unknown" } },
+        cells: {},
+      },
+    });
+    expect(absentTerminalCell.runs[0]?.steps[0]?.cell?.status).toBe("missing");
     const waitingForUser = buildTerminalScreen({
       ...controller.presentation,
       state: {
@@ -120,21 +206,64 @@ describe("OpenTUI interactive terminal", () => {
     try {
       app = new OpenTuiApp(setup.renderer, appController);
       let frame = await setup.waitForFrame(value => value.includes("OpenTUI test / main") && value.includes("Inspect the workspace"));
+      const initialMessageId = controller.presentation.state.messages.find(message => message.content === "Inspect the workspace")!.id;
+      const initialMessageBody = setup.renderer.root.findDescendantById(
+        `agencity-transcript-message-body-${initialMessageId}`,
+      );
+      expect(initialMessageBody).toBeInstanceOf(MarkdownRenderable);
       expect(frame).toContain("TRUSTED-LOCAL");
       expect(frame).toContain("Ask Agencity");
-      expect(frame).toContain("RECOVERY");
+      expect(frame).not.toContain("SESSION");
+      expect(frame).not.toContain("RECOVERY");
+      const initialLines = frame.split("\n");
+      const composerLine = initialLines.findIndex(line => line.includes("› Ask Agencity"));
+      expect(initialLines[composerLine - 1]?.trim()).toBe("");
+      expect(initialLines[composerLine + 1]?.trim()).toBe("");
 
       await setup.mockInput.typeText("draft response");
       frame = await setup.waitForFrame(value => value.includes("draft response"));
       expect(frame).toContain("draft response");
-      await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", "A committed update arrived");
-      frame = await setup.waitForFrame(value => value.includes("A committed update arrived") && value.includes("draft response"));
+      const committedMarkdown = "## A committed update arrived\n\n- retained item\n\n```typescript\nconst answer = 42;\n```\n\n```unsupported-language\nplain fallback\n```";
+      await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", committedMarkdown);
+      frame = await setup.waitForFrame(value =>
+        value.includes("A committed update arrived")
+        && value.includes("const answer")
+        && value.includes("plain fallback")
+        && value.includes("draft response"),
+      );
       expect(frame).toContain("A committed update arrived");
+      expect(frame).not.toContain("## A committed update arrived");
+      expect(setup.renderer.root.findDescendantById(`agencity-transcript-message-body-${initialMessageId}`))
+        .toBe(initialMessageBody);
+      const markdownMessageId = controller.presentation.state.messages.find(message => message.content === committedMarkdown)!.id;
+      const markdownBody = setup.renderer.root.findDescendantById(
+        `agencity-transcript-message-body-${markdownMessageId}`,
+      ) as MarkdownRenderable;
+      expect(markdownBody.content).toBe(committedMarkdown);
       for (let index = 1; index <= 28; index++) {
         await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", `Long timeline update ${index}`);
       }
       frame = await setup.waitForFrame(value => value.includes("Long timeline update 28") && value.includes("draft response"));
       expect(frame).toContain("Long timeline update 28");
+      setup.mockInput.pressKey("\u001b[5~");
+      await Bun.sleep(20);
+      await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", "Update while timeline is scrolled away");
+      await Bun.sleep(20);
+      frame = (await setup.captureCharFrame()).toString();
+      expect(frame).not.toContain("Update while timeline is scrolled away");
+      setup.mockInput.pressKey("\u001b[6~");
+      frame = await setup.waitForFrame(value => value.includes("Update while timeline is scrolled away"));
+
+      app.showOutput("First obsolete command notice");
+      app.showOutput("Selected branch model: openai:gpt-test.");
+      frame = await setup.waitForFrame(value => value.includes("Selected branch model"));
+      expect(frame).not.toContain("First obsolete command notice");
+      setup.mockInput.pressEscape();
+      frame = await setup.waitForFrame(value =>
+        value.includes("Update while timeline is scrolled away")
+        && !value.includes("Selected branch model"),
+      );
+      expect(frame).not.toContain("Selected branch model");
 
       setup.mockInput.pressKey("a", { ctrl: true });
       setup.mockInput.pressKey("k", { ctrl: true });
@@ -156,11 +285,6 @@ describe("OpenTUI interactive terminal", () => {
       await Bun.sleep(20);
       setup.mockInput.pressKey("\u001b[5~");
       frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS"));
-
-      app.showOutput("First obsolete command notice");
-      app.showOutput("Selected branch model: openai:gpt-test.");
-      frame = await setup.waitForFrame(value => value.includes("Selected branch model"));
-      expect(frame).not.toContain("First obsolete command notice");
 
       app.showProvisional("temporary-effect", "temporary provider prefix");
       frame = await setup.waitForFrame(value => value.includes("temporary provider prefix"));
@@ -421,12 +545,18 @@ describe("OpenTUI interactive terminal", () => {
       setup.resize(52, 9);
       frame = await setup.waitForFrame(value => value.includes("Reviewer") && value.includes("TRUSTED-LOCAL"));
       expect(frame).toContain("Enter/→ open");
+      setup.resize(52, 6);
+      frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("TRUSTED-LOCAL"));
+      expect(frame).toContain("Ask Agencity");
+      expect(frame).not.toContain("1 agent: 1 working");
+      setup.resize(52, 9);
+      await setup.waitForFrame(value => value.includes("Reviewer") && value.includes("Enter/→ open"));
 
       setup.mockInput.pressKey("\u001b[C");
       expect(await app.settle()).toBe(true);
       frame = await setup.waitForFrame(value => value.includes("Root agent › Reviewer / unnamed branch"));
       expect(frame).toContain("1 agent: 1 idle");
-      expect(frame).toContain("← parent");
+      expect(frame).toContain("Esc close");
       expect(frame).not.toContain("AGENT FAMILY");
 
       await setup.mockInput.typeText("child draft");
@@ -438,7 +568,7 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressKey("\u001b[D");
       expect(await app.settle()).toBe(true);
       frame = await setup.waitForFrame(value => value.includes("Root agent / main") && !value.includes("Root agent › Reviewer"));
-      expect(frame).toContain("↓ agents");
+      expect(frame).toContain("Enter or → to open");
 
       const task = await supervisor.storage.getTask?.(child.taskId);
       expect(task?.status).toBe("admitted");
@@ -449,6 +579,126 @@ describe("OpenTUI interactive terminal", () => {
       setup.renderer.destroy();
       await terminal.detach(false);
       await supervisor.close();
+    }
+  });
+
+  test("retains committed message and cell renderables across unrelated updates", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 30 });
+    const host = new ScrollBoxRenderable(setup.renderer, {
+      id: "transcript-identity-host",
+      width: "100%",
+      height: "100%",
+      scrollY: true,
+      scrollX: false,
+      stickyScroll: true,
+      stickyStart: "bottom",
+    });
+    setup.renderer.root.add(host);
+    const syntaxStyle = createTerminalSyntaxStyle();
+    const view: TerminalScreenView = {
+      workspaceId: "workspace",
+      sessionName: "Transcript",
+      branchName: "main",
+      model: "fixture:model",
+      providerMode: "committed",
+      connection: "connected",
+      historicalCursor: null,
+      ancestry: ["Transcript"],
+      conversation: [{
+        id: "message-1",
+        role: "assistant",
+        content: "# Result\n\nA **structured** answer.\n\n```typescript\nconst value = 42;\n```",
+      }],
+      runs: [{
+        id: "run-1",
+        task: "Inspect retained output",
+        status: "succeeded",
+        statusLabel: "succeeded",
+        active: false,
+        provisional: false,
+        cancellationRequested: false,
+        reason: null,
+        pendingInput: null,
+        steps: [{
+          id: "step-1",
+          ordinal: 1,
+          label: "TypeScript cell",
+          detail: "const value = 42;",
+          attempts: 2,
+          cell: {
+            id: "agent-run-cell-action-1",
+            language: "typescript",
+            code: "const value = 42;\nreturn { value };",
+            status: "committed",
+            attempts: 1,
+            logs: ["computed value"],
+            result: { value: 42 },
+            error: null,
+          },
+        }],
+      }],
+      familyChildren: [],
+      familyParent: null,
+      familySummary: null,
+      familyRefresh: "current",
+      runState: "succeeded",
+      composerPlaceholder: "Ask Agencity…",
+      attentionCount: 0,
+      recoveryLabel: "recovery healthy",
+      budgetLabel: "2 turns · 20 tokens",
+      trustLabel: "TRUSTED-LOCAL",
+    };
+    try {
+      const transcript = new TerminalTranscript(setup.renderer, host, syntaxStyle);
+      transcript.reconcile(view, new Set(["run-1"]));
+      await setup.waitForFrame(value =>
+        value.includes("const value = 42;")
+        && value.includes("computed value")
+        && value.includes("2 model attempts"),
+      );
+      const message = setup.renderer.root.findDescendantById(
+        "agencity-transcript-message-body-message-1",
+      ) as MarkdownRenderable;
+      const source = setup.renderer.root.findDescendantById(
+        "agencity-transcript-cell-source-agent-run-cell-action-1",
+      ) as CodeRenderable;
+      expect(message).toBeInstanceOf(MarkdownRenderable);
+      expect(source).toBeInstanceOf(CodeRenderable);
+      expect(message.content).toBe(view.conversation[0]!.content);
+      expect(source.content).toBe(view.runs[0]!.steps[0]!.cell!.code);
+      const logs = setup.renderer.root.findDescendantById(
+        "agencity-transcript-cell-logs-agent-run-cell-action-1",
+      )!;
+      setup.renderer.startSelection(source, source.screenX, source.screenY);
+      setup.renderer.updateSelection(
+        logs,
+        logs.screenX + Math.max(1, logs.width - 1),
+        logs.screenY + Math.max(0, logs.height - 1),
+        { finishDragging: true },
+      );
+      const selected = setup.renderer.getSelection()?.getSelectedText() ?? "";
+      expect(selected).toContain(source.content);
+      expect(selected).toContain("computed value");
+      setup.renderer.clearSelection();
+
+      transcript.reconcile(view, new Set());
+      await setup.waitForFrame(value => value.includes("Ctrl-O to expand latest") && !value.includes("return { value };"));
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-source-agent-run-cell-action-1"))
+        .toBe(source);
+      transcript.reconcile(view, new Set(["run-1"]));
+      await setup.waitForFrame(value => value.includes("return { value };"));
+
+      transcript.reconcile({ ...view, connection: "reconnecting", familyRefresh: "refreshing" }, new Set(["run-1"]));
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-message-body-message-1"))
+        .toBe(message);
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-source-agent-run-cell-action-1"))
+        .toBe(source);
+      await source.highlightingDone;
+      await Bun.sleep(25);
+    } finally {
+      host.destroyRecursively();
+      syntaxStyle.destroy();
+      setup.renderer.destroy();
     }
   });
 

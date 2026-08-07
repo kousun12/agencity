@@ -1,15 +1,15 @@
 # Rich terminal rendering and layout plan
 
-**Status:** Ready for implementation  
+**Status:** Implemented and verified  
 **Date:** August 7, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
-**Related TUI work:** [Ergonomic agent-family navigation](./2026-08-07-ergonomic-agent-family-navigation-plan.md)
+**Baseline:** [Ergonomic agent-family navigation](./2026-08-07-ergonomic-agent-family-navigation-plan.md) — implemented and merged. This plan builds on the shipped family summary row, family browser, breadcrumb ancestry, and parent/child route navigation, and must preserve them unchanged.
 
 ## Summary
 
-Agencity's full-screen terminal currently renders the conversation, run activity, and task activity as one plain text value. This preserves readable content but discards Markdown structure, syntax roles, cell source, cell output, and semantic status styling. The default wide layout also reserves up to 40 percent of the terminal for an informational inspector, while the fixed composer uses asymmetric vertical spacing and the footer relies on truncating one long status string.
+Agencity's full-screen terminal previously rendered conversation and run activity as one plain text value, discarded Markdown and retained cell structure, reserved idle width for an informational inspector, and used asymmetric composer spacing plus one truncating footer string.
 
-This plan improves the terminal presentation without changing durable runtime semantics:
+The implemented presentation improves the terminal without changing durable runtime semantics:
 
 1. committed user and assistant messages render as structured Markdown;
 2. fenced code and retained TypeScript cells use OpenTUI's syntax-aware renderers;
@@ -17,6 +17,8 @@ This plan improves the terminal presentation without changing durable runtime se
 4. the composer becomes a symmetric, fixed dock with a visible prompt;
 5. the footer prioritizes status and interaction hints by available width;
 6. the conversation uses the full terminal width unless a contextual inspector is active.
+
+The implemented agent-family navigation — the summary row between the composer and footer, the family browser in the contextual panel, breadcrumb ancestry in the header, and parent/child key navigation — is part of the baseline. This plan restyles shared surfaces around it and does not change its interaction semantics, status vocabulary, or route-switching behavior.
 
 The implementation uses the existing `@opentui/core` dependency. OpenTUI already provides `MarkdownRenderable`, `CodeRenderable`, `SyntaxStyle`, bundled parser assets, and the `web-tree-sitter` peer currently resolved by the repository lockfile. Agencity does not copy Prime Agent's renderer or add `cli-highlight`.
 
@@ -26,7 +28,7 @@ The current presentation has four related limitations.
 
 ### The transcript is flattened
 
-`src/tui/opentui.ts` builds one string in `renderTimeline()` and assigns it to a single `TextRenderable`. Every role label, message, run, step, and task therefore shares one foreground color and one wrapping mode.
+`src/tui/opentui.ts` builds one string in `renderTimeline()` and assigns it to a single `TextRenderable`. Every role label, message, run, and step therefore shares one foreground color and one wrapping mode.
 
 Consequences:
 
@@ -38,32 +40,28 @@ Consequences:
 
 ### Cell presentation loses retained structure
 
-`src/tui/view-model.ts` reduces a TypeScript action to the first non-empty source line. The durable projection already contains the complete action and its stable cell record, but the TUI view model does not carry:
+`src/tui/view-model.ts` reduces a TypeScript action to the first non-empty source line. `TerminalStepView` carries the step label, a one-line detail, and the model-attempt count, but not:
 
 - complete TypeScript source;
 - cell lifecycle status;
+- cell execution attempts;
 - logs;
 - result;
-- error;
-- attempt count beyond the model-attempt summary.
+- error.
 
-The terminal therefore cannot present the generated program and its observation in the compact, inspectable form expected from a programmatic agent.
+The durable projection already contains everything required: `AgentState.cells` retains each cell's full `code`, `status`, `attempts`, `logs`, `result`, and `error`, and the public protocol snapshot delivers the complete projected state to the client. The terminal simply does not present the generated program and its observation in the compact, inspectable form expected from a programmatic agent.
 
 ### The bottom dock is asymmetric
 
-The composer is fixed at three rows:
+The composer surface is a bordered box with top padding and no bottom padding: three rows on ordinary terminals and two rows on terminals of ten rows or fewer. The family summary row and footer follow immediately, so the bottom area appears uneven even though the total row count is stable.
 
-1. a top border;
-2. one row of top padding;
-3. a one-row input.
-
-There is no bottom padding. The footer immediately follows the input, so the bottom area appears uneven even though the total row count is stable.
-
-The footer combines trust, recovery, attention, budget, command help, and modal interaction hints into one string. OpenTUI truncates the right side when it does not fit, which removes the interaction hint before less important telemetry.
+The footer joins trusted-local authority, the family-navigation hint, recovery state, attention count, budget, and command help into one truncating string. On very short terminals it already reduces to authority plus the family hint, but at ordinary heights OpenTUI truncates the right side when the string does not fit, which removes actionable hints before less important telemetry.
 
 ### The default inspector consumes conversation width
 
 On every terminal at least 96 columns wide, the details panel remains visible and occupies 40 to 64 columns even when no contextual inspector is open. Its default session, run, budget, and recovery summary duplicates information already available in the header and footer. Long conversation and code lines wrap early while the panel remains mostly empty.
+
+Transient notices also render inside this panel, so notice visibility is currently coupled to panel visibility.
 
 ## Goals
 
@@ -76,12 +74,13 @@ On every terminal at least 96 columns wide, the details panel remains visible an
 - Keep trusted-local authority, connection state, and attention visible at every supported width.
 - Preserve the most relevant active interaction hint instead of depending on right truncation.
 - Give the conversation the full main area when no inspector is active.
-- Integrate cleanly with the family summary and family browser defined by the ergonomic agent-family navigation plan.
+- Preserve the implemented family summary row, family browser, breadcrumb, and parent/child key navigation unchanged.
 - Keep all presentation state disposable and reconstructible from the public protocol projection.
 
 ## Non-goals
 
 - Changing canonical events, durable session identity, cell execution, effects, recovery, or model behavior.
+- Changing family-navigation interaction, its status vocabulary, or route-switching semantics.
 - Parsing arbitrary assistant prose as executable TypeScript.
 - Adding syntax highlighting to the composer.
 - Adding a new Markdown or syntax-highlighting dependency when OpenTUI supports the required language.
@@ -137,7 +136,7 @@ The initial palette should retain the current dark background while adopting the
 
 Create one `SyntaxStyle` for the `OpenTuiApp` lifecycle. Pass it to every Markdown and code renderable and destroy it with the app. Do not recreate the native style object on each presentation update.
 
-The current lockfile resolves OpenTUI's exact `web-tree-sitter@0.25.10` peer. A direct root dependency is added only if the source/link installation test demonstrates that the peer is absent in a supported install. The plan does not change dependency ownership preemptively.
+The current lockfile resolves OpenTUI's exact `web-tree-sitter@0.25.10` peer, and OpenTUI resolves its tree-sitter worker and grammar assets through bundled-file imports rather than the process working directory. A direct root dependency is added only if the source/link installation test demonstrates that the peer is absent in a supported install. The plan does not change dependency ownership preemptively.
 
 ### Structured conversation blocks
 
@@ -160,7 +159,11 @@ User and assistant messages retain their exact content. The renderer configures:
 
 Role labels are semantic text renderables rather than inserted Markdown headings. User content therefore cannot merge with or restyle the next role label.
 
-The transcript reconciler updates an existing message body when the same message identity changes in presentation state and replaces children only when the block structure changes. Committed messages normally remain immutable; reconciliation primarily prevents unrelated protocol updates from rebuilding every Markdown and code block.
+The transcript reconciler updates an existing message body when the same message identity changes in presentation state and replaces children only when the block structure changes. Committed messages normally remain immutable. Renderable identity must be stable: an unrelated presentation update — a family refresh, connection change, notice, or footer change — must not recreate existing Markdown or code renderables, because each recreation repeats native parsing work. A deterministic test asserts this identity stability.
+
+The timeline remains a scroll container that follows new committed content at the bottom. Bottom-following over a reconciled child collection is verified explicitly: if OpenTUI's sticky scrolling does not preserve follow-until-the-user-scrolls-away semantics across changing children, the transcript host implements that behavior itself rather than assuming it.
+
+Message bodies and cell source remain selectable. Selection within a block copies the exact underlying text; cross-block selection follows OpenTUI's renderer selection model and is covered by an interaction test.
 
 ### Typed cell activity
 
@@ -171,7 +174,7 @@ interface TerminalCellView {
   id: string;
   language: "typescript";
   code: string;
-  status: "proposed" | "running" | "committed" | "failed" | "abandoned" | "missing";
+  status: "pending" | "proposed" | "running" | "committed" | "failed" | "abandoned" | "missing";
   attempts: number;
   logs: readonly string[];
   result: JsonValue | null;
@@ -179,7 +182,9 @@ interface TerminalCellView {
 }
 ```
 
-For a TypeScript action, `buildTerminalScreen()` resolves the stable cell ID as `agent-run-cell-${actionId}` and joins the action with the matching projected cell. A committed action without an expected cell remains visibly `missing`; it is not shown as completed.
+For a TypeScript action, `buildTerminalScreen()` resolves the stable cell ID as `agent-run-cell-${actionId}` and joins the action with the matching projected cell. `proposed`, `running`, `committed`, `failed`, and `abandoned` mirror the projected cell lifecycle. `pending` and `missing` are client-side presentation states for an absent expected cell record: while the owning run is still active, the join renders `pending` with neutral styling because the cell record may not have committed yet; once the run is terminal, an absent expected cell renders `missing` with danger styling. A committed action without an expected cell is never shown as completed.
+
+Cell execution `attempts` come from the projected cell record. The existing model-attempt count on the step remains separate and keeps its current meaning.
 
 The default activity row shows:
 
@@ -203,7 +208,7 @@ Result formatting uses the existing safe bounded-inspection conventions. Large o
 
 ### Other activity rows
 
-Run and task summaries remain text-based but use structured styled chunks:
+Run summaries remain text-based but use structured styled chunks:
 
 - active: accent marker;
 - succeeded or completed: success marker;
@@ -213,7 +218,7 @@ Run and task summaries remain text-based but use structured styled chunks:
 
 Status derivation continues to come from the pure view model. Render code does not infer durable status from prose.
 
-When the ergonomic family navigator is present, its persistent family summary replaces the passive default `AGENTS` timeline section as specified by that plan. This work styles the shared activity vocabulary but does not duplicate child rows in the conversation.
+The family summary row already replaced the passive `AGENTS` timeline section. This work styles the shared activity vocabulary used by run rows, the family summary, and the family browser; it does not add child rows back into the conversation.
 
 ### Composer surface
 
@@ -234,7 +239,7 @@ Hidden credential input, model entry, busy state, submission, paste, and draft p
 
 At very narrow widths, horizontal padding reduces before the prompt or input is clipped. The input always retains at least one editable column.
 
-The family summary, when present, occupies its own fixed row between the composer and footer. It does not become composer padding.
+The family summary keeps its own fixed row between the composer and footer, with its existing focus behavior, printable-input handoff, and browser opening unchanged. It does not become composer padding.
 
 ### Width-aware footer
 
@@ -251,14 +256,16 @@ Left-side priority:
 Right-side priority:
 
 1. active modal or inspector action;
-2. parent or family-navigation action when available;
+2. the family-navigation hint;
 3. `Ctrl-P commands`.
+
+The existing family hint derivation — browser selection hints, summary focus hints, `← parent`, `↓ agents`, and the historical-mode notice — is preserved as-is. This plan changes the hint's placement and truncation priority, not its content or the conditions that produce it.
 
 Wide terminals show all applicable values. Narrow terminals remove low-priority healthy and budget values before shortening actionable hints. Very short terminals keep one footer row and do not allow the footer to overlap the composer or main area.
 
 ### Contextual inspector
 
-The details panel is hidden when no inspector is active.
+The details panel is hidden when no contextual content is active.
 
 It becomes visible for:
 
@@ -267,7 +274,10 @@ It becomes visible for:
 - hidden credential setup;
 - explicit structured detail;
 - provisional provider output;
-- the family browser on wide terminals.
+- the family browser;
+- an active transient notice.
+
+Transient notices continue to render in the contextual panel. An active notice makes the panel visible; when the notice expires and nothing else is active, the panel hides again. Notices on narrow terminals must not permanently replace the conversation.
 
 On wide terminals, an active inspector uses the existing bounded side width. On narrow terminals, it replaces the main timeline while preserving the header, composer, family summary, and footer. Closing it restores the conversation without changing the route or committed state.
 
@@ -275,7 +285,7 @@ The default session, run, budget, recovery, and shortcuts summary is removed fro
 
 ### Responsive height
 
-Define three height modes in presentation code:
+The current renderer special-cases terminals of ten rows or fewer by shrinking the composer and panel padding. Replace that ad-hoc adjustment with three explicit height modes in presentation code:
 
 - **normal:** two-row header, three-row composer, optional family summary, one-row footer;
 - **compact:** one-row header, two-row composer, optional family summary, one-row footer;
@@ -293,7 +303,7 @@ The main area retains at least one usable row. If the terminal cannot display an
 - Markdown rendering does not enable HTML, terminal escape injection, arbitrary file loading, or code execution.
 - Syntax parsing is presentation-only and cannot change the admitted action or executed source.
 - Unsupported parser capability falls back visibly to plain code without changing content.
-- Renderable and native syntax-style resources are destroyed when the app closes.
+- Renderable, native syntax-style, and tree-sitter parser worker resources are destroyed when the app closes, so detach and exit remain clean.
 - Trusted-local authority remains visible in every responsive layout.
 
 ## Delivery sequence
@@ -303,13 +313,13 @@ The main area retains at least one usable row. If the terminal cannot display an
 - Add the shared terminal theme and syntax style.
 - Extract transcript formatting and reconciliation from `opentui.ts` into a focused TUI module.
 - Render committed user and assistant bodies with `MarkdownRenderable`.
-- Keep role labels and run/task headers as independent semantic text.
-- Preserve selection, sticky scrolling, input drafts, inspector state, and cursorless progress behavior.
+- Keep role labels and run headers as independent semantic text.
+- Preserve selection, bottom-following scroll, input drafts, inspector state, family summary focus and browser behavior, and cursorless progress behavior.
 
 ### 2. Durable cell projection and rendering
 
 - Extend `TerminalStepView` with full typed cell presentation.
-- Join TypeScript actions to stable projected cell records.
+- Join TypeScript actions to stable projected cell records, with `pending` for active runs and `missing` only after the run is terminal.
 - Add compact and expanded cell renderables.
 - Render source with `CodeRenderable` and output with bounded text renderables.
 - Keep missing, running, failed, abandoned, and unknown outcomes explicit.
@@ -318,15 +328,16 @@ The main area retains at least one usable row. If the terminal cannot display an
 
 - Replace composer border/top-padding geometry with the symmetric raised surface.
 - Add the prompt glyph and width-aware horizontal allocation.
-- Split footer status and action hints.
-- Hide the idle inspector and preserve active inspector behavior.
-- Add compact and minimum height modes.
-- Integrate the optional family summary row without duplicating activity.
+- Split footer status and action hints, keeping the existing family hint content.
+- Hide the idle inspector, define notice-driven visibility, and preserve active inspector behavior.
+- Replace the ad-hoc very-short handling with the compact and minimum height modes.
+- Keep the family summary row placement and focus behavior unchanged.
 
 ### 4. Product verification and documentation
 
 - Add focused pure tests for timeline projection, cell joining, status tone selection, footer priority, and responsive mode selection.
-- Keep existing OpenTUI interaction tests for draft preservation, resize, inspectors, model setup, secret masking, task submission, and detach passing.
+- Add the renderable identity stability test for the transcript reconciler.
+- Update existing OpenTUI frame and interaction assertions to the structured presentation. A structural rendering change alters existing frame output, so assertions change with it; the behaviors they verify — draft preservation, resize, inspectors, model setup, secret masking, task submission, family navigation, and detach — must continue to pass unchanged in meaning.
 - Extend the installed pseudo-terminal smoke only as needed to prove that parser assets load and the interactive product remains usable.
 - Run typecheck, architecture checks, focused TUI tests, the linked executable pseudo-terminal test, and the full verification gate.
 - Update public TUI documentation where it describes the default inspector, transcript presentation, composer, or footer.
@@ -340,9 +351,10 @@ This verification does not add screenshot comparisons, golden terminal frames, p
 - `src/tui/transcript.ts` — message, activity, and cell renderable construction and reconciliation.
 - `src/tui/view-model.ts` — complete cell projection and pure status/presentation fields.
 - `src/tui/opentui.ts` — transcript host, composer, footer, inspector visibility, responsive height, and resource lifecycle.
-- `test/unit/opentui.test.ts` — existing interaction and renderer integration behavior.
-- `test/unit/tui-view-model.test.ts` or a focused new test — pure cell joining, status, footer priority, and responsive-mode rules.
-- `test/e2e/opentui-pty.test.ts` — installed interactive startup, task submission, and detach smoke.
+- `test/unit/opentui.test.ts` — updated frame and interaction assertions, renderer integration, and reconciler identity stability.
+- a focused new unit test (for example `test/unit/tui-transcript.test.ts`) — pure cell joining, status and tone selection, footer priority, and responsive-mode rules.
+- `test/unit/tui-family-view-model.test.ts` — existing family presentation coverage remains passing.
+- `test/e2e/opentui-pty.test.ts` — installed interactive startup, task submission, family navigation, and detach smoke.
 - `docs/user-guide.md`, `docs/capabilities.md`, `docs/verification.md`, and `AGENTS.md` — shipped behavior and verified capability claims where affected.
 
 ## Test plan
@@ -352,9 +364,9 @@ This verification does not add screenshot comparisons, golden terminal frames, p
 - User and assistant content remains exact.
 - TypeScript actions retain complete source.
 - Stable action IDs resolve the correct cell and never another run's cell.
-- Missing expected cells remain `missing`.
-- Logs, result, error, status, and attempts retain deterministic order and values.
-- Status tone selection is exhaustive for current run, task, and cell states.
+- An absent expected cell is `pending` while its run is active and `missing` once the run is terminal; neither is shown as completed.
+- Logs, result, error, status, and cell attempts retain deterministic order and values.
+- Status tone selection is exhaustive for current run, family, and cell states.
 - Footer priority retains authority, active errors, and current actions before healthy telemetry.
 - Responsive mode selection is deterministic at boundary heights.
 
@@ -362,12 +374,16 @@ This verification does not add screenshot comparisons, golden terminal frames, p
 
 - Markdown and code renderables accept committed message and cell content without changing the underlying text.
 - Unsupported fenced languages fall back to plain code.
+- An unrelated presentation update — family refresh, connection change, or notice — does not recreate existing committed message or cell renderables.
 - Expanding activity exposes complete cell source and bounded output.
 - Collapsing activity restores the compact row.
 - Presentation updates preserve an in-progress composer draft.
-- Sticky scrolling continues to follow new committed content until the user scrolls away.
+- Bottom-following continues for new committed content and stops while the user is scrolled away, asserted against the reconciled child collection rather than a single text node.
+- Selection within a message or cell block copies the exact underlying text.
+- Family summary focus, browser selection, and parent/child navigation keys behave identically on the structured layout.
 - Active inspectors retain existing key ownership.
 - Narrow inspectors replace the timeline without hiding the composer or footer.
+- Transient notices appear without an idle inspector and do not permanently replace the conversation on narrow terminals.
 - Secret input remains masked and absent from transcript, notices, and errors.
 - Resize does not create overlapping composer, footer, family summary, or inspector regions.
 
@@ -382,7 +398,7 @@ A linked `agencity` executable in a fresh external repository must:
 5. detach cleanly;
 6. resume the same durable work without duplicating the cell or model call.
 
-The installed smoke verifies product operation rather than terminal appearance.
+The installed smoke verifies product operation rather than terminal appearance. The existing installed family-navigation journey must continue to pass on the structured layout.
 
 ## Completion criteria
 
@@ -391,11 +407,11 @@ The work is complete when:
 1. Committed Markdown no longer renders as undifferentiated plain text.
 2. Supported fenced code and retained TypeScript cells receive syntax-aware presentation.
 3. Expanded cell activity shows the exact retained source and bounded retained outcome.
-4. Failed, unknown, missing, and interrupted cell states remain explicit.
+4. Failed, unknown, missing, and interrupted cell states remain explicit, and active runs are not misreported as missing.
 5. The composer has symmetric vertical spacing and stable horizontal prompt alignment.
 6. The footer preserves trusted-local authority and the current actionable hint at supported widths.
-7. The idle conversation uses the full main width, while active inspectors remain accessible and responsive.
-8. Family navigation can add its summary and browser without conflicting default activity or bottom-dock geometry.
-9. Existing secret handling, draft preservation, resize, detach, resume, and snapshot-plus-cursor behavior remain correct.
+7. The idle conversation uses the full main width, while active inspectors and transient notices remain accessible and responsive.
+8. The implemented family summary, browser, breadcrumb, and navigation keys behave identically on the structured transcript and symmetric bottom dock.
+9. Existing secret handling, draft preservation, resize, detach, resume, family navigation, and snapshot-plus-cursor behavior remain correct.
 10. `bun run typecheck`, `bun run check:architecture`, focused tests, the installed pseudo-terminal smoke, and `bun run verify` pass.
 11. Public documentation and `AGENTS.md` accurately describe shipped behavior and remaining language or terminal limitations.
