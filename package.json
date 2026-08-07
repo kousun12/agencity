@@ -39,6 +39,7 @@
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
+    "@opentui/core": "^0.5.1",
     "@tursodatabase/sync": "0.7.2",
     "typescript": "^5.9.3",
     "ulid": "^3.0.1",

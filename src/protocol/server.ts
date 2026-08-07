@@ -35,6 +35,8 @@ export interface ProtocolServerOptions {
 
 export class ProtocolServer {
   #server: ReturnType<typeof Bun.serve> | null = null;
+  #activeHandlers = 0;
+  readonly #handlerDrainResolvers = new Set<() => void>();
   constructor(readonly supervisor: Supervisor, readonly options: ProtocolServerOptions = {}) {}
 
   listen(port = 0, hostname = "127.0.0.1"): ReturnType<typeof Bun.serve> {
@@ -42,10 +44,19 @@ export class ProtocolServer {
     this.#server = Bun.serve({ port, hostname, fetch: (request) => this.handle(request) });
     return this.#server;
   }
-  stop(): void { this.#server?.stop(); this.#server = null; }
+  async stop(closeActiveConnections = false): Promise<void> {
+    const server = this.#server;
+    this.#server = null;
+    await server?.stop(closeActiveConnections);
+  }
+  async drainHandlers(): Promise<void> {
+    if (this.#activeHandlers === 0) return;
+    await new Promise<void>(resolve => { this.#handlerDrainResolvers.add(resolve); });
+  }
 
   /** Public router used identically by HTTP and InProcessProtocolTransport. */
   async handle(request: Request): Promise<Response> {
+    this.#activeHandlers++;
     try {
       const url = new URL(request.url); const parts = url.pathname.split("/").filter(Boolean);
       if (this.options.bearerToken && !authorized(request, this.options.bearerToken)) {
@@ -256,6 +267,12 @@ export class ProtocolServer {
         message: scrubText(error instanceof Error ? error.message : String(error)),
         details: protocolErrorDetails(error),
       } }, { status });
+    } finally {
+      this.#activeHandlers--;
+      if (this.#activeHandlers === 0) {
+        for (const resolve of this.#handlerDrainResolvers) resolve();
+        this.#handlerDrainResolvers.clear();
+      }
     }
   }
 

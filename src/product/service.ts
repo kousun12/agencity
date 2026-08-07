@@ -80,6 +80,14 @@ export interface ManagedServiceStatus {
   readonly startedAt: string;
   readonly recovery: "pending" | "running" | "complete" | "failed";
   readonly recoveryError: string | null;
+  readonly idleShutdownMs: number;
+  readonly idleShutdownAt: string;
+  readonly attachedClients: number;
+  readonly keepAliveReasons: readonly {
+    readonly kind: "attached_clients" | "resident_workers" | "active_runs" | "pending_effects" | "queued_wakes" | "active_schedules" | "active_heartbeats";
+    readonly count: number;
+    readonly summary: string;
+  }[];
   readonly roots: readonly {
     readonly sessionId: string;
     readonly branchId: string;
@@ -210,6 +218,7 @@ export class ManagedWorkspaceService {
   readonly #workers = new ResidentRootQueue();
   readonly #startedAt: string;
   readonly #attachmentProbe: () => boolean;
+  readonly #attachmentCountProbe: () => number;
   #lifecycle: ManagedServiceStatus["lifecycle"] = "starting";
   #recovery: ManagedServiceStatus["recovery"] = "pending";
   #recoveryError: string | null = null;
@@ -226,6 +235,7 @@ export class ManagedWorkspaceService {
     manifest: ServiceManifestV1,
     config: ManagedServiceConfiguration,
     attachmentProbe: () => boolean,
+    attachmentCountProbe: () => number,
   ) {
     this.supervisor = supervisor;
     this.catalog = catalog;
@@ -234,6 +244,7 @@ export class ManagedWorkspaceService {
     this.config = config;
     this.#startedAt = manifest.startedAt;
     this.#attachmentProbe = attachmentProbe;
+    this.#attachmentCountProbe = attachmentCountProbe;
   }
 
   static async open(config: ManagedServiceConfiguration, appVersion: string): Promise<ManagedWorkspaceService> {
@@ -282,7 +293,7 @@ export class ManagedWorkspaceService {
           configHash: managedServiceConfigurationHash(normalized),
         },
         ready: () => service?.ready ?? false,
-        status: () => service!.status(),
+        status: () => service!.status(true),
         shutdown: () => service!.requestShutdown(),
         agents: () => service!.agents(),
         startRun: (sessionId: string, branchId: string, input: StartAgentRunInput) => service!.startRun(sessionId, branchId, input),
@@ -308,9 +319,10 @@ export class ManagedWorkspaceService {
       protocol = new ProtocolServer(supervisor, { bearerToken, service: hooks });
       const originalHandle = protocol.handle.bind(protocol);
       protocol.handle = async (request: Request): Promise<Response> => {
-        const response = await originalHandle(request);
-        if (response.status !== 401 && service) service.#recordActivity();
-        return response;
+        const authenticated = request.headers.get("authorization") === `Bearer ${bearerToken}`;
+        if (service && authenticated) service.#recordActivity();
+        try { return await originalHandle(request); }
+        finally { if (service && authenticated) service.#recordActivity(); }
       };
       const listener = protocol.listen(0, "127.0.0.1");
       const manifest = createServiceManifest({
@@ -336,6 +348,7 @@ export class ManagedWorkspaceService {
         manifest,
         normalized,
         () => listener.pendingRequests > 0 || listener.pendingWebSockets > 0,
+        () => listener.pendingRequests + listener.pendingWebSockets,
       );
       service.#startRecovery();
       await service.#recoveryPromise;
@@ -357,7 +370,7 @@ export class ManagedWorkspaceService {
             manifest: publishedManifest,
           }).catch(() => {});
         }
-        protocol?.stop();
+        await protocol?.stop().catch(() => {});
         await supervisor.close().catch(() => {});
       }
       throw error;
@@ -366,8 +379,11 @@ export class ManagedWorkspaceService {
 
   get ready(): boolean { return this.#lifecycle === "running"; }
 
-  async status(): Promise<ManagedServiceStatus> {
+  async status(excludeCurrentRequest = false): Promise<ManagedServiceStatus> {
     const summaries = await this.catalog.list();
+    const idleShutdownMs = this.config.idleShutdownMs ?? DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS;
+    const attachedClients = Math.max(0, this.#attachmentCountProbe() - (excludeCurrentRequest ? 1 : 0));
+    const keepAliveReasons = await this.#keepAliveReasons(attachedClients);
     return {
       lifecycle: this.#lifecycle,
       mode: "trusted-local",
@@ -376,6 +392,10 @@ export class ManagedWorkspaceService {
       startedAt: this.#startedAt,
       recovery: this.#recovery,
       recoveryError: this.#recoveryError,
+      idleShutdownMs,
+      idleShutdownAt: new Date(this.#lastActivityAt + idleShutdownMs).toISOString(),
+      attachedClients,
+      keepAliveReasons,
       roots: summaries.filter(summary => summary.root && summary.initialBranch).map(summary => ({
         sessionId: summary.sessionId,
         branchId: summary.branchId,
@@ -401,6 +421,7 @@ export class ManagedWorkspaceService {
     this.#workers.enqueue(session.rootSessionId, async () => {
       try { await this.supervisor.runs.advance(sessionId, branchId, admitted.runId); }
       catch (error) { this.#recoveryError = scrubText(error instanceof Error ? error.message : String(error)); }
+      finally { this.#recordActivity(); }
     });
     return { accepted: true, runId: admitted.runId, sessionId, branchId, status: admitted.status, cursor };
   }
@@ -436,6 +457,8 @@ export class ManagedWorkspaceService {
         try { await operation(); } catch (error) { failures.push(error); }
       };
       await this.#recoveryPromise?.catch(error => { failures.push(error); });
+      await settle(() => this.protocol.stop(true));
+      await settle(() => this.protocol.drainHandlers());
       await settle(() => this.#workers.drain());
       await settle(() => this.supervisor.heartbeats.close());
       await settle(() => this.supervisor.schedules.close());
@@ -444,7 +467,6 @@ export class ManagedWorkspaceService {
         workspaceId: this.config.workspace.workspaceId,
         manifest: this.manifest,
       }).catch(() => {});
-      try { this.protocol.stop(); } catch (error) { failures.push(error); }
       await settle(() => this.supervisor.close());
       if (this.#lifecycle !== "failed") this.#lifecycle = "stopped";
       if (this.#exitProcessWhenClosed) {
@@ -513,14 +535,11 @@ export class ManagedWorkspaceService {
   async #hasOutstandingWork(): Promise<boolean> {
     if (this.#workers.busy) return true;
     const storage = this.supervisor.storage;
-    const now = new Date().toISOString();
-    if ((await storage.listDueSchedules?.(now))?.length) return true;
-    if ((await storage.listDueHeartbeats?.(now))?.length) return true;
-    for (const route of await storage.listBranches()) {
+    for (const route of await this.#ownedRoutes()) {
       const events = await storage.loadEvents(route.sessionId, { branchId: route.branchId });
       if (events.length) {
         const state = projectEvents(events);
-        if (Object.values(state.agentRuns).some(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status))) return true;
+        if (Object.values(state.agentRuns).some(run => run.status === "queued" || run.status === "running")) return true;
         if (Object.values(state.effects).some(effect => effect.status === "requested" || effect.status === "started")) return true;
       }
       if ((await storage.listWakes?.(route.sessionId, route.branchId, ["queued", "claimed"]))?.length) return true;
@@ -530,6 +549,56 @@ export class ManagedWorkspaceService {
       if ((await storage.listHeartbeats?.(route.sessionId, route.branchId))?.some(heartbeat => heartbeat.status === "active")) return true;
     }
     return false;
+  }
+
+  async #keepAliveReasons(attachedClients: number): Promise<ManagedServiceStatus["keepAliveReasons"]> {
+    const counts = new Map<ManagedServiceStatus["keepAliveReasons"][number]["kind"], number>();
+    const add = (kind: ManagedServiceStatus["keepAliveReasons"][number]["kind"], count = 1): void => {
+      counts.set(kind, (counts.get(kind) ?? 0) + count);
+    };
+    if (attachedClients > 0) add("attached_clients", attachedClients);
+    if (this.#workers.busy) add("resident_workers");
+    const storage = this.supervisor.storage;
+    for (const route of await this.#ownedRoutes()) {
+      const events = await storage.loadEvents(route.sessionId, { branchId: route.branchId });
+      if (events.length) {
+        const state = projectEvents(events);
+        add("active_runs", Object.values(state.agentRuns).filter(run => run.status === "queued" || run.status === "running").length);
+        add("pending_effects", Object.values(state.effects).filter(effect => effect.status === "requested" || effect.status === "started").length);
+      }
+      add("queued_wakes", (await storage.listWakes?.(route.sessionId, route.branchId, ["queued", "claimed"]))?.length ?? 0);
+      add("active_schedules", (await storage.listSchedules?.(route.sessionId, route.branchId))?.filter(schedule => schedule.status === "active").length ?? 0);
+      add("active_heartbeats", (await storage.listHeartbeats?.(route.sessionId, route.branchId))?.filter(heartbeat => heartbeat.status === "active").length ?? 0);
+    }
+    const labels: Record<ManagedServiceStatus["keepAliveReasons"][number]["kind"], [string, string]> = {
+      attached_clients: ["attached client", "attached clients"],
+      resident_workers: ["resident worker", "resident workers"],
+      active_runs: ["active run", "active runs"],
+      pending_effects: ["pending effect", "pending effects"],
+      queued_wakes: ["queued wake", "queued wakes"],
+      active_schedules: ["active schedule", "active schedules"],
+      active_heartbeats: ["active heartbeat", "active heartbeats"],
+    };
+    return [...counts.entries()]
+      .filter(([, count]) => count > 0)
+      .map(([kind, count]) => ({ kind, count, summary: `${count} ${labels[kind][count === 1 ? 0 : 1]}` }));
+  }
+
+  async #ownedRoutes(): Promise<Array<{ sessionId: string; branchId: string }>> {
+    const storage = this.supervisor.storage;
+    const sessions = new Map<string, Awaited<ReturnType<NonNullable<typeof storage.getSession>>>>();
+    const routes: Array<{ sessionId: string; branchId: string }> = [];
+    for (const route of await storage.listBranches()) {
+      let session = sessions.get(route.sessionId);
+      if (session === undefined) {
+        session = await storage.getSession?.(route.sessionId) ?? null;
+        sessions.set(route.sessionId, session);
+      }
+      if (!session || session.workspaceId !== this.config.workspace.workspaceId) continue;
+      if (session.executionOwnerDeviceId && session.executionOwnerDeviceId !== this.supervisor.device.deviceId) continue;
+      routes.push(route);
+    }
+    return routes;
   }
 
   #startRecovery(): void {

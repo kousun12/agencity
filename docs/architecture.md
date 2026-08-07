@@ -33,7 +33,7 @@ The Bun heap, console globals, open handles, child processes, notifications, sna
 - `src/storage/contract.ts` uses only domain values. Only `src/storage/libsql.ts` and `src/storage/turso.ts` may import LibSQL/Turso SDKs; the modern `@tursodatabase/sync` package is confined specifically to `src/storage/turso.ts`, and emitted package declarations must not expose SDK types.
 - Artifact and executor interfaces expose stable IDs, JSON requests, four-way outcomes, and explicit failures rather than filesystem/child-process types.
 - Runtime services compose contracts and own valid writes. Generated console SQL is analytical/read-only; SDK RPC invokes typed commands.
-- Protocol and UI adapt runtime operations. The current TUI is in-process rather than an HTTP client; this is a known Slice 1 limitation.
+- Protocol and UI adapt runtime operations. The product TUI is a full-screen OpenTUI client over the authenticated loopback `AgentClient`; explicit diagnostic TUI routes use `InProcessProtocolTransport` through the same public `ProtocolServer.handle` router. Both retain snapshot-plus-cursor semantics and keep presentation state non-canonical.
 
 `bun run check:architecture` makes the first two boundaries, package barrels, migration classifications, immutable guards, and canonical SQL rules executable.
 

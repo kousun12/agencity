@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { LibSqlStorage } from "../../src/storage/index.ts";
+import { ScriptedAgentActionProvider } from "../../src/executors/index.ts";
 import { Supervisor } from "../../src/runtime/index.ts";
 import { ManagedWorkspaceService, connectManagedService, managedServiceConfigurationHash, readServiceManifest, resolveWorkspace, serviceStatePaths, type ManagedServiceConfiguration, type ServiceManifestV1 } from "../../src/product/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
@@ -142,7 +143,11 @@ describe("managed workspace service", () => {
     const after = await reattached.history(session.sessionId, session.branchId);
     expect(after.filter(event => BigInt(event.cursor) > BigInt(cursorAtDetach)).length).toBeGreaterThan(0);
     expect(new Set(after.map(event => event.cursor)).size).toBe(after.length);
-    expect((await reattached.serviceStatus() as any).roots[0]).toMatchObject({ worker: "detached" });
+    const status = await reattached.serviceStatus() as any;
+    expect(status.roots[0]).toMatchObject({ worker: "detached" });
+    expect(status).toMatchObject({ attachedClients: 0, idleShutdownMs: 60_000 });
+    expect(status.keepAliveReasons).not.toContainEqual(expect.objectContaining({ kind: "attached_clients" }));
+    expect(new Date(status.idleShutdownAt).getTime()).toBeGreaterThan(Date.now());
   });
 
   test("rejects incompatible client configuration and runs schedule delivery only under the resident owner", async () => {
@@ -171,6 +176,45 @@ describe("managed workspace service", () => {
     await service.close();
     expect(await Bun.file(serviceStatePaths(config.workspace.root).manifestPath).exists()).toBe(false);
     expect(service.supervisor.executionLeases?.lost).toBe(false);
+  });
+
+  test("graceful shutdown waits for protocol handlers admitted before draining", async () => {
+    const config = await configuration("agencity-managed-handler-drain-");
+    const service = await opened(config);
+    const encoder = new TextEncoder();
+    let releaseBody = (): void => {};
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        releaseBody = () => {
+          controller.enqueue(encoder.encode(JSON.stringify({
+            workspaceId: config.workspace.workspaceId,
+            model: { provider: "echo", model: "echo-1" },
+          })));
+          controller.close();
+        };
+      },
+    });
+    const request = new Request(`${service.manifest.url}/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${service.manifest.bearerToken}`,
+        "content-type": "application/json",
+      },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const responsePromise = service.protocol.handle(request);
+    await Bun.sleep(0);
+
+    let closed = false;
+    const closePromise = service.close().then(() => { closed = true; });
+    await Bun.sleep(20);
+    expect(closed).toBe(false);
+
+    releaseBody();
+    expect((await responsePromise).status).toBe(200);
+    await closePromise;
+    expect(closed).toBe(true);
   });
 
 
@@ -267,6 +311,39 @@ describe("managed workspace service", () => {
     } finally { raw.close(); }
   });
 
+  test("a durable run waiting for user input does not keep the service process resident", async () => {
+    const config = { ...(await configuration("agencity-managed-waiting-input-")), idleShutdownMs: 100 };
+    const provider = new ScriptedAgentActionProvider([{
+      protocol: "agencity.agent-action",
+      version: 1,
+      type: "clarification",
+      question: "Which retained choice?",
+    }], "waiting-input-provider");
+    const preparer = await Supervisor.open({
+      databaseUrl: `file:${config.databasePath}`,
+      artifactDirectory: config.artifactDirectory,
+      workspaceRoot: config.workspace.root,
+      profileDatabaseUrl: `file:${config.profileDatabasePath}`,
+      modelProviders: [provider],
+      recover: false,
+    });
+    try {
+      const session = await preparer.createSession({
+        workspaceId: config.workspace.workspaceId,
+        model: { provider: provider.name, model: "scripted-v1" },
+      });
+      expect(await preparer.runs.start(session.sessionId, session.branchId, "Ask and wait"))
+        .toMatchObject({ status: "waiting_for_user" });
+    } finally {
+      await preparer.close();
+    }
+
+    const service = await opened(config);
+    const manifestPath = serviceStatePaths(config.workspace.root).manifestPath;
+    await waitFor(async () => !(await Bun.file(manifestPath).exists()), "idle shutdown while waiting for durable input", 5_000);
+    expect(service.ready).toBe(false);
+  });
+
   test("idle shutdown preserves attached clients and future detached schedules", async () => {
     const config = { ...(await configuration("agencity-managed-idle-safety-")), idleShutdownMs: 250 };
     const service = await opened(config);
@@ -280,6 +357,11 @@ describe("managed workspace service", () => {
     expect(response.status).toBe(200);
     await Bun.sleep(300);
     expect(service.ready).toBe(true);
+    expect(await service.status()).toMatchObject({
+      attachedClients: 1,
+      idleShutdownMs: 250,
+      keepAliveReasons: [expect.objectContaining({ kind: "attached_clients", count: 1 })],
+    });
     controller.abort();
     await response.body?.cancel().catch(() => {});
 
@@ -288,6 +370,7 @@ describe("managed workspace service", () => {
       prompt: "future detached schedule",
     });
     expect((await service.supervisor.storage.listSchedules?.(session.sessionId, session.branchId))?.[0]).toMatchObject({ scheduleId: schedule.scheduleId, status: "active" });
+    expect((await service.status()).keepAliveReasons).toContainEqual(expect.objectContaining({ kind: "active_schedules", count: 1, summary: "1 active schedule" }));
     await Bun.sleep(700);
     expect(service.ready).toBe(true);
     await client.clearSchedule(schedule.scheduleId, "idle policy test complete");

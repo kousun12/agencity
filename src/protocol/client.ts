@@ -51,6 +51,7 @@ export interface BranchWatchHandlers {
   /** Ephemeral prefixes must be removed on commit, disconnect, or reconnect. */
   readonly onProgressDiscard?: (effectIds: readonly string[], reason: "committed" | "disconnect" | "reconnect") => unknown | Promise<unknown>;
   readonly onReconnect?: (attempt: number, afterCursor: string) => unknown | Promise<unknown>;
+  readonly onConnectionState?: (state: "connected" | "reconnecting" | "disconnected") => unknown | Promise<unknown>;
 }
 
 export interface BranchWatchOptions {
@@ -63,18 +64,23 @@ export interface BranchWatchOptions {
 export interface AgentStreamHandlers {
   readonly onEvent: (event: AgentEvent) => unknown | Promise<unknown>;
   readonly onProgress?: (progress: EffectProgressNotification) => unknown | Promise<unknown>;
+  readonly onOpen?: () => unknown | Promise<unknown>;
 }
 
 export class AgentClient {
   readonly transport: ProtocolTransport;
   readonly baseUrl: string;
   readonly bearerToken: string | undefined;
+  readonly #pendingRequests = new Set<AbortController>();
   constructor(baseUrlOrTransport: string | ProtocolTransport, bearerToken?: string) {
     this.transport = typeof baseUrlOrTransport === "string"
       ? new HttpProtocolTransport(baseUrlOrTransport, bearerToken)
       : baseUrlOrTransport;
     this.baseUrl = "baseUrl" in this.transport ? String(this.transport.baseUrl) : "http://agencity.in-process";
     this.bearerToken = bearerToken;
+  }
+  abortPendingRequests(reason = "Protocol client detached"): void {
+    for (const controller of this.#pendingRequests) controller.abort(new DOMException(reason, "AbortError"));
   }
   health(): Promise<{ ok: boolean; authenticated?: boolean; workspaceId?: string; instanceId?: string; appVersion?: string; protocolMin?: number; protocolMax?: number; configHash?: string }> { return this.#json("/health"); }
   capabilities(): Promise<ProtocolCapabilities> { return this.#json("/capabilities"); }
@@ -109,14 +115,16 @@ export class AgentClient {
     handlers: AgentStreamHandlers,
     signal?: AbortSignal,
   ): Promise<void> {
-    const response = await this.transport.request(
+    const request = await this.#request(
       `/sessions/${encodeURIComponent(sessionId)}/stream?branch=${encodeURIComponent(branchId)}&after=${encodeURIComponent(afterCursor)}`,
       signal === undefined ? {} : { signal },
     );
-    if (!response.ok) throw await protocolError(response);
-    if (!response.body) throw new Error("Protocol stream response has no body");
-    let cursor = afterCursor;
     try {
+      const response = request.response;
+      if (!response.ok) throw await protocolError(response);
+      if (!response.body) throw new Error("Protocol stream response has no body");
+      await handlers.onOpen?.();
+      let cursor = afterCursor;
       await readProtocolStream(response.body, async (eventName, data) => {
         const value = JSON.parse(data) as AgentEvent | EffectProgressNotification;
         if (eventName === "progress") {
@@ -130,6 +138,8 @@ export class AgentClient {
       }, signal);
     } catch (error) {
       if (!signal?.aborted) throw error;
+    } finally {
+      request.release();
     }
   }
   /**
@@ -156,11 +166,13 @@ export class AgentClient {
     while (!options.signal?.aborted) {
       if (attempt > 0) {
         await discard("reconnect");
+        await handlers.onConnectionState?.("reconnecting");
         await handlers.onReconnect?.(attempt, cursor);
       }
       let endedNormally = false;
       try {
         await this.stream(sessionId, branchId, cursor, {
+          onOpen: async () => { await handlers.onConnectionState?.("connected"); },
           onEvent: async (event) => {
             if (BigInt(event.cursor) <= BigInt(cursor)) return;
             const effectId = event.type === "EffectOutcomeRecorded"
@@ -179,10 +191,14 @@ export class AgentClient {
       } catch (error) {
         if (options.signal?.aborted) break;
         await discard("disconnect");
+        await handlers.onConnectionState?.("disconnected");
         if (error instanceof ProtocolClientError && error.status >= 400 && error.status < 500) throw error;
       }
       if (options.signal?.aborted) break;
-      if (endedNormally) await discard("disconnect");
+      if (endedNormally) {
+        await discard("disconnect");
+        await handlers.onConnectionState?.("disconnected");
+      }
       if (options.maxReconnects !== undefined && attempt >= options.maxReconnects) break;
       attempt++;
       await abortableDelay(delay, options.signal);
@@ -290,10 +306,36 @@ export class AgentClient {
   #put<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "PUT", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
   #post<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "POST", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
   async #json<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await this.transport.request(path, init);
-    if (!response.ok) throw await protocolError(response);
-    try { return await response.json() as T; }
-    catch { throw new ProtocolClientError("INVALID_RESPONSE", "Protocol response was not valid JSON", response.status); }
+    const request = await this.#request(path, init);
+    try {
+      const response = request.response;
+      if (!response.ok) throw await protocolError(response);
+      try { return await response.json() as T; }
+      catch { throw new ProtocolClientError("INVALID_RESPONSE", "Protocol response was not valid JSON", response.status); }
+    } finally {
+      request.release();
+    }
+  }
+  async #request(path: string, init: RequestInit = {}): Promise<{ response: Response; release: () => void }> {
+    const controller = new AbortController();
+    const external = init.signal;
+    const abort = (): void => controller.abort(external?.reason);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      this.#pendingRequests.delete(controller);
+      external?.removeEventListener("abort", abort);
+    };
+    if (external?.aborted) abort();
+    else external?.addEventListener("abort", abort, { once: true });
+    this.#pendingRequests.add(controller);
+    try {
+      return { response: await this.transport.request(path, { ...init, signal: controller.signal }), release };
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 }
 
@@ -326,6 +368,8 @@ async function readProtocolStream(
   signal?: AbortSignal,
 ): Promise<void> {
   const reader = body.getReader();
+  const abort = (): void => { void reader.cancel(signal?.reason).catch(() => {}); };
+  signal?.addEventListener("abort", abort, { once: true });
   const decoder = new TextDecoder();
   let buffer = "";
   let eventName = "message";
@@ -354,6 +398,7 @@ async function readProtocolStream(
     else if (buffer.startsWith("data:")) dataLines.push(buffer.slice(5).replace(/^ /, ""));
     await dispatch();
   } finally {
+    signal?.removeEventListener("abort", abort);
     try { await reader.cancel(); } catch {}
     reader.releaseLock();
   }

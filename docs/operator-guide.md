@@ -67,7 +67,7 @@ Run `agencity --help` (or `bun run dev -- --help`) for the built-in help. With n
 
 ```sh
 agencity                              # discover workspace, create/resume, open TUI
-agencity "inspect this repository"   # run typed autonomous actions, then open TUI
+agencity "inspect this repository"   # open TUI and run typed autonomous actions
 agencity new [TASK]
 agencity resume [NAME|ID]
 agencity sessions [--json]
@@ -109,7 +109,7 @@ Normal product tasks always carry an explicit goal selection policy. `--goal aut
 
 Inside the TUI, `/goal` and `/goals` show the current/history view, while `/goal create DESCRIPTION`, `/goal pause`, `/goal resume`, `/goal clear`, and `/goal complete` operate without copied IDs. `/heartbeats`, `/heartbeat create MS PROMPT`, and index-based pause/resume/clear commands manage user wakes. `/schedules`, `/schedule once ISO PROMPT`, `/schedule every MS PROMPT`, and index-based lifecycle commands manage one-time and interval prompts. Missed recurring ticks coalesce.
 
-Heartbeats and schedules queue durable wakes and deliver them through the ordinary typed `AgentRunService` with stable IDs. Ordinary product commands start or discover the per-workspace resident service; its wake pollers run only after lease admission, so future due work continues while no terminal client is attached. An explicit `service shutdown` stops those pollers and leaves the durable schedules resumable on the next on-demand start.
+Heartbeats and schedules queue durable wakes and deliver them through the ordinary typed `AgentRunService` with stable IDs. Ordinary product commands start or discover the per-workspace resident service; its wake pollers run only after lease admission, so future due work continues while no terminal client is attached. A service with no attached client, resident worker, queued/running run, pending effect, queued wake, active schedule, or active heartbeat exits after 60 seconds by default. A durable `waiting_for_user` run is resumed on demand and does not keep the process resident by itself. `service status` reports the idle deadline, attached-client count, and exact keep-alive reasons. An explicit `service shutdown` stops pollers and leaves durable schedules resumable on the next on-demand start.
 
 ### Provider and model onboarding
 
@@ -232,17 +232,17 @@ bun run src/cli.ts debug protocol-serve --port 3131
 
 The product-managed service binds an ephemeral `127.0.0.1` port and authenticates every request with the random bearer in its 0600 discovery manifest. Discovery accepts it only when authenticated health identity, protocol/config compatibility, and the matching live workspace lease all agree. The advanced `serve --port` diagnostic is separate and unauthenticated. Neither surface is supported beyond loopback without an independently administered boundary.
 
-`agencity service status` observes lifecycle and resident roots; `service shutdown` stops admission and drains without cancelling or deleting sessions. `agencity agents`, `status TARGET`, `attach TARGET`, `send TARGET MESSAGE`, and `stop TARGET` use the managed service. `agencity run --detach TASK` returns after durable acceptance. Ctrl-C or normal client exit detaches only; `stop` is the explicit durable cancellation operation. The service starts on demand and is not registered as an OS boot/login daemon.
+`agencity service status` observes lifecycle, idle deadline, structured keep-alive reasons, and resident roots; `service shutdown` stops admission and drains without cancelling or deleting sessions. `agencity agents`, `status TARGET`, `attach TARGET`, `send TARGET MESSAGE`, and `stop TARGET` use the managed service. `agencity run --detach TASK` returns after durable acceptance. Ctrl-C or normal client exit detaches only; `stop` is the explicit durable cancellation operation. The service starts on demand and is not registered as an OS boot/login daemon.
 
 ## TUI
 
-The normal TUI path is simply `agencity` or `agencity [TASK]`; the product bootstrap selects durable work and prints a workspace/session/model/run/trusted-local header. The existing explicit-ID route remains available for diagnostics:
+The normal TUI path is simply `agencity` or `agencity [TASK]`. On an interactive terminal, the product bootstrap selects durable work and opens a full-screen OpenTUI workspace; an initial task starts after admission while that workspace is visible. The existing explicit-ID route remains available for transcript-oriented diagnostics:
 
 ```sh
 agencity debug tui --session <SESSION_ID> --branch <BRANCH_ID>
 ```
 
-Plain text starts a typed autonomous run, or answers the pending clarification/permission request for the active run. The non-interactive product surface also supports `agencity refine [INSTRUCTIONS]`, `agencity refine status`, `agencity refine auto on|off`, and the explicitly advanced `agencity refine propose-json JSON` path. Automatic mode is a profile preference, is off by default, and version 1 can trigger only local review.
+The full-screen layout keeps the session/branch/model and connection state at the top, conversation and grouped run activity in the main viewport, a stable composer at the bottom, and recovery/attention/budget/trusted-local status in the footer. Terminals at least 100 columns also show the command/details pane; narrower terminals place command search in the main viewport. Plain text starts a typed autonomous run, or answers the pending clarification/permission request for the active run. `Ctrl-P` opens command search, `Ctrl-O` expands or collapses the latest completed activity, Page Up/Down scroll, Escape closes command/details output, and `Ctrl-D` detaches. The non-interactive product surface also supports `agencity refine [INSTRUCTIONS]`, `agencity refine status`, `agencity refine auto on|off`, and the explicitly advanced `agencity refine propose-json JSON` path. Automatic mode is a profile preference, is off by default, and version 1 can trigger only local review.
 
 Commands:
 
@@ -264,7 +264,7 @@ Commands:
 | `/skill-test <entry> [version]` | Run durable compile/runtime tests for an exact skill. |
 | `/skill <entry> <json-input>` | Invoke the active exact skill version through the outbox. |
 | `/cancel-task <id> [reason]` | Cascade cancellation through a task's descendants. |
-| `/complete-goal <id>` | Run current-version completion gates for a goal. |
+| `/goal complete` | Request completion of the current goal and run its current-version gates. |
 | `/stop` | Commit cancellation intent for the active agent run and reconcile its current boundary. |
 | `/cell <typescript>` | Execute one disposable-console cell and print its result. |
 | `/branch <cursor> [name]` | Fork at a historical cursor and switch this TUI to the child. |
@@ -280,11 +280,11 @@ Commands:
 
 The product and diagnostic TUI both use `AgentClient` and the public protocol contract. Product attach uses authenticated loopback HTTP; diagnostic `debug tui`/`tui` uses `InProcessProtocolTransport`, which calls the exact same `ProtocolServer.handle` router rather than private supervisor services. The client snapshots then watches after the last successfully applied committed cursor, deduplicates on reconnect, and clears cursorless progress on commit or disconnect. `/history CURSOR` creates a read-only historical projection while live state continues observationally; `/live` returns to the latest committed state without replaying an effect.
 
-The live pane is a concise product projection, not a canonical-event tail. It shows assistant messages, bounded cell results and failures, user-input requests, consequential unknown/failure outcomes, and terminal run state without routine IDs or cursors. `/history` retains the complete cursor/event/payload audit.
+The live viewport is a concise product projection, not a canonical-event tail. It shows user/assistant conversation plus one grouped activity entry per durable run. Active runs expand their typed steps; completed runs collapse by default. Retained child tasks appear as an agent summary. Consequential command and recovery details use the details pane without replacing the composer. `/history` retains the complete cursor/event/payload audit.
 
-Streaming-capable providers render bounded temporary deltas only for legacy user-visible model turns. AgentRun providers stream typed action JSON, so their deltas and committed raw actions remain internal; the TUI prints one `[agent working…]` indicator and shows assistant text only after a validated `final` action commits it. Failed or disconnected visible prefixes are labeled discarded rather than persisted. Routine SSE reconnects are silent; a terminal watch failure remains visible. Echo and other non-streaming providers truthfully report committed responses only. `/unknown` and `/reconcile` inspect and append assessments without retrying or rewriting the unknown outcome. The non-interactive `agencity reconcile latest ASSESSMENT SUMMARY` form resolves the newest unknown effect inside the selected branch, so ordinary recovery does not require copying an opaque effect identifier.
+Streaming-capable providers render bounded temporary state without exposing typed action JSON. AgentRun deltas and committed raw actions remain internal; the active run is marked working and assistant text appears only after a validated `final` action commits it. Failed or disconnected provisional progress is discarded rather than persisted. Routine SSE reconnects update the persistent connection state; a terminal watch failure remains visible in details. Echo and other non-streaming providers truthfully report committed responses only. `/unknown` and `/reconcile` inspect and append assessments without retrying or rewriting the unknown outcome. The non-interactive `agencity reconcile latest ASSESSMENT SUMMARY` form resolves the newest unknown effect inside the selected branch, so ordinary recovery does not require copying an opaque effect identifier.
 
-First Ctrl-C requests durable cancellation for an active run; a second Ctrl-C detaches with an explicit warning that external/durable work may outlive the client. With no active run, the first Ctrl-C detaches immediately. Ctrl-C, `/quit`, and `/exit` abort pending readline input, stop the watch, and return normally without forcing process exit.
+First Ctrl-C requests durable cancellation for an active run; a second Ctrl-C detaches with an explicit warning that external/durable work may outlive the client. With no active run, the first Ctrl-C detaches immediately. `Ctrl-D`, `/quit`, and `/exit` detach without cancellation. Detach restores the original terminal screen and reports whether the workspace service will stop at its idle deadline or which retained-work reasons keep it active.
 
 ## Providers
 

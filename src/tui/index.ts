@@ -7,9 +7,13 @@ import {
 } from "../protocol/index.ts";
 import type { RecoverySummaryView } from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
+import {
+  type TerminalConnectionState,
+  type TerminalPresentation,
+} from "./view-model.ts";
 
 export type TerminalAgentClient = Pick<AgentClient,
-  "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
+  "abortPendingRequests" | "capabilities" | "serviceStatus" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
   "createSession" | "modelProviders" | "startRun" | "run" | "respondToRun" | "cancelRun" |
   "cell" | "fork" | "resume" | "inspectContext" | "compact" | "agents" | "tasks" | "mailbox" | "cancelTask" |
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
@@ -25,7 +29,13 @@ export interface TerminalUIOptions {
   readonly input?: NodeJS.ReadableStream;
   readonly output?: Pick<NodeJS.WriteStream, "write">;
   readonly interactive?: boolean;
+  readonly manageSignals?: boolean;
+  readonly onOutput?: (value: string) => void;
+  readonly onProvisionalOutput?: (effectId: string, value: string) => void;
+  readonly onProvisionalDiscard?: (effectIds: readonly string[], reason: "committed" | "disconnect" | "reconnect") => void;
 }
+
+export type TerminalPresentationListener = (presentation: TerminalPresentation) => void;
 
 
 export type TerminalCommandCategory = "product" | "status" | "notebook" | "autonomy" | "operations";
@@ -191,12 +201,16 @@ export class TerminalUI {
   readonly #output: Pick<NodeJS.WriteStream, "write">;
   readonly #input: NodeJS.ReadableStream;
   readonly #interactive: boolean;
+  readonly #manageSignals: boolean;
   readonly #interrupts = new TerminalInterruptPolicy();
+  readonly #presentationListeners = new Set<TerminalPresentationListener>();
   #sessionId = "";
   #branchId = "";
   #productCatalog = false;
   #liveState: AgentState | null = null;
   #viewState: AgentState | null = null;
+  #capabilities: ProtocolCapabilities | null = null;
+  #connection: TerminalConnectionState = "connecting";
   #historicalCursor: string | null = null;
   #progress = new Map<string, string>();
   #streamedEffectIds = new Set<string>();
@@ -204,51 +218,32 @@ export class TerminalUI {
   #visibleProgressEffectIds = new Set<string>();
   #agentProgressRunByEffect = new Map<string, string>();
   #agentWorkingRunIds = new Set<string>();
+  #agentWorkingAnnouncementRunIds = new Set<string>();
   #watchController: AbortController | null = null;
   #watchPromise: Promise<void> | null = null;
   #detachController: AbortController | null = null;
   #sigintHandler: (() => void) | null = null;
   #lastDetachDecision: Extract<InterruptDecision, { action: "detach" }> | null = null;
   #detached = false;
+  #closing = false;
   #readline: ReadlineInterface | null = null;
 
   constructor(readonly client: TerminalAgentClient, readonly options: TerminalUIOptions = {}) {
     this.#input = options.input ?? stdin;
     this.#output = options.output ?? stdout;
     this.#interactive = options.interactive ?? Boolean((this.#input as { isTTY?: boolean }).isTTY && (this.#output as { isTTY?: boolean }).isTTY);
+    this.#manageSignals = options.manageSignals ?? true;
   }
 
   async run(sessionId: string, branchId: string): Promise<void> {
-    this.#sessionId = sessionId;
-    this.#branchId = branchId;
-    this.#detached = false;
-    this.#lastDetachDecision = null;
-    this.#detachController = new AbortController();
-    const capabilities = await this.client.capabilities();
-    this.#productCatalog = capabilities.productCatalog;
-    const snapshot = await this.client.snapshot(sessionId, branchId);
-    this.#liveState = snapshot.state;
-    this.#viewState = snapshot.state;
-    const recovery = await this.client.recoverySummary(sessionId, branchId);
-    this.#write(`${renderStartupStatus(snapshot.state, capabilities, recovery)}\n`);
-    if (recovery.unknownEffects.length) this.#write("Unknown effects require inspection with /unknown and evidence-only /reconcile; resume never retries them.\n");
-    this.#write("/help opens the command palette. /quit detaches without cancellation.\n");
-    await this.#startWatch();
-    this.#sigintHandler = (): void => {
-      void this.handleInterrupt().catch((error) => {
-        if (!this.#detached) {
-          try { this.#renderError(error, "interrupt"); } catch {}
-        }
-      });
-    };
-    process.on("SIGINT", this.#sigintHandler);
+    await this.attach(sessionId, branchId);
     try {
       if (!this.#interactive) return;
       this.#readline = createInterface({ input: this.#input, output: this.#output as NodeJS.WriteStream });
       while (!this.#detached) {
         let line: string;
         try {
-          line = (await this.#readline.question(this.#prompt(), { signal: this.#detachController.signal })).trim();
+          line = (await this.#readline.question(this.#prompt(), { signal: this.#detachController?.signal })).trim();
         } catch {
           break;
         }
@@ -260,22 +255,90 @@ export class TerminalUI {
         }
       }
     } finally {
-      this.#removeSigintHandler();
-      this.#detachController?.abort();
-      this.#detachController = null;
-      this.#readline?.close();
-      this.#readline = null;
-      this.#watchController?.abort();
-      await this.#watchPromise?.catch(() => {});
-      this.#write("Detached. Session identity and durable work remain owned by the service.\n");
+      await this.detach(true, this.#interactive);
     }
+  }
+
+  async attach(sessionId: string, branchId: string, announce = true): Promise<void> {
+    this.#sessionId = sessionId;
+    this.#branchId = branchId;
+    this.#detached = false;
+    this.#closing = false;
+    this.#lastDetachDecision = null;
+    this.#detachController = new AbortController();
+    const capabilities = await this.client.capabilities();
+    this.#capabilities = capabilities;
+    this.#productCatalog = capabilities.productCatalog;
+    const snapshot = await this.client.snapshot(sessionId, branchId);
+    this.#liveState = snapshot.state;
+    this.#viewState = snapshot.state;
+    const recovery = await this.client.recoverySummary(sessionId, branchId);
+    if (announce) {
+      this.#write(`${renderStartupStatus(snapshot.state, capabilities, recovery)}\n`);
+      if (recovery.unknownEffects.length) this.#write("Unknown effects require inspection with /unknown and evidence-only /reconcile; resume never retries them.\n");
+      this.#write("/help opens the command palette. /quit detaches without cancellation.\n");
+    }
+    await this.#startWatch();
+    if (this.#manageSignals) {
+      this.#sigintHandler = (): void => {
+        void this.handleInterrupt().catch((error) => {
+          if (!this.#detached) {
+            try { this.#renderError(error, "interrupt"); } catch {}
+          }
+        });
+      };
+      process.on("SIGINT", this.#sigintHandler);
+    }
+    this.#publish();
+  }
+
+  async detach(announce = true, markDetached = true): Promise<void> {
+    if (markDetached) {
+      this.#requestDetach();
+      this.abortPendingOperations();
+    }
+    this.#watchController?.abort();
+    this.#removeSigintHandler();
+    this.#detachController?.abort();
+    this.#detachController = null;
+    this.#readline?.close();
+    this.#readline = null;
+    await this.#watchPromise?.catch(() => {});
+    this.#connection = "disconnected";
+    this.#publish();
+    if (announce) this.#write("Detached. Session identity and durable work remain owned by the service.\n");
+  }
+
+  get detached(): boolean { return this.#detached; }
+
+  abortPendingOperations(): void {
+    this.#closing = true;
+    this.client.abortPendingRequests("Terminal detached");
+  }
+
+  get presentation(): TerminalPresentation {
+    if (!this.#viewState || !this.#capabilities) throw new Error("Terminal is not attached");
+    return {
+      state: this.#viewState,
+      capabilities: this.#capabilities,
+      historicalCursor: this.#historicalCursor,
+      connection: this.#connection,
+      provisionalRunIds: [...this.#agentWorkingRunIds],
+    };
+  }
+
+  subscribePresentation(listener: TerminalPresentationListener): () => void {
+    this.#presentationListeners.add(listener);
+    if (this.#viewState && this.#capabilities) listener(this.presentation);
+    return () => { this.#presentationListeners.delete(listener); };
   }
 
   /** Public command entry for renderer/command tests and alternate terminal shells. */
   async execute(line: string): Promise<"continue" | "detach"> {
+    if (this.#closing) return "detach";
     if (line === "/quit" || line === "/exit") { this.#requestDetach(); return "detach"; }
     if (line === "/help") { this.#writePalette(); return "continue"; }
-    if (line === "/live") { this.#historicalCursor = null; this.#viewState = this.#liveState; this.#write("Returned to live state.\n"); return "continue"; }
+    if (line === "/live") { this.#historicalCursor = null; this.#viewState = this.#liveState; this.#write("Returned to live state.\n"); this.#publish(); return "continue"; }
     if (line === "/info" || line === "/status") { await this.#info(); return "continue"; }
     if (line === "/sessions") { this.#json(await this.client.productSessions()); return "continue"; }
     if (line.startsWith("/sessions select ")) { const target=line.slice(17).trim(); const selected=await this.client.productSelect(target); await this.#switch(selected.sessionId, selected.branchId); return "continue"; }
@@ -369,6 +432,7 @@ Confirmation digest: ${preview.confirmationDigest}
       onSnapshot: (snapshot) => {
         this.#liveState = snapshot.state;
         if (this.#historicalCursor === null) this.#viewState = snapshot.state;
+        this.#publish();
       },
       onEvent: (event) => {
         if (!this.#liveState) return;
@@ -396,14 +460,19 @@ Confirmation digest: ${preview.confirmationDigest}
           const callId = String((event.payload as { callId?: string }).callId ?? "");
           if (callId) this.#streamedCallIds.delete(callId);
         }
-        if (event.type === "AgentRunStatusChanged" && TERMINAL_RUN_STATUSES.has(String((event.payload as { status?: string }).status))) {
+        if (event.type === "AgentRunStatusChanged" && (
+          TERMINAL_RUN_STATUSES.has(String((event.payload as { status?: string }).status))
+          || String((event.payload as { status?: string }).status) === "waiting_for_user"
+        )) {
           const runId = String((event.payload as { runId?: string }).runId ?? "");
           this.#interrupts.reset();
           this.#agentWorkingRunIds.delete(runId);
+          this.#agentWorkingAnnouncementRunIds.delete(runId);
           for (const [effectId, progressRunId] of this.#agentProgressRunByEffect) {
             if (progressRunId === runId) this.#agentProgressRunByEffect.delete(effectId);
           }
         }
+        this.#publish();
       },
       onProgress: (progress) => {
         const text = progress.kind === "model-output-delta" && progress.value && typeof progress.value === "object" && "text" in progress.value
@@ -414,46 +483,79 @@ Confirmation digest: ${preview.confirmationDigest}
           if (this.#historicalCursor === null) {
             this.#visibleProgressEffectIds.add(progress.effectId);
             this.#agentProgressRunByEffect.set(progress.effectId, runId);
-            if (!this.#agentWorkingRunIds.has(runId)) {
-              this.#agentWorkingRunIds.add(runId);
+            this.#agentWorkingRunIds.add(runId);
+            if (!this.#agentWorkingAnnouncementRunIds.has(runId)) {
+              this.#agentWorkingAnnouncementRunIds.add(runId);
               this.#write("[agent working…]\n");
             }
           }
+          this.#publish();
           return;
         }
         if (!text || this.#historicalCursor !== null) return;
         this.#streamedEffectIds.add(progress.effectId);
         this.#visibleProgressEffectIds.add(progress.effectId);
         this.#progress.set(progress.effectId, (this.#progress.get(progress.effectId) ?? "") + text);
-        this.#write(text);
+        if (this.options.onProvisionalOutput) this.options.onProvisionalOutput(progress.effectId, text);
+        else this.#write(text);
+        this.#publish();
       },
       onProgressDiscard: (ids, reason) => {
         let discardedVisibleProgress = false;
+        const affectedRunIds = new Set<string>();
         for (const id of ids) {
           this.#progress.delete(id);
           if (this.#visibleProgressEffectIds.delete(id) && reason !== "committed") discardedVisibleProgress = true;
+          const progressRunId = this.#agentProgressRunByEffect.get(id);
+          if (progressRunId) affectedRunIds.add(progressRunId);
           this.#agentProgressRunByEffect.delete(id);
           if (reason !== "committed") this.#streamedEffectIds.delete(id);
         }
-        if (discardedVisibleProgress) this.#write("\n[provisional progress discarded after connection loss]\n");
+        for (const runId of affectedRunIds) {
+          if (![...this.#agentProgressRunByEffect.values()].includes(runId)) this.#agentWorkingRunIds.delete(runId);
+        }
+        this.options.onProvisionalDiscard?.(ids, reason);
+        if (discardedVisibleProgress && !this.options.onProvisionalDiscard) this.#write("\n[provisional progress discarded after connection loss]\n");
+        this.#publish();
       },
-      onReconnect: () => {},
+      onReconnect: () => {
+        this.#connection = "reconnecting";
+        this.#publish();
+      },
+      onConnectionState: (state) => {
+        this.#connection = state;
+        this.#publish();
+      },
     };
   }
 
   async #startWatch(): Promise<void> {
     this.#watchController?.abort();
     await this.#watchPromise?.catch(() => {});
+    this.#connection = "connecting";
+    this.#publish();
     const controller = new AbortController();
     this.#watchController = controller;
     this.#watchPromise = this.client.watchBranch(this.#sessionId, this.#branchId, this.#watchHandlers(), { signal: controller.signal });
     void this.#watchPromise.catch((error) => {
-      if (!controller.signal.aborted) this.#write(`[protocol watch failed] ${scrubText(error instanceof Error ? error.message : String(error))}\n`);
+      if (!controller.signal.aborted) {
+        this.#connection = "disconnected";
+        this.#write(`[protocol watch failed] ${scrubText(error instanceof Error ? error.message : String(error))}\n`);
+        this.#publish();
+      }
     });
   }
 
   async #switch(sessionId:string,branchId:string):Promise<void>{
-    this.#watchController?.abort();await this.#watchPromise?.catch(()=>{});this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();this.#visibleProgressEffectIds.clear();this.#agentProgressRunByEffect.clear();this.#agentWorkingRunIds.clear();const snapshot=await this.client.snapshot(sessionId,branchId);this.#liveState=snapshot.state;this.#viewState=snapshot.state;this.#interrupts.reset();await this.#startWatch();const sessionName=snapshot.state.sessionName??"unnamed session";const branchName=snapshot.state.branch.name??"unnamed branch";this.#write(`Switched to ${sessionName}/${branchName}.\n`);
+    this.#watchController?.abort();
+    await this.#watchPromise?.catch(()=>{});
+    if (this.#closing) return;
+    this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();this.#visibleProgressEffectIds.clear();this.#agentProgressRunByEffect.clear();this.#agentWorkingRunIds.clear();this.#agentWorkingAnnouncementRunIds.clear();
+    const snapshot=await this.client.snapshot(sessionId,branchId);
+    if (this.#closing) return;
+    this.#liveState=snapshot.state;this.#viewState=snapshot.state;
+    this.#interrupts.reset();await this.#startWatch();
+    const sessionName=snapshot.state.sessionName??"unnamed session";const branchName=snapshot.state.branch.name??"unnamed branch";this.#write(`Switched to ${sessionName}/${branchName}.\n`);this.#publish();
   }
 
   async #history(cursor:string):Promise<void>{
@@ -461,10 +563,10 @@ Confirmation digest: ${preview.confirmationDigest}
     if(!cursor){events.forEach((event)=>this.#write(`${event.cursor} ${event.type} ${JSON.stringify(event.payload)}\n`));return;}
     if(!/^\d+$/.test(cursor))throw new Error("/history CURSOR requires a numeric committed cursor");
     const selected=events.filter((event)=>BigInt(event.cursor)<=BigInt(cursor));if(!selected.length)throw new Error(`No retained history at cursor ${cursor}`);
-    this.#viewState=projectEvents(selected);this.#historicalCursor=this.#viewState.cursor;this.#write(`Historical projection at ${this.#historicalCursor}; live events remain observational only. Use /live to return.\n`);this.#json(this.#viewState);
+    this.#viewState=projectEvents(selected);this.#historicalCursor=this.#viewState.cursor;this.#write(`Historical projection at ${this.#historicalCursor}; live events remain observational only. Use /live to return.\n`);this.#json(this.#viewState);this.#publish();
   }
 
-  async #info():Promise<void>{const caps=await this.client.capabilities();const recovery=await this.client.recoverySummary(this.#sessionId,this.#branchId);this.#write(`${renderStartupStatus(this.#requireState(),caps,recovery)}\n`);}
+  async #info():Promise<void>{const caps=await this.client.capabilities();const recovery=await this.client.recoverySummary(this.#sessionId,this.#branchId);this.#capabilities=caps;this.#write(`${renderStartupStatus(this.#requireState(),caps,recovery)}\n`);this.#publish();}
   async #stop(reason:string):Promise<void>{const active=this.#activeRun();if(!active){this.#write("No active run.\n");return;}await this.client.cancelRun(this.#sessionId,this.#branchId,active.id,reason);this.#write("Cancellation requested.\n");}
   async #startOrRespond(text:string):Promise<void>{
     const active=this.#activeRun();
@@ -482,7 +584,12 @@ Confirmation digest: ${preview.confirmationDigest}
   #activeRun(){return Object.values(this.#liveState?.agentRuns??{}).find((run)=>!TERMINAL_RUN_STATUSES.has(run.status));}
   #requireState():AgentState{if(!this.#viewState)throw new Error("No projected state");return this.#viewState;}
   #prompt():string{return `${(this.#liveState?.sessionName??"agent").slice(-12)}/${(this.#liveState?.branch.name??"live").slice(-12)}${this.#historicalCursor?`@${this.#historicalCursor}`:""}> `;}
-  #write(value:string):void{this.#output.write(value);}
+  #write(value:string):void{if(this.options.onOutput)this.options.onOutput(value);else this.#output.write(value);}
+  #publish():void{
+    if(!this.#viewState||!this.#capabilities)return;
+    const presentation=this.presentation;
+    for(const listener of this.#presentationListeners)listener(presentation);
+  }
   #renderError(error:unknown,context:"command"|"interrupt"):void{this.#write(`${renderTerminalError(error,context)}\n`);}
   #json(value:unknown):void{this.#write(`${JSON.stringify(value,null,2)}\n`);}
   #writePalette():void{

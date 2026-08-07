@@ -29,7 +29,7 @@ agencity --version
 agencity --demo                      # explicit fixture mode
 ```
 
-The link points at the checkout. Keep that checkout and its `node_modules` available. Runtime assets are resolved relative to the executable module rather than the caller's working directory, so the command works from another repository. The checked-in `src/cli.ts` target has Git mode `100755`; `bun link` is expected to produce a directly executable link without a post-install `chmod`. An archive, copy, or packaging process that drops that executable bit is not a valid installation. Re-run `bun link` if the checkout is moved. Use `bun unlink` according to Bun's documentation to remove the registration.
+The link points at the checkout. Keep that checkout and its `node_modules` available, including the platform-specific OpenTUI package installed by Bun. Runtime assets are resolved relative to the executable module rather than the caller's working directory, so the command and full-screen interactive renderer work from another repository. The checked-in `src/cli.ts` target has Git mode `100755`; `bun link` is expected to produce a directly executable link without a post-install `chmod`. An archive, copy, or packaging process that drops that executable bit is not a valid installation. Re-run `bun install` and `bun link` if the checkout is moved. Use `bun unlink` according to Bun's documentation to remove the registration.
 
 For isolated verification or CI, choose a temporary Bun install root:
 

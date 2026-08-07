@@ -21,7 +21,7 @@ All successful non-streaming responses are JSON. Failures use the typed, scrubbe
 |---|---|---|
 | `GET /health` | none | authenticated managed identity/version/config health (or basic embedded health) |
 | `GET /capabilities` | none | v1 trusted-local, snapshot/resume, progress, historical projection, sync, service/catalog, and provider capability descriptor |
-| `GET /service/status` | none | managed lifecycle, recovery, and resident-root worker states |
+| `GET /service/status` | none | managed lifecycle, recovery, idle timeout/deadline, attached-client count, structured keep-alive reasons, and resident-root worker states |
 | `POST /service/shutdown` | none | accepted graceful drain; it does not cancel sessions |
 | `GET /service/agents` | none | named root sessions and running/idle/detached state |
 | `POST /sessions/:session/stop?branch=:branch` | `{ reason? }` | durable user-requested active-run cancellation |

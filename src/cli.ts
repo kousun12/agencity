@@ -28,10 +28,12 @@ import {
   connectManagedService,
   observeManagedService,
   type ManagedServiceConfiguration,
+  type ManagedServiceStatus,
 } from "./product/index.ts";
 import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./protocol/index.ts";
 import { Supervisor, type AgentRunResult } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
+import { OpenTerminalUI } from "./tui/opentui.ts";
 
 const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills", "context", "compact"]);
 
@@ -165,7 +167,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       const target = parsed.command === "resume" || parsed.command === "attach"
         ? parsed.positionals.join(" ").trim() || undefined
         : option("session");
-      selection = await client.productSelect(target, option("branch"));
+      selection = await selectManagedSession(client, existing, target, option("branch"), interactive, prompter);
       summary = (await client.productSessions() as ProductBranchSummary[]).find(candidate => candidate.sessionId === selection.sessionId && candidate.branchId === selection.branchId)!;
       await client.resume(selection.sessionId, selection.branchId);
     }
@@ -173,7 +175,8 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const providers = await client.modelProviders();
     const available = providers.some(provider => provider.name === summary.model.provider);
     const remediation = available ? null : `Install or configure provider ${summary.model.provider}, then restart the managed service.`;
-    if (!parsed.flags.has("json")) printStartup(workspace, summary, available, remediation);
+    const opensInteractiveTerminal = interactive && ["product", "new", "resume", "attach"].includes(parsed.command);
+    if (!parsed.flags.has("json") && !opensInteractiveTerminal) printStartup(workspace, summary, available, remediation);
     if (parsed.command === "branch") {
       const [position, ...nameParts] = parsed.positionals;
       if (position !== "head") throw new ValidationError("branch requires `head [NAME]`; low-level point-in-time forks remain under debug branch");
@@ -287,20 +290,59 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
         else console.log("Run accepted (detached; the managed service continues after client exit)");
         return;
       }
-      const result = parsed.command === "run"
-        ? await runToTerminalWithInterrupts(client, selection.sessionId, selection.branchId, input)
-        : await startAndWaitForRun(client, selection.sessionId, selection.branchId, input);
-      if (result === null) return;
-      if (parsed.command === "run") { printProductRunResult(result, parsed.flags.has("json")); return; }
-      if (result.status === "succeeded") console.log(result.final ?? "");
-      else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
-      else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
+      if (parsed.command === "run") {
+        const result = await runToTerminalWithInterrupts(client, selection.sessionId, selection.branchId, input);
+        if (result !== null) printProductRunResult(result, parsed.flags.has("json"));
+        return;
+      }
+      if (interactive) {
+        await client.startRun(selection.sessionId, selection.branchId, input);
+      } else {
+        const result = await startAndWaitForRun(client, selection.sessionId, selection.branchId, input);
+        if (result.status === "succeeded") console.log(result.final ?? "");
+        else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
+        else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
+      }
     }
 
     if (parsed.command === "attach" || interactive || !task) await attachManagedClient(client, selection.sessionId, selection.branchId);
   } finally {
     // Closing a client is detach-only. The resident service owns durable work.
     prompter.close();
+  }
+}
+
+async function selectManagedSession(
+  client: AgentClient,
+  candidates: readonly ProductBranchSummary[],
+  target: string | undefined,
+  branchId: string | undefined,
+  interactive: boolean,
+  prompter: ProductPrompter,
+): Promise<{ sessionId: string; branchId: string }> {
+  try {
+    return await client.productSelect(target, branchId);
+  } catch (error) {
+    const ambiguous = error instanceof Error && /ambiguous|Multiple sessions/i.test(error.message);
+    if (!interactive || branchId || !ambiguous) throw error;
+    const choices = target
+      ? candidates.filter(candidate =>
+          candidate.sessionId === target
+          || candidate.sessionName === target
+          || candidate.branchId === target
+          || candidate.branchName === target)
+      : candidates.filter(candidate => candidate.root && candidate.initialBranch);
+    if (choices.length === 0) throw error;
+    console.log(choices.map((candidate, index) => [
+      `${index + 1}) ${candidate.sessionName} / ${candidate.branchName}`,
+      `   ${candidate.status} · ${candidate.model.provider}/${candidate.model.model} · updated ${candidate.updatedAt}`,
+      `   ${candidate.taskSummary ?? "No task yet"} · ${candidate.unresolvedWork} unresolved`,
+    ].join("\n")).join("\n"));
+    const answer = (await prompter.question("Choose session/branch number or name: ")).trim();
+    const byNumber = choices[Number(answer) - 1];
+    return byNumber
+      ? client.productSelect(byNumber.sessionId, byNumber.branchId)
+      : client.productSelect(answer);
   }
 }
 
@@ -357,7 +399,41 @@ async function serviceCommand(configuration: ManagedServiceConfiguration, parsed
     return;
   }
   const client = new AgentClient(observed.manifest.url, observed.manifest.bearerToken);
-  printValue(action === "shutdown" ? await client.shutdownService() : await client.serviceStatus(), parsed.flags.has("json"));
+  if (action === "shutdown") {
+    let before: Partial<ManagedServiceStatus> | null = null;
+    const timedOut = Symbol("service-status-timeout");
+    const preflight = client.serviceStatus()
+      .then(value => value as Partial<ManagedServiceStatus>)
+      .catch(() => null);
+    const observedStatus = await Promise.race([preflight, Bun.sleep(750).then(() => timedOut)]);
+    if (observedStatus === timedOut) client.abortPendingRequests("Shutdown status preflight timed out");
+    else before = observedStatus as Partial<ManagedServiceStatus> | null;
+    const result = await client.shutdownService();
+    if (parsed.flags.has("json")) {
+      printValue(result, true);
+    } else {
+      const reasons = before?.keepAliveReasons?.map(reason => reason.summary) ?? [];
+      console.log([
+        "Workspace service shutdown requested; admission has stopped.",
+        reasons.length ? `Draining retained work: ${reasons.join("; ")}.` : "No retained background work was reported.",
+        "Sessions remain durable; this command does not cancel agent work.",
+      ].join("\n"));
+    }
+    return;
+  }
+  const status = await client.serviceStatus() as ManagedServiceStatus;
+  if (parsed.flags.has("json")) {
+    printValue(status, true);
+    return;
+  }
+  console.log([
+    `Workspace service: ${status.lifecycle}`,
+    `Recovery: ${status.recovery}${status.recoveryError ? ` — ${status.recoveryError}` : ""}`,
+    `Attached clients: ${status.attachedClients ?? "not reported by this service version"}`,
+    `Idle shutdown: ${status.idleShutdownAt ?? "not reported by this service version"}${status.idleShutdownMs === undefined ? "" : ` (${status.idleShutdownMs} ms after activity)`}`,
+    `Keeps alive: ${status.keepAliveReasons === undefined ? "not reported by this service version" : status.keepAliveReasons.length ? status.keepAliveReasons.map(reason => reason.summary).join("; ") : "none"}`,
+    `Root sessions: ${status.roots.length}`,
+  ].join("\n"));
 }
 
 async function doctorUninitialized(workspace: { root: string; workspaceId: string | null; name: string; stateDirectory: string }, json: boolean): Promise<void> {
@@ -609,7 +685,12 @@ async function waitForRun(
 }
 
 async function attachManagedClient(client: AgentClient, sessionId: string, branchId: string): Promise<void> {
-  await new TerminalUI(client, { interactive: process.stdin.isTTY === true && process.stdout.isTTY === true }).run(sessionId, branchId);
+  const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
+  if (interactive) {
+    await new OpenTerminalUI(client).run(sessionId, branchId);
+    return;
+  }
+  await new TerminalUI(client, { interactive: false }).run(sessionId, branchId);
 }
 
 async function manageAutonomyClient(client: AgentClient, sessionId: string, branchId: string, parsed: ParsedCliArgs): Promise<void> {

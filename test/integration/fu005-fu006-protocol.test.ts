@@ -29,6 +29,27 @@ async function appendUnknown(supervisor: Supervisor, sessionId: string, branchId
 }
 
 describe("FU-005 protocol transport contract", () => {
+  test("a terminal client can abort its outstanding protocol requests during detach", async () => {
+    let requestSignal: AbortSignal | null = null;
+    const transport: ProtocolTransport = {
+      kind: "in-process",
+      request: async (_path, init = {}) => {
+        requestSignal = init.signal ?? null;
+        await new Promise<void>((_resolve, reject) => {
+          requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
+        });
+        throw new Error("unreachable");
+      },
+    };
+    const client = new AgentClient(transport);
+    const pending = client.serviceStatus();
+    await Bun.sleep(0);
+    client.abortPendingRequests("terminal detached");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError", message: "terminal detached" });
+    expect(requestSignal).not.toBeNull();
+    expect((requestSignal as unknown as AbortSignal).aborted).toBe(true);
+  });
+
   test("HTTP and in-process clients use the same router, request bodies, capabilities, typed errors, and reconciliation routes", async () => {
     const { supervisor } = await fixture();
     const protocol = new ProtocolServer(supervisor);
@@ -161,7 +182,7 @@ describe("FU-005 protocol transport contract", () => {
       },
     };
     const client = new AgentClient(transport);
-    const applied: string[] = []; const reconnects: Array<{ attempt: number; cursor: string }> = []; const discards: string[] = [];
+    const applied: string[] = []; const reconnects: Array<{ attempt: number; cursor: string }> = []; const discards: string[] = []; const connectionStates: string[] = [];
     let failFirstDelivery = true;
     await client.watchBranch(session.sessionId, session.branchId, {
       onSnapshot: () => {},
@@ -173,11 +194,13 @@ describe("FU-005 protocol transport contract", () => {
       onProgress: () => {},
       onProgressDiscard: (ids, reason) => { discards.push(`${reason}:${ids.join(",")}`); },
       onReconnect: (attempt, cursor) => { reconnects.push({ attempt, cursor }); },
+      onConnectionState: state => { connectionStates.push(state); },
     }, { reconnectDelayMs: 0, maxReconnects: 1 });
     expect(streamAttempt).toBe(2);
     expect(applied.filter((id) => id === firstEvent!.id)).toHaveLength(1);
     expect(applied).toHaveLength(2);
     expect(reconnects).toEqual([{ attempt: 1, cursor: expect.any(String) }]);
+    expect(connectionStates).toEqual(["connected", "disconnected", "reconnecting", "connected", "disconnected"]);
     expect(BigInt(reconnects[0]!.cursor)).toBeLessThan(BigInt(firstEvent!.cursor));
     expect(discards).toContain("disconnect:ephemeral");
     await supervisor.close();
