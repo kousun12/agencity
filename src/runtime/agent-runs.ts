@@ -95,13 +95,18 @@ const OBSERVATION_TYPES = new Set([
   "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged", "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered",
   "RecursiveModelStarted", "RecursiveModelStatusChanged", "SkillInvocationRecorded",
   "SubagentSpecInvoked", "AgentRunUserInputReceived", "AgentRunGoalCheckRecorded",
-  "RefinementObservationRecorded", "RefinementDecided",
+  "AgentRunActionRejected", "RefinementObservationRecorded", "RefinementDecided",
 ]);
+
+const MAX_ACTION_CORRECTION_ATTEMPTS = 1;
 
 const SDK_GUIDE = [
   "The only executable action is a TypeScript cell. Do not request parallel provider tools.",
   "Cell globals: sdk, sql, session, console, state, artifacts, tools, inspect, cells, rlm.",
   "Use tools.readFile(path), tools.writeFile(path, content, expectedSha256?), and tools.shell(command, options?) for repository work.",
+  "Tool results are objects, not strings: readFile returns { content, sha256, size }; writeFile returns { path, sha256, size, unchanged? }; shell returns { exitCode, stdout, stderr, truncated }.",
+  "Read and edit file.content, and pass file.sha256 as expectedSha256 when replacing a previously read file. Shell options use { timeoutMs, cwd?, idempotencyKey? }; the option is timeoutMs, not timeout.",
+  "tools.readFile, tools.writeFile, and tools.shell throw when their durable effect does not succeed. Use tools.request(executor, operation, input, options?) when an expected failed outcome must be inspected without failing the cell.",
   "Use sql`SELECT ... ${value}` only for read-only relational queries; use state.get/set/list for durable JSON and artifacts.put/get for larger content.",
   "Use cells.list/get for retained notebook history; use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
   "A cell's final expression or explicit return is its bounded observation. Values in lexical bindings or globalThis disappear after the committed cell boundary.",
@@ -369,6 +374,11 @@ export class AgentRunService {
         if (!progressed) return this.get(sessionId, branchId, runId);
         continue;
       }
+      if (step?.rejection && consecutiveActionRejections(run) > MAX_ACTION_CORRECTION_ATTEMPTS) {
+        const failedCheck = Object.values(run.goalChecks).at(-1);
+        await this.#terminal(sessionId, branchId, run, failedCheck?.status === "failed" ? "blocked" : "failed", failedCheck?.status === "failed" ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}` : `Rejected model action: ${step.rejection}`);
+        continue;
+      }
       if (state.budget.exceeded || budgetReached(state.budget.limits, state.budget)) {
         await this.#terminal(sessionId, branchId, run, "budget_exceeded", "Session budget is exhausted");
         continue;
@@ -413,11 +423,7 @@ export class AgentRunService {
 
       if (isTerminal(run.status) || run.status === "waiting_for_user") continue;
       if (run.cancellationRequested) continue;
-      if (step.rejection) {
-        const failedCheck = Object.values(run.goalChecks).at(-1);
-        await this.#terminal(sessionId, branchId, run, failedCheck?.status === "failed" ? "blocked" : "failed", failedCheck?.status === "failed" ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}` : `Rejected model action: ${step.rejection}`);
-        continue;
-      }
+      if (step.rejection) continue;
       const action = step.action!;
       // The already-admitted model action is retained at the exact budget
       // boundary. Only non-effect run-control actions may be processed there.
@@ -967,6 +973,7 @@ function agentProviderContext(
     "terminalNotices", "recursiveModels", "documents", "inputSets", "heartbeats", "schedules", "wakes", "activeRuns",
     "harness", "compactions", "workingValues", "artifacts", "queryHints",
   ].filter((key) => durable[key] !== undefined).map((key) => [key, durable[key]]));
+  const correctingRejectedAction = observations.some((observation) => observation.type === "AgentRunActionRejected");
   const stepInput = {
     runId: run.id,
     task: run.task,
@@ -974,7 +981,9 @@ function agentProviderContext(
     status: run.status,
     observations,
     durableContext,
-    instruction: observations.length
+    instruction: correctingRejectedAction
+      ? "The prior response was rejected without executing any code. Use the exact validation error in the observation and return exactly one corrected action JSON object."
+      : observations.length
       ? "Continue from these new exact-once durable observations."
       : "Choose the first concrete action for this task.",
   };
@@ -1050,6 +1059,12 @@ function boundedGoalSummary(goal: GoalHandle, status: "passed" | "failed" | "unk
   }));
   const encoded = JSON.stringify({ status, goalId: goal.goalId, reason: goal.reason ?? null, gates });
   return encoded.length <= 16_384 ? encoded : `${encoded.slice(0, 16_383)}…`;
+}
+
+function consecutiveActionRejections(run: AgentRunState): number {
+  const firstNonRejectedOffset = [...run.steps].reverse()
+    .findIndex((step) => step.rejection === undefined);
+  return firstNonRejectedOffset === -1 ? run.steps.length : firstNonRejectedOffset;
 }
 
 function isTerminal(status: AgentRunStatus): boolean { return TERMINAL_RUN_STATUSES.includes(status); }

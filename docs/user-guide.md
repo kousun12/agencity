@@ -70,6 +70,8 @@ A task is the instruction you give Agencity. A run is one durable attempt to car
 - a final answer;
 - an explicit blocked or failed result.
 
+Every response must contain exactly one valid versioned action. If validation rejects a response, Agencity retains it without executing its code and gives the model one bounded correction step with the exact error. A second consecutive rejection ends the run. Normal budget and step limits also apply to the correction.
+
 Agencity records a requested external effect before executing it. A dependent model step starts only after the result is committed. A final answer may also be checked by a completion gate:
 
 ```sh

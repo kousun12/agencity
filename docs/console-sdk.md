@@ -207,7 +207,7 @@ const shell = await tools.shell("bun test", {
 const file = await tools.readFile("package.json");
 await tools.writeFile(
   "notes/result.txt",
-  "done",
+  `${file.content}\nreviewed\n`,
   file.sha256,
 );
 
@@ -224,7 +224,13 @@ const outcome = await tools.request(
 
 `tools.request(executor, operation, input, options?)` commits `EffectRequested` before execution and returns `{ outcome, output?, error? }`, where outcome is `succeeded`, `failed`, `cancelled`, or `unknown`.
 
-`tools.shell`, `tools.readFile`, and `tools.writeFile` throw unless the outcome is `succeeded`. Shell defaults to non-idempotent. File operations default to idempotent except exact-text replace. The flag is a caller assertion about logical effect semantics, not proof that an external system is safe to retry.
+The convenience helpers return structured output:
+
+- `tools.readFile(path)` returns `{ content, sha256, size }`. Read or edit `content`; the result itself is not a string.
+- `tools.writeFile(path, content, expectedSha256?)` returns `{ path, sha256, size, unchanged? }`. Pass the digest from a prior read when replacing that exact version.
+- `tools.shell(command, options?)` returns `{ exitCode, stdout, stderr, truncated }`. Supported execution options include `timeoutMs` and `cwd`; the timeout key is not `timeout`.
+
+`tools.shell`, `tools.readFile`, and `tools.writeFile` throw unless the outcome is `succeeded`. Use `tools.request` when an expected failed outcome must be inspected without failing the cell. Shell defaults to non-idempotent. File operations default to idempotent except exact-text replace. The flag is a caller assertion about logical effect semantics, not proof that an external system is safe to retry.
 
 The file executor constrains typed file operations to its configured root and checks symlink escapes. The shell executor constrains only its initial working directory. Generated TypeScript and shell commands retain ambient OS authority.
 

@@ -106,6 +106,22 @@ function crashAfterNextActionCommit(supervisor: Supervisor): () => void {
   return () => Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: appendEvents });
 }
 
+function crashAfterActionRejection(supervisor: Supervisor, occurrence = 1): () => void {
+  const appendEvents = supervisor.storage.appendEvents.bind(supervisor.storage);
+  let rejections = 0;
+  Object.defineProperty(supervisor.storage, "appendEvents", {
+    configurable: true,
+    value: async (events: Parameters<typeof appendEvents>[0]) => {
+      const appended = await appendEvents(events);
+      if (events.some(event => event.type === "AgentRunActionRejected") && ++rejections === occurrence) {
+        throw new Error("simulated crash after AgentRunActionRejected");
+      }
+      return appended;
+    },
+  });
+  return () => Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: appendEvents });
+}
+
 describe("autonomous durable agent runs", () => {
   test("executes typed TypeScript actions and delivers every cell observation once to the dependent context", async () => {
     const value = await fixture([
@@ -125,6 +141,10 @@ describe("autonomous durable agent runs", () => {
       expect(result).toMatchObject({ status: "succeeded", steps: 2, final: "Created answer.txt and verified its contents." });
       expect(await Bun.file(`${value.temp.workspaceRoot}/answer.txt`).text()).toBe("durable-agent-run");
       expect(value.provider.calls).toBe(2);
+      const firstContext = JSON.stringify(value.provider.contexts[0]);
+      expect(firstContext).toContain("readFile returns { content, sha256, size }");
+      expect(firstContext).toContain("the option is timeoutMs, not timeout");
+      expect(firstContext).toContain("shell returns { exitCode, stdout, stderr, truncated }");
 
       const observations = value.provider.contexts.flatMap(providerObservations);
       const cells = observations.filter(item => item.type === "CellCommitted");
@@ -154,17 +174,125 @@ describe("autonomous durable agent runs", () => {
     } finally { await value.supervisor.close(); }
   });
 
-  test("strictly rejects malformed actions without executing their code-like text", async () => {
-    const value = await fixture(["```json\n{\"type\":\"typescript\",\"code\":\"await tools.writeFile('owned','bad')\"}\n```"]);
+  test("delivers a rejected action once and accepts one bounded correction without executing rejected code", async () => {
+    const value = await fixture([
+      "```json\n{\"type\":\"typescript\",\"code\":\"await tools.writeFile('owned','bad')\"}\n```",
+      action({ type: "final", content: "Recovered with one valid action." }),
+    ]);
     try {
       const result = await value.supervisor.runs.start(value.sessionId, value.branchId, "Do not execute malformed output");
-      expect(result.status).toBe("failed");
-      expect(result.reason).toContain("Rejected model action");
+      expect(result).toMatchObject({ status: "succeeded", steps: 2, final: "Recovered with one valid action." });
+      expect(value.provider.calls).toBe(2);
       expect(await Bun.file(`${value.temp.workspaceRoot}/owned`).exists()).toBe(false);
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
       expect(Object.values(state.cells)).toEqual([]);
       expect(state.agentRuns[result.runId]?.steps[0]?.rejection).toContain("exactly one JSON object");
+      const correctionObservations = providerObservations(value.provider.contexts[1]!)
+        .filter(item => item.type === "AgentRunActionRejected");
+      expect(correctionObservations).toHaveLength(1);
+      expect((value.provider.contexts[1] as any).run.instruction)
+        .toContain("return exactly one corrected action JSON object");
+      expect(correctionObservations[0]?.payload).toMatchObject({
+        runId: result.runId,
+        error: expect.stringContaining("exactly one JSON object"),
+      });
+      expect(value.provider.contexts.flatMap(providerObservations)
+        .filter(item => item.eventId === correctionObservations[0]!.eventId)).toHaveLength(1);
     } finally { await value.supervisor.close(); }
+  });
+
+  test("fails after the bounded action-correction attempt is also malformed", async () => {
+    const malformed = "```json\n{\"type\":\"typescript\",\"code\":\"await tools.writeFile('owned','bad')\"}\n```";
+    const value = await fixture([malformed, malformed]);
+    try {
+      const result = await value.supervisor.runs.start(value.sessionId, value.branchId, "Do not execute malformed output");
+      expect(result).toMatchObject({ status: "failed", steps: 2 });
+      expect(result.reason).toContain("Rejected model action");
+      expect(value.provider.calls).toBe(2);
+      expect(await Bun.file(`${value.temp.workspaceRoot}/owned`).exists()).toBe(false);
+      const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
+      expect(Object.values(state.cells)).toEqual([]);
+      expect(state.agentRuns[result.runId]?.steps.map(step => step.rejection)).toEqual([
+        expect.stringContaining("exactly one JSON object"),
+        expect.stringContaining("exactly one JSON object"),
+      ]);
+    } finally { await value.supervisor.close(); }
+  });
+
+  test("does not admit an action-correction call after the durable turn budget is exhausted", async () => {
+    const value = await fixture([
+      "not an action",
+      action({ type: "final", content: "Must not be requested." }),
+    ], { turnLimit: 1 });
+    try {
+      const result = await value.supervisor.runs.start(value.sessionId, value.branchId, "Respect correction bounds");
+      expect(result).toMatchObject({ status: "budget_exceeded", steps: 1 });
+      expect(value.provider.calls).toBe(1);
+      const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
+      expect(state.agentRuns[result.runId]?.steps[0]?.rejection).toContain("exactly one JSON object");
+    } finally { await value.supervisor.close(); }
+  });
+
+  test("resumes the bounded correction after a crash committed the rejection", async () => {
+    const value = await fixture([
+      "not an action",
+      action({ type: "final", content: "Recovered after restart." }),
+    ]);
+    let restore = () => {};
+    try {
+      const admitted = await value.supervisor.runs.admit(
+        value.sessionId,
+        value.branchId,
+        "Recover a rejected action",
+      );
+      restore = crashAfterActionRejection(value.supervisor);
+      await expect(value.supervisor.runs.advance(value.sessionId, value.branchId, admitted.runId))
+        .rejects.toThrow("simulated crash after AgentRunActionRejected");
+      restore();
+      restore = () => {};
+
+      const recovered = await value.supervisor.runs.advance(value.sessionId, value.branchId, admitted.runId);
+      expect(recovered).toMatchObject({ status: "succeeded", steps: 2, final: "Recovered after restart." });
+      expect(value.provider.calls).toBe(2);
+      const history = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
+      expect(history.filter(event => event.type === "AgentRunActionRejected")).toHaveLength(1);
+      expect(value.provider.contexts.flatMap(providerObservations)
+        .filter(observation => observation.type === "AgentRunActionRejected")).toHaveLength(1);
+    } finally {
+      restore();
+      await value.supervisor.close();
+    }
+  });
+
+  test("does not exceed the correction bound after a crash committed the second rejection", async () => {
+    const value = await fixture([
+      "not an action",
+      "also not an action",
+      action({ type: "final", content: "Must not be requested." }),
+    ]);
+    let restore = () => {};
+    try {
+      const admitted = await value.supervisor.runs.admit(
+        value.sessionId,
+        value.branchId,
+        "Stop after the bounded correction",
+      );
+      restore = crashAfterActionRejection(value.supervisor, 2);
+      await expect(value.supervisor.runs.advance(value.sessionId, value.branchId, admitted.runId))
+        .rejects.toThrow("simulated crash after AgentRunActionRejected");
+      restore();
+      restore = () => {};
+
+      const recovered = await value.supervisor.runs.advance(value.sessionId, value.branchId, admitted.runId);
+      expect(recovered).toMatchObject({ status: "failed", steps: 2 });
+      expect(recovered.reason).toContain("Rejected model action");
+      expect(value.provider.calls).toBe(2);
+      const history = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
+      expect(history.filter(event => event.type === "AgentRunActionRejected")).toHaveLength(2);
+    } finally {
+      restore();
+      await value.supervisor.close();
+    }
   });
 
   test("deduplicates stable run requests and rejects changed intent", async () => {
