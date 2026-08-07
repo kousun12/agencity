@@ -6,3 +6,4 @@ coverage/
 .prime-agent/
 .env
 .DS_Store
+.claude
