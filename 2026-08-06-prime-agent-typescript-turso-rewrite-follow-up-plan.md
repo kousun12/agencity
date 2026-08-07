@@ -360,7 +360,7 @@ The TUI becomes the default terminal product and projects the same public snapsh
 
 ### Completion evidence
 
-- Commits: `ab17e18`, `dee7118`, `c570c09`, and `11cb70d`.
+- Commits: `ab17e18`, `dee7118`, `c570c09`, `11cb70d`, and `ee874b2`.
 - Implementation: shared HTTP/in-process router transport, typed client errors and cursor-safe watcher, protocol-only TUI with live/historical projections, palette/status/cells/autonomy/operations, provisional progress, and trusted-local/capability presentation.
 - Verification: full verify passed 576 tests with 2 external skips; transport/TUI focused suites passed. Independent review validated router equivalence, cursor races/dedupe and no Supervisor/storage dependency; command-error/SSE cleanup defects were fixed and re-review passed.
 - Remaining limitation: readline presentation is intentionally basic; managed lifecycle is supplied by FU-015.
@@ -400,7 +400,7 @@ Users can stop, detach, resume, and reconcile work while the interface accuratel
 
 ### Completion evidence
 
-- Commits: `ab17e18`, `4c0adbc`, and `11cb70d`.
+- Commits: `ab17e18`, `4c0adbc`, `11cb70d`, and `ee874b2`.
 - Implementation: append-only effect reconciliation evidence, unknown inspection/no-ID CLI, recovery summary, durable cancel-versus-detach semantics, first/second interrupt handling, and truthful managed/embedded warnings. Reconciliation never rewrites or retries the original unknown effect.
 - Verification: reconciliation reducer/rebuild/protocol/CLI and SIGINT tests passed; independent review and re-review passed after command and cancellation errors were made scrubbed/non-fatal.
 - Remaining limitation: reconciliation records user assessments rather than proving external truth; successor work remains an explicit new run.
@@ -1215,3 +1215,10 @@ Add dated review and implementation evidence here.
 - The reproduced product journey covers missing-provider truthfulness, explicit model setup, autonomous coding cells/tools, executed recursive result, retained same-child follow-up, failed-gate repair, installed TUI `/quit`, detach and client loss, resident completion, no-ID reattach/status/tree/history, named branch/resume, distinct terminal outcomes, post-commit crash recovery, unknown/no-retry reconciliation, refinement, skills, streaming, compaction, and schedules.
 - Final `bun run verify` after the last hardening commit passed typecheck and architecture checks, 593 core tests with 2 external skips, and 12 installed acceptance tests with 1 opt-in real-provider skip. `bun run test:acceptance:matrix` reported deterministic `PASS` and real-provider, official Turso server, and Turso Cloud rows as `SKIP` with prerequisite names only.
 - External live-provider and Turso rows remain unverified in this environment; source/link installation is proven, while registry or standalone packaging is not claimed. Trusted-local OS authority, no cross-device automatic failover, and the basic readline presentation remain explicit limitations.
+
+
+### August 7, 2026 — TUI product-output hardening after first manual trial
+
+- A real-provider manual trial exposed three presentation defects despite the protocol and recovery paths working: raw internal action JSON streamed into the terminal, routine canonical events/reconnects overwhelmed the conversation, and an idle Ctrl-C announced detach without resolving Bun's pending readline question.
+- Commit `ee874b2` makes live output a concise product projection, keeps structured action deltas internal, preserves validated assistant output and audit history, silences routine reconnects, and aborts pending readline input so Ctrl-C, `/quit`, and `/exit` detach exactly once without `process.exit`.
+- Typecheck, architecture, 11 TUI tests, 19 protocol/streaming tests, 16 product tests, and the installed primary acceptance path passed after the fix.
