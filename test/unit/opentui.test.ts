@@ -666,6 +666,20 @@ describe("OpenTUI interactive terminal", () => {
       expect(source).toBeInstanceOf(CodeRenderable);
       expect(message.content).toBe(view.conversation[0]!.content);
       expect(source.content).toBe(view.runs[0]!.steps[0]!.cell!.code);
+      const logs = setup.renderer.root.findDescendantById(
+        "agencity-transcript-cell-logs-agent-run-cell-action-1",
+      )!;
+      setup.renderer.startSelection(source, source.screenX, source.screenY);
+      setup.renderer.updateSelection(
+        logs,
+        logs.screenX + Math.max(1, logs.width - 1),
+        logs.screenY + Math.max(0, logs.height - 1),
+        { finishDragging: true },
+      );
+      const selected = setup.renderer.getSelection()?.getSelectedText() ?? "";
+      expect(selected).toContain(source.content);
+      expect(selected).toContain("computed value");
+      setup.renderer.clearSelection();
 
       transcript.reconcile(view, new Set());
       await setup.waitForFrame(value => value.includes("Ctrl-O to expand latest") && !value.includes("return { value };"));
