@@ -136,7 +136,12 @@ function familyActivityMarker(activity: TerminalFamilyChildView["activity"]): st
   return "○";
 }
 
-function renderFamilyBrowser(view: TerminalScreenView, selectedKey: string | null, compact = false): string {
+function renderFamilyBrowser(
+  view: TerminalScreenView,
+  selectedKey: string | null,
+  compact = false,
+  showModel = false,
+): string {
   if (compact) {
     const selected = view.familyChildren.find(child => child.key === selectedKey) ?? view.familyChildren[0];
     return [
@@ -153,7 +158,7 @@ function renderFamilyBrowser(view: TerminalScreenView, selectedKey: string | nul
   for (const child of view.familyChildren) {
     const selected = child.key === selectedKey;
     lines.push(
-      `${selected ? ">" : " "} ${familyActivityMarker(child.activity)} ${child.displayName} — ${child.activityLabel}`,
+      `${selected ? ">" : " "} ${familyActivityMarker(child.activity)} ${child.displayName} — ${child.activityLabel}${showModel && child.model ? ` · ${child.model}` : ""}`,
       `    ${child.task}`,
     );
     if (child.cancellationRequested) lines.push("    cancellation requested");
@@ -1057,7 +1062,7 @@ export class OpenTuiApp {
       : provisional
         ? `PROVISIONAL OUTPUT\n${provisional}`
         : this.#familyFocus === "browser"
-          ? renderFamilyBrowser(this.#view, this.#familySelectedKey, veryShort)
+          ? renderFamilyBrowser(this.#view, this.#familySelectedKey, veryShort, width >= 96)
         : this.#detail
           ? this.#detail.kind === "model" && !this.#rawDetail
             ? renderModelInspector(this.#detail, this.#modelProviderIndex, this.#modelEntryProvider)

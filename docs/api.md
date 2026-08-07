@@ -138,7 +138,7 @@ const terminal = await supervisor.models.result(call.handleId, {
 });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, cancellation state, and derived `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable` activity. Its bounded reason codes distinguish user input, permission, blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state cases. Missing retained state stays unavailable instead of resolving to another branch.
+`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable` activity. Its bounded reason codes distinguish user input, permission, blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state cases. Missing retained state stays unavailable instead of resolving to another branch.
 
 Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
 

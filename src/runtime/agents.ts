@@ -55,7 +55,7 @@ export interface FamilyAgentRecord {
   readonly sessionId: string; readonly branchId: string; readonly name: string | null;
   readonly relationship: FamilyRelationship; readonly depth: number; readonly status: string;
   readonly taskId: string | null; readonly taskStatus: TaskStatus | null;
-  readonly task: string | null; readonly cancellationRequested: boolean;
+  readonly task: string | null; readonly model: ModelConfiguration | null; readonly cancellationRequested: boolean;
   readonly activity: FamilyAgentActivity; readonly activityReason: FamilyAgentActivityReason;
 }
 export type FamilyAgentActivity = "working" | "waiting" | "idle" | "attention" | "ended" | "unavailable";
@@ -421,6 +421,7 @@ export class AgentService {
         taskId: candidate.taskId,
         taskStatus: task?.status ?? null,
         task: task?.task ?? candidate.taskFallback,
+        model: state?.model ?? task?.model ?? null,
         cancellationRequested: task?.cancellationRequested ?? false,
         ...activity,
       };

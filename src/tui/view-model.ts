@@ -69,6 +69,7 @@ export interface TerminalFamilyChildView extends TerminalRoute {
   readonly activityLabel: string;
   readonly activityReason: FamilyAgentActivityReason;
   readonly activityReasonLabel: string | null;
+  readonly model: string | null;
   readonly cancellationRequested: boolean;
   readonly openable: boolean;
 }
@@ -156,6 +157,7 @@ export function buildTerminalFamilyChildren(records: readonly FamilyAgentRecord[
       activityLabel: record.activity,
       activityReason: record.activityReason,
       activityReasonLabel: record.activityReason === null ? null : FAMILY_REASON_LABELS[record.activityReason],
+      model: record.model ? `${record.model.provider}:${record.model.model}` : null,
       cancellationRequested: record.cancellationRequested,
       openable: record.activity !== "unavailable",
     }))

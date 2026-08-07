@@ -313,7 +313,7 @@ Methods:
 - `cancel(target, reason?)`
 - `followUp(target, content, options?)`
 
-`list()` returns the same additive family projection as the public protocol. Every row includes exact session and branch identity, relationship, name, depth, session and task status, task summary, cancellation-request state, derived activity, and a bounded activity reason. Direct children are scoped to task edges admitted from the executing branch. Missing required state is returned as `unavailable` with `missing_state`; it is not omitted or redirected.
+`list()` returns the same additive family projection as the public protocol. Every row includes exact session and branch identity, relationship, name, depth, session and task status, task summary, model configuration, cancellation-request state, derived activity, and a bounded activity reason. Direct children are scoped to task edges admitted from the executing branch. Missing required state is returned as `unavailable` with `missing_state`; it is not omitted or redirected.
 
 The executing session and branch always supply sender identity. Targets are limited to the unique parent, direct children, or siblings; deeper and cross-root targets are rejected. The literal `parent` selects the unique parent. Ambiguous names fail.
 

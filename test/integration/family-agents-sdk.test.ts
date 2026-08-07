@@ -145,6 +145,7 @@ describe("FU-012 retained family messaging", () => {
         taskId: "family-missing-task",
         taskStatus: "pending",
         task: "State is intentionally missing",
+        model: { provider: "family-actions", model: "scripted" },
         cancellationRequested: false,
         activity: "unavailable",
         activityReason: "missing_state",

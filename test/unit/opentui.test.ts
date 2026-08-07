@@ -412,6 +412,7 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressEnter();
       frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("> ● Reviewer — working"));
       expect(frame).toContain("Review the implementation");
+      expect(frame).toContain("echo:echo-1");
 
       setup.resize(72, 16);
       frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("TRUSTED-LOCAL"));
