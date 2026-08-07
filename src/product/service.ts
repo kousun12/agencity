@@ -457,11 +457,12 @@ export class ManagedWorkspaceService {
         try { await operation(); } catch (error) { failures.push(error); }
       };
       await this.#recoveryPromise?.catch(error => { failures.push(error); });
-      await settle(() => this.protocol.stop(true));
+      this.protocol.stopAccepting();
       await settle(() => this.protocol.drainHandlers());
       await settle(() => this.#workers.drain());
       await settle(() => this.supervisor.heartbeats.close());
       await settle(() => this.supervisor.schedules.close());
+      await settle(() => this.protocol.closeActiveConnections());
       await unpublishServiceManifest({
         workspaceRoot: this.config.workspace.root,
         workspaceId: this.config.workspace.workspaceId,

@@ -162,7 +162,10 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
   const attentionGates = Object.values(state.goals).flatMap(goal => Object.values(goal.gates))
     .filter(gate => ["failed", "unknown", "running"].includes(gate.status)).length;
   const cancellationPending = Object.values(state.agentRuns).filter(run => run.cancellationRequested && !isTerminalRunStatus(run.status)).length;
-  const attentionCount = unknownEffects + attentionGates + cancellationPending;
+  const pendingUserInputs = Object.values(state.agentRuns)
+    .flatMap(run => Object.values(run.inputRequests))
+    .filter(request => request.response === undefined).length;
+  const attentionCount = unknownEffects + attentionGates + cancellationPending + pendingUserInputs;
   const streaming = provider?.capabilities.streaming ? "incremental" : "committed";
   const recoveryCount = pendingEffects + unknownEffects + activeTasks + attentionGates;
 

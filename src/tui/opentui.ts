@@ -583,13 +583,15 @@ export class OpenTerminalUI {
       return;
     }
     let serviceStatus: ManagedServiceStatusView | null = null;
-    const timedOut = Symbol("service-status-timeout");
-    const statusRequest = this.client.serviceStatus()
-      .then(value => value as ManagedServiceStatusView)
-      .catch(() => null);
-    const statusResult = await Promise.race([statusRequest, Bun.sleep(750).then(() => timedOut)]);
-    if (statusResult === timedOut) this.client.abortPendingRequests("Detach status timed out");
-    else serviceStatus = statusResult as ManagedServiceStatusView | null;
+    if (this.client.serviceStatus) {
+      const timedOut = Symbol("service-status-timeout");
+      const statusRequest = this.client.serviceStatus()
+        .then(value => value as ManagedServiceStatusView)
+        .catch(() => null);
+      const statusResult = await Promise.race([statusRequest, Bun.sleep(750).then(() => timedOut)]);
+      if (statusResult === timedOut) this.client.abortPendingRequests?.("Detach status timed out");
+      else serviceStatus = statusResult as ManagedServiceStatusView | null;
+    }
     this.#output.write(`${formatManagedDetach(serviceStatus)}\n`);
   }
 }

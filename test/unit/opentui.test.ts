@@ -73,6 +73,28 @@ describe("OpenTUI interactive terminal", () => {
       },
     });
     expect(proposedFinal.runs[0]?.steps[0]).toMatchObject({ label: "Completion proposed", detail: null });
+    const waitingForUser = buildTerminalScreen({
+      ...controller.presentation,
+      state: {
+        ...controller.presentation.state,
+        agentRuns: {
+          "waiting-run": {
+            id: "waiting-run",
+            task: "Need a choice",
+            status: "waiting_for_user",
+            steps: [],
+            inputRequests: {
+              "choice-request": { question: "Which option?", response: undefined },
+            },
+            cancellationRequested: false,
+          } as any,
+        },
+      },
+    });
+    expect(waitingForUser).toMatchObject({
+      attentionCount: 1,
+      composerPlaceholder: "Answer the pending request…",
+    });
     const setup = await createTestRenderer({ width: 112, height: 30 });
     let releaseSlowCommand = (): void => {};
     let slowCommandAborted = false;

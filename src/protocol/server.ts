@@ -35,6 +35,8 @@ export interface ProtocolServerOptions {
 
 export class ProtocolServer {
   #server: ReturnType<typeof Bun.serve> | null = null;
+  #stoppingServer: ReturnType<typeof Bun.serve> | null = null;
+  #stopAcceptingResult: Promise<unknown | null> | null = null;
   #activeHandlers = 0;
   readonly #handlerDrainResolvers = new Set<() => void>();
   constructor(readonly supervisor: Supervisor, readonly options: ProtocolServerOptions = {}) {}
@@ -45,9 +47,35 @@ export class ProtocolServer {
     return this.#server;
   }
   async stop(closeActiveConnections = false): Promise<void> {
+    this.stopAccepting();
+    if (closeActiveConnections) {
+      await this.closeActiveConnections();
+      return;
+    }
+    const error = await this.#stopAcceptingResult;
+    this.#stoppingServer = null;
+    this.#stopAcceptingResult = null;
+    if (error !== null) throw error;
+  }
+  stopAccepting(): void {
+    if (this.#stoppingServer) return;
     const server = this.#server;
     this.#server = null;
-    await server?.stop(closeActiveConnections);
+    if (!server) return;
+    this.#stoppingServer = server;
+    this.#stopAcceptingResult = server.stop(false).then(() => null, error => error);
+  }
+  async closeActiveConnections(): Promise<void> {
+    const server = this.#stoppingServer;
+    const stopAcceptingResult = this.#stopAcceptingResult;
+    this.#stoppingServer = null;
+    this.#stopAcceptingResult = null;
+    let closeError: unknown = null;
+    try { await server?.stop(true); }
+    catch (error) { closeError = error; }
+    const stopError = await stopAcceptingResult;
+    if (closeError !== null) throw closeError;
+    if (stopError !== null && stopError !== undefined) throw stopError;
   }
   async drainHandlers(): Promise<void> {
     if (this.#activeHandlers === 0) return;

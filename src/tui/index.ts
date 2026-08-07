@@ -13,7 +13,7 @@ import {
 } from "./view-model.ts";
 
 export type TerminalAgentClient = Pick<AgentClient,
-  "abortPendingRequests" | "capabilities" | "serviceStatus" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
+  "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
   "createSession" | "modelProviders" | "startRun" | "run" | "respondToRun" | "cancelRun" |
   "cell" | "fork" | "resume" | "inspectContext" | "compact" | "agents" | "tasks" | "mailbox" | "cancelTask" |
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
@@ -22,7 +22,7 @@ export type TerminalAgentClient = Pick<AgentClient,
   "memoryList" | "memorySearch" | "harnessList" | "listSkills" | "getSkill" | "previewSkillImport" | "installSkill" | "enableSkill" | "disableSkill" | "removeSkill" | "proposeSkill" | "refinements" | "requestRefinement" | "refinementReviews" | "refinementPolicy" | "setAutomaticRefinement" | "userCorrection" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
   "syncStatus" | "syncNow" | "syncConflicts" | "resolveSyncConflict" | "recoverySummary" | "unknownEffects" |
   "inspectUnknownEffect" | "reconcileUnknownEffect"
->;
+> & Partial<Pick<AgentClient, "abortPendingRequests" | "serviceStatus">>;
 
 export interface TerminalUIOptions {
   readonly workspaceId?: string;
@@ -313,7 +313,7 @@ export class TerminalUI {
 
   abortPendingOperations(): void {
     this.#closing = true;
-    this.client.abortPendingRequests("Terminal detached");
+    this.client.abortPendingRequests?.("Terminal detached");
   }
 
   get presentation(): TerminalPresentation {

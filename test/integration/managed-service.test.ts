@@ -183,9 +183,13 @@ describe("managed workspace service", () => {
     const service = await opened(config);
     const encoder = new TextEncoder();
     let releaseBody = (): void => {};
+    let bodyReleased = false;
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
+        controller.enqueue(encoder.encode(" "));
         releaseBody = () => {
+          if (bodyReleased) return;
+          bodyReleased = true;
           controller.enqueue(encoder.encode(JSON.stringify({
             workspaceId: config.workspace.workspaceId,
             model: { provider: "echo", model: "echo-1" },
@@ -194,7 +198,8 @@ describe("managed workspace service", () => {
         };
       },
     });
-    const request = new Request(`${service.manifest.url}/sessions`, {
+    let requestSettled = false;
+    const responsePromise = fetch(`${service.manifest.url}/sessions`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${service.manifest.bearerToken}`,
@@ -202,19 +207,24 @@ describe("managed workspace service", () => {
       },
       body,
       duplex: "half",
-    } as RequestInit & { duplex: "half" });
-    const responsePromise = service.protocol.handle(request);
-    await Bun.sleep(0);
+    } as RequestInit & { duplex: "half" }).finally(() => { requestSettled = true; });
+    try {
+      await waitFor(async () => (await service.status()).attachedClients > 0, "admitted slow HTTP request", 2_000);
 
-    let closed = false;
-    const closePromise = service.close().then(() => { closed = true; });
-    await Bun.sleep(20);
-    expect(closed).toBe(false);
+      let closed = false;
+      const closePromise = service.close().then(() => { closed = true; });
+      await Bun.sleep(20);
+      expect(closed).toBe(false);
+      expect(requestSettled).toBe(false);
 
-    releaseBody();
-    expect((await responsePromise).status).toBe(200);
-    await closePromise;
-    expect(closed).toBe(true);
+      releaseBody();
+      expect((await responsePromise).status).toBe(200);
+      await closePromise;
+      expect(closed).toBe(true);
+    } finally {
+      releaseBody();
+      await responsePromise.catch(() => null);
+    }
   });
 
 
