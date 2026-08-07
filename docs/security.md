@@ -32,12 +32,13 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 
 - Credential-shaped environment variables are removed from the console worker.
 - The shell executor receives an environment with credential-shaped names removed.
-- The OpenAI-compatible provider resolves its key in the supervisor.
-- Inputs containing an actual known environment secret value are rejected before durable append.
+- OpenAI, Anthropic, and Vercel AI Gateway providers resolve stored or environment keys in the supervisor.
+- TUI-stored model keys live in a profile-owned `auth.json` written with mode `0600`, separate from canonical events and profile preferences.
+- Inputs containing an actual known environment or stored model secret value are rejected before durable append.
 - Known secret byte strings are redacted from executor outputs, logs, and errors before they become durable.
 - Benign domain fields named `token`, `auth`, `password`, and similar are preserved; key names alone never trigger data mutation.
 
-This is best-effort accidental-leak prevention. Names outside the heuristic, short secret values, credentials in files/agents/keychains, encoded values, or alternate process channels may still be visible to trusted code. Opaque handles are allowed, but a complete credential-broker implementation is deferred.
+This is best-effort accidental-leak prevention. Names outside the heuristic, short secret values, credentials in other files/agents/keychains, encoded values, or alternate process channels may still be visible to trusted code. Generated code has the same OS-user authority and can read the profile credential file through ambient filesystem APIs. The model credential store is a narrow supervisor broker, not a general secret vault or hostile-code boundary; opaque references remain available for externally managed credentials.
 
 ### Typed file adapter
 
@@ -53,7 +54,7 @@ Event headers/payloads and JSON values are validated before append. Working JSON
 
 ## Secrets and durable state
 
-Do not intentionally put secrets in prompts, workspace files read into context, artifact content, tool command strings, or user messages. Scrubbing cannot provide erasure guarantees after arbitrary secret transformation. Provider configuration should contain references/closures resolved by trusted supervisor code rather than key strings in model-visible tables.
+Do not intentionally put secrets in prompts, workspace files read into context, artifact content, tool command strings, or user messages. Scrubbing cannot provide erasure guarantees after arbitrary secret transformation. Provider keys belong in the owner-only model credential file, the trusted supervisor environment, or externally managed references—not in model-visible tables.
 
 If a secret is found in retained data, stop the runtime, rotate the secret, determine all database/artifact/log replicas, and apply an ownership-approved deletion/export policy. Slice 4 manifests enumerate managed local/profile/artifact/replica resources and block unsupported Cloud administrative deletion; operators must complete and verify the physical deletion through the owning Turso administration surface rather than treating a data-client sync call as deletion.
 
@@ -63,7 +64,7 @@ If a secret is found in retained data, stop the runtime, rotate the secret, dete
 2. Keep HTTP on `127.0.0.1` unless an authenticated proxy and network policy surround it.
 3. Mount only the intended workspace and state/artifact directories in a remote sandbox.
 4. Restrict outbound network independently if generated shell/code must not connect freely.
-5. Put provider keys only in the trusted supervisor environment; avoid credential files in readable mounts.
+5. Put provider keys only in the owner-only profile credential file, the trusted supervisor environment, or an externally managed secret store; protect the profile directory from other users.
 6. Treat shell and dynamic module use as full local code execution.
 7. Inspect `unknown` effects before any manual retry.
 8. Back up database and referenced artifacts together, and protect both as potentially sensitive trajectory data.

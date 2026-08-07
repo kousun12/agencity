@@ -25,8 +25,11 @@ All successful non-streaming responses are JSON. Failures use the typed, scrubbe
 | `POST /service/shutdown` | none | accepted graceful drain; it does not cancel sessions |
 | `GET /service/agents` | none | named root sessions and running/idle/detached state |
 | `POST /sessions/:session/stop?branch=:branch` | `{ reason? }` | durable user-requested active-run cancellation |
-| `GET /model-providers` | none | secret-free provider descriptors with truthful `capabilities.streaming` |
+| `GET /model-providers` | none | secret-free provider descriptors with truthful usability, credential source, remediation, and streaming capability |
+| `GET /product/config` | none | workspace default model, opaque credential references, and secret-free provider descriptors |
+| `POST /product/config/provider-key` | `{ provider, apiKey: string \| null }` | store or remove an OpenAI, Anthropic, or Vercel AI Gateway key; returns status only |
 | `POST /sessions` | `{ workspaceId?, model?, budget? }` | `{ sessionId, branchId }` |
+| `POST /sessions/:session/model?branch=:branch` | `{ model: ModelConfiguration }` | append an explicit idle-branch model change after provider availability validation |
 | `GET /sessions/:session/snapshot?branch=:branch` | none | `{ cursor, state }` |
 | `GET /sessions/:session/history?branch=:branch` | none | ordered `AgentEvent[]` including branch lineage |
 | `GET /sessions/:session/recovery-summary?branch=:branch` | none | pending/unknown effects, active/cancelling runs and children, gate attention, and terminal notices |

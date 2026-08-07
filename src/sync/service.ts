@@ -27,6 +27,8 @@ export interface SyncServiceOptions {
   readonly workspaceName?: string;
   readonly databaseUrl: string;
   readonly artifactDirectory?: string;
+  /** Owner-only model credential file managed with whole-profile deletion. */
+  readonly profileCredentialPath?: string;
   /** Required assertion before whole-directory workspace artifact erasure. */
   readonly artifactDirectoryOwnership?: "exclusive" | "shared";
   readonly syncUrl?: string;
@@ -47,6 +49,7 @@ export class SyncService {
   readonly workspaceName:string;
   readonly databaseUrl:string;
   readonly artifactDirectory:string|undefined;
+  readonly profileCredentialPath:string|undefined;
   readonly artifactDirectoryOwnership:"exclusive"|"shared";
   readonly replicaUrl:string|undefined;
   readonly transport:SyncTransport|null;
@@ -63,7 +66,7 @@ export class SyncService {
   constructor(options:SyncServiceOptions){
     this.storage=options.storage;this.profile=options.profile;this.device=options.device;
     this.workspaceId=required(options.workspaceId,"workspaceId");this.workspaceName=options.workspaceName??this.workspaceId;
-    this.databaseUrl=options.databaseUrl;this.artifactDirectory=options.artifactDirectory;this.artifactDirectoryOwnership=options.artifactDirectoryOwnership??"shared";this.replicaUrl=options.replicaUrl;
+    this.databaseUrl=options.databaseUrl;this.artifactDirectory=options.artifactDirectory;this.profileCredentialPath=options.profileCredentialPath;this.artifactDirectoryOwnership=options.artifactDirectoryOwnership??"shared";this.replicaUrl=options.replicaUrl;
     this.transport=options.transport??null;this.remoteDeletionAdmin=options.remoteDeletionAdmin??null;this.intervalMs=options.intervalMs??30_000;this.#now=options.now??(()=>new Date());
     if(!Number.isSafeInteger(this.intervalMs)||this.intervalMs<0)throw new ValidationError("Sync interval must be a nonnegative safe integer");
     this.replicaId=this.transport?.id??`local:${this.workspaceId}:${this.device.deviceId}`;
@@ -154,7 +157,7 @@ export class SyncService {
     const authenticatedRemoteDeletion=this.remoteDeletionAdmin?.capabilities.authenticatedAdministration===true&&this.remoteDeletionAdmin.capabilities.deleteWorkspaceReplica;
     const remoteDeletionSupported=scopeKind==="workspace"&&authenticatedRemoteDeletion&&remoteManaged&&syncUrls.size>0&&unaddressable.size===0;
     const resources:JsonValue={
-      workspaceDatabase:this.databaseUrl,profileDatabase:this.profile?.url??null,
+      workspaceDatabase:this.databaseUrl,profileDatabase:this.profile?.url??null,profileCredentialFile:this.profileCredentialPath??null,
       artifactDirectory:this.artifactDirectory??null,artifactDirectoryOwnership:this.artifactDirectoryOwnership,
       replicaFile:evidence.localReplicaUrls[0]??null,replicaFiles:evidence.localReplicaUrls,
       replicaTransport:this.transport?.id??null,workspaceCatalog:profileCatalog as unknown as JsonValue,
@@ -193,7 +196,7 @@ export class SyncService {
     if(receiptDirectory&&this.artifactDirectory&&inside(resolve(this.artifactDirectory),receiptDirectory))throw new ValidationError("Deletion receipt directory must be outside the managed artifact directory");
     const receiptPath=receiptDirectory?join(receiptDirectory,`${manifest.manifestId}.json`):null;
     const createdAt=this.#iso();
-    const removed={databaseFiles:[] as string[],replicaFiles:[] as string[],artifactFiles:[] as string[],rows:{} as Record<string,number>};
+    const removed={databaseFiles:[] as string[],replicaFiles:[] as string[],artifactFiles:[] as string[],credentialFiles:[] as string[],rows:{} as Record<string,number>};
     const retainedSharedArtifacts:string[]=[];const remoteAdminReceipts:PhysicalDeletionReceipt["remoteAdminReceipts"][number][]=[];
     const build=(status:PhysicalDeletionReceipt["status"],error:string|null,completedAt:string|null):PhysicalDeletionReceipt=>({
       version:1,manifestId:manifest.manifestId,scopeKind:input.scopeKind,scopeId:input.scopeId,requestedBy:input.requestedBy,
@@ -239,6 +242,7 @@ export class SyncService {
         const foreign=(await this.profile?.listWorkspaces(true)??[]).filter(row=>row.ownerProfileId!==this.device.profileId);
         if(foreign.length)throw new ValidationError("Profile database contains foreign-owned workspace catalog rows; refusing whole-file deletion");
         await this.stop();this.profile?.close();
+        if(this.profileCredentialPath)await removeFileAndRecord(resolve(this.profileCredentialPath),removed.credentialFiles);
         await removeManagedDatabase(localFilePath(this.profile!.url,"profile database"),removed.databaseFiles);
         const resources={...manifestResources,receiptPath,removed} as JsonValue;
         await this.storage.completeDataManifest(manifest.manifestId,"completed",resources,this.#iso());

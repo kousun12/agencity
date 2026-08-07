@@ -35,7 +35,7 @@ The local transport maintains an immutable replica-incarnation marker. The works
 
 Pulled envelopes pass digest/schema/event validation and causal ordering before canonical append. Duplicate content is idempotent. Divergent event IDs, duplicate intents, offline branch advances, rejected mutations, and competing task claims are retained and surfaced. No last-writer rule decides agent execution ownership. An explicit `SyncConflictResolved` event records a user decision without rewriting history.
 
-Tokens remain in process memory. Profile storage accepts only opaque credential references. The data client does not provide Cloud administrative deletion, distributed leases, task stealing, global budget reservations, or automatic owner failover, so those capabilities remain false.
+Sync and Cloud tokens remain in process memory. The profile database accepts only opaque credential references; separately managed model-provider keys may live in the owner-only profile `auth.json`. The data client does not provide Cloud administrative deletion, distributed leases, task stealing, global budget reservations, or automatic owner failover, so those capabilities remain false.
 
 ## Consequences
 

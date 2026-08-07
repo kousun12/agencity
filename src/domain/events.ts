@@ -7,7 +7,7 @@ import { agentActionSchema, type AgentAction } from "./agent-action.ts";
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
 export const eventTypes = [
-  "SessionCreated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "MessageAppended",
+  "SessionCreated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
   "WorkingValueSet", "ArtifactRegistered", "EffectRequested", "EffectAttemptStarted",
   "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ContextCompactionRequested", "ContextCompactionFailed",
@@ -89,6 +89,7 @@ export interface EventPayloads {
   SessionNamed: { name: string };
   BranchNamed: { name: string };
   SessionStatusChanged: { status: SessionStatus; reason?: string };
+  SessionModelChanged: { previousModel: ModelConfiguration; model: ModelConfiguration; selectedBy: "user" };
   MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string; mailbox?: { mailboxMessageId: string; fromSessionId: string; relationship: FamilyRelationship; taskId?: string; artifactIds?: string[]; receiptEventId: string } };
   CellProposed: { cellId: string; code: string; dependencies: string[] };
   CellStarted: { cellId: string; attempt: number };
@@ -249,6 +250,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SessionNamed: z.object({ name: z.string().min(1) }),
   BranchNamed: z.object({ name: z.string().min(1) }),
   SessionStatusChanged: z.object({ status: z.enum(["idle", "running", "stopped", "failed", "archived"]), reason: z.string().optional() }),
+  SessionModelChanged: z.object({ previousModel: modelSchema, model: modelSchema, selectedBy: z.literal("user") }).strict(),
   MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional(), mailbox: z.object({ mailboxMessageId: id, fromSessionId: id, relationship: z.enum(["parent", "child", "sibling"]), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), receiptEventId: id }).optional() }),
   CellProposed: z.object({ cellId: id, code: z.string(), dependencies: z.array(id) }),
   CellStarted: z.object({ cellId: id, attempt: positiveInteger }),

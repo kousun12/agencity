@@ -7,6 +7,7 @@ import {
 } from "../protocol/index.ts";
 import type { RecoverySummaryView } from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
+import type { ModelConfiguration } from "../domain/index.ts";
 import {
   type TerminalConnectionState,
   type TerminalPresentation,
@@ -15,6 +16,7 @@ import {
 export type TerminalAgentClient = Pick<AgentClient,
   "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
   "createSession" | "modelProviders" | "startRun" | "run" | "respondToRun" | "cancelRun" |
+  "productConfig" | "productSetModel" | "productSetProviderKey" | "selectModel" |
   "cell" | "fork" | "resume" | "inspectContext" | "compact" | "agents" | "tasks" | "mailbox" | "cancelTask" |
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
   "heartbeats" | "createHeartbeat" | "pauseHeartbeat" | "resumeHeartbeat" | "cancelHeartbeat" |
@@ -55,7 +57,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/stop", aliases: [], category: "product", usage: "/stop", summary: "Request durable run cancellation." },
   { name: "/quit", aliases: ["/exit"], category: "product", usage: "/quit", summary: "Detach without cancellation." },
   { name: "/info", aliases: ["/status"], category: "status", usage: "/info", summary: "Show model, recovery, trust, and protocol status." },
-  { name: "/model", aliases: [], category: "status", usage: "/model", summary: "Show the branch-pinned model and provider capability." },
+  { name: "/model", aliases: [], category: "status", usage: "/model [PROVIDER:MODEL|login PROVIDER|logout PROVIDER]", summary: "Configure a provider and explicitly select the branch model." },
   { name: "/budget", aliases: [], category: "status", usage: "/budget", summary: "Show committed budget usage." },
   { name: "/snapshot", aliases: [], category: "status", usage: "/snapshot", summary: "Show the projected state currently being viewed." },
   { name: "/mailbox", aliases: [], category: "status", usage: "/mailbox", summary: "Show retained family messages and receipts." },
@@ -123,7 +125,7 @@ export function renderStartupStatus(
   return [
     "Agencity trusted-local TUI (protocol-backed terminal client)",
     `Session: ${state.sessionName ?? "unnamed session"} / ${state.branch.name ?? "unnamed branch"}`,
-    `Model: ${state.model.provider}/${state.model.model} (${streaming})`,
+    `Model: ${state.model.provider}:${state.model.model} (${streaming})`,
     "Authority: TRUSTED-LOCAL; generated code has the runtime process's OS authority (not sandboxed)",
     `Protocol: snapshot+cursor resume=${capabilities.snapshotCursorResume}; progress is ephemeral; sync=${sync}`,
     `Recovery: ${recovery.pendingEffectIds.length} pending effects, ${recovery.unknownEffects.length} unknown, ${recovery.activeChildTaskIds.length} active children, ${recovery.attentionGoalGateIds.length} failed/unknown/running gates`,
@@ -164,6 +166,8 @@ export function renderEvent(event: AgentEvent): string | null {
   switch (event.type) {
     case "MessageAppended":
       return payload.role === "assistant" ? `assistant: ${String(payload.content)}` : null;
+    case "SessionModelChanged":
+      return `[model changed] ${String((payload.model as { provider?: string } | undefined)?.provider ?? "")}:${String((payload.model as { model?: string } | undefined)?.model ?? "")}`;
     case "CellCommitted":
       return `[cell complete] ${conciseValue(payload.result)}`;
     case "CellFailed":
@@ -227,6 +231,7 @@ export class TerminalUI {
   #detached = false;
   #closing = false;
   #readline: ReadlineInterface | null = null;
+  #pendingCredentialProvider: string | null = null;
 
   constructor(readonly client: TerminalAgentClient, readonly options: TerminalUIOptions = {}) {
     this.#input = options.input ?? stdin;
@@ -243,8 +248,11 @@ export class TerminalUI {
       while (!this.#detached) {
         let line: string;
         try {
-          line = (await this.#readline.question(this.#prompt(), { signal: this.#detachController?.signal })).trim();
-        } catch {
+          line = this.#pendingCredentialProvider
+            ? await this.#hiddenCredentialQuestion()
+            : (await this.#readline.question(this.#prompt(), { signal: this.#detachController?.signal })).trim();
+        } catch (error) {
+          if (!this.#detachController?.signal.aborted) this.#write(`${renderTerminalError(error, "input")}\n`);
           break;
         }
         if (!line) continue;
@@ -310,6 +318,7 @@ export class TerminalUI {
   }
 
   get detached(): boolean { return this.#detached; }
+  get pendingSecretInput(): boolean { return this.#pendingCredentialProvider !== null; }
 
   abortPendingOperations(): void {
     this.#closing = true;
@@ -336,6 +345,20 @@ export class TerminalUI {
   /** Public command entry for renderer/command tests and alternate terminal shells. */
   async execute(line: string): Promise<"continue" | "detach"> {
     if (this.#closing) return "detach";
+    if (this.#pendingCredentialProvider) {
+      if (line === "/cancel") {
+        this.#pendingCredentialProvider = null;
+        this.#write("Provider login cancelled.\n");
+        return "continue";
+      }
+      const provider = this.#pendingCredentialProvider;
+      await this.client.productSetProviderKey(provider, line.trim());
+      this.#pendingCredentialProvider = null;
+      this.#capabilities = await this.client.capabilities();
+      this.#write(`Saved API key for ${provider} in the owner-only local auth file.\n`);
+      this.#publish();
+      return "continue";
+    }
     if (line === "/quit" || line === "/exit") { this.#requestDetach(); return "detach"; }
     if (line === "/help") { this.#writePalette(); return "continue"; }
     if (line === "/live") { this.#historicalCursor = null; this.#viewState = this.#liveState; this.#write("Returned to live state.\n"); this.#publish(); return "continue"; }
@@ -347,7 +370,7 @@ export class TerminalUI {
       if(this.#productCatalog)await this.client.productSelect(created.sessionId, created.branchId);
       await this.#switch(created.sessionId, created.branchId); return "continue";
     }
-    if (line === "/model") { const state=this.#requireState(); const descriptor=(await this.client.modelProviders()).find((item)=>item.name===state.model.provider); this.#json({selected:state.model,provider:descriptor??null,resumedBranchesNeverChangeModelSilently:true}); return "continue"; }
+    if (line === "/model" || line.startsWith("/model ")) { await this.#model(line.slice(6).trim()); return "continue"; }
     if (line === "/history" || line.startsWith("/history ")) { await this.#history(line.slice(8).trim()); return "continue"; }
     if (line === "/snapshot") { this.#json(this.#requireState()); return "continue"; }
     if (line === "/budget") { this.#json(this.#requireState().budget); return "continue"; }
@@ -550,7 +573,7 @@ Confirmation digest: ${preview.confirmationDigest}
     this.#watchController?.abort();
     await this.#watchPromise?.catch(()=>{});
     if (this.#closing) return;
-    this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();this.#visibleProgressEffectIds.clear();this.#agentProgressRunByEffect.clear();this.#agentWorkingRunIds.clear();this.#agentWorkingAnnouncementRunIds.clear();
+    this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#pendingCredentialProvider=null;this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();this.#visibleProgressEffectIds.clear();this.#agentProgressRunByEffect.clear();this.#agentWorkingRunIds.clear();this.#agentWorkingAnnouncementRunIds.clear();
     const snapshot=await this.client.snapshot(sessionId,branchId);
     if (this.#closing) return;
     this.#liveState=snapshot.state;this.#viewState=snapshot.state;
@@ -567,6 +590,51 @@ Confirmation digest: ${preview.confirmationDigest}
   }
 
   async #info():Promise<void>{const caps=await this.client.capabilities();const recovery=await this.client.recoverySummary(this.#sessionId,this.#branchId);this.#capabilities=caps;this.#write(`${renderStartupStatus(this.#requireState(),caps,recovery)}\n`);this.#publish();}
+  async #model(command:string):Promise<void>{
+    const providers=await this.client.modelProviders();
+    if(!command){
+      const config=await this.client.productConfig();
+      this.#json({
+        selected:`${this.#requireState().model.provider}:${this.#requireState().model.model}`,
+        defaultModel:config.defaultModel,
+        providers:providers.map(provider=>({
+          provider:provider.name,
+          displayName:provider.displayName,
+          usable:provider.usable,
+          credentialSource:provider.credentialSource,
+          ...(provider.remediation===undefined?{}:{remediation:provider.remediation}),
+        })),
+        usage:"/model PROVIDER:MODEL | /model login PROVIDER | /model logout PROVIDER",
+      });
+      return;
+    }
+    const login=/^login\s+(\S+)$/.exec(command);
+    if(login){
+      const provider=login[1]!;
+      if(!["openai","anthropic","vercel"].includes(provider))throw new Error("/model login supports openai, anthropic, or vercel");
+      this.#pendingCredentialProvider=provider;
+      this.#write(`Enter API key for ${provider}; input is hidden. Use Escape or /cancel to cancel.\n`);
+      return;
+    }
+    const logout=/^logout\s+(\S+)$/.exec(command);
+    if(logout){
+      const provider=logout[1]!;
+      await this.client.productSetProviderKey(provider,null);
+      this.#capabilities=await this.client.capabilities();
+      this.#write(`Removed the stored API key for ${provider}. Environment credentials, if set, remain usable.\n`);
+      this.#publish();
+      return;
+    }
+    if(this.#historicalCursor!==null)throw new Error("Return to /live before changing the branch model");
+    const model=parseTerminalModel(command.replace(/^set\s+/,""));
+    const descriptor=providers.find(provider=>provider.name===model.provider);
+    if(!descriptor)throw new Error(`Unknown model provider: ${model.provider}`);
+    if(!descriptor.usable)throw new Error(descriptor.remediation??`Use /model login ${model.provider} first`);
+    const selected=await this.client.selectModel(this.#sessionId,this.#branchId,model) as {changed?:boolean;model?:ModelConfiguration};
+    const selectedModel=selected.model??model;
+    await this.client.productSetModel(formatTerminalModel(selectedModel));
+    this.#write(`${selected.changed===false?"Model already selected":"Selected branch model"}: ${formatTerminalModel(selectedModel)}. Saved as this workspace's default.\n`);
+  }
   async #stop(reason:string):Promise<void>{const active=this.#activeRun();if(!active){this.#write("No active run.\n");return;}await this.client.cancelRun(this.#sessionId,this.#branchId,active.id,reason);this.#write("Cancellation requested.\n");}
   async #startOrRespond(text:string):Promise<void>{
     const active=this.#activeRun();
@@ -584,6 +652,21 @@ Confirmation digest: ${preview.confirmationDigest}
   #activeRun(){return Object.values(this.#liveState?.agentRuns??{}).find((run)=>!TERMINAL_RUN_STATUSES.has(run.status));}
   #requireState():AgentState{if(!this.#viewState)throw new Error("No projected state");return this.#viewState;}
   #prompt():string{return `${(this.#liveState?.sessionName??"agent").slice(-12)}/${(this.#liveState?.branch.name??"live").slice(-12)}${this.#historicalCursor?`@${this.#historicalCursor}`:""}> `;}
+  async #hiddenCredentialQuestion():Promise<string>{
+    if(!this.#readline||!this.#pendingCredentialProvider)throw new Error("Credential prompt is unavailable");
+    const hidden=this.#readline as ReadlineInterface&{_writeToOutput?:(value:string)=>void;history?:string[]};
+    const original=hidden._writeToOutput;
+    if(typeof original!=="function")throw new Error("This terminal cannot provide hidden credential input");
+    let answer="";
+    this.#write(`API key for ${this.#pendingCredentialProvider}: `);
+    hidden._writeToOutput=()=>{};
+    try{answer=await this.#readline.question("",{signal:this.#detachController?.signal});return answer.trim();}
+    finally{
+      hidden._writeToOutput=original;
+      if(answer&&hidden.history){for(let index=hidden.history.length-1;index>=0;index--){if(hidden.history[index]===answer)hidden.history.splice(index,1);}}
+      this.#write("\n");
+    }
+  }
   #write(value:string):void{if(this.options.onOutput)this.options.onOutput(value);else this.#output.write(value);}
   #publish():void{
     if(!this.#viewState||!this.#capabilities)return;
@@ -602,3 +685,14 @@ Confirmation digest: ${preview.confirmationDigest}
     this.#write(lines.join("\n")+"\n");
   }
 }
+
+function parseTerminalModel(value:string):ModelConfiguration{
+  const separator=value.indexOf(":");
+  if(separator<=0||separator===value.length-1)throw new Error("Model must use PROVIDER:MODEL format");
+  const provider=value.slice(0,separator);
+  const model=value.slice(separator+1);
+  if(!/^[a-z][a-z0-9-]*$/.test(provider)||/\s/.test(model))throw new Error("Model must use PROVIDER:MODEL format");
+  return{provider,model};
+}
+
+function formatTerminalModel(model:ModelConfiguration):string{return`${model.provider}:${model.model}`;}

@@ -14,12 +14,17 @@ export interface ModelProviderDescriptor {
   readonly name: string;
   readonly displayName: string;
   readonly capabilities: ModelProviderCapabilities;
+  readonly usable: boolean;
+  readonly credentialSource: "stored" | "environment" | "programmatic" | "missing";
+  readonly remediation?: string;
 }
 export interface ModelProvider {
   readonly name: string;
   /** A missing declaration is deliberately treated as non-streaming. */
   readonly capabilities?: ModelProviderCapabilities;
   readonly displayName?: string;
+  availability?(): Pick<ModelProviderDescriptor, "usable" | "credentialSource" | "remediation">;
+  normalizeModel?(model: string): string;
   complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse>;
   /**
    * Optional incremental completion. Implementations opt in only by declaring
@@ -37,6 +42,7 @@ export class EchoModelProvider implements ModelProvider {
   readonly name = "echo";
   readonly displayName = "Echo (demo fixture; non-streaming)";
   readonly capabilities = { streaming: false, contextWindowTokens: 128_000, contextCapacitySource: "model-catalog" } as const;
+  availability() { return { usable: true, credentialSource: "programmatic" as const }; }
   async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     let text = "";
@@ -91,6 +97,8 @@ export interface OpenAICompatibleOptions {
   readonly baseUrl: string;
   readonly apiKey: () => string | undefined;
   readonly providerName?: string;
+  readonly displayName?: string;
+  readonly availability?: () => Pick<ModelProviderDescriptor, "usable" | "credentialSource" | "remediation">;
   /**
    * Explicitly disable streaming for compatible endpoints that do not support
    * SSE. Streaming defaults to true; a streaming failure is never retried as a
@@ -112,7 +120,13 @@ export class OpenAICompatibleProvider implements ModelProvider {
       streaming,
       ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens, contextCapacitySource: options.contextCapacitySource ?? "operator-configuration" }),
     };
-    this.displayName = `${this.name} (OpenAI-compatible; ${streaming ? "streaming" : "non-streaming"})`;
+    this.displayName = options.displayName ?? `${this.name} (OpenAI-compatible; ${streaming ? "streaming" : "non-streaming"})`;
+  }
+  availability() {
+    return this.options.availability?.() ?? {
+      usable: Boolean(this.options.apiKey()),
+      credentialSource: this.options.apiKey() ? "programmatic" as const : "missing" as const,
+    };
   }
   async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
     const key = this.options.apiKey(); if (!key) throw new ValidationError(`Credential unavailable for ${this.name}`);
@@ -198,6 +212,181 @@ export class OpenAICompatibleProvider implements ModelProvider {
     if (!completed) throw new Error("Model stream ended before [DONE]");
     return { text, finishReason, usage };
   }
+}
+
+export interface AnthropicCompatibleOptions {
+  readonly baseUrl: string;
+  readonly apiKey: () => string | undefined;
+  readonly providerName?: string;
+  readonly displayName?: string;
+  readonly streaming?: boolean;
+  readonly normalizeModel?: (model: string) => string;
+  readonly availability?: () => Pick<ModelProviderDescriptor, "usable" | "credentialSource" | "remediation">;
+  readonly contextWindowTokens?: number;
+  readonly contextCapacitySource?: "provider-metadata" | "model-catalog" | "operator-configuration";
+}
+
+export class AnthropicCompatibleProvider implements ModelProvider {
+  readonly name: string;
+  readonly displayName: string;
+  readonly capabilities: ModelProviderCapabilities;
+
+  constructor(readonly options: AnthropicCompatibleOptions) {
+    this.name = options.providerName ?? "anthropic";
+    const streaming = options.streaming ?? true;
+    this.capabilities = {
+      streaming,
+      ...(options.contextWindowTokens === undefined ? {} : {
+        contextWindowTokens: options.contextWindowTokens,
+        contextCapacitySource: options.contextCapacitySource ?? "operator-configuration",
+      }),
+    };
+    this.displayName = options.displayName ?? `${this.name} (Anthropic-compatible; ${streaming ? "streaming" : "non-streaming"})`;
+  }
+
+  availability() {
+    return this.options.availability?.() ?? {
+      usable: Boolean(this.options.apiKey()),
+      credentialSource: this.options.apiKey() ? "programmatic" as const : "missing" as const,
+    };
+  }
+
+  normalizeModel(model: string): string {
+    return this.options.normalizeModel?.(model) ?? model;
+  }
+
+  async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+    const response = await this.#request(context, configuration, signal, false);
+    const body = await response.json() as {
+      content?: Array<{ type?: string; text?: string }>;
+      stop_reason?: string | null;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    const text = body.content?.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text).join("") ?? "";
+    return {
+      text,
+      finishReason: body.stop_reason ?? "stop",
+      usage: {
+        inputTokens: body.usage?.input_tokens ?? 0,
+        outputTokens: body.usage?.output_tokens ?? 0,
+        costUsd: 0,
+      },
+    };
+  }
+
+  async stream(
+    context: JsonValue,
+    configuration: ModelConfiguration,
+    signal: AbortSignal,
+    onDelta: (delta: ModelOutputDelta) => void,
+  ): Promise<ModelResponse> {
+    const response = await this.#request(context, configuration, signal, true);
+    if (!response.body) throw new Error("Model streaming response has no body");
+    let text = "";
+    let finishReason = "stop";
+    let usage: Usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+    let completed = false;
+    await readServerSentEvents(response.body, (data) => {
+      let event: {
+        type?: string;
+        message?: { usage?: { input_tokens?: number; output_tokens?: number } };
+        delta?: { type?: string; text?: string; stop_reason?: string | null };
+        usage?: { input_tokens?: number; output_tokens?: number };
+        error?: { type?: string; message?: string };
+      };
+      try { event = JSON.parse(data) as typeof event; }
+      catch { throw new Error("Model stream returned invalid JSON"); }
+      if (event.type === "error") {
+        const kind = event.error?.type ? ` ${event.error.type}` : "";
+        const message = event.error?.message ? `: ${event.error.message}` : "";
+        throw new Error(`Model stream error${kind}${message}`);
+      }
+      if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
+        text += event.delta.text;
+        onDelta({ text: event.delta.text });
+      }
+      if (event.type === "message_start" && event.message?.usage) {
+        usage = {
+          inputTokens: event.message.usage.input_tokens ?? usage.inputTokens,
+          outputTokens: event.message.usage.output_tokens ?? usage.outputTokens,
+          costUsd: 0,
+        };
+      }
+      if (event.type === "message_delta") {
+        if (event.delta?.stop_reason) finishReason = event.delta.stop_reason;
+        if (event.usage) {
+          usage = {
+            inputTokens: event.usage.input_tokens ?? usage.inputTokens,
+            outputTokens: event.usage.output_tokens ?? usage.outputTokens,
+            costUsd: 0,
+          };
+        }
+      }
+      if (event.type === "message_stop") completed = true;
+    }, signal);
+    if (!completed) throw new Error("Model stream ended before message_stop");
+    return { text, finishReason, usage };
+  }
+
+  async #request(
+    context: JsonValue,
+    configuration: ModelConfiguration,
+    signal: AbortSignal,
+    stream: boolean,
+  ): Promise<Response> {
+    const key = this.options.apiKey();
+    if (!key) throw new ValidationError(`Credential unavailable for ${this.name}`);
+    const prepared = anthropicContext(context);
+    const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: stream ? "text/event-stream" : "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: configuration.model,
+        messages: prepared.messages,
+        ...(prepared.system ? { system: prepared.system } : {}),
+        max_tokens: configuration.maxOutputTokens ?? 4_096,
+        ...(configuration.temperature === undefined ? {} : { temperature: configuration.temperature }),
+        stream,
+      }),
+      signal,
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      if ((response.status === 400 || response.status === 413 || response.status === 422) &&
+          /context(?:_| )?(?:length|window)|maximum context|too many tokens|token limit/i.test(body)) {
+        throw new ModelProviderContextWindowOverflowError(this.name, configuration.model);
+      }
+      throw new Error(`Model HTTP ${response.status}: ${body}`);
+    }
+    return response;
+  }
+}
+
+function anthropicContext(context: JsonValue): {
+  system: string;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+} {
+  const record = context && typeof context === "object" && !Array.isArray(context) ? context : {};
+  const rawMessages = Array.isArray(record.messages) ? record.messages : [];
+  const system: string[] = [];
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
+  for (const raw of rawMessages) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || typeof raw.content !== "string") continue;
+    if (raw.role === "system") {
+      system.push(raw.content);
+      continue;
+    }
+    const role = raw.role === "assistant" ? "assistant" : "user";
+    const previous = messages.at(-1);
+    if (previous?.role === role) previous.content += `\n\n${raw.content}`;
+    else messages.push({ role, content: raw.content });
+  }
+  return { system: system.join("\n\n"), messages };
 }
 
 async function readServerSentEvents(
@@ -315,17 +504,26 @@ export class ModelExecutor implements EffectExecutor {
   }
 
   providers(): ModelProviderDescriptor[] {
-    return [...this.#providers.values()].map((provider) => ({
-      name: provider.name,
-      displayName: provider.displayName ?? provider.name,
-      capabilities: {
-        streaming: provider.capabilities?.streaming === true,
-        ...(provider.capabilities?.contextWindowTokens === undefined ? {} : {
-          contextWindowTokens: provider.capabilities.contextWindowTokens,
-          contextCapacitySource: provider.capabilities.contextCapacitySource ?? "provider-metadata",
-        }),
-      },
-    }));
+    return [...this.#providers.values()].map((provider) => {
+      const availability = provider.availability?.() ?? { usable: true, credentialSource: "programmatic" as const };
+      return {
+        name: provider.name,
+        displayName: provider.displayName ?? provider.name,
+        capabilities: {
+          streaming: provider.capabilities?.streaming === true,
+          ...(provider.capabilities?.contextWindowTokens === undefined ? {} : {
+            contextWindowTokens: provider.capabilities.contextWindowTokens,
+            contextCapacitySource: provider.capabilities.contextCapacitySource ?? "provider-metadata",
+          }),
+        },
+        ...availability,
+      };
+    });
+  }
+
+  normalizeConfiguration(configuration: ModelConfiguration): ModelConfiguration {
+    const normalized = this.#providers.get(configuration.provider)?.normalizeModel?.(configuration.model) ?? configuration.model;
+    return normalized === configuration.model ? configuration : { ...configuration, model: normalized };
   }
 
   contextCapacity(configuration: ModelConfiguration): Readonly<{ provider: string; model: string; source: "provider-metadata" | "model-catalog" | "operator-configuration" | "unknown"; contextWindowTokens: number | null }> {

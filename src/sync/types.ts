@@ -216,6 +216,7 @@ export interface PhysicalDeletionReceipt {
     readonly databaseFiles: readonly string[];
     readonly replicaFiles: readonly string[];
     readonly artifactFiles: readonly string[];
+    readonly credentialFiles: readonly string[];
     readonly rows: Readonly<Record<string, number>>;
   };
   readonly retainedSharedArtifacts: readonly string[];

@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import { AgentRuntimeError } from "../domain/index.ts";
+import { AgentRuntimeError, ValidationError } from "../domain/index.ts";
+import type { ModelConfiguration } from "../domain/index.ts";
 import type { AgentRunResult, StartAgentRunInput } from "../runtime/index.ts";
 import { scrubJson, scrubText } from "../security/scrub.ts";
 import type { Supervisor } from "../runtime/index.ts";
@@ -24,6 +25,7 @@ export interface ProtocolServiceHooks {
   readonly productRename?: (sessionId: string, branchId: string | undefined, name: string) => Promise<unknown>;
   readonly productConfig?: () => Promise<unknown>;
   readonly productSetModel?: (model: string | null) => Promise<unknown>;
+  readonly productSetProviderKey?: (provider: string, apiKey: string | null) => Promise<unknown>;
   readonly productCredentialReference?: (provider: string, reference: string, label: string) => Promise<unknown>;
 }
 
@@ -114,6 +116,7 @@ export class ProtocolServer {
         if (request.method === "POST" && url.pathname === "/product/rename" && this.options.service.productRename) { const body=await jsonBody(request); return Response.json(await this.options.service.productRename(String(body.sessionId ?? ""), typeof body.branchId === "string" ? body.branchId : undefined, String(body.name ?? ""))); }
         if (request.method === "GET" && url.pathname === "/product/config" && this.options.service.productConfig) return Response.json(await this.options.service.productConfig());
         if (request.method === "POST" && url.pathname === "/product/config/model" && this.options.service.productSetModel) { const body=await jsonBody(request); return Response.json(await this.options.service.productSetModel(body.model === null ? null : String(body.model ?? ""))); }
+        if (request.method === "POST" && url.pathname === "/product/config/provider-key" && this.options.service.productSetProviderKey) { const body=await jsonBody(request); return Response.json(await this.options.service.productSetProviderKey(String(body.provider ?? ""), body.apiKey === null ? null : String(body.apiKey ?? ""))); }
         if (request.method === "POST" && url.pathname === "/product/config/credential-reference" && this.options.service.productCredentialReference) { const body=await jsonBody(request); return Response.json(await this.options.service.productCredentialReference(String(body.provider ?? ""), String(body.reference ?? ""), String(body.label ?? ""))); }
       }
       if (request.method === "GET" && url.pathname === "/model-providers") return Response.json(this.supervisor.modelExecutor.providers());
@@ -170,6 +173,18 @@ export class ProtocolServer {
         if (request.method === "GET" && parts[2] === "history" && branchId) return Response.json(await this.supervisor.projections.history(sessionId, branchId));
         if (request.method === "GET" && parts[2] === "stream" && branchId) return this.#stream(sessionId, branchId, url.searchParams.get("after") ?? "0", request.signal);
         if (request.method === "POST" && parts[2] === "messages" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.appendMessage(sessionId, branchId, "user", String(body.content ?? ""))); }
+        if (request.method === "POST" && parts[2] === "model" && branchId) {
+          const body = await jsonBody(request);
+          const model = body.model;
+          if (!model || typeof model !== "object" || Array.isArray(model)) {
+            throw new ValidationError("Model selection requires provider and model");
+          }
+          const configuration = model as Record<string, unknown>;
+          if (typeof configuration.provider !== "string" || typeof configuration.model !== "string") {
+            throw new ValidationError("Model selection requires provider and model");
+          }
+          return Response.json(await this.supervisor.selectModel(sessionId, branchId, configuration as unknown as ModelConfiguration));
+        }
         if (request.method === "POST" && parts[2] === "stop" && branchId && this.options.service) { const body=await jsonBody(request); return Response.json(await this.options.service.stop(sessionId, branchId, typeof body.reason === "string" ? body.reason : undefined)); }
         if (parts[2] === "runs" && branchId) {
           if (request.method === "POST" && parts.length === 3) {

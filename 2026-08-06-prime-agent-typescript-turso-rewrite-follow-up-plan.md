@@ -237,7 +237,7 @@ Interactive startup discovers usable providers, makes model choice explicit, and
 - Allow programmatically installed providers to participate in selection.
 - Persist provider/model identifiers and opaque credential references at the appropriate scope.
 - Never persist raw secrets in events, profile/workspace stores, logs, artifacts, or diagnostic bundles.
-- Add `--model PROVIDER/MODEL` and explicit `--demo` options.
+- Add `--model PROVIDER:MODEL` and explicit `--demo` options. The colon keeps gateway model IDs containing `/` unambiguous.
 - Explain unavailable providers and remediation through startup and `agencity doctor`.
 - Never silently change the model of an existing branch; require a new session or explicit fork policy.
 

@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentState } from "../domain/index.ts";
+import type { AgentEvent, AgentState, ModelConfiguration } from "../domain/index.ts";
 import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
@@ -90,14 +90,16 @@ export class AgentClient {
   productSessions(): Promise<any[]> { return this.#json("/product/sessions"); }
   productSelect(target?: string, branchId?: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/product/select", { ...(target === undefined ? {} : { target }), ...(branchId === undefined ? {} : { branchId }) }); }
   productRename(sessionId: string, branchId: string | undefined, name: string): Promise<unknown> { return this.#post("/product/rename", { sessionId, ...(branchId === undefined ? {} : { branchId }), name }); }
-  productConfig(): Promise<{ defaultModel: string | null; credentialReferences: unknown[] }> { return this.#json("/product/config"); }
+  productConfig(): Promise<{ defaultModel: string | null; credentialReferences: unknown[]; providers?: ModelProviderDescriptor[] }> { return this.#json("/product/config"); }
   productSetModel(model: string | null): Promise<unknown> { return this.#post("/product/config/model", { model }); }
+  productSetProviderKey(provider: string, apiKey: string | null): Promise<unknown> { return this.#post("/product/config/provider-key", { provider, apiKey }); }
   productCredentialReference(provider: string, reference: string, label: string): Promise<unknown> { return this.#post("/product/config/credential-reference", { provider, reference, label }); }
   stopSession(sessionId: string, branchId: string, reason?: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/stop?branch=${branchId}`, reason === undefined ? {} : { reason }); }
   modelProviders(): Promise<ModelProviderDescriptor[]> { return this.#json("/model-providers"); }
   createSession(workspaceId: string, options: { model?: unknown; budget?: unknown; sessionName?: string; branchName?: string } = {}): Promise<{ sessionId: string; branchId: string }> { return this.#post("/sessions", { workspaceId, ...options }); }
   snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
   message(sessionId: string, branchId: string, content: string): Promise<AgentEvent> { return this.#post(`/sessions/${sessionId}/messages?branch=${branchId}`, { content }); }
+  selectModel(sessionId: string, branchId: string, model: ModelConfiguration): Promise<unknown> { return this.#post(`/sessions/${sessionId}/model?branch=${branchId}`, { model }); }
   startRun(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs?branch=${branchId}`, typeof input === "string" ? { task: input } : input); }
   run(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#json(`/sessions/${sessionId}/runs/${runId}?branch=${branchId}`); }
   resumeRun(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/resume?branch=${branchId}`); }

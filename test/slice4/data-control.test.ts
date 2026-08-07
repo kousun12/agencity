@@ -62,9 +62,9 @@ describe("ownership-aware physical data control",()=>{
   test("physically erases the owned profile database while retaining the independently scoped workspace",async()=>{
     const directory=await mkdtemp(join(tmpdir(),"agencity-delete-profile-"));let supervisor:Supervisor|undefined;
     try{
-      supervisor=await Supervisor.open(options(directory));const profileId=supervisor.device.profileId;await supervisor.profile.setPreference("private.preference",{remove:true});await supervisor.createSession({workspaceId:"workspace"});
+      supervisor=await Supervisor.open(options(directory));const profileId=supervisor.device.profileId;await supervisor.profile.setPreference("private.preference",{remove:true});await supervisor.credentials.set("openai","profile-owned-secret-123456");await supervisor.createSession({workspaceId:"workspace"});
       const receipt=await supervisor.deleteOwnedData({scopeKind:"profile",scopeId:profileId,requestedBy:"owner",confirmation:`DELETE profile ${profileId}`,receiptDirectory:join(directory,"receipts")});supervisor=undefined;
-      expect(receipt.status).toBe("completed");expect(await exists(join(directory,"profile.db"))).toBe(false);expect(await exists(join(directory,"workspace.db"))).toBe(true);expect(await exists(receipt.receiptPath!)).toBe(true);
+      expect(receipt.status).toBe("completed");expect(await exists(join(directory,"profile.db"))).toBe(false);expect(await exists(join(directory,"auth.json"))).toBe(false);expect(receipt.removed.credentialFiles).toContain(join(directory,"auth.json"));expect(await exists(join(directory,"workspace.db"))).toBe(true);expect(await exists(receipt.receiptPath!)).toBe(true);
     }finally{await supervisor?.close();await rm(directory,{recursive:true,force:true});}
   });
 

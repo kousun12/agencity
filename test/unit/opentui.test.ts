@@ -188,5 +188,54 @@ describe("OpenTUI interactive terminal", () => {
       keepAliveReasons: [{ kind: "active_schedules", count: 1, summary: "1 active schedule" }],
     })).toBe("Detached. Service remains active: 1 active schedule.");
   });
+
+  test("masks provider API keys before sending them to the controller", async () => {
+    const temp = await makeTempRuntime("agencity-opentui-secret-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "terminal",
+      sessionName: "Secret input",
+      branchName: "main",
+    });
+    const client = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const terminal = new TerminalUI(client, { interactive: false, manageSignals: false });
+    await terminal.attach(session.sessionId, session.branchId, false);
+    const setup = await createTestRenderer({ width: 90, height: 24 });
+    const secret = "hidden-provider-key-123456";
+    let received = "";
+    let pending = true;
+    const controller: OpenTuiController = {
+      get presentation() { return terminal.presentation; },
+      get detached() { return terminal.detached; },
+      get pendingSecretInput() { return pending; },
+      subscribePresentation: listener => terminal.subscribePresentation(listener),
+      execute: async value => {
+        received = value;
+        pending = false;
+        return "continue";
+      },
+      handleInterrupt: () => terminal.handleInterrupt(),
+    };
+    const app = new OpenTuiApp(setup.renderer, controller);
+    try {
+      await setup.mockInput.pasteBracketedText(secret);
+      const masked = await setup.waitForFrame(frame => frame.includes("•".repeat(secret.length)));
+      expect(masked).not.toContain(secret);
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      expect(received).toBe(secret);
+      expect((await setup.captureCharFrame()).toString()).not.toContain(secret);
+    } finally {
+      app.destroy();
+      setup.renderer.destroy();
+      await terminal.detach(false);
+      await supervisor.close();
+    }
+  });
 });
 

@@ -5,6 +5,7 @@ import { LibSqlStorage } from "../../src/storage/index.ts";
 import { ScriptedAgentActionProvider } from "../../src/executors/index.ts";
 import { Supervisor } from "../../src/runtime/index.ts";
 import { ManagedWorkspaceService, connectManagedService, managedServiceConfigurationHash, readServiceManifest, resolveWorkspace, serviceStatePaths, type ManagedServiceConfiguration, type ServiceManifestV1 } from "../../src/product/index.ts";
+import { TerminalUI } from "../../src/tui/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -103,6 +104,51 @@ async function opened(config: ManagedServiceConfiguration): Promise<ManagedWorks
 }
 
 describe("managed workspace service", () => {
+  test("brokers stored provider keys and durable model selection through the public client", async () => {
+    const config = await configuration("agencity-managed-model-config-");
+    const service = await opened(config);
+    const client = (await connectManagedService(config, { spawn: false })).client;
+    const secret = "managed-provider-secret-123456";
+    const session = await service.supervisor.createSession({
+      workspaceId: config.workspace.workspaceId,
+      model: { provider: "echo", model: "echo-1" },
+    });
+    let output = "";
+    const terminal = new TerminalUI(client, {
+      interactive: false,
+      output: { write(value: string | Uint8Array) { output += String(value); return true; } },
+    });
+    await terminal.attach(session.sessionId, session.branchId, false);
+    try {
+      await terminal.execute("/model login anthropic");
+      expect(terminal.pendingSecretInput).toBe(true);
+      await terminal.execute(secret);
+      expect(terminal.pendingSecretInput).toBe(false);
+      expect((await client.productConfig()).providers?.find(provider => provider.name === "anthropic")!).toMatchObject({
+        usable: true,
+        credentialSource: "stored",
+      });
+      expect((await stat(join(config.workspace.stateDirectory, "auth.json"))).mode & 0o077).toBe(0);
+
+      await terminal.execute("/model anthropic:fable-5");
+      expect((await client.snapshot(session.sessionId, session.branchId)).state.model).toEqual({
+        provider: "anthropic",
+        model: "claude-fable-5",
+      });
+      expect(output).toContain("Saved API key for anthropic in the owner-only local auth file.");
+      expect(output).toContain("Selected branch model: anthropic:claude-fable-5.");
+      expect(output).not.toContain(secret);
+      expect(JSON.stringify(await client.history(session.sessionId, session.branchId))).not.toContain(secret);
+
+      await terminal.execute("/model logout anthropic");
+      expect((await client.productConfig()).providers?.find(provider => provider.name === "anthropic")!).toMatchObject({
+        credentialSource: process.env.ANTHROPIC_API_KEY ? "environment" : "missing",
+      });
+    } finally {
+      await terminal.detach(false);
+    }
+  });
+
   test("elects one service, publishes owner-only discovery, and requires bearer auth on every route", async () => {
     const config = await configuration("agencity-managed-election-");
     const outcomes = await Promise.allSettled([

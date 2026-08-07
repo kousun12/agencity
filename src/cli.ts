@@ -8,12 +8,13 @@ import { CLI_HELP_GROUPS, buildDataDeleteConfirmation, parseAdvancedArgv, type A
 import { createCliErrorEnvelope, createCliSuccessEnvelope, planCliOutput, type CliJsonValue } from "./cli/output.ts";
 import { CliRunInterruptCoordinator } from "./cli/run-interrupt.ts";
 import { AgentRuntimeError, ValidationError, type JsonValue, type ModelConfiguration } from "./domain/index.ts";
-import { containsCredentialMaterial, scrubText } from "./security/index.ts";
+import { containsCredentialMaterial, inspectModelCredentialStatuses, modelCredentialPathForProfile, scrubText } from "./security/index.ts";
 import {
   ProductCatalog,
   chooseNewModel,
   defaultProfilePath,
   deriveDisplayName,
+  formatModel,
   modelAvailability,
   providerStatuses,
   parseModel,
@@ -335,7 +336,7 @@ async function selectManagedSession(
     if (choices.length === 0) throw error;
     console.log(choices.map((candidate, index) => [
       `${index + 1}) ${candidate.sessionName} / ${candidate.branchName}`,
-      `   ${candidate.status} · ${candidate.model.provider}/${candidate.model.model} · updated ${candidate.updatedAt}`,
+      `   ${candidate.status} · ${candidate.model.provider}:${candidate.model.model} · updated ${candidate.updatedAt}`,
       `   ${candidate.taskSummary ?? "No task yet"} · ${candidate.unresolvedWork} unresolved`,
     ].join("\n")).join("\n"));
     const answer = (await prompter.question("Choose session/branch number or name: ")).trim();
@@ -436,6 +437,24 @@ async function serviceCommand(configuration: ManagedServiceConfiguration, parsed
   ].join("\n"));
 }
 
+async function doctorProviderStatuses(profileDatabasePath: string): Promise<Array<{
+  provider: string;
+  usable: boolean;
+  demo: boolean;
+  credentialSource: "stored" | "environment" | "missing" | "programmatic";
+}>> {
+  const statuses = await inspectModelCredentialStatuses(modelCredentialPathForProfile(profileDatabasePath));
+  return [
+    { provider: "echo", usable: true, demo: true, credentialSource: "programmatic" },
+    ...statuses.map(status => ({
+      provider: status.provider,
+      usable: status.configured,
+      demo: false,
+      credentialSource: status.source,
+    })),
+  ];
+}
+
 async function doctorUninitialized(workspace: { root: string; workspaceId: string | null; name: string; stateDirectory: string }, json: boolean): Promise<void> {
   const report = {
     application: await applicationVersion(),
@@ -444,7 +463,7 @@ async function doctorUninitialized(workspace: { root: string; workspaceId: strin
     observer: "read-only (no workspace initialization, recovery, wake ticks, migrations, or canonical writes)",
     workspace,
     service: { state: "stopped", onDemand: true },
-    providers: [{ provider: "echo", usable: true, demo: true }, { provider: "openai", usable: Boolean(process.env.OPENAI_API_KEY), demo: false }],
+    providers: await doctorProviderStatuses(defaultProfilePath()),
   };
   if (json) console.log(JSON.stringify(report, null, 2));
   else console.log([`Agencity ${report.application} · Bun ${report.bun.version}`, `Workspace: ${workspace.name} (${workspace.root}) [not initialized]`, `Mode: ${report.mode}`, "Service: stopped (started on demand; not an OS boot service)", `Observer: ${report.observer}`].join("\n"));
@@ -452,10 +471,7 @@ async function doctorUninitialized(workspace: { root: string; workspaceId: strin
 
 async function doctorObserver(configuration: ManagedServiceConfiguration, json: boolean): Promise<void> {
   const observed = await observeManagedService(configuration);
-  const providers = [
-    { provider: "echo", usable: true, demo: true },
-    { provider: "openai", usable: Boolean(process.env.OPENAI_API_KEY), demo: false },
-  ];
+  const providers = await doctorProviderStatuses(configuration.profileDatabasePath);
   const report = {
     application: await applicationVersion(),
     bun: { version: Bun.version, required: ">=1.2.0", compatible: runtimeCompatible() },
@@ -500,9 +516,9 @@ async function managedConfig(client: AgentClient, parsed: ParsedCliArgs): Promis
   if (!action) { printValue(await client.productConfig(), parsed.flags.has("json")); return; }
   if (action === "set-model") {
     const value = parsed.positionals[1];
-    if (!value) throw new ValidationError("config set-model requires PROVIDER/MODEL");
-    parseModel(value);
-    printValue(await client.productSetModel(value), parsed.flags.has("json"));
+    if (!value) throw new ValidationError("config set-model requires PROVIDER:MODEL");
+    const model = parseModel(value);
+    printValue(await client.productSetModel(formatModel(model)), parsed.flags.has("json"));
     return;
   }
   if (action === "clear-model") { printValue(await client.productSetModel(null), parsed.flags.has("json")); return; }
@@ -524,32 +540,33 @@ async function chooseManagedModel(client: AgentClient, parsed: ParsedCliArgs, in
   if (explicit) {
     const model = parseModel(explicit);
     if (model.provider === "echo") throw new ValidationError("Echo is a demo fixture; use --demo so demo behavior is explicit");
-    if (!providers.some(provider => provider.name === model.provider)) throw new ValidationError(`Model provider is unavailable: ${model.provider}`);
-    await client.productSetModel(explicit);
+    const provider = providers.find(provider => provider.name === model.provider);
+    if (!provider?.usable) throw new ValidationError(provider?.remediation ?? `Model provider is unavailable: ${model.provider}`);
+    await client.productSetModel(formatModel(model));
     return model;
   }
   const configured = await client.productConfig();
   if (configured.defaultModel) {
     const model = parseModel(configured.defaultModel);
-    if (model.provider !== "echo" && providers.some(provider => provider.name === model.provider)) return model;
+    if (model.provider !== "echo" && providers.some(provider => provider.name === model.provider && provider.usable)) return model;
   }
-  const real = providers.filter(provider => provider.name !== "echo");
+  const real = providers.filter(provider => provider.name !== "echo" && provider.usable);
   for (const provider of real) {
     const model = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`];
     if (model?.trim()) {
-      await client.productSetModel(`${provider.name}/${model.trim()}`);
+      await client.productSetModel(`${provider.name}:${model.trim()}`);
       return { provider: provider.name, model: model.trim() };
     }
   }
-  if (!interactive) throw new ValidationError("No usable model is selected. Pass --model PROVIDER/MODEL after configuring a provider, or use --demo explicitly");
+  if (!interactive) throw new ValidationError("No usable model is selected. Pass --model PROVIDER:MODEL after configuring a provider, or use --demo explicitly");
   if (!real.length) {
     const answer = (await prompter.question("No real provider is usable. Start the visibly labeled Echo demo fixture? [y/N] ")).trim().toLowerCase();
     if (answer === "y" || answer === "yes") return { provider: "echo", model: "echo-1" };
-    throw new ValidationError("No usable provider. Set OPENAI_API_KEY or use --demo only for fixture behavior");
+    throw new ValidationError("No usable provider. Use /model login openai|anthropic|vercel, set the matching environment variable, or use --demo only for fixture behavior");
   }
   const modelId = (await prompter.question(`Model ID for ${real[0]!.displayName}: `)).trim();
   if (!modelId) throw new ValidationError("Model ID is required");
-  await client.productSetModel(`${real[0]!.name}/${modelId}`);
+  await client.productSetModel(`${real[0]!.name}:${modelId}`);
   return { provider: real[0]!.name, model: modelId };
 }
 
@@ -823,7 +840,7 @@ async function sessions(catalog: ProductCatalog, parsed: ParsedCliArgs): Promise
 function formatSessions(rows: readonly ProductBranchSummary[]): string {
   return rows.map((row, index) => [
     `${index + 1}) ${row.sessionName} / ${row.branchName}`,
-    `   ${row.status} · ${row.model.provider}/${row.model.model} · updated ${row.updatedAt}`,
+    `   ${row.status} · ${row.model.provider}:${row.model.model} · updated ${row.updatedAt}`,
     `   task: ${row.taskSummary ?? "(none)"} · goals ${row.activeGoals} · unresolved ${row.unresolvedWork}`,
     `   ids: ${row.sessionId}/${row.branchId}`,
   ].join("\n" )).join("\n");
@@ -844,9 +861,9 @@ async function config(supervisor: Supervisor, workspace: ResolvedWorkspace, pars
   }
   if (action === "set-model") {
     const requested = parsed.positionals[1] ?? parsed.values.get("model");
-    if (!requested) throw new ValidationError("config set-model requires PROVIDER/MODEL");
+    if (!requested) throw new ValidationError("config set-model requires PROVIDER:MODEL");
     await chooseNewModel({ supervisor, workspaceId: workspace.workspaceId, explicitModel: requested, demo: false, interactive, prompt: question => prompter.question(question) });
-    console.log(`Saved non-secret workspace model preference: ${requested}`);
+    console.log(`Saved non-secret workspace model preference: ${formatModel(parseModel(requested))}`);
     return;
   }
   if (action === "clear-model") {
@@ -1070,7 +1087,7 @@ function printStartup(workspace: ResolvedWorkspace, session: ProductBranchSummar
     "Agencity product session",
     `Workspace: ${workspace.name} (${workspace.root})`,
     `Session: ${session.sessionName} / ${session.branchName}`,
-    `Model: ${session.model.provider}/${session.model.model}${demoLabel}${providerUsable ? "" : " [UNAVAILABLE]"}`,
+    `Model: ${session.model.provider}:${session.model.model}${demoLabel}${providerUsable ? "" : " [UNAVAILABLE]"}`,
     `Run state: ${providerUsable ? session.status : "blocked by provider configuration"}`,
     "Mode: trusted-local; generated code has this process's OS authority (not sandboxed)",
     ...(!providerUsable && remediation ? [`Remediation: ${remediation}`] : []),
@@ -1110,7 +1127,7 @@ function printHelp(): void {
     "",
     ...sections.flatMap((section) => [section, ""]),
     "Common product options:",
-    "  --workspace PATH --model PROVIDER/MODEL --demo --new --detach --completion-gate COMMAND --json --version --help",
+    "  --workspace PATH --model PROVIDER:MODEL --demo --new --detach --completion-gate COMMAND --json --version --help",
     "Advanced options:",
     "  --session ID --branch ID --cursor N --db PATH --artifacts PATH --workspace-root PATH",
     "  --sync-url URL --replica PATH --scope KIND --scope-id ID --destination PATH",

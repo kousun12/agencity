@@ -2,12 +2,32 @@ import type { JsonValue } from "../domain/json.ts";
 
 const SENSITIVE_KEY = /(?:^|_)(?:api_?key|token|secret|password|passwd|credential|authorization|auth)(?:_|$)/i;
 const REDACTED = "[REDACTED]";
+const brokeredSecrets = new Map<string, number>();
 
 function knownSecrets(environment: NodeJS.ProcessEnv = process.env): string[] {
-  return Object.entries(environment)
+  const environmentSecrets = Object.entries(environment)
     .filter(([key, value]) => SENSITIVE_KEY.test(key) && typeof value === "string" && value.length >= 4)
-    .map(([, value]) => value as string)
+    .map(([, value]) => value as string);
+  return [...new Set([...environmentSecrets, ...brokeredSecrets.keys()])]
     .sort((left, right) => right.length - left.length);
+}
+
+/**
+ * Registers a supervisor-side credential value for rejection and redaction.
+ * The returned release function is reference-counted so multiple local
+ * supervisors may safely broker the same credential in one process.
+ */
+export function registerBrokeredSecret(value: string): () => void {
+  if (value.length < 4) throw new Error("Brokered credentials must contain at least four characters");
+  brokeredSecrets.set(value, (brokeredSecrets.get(value) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const remaining = (brokeredSecrets.get(value) ?? 1) - 1;
+    if (remaining <= 0) brokeredSecrets.delete(value);
+    else brokeredSecrets.set(value, remaining);
+  };
 }
 
 /**

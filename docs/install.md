@@ -57,16 +57,22 @@ There is currently no supported registry or standalone binary channel. Do not us
 
 ## Provider setup
 
-A real model is never replaced silently by Echo. For an OpenAI-compatible endpoint:
+A real model is never replaced silently by Echo. In the interactive TUI, `/model` lists the supported providers and their credential status. Store an API key with hidden input, then select any model exposed by that provider:
 
 ```sh
-export OPENAI_API_KEY='...'
-# Optional; defaults to https://api.openai.com/v1
-export OPENAI_BASE_URL='https://provider.example/v1'
-agencity --model openai/MODEL_ID
+/model login openai
+/model openai:gpt-5.6-sol
+
+/model login anthropic
+/model anthropic:fable-5
+
+/model login vercel
+/model vercel:openai/gpt-5.6-sol
 ```
 
-The key remains process-local. `--model` persists only the provider/model identifiers. `agencity config credential-ref PROVIDER HANDLE LABEL` stores an opaque handle such as `env:OPENAI_API_KEY`, never the referenced value. Use `agencity doctor` for secret-free provider remediation. Echo is a deterministic demo/test fixture and requires `--demo` or a visibly labeled interactive choice.
+Stored keys live in the owner-only profile `auth.json`, separate from profile preferences and canonical workspace history. `/model logout PROVIDER` removes the stored key. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY` remain supported as process-environment fallbacks; a stored key takes precedence. `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `AI_GATEWAY_BASE_URL` may override their corresponding endpoints.
+
+Model identifiers use `provider:model`, so a provider-specific model ID may contain `/`. Anthropic shorthand such as `anthropic:fable-5` is normalized once to the durable and wire-visible `anthropic:claude-fable-5`; Vercel gateway IDs pass through unchanged. `--model PROVIDER:MODEL` selects the same format outside the TUI and persists only the non-secret identifier. `agencity config credential-ref PROVIDER HANDLE LABEL` remains an opaque-reference facility and never stores the referenced value. Echo is a deterministic demo/test fixture and requires `--demo` or a visibly labeled interactive choice.
 
 ## Release acceptance from an isolated link
 

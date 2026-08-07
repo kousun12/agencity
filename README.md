@@ -32,9 +32,14 @@ For a command on `PATH`, the supported unpublished workflow is `bun link` from t
 From a repository, `agencity` (or `bun run dev`) discovers the nearest `.agencity` or version-control root, canonicalizes path aliases, and creates or resumes named durable work without requiring session IDs:
 
 ```sh
-# Real provider: credentials stay in the supervisor process; only this model ID is saved.
-export OPENAI_API_KEY='...'
-agencity --model openai/gpt-4o-mini "inspect this repository"
+# Real provider: use the TUI's hidden credential prompt, then select any model.
+agencity
+/model login openai
+/model openai:gpt-5.6-sol
+
+# Gateway model IDs may contain slashes.
+/model login vercel
+/model vercel:openai/gpt-5.6-sol
 
 # Deterministic fixture behavior is always explicit.
 agencity --demo "exercise the durable product route"
@@ -51,7 +56,7 @@ agencity service shutdown
 
 `--workspace PATH` overrides discovery. The canonical root contains an owner-only `.agencity/workspace-id` marker. That opaque identity moves with the repository and makes real paths and symlinked entry paths converge; concurrent first opens atomically choose one marker. A pre-marker `.agencity/agent.db` is migrated once to its legacy path-derived identity. Agencity refuses symlinked, insecure, or malformed markers rather than silently creating a different workspace.
 
-A workspace-scoped recent branch and non-secret model preference live in the separate profile store. If selection is ambiguous the interactive command asks instead of choosing by row order; scripts receive a typed nonzero error and can use `sessions --select NAME`. A retained branch never changes model silently, and remains inspectable when its provider is unavailable.
+A workspace-scoped recent branch and non-secret `provider:model` preference live in the separate profile store. OpenAI, Anthropic, and Vercel AI Gateway keys may be saved in an owner-only profile `auth.json`; environment variables remain supported fallbacks. Raw keys never enter profile preferences or canonical workspace history. If selection is ambiguous the interactive command asks instead of choosing by row order; scripts receive a typed nonzero error and can use `sessions --select NAME`. A retained branch never changes model silently, and remains inspectable when its provider is unavailable.
 
 The product entrypoint discovers or starts one authenticated loopback background service per workspace on demand; it is not installed as an OS boot/login service. Closing or interrupting a client only detaches. A quiescent service exits automatically after 60 seconds. Active runs, effects, schedules, heartbeats, wakes, workers, and attached clients keep it resident and are listed by `service status`; a durable run waiting only for user input does not require a resident process. `stop TARGET` durably requests run cancellation, while `service shutdown` stops admission, drains resident workers, releases leases, and leaves sessions intact. `attach`, `send`, `status`, and `agents` use names or IDs without making the client the execution owner.
 

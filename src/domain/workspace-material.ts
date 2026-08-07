@@ -13,6 +13,7 @@ export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   SessionNamed: "non-material",
   BranchNamed: "non-material",
   SessionStatusChanged: "non-material",
+  SessionModelChanged: "non-material",
   MessageAppended: "material",
   CellProposed: "non-material",
   CellStarted: "non-material",

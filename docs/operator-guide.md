@@ -114,13 +114,19 @@ Heartbeats and schedules queue durable wakes and deliver them through the ordina
 ### Provider and model onboarding
 
 ```sh
-export OPENAI_API_KEY='...'
-# optional: export OPENAI_BASE_URL='https://provider.example/v1'
-agencity --model openai/MODEL_ID
+agencity
+/model login openai
+/model openai:gpt-5.6-sol
+/model login anthropic
+/model anthropic:fable-5
+/model login vercel
+/model vercel:openai/gpt-5.6-sol
 agencity --demo  # visibly labeled deterministic Echo fixture
 ```
 
-The real-provider path persists only `provider/model`; raw credentials never enter preferences, events, logs, artifacts, or doctor output. `config credential-ref PROVIDER env:VARIABLE LABEL` records an opaque external handle, not a credential. Non-interactive new work without a usable real provider and model fails nonzero rather than choosing Echo. A resumed branch always retains its original model; if that provider is unavailable the branch remains visible and opens in a blocked configuration state.
+`/model login PROVIDER` accepts a key through hidden terminal input. The profile-owned `auth.json` stores OpenAI, Anthropic, and Vercel AI Gateway keys with owner-only permissions, separate from profile preferences and workspace state. `/model logout PROVIDER` removes a stored key. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY` remain environment fallbacks. `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `AI_GATEWAY_BASE_URL` may override their corresponding endpoints.
+
+The real-provider path persists the selected `provider:model` identifier. The model portion may contain `/`, as in `vercel:openai/gpt-5.6-sol`. Anthropic shorthand such as `anthropic:fable-5` is normalized before persistence to `anthropic:claude-fable-5`, which is also the exact model ID recorded for provider calls. Raw credentials never enter preferences, events, logs, artifacts, or doctor output. `config credential-ref PROVIDER env:VARIABLE LABEL` records an opaque external handle, not a credential. Non-interactive new work without a usable real provider and model fails nonzero rather than choosing Echo. A resumed branch always retains its original model; an explicit model change commits `SessionModelChanged` only while no model work is active.
 
 Programmatically supplied `SupervisorOptions.modelProviders` appear in the same secret-free provider catalog. Providers may expose streaming capability, but model choice still requires a model identifier (an environment `<PROVIDER>_MODEL`, persisted preference, `--model`, or interactive input).
 
@@ -249,6 +255,9 @@ Commands:
 | Command | Behavior |
 |---|---|
 | `/history [CURSOR]` / `/live` | Print canonical history, or inspect a read-only historical projection and return to the live cursor. |
+| `/model` | List OpenAI, Anthropic, Vercel AI Gateway, and demo availability without exposing credentials. |
+| `/model login PROVIDER` / `/model logout PROVIDER` | Store a provider key through hidden input, or remove its stored value. |
+| `/model PROVIDER:MODEL` | Persist the workspace default and durably select the model for the current idle branch. |
 | `/budget` | Print current token, cost, turn, and wall-time counters/limits. |
 | `/snapshot` | Print the entire current `AgentState`. |
 | `/tree` | Print the recursive child-session tree and task status. |
@@ -288,9 +297,9 @@ First Ctrl-C requests durable cancellation for an active run; a second Ctrl-C de
 
 ## Providers
 
-`Supervisor.open` always installs `EchoModelProvider`, visibly named `Echo (demo fixture; non-streaming)`. If `OPENAI_API_KEY` exists, it also installs a streaming OpenAI-compatible provider named `openai`; `OPENAI_BASE_URL` changes its endpoint. Programmatic callers can inject additional `ModelProvider` implementations with `modelProviders`. Providers omit `capabilities` or declare `{ streaming: false }` to use `complete`; streaming providers must declare `{ streaming: true }` and implement `stream`. The runtime does not silently fall back to a second complete request if an advertised stream fails. Secret-free descriptors are available from `supervisor.modelProviders` and `GET /model-providers`. `providerConcurrency` accepts a positive default or a per-provider map; the one shared limiter covers root turns, recursive calls, and model-backed gates.
+`Supervisor.open` always installs `EchoModelProvider`, visibly named `Echo (demo fixture; non-streaming)`, plus credential-brokered OpenAI, Anthropic, and Vercel AI Gateway providers. OpenAI uses Chat Completions; Anthropic and Vercel use Anthropic Messages, with Vercel receiving model IDs such as `openai/gpt-5.6-sol` unchanged. Programmatic callers can inject additional `ModelProvider` implementations with `modelProviders`. Providers omit `capabilities` or declare `{ streaming: false }` to use `complete`; streaming providers must declare `{ streaming: true }` and implement `stream`. The runtime does not silently fall back to a second complete request if an advertised stream fails. Secret-free descriptors, including usability and credential source, are available from `supervisor.modelProviders` and `GET /model-providers`. `providerConcurrency` accepts a positive default or a per-provider map; the one shared limiter covers root turns, recursive calls, and model-backed gates.
 
-Provider credentials remain in the supervisor. Common credential-shaped variables are removed from the console worker and non-login shell executor environments. Inputs containing an actual known secret value are rejected; executor outputs/logs/errors redact known values. Benign fields named `token`, `auth`, or similar are not mutated. This reduces accidental disclosure but is not a hostile-code boundary; trusted generated code has OS access and must be contained externally when necessary.
+Provider credentials remain in the supervisor. Stored credentials are registered with the same known-secret rejection and redaction path as environment credentials, and are released when replaced, removed, or closed. Common credential-shaped variables are removed from the console worker and non-login shell executor environments. Inputs containing an actual known secret value are rejected; executor outputs/logs/errors redact known values. Benign fields named `token`, `auth`, or similar are not mutated. This reduces accidental disclosure but is not a hostile-code boundary; trusted generated code has OS access and must be contained externally when necessary.
 
 ## Recovery startup
 
@@ -328,7 +337,7 @@ bun run src/cli.ts data delete --workspace demo --scope workspace --scope-id dem
   --exclusive-artifacts
 ```
 
-Workspace/profile erasure requires an external receipt directory; it may not be inside the artifact root. Whole-workspace deletion removes the local workspace DB, exact LibSQL sidecars, every durable local replica path, the official Turso Sync `-wal`, `-wal-revert`, `-info`, `-changes`, replace-base/allowlisted backup and `.db-log` files, and the entire explicitly exclusive CAS root; similarly named unrelated sentinels are retained. Receipt removed-lists contain only entries found absent after the attempt. A permission failure leaves the catalog owned (not tombstoned), so fix the filesystem and repeat the same confirmed request. Session deletion preflights links before touching CAS, removes only artifact objects with no retained local reference, then rechecks and transactionally erases rows. Linked/recursive, replicated, harness/quarantine-referenced, or otherwise cross-referenced sessions return `CAPABILITY_UNAVAILABLE` without losing their artifacts.
+Workspace/profile erasure requires an external receipt directory; it may not be inside the artifact root. Whole-profile deletion removes both the profile database and its model credential file. Whole-workspace deletion removes the local workspace DB, exact LibSQL sidecars, every durable local replica path, the official Turso Sync `-wal`, `-wal-revert`, `-info`, `-changes`, replace-base/allowlisted backup and `.db-log` files, and the entire explicitly exclusive CAS root; similarly named unrelated sentinels are retained. Receipt removed-lists contain only entries found absent after the attempt. A permission failure leaves the catalog owned (not tombstoned), so fix the filesystem and repeat the same confirmed request. Session deletion preflights links before touching CAS, removes only artifact objects with no retained local reference, then rechecks and transactionally erases rows. Linked/recursive, replicated, harness/quarantine-referenced, or otherwise cross-referenced sessions return `CAPABILITY_UNAVAILABLE` without losing their artifacts.
 
 Remote-managed status is durable evidence, not current configuration: every replica-status row, progress/watermark, profile catalog URL/reference, and the old adjacent default path is consulted after reopen. Data-plane sync authentication is not Cloud administrative authority. A workspace delete is blocked unless an operator supplies a separately authenticated `ManagedReplicaDeletionAdmin`, every managed identity has an addressable sync URL, and the adapter returns a receipt for every distinct URL. Retries reuse stable scope/owner/URL idempotency keys. Remote session/profile granularity is unavailable. New workspaces cannot silently reuse a successful deletion tombstone, whose placement and credential-reference fields are scrubbed.
 

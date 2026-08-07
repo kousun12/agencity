@@ -1,6 +1,6 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, DependencyFailureError, ExecutionOwnershipConflictError, NotFoundError, ValidationError, canonicalSkillDigest, newId, projectEvents, reduceAgentState, validateNewEvent, validateRefinementReviewRequest } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, ValidationError, canonicalSkillDigest, newId, projectEvents, reduceAgentState, validateNewEvent, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
@@ -1004,7 +1004,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
   async getLatestCursor(sessionId: string, branchId: string): Promise<string|null> { const events=await this.loadEvents(sessionId,{branchId}); return events.at(-1)?.cursor ?? null; }
   async listBranches():Promise<Array<{sessionId:string;branchId:string}>>{const r=await this.#execute("SELECT session_id,branch_id FROM branches ORDER BY session_id,branch_id");return r.rows.map(row=>({sessionId:String(row.session_id),branchId:String(row.branch_id)}));}
   async saveSnapshot(state: AgentState): Promise<void> { await this.#execute({sql:"INSERT INTO snapshots(session_id,branch_id,cursor,reducer_version,state_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(session_id,branch_id) DO UPDATE SET cursor=excluded.cursor,reducer_version=excluded.reducer_version,state_json=excluded.state_json,updated_at=excluded.updated_at",args:[state.sessionId,state.branch.id,state.cursor,state.reducerVersion,json(state),new Date().toISOString()]}); }
-  async loadSnapshot(sessionId:string,branchId:string):Promise<AgentState|null>{const r=await this.#execute({sql:"SELECT reducer_version,state_json FROM snapshots WHERE session_id=? AND branch_id=?",args:[sessionId,branchId]});if(!r.rows[0]||Number(r.rows[0].reducer_version)!==6)return null;return JSON.parse(String(r.rows[0].state_json)) as AgentState;}
+  async loadSnapshot(sessionId:string,branchId:string):Promise<AgentState|null>{const r=await this.#execute({sql:"SELECT reducer_version,state_json FROM snapshots WHERE session_id=? AND branch_id=?",args:[sessionId,branchId]});if(!r.rows[0]||Number(r.rows[0].reducer_version)!==REDUCER_VERSION)return null;return JSON.parse(String(r.rows[0].state_json)) as AgentState;}
   async deleteSnapshots(sessionId?:string):Promise<void>{if(sessionId)await this.#execute({sql:"DELETE FROM snapshots WHERE session_id=?",args:[sessionId]});else await this.#execute("DELETE FROM snapshots");}
 
   async getProcessExecutionLease(scope: ProcessExecutionLeaseScope): Promise<ProcessExecutionLeaseRecord | null> {

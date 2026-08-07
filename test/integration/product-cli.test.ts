@@ -266,7 +266,7 @@ describe("product CLI", () => {
     const first = await cli(["run", "--workspace", value.workspace, "--demo", "inspect this repository"], { home: value.home });
     expect(first).toMatchObject({ code: 0, stderr: "" });
     expect(first.stdout).toContain("Session: inspect this repository / main");
-    expect(first.stdout).toContain("Model: echo/echo-1 [DEMO FIXTURE]");
+    expect(first.stdout).toContain("Model: echo:echo-1 [DEMO FIXTURE]");
     expect(first.stdout).toContain("Echo: inspect this repository");
 
     const resumed = await cli(["run", "--workspace", value.workspace, "continue inspection"], { home: value.home });
@@ -317,7 +317,7 @@ describe("product CLI", () => {
     const value = await fixture();
     const invokeTui = async (extraEnv: Record<string, string>) => {
       const { OPENAI_API_KEY: _key, ...clean } = process.env;
-      const child = Bun.spawn([process.execPath, "run", join(root, "src/cli.ts"), "--workspace", value.workspace, "--model", "openai/test-model"], {
+      const child = Bun.spawn([process.execPath, "run", join(root, "src/cli.ts"), "--workspace", value.workspace, "--model", "openai:test-model"], {
         cwd: root, env: { ...clean, HOME: value.home, ...extraEnv }, stdout: "pipe", stderr: "pipe", stdin: "pipe",
       });
       child.stdin.write("/quit\n"); child.stdin.end();
@@ -327,7 +327,7 @@ describe("product CLI", () => {
     expect(createdCode).toBe(0);
     const resumed = await cli(["run", "--workspace", value.workspace, "work while unavailable"], { home: value.home });
     expect(resumed.code).toBe(1);
-    expect(resumed.stdout).toContain("Model: openai/test-model");
+    expect(resumed.stdout).toContain("Model: openai:test-model");
     expect(resumed.stderr).toContain("Run failed");
     expect(resumed.stdout).not.toContain("[UNAVAILABLE]");
     const rows = JSON.parse((await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home })).stdout) as Array<{ model: { provider: string; model: string } }>;
@@ -355,6 +355,27 @@ describe("product CLI", () => {
     const report = JSON.parse(checked.stdout) as { providers: Array<{ provider: string; usable: boolean }> };
     expect(report.providers).toContainEqual(expect.objectContaining({ provider: "openai", usable: true }));
     expect(await allFileText(value.directory)).not.toContain(secret);
+  });
+
+  test("doctor reports stored provider credentials without exposing their values", async () => {
+    const value = await fixture();
+    const secret = "stored-doctor-secret-0123456789";
+    const profileDirectory = join(value.home, ".agencity");
+    await mkdir(profileDirectory, { recursive: true });
+    await writeFile(join(profileDirectory, "auth.json"), JSON.stringify({
+      version: 1,
+      providers: { vercel: { apiKey: secret } },
+    }), { mode: 0o600 });
+
+    const checked = await cli(["doctor", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(checked).toMatchObject({ code: 0, stderr: "" });
+    expect(checked.stdout).not.toContain(secret);
+    const report = JSON.parse(checked.stdout) as { providers: Array<{ provider: string; usable: boolean; credentialSource: string }> };
+    expect(report.providers).toContainEqual(expect.objectContaining({
+      provider: "vercel",
+      usable: true,
+      credentialSource: "stored",
+    }));
   });
 
   test("credential configuration rejects expanded known secrets and credential-shaped references or labels without disclosure", async () => {

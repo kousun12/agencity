@@ -142,7 +142,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 
 ### Incomplete product surfaces
 
-- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. The package remains private and has no claimed registry or standalone release channel.
+- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. The TUI `/model` flow stores owner-only OpenAI, Anthropic, and Vercel AI Gateway keys outside canonical/profile preference databases and selects durable `provider:model` configurations, including gateway IDs containing `/`. Environment keys remain supported fallbacks. The package remains private and has no claimed registry or standalone release channel.
 - Echo is an explicitly labeled demo fixture; ordinary non-interactive work without a usable provider fails rather than silently falling back.
 - The ordinary task route drives the strict `agencity.agent-action` version-1 autonomous loop. Only validated TypeScript actions execute generated work; final, clarification, permission, blocked, and failed are typed run control. Raw action JSON remains internal attributable history.
 - Console cells support notebook observation, bounded `inspect`, artifact spill, `state.list`, and retained `cells.list/get`; lexical bindings remain deliberately non-durable.

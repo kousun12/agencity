@@ -61,6 +61,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `SessionNamed` | `{ name }` | Changes the human session label without changing durable identity or retained task text. Product listing resolves the latest attributable rename across retained branches. |
 | `BranchNamed` | `{ name }` | Changes the current branch label; the rebuildable branch routing projection mirrors it. |
 | `SessionStatusChanged` | `{ status: SessionStatus, reason?: string }` | Sets projected lifecycle status. |
+| `SessionModelChanged` | `{ previousModel, model, selectedBy: "user" }` | Replaces the selected model for the current branch only when `previousModel` still matches and no model work is active. It is explicit user configuration, not workspace-material evidence. |
 | `MessageAppended` | `{ messageId, role: "system" | "user" | "assistant" | "tool", content: string, modelCallId?: string }` | Appends one conversation message. |
 | `CellProposed` | `{ cellId, code: string, dependencies: string[] }` | Creates a proposed cell with attempt count zero. |
 | `CellStarted` | `{ cellId, attempt: positive integer }` | Moves a proposed/running cell to running. |

@@ -3,6 +3,7 @@ import type {
   AgentRunInputRequestState, AgentRunState, AgentRunStepState, AgentState, CellState, DocumentChunkState, EffectState, GoalGateState,
   MailboxMessageState, ModelCallState, RecursiveModelState, TaskState, TerminalNoticeState,
 } from "./state.ts";
+import { REDUCER_VERSION } from "./state.ts";
 import { InvalidTransitionError, ValidationError } from "./errors.ts";
 import { parseAgentAction, type AgentAction } from "./agent-action.ts";
 
@@ -25,7 +26,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     const parentBranchId = p.parentBranchId ?? null;
     if ((parentSessionId === null) !== (parentBranchId === null)) throw new ValidationError("Session ancestry requires both parent IDs");
     return {
-      reducerVersion: 6, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
+      reducerVersion: REDUCER_VERSION, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
       parentSessionId, parentBranchId, rootSessionId: p.rootSessionId ?? event.sessionId,
       depth: p.depth ?? 0, taskId: p.taskId ?? null,
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
@@ -42,6 +43,15 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "SessionNamed": return { ...next, sessionName: (event.payload as EventPayloads["SessionNamed"]).name };
     case "BranchNamed": return { ...next, branch: { ...state.branch, name: (event.payload as EventPayloads["BranchNamed"]).name } };
     case "SessionStatusChanged": return { ...next, status: (event.payload as EventPayloads["SessionStatusChanged"]).status };
+    case "SessionModelChanged": {
+      const p = event.payload as EventPayloads["SessionModelChanged"];
+      if (!Bun.deepEquals(p.previousModel, state.model)) throw new InvalidTransitionError("sessionModel", `${state.model.provider}:${state.model.model}`, `${p.model.provider}:${p.model.model}`);
+      if (Object.values(state.agentRuns).some(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status)) ||
+          Object.values(state.modelCalls).some(call => call.status === "requested")) {
+        throw new InvalidTransitionError("sessionModel", "active", `${p.model.provider}:${p.model.model}`);
+      }
+      return { ...next, model: p.model };
+    }
     case "MessageAppended": { const p = event.payload as EventPayloads["MessageAppended"]; return { ...next, messages: [...state.messages, { id: p.messageId, role: p.role, content: p.content, eventId: event.id, eventCursor: event.cursor, schemaVersion: event.schemaVersion, modelCallId: p.modelCallId ?? null, ...(p.mailbox === undefined ? {} : { mailbox: { ...p.mailbox, ...(p.mailbox.artifactIds === undefined ? {} : { artifactIds: [...p.mailbox.artifactIds] }) } }) }] }; }
     case "CellProposed": { const p = event.payload as EventPayloads["CellProposed"]; if (state.cells[p.cellId]) throw new InvalidTransitionError("cell", state.cells[p.cellId]!.status, "proposed"); const cell: CellState = { id: p.cellId, code: p.code, status: "proposed", attempts: 0, logs: [], eventId: event.id }; return { ...next, cells: { ...state.cells, [p.cellId]: cell } }; }
     case "CellStarted": { const p = event.payload as EventPayloads["CellStarted"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("cell", old?.status ?? "missing", "running"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "running", attempts: p.attempt, eventId: event.id } } }; }

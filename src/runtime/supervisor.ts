@@ -29,6 +29,7 @@ import {
 } from "../domain/index.ts";
 import {
   EchoModelProvider,
+  AnthropicCompatibleProvider,
   FileExecutor,
   ModelExecutor,
   OpenAICompatibleProvider,
@@ -43,7 +44,14 @@ import { ContextMaterializer } from "./context.ts";
 import { ModelLoop } from "./model-loop.ts";
 import { OutboxRunner } from "./outbox.ts";
 import { ProjectionService } from "./projection.ts";
-import { containsBrokeredSecret, scrubJson, scrubText } from "../security/index.ts";
+import {
+  ModelCredentialStore,
+  containsBrokeredSecret,
+  modelCredentialPathForProfile,
+  scrubJson,
+  scrubText,
+  type SupportedModelProviderName,
+} from "../security/index.ts";
 import { AgentService } from "./agents.ts";
 import { DocumentService } from "./documents.ts";
 import { GoalService } from "./goals.ts";
@@ -92,6 +100,8 @@ export interface SupervisorOptions {
   readonly skillPermissionAllowlist?: readonly string[];
   /** Separate durable profile catalog/preferences/credential-reference database. */
   readonly profileDatabaseUrl?: string;
+  /** Separate owner-only API-key file; defaults beside the profile database. */
+  readonly modelCredentialPath?: string;
   readonly deviceName?: string;
   /** Optional cloud transport. Without this block the runtime is completely local-only. */
   readonly sync?: {
@@ -250,6 +260,7 @@ function cellListOptions(raw: unknown): Required<Pick<CellListOptions, "limit">>
 export class Supervisor {
   readonly storage: AgentStorage;
   readonly profile: ProfileStore;
+  readonly credentials: ModelCredentialStore;
   readonly device: DeviceIdentity;
   readonly sync: SyncService;
   readonly artifacts: LocalArtifactStore;
@@ -283,6 +294,7 @@ export class Supervisor {
   private constructor(
     storage: AgentStorage,
     profile: ProfileStore,
+    credentials: ModelCredentialStore,
     device: DeviceIdentity,
     sync: SyncService,
     artifacts: LocalArtifactStore,
@@ -298,6 +310,7 @@ export class Supervisor {
   ) {
     this.storage = storage;
     this.profile = profile;
+    this.credentials = credentials;
     this.device = device;
     this.sync = sync;
     this.artifacts = artifacts;
@@ -336,10 +349,30 @@ export class Supervisor {
     const profileDatabaseUrl=options.profileDatabaseUrl??adjacentFileUrl(options.databaseUrl,".profile.db");
     if(profileDatabaseUrl.startsWith("file:"))await mkdir(dirname(fileURLToPath(new URL(profileDatabaseUrl))),{recursive:true});
     const profile = await ProfileStore.open(profileDatabaseUrl);
-    const device = await profile.getOrCreateDeviceIdentity(options.deviceName);
+    let credentials: ModelCredentialStore;
+    try {
+      if (!options.modelCredentialPath && !profileDatabaseUrl.startsWith("file:")) {
+        throw new ValidationError("A model credential path is required when the profile database is not file-backed");
+      }
+      const credentialPath = options.modelCredentialPath ??
+        modelCredentialPathForProfile(fileURLToPath(new URL(profileDatabaseUrl)));
+      credentials = await ModelCredentialStore.open(credentialPath);
+    } catch (error) {
+      profile.close();
+      throw error;
+    }
+    let device: DeviceIdentity;
+    try {
+      device = await profile.getOrCreateDeviceIdentity(options.deviceName);
+    } catch (error) {
+      credentials.close();
+      profile.close();
+      throw error;
+    }
     const openingWorkspaceId=options.sync?.workspaceId??"default";const catalog=await profile.getWorkspace(openingWorkspaceId);
-    if(catalog?.deletedAt){profile.close();throw new ValidationError("Configured workspace is tombstoned and cannot be silently reclaimed",{workspaceId:openingWorkspaceId,deletedAt:catalog.deletedAt});}
+    if(catalog?.deletedAt){credentials.close();profile.close();throw new ValidationError("Configured workspace is tombstoned and cannot be silently reclaimed",{workspaceId:openingWorkspaceId,deletedAt:catalog.deletedAt});}
     if (options.sync?.credentialReference && !await profile.getCredentialReference(options.sync.credentialReference)) {
+      credentials.close();
       profile.close();
       throw new ValidationError(`Unknown profile credential reference: ${options.sync.credentialReference}`);
     }
@@ -372,6 +405,7 @@ export class Supervisor {
       ...(options.sync?.workspaceName === undefined ? {} : { workspaceName: options.sync.workspaceName }),
       databaseUrl: options.databaseUrl,
       artifactDirectory: options.artifactDirectory,
+      profileCredentialPath: credentials.path,
       ...(options.artifactDirectoryOwnership === undefined ? {} : { artifactDirectoryOwnership: options.artifactDirectoryOwnership }),
       ...(options.sync?.syncUrl === undefined ? {} : { syncUrl: options.sync.syncUrl }),
       ...(replicaUrl === undefined ? {} : { replicaUrl }),
@@ -384,17 +418,40 @@ export class Supervisor {
     catch (error) {
       await sync.stop().catch(() => {});
       await executionLeases?.close().catch(() => {});
-      storage.close();profile.close();
+      storage.close();credentials.close();profile.close();
       throw error;
     }
     const artifacts = new LocalArtifactStore(options.artifactDirectory);
     const providers: ModelProvider[] = [new EchoModelProvider(), ...(options.modelProviders ?? [])];
-    if (process.env.OPENAI_API_KEY) {
-      providers.push(new OpenAICompatibleProvider({
-        baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
-        apiKey: () => process.env.OPENAI_API_KEY,
-      }));
-    }
+    const configuredNames = new Set(providers.map(provider => provider.name));
+    const availability = (provider: SupportedModelProviderName) => {
+      const status = credentials.status(provider);
+      return {
+        usable: status.configured,
+        credentialSource: status.source,
+        ...(status.configured ? {} : { remediation: `Use /model login ${provider} or set ${status.environmentVariable}.` }),
+      };
+    };
+    if (!configuredNames.has("openai")) providers.push(new OpenAICompatibleProvider({
+      baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
+      apiKey: () => credentials.resolve("openai"),
+      displayName: "OpenAI",
+      availability: () => availability("openai"),
+    }));
+    if (!configuredNames.has("anthropic")) providers.push(new AnthropicCompatibleProvider({
+      baseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
+      apiKey: () => credentials.resolve("anthropic"),
+      displayName: "Anthropic",
+      normalizeModel: model => model.startsWith("claude-") ? model : `claude-${model}`,
+      availability: () => availability("anthropic"),
+    }));
+    if (!configuredNames.has("vercel")) providers.push(new AnthropicCompatibleProvider({
+      baseUrl: process.env.AI_GATEWAY_BASE_URL ?? "https://ai-gateway.vercel.sh",
+      apiKey: () => credentials.resolve("vercel"),
+      providerName: "vercel",
+      displayName: "Vercel AI Gateway",
+      availability: () => availability("vercel"),
+    }));
     const modelExecutor = new ModelExecutor(providers, options.providerConcurrency ?? 1);
     const executors = [
       new ShellExecutor(workspaceRoot),
@@ -405,6 +462,7 @@ export class Supervisor {
     const supervisor = new Supervisor(
       storage,
       profile,
+      credentials,
       device,
       sync,
       artifacts,
@@ -425,6 +483,11 @@ export class Supervisor {
 
   /** Secret-free provider descriptors suitable for onboarding and clients. */
   get modelProviders() { return this.modelExecutor.providers(); }
+
+  /** Resolves provider-defined shorthand before model identity becomes durable. */
+  normalizeModelConfiguration(model: ModelConfiguration): ModelConfiguration {
+    return this.modelExecutor.normalizeConfiguration(model);
+  }
 
   /** Reconciles retained work only after managed lease admission. */
   async recoverExecution(options: { readonly drainPending?: boolean } = {}): Promise<void> {
@@ -462,6 +525,7 @@ export class Supervisor {
     await this.sync.stop();
     await this.executionLeases?.close();
     this.storage.close();
+    this.credentials.close();
     this.profile.close();
   }
 
@@ -478,7 +542,7 @@ export class Supervisor {
     finally {
       await this.sync.stop().catch(() => {});
       await this.executionLeases?.close().catch(() => {});
-      this.storage.close();this.profile.close();this.#closed = true;
+      this.storage.close();this.credentials.close();this.profile.close();this.#closed = true;
     }
   }
 
@@ -495,7 +559,7 @@ export class Supervisor {
     if (!catalog) await this.profile.putWorkspace({ workspaceId: options.workspaceId, name: options.workspaceId, databaseUrl: this.sync.databaseUrl, replicaUrl: null, syncUrl: null, credentialReference: null, ownerProfileId: this.device.profileId, createdAt: now, updatedAt: now, deletedAt: null });
     const sessionId = options.sessionId ?? newId();
     const branchId = options.branchId ?? newId();
-    const model = options.model ?? { provider: "echo", model: "echo-1" };
+    const model = this.normalizeModelConfiguration(options.model ?? { provider: "echo", model: "echo-1" });
     await this.storage.appendEvents([{
       sessionId,
       branchId,
@@ -512,6 +576,41 @@ export class Supervisor {
       },
     }]);
     return { sessionId, branchId };
+  }
+
+  /** Explicitly changes the durable branch model while no model work is active. */
+  async selectModel(sessionId: string, branchId: string, model: ModelConfiguration): Promise<{
+    readonly changed: boolean;
+    readonly previousModel: ModelConfiguration;
+    readonly model: ModelConfiguration;
+    readonly eventId?: string;
+    readonly cursor?: string;
+  }> {
+    const normalizedModel = this.normalizeModelConfiguration(model);
+    const descriptor = this.modelExecutor.providers().find(provider => provider.name === normalizedModel.provider);
+    if (!descriptor || normalizedModel.provider === "echo") {
+      throw new ValidationError(normalizedModel.provider === "echo"
+        ? "Echo is a demo fixture and cannot be selected through /model"
+        : `Unknown model provider: ${normalizedModel.provider}`);
+    }
+    if (!descriptor.usable) throw new ValidationError(descriptor.remediation ?? `Credential unavailable for ${normalizedModel.provider}`);
+    const events = await this.storage.loadEvents(sessionId, { branchId });
+    if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
+    const state = projectEvents(events);
+    if (Bun.deepEquals(state.model, normalizedModel)) return { changed: false, previousModel: state.model, model: normalizedModel };
+    if (Object.values(state.agentRuns).some(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status)) ||
+        Object.values(state.modelCalls).some(call => call.status === "requested")) {
+      throw new ValidationError("Cannot change the branch model while model work is active");
+    }
+    const [event] = await this.storage.appendEvents([{
+      sessionId,
+      branchId,
+      type: "SessionModelChanged",
+      producer: "client",
+      idempotencyKey: `session-model:${newId()}`,
+      payload: { previousModel: state.model, model: normalizedModel, selectedBy: "user" },
+    }]);
+    return { changed: true, previousModel: state.model, model: normalizedModel, eventId: event!.id, cursor: event!.cursor };
   }
 
   async nameSession(sessionId: string, branchId: string, name: string): Promise<void> {

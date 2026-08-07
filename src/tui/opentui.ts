@@ -7,6 +7,8 @@ import {
   ScrollBoxRenderable,
   TextRenderable,
   type KeyEvent,
+  type PasteEvent,
+  decodePasteBytes,
 } from "@opentui/core";
 import { stdin, stdout } from "node:process";
 import { scrubText } from "../security/index.ts";
@@ -139,6 +141,7 @@ function paletteText(query: string): string {
 export interface OpenTuiController {
   readonly presentation: TerminalPresentation;
   readonly detached: boolean;
+  readonly pendingSecretInput?: boolean;
   subscribePresentation(listener: (presentation: TerminalPresentation) => void): () => void;
   execute(line: string): Promise<"continue" | "detach">;
   handleInterrupt(): Promise<InterruptDecision>;
@@ -167,6 +170,7 @@ export class OpenTuiApp {
   #busy = false;
   #closed = false;
   #activeOperation: Promise<void> | null = null;
+  #secretBuffer = "";
 
   constructor(readonly renderer: CliRenderer, readonly controller: OpenTuiController) {
     this.#view = buildTerminalScreen(controller.presentation);
@@ -279,6 +283,7 @@ export class OpenTuiApp {
       this.#render();
     });
     renderer.keyInput.on("keypress", this.#onKey);
+    renderer.keyInput.on("paste", this.#onPaste);
     renderer.on(CliRenderEvents.RESIZE, this.#onResize);
     this.#render();
     this.#composer.focus();
@@ -339,6 +344,7 @@ export class OpenTuiApp {
     this.#closed = true;
     this.#unsubscribe();
     this.renderer.keyInput.off("keypress", this.#onKey);
+    this.renderer.keyInput.off("paste", this.#onPaste);
     this.renderer.off(CliRenderEvents.RESIZE, this.#onResize);
     this.#root.destroyRecursively();
   }
@@ -347,7 +353,48 @@ export class OpenTuiApp {
     this.#render();
   };
 
+  #onPaste = (event: PasteEvent): void => {
+    if (!this.controller.pendingSecretInput) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const value = decodePasteBytes(event.bytes);
+    this.#secretBuffer = `${this.#secretBuffer}${value}`.slice(0, 16_385);
+    this.#composer.value = "•".repeat(this.#secretBuffer.length);
+  };
+
   #onKey = (key: KeyEvent): void => {
+    if (this.controller.pendingSecretInput) {
+      key.preventDefault();
+      key.stopPropagation();
+      if (key.ctrl && key.name === "d") {
+        this.#secretBuffer = "";
+        this.#composer.value = "";
+        this.requestExit();
+        return;
+      }
+      if (key.name === "escape" || key.ctrl && key.name === "c") {
+        this.#secretBuffer = "";
+        this.#composer.value = "";
+        void this.controller.execute("/cancel").finally(() => {
+          if (!this.#closed) { this.#render(); this.#composer.focus(); }
+        });
+        return;
+      }
+      if (key.name === "return" || key.name === "linefeed" || key.name === "kpenter") {
+        void this.#submitSecret();
+        return;
+      }
+      if (key.name === "backspace" || key.name === "delete") {
+        this.#secretBuffer = this.#secretBuffer.slice(0, -1);
+        this.#composer.value = "•".repeat(this.#secretBuffer.length);
+        return;
+      }
+      if (!key.ctrl && !key.meta && key.sequence && !/[\r\n\0-\x1f\x7f]/.test(key.sequence)) {
+        this.#secretBuffer += key.sequence;
+        this.#composer.value = "•".repeat(this.#secretBuffer.length);
+      }
+      return;
+    }
     if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
       key.preventDefault();
       key.stopPropagation();
@@ -419,6 +466,26 @@ export class OpenTuiApp {
     });
   }
 
+  async #submitSecret(): Promise<void> {
+    if (!this.#secretBuffer || this.#busy) return;
+    const secret = this.#secretBuffer;
+    this.#secretBuffer = "";
+    this.#composer.value = "";
+    this.#busy = true;
+    this.#render();
+    try {
+      await this.controller.execute(secret);
+    } catch (error) {
+      this.showOutput(renderTerminalError(error));
+    } finally {
+      this.#busy = false;
+      if (!this.#closed) {
+        this.#render();
+        this.#composer.focus();
+      }
+    }
+  }
+
   async #performSubmit(value: string): Promise<void> {
     this.#composer.value = "";
     this.#paletteQuery = "";
@@ -469,7 +536,9 @@ export class OpenTuiApp {
     const showDetails = width >= 100;
     this.#details.visible = showDetails;
     const provisional = [...this.#provisionalOutput.values()].join("");
-    const details = this.#paletteQuery
+    const details = this.controller.pendingSecretInput
+      ? "PROVIDER LOGIN\nAPI key input is hidden.\nEnter saves · Esc cancels"
+      : this.#paletteQuery
       ? paletteText(this.#paletteQuery)
       : provisional
         ? `PROVISIONAL OUTPUT\n${provisional}`
@@ -498,7 +567,7 @@ export class OpenTuiApp {
     this.#header.fg = this.#view.connection === "connected" ? COLORS.text : COLORS.warning;
     this.#timelineText.content = renderTimeline(this.#view, this.#expandedRunIds, compactDetails);
     this.#detailsText.content = details;
-    this.#composer.placeholder = this.#busy ? "Working…" : this.#view.composerPlaceholder;
+    this.#composer.placeholder = this.#busy ? "Working…" : this.controller.pendingSecretInput ? "API key (input hidden)…" : this.#view.composerPlaceholder;
     this.#footer.content = `${this.#view.trustLabel} · ${this.#view.recoveryLabel} · ${this.#view.attentionCount} attention · ${this.#view.budgetLabel} · Ctrl-P commands`;
     this.#footer.fg = this.#view.attentionCount > 0 ? statusColor("waiting for user") : COLORS.muted;
     this.renderer.setTerminalTitle(`Agencity — ${this.#view.sessionName}`);

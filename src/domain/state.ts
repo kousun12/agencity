@@ -6,6 +6,8 @@ import type {
 import type { AgentAction } from "./agent-action.ts";
 import type { JsonValue } from "./json.ts";
 
+export const REDUCER_VERSION = 7 as const;
+
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
 export interface CellState { readonly id: string; readonly code: string; readonly status: "proposed" | "running" | "committed" | "failed" | "abandoned"; readonly attempts: number; readonly result?: JsonValue; readonly logs: string[]; readonly error?: string; readonly eventId: string; }
@@ -96,7 +98,7 @@ export interface AgentRunState {
 }
 
 export interface AgentState {
-  readonly reducerVersion: 6; readonly sessionId: string; readonly workspaceId: string; readonly sessionName?: string | null; readonly branch: BranchState;
+  readonly reducerVersion: typeof REDUCER_VERSION; readonly sessionId: string; readonly workspaceId: string; readonly sessionName?: string | null; readonly branch: BranchState;
   readonly parentSessionId: string | null; readonly parentBranchId: string | null; readonly rootSessionId: string;
   readonly depth: number; readonly taskId: string | null;
   readonly model: ModelConfiguration; readonly status: SessionStatus; readonly cursor: string; readonly appliedEventIds: string[];

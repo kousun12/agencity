@@ -8,6 +8,7 @@ import { LibSqlStorage } from "../storage/index.ts";
 import { scrubText } from "../security/index.ts";
 import { ProductCatalog } from "./catalog.ts";
 import { workspacePreferenceKey, type ResolvedWorkspace } from "./workspace.ts";
+import { formatModel, parseModel } from "./providers.ts";
 import {
   assessService,
   assertServiceCompatibility,
@@ -304,12 +305,19 @@ export class ManagedWorkspaceService {
         productConfig: async () => {
           const model = await supervisor.profile.getPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"));
           const credentialReferences = (await supervisor.profile.listCredentialReferences()).map(({ reference, provider, label, createdAt, updatedAt }) => ({ reference, provider, label, createdAt, updatedAt }));
-          return { defaultModel: typeof model?.value === "string" ? model.value : null, credentialReferences };
+          return { defaultModel: typeof model?.value === "string" ? model.value : null, credentialReferences, providers: supervisor.modelProviders };
         },
         productSetModel: async (model: string | null) => {
           if (model !== null && !model.trim()) throw new ValidationError("Model preference is required");
-          await supervisor.profile.setPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"), model === null ? null : model.trim());
-          return { defaultModel: model === null ? null : model.trim() };
+          const normalizedModel = model === null ? null : formatModel(supervisor.normalizeModelConfiguration(parseModel(model)));
+          await supervisor.profile.setPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"), normalizedModel);
+          return { defaultModel: normalizedModel };
+        },
+        productSetProviderKey: async (provider: string, apiKey: string | null) => {
+          const status = apiKey === null
+            ? await supervisor.credentials.remove(provider)
+            : await supervisor.credentials.set(provider, apiKey);
+          return { provider: status.provider, configured: status.configured, source: status.source };
         },
         productCredentialReference: async (provider: string, reference: string, label: string) => {
           const record = await supervisor.profile.putCredentialReference({ reference, provider, label, metadata: { kind: "opaque-handle" } });
