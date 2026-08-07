@@ -112,13 +112,13 @@ export function renderStartupStatus(
     : "unknown";
   return [
     "Agencity trusted-local TUI (protocol-backed terminal client)",
-    `Session: ${state.sessionName ?? state.sessionId} / ${state.branch.name ?? state.branch.id}`,
+    `Session: ${state.sessionName ?? "unnamed session"} / ${state.branch.name ?? "unnamed branch"}`,
     `Model: ${state.model.provider}/${state.model.model} (${streaming})`,
     "Authority: TRUSTED-LOCAL; generated code has the runtime process's OS authority (not sandboxed)",
     `Protocol: snapshot+cursor resume=${capabilities.snapshotCursorResume}; progress is ephemeral; sync=${sync}`,
     `Recovery: ${recovery.pendingEffectIds.length} pending effects, ${recovery.unknownEffects.length} unknown, ${recovery.activeChildTaskIds.length} active children, ${recovery.attentionGoalGateIds.length} failed/unknown/running gates`,
     recovery.cancellationRequestedRunIds.length
-      ? `Cancellation reconciliation pending: ${recovery.cancellationRequestedRunIds.join(", ")}`
+      ? `Cancellation reconciliation pending for ${recovery.cancellationRequestedRunIds.length} run${recovery.cancellationRequestedRunIds.length === 1 ? "" : "s"}`
       : "Cancellation reconciliation: none pending",
   ].join("\n");
 }
@@ -137,17 +137,51 @@ export function renderTerminalError(error: unknown, context = "command"): string
   return `[${context} error:${code}${status}] ${message}`;
 }
 
-export function renderEvent(event: AgentEvent): string {
+const LIVE_SUMMARY_MAX_CHARS = 240;
+
+function conciseValue(value: unknown): string {
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  const oneLine = scrubText((serialized ?? String(value)).replace(/\s+/g, " ").trim());
+  return oneLine.length <= LIVE_SUMMARY_MAX_CHARS ? oneLine : `${oneLine.slice(0, LIVE_SUMMARY_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * Render the small user-facing projection used by the live TUI. Canonical
+ * event payloads, identifiers, and cursors remain available through /history.
+ */
+export function renderEvent(event: AgentEvent): string | null {
   const payload = event.payload as Record<string, unknown>;
   switch (event.type) {
-    case "MessageAppended": return `[message:${String(payload.role)}] ${String(payload.content)}`;
-    case "CellProposed": return `[cell:${String(payload.cellId)}] proposed`;
-    case "CellCommitted": return `[cell:${String(payload.cellId)}] committed ${JSON.stringify(payload.result)}`;
-    case "CellFailed": return `[cell:${String(payload.cellId)}] failed ${String(payload.error)}`;
-    case "EffectOutcomeRecorded": return `[effect:${String(payload.effectId)}] ${String(payload.outcome)}`;
-    case "EffectReconciliationRecorded": return `[unknown:${String(payload.effectId)}] assessment=${String(payload.assessment)} (effect remains unknown)`;
-    case "AgentRunStatusChanged": return `[run:${String(payload.runId)}] ${String(payload.status)}${payload.reason ? ` — ${String(payload.reason)}` : ""}`;
-    default: return `[${event.type}] cursor=${event.cursor}`;
+    case "MessageAppended":
+      return payload.role === "assistant" ? `assistant: ${String(payload.content)}` : null;
+    case "CellCommitted":
+      return `[cell complete] ${conciseValue(payload.result)}`;
+    case "CellFailed":
+      return `[cell failed] ${conciseValue(payload.error)}`;
+    case "EffectOutcomeRecorded":
+      if (payload.outcome === "unknown") return "[operation outcome unknown] Inspect with /unknown before retrying.";
+      if (payload.outcome === "failed") return `[operation failed] ${conciseValue(payload.error ?? "No error details were recorded.")}`;
+      return null;
+    case "EffectReconciliationRecorded":
+      return `[unknown outcome assessed as ${String(payload.assessment)}; the durable outcome remains unknown]`;
+    case "AgentRunUserInputRequested":
+      return payload.kind === "permission"
+        ? `[permission needed: ${conciseValue(payload.permission)}] ${conciseValue(payload.question)}`
+        : `[input needed] ${conciseValue(payload.question)}`;
+    case "AgentRunStatusChanged": {
+      const reason = payload.reason ? ` — ${conciseValue(payload.reason)}` : "";
+      switch (payload.status) {
+        case "succeeded": return "[run complete]";
+        case "blocked": return `[run blocked]${reason}`;
+        case "failed": return `[run failed]${reason}`;
+        case "cancelled": return `[run cancelled]${reason}`;
+        case "budget_exceeded": return `[run stopped: budget exceeded]${reason}`;
+        case "unknown": return `[run outcome unknown]${reason}`;
+        default: return null;
+      }
+    }
+    default:
+      return null;
   }
 }
 
@@ -167,8 +201,14 @@ export class TerminalUI {
   #progress = new Map<string, string>();
   #streamedEffectIds = new Set<string>();
   #streamedCallIds = new Set<string>();
+  #visibleProgressEffectIds = new Set<string>();
+  #agentProgressRunByEffect = new Map<string, string>();
+  #agentWorkingRunIds = new Set<string>();
   #watchController: AbortController | null = null;
   #watchPromise: Promise<void> | null = null;
+  #detachController: AbortController | null = null;
+  #sigintHandler: (() => void) | null = null;
+  #lastDetachDecision: Extract<InterruptDecision, { action: "detach" }> | null = null;
   #detached = false;
   #readline: ReadlineInterface | null = null;
 
@@ -181,6 +221,9 @@ export class TerminalUI {
   async run(sessionId: string, branchId: string): Promise<void> {
     this.#sessionId = sessionId;
     this.#branchId = branchId;
+    this.#detached = false;
+    this.#lastDetachDecision = null;
+    this.#detachController = new AbortController();
     const capabilities = await this.client.capabilities();
     this.#productCatalog = capabilities.productCatalog;
     const snapshot = await this.client.snapshot(sessionId, branchId);
@@ -191,19 +234,24 @@ export class TerminalUI {
     if (recovery.unknownEffects.length) this.#write("Unknown effects require inspection with /unknown and evidence-only /reconcile; resume never retries them.\n");
     this.#write("/help opens the command palette. /quit detaches without cancellation.\n");
     await this.#startWatch();
-    const sigint = (): void => {
+    this.#sigintHandler = (): void => {
       void this.handleInterrupt().catch((error) => {
-        try { this.#renderError(error, "interrupt"); } catch {}
+        if (!this.#detached) {
+          try { this.#renderError(error, "interrupt"); } catch {}
+        }
       });
     };
-    process.on("SIGINT", sigint);
+    process.on("SIGINT", this.#sigintHandler);
     try {
       if (!this.#interactive) return;
       this.#readline = createInterface({ input: this.#input, output: this.#output as NodeJS.WriteStream });
       while (!this.#detached) {
         let line: string;
-        try { line = (await this.#readline.question(this.#prompt())).trim(); }
-        catch { break; }
+        try {
+          line = (await this.#readline.question(this.#prompt(), { signal: this.#detachController.signal })).trim();
+        } catch {
+          break;
+        }
         if (!line) continue;
         try {
           await this.execute(line);
@@ -212,7 +260,9 @@ export class TerminalUI {
         }
       }
     } finally {
-      process.off("SIGINT", sigint);
+      this.#removeSigintHandler();
+      this.#detachController?.abort();
+      this.#detachController = null;
       this.#readline?.close();
       this.#readline = null;
       this.#watchController?.abort();
@@ -223,9 +273,9 @@ export class TerminalUI {
 
   /** Public command entry for renderer/command tests and alternate terminal shells. */
   async execute(line: string): Promise<"continue" | "detach"> {
-    if (line === "/quit" || line === "/exit") { this.#detached = true; this.#watchController?.abort(); return "detach"; }
+    if (line === "/quit" || line === "/exit") { this.#requestDetach(); return "detach"; }
     if (line === "/help") { this.#writePalette(); return "continue"; }
-    if (line === "/live") { this.#historicalCursor = null; this.#viewState = this.#liveState; this.#write(`Returned to live cursor ${this.#liveState?.cursor ?? "?"}.\n`); return "continue"; }
+    if (line === "/live") { this.#historicalCursor = null; this.#viewState = this.#liveState; this.#write("Returned to live state.\n"); return "continue"; }
     if (line === "/info" || line === "/status") { await this.#info(); return "continue"; }
     if (line === "/sessions") { this.#json(await this.client.productSessions()); return "continue"; }
     if (line.startsWith("/sessions select ")) { const target=line.slice(17).trim(); const selected=await this.client.productSelect(target); await this.#switch(selected.sessionId, selected.branchId); return "continue"; }
@@ -290,69 +340,120 @@ Confirmation digest: ${preview.confirmationDigest}
   }
 
   async handleInterrupt(): Promise<InterruptDecision> {
+    if (this.#detached) {
+      return this.#lastDetachDecision ?? {
+        action: "detach",
+        warning: "Detaching. Durable work, if any, may outlive this client.",
+      };
+    }
     const active = this.#activeRun();
     const decision = this.#interrupts.decide(active?.id ?? null);
     if (decision.action === "cancel") {
       try {
         await this.client.cancelRun(this.#sessionId,this.#branchId,decision.runId,"User requested cancellation with Ctrl-C");
-        this.#write(`Durable cancellation requested for run ${decision.runId}. Waiting for leaf-first reconciliation; press Ctrl-C again to detach.\n`);
+        if (!this.#detached) this.#write("Durable cancellation requested. Waiting for leaf-first reconciliation; press Ctrl-C again to detach.\n");
       } catch (error) {
-        this.#renderError(error, "interrupt");
-        this.#write(`Cancellation for run ${decision.runId} was not confirmed. Durable/external work may outlive this client; press Ctrl-C again to detach.\n`);
+        if (!this.#detached) {
+          this.#renderError(error, "interrupt");
+          this.#write("Cancellation was not confirmed. Durable/external work may outlive this client; press Ctrl-C again to detach.\n");
+        }
       }
-    } else {
+    } else if (this.#requestDetach(decision)) {
       this.#write(`${decision.warning}\n`);
-      this.#detached = true;
-      this.#watchController?.abort();
-      this.#readline?.close();
     }
     return decision;
   }
 
   #watchHandlers(): BranchWatchHandlers {
     return {
-      onSnapshot: (snapshot) => { this.#liveState=snapshot.state;if(this.#historicalCursor===null)this.#viewState=snapshot.state; },
+      onSnapshot: (snapshot) => {
+        this.#liveState = snapshot.state;
+        if (this.#historicalCursor === null) this.#viewState = snapshot.state;
+      },
       onEvent: (event) => {
         if (!this.#liveState) return;
-        this.#liveState=reduceAgentState(this.#liveState,event);
+        this.#liveState = reduceAgentState(this.#liveState, event);
         if (event.type === "EffectOutcomeRecorded") {
-          const effectId=String((event.payload as {effectId?:string}).effectId??"");
-          if(this.#streamedEffectIds.has(effectId)){
-            const call=Object.values(this.#liveState.modelCalls).find((item)=>item.effectId===effectId);
-            if(call)this.#streamedCallIds.add(call.id);
+          const effectId = String((event.payload as { effectId?: string }).effectId ?? "");
+          if (this.#streamedEffectIds.has(effectId)) {
+            const call = Object.values(this.#liveState.modelCalls).find((item) => item.effectId === effectId);
+            if (call) this.#streamedCallIds.add(call.id);
             this.#streamedEffectIds.delete(effectId);
           }
         }
-        if(this.#historicalCursor===null){
-          this.#viewState=this.#liveState;
-          const payload=event.payload as {callId?:string;modelCallId?:string};
-          const streamedCallId=payload.callId??payload.modelCallId;
-          const suppressStreamDuplicate=Boolean(streamedCallId&&this.#streamedCallIds.has(streamedCallId)&&(event.type==="ModelOutputChunk"||event.type==="MessageAppended"));
-          if(!suppressStreamDuplicate)this.#write(`${renderEvent(event)}\n`);
-          else if(event.type==="MessageAppended")this.#write("\n[assistant output committed]\n");
+        if (this.#historicalCursor === null) {
+          this.#viewState = this.#liveState;
+          const payload = event.payload as { callId?: string; modelCallId?: string };
+          const streamedCallId = payload.callId ?? payload.modelCallId;
+          const suppressStreamDuplicate = Boolean(
+            streamedCallId && this.#streamedCallIds.has(streamedCallId) && event.type === "MessageAppended",
+          );
+          const rendered = renderEvent(event);
+          if (suppressStreamDuplicate) this.#write("\n[assistant response committed]\n");
+          else if (rendered !== null) this.#write(`${rendered}\n`);
         }
-        if(event.type==="ModelCallCompleted"){
-          const callId=String((event.payload as {callId?:string}).callId??"");
-          if(callId)this.#streamedCallIds.delete(callId);
+        if (event.type === "ModelCallCompleted") {
+          const callId = String((event.payload as { callId?: string }).callId ?? "");
+          if (callId) this.#streamedCallIds.delete(callId);
         }
-        if(event.type==="AgentRunStatusChanged"&&TERMINAL_RUN_STATUSES.has(String((event.payload as {status?:string}).status)))this.#interrupts.reset();
+        if (event.type === "AgentRunStatusChanged" && TERMINAL_RUN_STATUSES.has(String((event.payload as { status?: string }).status))) {
+          const runId = String((event.payload as { runId?: string }).runId ?? "");
+          this.#interrupts.reset();
+          this.#agentWorkingRunIds.delete(runId);
+          for (const [effectId, progressRunId] of this.#agentProgressRunByEffect) {
+            if (progressRunId === runId) this.#agentProgressRunByEffect.delete(effectId);
+          }
+        }
       },
-      onProgress: (progress) => { const text=progress.kind==="model-output-delta"&&progress.value&&typeof progress.value==="object"&&"text" in progress.value?String((progress.value as {text:string}).text):"";this.#streamedEffectIds.add(progress.effectId);this.#progress.set(progress.effectId,(this.#progress.get(progress.effectId)??"")+text);if(text&&this.#historicalCursor===null)this.#write(text); },
-      onProgressDiscard: (ids,reason) => { ids.forEach((id)=>{this.#progress.delete(id);if(reason!=="committed")this.#streamedEffectIds.delete(id);});if(reason!=="committed"&&ids.length)this.#write(`\n[discarded ephemeral progress after ${reason}: ${ids.join(", ")}]\n`); },
-      onReconnect: (_attempt,cursor) => { this.#write(`[protocol reconnected after committed cursor ${cursor}; progress was not replayed]\n`); },
+      onProgress: (progress) => {
+        const text = progress.kind === "model-output-delta" && progress.value && typeof progress.value === "object" && "text" in progress.value
+          ? String((progress.value as { text: string }).text)
+          : "";
+        const runId = this.#agentRunIdForEffect(progress.effectId);
+        if (runId !== null) {
+          if (this.#historicalCursor === null) {
+            this.#visibleProgressEffectIds.add(progress.effectId);
+            this.#agentProgressRunByEffect.set(progress.effectId, runId);
+            if (!this.#agentWorkingRunIds.has(runId)) {
+              this.#agentWorkingRunIds.add(runId);
+              this.#write("[agent working…]\n");
+            }
+          }
+          return;
+        }
+        if (!text || this.#historicalCursor !== null) return;
+        this.#streamedEffectIds.add(progress.effectId);
+        this.#visibleProgressEffectIds.add(progress.effectId);
+        this.#progress.set(progress.effectId, (this.#progress.get(progress.effectId) ?? "") + text);
+        this.#write(text);
+      },
+      onProgressDiscard: (ids, reason) => {
+        let discardedVisibleProgress = false;
+        for (const id of ids) {
+          this.#progress.delete(id);
+          if (this.#visibleProgressEffectIds.delete(id) && reason !== "committed") discardedVisibleProgress = true;
+          this.#agentProgressRunByEffect.delete(id);
+          if (reason !== "committed") this.#streamedEffectIds.delete(id);
+        }
+        if (discardedVisibleProgress) this.#write("\n[provisional progress discarded after connection loss]\n");
+      },
+      onReconnect: () => {},
     };
   }
 
   async #startWatch(): Promise<void> {
     this.#watchController?.abort();
-    await this.#watchPromise?.catch(()=>{});
-    this.#watchController=new AbortController();
-    this.#watchPromise=this.client.watchBranch(this.#sessionId,this.#branchId,this.#watchHandlers(),{signal:this.#watchController.signal});
-    void this.#watchPromise.catch((error)=>{if(!this.#watchController?.signal.aborted)this.#write(`[protocol watch failed: ${error instanceof Error?error.message:String(error)}]\n`);});
+    await this.#watchPromise?.catch(() => {});
+    const controller = new AbortController();
+    this.#watchController = controller;
+    this.#watchPromise = this.client.watchBranch(this.#sessionId, this.#branchId, this.#watchHandlers(), { signal: controller.signal });
+    void this.#watchPromise.catch((error) => {
+      if (!controller.signal.aborted) this.#write(`[protocol watch failed] ${scrubText(error instanceof Error ? error.message : String(error))}\n`);
+    });
   }
 
   async #switch(sessionId:string,branchId:string):Promise<void>{
-    this.#watchController?.abort();await this.#watchPromise?.catch(()=>{});this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();const snapshot=await this.client.snapshot(sessionId,branchId);this.#liveState=snapshot.state;this.#viewState=snapshot.state;this.#interrupts.reset();await this.#startWatch();this.#write(`Switched to ${snapshot.state.sessionName??sessionId}/${snapshot.state.branch.name??branchId} at ${snapshot.cursor}.\n`);
+    this.#watchController?.abort();await this.#watchPromise?.catch(()=>{});this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();this.#visibleProgressEffectIds.clear();this.#agentProgressRunByEffect.clear();this.#agentWorkingRunIds.clear();const snapshot=await this.client.snapshot(sessionId,branchId);this.#liveState=snapshot.state;this.#viewState=snapshot.state;this.#interrupts.reset();await this.#startWatch();const sessionName=snapshot.state.sessionName??"unnamed session";const branchName=snapshot.state.branch.name??"unnamed branch";this.#write(`Switched to ${sessionName}/${branchName}.\n`);
   }
 
   async #history(cursor:string):Promise<void>{
@@ -364,21 +465,23 @@ Confirmation digest: ${preview.confirmationDigest}
   }
 
   async #info():Promise<void>{const caps=await this.client.capabilities();const recovery=await this.client.recoverySummary(this.#sessionId,this.#branchId);this.#write(`${renderStartupStatus(this.#requireState(),caps,recovery)}\n`);}
-  async #stop(reason:string):Promise<void>{const active=this.#activeRun();if(!active){this.#write("No active run.\n");return;}this.#json(await this.client.cancelRun(this.#sessionId,this.#branchId,active.id,reason));}
+  async #stop(reason:string):Promise<void>{const active=this.#activeRun();if(!active){this.#write("No active run.\n");return;}await this.client.cancelRun(this.#sessionId,this.#branchId,active.id,reason);this.#write("Cancellation requested.\n");}
   async #startOrRespond(text:string):Promise<void>{
-    const active=this.#activeRun();let result;
-    if(active?.status==="waiting_for_user"){const request=Object.values(active.inputRequests).find((item)=>item.response===undefined);if(!request)throw new Error("Waiting run has no pending request");const approved=request.kind==="permission"?/^(y|yes|approve|approved)$/i.test(text):undefined;result=await this.client.respondToRun(this.#sessionId,this.#branchId,active.id,request.id,{response:text,...(approved===undefined?{}:{approved})});}
-    else if(active){this.#write(`Run ${active.id} is ${active.status}; /stop requests cancellation.\n`);return;}
-    else result=await this.client.startRun(this.#sessionId,this.#branchId,{task:text,goalMode:"auto"});
-    this.#json(result);
+    const active=this.#activeRun();
+    if(active?.status==="waiting_for_user"){const request=Object.values(active.inputRequests).find((item)=>item.response===undefined);if(!request)throw new Error("Waiting run has no pending request");const approved=request.kind==="permission"?/^(y|yes|approve|approved)$/i.test(text):undefined;const result=await this.client.respondToRun(this.#sessionId,this.#branchId,active.id,request.id,{response:text,...(approved===undefined?{}:{approved})});if(result.status==="queued"||result.status==="running")this.#write("Response accepted.\n");}
+    else if(active){this.#write(`A run is ${active.status}; /stop requests cancellation.\n`);return;}
+    else {const result=await this.client.startRun(this.#sessionId,this.#branchId,{task:text,goalMode:"auto"});if(result.status==="queued"||result.status==="running")this.#write("Run accepted.\n");}
   }
   async #goal(command:string):Promise<void>{if(command.startsWith("create ")){this.#json(await this.client.createGoal(this.#sessionId,this.#branchId,command.slice(7)));return;}const current=await this.client.currentGoal(this.#sessionId,this.#branchId);if(!current){this.#write("No current goal.\n");return;}if(command==="pause")this.#json(await this.client.pauseGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="resume")this.#json(await this.client.resumeGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="clear")this.#json(await this.client.clearGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="complete")this.#json(await this.client.requestGoalCompletion(this.#sessionId,this.#branchId,current.goalId));else throw new Error("/goal create DESCRIPTION|pause|resume|clear|complete");}
   async #heartbeat(command:string):Promise<void>{const create=/^create\s+(\d+)(?:\s+([\s\S]+))?$/.exec(command);if(create){this.#json(await this.client.createHeartbeat(this.#sessionId,this.#branchId,{intervalMs:Number(create[1]),...(create[2]?{prompt:create[2]}:{})}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/heartbeat create MS [PROMPT]|pause N|resume N|clear N");const item=(await this.client.heartbeats(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Heartbeat number not found");this.#json(change[1]==="pause"?await this.client.pauseHeartbeat(item.heartbeatId):change[1]==="resume"?await this.client.resumeHeartbeat(item.heartbeatId):await this.client.cancelHeartbeat(item.heartbeatId));}
   async #schedule(command:string):Promise<void>{const once=/^once\s+(\S+)\s+([\s\S]+)$/.exec(command);const every=/^every\s+(\d+)\s+([\s\S]+)$/.exec(command);if(once){this.#json(await this.client.createSchedule(this.#sessionId,this.#branchId,{at:once[1]!,prompt:once[2]!}));return;}if(every){this.#json(await this.client.createSchedule(this.#sessionId,this.#branchId,{intervalMs:Number(every[1]),prompt:every[2]!}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/schedule once ISO PROMPT|every MS PROMPT|pause N|resume N|clear N");const item=(await this.client.schedules(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Schedule number not found");this.#json(change[1]==="pause"?await this.client.pauseSchedule(item.scheduleId):change[1]==="resume"?await this.client.resumeSchedule(item.scheduleId):await this.client.clearSchedule(item.scheduleId));}
   async #reconcile(command:string):Promise<void>{const match=/^(\S+)\s+(succeeded|failed|no_effect|still_unknown)\s+([\s\S]+)$/.exec(command);if(!match)throw new Error("/reconcile EFFECT_ID succeeded|failed|no_effect|still_unknown SUMMARY");this.#json(await this.client.reconcileUnknownEffect(this.#sessionId,this.#branchId,match[1]!,{assessment:match[2] as "succeeded"|"failed"|"no_effect"|"still_unknown",summary:match[3]!,recordedBy:"terminal-user"}));this.#write("Assessment recorded as evidence. The durable effect remains unknown and was not retried. Start a new /run only if safe.\n");}
+  #agentRunIdForEffect(effectId:string):string|null{for(const run of Object.values(this.#liveState?.agentRuns??{})){for(const step of run.steps){if(step.effectId===effectId||step.modelAttempts.some((attempt)=>attempt.effectId===effectId))return run.id;}}return null;}
+  #requestDetach(decision?:Extract<InterruptDecision,{action:"detach"}>):boolean{if(this.#detached)return false;this.#detached=true;if(decision)this.#lastDetachDecision=decision;this.#removeSigintHandler();this.#detachController?.abort();this.#watchController?.abort();return true;}
+  #removeSigintHandler():void{if(!this.#sigintHandler)return;process.off("SIGINT",this.#sigintHandler);this.#sigintHandler=null;}
   #activeRun(){return Object.values(this.#liveState?.agentRuns??{}).find((run)=>!TERMINAL_RUN_STATUSES.has(run.status));}
   #requireState():AgentState{if(!this.#viewState)throw new Error("No projected state");return this.#viewState;}
-  #prompt():string{return `${(this.#liveState?.sessionName??this.#sessionId).slice(-12)}/${(this.#liveState?.branch.name??this.#branchId).slice(-12)}${this.#historicalCursor?`@${this.#historicalCursor}`:""}> `;}
+  #prompt():string{return `${(this.#liveState?.sessionName??"agent").slice(-12)}/${(this.#liveState?.branch.name??"live").slice(-12)}${this.#historicalCursor?`@${this.#historicalCursor}`:""}> `;}
   #write(value:string):void{this.#output.write(value);}
   #renderError(error:unknown,context:"command"|"interrupt"):void{this.#write(`${renderTerminalError(error,context)}\n`);}
   #json(value:unknown):void{this.#write(`${JSON.stringify(value,null,2)}\n`);}
