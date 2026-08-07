@@ -13,7 +13,7 @@ This plan replaces expanded context storage for new events with:
 1. immutable, content-addressed context fragments defined once in canonical history;
 2. a compact manifest that preserves the exact structure and ordering of each materialized context;
 3. a resolver that reconstructs and verifies the original `JsonValue` before token estimation or model execution;
-4. reference-shaped model effects so outbox state, snapshots, sync envelopes, and exports do not re-embed the expanded context.
+4. reference-shaped context-backed model effects so outbox state, snapshots, sync envelopes, and exports do not re-embed the expanded context.
 
 The first event that uses a fragment stores its exact JSON value. Later visible events reference the fragment's digest and source event. Fragment definitions remain inside canonical events rather than the external artifact store. This keeps context dependencies available to current event synchronization, export, branch replay, and owned-scope deletion without requiring general artifact replication.
 
@@ -45,7 +45,7 @@ For a growing conversation, repeated expanded contexts can approach quadratic st
 - Preserve the existing `contentHash` over the exact `JSON.stringify(context)` bytes.
 - Store repeatable context content once per visible session history and represent later occurrences with small references.
 - Remove the complete expanded context copy from new `ContextMaterialized` event payloads and `context_records` rows.
-- Store only a context identity and hash in new model-effect requests so outbox rows, effect projections, snapshots, sync envelopes, protocol history, and exports do not copy the expanded value.
+- Store only a context identity and hash in new model-effect requests backed by `ContextMaterialized` so outbox rows, effect projections, snapshots, sync envelopes, protocol history, and exports do not copy the expanded value. Context-independent model effects, including model-summary compaction prompts, remain inline.
 - Preserve exact source-event, harness, compaction, model-attempt, and context-capacity provenance.
 - Preserve local-first operation, offline writes, divergent branches, and current event-envelope synchronization.
 - Open, replay, inspect, export, synchronize, branch, and delete databases containing any mixture of version-1 and version-2 context events.
@@ -111,7 +111,7 @@ Version-1 `contentHash` values remain historical assertions because the current 
 
 - **Fragment:** An immutable JSON value identified by the SHA-256 digest of its exact tagged UTF-8 JSON encoding.
 - **Fragment definition:** The first visible canonical occurrence that stores a fragment's value, digest, byte length, and encoding.
-- **Fragment reference:** A digest plus the source event and definition ordinal needed to locate and verify the fragment.
+- **Fragment reference:** A tagged pointer to either a definition ordinal in the same event or a digest, prior source event, and definition ordinal needed to locate and verify an earlier fragment.
 - **Manifest:** A complete ordered recipe for reconstructing one context from fragment references and small structural metadata.
 - **Codec:** A versioned pure encoder and decoder that maps between a `JsonValue` and a manifest plus fragment definitions.
 - **Resolution:** Loading definitions, checking scope and integrity, decoding the manifest, and verifying the final context hash.
@@ -157,9 +157,13 @@ interface ContextFragmentSource {
   eventId: string;
   definitionOrdinal: number;
 }
+
+type ContextFragmentReference =
+  | { location: "local"; definitionOrdinal: number }
+  | { location: "prior"; sourceIndex: number };
 ```
 
-Manifest nodes identify entries in `fragmentSources` by array index, so digests and source coordinates are not repeated throughout the manifest. The durable meaning remains explicit: every reference identifies immutable bytes and the event that owns them.
+Manifest nodes use tagged references. A local reference identifies an entry in the same event's `definitions` array by ordinal. A prior reference identifies an entry in `fragmentSources` by array index, so digests and prior source coordinates are not repeated throughout the manifest. Local definitions never refer to their owning event by ID; the append path may allocate the event ID normally. The durable meaning remains explicit: every reference identifies immutable bytes and either their local definition or the earlier event that owns them.
 
 This design is preferred over placing context bodies in the existing artifact store because automatic artifact replication is currently unavailable. A synced event that depended on a machine-local artifact could become unresolvable on another device. Keeping definitions in event envelopes preserves current local, sync, export, and recovery boundaries.
 
@@ -226,22 +230,26 @@ Upcasting must not inflate every version-2 event back into a full inline payload
 
 ## Write path
 
-1. `ContextMaterializer` builds the final context exactly as it does today, including any agent-run transform.
-2. Secret rejection and redaction run before fragment encoding.
-3. The codec calculates the existing full-context serialized bytes and `contentHash`.
-4. The codec emits a complete manifest and candidate fragment definitions.
-5. Storage finds reusable definitions visible to the target branch and rewrites matching candidates as references.
-6. The new context event receives its stable event ID before append so definitions owned by that event can refer to it deterministically.
-7. Canonical append validation checks:
+1. `ContextMaterializer` determines the stable `contextId` and idempotency key for the materialization intent. A caller-supplied idempotency key requires a stable caller-supplied `contextId`; otherwise the default key remains derived from the generated `contextId`.
+2. Before rebuilding or encoding context, the materializer looks up an existing `ContextMaterialized` event for the same session, event type, and idempotency key. A matching event must agree on branch and `contextId`; the resolver returns that retained context and event without re-encoding. A mismatch remains an idempotency conflict.
+3. When no matching event exists, `ContextMaterializer` builds the final context exactly as it does today, including any agent-run transform.
+4. Secret rejection and redaction run before fragment encoding.
+5. The codec calculates the existing full-context serialized bytes and `contentHash`.
+6. The codec emits a complete manifest and candidate fragment definitions.
+7. Storage finds reusable definitions visible to the target branch and rewrites matching candidates as prior references. Definitions owned by the new event remain local ordinal references and do not contain the new event's ID.
+8. Canonical append validation checks:
    - every local definition's digest and byte length;
    - every earlier source event's session, visibility, order, schema, ordinal, digest, and value;
+   - every local and prior manifest reference;
    - complete manifest resolution;
    - the final `contentHash`;
    - idempotency-key agreement over the complete durable payload.
-8. The event and its reference projections commit in one relational transaction.
-9. The already-built in-memory context may be returned to the immediate caller only after the canonical append succeeds.
+9. The event and its reference projections commit in one relational transaction.
+10. The already-built in-memory context may be returned to the immediate caller only after the canonical append succeeds.
 
 Concurrent writers may independently define the same digest on divergent branches. Both events remain valid. The projection chooses only definitions visible to a given branch and never rewrites canonical history to select a global winner.
+
+Idempotent retry never changes a committed payload from local definitions to prior references merely because the original event has become visible: the retained event is found and returned before encoding. Concurrent attempts that both reach append remain governed by the existing full-payload idempotency comparison. Identical payloads converge on the retained event; differing payloads produce an explicit conflict and never append a second event.
 
 ## Read and recovery path
 
@@ -259,7 +267,7 @@ interface ContextResolver {
 
 Resolution behavior:
 
-- Version 1 returns and verifies `payload.context`.
+- Version 1 returns `payload.context` unchanged. Its `contentHash` remains a historical assertion and is not newly recomputed as an enforcing read-time check; this preserves the meaning and readability of retained version-1 history.
 - Version 2 loads the complete manifest and every canonical fragment source, verifies each fragment, decodes the context, and verifies `contentHash`.
 - Resolution rejects references outside the session or visible branch ancestry.
 - Missing source events, invalid ordinals, changed encodings, size mismatches, and hash mismatches produce typed dependency failures.
@@ -277,7 +285,7 @@ All direct reads of `event.payload.context` move behind this contract, including
 
 ## Model effect and snapshot path
 
-Referenced context events do not achieve the storage goal if the same expanded value is copied into the model effect. New model effect requests use a typed reference input:
+Referenced context events do not achieve the storage goal if the same expanded value is copied into a model effect that consumes that context. New model effect requests backed by `ContextMaterialized` use a typed reference input:
 
 ```ts
 interface ReferencedModelEffectInput {
@@ -291,12 +299,14 @@ interface ReferencedModelEffectInput {
 
 The model executor receives a `ContextResolver` dependency. After the outbox has claimed the durable request and before any provider network call, it resolves the context using the effect's session and branch, verifies `contentHash`, and passes the expanded value to the provider only in memory.
 
-The durable effect request, outbox row, reducer `EffectState`, and snapshots retain the reference input rather than the expanded context. Sync and protocol streams therefore carry the reference-shaped effect as well.
+For context-backed calls, the durable effect request, outbox row, reducer `EffectState`, and snapshots retain the reference input rather than the expanded context. Sync and protocol streams therefore carry the reference-shaped effect as well.
 
 The executor permanently supports both forms:
 
-- retained version-1 model effects with inline `input.context`;
-- new referenced model effects with `inputFormat: "context-reference-v1"`.
+- inline model effects with `input.context`, including retained version-1 requests and new context-independent requests;
+- referenced context-backed model effects with `inputFormat: "context-reference-v1"`.
+
+Model-summary compaction effects construct bounded prompts that do not have a `ContextMaterialized.contextId`. They remain inline model effects. Their frozen source payloads and any separate optimization of those forensic inputs remain outside this plan. The executor dispatches by input shape and does not require a context resolver for inline effects.
 
 The reference form does not change outbox ordering, idempotency, attempt accounting, cancellation, or unknown-outcome rules. Failure to resolve before contacting the provider records a dependency failure and cannot become an unknown provider outcome. Once the provider call begins, existing non-idempotent recovery semantics apply.
 
@@ -388,10 +398,10 @@ No public caller should need to understand fragment manifests to request a model
 ### Phase 4 — Dual-read runtime integration
 
 - Route every complete-context read through the resolver.
-- Add dual-format model effect execution and change new model-effect inputs to context references while preserving retained inline requests.
+- Add dual-format model effect execution and change new context-backed model-effect inputs to context references while preserving inline requests for retained history and context-independent calls such as model-summary compaction.
 - Keep version-1 writes as the default.
 - Exercise agent runs, one-turn calls, compaction, refinement, recursive models, context inspection, restart, and recovery against both formats.
-- Remove direct runtime assumptions that `payload.context` or model `EffectRequested.input.context` always exists.
+- Remove direct runtime assumptions that `payload.context` always exists, and make model execution dispatch explicitly between inline and referenced inputs.
 
 ### Phase 5 — Version-2 write and sync integration
 
@@ -427,8 +437,10 @@ If the 50% context-byte target is missed, keep version-1 writes as the default a
 ### Events, storage, and replay
 
 - Version-1-only, version-2-only, and mixed retained histories.
+- A retained version-1 context with a shape-valid but mismatched historical `contentHash` remains readable and is not reinterpreted as a version-2 integrity failure.
 - Duplicate application remains a true no-op.
-- Idempotency-key reuse agrees on definitions, references, manifest, and provenance.
+- A committed idempotent materialization retry returns the retained event before encoding, without changing local definitions into prior references or producing a conflict.
+- Same-source concurrent attempts for one stable materialization intent append at most one event; payload disagreement remains an explicit conflict.
 - Projection deletion and rebuild produce the same context records and fragment index.
 - Rebuild does not execute model or tool effects.
 - A fork reuses ancestor definitions but cannot use sibling-only definitions.
@@ -442,10 +454,11 @@ If the 50% context-byte target is missed, keep version-1 writes as the default a
 - Restart after context append but before model request resolves the retained context and admits one model request.
 - Restart after model request does not rematerialize context or duplicate the effect.
 - Missing or corrupt fragments block before a provider effect.
-- New model effect events, outbox rows, reducer state, and snapshots contain only the context reference; retained inline model effects still execute correctly.
+- New context-backed model effect events, outbox rows, reducer state, and snapshots contain only the context reference; retained and context-independent inline model effects still execute correctly.
 - A resolver failure records a dependency failure without contacting the provider or producing an unknown provider outcome.
 - Context-window estimation and overflow retries use resolved exact contexts.
 - Deterministic and model-summary compaction retain their current source and derivation semantics.
+- Model-summary compaction prompts remain explicit inline effects and execute without a `contextId`.
 
 ### Sync and branches
 
@@ -506,7 +519,7 @@ The work is complete when:
 
 1. New contexts default to the referenced format and old contexts remain readable.
 2. Every model provider receives the same context value as the inline implementation for the same retained history.
-3. New model effect events, outbox rows, effect projections, snapshots, sync envelopes, and exports contain context references rather than expanded context copies.
+3. New model effects backed by `ContextMaterialized`, together with their outbox rows, effect projections, snapshots, sync envelopes, and exports, contain context references rather than expanded context copies. Context-independent effects such as model-summary compaction prompts remain inline.
 4. Recovery never depends on a live heap, projection-only bytes, or an unreplicated artifact.
 5. Missing or corrupt references prevent dependent model effects and remain visible.
 6. Mixed histories rebuild, sync, export, branch, and delete correctly.
