@@ -50,10 +50,10 @@ interface RunBlock extends TranscriptBlock {
   readonly pending: TextRenderable;
   readonly reason: TextRenderable;
   readonly stepsHost: BoxRenderable;
-  readonly collapsed: TextRenderable;
   readonly stepBlocks: Map<string, StepBlock>;
   run: TerminalRunView;
   expanded: boolean;
+  inline: boolean;
 }
 
 function lineCount(value: string): number {
@@ -112,10 +112,14 @@ export function terminalCellMarker(status: TerminalCellView["status"]): string {
   }
 }
 
-function runSummary(run: TerminalRunView): string {
+function runSummary(run: TerminalRunView, inline: boolean, expanded: boolean): string {
   const provisional = run.provisional ? " · working" : "";
   const cancellation = run.cancellationRequested ? " · cancellation requested" : "";
-  return `${run.statusLabel}${provisional}${cancellation} — ${run.task}`;
+  const task = inline ? "" : ` — ${run.task}`;
+  const steps = !expanded && run.steps.length > 0
+    ? ` · ${run.steps.length} step${run.steps.length === 1 ? "" : "s"} (Ctrl-O to expand latest)`
+    : "";
+  return `${run.statusLabel}${provisional}${cancellation}${task}${steps}`;
 }
 
 function cellSummary(step: TerminalStepView, cell: TerminalCellView): string {
@@ -147,7 +151,35 @@ export class TerminalTranscript {
 
   reconcile(view: TerminalScreenView, expandedRunIds: ReadonlySet<string>): void {
     const desired: TranscriptBlock[] = [];
+    const runs = view.runs.slice(-6);
+    const visibleMessageIds = new Set(view.conversation.map(message => message.id));
+    const runsByTaskMessage = new Map(runs.map(run => [run.taskMessageId, run]));
+    const runsByFinalMessage = new Map(
+      runs
+        .filter((run): run is TerminalRunView & { finalMessageId: string } => run.finalMessageId !== null)
+        .map(run => [run.finalMessageId, run]),
+    );
+    const placedRunIds = new Set<string>();
+    const appendRun = (run: TerminalRunView, inline: boolean): void => {
+      if (placedRunIds.has(run.id)) return;
+      const key = `run:${run.id}`;
+      let block = this.#blocks.get(key) as RunBlock | undefined;
+      if (!block) {
+        block = this.#createRunBlock(key, run);
+        this.#blocks.set(key, block);
+      }
+      block.run = run;
+      block.expanded = run.active || expandedRunIds.has(run.id);
+      block.inline = inline;
+      block.update();
+      desired.push(block);
+      placedRunIds.add(run.id);
+    };
+
     for (const message of view.conversation) {
+      const finalRun = runsByFinalMessage.get(message.id);
+      if (finalRun && !visibleMessageIds.has(finalRun.taskMessageId)) appendRun(finalRun, false);
+
       const key = `message:${message.id}`;
       let block = this.#blocks.get(key) as MessageBlock | undefined;
       if (!block) {
@@ -158,40 +190,12 @@ export class TerminalTranscript {
       }
       block.update();
       desired.push(block);
+
+      const taskRun = runsByTaskMessage.get(message.id);
+      if (taskRun) appendRun(taskRun, true);
     }
 
-    const runs = view.runs.slice(-6);
-    if (runs.length > 0) {
-      const key = "activity:heading";
-      let heading = this.#blocks.get(key);
-      if (!heading) {
-        const root = new TextRenderable(this.renderer, {
-          id: "agencity-transcript-activity-heading",
-          width: "100%",
-          height: 1,
-          marginTop: 1,
-          fg: TERMINAL_THEME.muted,
-          content: "ACTIVITY",
-          wrapMode: "none",
-        });
-        heading = { key, root, update: () => {} };
-        this.#blocks.set(key, heading);
-      }
-      desired.push(heading);
-    }
-
-    for (const run of runs) {
-      const key = `run:${run.id}`;
-      let block = this.#blocks.get(key) as RunBlock | undefined;
-      if (!block) {
-        block = this.#createRunBlock(key, run);
-        this.#blocks.set(key, block);
-      }
-      block.run = run;
-      block.expanded = run.active || expandedRunIds.has(run.id);
-      block.update();
-      desired.push(block);
-    }
+    for (const run of runs) appendRun(run, false);
 
     const desiredKeys = new Set(desired.map(block => block.key));
     for (const [key, block] of this.#blocks) {
@@ -309,22 +313,12 @@ export class TerminalTranscript {
       paddingLeft: 2,
       backgroundColor: TERMINAL_THEME.background,
     });
-    const collapsed = new TextRenderable(this.renderer, {
-      id: `agencity-transcript-run-collapsed-${run.id}`,
-      width: "100%",
-      height: 1,
-      paddingLeft: 2,
-      fg: TERMINAL_THEME.muted,
-      wrapMode: "none",
-      truncate: true,
-    });
     header.add(marker);
     header.add(summary);
     root.add(header);
     root.add(pending);
     root.add(reason);
     root.add(stepsHost);
-    root.add(collapsed);
 
     const block: RunBlock = {
       key,
@@ -334,22 +328,18 @@ export class TerminalTranscript {
       pending,
       reason,
       stepsHost,
-      collapsed,
       stepBlocks: new Map(),
       run,
       expanded: run.active,
+      inline: false,
       update: () => {
         const current = block.run;
         marker.content = terminalRunMarker(current);
         marker.fg = terminalToneColor(current.provisional ? "provisional" : terminalRunTone(current.status));
-        summary.content = runSummary(current);
+        summary.content = runSummary(current, block.inline, block.expanded);
         pending.content = current.pendingInput ? `needs input: ${current.pendingInput}` : "";
         reason.content = current.reason ?? "";
         stepsHost.visible = block.expanded;
-        collapsed.visible = !block.expanded && current.steps.length > 0;
-        collapsed.content = current.steps.length
-          ? `▸ ${current.steps.length} step${current.steps.length === 1 ? "" : "s"} (Ctrl-O to expand latest)`
-          : "";
         if (block.expanded) this.#reconcileSteps(block, current.steps.slice(-8));
       },
     };

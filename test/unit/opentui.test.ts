@@ -77,7 +77,11 @@ describe("OpenTUI interactive terminal", () => {
         },
       },
     });
-    expect(proposedFinal.runs[0]?.steps[0]).toMatchObject({ label: "Completion proposed", detail: null });
+    expect(proposedFinal.runs[0]).toMatchObject({
+      taskMessageId: "agent-run-task-gated-run",
+      finalMessageId: null,
+      steps: [expect.objectContaining({ label: "Completion proposed", detail: null })],
+    });
     const typescriptCode = "const rows = await sql.query('select 1');\nreturn rows;";
     const typescriptRun: AgentRunState = {
       id: "typescript-run",
@@ -604,14 +608,23 @@ describe("OpenTUI interactive terminal", () => {
       connection: "connected",
       historicalCursor: null,
       ancestry: ["Transcript"],
-      conversation: [{
-        id: "message-1",
-        role: "assistant",
-        content: "# Result\n\nA **structured** answer.\n\n```typescript\nconst value = 42;\n```",
-      }],
+      conversation: [
+        {
+          id: "agent-run-task-run-1",
+          role: "user",
+          content: "Inspect retained output",
+        },
+        {
+          id: "message-1",
+          role: "assistant",
+          content: "# Result\n\nA **structured** answer.\n\n```typescript\nconst value = 42;\n```",
+        },
+      ],
       runs: [{
         id: "run-1",
         task: "Inspect retained output",
+        taskMessageId: "agent-run-task-run-1",
+        finalMessageId: "message-1",
         status: "succeeded",
         statusLabel: "succeeded",
         active: false,
@@ -664,8 +677,14 @@ describe("OpenTUI interactive terminal", () => {
       ) as CodeRenderable;
       expect(message).toBeInstanceOf(MarkdownRenderable);
       expect(source).toBeInstanceOf(CodeRenderable);
-      expect(message.content).toBe(view.conversation[0]!.content);
+      expect(message.content).toBe(view.conversation[1]!.content);
       expect(source.content).toBe(view.runs[0]!.steps[0]!.cell!.code);
+      expect(host.getChildren().map(child => child.id)).toEqual([
+        "agencity-transcript-message-agent-run-task-run-1",
+        "agencity-transcript-run-run-1",
+        "agencity-transcript-message-message-1",
+      ]);
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-activity-heading")).toBeUndefined();
       const logs = setup.renderer.root.findDescendantById(
         "agencity-transcript-cell-logs-agent-run-cell-action-1",
       )!;

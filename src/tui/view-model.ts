@@ -63,6 +63,8 @@ export interface TerminalCellView {
 export interface TerminalRunView {
   readonly id: string;
   readonly task: string;
+  readonly taskMessageId: string;
+  readonly finalMessageId: string | null;
   readonly status: AgentRunState["status"];
   readonly statusLabel: string;
   readonly active: boolean;
@@ -309,6 +311,8 @@ function runView(state: AgentState, run: AgentRunState, provisionalRunIds: Reado
   return {
     id: run.id,
     task: run.task,
+    taskMessageId: `agent-run-task-${run.id}`,
+    finalMessageId: run.finalMessageId ?? null,
     status: run.status,
     statusLabel: run.status.replaceAll("_", " "),
     active: !isTerminalRunStatus(run.status),

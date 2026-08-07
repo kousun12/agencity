@@ -101,7 +101,7 @@ Agencity remembers the recent branch for each workspace. If more than one choice
 
 ## Terminal interface basics
 
-The full-screen terminal interface renders committed user and assistant messages as structured Markdown. Supported fenced languages and retained TypeScript cells use syntax-aware rendering; unsupported fenced languages remain readable as plain code. Run activity keeps a compact status row. Expanding it with `Ctrl-O` shows the exact retained TypeScript source, logs, bounded result, and error.
+The full-screen terminal interface renders committed user and assistant messages as structured Markdown. Supported fenced languages and retained TypeScript cells use syntax-aware rendering; unsupported fenced languages remain readable as plain code. Each run appears directly after the user task that started it and before the resulting assistant message. Completed activity collapses to one status row; expanding it with `Ctrl-O` shows the exact retained TypeScript source, logs, bounded result, and error.
 
 The bottom composer is a fixed raised surface with a visible `›` prompt. A family summary, when present, remains between the composer and footer. The footer keeps the trusted-local boundary and current action visible, then adds connection, attention, recovery, budget, family, and command hints as width permits.
 
