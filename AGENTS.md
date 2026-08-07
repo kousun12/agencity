@@ -1,7 +1,7 @@
 # AGENTS.md
 
 **Role:** Canonical repository guide  
-**Last reviewed:** August 6, 2026
+**Last reviewed:** August 7, 2026
 
 This file is the current source of truth for Agencity's purpose, product intention, design principles, supported behavior, known gaps, architecture, and implementation rules. A new reader should not need another product document to understand what the project is trying to build or what is currently real.
 
@@ -142,14 +142,14 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 
 ### Incomplete product surfaces
 
-- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. The TUI `/model` inspector is a keyboard-driven provider/model picker; it stores owner-only OpenAI, Anthropic, and Vercel AI Gateway keys outside canonical/profile preference databases and selects durable `provider:model` configurations, including gateway IDs containing `/`. Environment keys remain supported fallbacks. The package remains private and has no claimed registry or standalone release channel.
-- Echo is an explicitly labeled demo fixture; ordinary non-interactive work without a usable provider fails rather than silently falling back.
+- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. First interactive startup without a usable provider asks the user to choose OpenAI, Anthropic, or Vercel AI Gateway, accepts the key through hidden input, and asks for the model ID before creating a session. The TUI `/model` inspector is a keyboard-driven provider/model picker; it stores owner-only provider keys outside canonical/profile preference databases and selects durable `provider:model` configurations, including gateway IDs containing `/`. Environment keys remain supported fallbacks. The package remains private and has no claimed registry or standalone release channel.
+- The product has no demo mode. Echo remains an internal deterministic test provider and is filtered from product selection, help, status, and onboarding. Ordinary non-interactive work without a usable provider fails with setup guidance.
 - The ordinary task route drives the strict `agencity.agent-action` version-1 autonomous loop. Only validated TypeScript actions execute generated work; final, clarification, permission, blocked, and failed are typed run control. Raw action JSON remains internal attributable history.
 - Console cells support notebook observation, bounded `inspect`, artifact spill, `state.list`, and retained `cells.list/get`; lexical bindings remain deliberately non-durable.
 - The console exposes first-class durable `rlm.start/startMany/get/result/cancel` handles plus `sdk.agents` roster, spawn, bounded direct messaging, receipts, acknowledgement, cancellation, and same-session retained follow-up.
 - `/refine`, the public protocol client, and `sdk.harness.review/reviews` run a strict trajectory-to-candidate review through an ordinary durable recursive model child. Frozen bounded sources, decisions, proposal identity, and recovery status remain attributable. Automatic refinement is profile-opt-in, local-only, and scans typed repeated effect failures, distinct-pin gate failures, and explicit `UserCorrection` events only at committed AgentRun boundaries; repeated success, stale-memory, and unproductive-delegation detectors are not implemented.
 - The interactive TUI is a full-screen OpenTUI client of the managed workspace service. It retains a stable composer while snapshots, cursor-resumable committed SSE events, and cursorless progress update a grouped conversation/activity view; persistent status shows the selected branch, model, connection, recovery, attention, budget, and trusted-local boundary. A responsive contextual inspector replaces command results with task-specific sections, dismisses or replaces prior details predictably, and exposes raw diagnostics only through `Shift-R` or `/raw`. Non-TTY execution retains a readable plain transcript fallback.
-- Streaming-capable providers emit bounded cursorless progress before an atomic committed response; Echo and explicitly non-streaming providers truthfully report committed-only behavior. Real-provider streaming remains credential-gated.
+- Streaming-capable providers emit bounded cursorless progress before an atomic committed response; non-streaming providers truthfully report committed-only behavior. Real-provider streaming remains credential-gated.
 - Unknown effects are retained and visible through startup/status plus `unknown` and evidence-only `reconcile` product flows. Reconciliation deliberately does not rewrite the unknown outcome or authorize automatic retry.
 - The on-demand managed workspace service owns detached runs, schedules, and recovery behind the same authenticated loopback protocol, with process fencing and tested client detach/reattach. A quiescent service exits after 60 seconds; active runs, effects, wakes, schedules, heartbeats, resident workers, and attached clients keep it alive and are reported by `service status`, while a durable run waiting only for user input does not. Graceful shutdown stops admission, drains admitted protocol handlers and resident workers, and preserves sessions. The service is not an OS-login service and has no cross-device execution-owner failover.
 - FU-009 release acceptance now invokes only an isolated `bun link` executable from fresh external repositories. Its guarded black-box matrix covers truthful missing-provider behavior, explicit fixture-model selection, coding cells/tools, durable recursive/family follow-up, failed-gate repair, detach/client loss/service recovery, named head branch/resume/history/tree, distinct JSON run exits, post-commit crash recovery and unknown/no-retry reconciliation, plus refinement, installed skills, streaming, compaction, and schedules. The full-screen renderer has deterministic OpenTUI frame/input/resize coverage plus a linked-executable pseudo-terminal task/commit/detach test; the release matrix remains non-interactive. The real-provider, official Turso, and Cloud rows remain explicitly opt-in and may be skipped.
@@ -174,7 +174,7 @@ The initial terminal product is complete only when all of these are reproducible
 - A clean supported installation exposes `agencity`, and the source-checkout development command enters the same product flow.
 - In a fresh repository, `agencity` creates or selects durable work and opens a ready terminal interface without asking for internal IDs.
 - Re-entering the repository resumes an unambiguous selected branch; ambiguous choices use a human-readable selector rather than incidental row order.
-- Provider/model choice is explicit. Echo is visibly a demo fixture, missing configuration fails truthfully, and a resumed branch never changes model silently.
+- Provider/model choice is explicit. Interactive missing configuration enters hidden credential setup, non-interactive missing configuration fails truthfully, and a resumed branch never changes model silently except for an explicit migration from a retained former Echo branch.
 - A normal task drives the typed autonomous lifecycle and TypeScript action surface rather than stopping after one chat completion.
 - Worker, supervisor, and client interruption at durable boundaries reconstructs the same committed state without duplicate cells, effects, model calls, or children.
 - Cancellation requests, budget exhaustion, failed gates, unknown effects, and unavailable capabilities are distinct visible states with safe resume or reconciliation behavior.
@@ -260,7 +260,9 @@ Primary source areas:
 - `test/` — unit, integration, end-to-end, slice-specific, adversarial, and placement conformance tests.
 - `scripts/check-architecture.ts` — architectural boundary and schema/table checks.
 
-The `docs/` tree contains detailed operator, API, protocol, event, table, recovery, security, placement, decision, and verification material. Those documents elaborate implementation mechanics; they do not replace this file as the product/status authority. Update both when behavior changes, and correct a technical document when current code disproves it.
+The `docs/` tree is the maintained public documentation set. [`docs/README.md`](./docs/README.md) is its reader-facing entrypoint and must keep user, operator, integration, architecture, reference, decision, verification, and planning material clearly separated. Public documents explain the product without assuming knowledge of delivery phases, internal ticket names, implementation plans, or prior discussions.
+
+This file remains canonical for product direction, intended behavior, current implementation status, and repository rules. Public docs elaborate supported behavior and operation without replacing that authority. When code or current product status disproves a public document, the document is defective and must be corrected.
 
 ## Non-negotiable invariants
 
@@ -399,7 +401,7 @@ The no-ID product entrypoint and compatible raw diagnostic CLI are both implemen
 
 - `agencity` creates or resumes and opens the product directly;
 - users should not copy session or branch IDs for normal operation;
-- echo must remain an explicitly labeled demo/test provider;
+- product selection must exclude internal deterministic test providers;
 - provider setup must not require dropping to HTTP or TypeScript APIs;
 - the TUI should project the public client/event contract;
 - a task should drive a typed, recoverable model-to-TypeScript/tool action loop rather than only one chat response;
@@ -428,7 +430,22 @@ Static structure checks do not replace behavioral tests, black-box product verif
 
 ## Documentation expectations
 
-Update documentation in the same change when behavior, commands, events, tables, security claims, recovery semantics, capabilities, or public APIs change.
+The `docs/` directory is Agencity's maintained public documentation set, with `docs/README.md` as its index. Keep it accurate as part of implementation work rather than treating documentation as a later cleanup. Each public page must stand on its own, define necessary terms, and use stable product language instead of assuming knowledge of a delivery phase, ticket, implementation plan, or prior discussion.
+
+Treat stale public documentation as a product defect. Update the relevant documents in the same change whenever behavior, configuration, commands, APIs, events, tables, security boundaries, recovery semantics, data lifecycle, capabilities, installation, or verification claims change.
+
+At minimum:
+
+- user-visible workflows update `README.md`, `docs/user-guide.md`, or both;
+- defaults, options, paths, providers, credentials, or environment variables update `docs/configuration.md`;
+- backup, export, import/restore limits, migration, or deletion behavior updates `docs/data-lifecycle.md`;
+- operational procedures update `docs/operator-guide.md`;
+- public TypeScript, protocol, or console surfaces update their dedicated API documents;
+- security or recovery changes update `docs/security.md` or `docs/recovery.md`;
+- capability or verification changes update their dedicated public summaries; and
+- the public map in `docs/README.md` stays current when documents are added, moved, renamed, or retired.
+
+Keep `AGENTS.md` current in the same change when product direction, intended behavior, implementation status, invariants, supported user journey, or known limitations change. Implementation plans may retain delivery-specific detail, but public pages must use stable product language and label plan links as planning or historical material.
 
 Do not leave docs claiming:
 

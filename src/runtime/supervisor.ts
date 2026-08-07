@@ -590,7 +590,7 @@ export class Supervisor {
     const descriptor = this.modelExecutor.providers().find(provider => provider.name === normalizedModel.provider);
     if (!descriptor || normalizedModel.provider === "echo") {
       throw new ValidationError(normalizedModel.provider === "echo"
-        ? "Echo is a demo fixture and cannot be selected through /model"
+        ? "Echo is an internal test fixture and cannot be selected through /model"
         : `Unknown model provider: ${normalizedModel.provider}`);
     }
     if (!descriptor.usable) throw new ValidationError(descriptor.remediation ?? `Credential unavailable for ${normalizedModel.provider}`);

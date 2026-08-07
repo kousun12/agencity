@@ -33,7 +33,6 @@ export interface TerminalModelProviderDetail {
   readonly credentialLabel: string;
   readonly remediation?: string;
   readonly credentialManaged: boolean;
-  readonly demo: boolean;
 }
 
 export interface TerminalModelDetail {
@@ -745,7 +744,7 @@ export function buildTerminalModelDetail(input: {
   readonly workspaceDefault: string | null;
   readonly providers: readonly ModelProviderDescriptor[];
 }): TerminalModelDetail {
-  const providers = input.providers.map(provider => ({
+  const providers = input.providers.filter(provider => provider.name !== "echo").map(provider => ({
     name: provider.name,
     displayName: provider.displayName,
     usable: provider.usable,
@@ -755,11 +754,10 @@ export function buildTerminalModelDetail(input: {
       : provider.credentialSource === "environment"
         ? "environment"
         : provider.credentialSource === "programmatic"
-          ? provider.name === "echo" ? "demo fixture" : "available"
+          ? "available"
           : "not configured",
     ...(provider.remediation === undefined ? {} : { remediation: provider.remediation }),
     credentialManaged: ["openai", "anthropic", "vercel"].includes(provider.name),
-    demo: provider.name === "echo",
   }));
   return {
     kind: "model",
@@ -776,7 +774,6 @@ export function buildTerminalModelDetail(input: {
         displayName: provider.displayName,
         usable: provider.usable,
         credentialSource: provider.credentialSource,
-        demo: provider.demo,
         ...(provider.remediation === undefined ? {} : { remediation: provider.remediation }),
       })),
     },
@@ -829,7 +826,7 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
       `  ${detail.workspaceDefault ?? "Not set"}`,
       "",
       "Providers",
-      ...detail.providers.map(provider => `${provider.usable ? "✓" : "○"} ${provider.displayName} — ${provider.credentialLabel}${provider.demo ? " [DEMO]" : ""}`),
+      ...detail.providers.map(provider => `${provider.usable ? "✓" : "○"} ${provider.displayName} — ${provider.credentialLabel}`),
     ];
     if (options.footer !== false) lines.push("", "Enter choose · L login · X logout · Shift-R raw · Esc close");
     return lines.join("\n");

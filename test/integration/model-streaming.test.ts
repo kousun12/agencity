@@ -349,7 +349,7 @@ describe("provider output streaming", () => {
       capabilities: { streaming: false },
     });
     expect(supervisor.modelProviders.find((item) => item.name === "echo")).toMatchObject({
-      displayName: "Echo (demo fixture; non-streaming)",
+      displayName: "Echo (internal test fixture; non-streaming)",
       capabilities: { streaming: false },
     });
     const progress: EffectProgressNotification[] = [];

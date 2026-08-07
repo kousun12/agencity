@@ -40,7 +40,7 @@ export interface ModelProvider {
 
 export class EchoModelProvider implements ModelProvider {
   readonly name = "echo";
-  readonly displayName = "Echo (demo fixture; non-streaming)";
+  readonly displayName = "Echo (internal test fixture; non-streaming)";
   readonly capabilities = { streaming: false, contextWindowTokens: 128_000, contextCapacitySource: "model-catalog" } as const;
   availability() { return { usable: true, credentialSource: "programmatic" as const }; }
   async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {

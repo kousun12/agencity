@@ -1,72 +1,164 @@
 # Placement adapters and conformance
 
-Agencity treats relational state, artifacts, retrieval candidate generation, and execution as replaceable components. The default implementations remain local. The `@prime-agent/runtime/placement` export adds remote adapters whose calls cross a real HTTP boundary and whose server-side state is not available to the client object.
+Agencity separates relational state, artifact storage, memory candidate generation, and effect execution from their physical placement. The package provides local adapters, remote HTTP client adapters, and matching server handlers.
 
-## Capability rule
+An implemented adapter is not a managed deployment. This repository does not provision, host, authenticate, monitor, or operate a remote relational service, object store, candidate-index service, or execution sandbox. An integrator supplies the endpoint and its security, availability, and isolation controls.
 
-Every adapter publishes a placement descriptor containing its location, transport/protocol, and component-specific capabilities. A caller must branch on that descriptor before requesting optional behavior. Adapters fail closed with the stable `CAPABILITY_UNAVAILABLE` domain code when optional behavior is not advertised; they do not emulate a weaker guarantee.
+The ordinary local product composes local LibSQL, a local filesystem content-addressed store (CAS) for artifacts, local FTS5 candidate generation, and trusted-local executors. The per-workspace managed product service is still local process lifecycle; it is not the remote placement service described here.
 
-Dependency availability is separate from capability. An advertised remote operation whose endpoint, object, or valid response is unavailable fails as `DEPENDENCY_FAILURE`. The remote executor is the exception required by side-effect semantics: losing its response after dispatch yields the typed `unknown` outcome because the effect may have happened.
+## Capability and failure rules
+
+Every placement publishes a descriptor with:
+
+- `placement`: `local` or `remote`;
+- `transport`: `in-process` or `http`;
+- a versioned component protocol;
+- component-specific capabilities.
+
+Callers must check optional capabilities. A request for semantics the adapter did not advertise fails with `CAPABILITY_UNAVAILABLE`; the runtime does not silently emulate a weaker guarantee or switch to local placement.
+
+Availability is distinct from capability:
+
+- an advertised remote operation whose endpoint, object, or valid response is unavailable fails with `DEPENDENCY_FAILURE`;
+- remote executor transport loss after dispatch returns the typed effect outcome `unknown`, because the external effect may have happened;
+- a server-observed executor exception is definitively `failed`;
+- cancellation before dispatch is `cancelled`.
+
+These distinctions preserve unsupported, unavailable, failed, cancelled, and uncertain states.
 
 ## Relational state
 
-`localRelationalState(storage)` describes a process-local `AgentStorage`. `HttpRelationalStateStore.connect()` discovers a server's capabilities and implements the same storage contract through `agencity-relational-rpc-v1`. `createRelationalStateRpcHandler()` is the matching production HTTP handler for a server-owned store.
+`localRelationalState(storage)` describes an in-process `AgentStorage`.
 
-The RPC allowlist contains domain storage operations only. It cannot dynamically invoke arbitrary methods. Values cross a versioned JSON wire codec, including `Uint8Array` and `bigint`; no LibSQL or Turso SDK value crosses the adapter boundary. Remote subscriptions are not implied by HTTP RPC and currently throw `CAPABILITY_UNAVAILABLE`. Remote schema migration is operator-owned unless the handler explicitly enables `administrativeMigrations`.
-
-A typical server mounts the handler in its own process:
+`HttpRelationalStateStore.connect()` discovers capabilities and implements the storage contract over `agencity-relational-rpc-v1`. `createRelationalStateRpcHandler()` is the matching handler for a server-owned `AgentStorage`.
 
 ```ts
+import {
+  HttpRelationalStateStore,
+  createRelationalStateRpcHandler,
+} from "@prime-agent/runtime/placement";
+
+// In an operator-owned server process:
 const handler = createRelationalStateRpcHandler(serverOwnedStorage, {
   analyticalSql: true,
   administrativeMigrations: false,
 });
 Bun.serve({ fetch: handler });
+
+// In the runtime process:
+const storage = await HttpRelationalStateStore.connect({
+  endpoint,
+  headers: () => ({ authorization: `Bearer ${token}` }),
+});
 ```
 
-The client knows only the URL:
+The RPC allowlist contains known storage-domain methods; it cannot dynamically invoke arbitrary methods. Values cross a versioned JSON codec that supports `Uint8Array` and `bigint`. LibSQL and Turso SDK values stay inside adapters.
+
+The HTTP relational adapter advertises:
+
+- no offline writes;
+- no same-device process fencing in this protocol version;
+- no in-process commit notifications;
+- the backing store's distributed-lease capability;
+- analytical SQL only when the server enables it;
+- administrative migration only when the server enables it;
+- recursive operations and candidate-index rebuild only when the backing store implements them.
+
+Remote subscriptions are unavailable. Remote migration is operator-owned by default.
+
+The included handler does not add authentication, TLS, tenancy, rate limiting, or deployment management. Wrap it in an operator-controlled service boundary.
+
+## Artifact content-addressed storage
+
+`LocalArtifactStore` uses a filesystem CAS. `localObjectCasDescriptor()` publishes its placement capabilities.
+
+`S3CompatibleArtifactStore` implements path-style S3/R2 HTTP `PUT`, `GET`, and `DELETE`. It accepts static headers or an authorization callback, allowing an integrator to provide SigV4 or an edge credential broker without exposing an official object-store SDK type in Agencity's API.
 
 ```ts
-const storage = await HttpRelationalStateStore.connect({ endpoint });
+import {
+  S3CompatibleArtifactStore,
+} from "@prime-agent/runtime/placement";
+
+const artifacts = new S3CompatibleArtifactStore({
+  endpoint: "https://objects.example",
+  bucket: "agencity",
+  prefix: "artifacts",
+  headers: async ({ method, url, key, digest }) =>
+    signObjectRequest({ method, url, key, digest }),
+});
 ```
 
-## Artifact CAS
-
-`localObjectCasDescriptor()` declares the capabilities of the filesystem CAS. `S3CompatibleArtifactStore` uses path-style S3/R2 HTTP object operations (`PUT`, `GET`, and `DELETE`) and accepts an authorization-header callback so a deployment can supply SigV4 or an edge credential broker without leaking official SDK types into public contracts.
-
-Object keys derive only from the bytes:
+Object keys derive only from content:
 
 ```text
 <prefix>/sha256/<first two hex digits>/<64-character sha256 digest>
 ```
 
-The durable artifact ID remains `sha256:<digest>` across local files and object storage. PUT sends `If-None-Match: *`, `x-amz-checksum-sha256`, and `x-amz-meta-sha256`. Every resolve verifies both byte length and sha256. Export and range-read verify the complete object before returning data; a sha256 ID authenticates the whole object, so the current integrity-preserving range implementation deliberately downloads the complete object rather than trusting an unauthenticated partial response. Missing, inaccessible, or corrupt objects are `DEPENDENCY_FAILURE`.
+The durable ID remains `sha256:<digest>` across local and remote placement. Conditional PUT uses `If-None-Match: *` and checksum metadata. Every resolve verifies byte length and digest. Range reads download and verify the whole object before returning a slice because the artifact ID authenticates the complete object.
+
+Missing, inaccessible, malformed, or corrupt content is `DEPENDENCY_FAILURE`.
+
+This adapter provides remote object placement, not replication between local and remote stores. The runtime does not automatically copy artifact bytes during Turso envelope sync and does not provide artifact garbage collection.
 
 ## Memory candidate index
 
-`HttpMemoryCandidateIndex.connect()` and `createCandidateIndexRpcHandler()` implement `agencity-candidate-index-http-v1`. The service returns only stable `(versionId, entryId, rank)` candidates. It has no authority to admit a memory into context.
+`localCandidateIndexDescriptor(index)` describes an in-process candidate generator.
 
-`MemoryService` continues to load canonical memory rows from relational state and applies authoritative session/workspace/user/global scope, version status, candidate exposure, tags, recency, conflict, and limit filters after candidate generation. Tests deliberately make the remote index return an out-of-scope candidate and prove the runtime rejects it. Rebuild is administrative and throws `CAPABILITY_UNAVAILABLE` unless the remote service advertises it.
+`HttpMemoryCandidateIndex.connect()` and `createCandidateIndexRpcHandler()` implement `agencity-candidate-index-http-v1`. The service returns only stable `{ versionId, entryId, rank }` candidates. It does not decide whether a record may enter model context.
 
-## Executors
+`MemoryService` loads canonical records from relational state and applies authoritative scope, version status, candidate exposure, tags, recency, conflicts, and limits after candidate generation. A remote index can therefore return an out-of-scope candidate without bypassing runtime policy.
 
-`TrustedLocalExecutor` wraps an existing local executor and labels the actual trust boundary accurately:
+Rebuild is an optional administrative capability and fails with `CAPABILITY_UNAVAILABLE` when not advertised.
 
-- `isolation: trusted-local-process`
-- `isolatedFromHost: false`
-- explicit operation, filesystem, network, and cancellation capabilities
+The default candidate index is local FTS5. The remote adapter can front FTS or another candidate generator, but this repository does not include embedding generation or a hosted semantic-search service.
 
-`RemoteSandboxExecutor.connect()` accepts managed isolation only when the server advertises `managed-remote-sandbox` and `isolatedFromHost: true`. `createExecutorRpcHandler()` receives that assertion from the server operator; a client option cannot promote a trusted process into a sandbox. A real deployment must run this handler inside the stated managed sandbox or equivalent isolation boundary. The loopback conformance server verifies transport semantics, not OS isolation.
+## Effect execution
 
-Both placements return only `succeeded`, `failed`, `cancelled`, or `unknown`. A server-observed executor exception is definitively `failed`. Cancellation before dispatch is `cancelled`. Timeout, disconnection, or a malformed response after dispatch is `unknown`, preserving uncertainty for non-idempotent effects. Requests outside the advertised operation set throw `CAPABILITY_UNAVAILABLE`.
+`TrustedLocalExecutor` wraps an in-process executor and reports its actual trust boundary:
 
-## Shared conformance suites
+- `isolation: "trusted-local-process"`;
+- `isolatedFromHost: false`;
+- explicit operation, filesystem, network, cancellation, and typed-outcome capabilities.
 
-`test/placement/conformance.ts` exports one behavioral function per contract:
+`RemoteSandboxExecutor.connect()` accepts a server only when it advertises:
 
-- `relationalStateConformance`
-- `artifactStoreConformance`
-- `candidateIndexConformance`
-- `executorConformance`
+- `isolation: "managed-remote-sandbox"`;
+- `isolatedFromHost: true`;
+- an explicit operation set and filesystem/network policy.
 
-`test/placement/placement.test.ts` runs each same function against both local and remote implementations. Remote cases start actual loopback Bun HTTP servers backed by independent server-owned LibSQL databases, FTS5 indexes, object maps, or executor workspaces. The suite additionally stops transports and corrupts object bytes to verify dependency and uncertainty behavior. Test object maps are server fixtures only; no production adapter has an in-memory/mock fallback.
+`createExecutorRpcHandler(executor, policy)` publishes the matching `agencity-executor-rpc-v1` handler. The server operator supplies the isolation assertion. A client option cannot promote a trusted process into a sandbox.
+
+The handler itself does not create or verify an OS sandbox. To make the descriptor truthful, the operator must run the handler inside a container, microVM, separate host, or equivalent isolation boundary with the advertised filesystem and network controls. The conformance test server verifies HTTP and effect semantics only; it does not verify OS isolation or attestation.
+
+Requests outside the advertised operation set fail with `CAPABILITY_UNAVAILABLE`. After dispatch:
+
+- a valid server terminal result is `succeeded`, `failed`, or `cancelled`;
+- timeout, disconnect, missing terminal response, or malformed terminal response becomes `unknown`;
+- no automatic local fallback occurs.
+
+The included executor RPC handler does not provide authentication, TLS, resource quotas, network policy, sandbox provisioning, or remote attestation.
+
+## Conformance evidence
+
+`test/placement/conformance.ts` defines shared behavioral suites:
+
+- `relationalStateConformance`;
+- `artifactStoreConformance`;
+- `candidateIndexConformance`;
+- `executorConformance`.
+
+`test/placement/placement.test.ts` applies the same suites to local and remote implementations. Remote tests use real loopback HTTP boundaries and independently owned server-side databases, indexes, object maps, or executor workspaces. Additional cases stop transports and corrupt object bytes to verify dependency-failure and unknown-outcome behavior.
+
+The object map and loopback executor used by tests are fixtures. There is no in-memory production fallback, hosted control plane, or production sandbox supplied by this repository.
+
+## Integration checklist
+
+1. Discover and persist the adapter descriptor.
+2. Reject a deployment whose required capabilities are false.
+3. Supply authentication, TLS, tenancy, rate limits, and endpoint lifecycle outside the provided handlers.
+4. Keep remote placement failure visible; never switch to local placement implicitly.
+5. Preserve `unknown` for effects that may have crossed the dispatch boundary.
+6. Back up relational state and referenced artifact bytes together.
+7. Treat executor isolation as an operator assertion that requires an actual external sandbox.
+
+See [TypeScript integration API](./api.md), [Capability matrix](./capabilities.md), [Trusted-local security boundary](./security.md), and [Crash recovery and unknown effects](./recovery.md).

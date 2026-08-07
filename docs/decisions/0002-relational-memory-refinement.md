@@ -1,11 +1,13 @@
 # ADR 0002: Event-sourced relational memory and measured refinement
 
-**Status:** Accepted
-**Date:** 2026-08-06
+- **Status:** Accepted
+- **Date:** 2026-08-06
+- **Scope:** Relational memory, harness versions, candidate evaluation, promotion, and rollback
+- **Extends:** [ADR 0001](./0001-durable-local-runtime-foundations.md)
 
 ## Context
 
-Delivery Slice 3 needs editable memory, prompt notes, generated TypeScript skills, and reusable subagent roles without making an FTS index, generated process, or persuasive self-reflection into durable authority. Candidate behavior must be measurable, bounded, attributable, reversible, and scope-sensitive. Active behavior must remain stable while a replacement candidate is evaluated.
+Agencity can adapt memory, prompt notes, generated TypeScript skills, and reusable subagent roles from retained experience. Adaptation must not make an FTS index, generated process, or persuasive self-reflection into durable authority. Candidate behavior must be measurable, bounded, attributable, reversible, and scope-sensitive. Active behavior must remain stable while a replacement candidate is evaluated.
 
 ## Decision
 
@@ -26,3 +28,13 @@ Delivery Slice 3 needs editable memory, prompt notes, generated TypeScript skill
 - User/global preferences cannot silently emerge from agent observations.
 - Compile/test effects add latency but make executable self-modification observable and recoverable.
 - Cloud synchronization may later relocate user/global projections without changing scope, authority, version, or context-provenance semantics.
+
+## Rejected alternatives and limitations
+
+1. **Treat FTS rank as authority.** Rejected because search rank does not establish scope, status, policy, or permission.
+2. **Replace an active version when a candidate is proposed.** Rejected because evaluation requires a stable control and explicit allocation.
+3. **Promote from the model's explanation alone.** Rejected because a claim about improvement is not attributable outcome evidence.
+4. **Infer user or global preferences from local observations.** Rejected because broader authority requires explicit named approval.
+5. **Run generated skills outside the outbox.** Rejected because compilation, tests, invocation, and recovery must remain attributable.
+
+FTS5 is candidate retrieval rather than semantic proof. Generated skills execute with trusted-local operating-system authority; their disposable process is not a security sandbox. Automatic refinement is limited to implemented typed triggers and does not imply that every repeated success, stale memory, or unproductive delegation is detected.

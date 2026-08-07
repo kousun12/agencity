@@ -131,7 +131,6 @@ export const LEGACY_CLI_BOOLEAN_OPTIONS = Object.freeze([
   "help",
   "version",
   "new",
-  "demo",
   "json",
   "restart-console-after-cell",
   "exclusive-artifacts",

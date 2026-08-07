@@ -1,14 +1,15 @@
 # ADR 0003: Exchange immutable envelopes with the official Turso Sync adapter
 
-- Status: accepted
-- Scope: Slice 4 Cloud exchange
-- Updated: 2026-08-05
+- **Status:** Accepted
+- **Date:** 2026-08-07
+- **Scope:** Optional offline-first relational synchronization
+- **Extends:** [ADR 0001](./0001-durable-local-runtime-foundations.md)
 
 ## Context
 
-The workspace schema predates multi-writer synchronization. Its local event cursor is an autoincrementing integer and the database also contains mutable snapshots, outbox leases, task/harness projections, and indexes. Sending that database through a last-push-wins system could silently overwrite canonical history, ownership, budgets, or permissions.
+Agencity's workspace database is locally authoritative and contains both canonical events and mutable local projections. Its event cursor is an autoincrementing local integer, while snapshots, outbox leases, task and harness projections, and indexes have different rebuild and ownership semantics. Sending this database directly through a last-push-wins system could silently overwrite canonical history, ownership, budgets, or permissions.
 
-The pinned official dependency is `@tursodatabase/sync@0.7.2`. Its supported surface is `connect({ path, url, authToken, ... })` plus local SQL and the explicit `push()`, `pull()`, `checkpoint()`, and `stats()` methods. `push()` sends logical CDC statements and concurrent row conflicts use last-push-wins. This is a different protocol and metadata topology from the legacy `@libsql/client` embedded-replica/frame API; Agencity does not wrap or emulate the old `Client.sync()` transport.
+The pinned official dependency is `@tursodatabase/sync@0.7.2`. Its supported surface is `connect({ path, url, authToken, ... })` plus local SQL and the explicit `push()`, `pull()`, `checkpoint()`, and `stats()` methods. `push()` sends logical change-data-capture (CDC) statements and concurrent row conflicts use last-push-wins. This is a different protocol and metadata topology from the legacy `@libsql/client` embedded-replica/frame API; Agencity does not wrap or emulate the old `Client.sync()` transport.
 
 ## Decision
 

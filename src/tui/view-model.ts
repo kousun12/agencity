@@ -173,7 +173,7 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
     workspaceId: state.workspaceId,
     sessionName: state.sessionName ?? "Unnamed session",
     branchName: state.branch.name ?? "unnamed branch",
-    model: `${state.model.provider}:${state.model.model}${state.model.provider === "echo" ? " [DEMO FIXTURE]" : ""}`,
+    model: `${state.model.provider}:${state.model.model}`,
     providerMode: streaming,
     connection: presentation.connection,
     historicalCursor: presentation.historicalCursor,

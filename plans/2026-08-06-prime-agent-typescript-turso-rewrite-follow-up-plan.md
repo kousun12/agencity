@@ -228,7 +228,7 @@ The current CLI `create` route always creates an `echo/echo-1` session. Choosing
 
 ### Outcome
 
-Interactive startup discovers usable providers, makes model choice explicit, and persists non-secret preferences. Echo is clearly labeled as demo/test behavior and is never a silent fallback.
+Interactive startup discovers usable providers, makes model choice explicit, and persists non-secret preferences. When no provider is configured, startup asks for a supported provider credential through hidden input before creating a session. Internal deterministic test providers are not exposed through product selection.
 
 ### Scope
 
@@ -237,7 +237,7 @@ Interactive startup discovers usable providers, makes model choice explicit, and
 - Allow programmatically installed providers to participate in selection.
 - Persist provider/model identifiers and opaque credential references at the appropriate scope.
 - Never persist raw secrets in events, profile/workspace stores, logs, artifacts, or diagnostic bundles.
-- Add `--model PROVIDER:MODEL` and explicit `--demo` options. The colon keeps gateway model IDs containing `/` unambiguous.
+- Add `--model PROVIDER:MODEL`. The colon keeps gateway model IDs containing `/` unambiguous.
 - Explain unavailable providers and remediation through startup and `agencity doctor`.
 - Never silently change the model of an existing branch; require a new session or explicit fork policy.
 
@@ -245,8 +245,9 @@ Interactive startup discovers usable providers, makes model choice explicit, and
 
 - First interactive run with one usable provider can select and save a model without leaving the CLI.
 - First interactive run with multiple providers presents a selector.
-- Echo requires `--demo` or an explicit, visibly labeled interactive choice.
-- Non-interactive execution without a usable provider fails with a typed error and nonzero status; it does not fall back to echo.
+- First interactive execution without a usable provider asks for OpenAI, Anthropic, or Vercel AI Gateway credentials through hidden input.
+- Non-interactive execution without a usable provider fails with a typed error and nonzero status.
+- Internal deterministic test providers cannot be selected through product startup or `/model`.
 - Resuming an unavailable model produces a visible blocked/configuration state rather than a silent replacement.
 - Persistence and diagnostic tests prove that raw credentials never enter durable state or output.
 
@@ -254,9 +255,9 @@ Interactive startup discovers usable providers, makes model choice explicit, and
 ### Completion evidence
 
 - Commit: `42982e4`.
-- Implementation: secret-free provider descriptors, explicit `--model`/`--demo`, OpenAI-compatible discovery, saved non-secret model preference, blocked unavailable resume, doctor remediation, and credential-reference validation at CLI and profile-store boundaries.
-- Verification: no-silent-Echo, unavailable-resume, doctor, expanded-secret rejection, output/database byte scans, and profile adapter tests in `test/integration/product-cli.test.ts` and `test/slice4/profile-adapter.test.ts`.
-- Remaining limitation: real-provider behavior remains credential-gated; Echo is explicitly a demo fixture.
+- Implementation: secret-free provider descriptors, explicit `--model`, hidden first-run credential onboarding, OpenAI-compatible discovery, saved non-secret model preference, blocked unavailable resume, doctor remediation, and credential-reference validation at CLI and profile-store boundaries. Echo remains an internal runtime test fixture and is absent from product selection.
+- Verification: provider-required non-interactive startup, hidden interactive credential onboarding, unavailable-resume, doctor, expanded-secret rejection, output/database byte scans, and profile adapter tests in `test/integration/product-cli.test.ts`, `test/e2e/opentui-pty.test.ts`, and `test/slice4/profile-adapter.test.ts`.
+- Remaining limitation: live-provider behavior remains credential-gated.
 
 ---
 
@@ -526,7 +527,7 @@ Use a deterministic structured-action provider for the default suite and an opt-
 
 - One end-to-end test completes create, task, autonomous execution, quit, resume, branch, and history inspection without parsing or supplying an internal ID.
 - A black-box restart test kills the product at each durable action boundary and reaches the same final state.
-- Tests prove echo cannot be selected silently.
+- Tests prove internal deterministic providers cannot be selected through the product.
 - Non-interactive mode has documented exit statuses for succeeded, failed, blocked, budget-exceeded, cancelled, and unknown outcomes.
 - `bun run verify` includes these product gates.
 - External provider and Turso tests remain clearly identified when credential- or binary-gated.
@@ -1020,7 +1021,7 @@ Providers that support token streaming deliver incremental assistant output to a
 - Keep the outbox lifecycle unchanged: durable request before execution, one terminal outcome, and `unknown` on uncertain interruption.
 - Define interruption behavior: a stream that dies before commit produces no committed assistant message; recovery observes the effect outcome, not the partial text.
 - Carry in-progress output through the protocol/SSE surface separately from committed events without breaking cursor-resume semantics.
-- Keep echo non-streaming and visibly labeled as the demo fixture.
+- Keep the internal Echo test fixture non-streaming and unavailable through product selection.
 
 ### Acceptance criteria
 
@@ -1037,7 +1038,7 @@ Providers that support token streaming deliver incremental assistant output to a
 
 ### Exclusions
 
-- Token streaming for the echo fixture.
+- Token streaming for the internal Echo test fixture.
 - Streaming cell or tool output; bounded logs already cover cells.
 
 

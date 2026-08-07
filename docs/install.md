@@ -1,6 +1,8 @@
-# Installation and executable workflows
+# Installation
 
-Agencity requires Bun 1.2 or newer. `agencity --version` reports both the application version and the active Bun runtime, and ordinary commands fail before opening state when Bun is unsupported.
+Agencity requires Bun 1.2 or newer. `agencity --version` reports the application version and active Bun runtime. Ordinary commands refuse to open state when the Bun version is unsupported.
+
+The package is private. It is not published to a package registry and has no supported standalone binary channel. The supported installation paths are a source checkout and a Bun link to that checkout.
 
 ## Source checkout
 
@@ -9,92 +11,155 @@ git clone <repository-url> agencity
 cd agencity
 bun install --frozen-lockfile
 bun run dev
-# Arguments are forwarded to the same product entrypoint:
-bun run dev -- "inspect this repository"
 ```
 
-`bun run dev`, `bun run src/cli.ts`, and the executable aliases all invoke `src/cli.ts`; there is no separate development behavior.
+Arguments after `--` go to the normal product entrypoint:
 
-## Supported local link
+```sh
+bun run dev -- "inspect this repository"
+bun run dev -- --version
+```
 
-This repository is private and is **not published to a package registry**. After installing dependencies in a source checkout, Bun's link workflow installs the declared executable into `~/.bun/bin`:
+`bun run dev`, `bun run src/cli.ts`, and the executable aliases invoke the same `src/cli.ts` entrypoint. There is no separate development product behavior.
+
+## Local link
+
+After installing dependencies, register the executable with Bun:
 
 ```sh
 cd /absolute/path/to/agencity
 bun install --frozen-lockfile
 bun link
-export PATH="$HOME/.bun/bin:$PATH"   # put this in your shell setup if needed
+export PATH="$HOME/.bun/bin:$PATH"
+
 cd /path/to/another/repository
 agencity --version
-agencity --demo                      # explicit fixture mode
+agencity
 ```
 
-The link points at the checkout. Keep that checkout and its `node_modules` available, including the platform-specific OpenTUI package installed by Bun. Runtime assets are resolved relative to the executable module rather than the caller's working directory, so the command and full-screen interactive renderer work from another repository. The checked-in `src/cli.ts` target has Git mode `100755`; `bun link` is expected to produce a directly executable link without a post-install `chmod`. An archive, copy, or packaging process that drops that executable bit is not a valid installation. Re-run `bun install` and `bun link` if the checkout is moved. Use `bun unlink` according to Bun's documentation to remove the registration.
+`bun link` exposes both declared executable names, `agencity` and the compatibility alias `prime-agent-ts`, under Bun's install bin directory, normally `~/.bun/bin`.
 
-For isolated verification or CI, choose a temporary Bun install root:
+The link points to the source checkout. Keep that checkout, its `node_modules`, and the platform-specific OpenTUI dependency available. Runtime assets are resolved relative to the executable module, so the command can run from another repository.
+
+The checked-in `src/cli.ts` has executable Git mode `100755`. A packaging or copy process that drops that bit is not a valid installation. No manual `chmod` is part of the supported workflow.
+
+Re-run `bun install` and `bun link` if the checkout moves. Use Bun's `bun unlink` workflow to remove the registration.
+
+## Isolated link for CI
+
+Use a temporary Bun install root when verification must not modify the normal user installation:
 
 ```sh
 BUN_INSTALL=/tmp/agencity-bun bun link --cwd /absolute/path/to/agencity
 PATH=/tmp/agencity-bun/bin:$PATH agencity --version
 ```
 
-## First invocation, workspace identity, and task escaping
+The black-box acceptance suite uses this pattern from fresh repositories and temporary home directories. It invokes the linked executable from outside the checkout instead of importing runtime internals.
 
-The linked and source entrypoints use the same workspace rules. First open writes an owner-only `.agencity/workspace-id` atomically. The marker moves with the repository, symlink paths resolve to the same identity, and a pre-marker database is migrated once. Startup rejects a symlinked, insecure, or malformed marker instead of regenerating identity.
+## First run
 
-Exact product command names keep their command meaning. To use one as task text, either quote a multi-word first argument or put `--` before it:
+Run `agencity` inside the repository where the agent should work:
 
 ```sh
-agencity "run the benchmark"   # one task argument, not the run command
-agencity -- run the benchmark  # explicit task escape
+cd /path/to/repository
+agencity
 ```
 
-Natural-language text after a legacy word is also a task (`agencity create a parser`); ID-bearing diagnostic forms such as `agencity chat --session ... --branch ... TEXT` remain commands.
+Agencity discovers the nearest `.agencity` or `.git` root. The first open creates an owner-only `.agencity/workspace-id` marker atomically. The marker moves with the repository, and canonical path resolution makes symlink aliases converge. Startup rejects a symlinked, insecure, malformed, or wrongly owned marker.
 
-## Published and standalone status
+Without a usable provider, an interactive first run:
 
-There is currently no supported registry or standalone binary channel. Do not use or document `bun add -g @prime-agent/runtime` as a released installation. The source and linked workflows above are the supported methods until a published artifact has its own clean installation test.
+1. asks for OpenAI, Anthropic, or Vercel AI Gateway;
+2. reads the API key through hidden terminal input; and
+3. asks for the exact model ID before creating work.
 
-## Provider setup
+After startup, `/model` opens the provider and model inspector. Up/Down selects a provider, `L` enters a key, `X` removes a saved key, and Enter accepts a model ID.
 
-A real model is never replaced silently by Echo. In the interactive TUI, `/model` opens the model inspector. Use Up/Down to select OpenAI, Anthropic, or Vercel AI Gateway; `L` starts hidden key entry, `X` removes a saved key, and Enter requests the exact model ID. The inspector shows the current branch model, workspace default, availability, and credential source without exposing credential values. The direct commands remain compatible:
+Direct commands remain available:
 
-```sh
+```text
 /model login openai
 /model openai:gpt-5.6-sol
 
 /model login anthropic
-/model anthropic:fable-5
+/model anthropic:claude-fable-5
 
 /model login vercel
 /model vercel:openai/gpt-5.6-sol
 ```
 
-Stored keys live in the owner-only profile `auth.json`, separate from profile preferences and canonical workspace history. `/model logout PROVIDER` removes the stored key. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY` remain supported as process-environment fallbacks; a stored key takes precedence. `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `AI_GATEWAY_BASE_URL` may override their corresponding endpoints.
+Stored provider keys live in the owner-only profile `auth.json`, separate from profile preferences and canonical workspace history. Environment fallbacks are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY`. A stored key takes precedence.
 
-Model identifiers use `provider:model`, so a provider-specific model ID may contain `/`. Anthropic shorthand such as `anthropic:fable-5` is normalized once to the durable and wire-visible `anthropic:claude-fable-5`; Vercel gateway IDs pass through unchanged. `--model PROVIDER:MODEL` selects the same format outside the TUI and persists only the non-secret identifier. `agencity config credential-ref PROVIDER HANDLE LABEL` remains an opaque-reference facility and never stores the referenced value. Echo is a deterministic demo/test fixture and requires `--demo` or a visibly labeled interactive choice.
+The model identifier uses `provider:model`; the model portion may contain `/`. `--model PROVIDER:MODEL` selects a model for new work. Non-interactive new work fails with setup guidance until both a usable credential and model are available.
 
-## Release acceptance from an isolated link
+There is no product demo mode or credential-free provider fallback. Internal deterministic providers are test-only and cannot be selected through the product CLI or `/model`.
 
-FU-009 release verification never invokes the checkout entry module directly. Each case creates a fresh temporary `HOME` and repository, runs `bun link` with an isolated `BUN_INSTALL`, and invokes that linked `agencity` executable from outside this checkout. A source guard rejects implementation imports, direct runtime clients, LibSQL access, diagnostic session/branch options, and caller-supplied history positions in `test/acceptance/`.
+See [Configuration](./configuration.md) for provider, model, endpoint, path, and precedence details.
+
+## Task text that looks like a command
+
+Exact product command names keep their command meaning. Use one quoted task argument or a leading `--` when the task begins with a command word:
+
+```sh
+agencity "run the benchmark and explain it"
+agencity -- run the benchmark and explain it
+```
+
+## Verify the checkout
+
+The deterministic repository gate is:
+
+```sh
+bun install --frozen-lockfile
+bun run verify
+```
+
+It runs type checking, architecture validation, core tests, and black-box acceptance through an isolated linked executable.
+
+The focused executable suites are:
 
 ```sh
 bun run test:acceptance
 bun run test:acceptance:matrix
 ```
 
-The deterministic suite starts an external loopback OpenAI-compatible endpoint that speaks the strict version-1 action protocol and SSE. It covers missing-provider behavior, explicit model configuration, coding cells and effects, recursive and retained-child work, failed-gate repair, detach/reattach, named head branching, history/tree/status, interruption, recovery, unknown outcomes without retry, reconciliation evidence, refinement, skill installation/testing, compaction, streaming, and scheduled wakes.
+The deterministic acceptance endpoint is an external loopback OpenAI-compatible fixture that implements the typed action and streaming protocols. Coverage includes provider setup failure, explicit model configuration, TypeScript cells and effects, retained child work, completion-gate repair, detach and reattach, branching, history, interruption, recovery, unknown outcomes without automatic retry, refinement, skills, compaction, streaming, and scheduled wakes.
 
-The matrix reports `PASS`, `FAIL`, and `SKIP` separately. Live integrations are opt-in:
+## Gated external verification
+
+External checks are opt-in. They must report `PASS`, `FAIL`, and `SKIP` separately. A skipped check is not evidence that the integration passed.
+
+Real provider:
 
 ```sh
-AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 OPENAI_API_KEY=... AGENCITY_ACCEPTANCE_REAL_MODEL=... OPENAI_BASE_URL=https://provider.example/v1   bun run test:acceptance:matrix
-
-TURSO_SYNC_SERVER_BIN=/absolute/path/to/tursodb   bun run test:acceptance:matrix
+AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 \
+OPENAI_API_KEY=... \
+AGENCITY_ACCEPTANCE_REAL_MODEL=... \
+bun run test:acceptance:matrix
 ```
 
-The real-provider row is `SKIP` unless explicitly enabled with a key and model. The official Turso row is `SKIP` without the external binary, and the real Turso Cloud row remains separately gated by `AGENCITY_TURSO_SMOKE=1` plus disposable credentials. A skipped row is not a pass.
+`OPENAI_BASE_URL` may point the provider row at a compatible endpoint.
 
-## Security boundary
+Official Turso Sync server:
 
-All workflows are trusted-local. Model-generated TypeScript and shell commands have the OS authority of the `agencity` process. Linking or installing the executable does not add a hostile-code sandbox.
+```sh
+TURSO_SYNC_SERVER_BIN=/absolute/path/to/tursodb \
+bun run test:acceptance:matrix
+```
+
+Real Turso Cloud requires a disposable database:
+
+```sh
+AGENCITY_TURSO_SMOKE=1 \
+TURSO_DATABASE_URL=... \
+TURSO_AUTH_TOKEN=... \
+bun run test:acceptance:matrix
+```
+
+The real-provider row is skipped unless explicitly enabled with a key and model. The official Turso row is skipped without the external binary. The Cloud row is skipped unless explicitly enabled with disposable credentials.
+
+## Trust boundary
+
+Installing or linking Agencity does not add a sandbox. Model-generated TypeScript, shell commands, and installed skills have the OS authority of the Agencity process. Run only trusted work or place the entire runtime inside an independently managed sandbox.
+
+Continue with the [User guide](./user-guide.md) and [Security](./security.md).

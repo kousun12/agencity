@@ -12,12 +12,12 @@ Do not change the first three columns or class tokens without updating the archi
 | `events` | `canonical-append-only` | `immutable` | Sole authoritative domain history. The adapter may insert validated events; `events_no_update` and `events_no_delete` abort rewrite/deletion. Retained history is never rebuilt from a projection. |
 | `sessions` | `rebuildable-projection` | `mutable` | Routing/index projection of `SessionCreated` (`session_id`, workspace, initial branch, execution-origin device, source event). Rebuild from events; no business transition may treat this row as canonical. The owner field prevents pulled work from becoming locally executable; it is not a distributed lease or failover mechanism. |
 | `branches` | `rebuildable-projection` | `mutable` | Lineage/index projection of `SessionCreated` and `BranchCreated`. Rebuild from events; branch meaning remains in canonical payloads/cursors. |
-| `snapshots` | `rebuildable-projection` | `mutable` | Disposable cached `AgentState` keyed by session/branch. Upsert/delete is expected. `rebuild` discards it and reduces canonical history. A current-cursor cache has no integrity hash in Slice 1 and must never be treated as authority. |
-| `context_records` | `immutable-derived` | `immutable` | Exact derived model-context/provenance copy, tied one-to-one to `ContextMaterialized.event_id`; migration 014 adds immutable typed `derivation_json` for compaction strategy/source/capacity provenance. `context_no_update`/`context_no_delete` prevent drift; it can be reconstructed from retained context events, but a retained row is never rewritten. |
+| `snapshots` | `rebuildable-projection` | `mutable` | Disposable cached `AgentState` keyed by session/branch. Upsert/delete is expected. `rebuild` discards it and reduces canonical history. A current-cursor cache has no integrity hash and must never be treated as authority. |
+| `context_records` | `immutable-derived` | `immutable` | Exact derived model-context/provenance copy, tied one-to-one to `ContextMaterialized.event_id`, including immutable typed `derivation_json` for compaction strategy/source/capacity provenance. `context_no_update`/`context_no_delete` prevent drift; it can be reconstructed from retained context events, but a retained row is never rewritten. |
 | `outbox` | `operational-projection` | `mutable` | Execution queue/status/attempt projection plus disposable owner/lease. Intent and terminal truth are `Effect*` events. Rebuild status from them; lost lease ownership is reconciled as safe retry or canonical unknown, never treated as success. |
 | `process_execution_leases` | `operational-projection` | `mutable` | Retained local process-owner/fence rows for workspace or root scope. Transactional claim/takeover monotonically increments the fence token; renew/release require the exact owner and token. Rows are never sync envelopes and provide no cross-device lease or automatic failover. |
 | `tasks` | `rebuildable-projection` | `mutable` | Current task admission/status/result projection of `Task*` and `Subagent*` events. Parent/child identity and terminal truth remain canonical events. |
-| `mailbox_messages` | `rebuildable-projection` | `mutable` | Shared sender/recipient query projection of canonical send, mailbox delivery, context delivery/failure, and acknowledgement events. It retains intent/reply/task/artifact/relationship/follow-up-run fields plus queued/context-delivered/acknowledged/failed receipt state. Migration 009 defaults retained old-shape paired deliveries to context-delivered; deletion/replay restores the exact row without delivering context or scheduling work. |
+| `mailbox_messages` | `rebuildable-projection` | `mutable` | Shared sender/recipient query projection of canonical send, mailbox delivery, context delivery/failure, and acknowledgement events. It retains intent/reply/task/artifact/relationship/follow-up-run fields plus queued/context-delivered/acknowledged/failed receipt state. Paired retained events without explicit context-receipt fields rebuild as context-delivered for compatibility; deletion/replay restores the exact row without delivering context or scheduling work. |
 | `terminal_notices` | `rebuildable-projection` | `mutable` | Parent-visible terminal delivery projection of paired `TaskTerminalNotice*` events. |
 | `documents` | `rebuildable-projection` | `mutable` | Imported document metadata projection of `DocumentImported`; canonical payload retains the metadata. |
 | `document_chunks` | `rebuildable-projection` | `mutable` | Ordered content/query projection of `DocumentChunkAdded`. Chunk identity, digest, ordinal, and content are retained canonically. |
@@ -47,7 +47,7 @@ Do not change the first three columns or class tokens without updating the archi
 | `subagent_spec_invocations` | `rebuildable-projection` | `mutable` | Exact specification-version pin for a normally admitted durable child task. |
 | `memory_fts` | `operational-projection` | `mutable` | Disposable FTS5 candidate index; it may be deleted/rebuilt from harness versions and never decides scope/status policy. |
 | `device_clocks` | `operational-projection` | `mutable` | Per-workspace monotonic origin-sequence allocator keyed by stable profile device ID. Event IDs still deduplicate if this operational clock must be reconstructed. |
-| `workspace_replica_status` | `operational-projection` | `mutable` | Truthful local lifecycle/error/incarnation/count, durable local replica placement, and official CDC/WAL/revision/network-stat observation for every current or historical replica identity. Administrative enumeration does not discard inactive rows or treat current configuration as the whole ownership boundary. |
+| `workspace_replica_status` | `operational-projection` | `mutable` | Truthful local lifecycle/error/incarnation/count, durable local replica placement, and official change-data-capture (CDC), write-ahead-log (WAL), revision, and network-stat observation for every current or historical replica identity. Administrative enumeration does not discard inactive rows or treat current configuration as the whole ownership boundary. |
 | `sync_ingest_receipts` | `operational-projection` | `mutable` | Durable envelope dedupe/ingestion receipt. It can be rebuilt by comparing retained envelopes with canonical event IDs and origin metadata. |
 | `sync_origin_watermarks` | `operational-projection` | `mutable` | Per-replica/per-origin incremental stage and terminal-ingest frontiers. They are performance hints: pending causal envelopes stop ingest advancement, a changed replica incarnation resets only staging, and retained receipts/quarantine remain the correctness boundary. |
 | `sync_quarantine` | `operational-projection` | `mutable` | Invalid or causally incomplete replicated input, retained outside canonical history with explicit reason and release state. Independent-session erasure deletes rows whose envelope belongs to that session but blocks when a retained envelope for another session contains its ID. |
@@ -65,29 +65,29 @@ Do not change the first three columns or class tokens without updating the archi
 - `migration-metadata`: migrator-owned version ledger, not agent domain state.
 - `engine-metadata`: database-engine-owned state, not an application write surface.
 
-No table is an unclassified mutable source of business truth. New migrations must add registry rows in the same change. A future lease/sync/index table must use an allowed operational class or extend this policy deliberately.
+No table is an unclassified mutable source of business truth. New migrations must add registry rows in the same change. Any lease, synchronization, or index table must use an allowed operational class or extend this policy deliberately.
 
 ## Per-table write rules
 
 ### `schema_migrations`
 
-Only `LibSqlStorage.migrate` inserts a successfully applied migration version. Agent-generated SQL cannot read it, and normal runtime services do not update/delete it. This metadata is mutable because future migrations append versions; it is not event sourced because it describes the database representation itself.
+Only `LibSqlStorage.migrate` inserts a successfully applied migration version. Agent-generated SQL cannot read it, and normal runtime services do not update/delete it. This metadata is mutable because schema changes append versions; it is not event sourced because it describes the database representation itself.
 
 ### `events`
 
 Only the LibSQL adapter performs `INSERT INTO events`, inside the same transaction as affected operational/derived rows. A partial batch rolls back. Unique event IDs and the partial unique `(session_id, type, idempotency_key)` index prevent duplicate logical appends. Exact duplicate keys return the retained event; changed branch/payload conflicts.
 
-SQL triggers make update/delete fail even on a separate administrative client. The architecture checker rejects `UPDATE`, `DELETE`, or `REPLACE` targeting `events` in application TypeScript. User-owned deletion/export across stores is a later product operation that must be designed explicitly; it must not masquerade as an ordinary event transition.
+SQL triggers make update/delete fail even on a separate administrative client. The architecture checker rejects `UPDATE`, `DELETE`, or `REPLACE` targeting `events` in application TypeScript. User-owned deletion and export across stores are separate guarded administrative operations; they must not masquerade as ordinary event transitions.
 
 ### `sessions` and `branches`
 
 These tables speed listing and branch-lineage queries. Adapter event application inserts rows transactionally. They currently have no ordinary update API. Because they have no immutable trigger and are not authoritative, they are conservatively classified mutable/rebuildable rather than append-only truth.
 
-`LibSqlStorage.rebuildOperationalProjections()` deletes and replays the session/branch routing rows together with all Slice 2 projections in global event cursor order. Repair uses that operation rather than ad hoc edits during execution.
+`LibSqlStorage.rebuildOperationalProjections()` deletes and replays the session/branch routing rows together with all recursive-session projections in global event cursor order. Repair uses that operation rather than ad hoc edits during execution.
 
 ### `snapshots`
 
-Projection reads accept a snapshot only at the current branch cursor. `saveSnapshot` upserts it; `deleteSnapshots` discards it. `ProjectionService.rebuild` always deletes session snapshots, reduces the stream twice to check deterministic equality, then stores a fresh snapshot. Snapshots contain no unique authority. Slice 1 does not hash/sign `state_json`, so a manually corrupted cache at the latest cursor can be returned by `getSnapshot` until an explicit rebuild; canonical replay remains the repair path.
+Projection reads accept a snapshot only at the current branch cursor. `saveSnapshot` upserts it; `deleteSnapshots` discards it. `ProjectionService.rebuild` always deletes session snapshots, reduces the stream twice to check deterministic equality, then stores a fresh snapshot. Snapshots contain no unique authority. The runtime does not hash or sign `state_json`, so a manually corrupted cache at the latest cursor can be returned by `getSnapshot` until an explicit rebuild; canonical replay remains the repair path.
 
 ### `context_records`
 
@@ -103,13 +103,13 @@ These rows fence competing processes that share one local canonical workspace da
 
 The table is not canonical agent history and is not rebuilt from events. It intentionally survives projection rebuild and database reopen because forgetting the last token would allow a stale process proof to become current again. Whole-workspace physical deletion removes the database; narrow independent-root erasure removes only that root's lease row after the existing ownership/quiescence checks. The table is private to model-visible analytical SQL and is never staged into synchronization envelopes.
 
-### Slice 2 recursive projections
+### Recursive session projections
 
-`tasks`, mailbox/terminal delivery rows, document/chunk/input-set rows, goals/gates (including the completion workspace pin added by migration 003), heartbeats, and recursive model handles are updated in the same transaction as their canonical event. Migration 007 adds only rebuildable recursive-handle input/provenance/hash and outcome/result/artifact columns; the corresponding `RecursiveModel*` events remain authoritative. `rebuildOperationalProjections()` deletes these mutable rows and replays only their source events; it never re-executes a model, gate, tool, heartbeat callback, or subagent. Document content is duplicated in a query-friendly table for the Slice 2 foundation, but the `DocumentChunkAdded` event remains authoritative.
+`tasks`, mailbox/terminal delivery rows, document/chunk/input-set rows, goals/gates with their completion workspace pins, heartbeats, and recursive model handles are updated in the same transaction as their canonical event. Recursive-handle input/provenance/hash and outcome/result/artifact columns are rebuildable query state; the corresponding `RecursiveModel*` events remain authoritative. `rebuildOperationalProjections()` deletes these mutable rows and replays only their source events; it never re-executes a model, gate, tool, heartbeat callback, or subagent. Document content is duplicated in a query-friendly table, but the `DocumentChunkAdded` event remains authoritative.
 
-### Slice 3 harness and retrieval projections
+### Harness and retrieval projections
 
-Harness entry/version rows, refinement proposals, allocations/exposures, observations, approvals, decisions, rollbacks, skill execution links, and subagent-spec pins are updated only while appending their canonical events. `rebuildOperationalProjections()` replays all Slice 3 event types in cursor order. Stable entry/version identifiers belong to events; a current pointer or projected status is never authority. `memory_fts` implements only the candidate-index contract: delete/rebuild is explicitly supported, while deterministic scope/status/tag/recency filters and every rejection/selection are recorded by `ContextMaterialized`.
+Harness entry/version rows, refinement proposals, allocations/exposures, observations, approvals, decisions, rollbacks, skill execution links, and subagent-spec pins are updated only while appending their canonical events. `rebuildOperationalProjections()` replays all harness and refinement event types in cursor order. Stable entry/version identifiers belong to events; a current pointer or projected status is never authority. `memory_fts` implements only the candidate-index contract: delete/rebuild is explicitly supported, while deterministic scope/status/tag/recency filters and every rejection/selection are recorded by `ContextMaterialized`.
 
 ### `sqlite_sequence`
 

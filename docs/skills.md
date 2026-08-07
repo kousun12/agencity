@@ -1,9 +1,10 @@
 # Local skills and the unified catalog
 
-**Status:** FU-017 product surface implemented
 **Trust boundary:** trusted-local; executable skills are not an OS sandbox
 
-Agencity exposes one catalog spanning workspace harness skills and separately
+An Agencity skill is versioned TypeScript behavior that can be tested, activated,
+invoked, disabled, and audited. Agencity exposes one catalog spanning
+workspace-governed skills and separately
 owned profile/global skills. Each product record has a human name, immutable
 entry/version identity, canonical definition digest, scope, provenance, latest
 test summary, and availability. Removed versions and prior invocations remain
@@ -59,7 +60,7 @@ digests are retained.
 Workspace installation uses the ordinary governed harness lifecycle: proposal,
 validation, pre-exposure test, bounded allocations, exact-branch exposure,
 post-exposure same-version retests, objective observations, and promotion.
-Workspace promotion still requires two distinct allocations and distinct
+Workspace promotion requires two distinct allocations and distinct
 durable evidence. Profile installation tests the staged immutable definition
 through the same skill outbox before `ProfileStore.stageGlobalSkill`; a failed
 test can only produce a disabled row.
@@ -98,11 +99,11 @@ forbidden.
 
 Absolute/traversing entries, URLs, package metadata, install hooks, assets,
 directories, and symlinks are rejected. The format is Agencity-native and is
-not compatible with Prime Agent or package registries.
+not compatible with package registries or other skill bundle formats.
 
 ## Execution and credentials
 
-Every test and invocation goes through the existing durable `skill` outbox,
+Every test and invocation goes through the durable `skill` outbox,
 uses the same strict input schema and runtime permission allowlist, and runs
 with the secret-stripped executor environment. Known brokered secret values and
 recognizable raw credentials are rejected from manifests, source, provenance,
@@ -138,7 +139,8 @@ rows from older runtimes with invalid skill names stay visible in unavailable
 management/history views for removal or rollback, but are quarantined from
 context and invocation instead of poisoning catalog materialization.
 
-Legacy profile skill rows are migrated without rewriting their original JSON.
-They appear only in management views as quarantined legacy records; they do not
+Retained profile skill rows that predate the native bundle schema remain stored
+without rewriting their original JSON. They appear only in management views as
+quarantined compatibility records; they do not
 enter normal context or invocation. Reinstall them as a native, tested bundle
 to make them executable.

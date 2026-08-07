@@ -133,7 +133,7 @@ describe("advanced CLI command recognition", () => {
       "sync-interval", "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by", "strategy", "from-context",
     ]));
     expect(new Set(LEGACY_CLI_BOOLEAN_OPTIONS)).toEqual(new Set([
-      "help", "version", "new", "demo", "json", "restart-console-after-cell", "exclusive-artifacts",
+      "help", "version", "new", "json", "restart-console-after-cell", "exclusive-artifacts",
     ]));
   });
 

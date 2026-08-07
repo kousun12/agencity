@@ -248,7 +248,7 @@ describe("OpenTUI interactive terminal", () => {
       },
       {
         name: "echo",
-        displayName: "Echo (demo fixture; non-streaming)",
+        displayName: "Echo (internal test fixture; non-streaming)",
         capabilities: { streaming: false },
         usable: true,
         credentialSource: "programmatic" as const,
@@ -293,7 +293,7 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressEnter();
       expect(await app.settle()).toBe(true);
       let frame = await setup.waitForFrame(value => value.includes("MODEL") && value.includes("Workspace default"));
-      expect(frame).toContain("Echo (demo fixture");
+      expect(frame).not.toContain("Echo");
       expect(frame).not.toContain('"credentialSource"');
       setup.mockInput.pressEscape();
       frame = await setup.waitForFrame(value => value.includes("Ask Agencity") && !value.includes("Providers"));
@@ -303,7 +303,6 @@ describe("OpenTUI interactive terminal", () => {
       expect(await app.settle()).toBe(true);
       await setup.waitForFrame(value => value.includes("MODEL") && value.includes("Workspace default"));
 
-      setup.mockInput.pressArrow("down");
       frame = await setup.waitForFrame(value => value.includes("> ○ OpenAI"));
       expect(frame).toContain("not configured");
 

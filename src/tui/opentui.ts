@@ -178,7 +178,7 @@ function renderModelInspector(detail: TerminalModelDetail, selectedIndex: number
   detail.providers.forEach((provider, index) => {
     const selected = index === selectedIndex;
     lines.push(`${selected ? ">" : " "} ${provider.usable ? "✓" : "○"} ${provider.displayName}`);
-    lines.push(`    ${provider.credentialLabel}${provider.demo ? " · DEMO FIXTURE" : ""}`);
+    lines.push(`    ${provider.credentialLabel}`);
     if (selected && !provider.usable && provider.remediation) lines.push(`    ${provider.remediation}`);
   });
   lines.push("", "↑/↓ provider · Enter choose · L login · X logout", "Shift-R raw · Esc close");
@@ -536,10 +536,6 @@ export class OpenTuiApp {
           key.preventDefault();
           key.stopPropagation();
           if (!provider) return;
-          if (provider.demo) {
-            this.#showNotice("Echo is a demo fixture. Start Agencity with --demo to use it explicitly.", "warning");
-            return;
-          }
           if (!provider.usable) {
             this.#showNotice(provider.remediation ?? `Press L to log in to ${provider.displayName}.`, "warning");
             return;

@@ -1,174 +1,129 @@
-# Agencity — recoverable Bun/LibSQL agent runtime
+# Agencity
 
-Agencity is a terminal-first autonomous agent runtime inspired by [Prime Agent](https://www.primeintellect.ai/blog/prime-agent) and its Recursive Language Model and Continual Harness ideas. Unlike Prime Agent's persistent Python kernel and file-based session state, Agencity stores durable agent identity, work, subagents, effects, and context in a relational event history while treating its TypeScript worker as disposable. This makes long-running work easier to recover, inspect, and resume after a process or terminal disappears.
+Agencity is a terminal-first autonomous agent runtime for work that may outlive one model context, terminal, or process. It keeps agent sessions, tasks, branches, tool effects, subagents, and evidence in a durable local event history—an append-only sequence of records. Generated work runs through disposable TypeScript cells, while committed state can be inspected and resumed after restart.
 
-The implementation follows the [Prime Agent TypeScript/Turso rewrite PRD](./plans/2026-08-05-prime-agent-typescript-turso-rewrite-prd.md). It runs durable root and recursive child agents against a local LibSQL database. Canonical events, explicitly checkpointed working values, task/mailbox/model handles, schedules, and content-addressed artifacts survive supervisor and console-worker restarts; the Bun heap does not.
+A **session** is a durable agent identity. A **branch** is one retained line of that session's history. An **effect** is an external action such as a model call, shell command, or file operation. Agencity records effect intent before execution and keeps success, failure, cancellation, and uncertainty distinct.
 
-> **Security boundary:** The runtime is **trusted-local only**. Model-generated TypeScript and shell commands have the operating-system authority of the runtime. The separate Bun console worker provides crash isolation, **not a security sandbox**. Read-only raw SQL is a shared, non-confidential diagnostic channel; candidate/workspace scope filters provide behavioral context isolation, not secrecy from SQL. The product-managed loopback service requires a random owner-only bearer token from `.agencity/service/manifest.json`; the advanced manually started `serve` diagnostic remains unauthenticated. Neither is a remote authorization boundary. Run only trusted workloads, keep either surface loopback-only, or put the entire runtime inside an independently managed sandbox. See [Security](./docs/security.md).
+## Trust warning
 
-## Delivery Slice 4 status
+Agencity is **trusted-local software, not a hostile-code sandbox**. Model-generated TypeScript, shell commands, and installed skills have the operating-system authority of the Agencity process. The separate Bun worker provides crash isolation only.
 
-Slices 1–3 provide recoverable execution, recursive agents, and relational continual-harness refinement. Slice 4 adds stable profile/device identity, a separate profile catalog/preferences/global-skill/credential-reference database, optional Turso Cloud envelope exchange through the pinned official `@tursodatabase/sync@0.7.2` adapter, deterministic replicated-envelope validation/ingestion, offline divergent branches, duplicate-intent and task-claim reconciliation, sync lifecycle/status/discovery, ownership-aware export, and retryable physical deletion for supported owned scopes. Destructive planning follows durable historical replica/catalog evidence rather than only the current transport and requires a separate authenticated admin for every managed URL.
+Run Agencity with a minimally privileged OS account or place the entire runtime inside an independently managed sandbox when the workspace or generated code is not fully trusted. Keep protocol surfaces on loopback. See [Security](./docs/security.md).
 
-The installed adapter exposes real directional `push()`, `pull()`, `checkpoint()`, and `stats()` primitives. A deferred URL keeps initialization local-only, and each cycle pushes staged local CDC before pulling conflict-resolved state, so Cloud failure never blocks or erases canonical local writes. Distributed coordination is still unavailable and reported as such. Conflicting offline task claims stay unresolved until an explicit user resolution event. See [ADR 0003](./docs/decisions/0003-turso-envelope-sync.md) and the [operator guide](./docs/operator-guide.md).
+## Install and first run
 
-This is not the whole PRD. PostgreSQL, semantic/embedding retrieval, a production Cloud administrative-deletion adapter, and a hostile-code sandbox remain later work. HTTP relational, object-CAS, candidate-index, and sandbox-executor placement adapters ship behind explicit capability contracts. `bun run verify` covers local, deterministic multi-replica, offline/conflict/restart/protocol, and real-adapter failure/incarnation tests; a real Cloud smoke is opt-in and credential-gated.
-
-## Requirements and install
+Requirements:
 
 - [Bun](https://bun.sh/) 1.2 or newer
-- A trusted local workspace (or an external sandbox containing the whole process)
+- a trusted local repository or an external sandbox around the whole runtime
+
+The package is private and is not published to a registry or standalone binary channel. Supported use is from a source checkout:
 
 ```sh
 git clone <repository-url> agencity
 cd agencity
 bun install --frozen-lockfile
-bun run verify
 bun run dev -- --version
 ```
 
-For a command on `PATH`, the supported unpublished workflow is `bun link` from this installed checkout, then ensure `~/.bun/bin` is on `PATH`. The checked-in `src/cli.ts` target is mode `100755`, so the link is directly executable and no manual `chmod` is part of installation. There is no supported registry or standalone release yet. See [Installation and executable workflows](./docs/install.md).
-
-## Product entrypoint
-
-From a repository, `agencity` (or `bun run dev`) discovers the nearest `.agencity` or version-control root, canonicalizes path aliases, and creates or resumes named durable work without requiring session IDs:
+For an `agencity` command on `PATH`, link that installed checkout:
 
 ```sh
-# Real provider: open the model inspector, choose a provider, log in, and enter its model ID.
+bun link
+export PATH="$HOME/.bun/bin:$PATH"
+cd /path/to/a/repository
 agencity
-/model
-# ↑/↓ selects a provider; L logs in; Enter accepts a model ID.
+```
 
-# Compatible direct commands remain available; gateway IDs may contain slashes.
-/model login openai
-/model openai:gpt-5.6-sol
-/model login vercel
-/model vercel:openai/gpt-5.6-sol
+On the first interactive launch without a usable provider, Agencity asks you to choose OpenAI, Anthropic, or Vercel AI Gateway, accepts the API key through hidden terminal input, and asks for the exact model ID before creating a session. Stored keys live in an owner-only profile `auth.json`; environment credentials remain supported fallbacks.
 
-# Deterministic fixture behavior is always explicit.
-agencity --demo "exercise the durable product route"
+There is no product demo mode or credential-free fallback. Echo is an internal deterministic test provider and is unavailable in product selection. Non-interactive new work fails with setup guidance until a provider and model are configured.
 
+See [Installation](./docs/install.md) and [Configuration](./docs/configuration.md).
+
+## Core behavior
+
+From a repository:
+
+```sh
+agencity
+agencity "find and fix the flaky test"
+agencity run "inspect the repository and report the result"
+```
+
+Agencity:
+
+- discovers the nearest repository root and creates or resumes named work without requiring internal IDs;
+- keeps the branch's model explicit and never silently changes it on resume;
+- asks the model for a validated, structured next action: a TypeScript cell, clarification, permission request, final answer, blocked result, or failure;
+- runs file, shell, SQL, model, subagent, memory, skill, and artifact operations through durable runtime APIs;
+- commits each action and observation before a dependent model step;
+- retains child agents, messages, goals, completion checks, budgets, and unresolved outcomes;
+- opens a full-screen terminal client on interactive terminals and a readable transcript for non-interactive use; and
+- starts an authenticated local-machine-only workspace service on demand so detached work can continue independently of the client.
+
+Useful commands:
+
+```sh
 agencity sessions
-agencity resume "inspect this repository"
-agencity doctor
-agencity config
-agencity run --detach "continue while this terminal is closed"
+agencity resume "session or branch name"
+agencity branch head "experiment"
+agencity history current
+agencity run --detach "continue after this terminal closes"
+agencity attach
 agencity agents
+agencity doctor
 agencity service status
-agencity service shutdown
 ```
 
-`--workspace PATH` overrides discovery. The canonical root contains an owner-only `.agencity/workspace-id` marker. That opaque identity moves with the repository and makes real paths and symlinked entry paths converge; concurrent first opens atomically choose one marker. A pre-marker `.agencity/agent.db` is migrated once to its legacy path-derived identity. Agencity refuses symlinked, insecure, or malformed markers rather than silently creating a different workspace.
+The default workspace database is `<repository>/.agencity/agent.db`. Large or byte-oriented results are stored separately in `<repository>/.agencity/artifacts/` and referenced by a SHA-256 content fingerprint. The product profile defaults to `~/.agencity/profile.db`.
 
-A workspace-scoped recent branch and non-secret `provider:model` preference live in the separate profile store. OpenAI, Anthropic, and Vercel AI Gateway keys may be saved in an owner-only profile `auth.json`; environment variables remain supported fallbacks. Raw keys never enter profile preferences or canonical workspace history. If selection is ambiguous the interactive command asks instead of choosing by row order; scripts receive a typed nonzero error and can use `sessions --select NAME`. A retained branch never changes model silently, and remains inspectable when its provider is unavailable.
+Closing a client detaches; it does not prove that durable or external work stopped. Use `/stop` in the terminal interface or `agencity stop TARGET` for explicit cancellation.
 
-The product entrypoint discovers or starts one authenticated loopback background service per workspace on demand; it is not installed as an OS boot/login service. Closing or interrupting a client only detaches. A quiescent service exits automatically after 60 seconds. Active runs, effects, schedules, heartbeats, wakes, workers, and attached clients keep it resident and are listed by `service status`; a durable run waiting only for user input does not require a resident process. `stop TARGET` durably requests run cancellation, while `service shutdown` stops admission, drains resident workers, releases leases, and leaves sessions intact. `attach`, `send`, `status`, and `agents` use names or IDs without making the client the execution owner.
+## Recovery and uncertainty
 
-Interactive terminals open a full-screen OpenTUI workspace with a stable composer, grouped run/cell/agent activity, a responsive contextual inspector, and persistent branch/model/recovery/budget/trusted-local status. Commands replace the inspector with labeled, task-specific views instead of appending raw JSON. `/model` is a keyboard-driven provider/model picker with masked login input. `Shift-R` or `/raw` deliberately opens the latest raw diagnostic data; Escape dismisses it. Echo is rendered as `[DEMO FIXTURE]`. Non-TTY commands retain a readable plain transcript fallback. Interactive product tasks enter this workspace while the strict `agencity.agent-action` version-1 loop runs; `agencity run TASK` remains the one-shot terminal-result command. Each model step chooses a typed final, TypeScript cell, clarification/permission request, blocked outcome, or failure. Cells use the injected SDK for all SQL, file, shell, model, subagent, memory, skill, and artifact work. Raw action JSON is retained as attributable internal history, never appended as an assistant conversation message; only a validated `final` becomes the user-visible assistant message.
-
-Command-like task text is deterministic. Multi-word text such as `agencity create a parser` is treated as a task, while exact product commands such as `run`, `new`, and `resume` keep their command meaning. Quote the whole first argument or place `--` before the task to force an ambiguous spelling: `agencity -- run the benchmark`. ID-bearing `chat` and `cell` invocations remain advanced commands.
-
-### Advanced CLI and compatibility aliases
-
-Low-level operations are grouped behind explicit diagnostic, sync, and data-control paths:
+Committed work is reconstructed from retained events rather than a live TypeScript heap. Work declared safe to repeat may resume after a crash. If an external action is not safe to repeat and may have happened without a committed result, Agencity records an `unknown` effect and does not retry it automatically.
 
 ```sh
-agencity debug session-create --workspace diagnostic
-agencity debug snapshot --session <SESSION_ID> --branch <BRANCH_ID>
-agencity debug history  --session <SESSION_ID> --branch <BRANCH_ID> --json
-agencity debug cell     --session <SESSION_ID> --branch <BRANCH_ID> 'return { ok: true };'
-agencity context --json
-agencity compact "preserve unresolved file paths" --strategy summary
-agencity sync status
-agencity data export --scope session --scope-id <SESSION_ID> --destination ./export
+agencity unknown
+agencity reconcile latest still_unknown "provider audit was inconclusive"
 ```
 
-Canonical grouped commands with `--json` emit one compact, versioned `agencity.cli-output` v1 envelope and use stable typed exit classes. The exact former spellings (`create`, `chat`, `cell`, `snapshot`, `history`, `rebuild`, `branch`, `tui`, `serve`, `sync*`, `conflicts`, and `delete-data`) remain silent compatibility aliases and retain their historical output during the compatibility window. `data delete` and `delete-data` both require the exact `DELETE <scope> <id>` phrase; there is no force bypass, and the guard runs before workspace state is opened.
+Reconciliation appends evidence without rewriting the unknown outcome or triggering a retry. Missing artifacts, failed completion checks, sync conflicts, unavailable providers, and partial deletion also remain visible.
 
-Use `--restart-console-after-cell` to exercise the recovery invariant continuously. Product placement defaults to `<workspace>/.agencity`; `--state-dir`, `--db`, `--artifacts`, and `--profile` override it. Full CLI/TUI instructions are in the [operator guide](./docs/operator-guide.md).
+## Important limitations
 
-## HTTP and event protocol
+- This is not a complete production-ready autonomous product.
+- Generated code is not isolated from the host operating system.
+- The product-managed service is local and on-demand, not an OS login service or a multi-tenant server.
+- Distributed leases, task stealing, and automatic cross-device execution-owner failover are unavailable.
+- Arbitrary external effects are not exactly-once.
+- Optional Turso synchronization exchanges never-rewritten event envelopes; it does not replace the authoritative local workspace database or replicate artifact bytes.
+- The shipped CLI has no production Turso Cloud administrative-deletion adapter.
+- PostgreSQL coordination, embedding retrieval, browser execution, artifact garbage collection, and hostile-code isolation are unavailable.
+- Export bundles do not have a general import or supported round-trip restore command.
+- Installation is limited to the tested source-checkout and local-link workflows.
 
-```sh
-bun run src/cli.ts debug protocol-serve --port 3131
-curl http://127.0.0.1:3131/health
-```
-
-The managed product service authenticates every route, including health and SSE, with the owner-only discovery bearer; clients also verify workspace identity, protocol range, configuration hash, authenticated health, and the matching live process lease before accepting it. The advanced `serve` command below is a deliberately separate embedded diagnostic and does not acquire this managed authority.
-
-The protocol supports autonomous run start/inspect/resume/respond/cancel, session creation, diagnostic one-turn chat, console cells, forks, snapshots, history, append-only unknown-effect assessment, resumable server-sent events, scoped memory, refinement/approval/rollback, exact-version skill execution, and specification-pinned subagents. A consumer loads a snapshot, remembers its cursor, then connects to the stream with `?after=<cursor>` and deduplicates by event ID. Notifications are at-least-once hints over the durable database stream. See [Protocol and console SDK](./docs/protocol.md).
-
-## TypeScript API
-
-The package exports stable domain-shaped contracts rather than LibSQL SDK values:
-
-```ts
-import {
-  Supervisor,
-  type AgentStorage,
-  type ArtifactStore,
-  type EffectExecutor,
-} from "@prime-agent/runtime";
-
-const supervisor = await Supervisor.open({
-  databaseUrl: "file:.agencity/agent.db",
-  artifactDirectory: ".agencity/artifacts",
-  workspaceRoot: process.cwd(),
-  restartConsoleAfterCell: true,
-});
-
-const session = await supervisor.createSession({ workspaceId: "demo" });
-const run = await supervisor.runs.start(session.sessionId, session.branchId, {
-  task: "Inspect this workspace and report the result",
-  requestKey: "example-run-1",
-});
-console.log(run);
-await supervisor.memory.create(session.sessionId, session.branchId, {
-  text: "This workspace verifies releases with bun run verify",
-  scope: "workspace",
-  tags: ["release"],
-});
-console.log(await supervisor.memory.search(session.sessionId, session.branchId, "release verify"));
-// modelLoop.turn remains an advanced one-turn text diagnostic; product tasks use runs.
-await supervisor.close();
-```
-
-Public subpath exports are `domain`, `storage`, `artifacts`, `executors`, `console`, `runtime`, `protocol`, `security`, and `tui`. API lifecycle and capability details are in [TypeScript API](./docs/api.md) and [Architecture and capability boundaries](./docs/architecture.md).
-
-## Durable data
-
-Default placement:
-
-- `.agencity/agent.db`: canonical events plus documented operational/derived tables;
-- `.agencity/artifacts/`: SHA-256 content-addressed immutable objects;
-- the configured workspace root: shell and file effect target.
-
-Do not copy only the database if referenced artifact bytes are required. Missing or digest-mismatched content is an explicit dependency failure. The authoritative/derived classification of every table is in [Mutable tables](./docs/mutable-tables.md), and event headers/payloads are in [Event schemas](./docs/events.md).
+See [Capabilities](./docs/capabilities.md) and [Data lifecycle](./docs/data-lifecycle.md).
 
 ## Verification
 
+The default deterministic gate is:
+
 ```sh
-bun run typecheck
-bun run check:architecture
-bun test
-# all three, in that order:
+bun install --frozen-lockfile
 bun run verify
 ```
 
-The architecture check validates package entrypoints, domain dependency direction, LibSQL/Turso SDK confinement (including emitted declaration surfaces), migration/table classifications, immutable-table guards, and forbidden canonical SQL mutations. See [Slice 1 verification](./docs/slice-1-verification.md) for acceptance-to-test evidence.
+It runs type checking, architecture checks, the core test suites, and linked-executable acceptance tests. External provider, official Turso server, and real Turso Cloud checks are credential- or dependency-gated and may be skipped. A skipped external check is not evidence that the integration passed.
 
-## Design documentation
+See [Verification](./docs/verification.md) and [Installation](./docs/install.md) for the tested executable workflows.
 
-- [Implementation plans](./plans/README.md)
-- [Installation and executable workflows](./docs/install.md)
-- [Operator guide: setup, CLI, and TUI](./docs/operator-guide.md)
-- [TypeScript API](./docs/api.md)
-- [Protocol and console SDK](./docs/protocol.md)
-- [Architecture and capability boundaries](./docs/architecture.md)
-- [Trusted-local security boundary](./docs/security.md)
-- [Crash recovery and unknown effects](./docs/recovery.md)
-- [Event schemas](./docs/events.md)
-- [Mutable table registry](./docs/mutable-tables.md)
-- [Consequential decisions and unsupported capabilities](./docs/decisions/0001-slice-1-boundaries.md)
-- [Slice 3 relational memory and refinement decision](./docs/decisions/0002-relational-memory-refinement.md)
-- [Slice 1 acceptance mapping and verification](./docs/slice-1-verification.md)
+## Documentation
+
+Start with the [documentation map](./docs/README.md).
+
+- Get started: [Installation](./docs/install.md), [User guide](./docs/user-guide.md), [Configuration](./docs/configuration.md)
+- Operate: [Operator runbook](./docs/operator-guide.md), [Recovery](./docs/recovery.md), [Security](./docs/security.md), [Data lifecycle](./docs/data-lifecycle.md)
+- Integrate: [TypeScript API](./docs/api.md), [Protocol](./docs/protocol.md), [Console SDK](./docs/console-sdk.md)
+- Understand: [Architecture](./docs/architecture.md), [Capabilities](./docs/capabilities.md), [Decisions](./docs/decisions/README.md)

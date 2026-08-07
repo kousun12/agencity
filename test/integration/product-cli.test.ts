@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { parseCliArgs } from "../../src/cli-args.ts";
 import { resolveWorkspace, validateServiceManifest, workspacePreferenceKey, type ServiceManifestV1 } from "../../src/product/index.ts";
 import { ProfileStore } from "../../src/storage/index.ts";
+import { StrictActionFixture } from "../acceptance/strict-action-fixture.ts";
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const directories: string[] = [];
 const ownedFixtureRoots = new Set<string>();
+const modelFixtures: StrictActionFixture[] = [];
 let baselineServicePids = new Set<number>();
 
 function serviceChildren(): Array<{ pid: number; command: string }> {
@@ -86,6 +88,7 @@ async function teardownFixtures(): Promise<void> {
     await shutdownOwnedServices(directory);
     await rm(directory, { recursive: true, force: true });
   }
+  for (const fixture of modelFixtures.splice(0)) fixture.close();
 }
 
 beforeAll(() => { baselineServicePids = new Set(serviceChildren().map(child => child.pid)); });
@@ -129,8 +132,8 @@ async function allFileText(directory: string): Promise<string> {
 describe("product CLI", () => {
   test("disambiguates command-like tasks from product and retained diagnostic commands", () => {
     expect(parseCliArgs([])).toMatchObject({ command: "product", positionals: [] });
-    expect(parseCliArgs(["fix", "the", "tests", "--demo"])).toMatchObject({ command: "product", positionals: ["fix", "the", "tests"] });
-    expect(parseCliArgs(["--demo", "create", "a", "parser"])).toMatchObject({ command: "product", positionals: ["create", "a", "parser"] });
+    expect(() => parseCliArgs(["fix", "the", "tests", "--demo"])).toThrow("Unknown option: --demo");
+    expect(() => parseCliArgs(["--demo", "create", "a", "parser"])).toThrow("Unknown option: --demo");
 
     expect(parseCliArgs(["run", "fix", "it", "--model", "openai/gpt-test"])).toMatchObject({ command: "run", positionals: ["fix", "it"] });
     expect(parseCliArgs(["history", "current"])).toMatchObject({ command: "history", positionals: ["current"] });
@@ -243,16 +246,17 @@ describe("product CLI", () => {
 
   test("no-subcommand route reaches a ready TUI and a second invocation resumes without IDs", async () => {
     const value = await fixture();
-    const invoke = async (extra: string[]) => {
+    const provider = new StrictActionFixture(); modelFixtures.push(provider);
+    const invoke = async (extra: string[], extraEnv: Record<string, string> = {}) => {
       const { OPENAI_API_KEY: _key, ...clean } = process.env;
       const child = Bun.spawn([process.execPath, "run", join(root, "src/cli.ts"), "--workspace", value.workspace, ...extra], {
-        cwd: root, env: { ...clean, HOME: value.home }, stdout: "pipe", stderr: "pipe", stdin: "pipe",
+        cwd: root, env: { ...clean, HOME: value.home, ...extraEnv }, stdout: "pipe", stderr: "pipe", stdin: "pipe",
       });
       child.stdin.write("/quit\n"); child.stdin.end();
       const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
       return { code, stdout, stderr };
     };
-    const first = await invoke(["--demo"]);
+    const first = await invoke([], provider.environment());
     expect(first).toMatchObject({ code: 0, stderr: "" });
     expect(first.stdout).toContain("Agencity product session");
     expect(first.stdout).toContain("Agencity trusted-local TUI");
@@ -261,23 +265,27 @@ describe("product CLI", () => {
     expect(second.stdout).toContain("Session: New session");
   });
 
-  test("explicit demo run creates named durable work, resumes it, selects, and renames without IDs for normal use", async () => {
+  test("configured provider run creates named durable work, resumes it, selects, and renames without IDs for normal use", async () => {
     const value = await fixture();
-    const first = await cli(["run", "--workspace", value.workspace, "--demo", "inspect this repository"], { home: value.home });
+    const provider = new StrictActionFixture(); modelFixtures.push(provider);
+    const first = await cli(["run", "--workspace", value.workspace, "--model", "openai:fixture-v1", "inspect this repository"], {
+      home: value.home,
+      extraEnv: provider.environment(),
+    });
     expect(first).toMatchObject({ code: 0, stderr: "" });
     expect(first.stdout).toContain("Session: inspect this repository / main");
-    expect(first.stdout).toContain("Model: echo:echo-1 [DEMO FIXTURE]");
-    expect(first.stdout).toContain("Echo: inspect this repository");
+    expect(first.stdout).toContain("Model: openai:fixture-v1");
+    expect(first.stdout).toContain("fixture completed: inspect this repository");
 
     const resumed = await cli(["run", "--workspace", value.workspace, "continue inspection"], { home: value.home });
     expect(resumed.code).toBe(0);
     expect(resumed.stdout).toContain("Session: inspect this repository / main");
-    expect(resumed.stdout).toContain("Echo: continue inspection");
+    expect(resumed.stdout).toContain("fixture completed: continue inspection");
 
     const listed = await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home });
     const rows = JSON.parse(listed.stdout) as Array<{ sessionId: string; branchId: string; sessionName: string; taskSummary: string; model: { provider: string } }>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ sessionName: "inspect this repository", taskSummary: "inspect this repository", model: { provider: "echo" } });
+    expect(rows[0]).toMatchObject({ sessionName: "inspect this repository", taskSummary: "inspect this repository", model: { provider: "openai" } });
 
     const renamed = await cli(["sessions", "--workspace", value.workspace, "--session", rows[0]!.sessionId, "--name", "Repository inspection", "--json"], { home: value.home });
     expect(renamed.code).toBe(0);
@@ -289,8 +297,12 @@ describe("product CLI", () => {
 
   test("multiple equally plausible roots require explicit selection rather than row order", async () => {
     const value = await fixture();
-    expect((await cli(["run", "--workspace", value.workspace, "--demo", "first root"], { home: value.home })).code).toBe(0);
-    expect((await cli(["run", "--workspace", value.workspace, "--new", "--demo", "second root"], { home: value.home })).code).toBe(0);
+    const provider = new StrictActionFixture(); modelFixtures.push(provider);
+    expect((await cli(["run", "--workspace", value.workspace, "--model", "openai:fixture-v1", "first root"], {
+      home: value.home,
+      extraEnv: provider.environment(),
+    })).code).toBe(0);
+    expect((await cli(["run", "--workspace", value.workspace, "--new", "second root"], { home: value.home })).code).toBe(0);
     const workspace = await resolveWorkspace({ override: value.workspace });
     const profile = await ProfileStore.open(`file:${join(value.home, ".agencity", "profile.db")}`);
     await profile.setPreference(workspacePreferenceKey(workspace.workspaceId, "recent"), null); profile.close();
@@ -300,10 +312,10 @@ describe("product CLI", () => {
     const rows = JSON.parse((await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home })).stdout) as Array<{ sessionId: string }>;
     const selected = await cli(["run", "--workspace", value.workspace, "--session", rows[0]!.sessionId, "explicit work"], { home: value.home });
     expect(selected.code).toBe(0);
-    expect(selected.stdout).toContain("Echo: explicit work");
+    expect(selected.stdout).toContain("fixture completed: explicit work");
   });
 
-  test("non-interactive new work never silently falls back to Echo", async () => {
+  test("non-interactive new work requires provider configuration", async () => {
     const value = await fixture();
     const failed = await cli(["run", "--workspace", value.workspace, "work without provider"], { home: value.home });
     expect(failed.code).not.toBe(0);

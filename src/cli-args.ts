@@ -23,7 +23,7 @@ const VALUE_OPTIONS = new Set([
   "scope", "scope-id", "confirmation", "receipt-dir", "destination", "requested-by", "reconciliation-id", "evidence", "strategy", "from-context", "completion-gate",
 ]);
 const BOOLEAN_OPTIONS = new Set([
-  "help", "version", "new", "demo", "json", "detach", "restart-console-after-cell", "exclusive-artifacts",
+  "help", "version", "new", "json", "detach", "restart-console-after-cell", "exclusive-artifacts",
 ]);
 
 export interface ParsedCliArgs {

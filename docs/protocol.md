@@ -1,275 +1,333 @@
-# Protocol and console SDK
+# Public HTTP, JSON, server-sent events, and `AgentClient` protocol
 
-Agencity has two distinct protocols in Slice 1:
+Agencity exposes one public client protocol through `ProtocolServer`. `HttpProtocolTransport` sends requests over HTTP and uses server-sent events (SSE) for live updates, while `InProcessProtocolTransport` constructs a standard `Request` and calls the same router. Both transports use the same route validation, JSON shapes, domain services, and typed failures.
 
-1. a loopback HTTP/JSON + server-sent-event interface for external clients;
-2. a private Bun IPC channel between the supervisor and disposable console worker, separate from stdout/stderr.
+Generated TypeScript cells use a separate private worker RPC. That boundary is not an external extension protocol; it is documented in [Generated TypeScript console SDK](./console-sdk.md).
 
-Neither protocol is an authentication or sandbox boundary.
+## Server modes and authentication
 
-## HTTP server
+### Managed product service
 
-Ordinary product commands discover or start a per-workspace `ManagedWorkspaceService` on demand. It binds an ephemeral `127.0.0.1` port, publishes an owner-only manifest, and requires `Authorization: Bearer …` on every route, including `/health` and SSE. The token is read from the 0600 manifest and is never passed in argv or printed. Authenticated health returns workspace/service identity, application and protocol versions, and the secret-free configuration hash used during discovery.
+Ordinary product commands discover or start a per-workspace managed service. It:
 
-`bun run src/cli.ts debug protocol-serve --port 3131` remains an advanced embedded diagnostic. It binds `127.0.0.1` but intentionally has no bearer/discovery/process-lease lifecycle. Exposing either server beyond loopback is unsupported without an independently authenticated boundary.
+- binds an ephemeral `127.0.0.1` port;
+- writes an owner-only discovery manifest;
+- requires `Authorization: Bearer <token>` on every route, including `/health` and SSE;
+- owns startup recovery, local process fencing, resident run advancement, schedules, and graceful drain.
 
-All successful non-streaming responses are JSON. Failures use the typed, scrubbed shape `{ "error": { "code", "message", "details" } }`; domain errors map to 400/404/409/424/501, unexpected failures use HTTP 500 and code `INTERNAL`, and unknown routes use HTTP 404. `AgentClient` raises the same `ProtocolClientError { code, status, details }` through HTTP and in-process transports.
+The token is read from the manifest and is not placed in argv, URLs, events, or output. Authenticated health includes workspace and service identity, application/protocol versions, readiness, and the configuration hash used during discovery.
 
-### Endpoints
+This is authenticated local process access, not multi-tenant authorization or a hostile-code sandbox.
 
-| Method and path | Input | Result |
-|---|---|---|
-| `GET /health` | none | authenticated managed identity/version/config health (or basic embedded health) |
-| `GET /capabilities` | none | v1 trusted-local, snapshot/resume, progress, historical projection, sync, service/catalog, and provider capability descriptor |
-| `GET /service/status` | none | managed lifecycle, recovery, idle timeout/deadline, attached-client count, structured keep-alive reasons, and resident-root worker states |
-| `POST /service/shutdown` | none | accepted graceful drain; it does not cancel sessions |
-| `GET /service/agents` | none | named root sessions and running/idle/detached state |
-| `POST /sessions/:session/stop?branch=:branch` | `{ reason? }` | durable user-requested active-run cancellation |
-| `GET /model-providers` | none | secret-free provider descriptors with truthful usability, credential source, remediation, and streaming capability |
-| `GET /product/config` | none | workspace default model, opaque credential references, and secret-free provider descriptors |
-| `POST /product/config/provider-key` | `{ provider, apiKey: string \| null }` | store or remove an OpenAI, Anthropic, or Vercel AI Gateway key; returns status only |
-| `POST /sessions` | `{ workspaceId?, model?, budget? }` | `{ sessionId, branchId }` |
-| `POST /sessions/:session/model?branch=:branch` | `{ model: ModelConfiguration }` | append an explicit idle-branch model change after provider availability validation |
-| `GET /sessions/:session/snapshot?branch=:branch` | none | `{ cursor, state }` |
-| `GET /sessions/:session/history?branch=:branch` | none | ordered `AgentEvent[]` including branch lineage |
-| `GET /sessions/:session/recovery-summary?branch=:branch` | none | pending/unknown effects, active/cancelling runs and children, gate attention, and terminal notices |
-| `GET /sessions/:session/effects/unknown?branch=:branch` | none | unknown effects plus append-only assessments and safe actions (`retryAllowed: false`) |
-| `GET /sessions/:session/effects/:effect/reconciliation?branch=:branch` | none | one unknown effect and its assessment history |
-| `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | `{ reconciliationId?, assessment, summary, evidence?, recordedBy }` | append-only evidence; effect stays unknown and `retried` is false |
-| `GET /sessions/:session/stream?branch=:branch&after=:cursor` | none | `text/event-stream` committed events plus cursorless ephemeral progress |
-| `POST /sessions/:session/messages?branch=:branch` | `{ content }` | committed user `AgentEvent` |
-| `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalMode?, goalId? }` | managed: durable `202 accepted` with run ID/cursor and resident advancement; embedded: advances through terminal or waiting boundary |
-| `GET /sessions/:session/runs/:run?branch=:branch` | none | current durable `AgentRunResult` |
-| `POST /sessions/:session/runs/:run/resume?branch=:branch` | none | resumed `AgentRunResult` |
-| `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | `{ response, approved? }` | continued result; permission requires explicit boolean `approved` |
-| `POST /sessions/:session/runs/:run/cancel?branch=:branch` | `{ reason? }` | cancellation-reconciled result |
-| `POST /sessions/:session/turns?branch=:branch` | none | advanced diagnostic `{ outcome, message? or error? }` |
-| `POST /sessions/:session/cells?branch=:branch` | `{ code }` | `{ cellId, result, logs }` |
-| `POST /sessions/:session/branches?branch=:parent` | `{ cursor, name? }` | `{ branchId }` |
-| `GET/POST /sessions/:session/agents?branch=:branch` | none or `SpawnAgentInput` | nuclear-family roster or durable child handle |
-| `POST /sessions/:session/agents/batch?branch=:branch` | `{ inputs: SpawnAgentInput[] }` | atomically admitted child handles |
-| `POST /sessions/:session/agents/:target/follow-up?branch=:branch` | `{ content, taskId?, artifactIds?, intentKey? }` | retained same-session follow-up receipt |
-| `POST /sessions/:session/agents/:target/cancel?branch=:branch` | `{ reason? }` | direct-child task or active-run cancellation result |
-| `GET /sessions/:session/tasks?branch=:branch` | none | durable branch task records |
-| `POST /sessions/:session/tasks/:task/cancel?branch=:branch` | `{ reason? }` | cascaded terminal task record |
-| `GET /sessions/:session/mailbox?branch=:branch&direction=all&limit=20&before=:cursor&pending=1` | none | bounded receipt-rich page and next cursor |
-| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` | stable durable delivery receipt |
-| `POST /sessions/:session/mailbox/:message/ack?branch=:branch` | none | acknowledged mailbox record |
-| `POST /sessions/:session/documents?branch=:branch` | `ImportDocumentInput` | document handle |
-| `POST /sessions/:session/input-sets?branch=:branch` | `CreateInputSetInput` | exact ordered input-set handle |
-| `POST /sessions/:session/models?branch=:branch` | `StartRecursiveModelInput` (`idempotencyKey` recommended for retry) | stable recursive model handle |
-| `GET /models/:handle` / `POST /models/:handle/cancel` | none or `{ reason? }` | current/terminal model handle |
-| `GET/POST /sessions/:session/goals?branch=:branch` | none or `CreateGoalInput` | goal list or created goal plus gates |
-| `GET /sessions/:session/goals/current?branch=:branch` | none | current user-authoritative goal or null |
-| `GET /sessions/:session/goals/:goal[/evaluations]?branch=:branch` | optional `gate` query | scoped goal or retained gate-evaluation history |
-| `POST /sessions/:session/goals/:goal/(completion|continue|pause|resume|clear)?branch=:branch` | operation-specific optional reason/bound | gate-checked or lifecycle-updated goal |
-| `GET/POST /sessions/:session/heartbeats?branch=:branch` | none or `CreateHeartbeatInput` | scoped heartbeat list or created user heartbeat |
-| `POST /heartbeats/:id/(tick|pause|resume|clear)` | `{ at? }`, `{ nextTickAt? }`, or `{ reason? }` | updated heartbeat handle |
-| `GET/POST /sessions/:session/schedules?branch=:branch` | none or `CreateScheduleInput` | scoped one-time/interval schedules or created user schedule |
-| `GET /sessions/:session/schedules/wakes?branch=:branch&status=...` | none | durable queued/claimed/delivered/unknown wake records |
-| `POST /schedules/:id/(tick|pause|resume|clear)` | operation-specific time/reason | updated schedule handle |
-| `GET /sync/status` | none | capabilities, persisted replica lifecycle, unresolved conflicts, quarantine count |
-| `POST /sync` / `POST /sync/reconnect` | none | manual/reconnect cycle (`stage → push → pull → ingest → checkpoint` for the official adapter) |
-| `POST /sync/push` | none | staged count, official post-push stats, and status |
-| `POST /sync/pull` | none | official pull-change flag, ingestion result, stats, and status |
-| `POST /sync/checkpoint` | none | official checkpoint result and stats |
-| `GET /sync/stats` | none | official local CDC/WAL/revision/network statistics |
-| `GET /sync/conflicts?status=unresolved|resolved` | none | attributable reconciliation records |
-| `POST /sync/conflicts/:id/resolve` | `ResolveConflictInput` | explicit durable `SyncConflictResolved` result |
-| `GET /sync/workspaces?refresh=1` | none | replicated workspace announcements (`refresh` invokes a real pull first) |
-| `POST /sync/manifests` | `{ operation, scopeKind, scopeId, requestedBy }` | ownership-aware resource/replica manifest |
-| `POST /sync/export` | `{ destination, scopeKind, scopeId, requestedBy }` | inspectable events/profile/replica-envelope/artifact bundle plus completed/partial manifest |
+### Embedded diagnostic server
 
-For snapshot/history/stream, the branch may alternatively occupy the fourth path segment, but the query parameter is the documented form. Slice 2 commands require `?branch=`. Family targets are URL-decoded and resolve only within the caller's parent/direct-child/sibling roster; sender identity is the path session/branch and body aliases cannot replace it. Mailbox pages sort newest-first by committed send time plus stable ID, use opaque base64url cursors, and report `queued`, `delivered_to_context`, `acknowledged`, or `failed` receipts with relationship/name/task/artifact/reply provenance. A rejected request returns the ordinary typed protocol error and commits no mailbox row.
+`agencity debug protocol-serve --port 3131` starts an advanced embedded diagnostic server on `127.0.0.1`. It is unauthenticated and has no discovery manifest, service lease, resident-run queue, or idle lifecycle. Do not expose it to an untrusted network.
 
-Mailbox family/task/artifact authorization, UTF-8/rate/pending bounds, document scope, spent-plus-active tree budgets, recoverable cancellation propagation, durable goal workspace pins, shared provider concurrency, and early-heartbeat rejection are enforced by the same domain services used in-process; transport routing does not weaken them. Domain/storage validation remains authoritative.
+`ProtocolServer` also accepts an optional bearer token for a custom embedded host, but the host remains responsible for discovery, authorization, TLS, execution ownership, and lifecycle.
 
-### Contract-identical transports
+## Response and error envelopes
 
-`HttpProtocolTransport` sends loopback requests and owner bearer headers. `InProcessProtocolTransport` constructs a standard `Request` and invokes the same public `ProtocolServer.handle` router; it is not a private `Supervisor` adapter. A shared conformance suite covers JSON bodies, capabilities, typed failures, snapshots/history, and unknown-effect routes through both transports. Body detection uses `request.body`, because an in-process `Request` has no transport-generated content-length header.
+Successful non-streaming responses are route-specific JSON values. Failures use:
 
-`AgentClient.watchBranch` performs snapshot-then-stream, applies committed callbacks serially, advances its reconnect cursor only after a handler successfully applies the event, ignores duplicate/older cursors, and reconnects from that cursor. Cursorless progress is temporary: it is discarded on a committed effect outcome, disconnect, or reconnect and is never replayed as history.
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Scrubbed human-readable message",
+    "details": null
+  }
+}
+```
 
-### Snapshot then SSE
+Domain errors map as follows:
 
-A correct consumer:
+| Code | HTTP status |
+|---|---:|
+| `VALIDATION_ERROR` | 400 |
+| `NOT_FOUND` | 404 |
+| `CONFLICT`, `INVALID_TRANSITION`, `EXECUTION_OWNERSHIP_CONFLICT` | 409 |
+| `DEPENDENCY_FAILURE` | 424 |
+| `CAPABILITY_UNAVAILABLE` | 501 |
+| unexpected failure as `INTERNAL` | 500 |
 
-1. calls `GET .../snapshot?branch=B` and renders the returned `state`;
-2. stores its opaque decimal-string `cursor` without converting it to a JavaScript `number`;
-3. connects to `GET .../stream?branch=B&after=<cursor>`;
-4. for each default SSE message, parses `data` as an `AgentEvent`, ignores event IDs already applied, reduces it, and persists the new cursor;
-5. optionally renders `event: progress` items as temporary UI state without reducing or persisting them;
-6. reconnects with the last applied committed cursor after any disconnect and clears temporary progress.
+Unknown routes return 404/`NOT_FOUND`. `AgentClient` raises `ProtocolClientError { code, status, details }` for the same failures over HTTP and in-process transports.
 
-A committed SSE item uses the cursor as `id:` and the full event JSON as `data:`. Publication happens after commit. Commit callbacks only wake the server; catch-up reads from storage, so a crash between commit and notification does not lose state. Delivery should be treated as at least once. Causally inherited branch events and branch-local events use database cursor order.
+## Route conventions
 
-Streaming model output uses a distinct `event: progress` frame whose JSON data is an `EffectProgressNotification`. It deliberately has no `id:` or durable cursor. It is delivered only to currently attached clients, is not replayed during catch-up, and may be bounded or dropped. For a diagnostic text turn, a client may display `model-output-delta` text provisionally and reconcile it with the committed assistant message. For an autonomous run, those deltas are raw action encoding and must not be rendered as ordinary assistant conversation; clients wait for typed action/run events and show only a validated `final` as assistant text. On failure, cancellation, unknown recovery, or disconnect, clients discard partial text. A non-streaming provider emits no progress.
+Session mutations and reads are branch-scoped. The documented form is `?branch=<branchId>`. Snapshot, history, and stream also accept the retained path-segment compatibility form, but new integrations should use the query parameter.
 
-The endpoint does not emit the initial snapshot, heartbeat frames, or an explicit end marker. Managed service discovery authenticates the local client and checks one version range/configuration; there is still no multi-tenant authorization, non-loopback authentication claim, in-place upgrade negotiation, or WebSocket transport. The advanced embedded server is unauthenticated.
+Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cursors are decimal strings and may exceed JavaScript's safe integer range; retain them as strings.
 
-### Minimal client example
+### Discovery, service, product catalog, and providers
+
+| Method and path | Result |
+|---|---|
+| `GET /health` | Managed authenticated identity/version/config/readiness, or basic embedded health. |
+| `GET /capabilities` | Protocol version, trusted-local mode, snapshot/resume, progress, historical projection, managed-service/catalog availability, sync capabilities, and raw provider descriptors. |
+| `GET /model-providers` | Secret-free raw supervisor provider descriptors. Product UIs must apply product policy; Echo is an internal test fixture, not a product-selectable provider. |
+| `GET /service/status` | Managed-only lifecycle, recovery, idle deadline, attached clients, keep-alive reasons, and resident root workers. |
+| `POST /service/shutdown` | Managed-only accepted graceful drain. It does not cancel sessions. |
+| `GET /service/agents` | Managed-only named root sessions and resident worker states. |
+| `GET /product/sessions` | Managed-only human-readable product session/branch catalog. |
+| `POST /product/select` | Managed-only `{ target?, branchId? }` selection; returns `{ sessionId, branchId }`. |
+| `POST /product/rename` | Managed-only `{ sessionId, branchId?, name }`. |
+| `GET /product/config` | Managed-only workspace default model, opaque credential references, and secret-free provider descriptors. |
+| `POST /product/config/model` | Managed-only `{ model: "provider:model" \| null }`. |
+| `POST /product/config/provider-key` | Managed-only `{ provider, apiKey: string \| null }`; stores or removes a supported key and returns status without the value. |
+| `POST /product/config/credential-reference` | Managed-only `{ provider, reference, label }`; stores an opaque reference, not credential bytes. |
+
+The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Echo can appear in low-level descriptors because it is installed for deterministic tests, but product onboarding, selection, help, and status must exclude it.
+
+### Sessions, branches, runs, cells, and recovery
+
+| Method and path | Input and result |
+|---|---|
+| `POST /sessions` | `{ workspaceId?, model?, budget?, sessionName?, branchName? }` → `{ sessionId, branchId }`. |
+| `POST /sessions/:session/model?branch=:branch` | `{ model: { provider, model } }` → explicit idle-branch model change. |
+| `GET /sessions/:session/snapshot?branch=:branch` | `{ cursor, state }`. |
+| `GET /sessions/:session/history?branch=:branch` | Ordered branch-lineage `AgentEvent[]`. |
+| `GET /sessions/:session/stream?branch=:branch&after=:cursor` | Committed-event SSE plus cursorless progress. |
+| `POST /sessions/:session/messages?branch=:branch` | `{ content }` → committed user message event. |
+| `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalMode?, goalId? }` → run result or managed acceptance. |
+| `GET /sessions/:session/runs/:run?branch=:branch` | Current retained `AgentRunResult`. |
+| `POST /sessions/:session/runs/:run/resume?branch=:branch` | Advance the retained run. |
+| `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | `{ response, approved? }`; permission requires boolean `approved`. |
+| `POST /sessions/:session/runs/:run/cancel?branch=:branch` | `{ reason? }` → cancellation-reconciled result. |
+| `POST /sessions/:session/stop?branch=:branch` | Managed-only `{ reason? }` → cancel the active run, if any. |
+| `POST /sessions/:session/turns?branch=:branch` | Advanced diagnostic one-turn model result. |
+| `POST /sessions/:session/cells?branch=:branch` | `{ code }` → `{ cellId, result, logs }`. |
+| `POST /sessions/:session/branches?branch=:parent` | `{ cursor, name?, compactionStrategy? }` → `{ branchId }`. |
+| `POST /sessions/:session/resume?branch=:branch` | Rebuild and reattach to a retained branch. |
+| `GET /sessions/:session/context?branch=:branch` | Effective context inspection with source provenance. |
+| `POST /sessions/:session/compact?branch=:branch` | Context compaction options → retained compaction view. |
+| `GET /sessions/:session/recovery-summary?branch=:branch` | Pending/unknown effects, active/cancelling work, gate attention, and terminal notices. |
+| `GET /sessions/:session/effects/unknown?branch=:branch` | Unknown effects, assessments, and safe actions. |
+| `GET /sessions/:session/effects/:effect/reconciliation?branch=:branch` | One unknown effect and assessment history. |
+| `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | Append `{ reconciliationId?, assessment, summary, evidence?, recordedBy }`; durable effect status remains unknown. |
+
+Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start` and holds the request through the next terminal or user-waiting boundary.
+
+Reconciliation is evidence-only. It never rewrites an unknown effect, reports a retry, or executes a successor operation.
+
+### Agents, mailboxes, documents, models, goals, and wakes
+
+| Method and path | Meaning |
+|---|---|
+| `GET /sessions/:session/agents?branch=:branch` | Nuclear-family roster and task state. |
+| `POST /sessions/:session/agents?branch=:branch` | Admit one `SpawnAgentInput`. |
+| `POST /sessions/:session/agents/batch?branch=:branch` | Atomically admit `{ inputs: SpawnAgentInput[] }`. |
+| `POST /sessions/:session/agents/:target/follow-up?branch=:branch` | Retained same-session follow-up. |
+| `POST /sessions/:session/agents/:target/cancel?branch=:branch` | Cancel a permitted family target. |
+| `GET /sessions/:session/tasks?branch=:branch` | Durable branch task records. |
+| `POST /sessions/:session/tasks/:task/cancel?branch=:branch` | Cascaded task cancellation. |
+| `GET /sessions/:session/mailbox?branch=:branch&direction=all&limit=20&before=:cursor&pending=1` | Bounded mailbox page. |
+| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` → durable delivery receipt. |
+| `POST /sessions/:session/mailbox/:message/ack?branch=:branch` | Acknowledge a message. |
+| `POST /sessions/:session/documents?branch=:branch` | Import a chunked document. |
+| `POST /sessions/:session/input-sets?branch=:branch` | Create an exact ordered input set. |
+| `POST /sessions/:session/models?branch=:branch` | Start a retained recursive model call. |
+| `GET /models/:handle` | Read a recursive model handle. |
+| `POST /models/:handle/cancel` | `{ reason? }` → cancel a recursive model call. |
+| `GET /sessions/:session/goals?branch=:branch` | List goals. |
+| `POST /sessions/:session/goals?branch=:branch` | Create a goal and gates. |
+| `GET /sessions/:session/goals/current?branch=:branch` | Current user-authoritative goal or `null`. |
+| `GET /sessions/:session/goals/:goal?branch=:branch` | One scoped goal. |
+| `GET /sessions/:session/goals/:goal/evaluations?branch=:branch&gate=:gate` | Retained gate evaluations. |
+| `POST /sessions/:session/goals/:goal/completion?branch=:branch` | Request gate-checked completion. |
+| `POST /sessions/:session/goals/:goal/continue?branch=:branch` | Continue under an optional turn bound. |
+| `POST /sessions/:session/goals/:goal/pause\|resume\|clear?branch=:branch` | Goal lifecycle change. |
+| `GET /sessions/:session/heartbeats?branch=:branch` | List heartbeats. |
+| `POST /sessions/:session/heartbeats?branch=:branch` | Create a user-owned heartbeat. |
+| `POST /heartbeats/:id/tick\|pause\|resume\|clear` | Heartbeat lifecycle operation. `cancel` is also accepted as a compatibility alias for `clear`. |
+| `GET /sessions/:session/schedules?branch=:branch` | List schedules. |
+| `POST /sessions/:session/schedules?branch=:branch` | Create a user-owned one-time or interval schedule. |
+| `GET /sessions/:session/schedules/wakes?branch=:branch&status=...` | Durable wake records. |
+| `POST /schedules/:id/tick\|pause\|resume\|clear` | Schedule lifecycle operation. |
+
+Family targets are URL-decoded and restricted to the caller's parent, direct children, or siblings. Sender identity comes from the path session/branch. Mailbox receipts retain queued, context-delivered, acknowledged, or failed state with relationship, task, artifact, and reply provenance.
+
+### Memory, refinement, skills, and specifications
+
+| Method and path | Meaning |
+|---|---|
+| `POST /sessions/:session/memory?branch=:branch` | Create scoped memory. |
+| `GET /sessions/:session/memory?branch=:branch&query=...` | Search with optional `scopes`, `statuses`, `tags`, `linkedEntryIds`, `since`, and `limit`; returns full provenance. |
+| `GET /sessions/:session/memory/list?branch=:branch` | List visible memory. |
+| `POST /sessions/:session/refinement-reviews?branch=:branch` | Admit an attributable trajectory review. |
+| `GET /sessions/:session/refinement-reviews?branch=:branch&status=...` | List branch review records. |
+| `GET /sessions/:session/refinement-reviews/:review?branch=:branch` | Read one branch-owned review. |
+| `GET /refinement-reviews?status=...` | Workspace-wide review diagnostics. |
+| `POST /sessions/:session/user-corrections?branch=:branch` | Append a typed correction citing earlier branch event IDs. |
+| `GET /refinement-policy` | Read the profile-owned automatic-trigger policy. |
+| `PUT /refinement-policy` | `{ enabled: boolean }`. |
+| `POST /sessions/:session/refinements?branch=:branch` | Submit a governed raw proposal. |
+| `POST .../refinements/:proposal/validate` | Validate shape, evidence, authority, conflicts, and compare-and-swap targets. |
+| `POST .../refinements/:proposal/activate` | Create/test candidates and set bounded exposure. |
+| `POST .../refinements/:proposal/allocate` | Allocate a candidate. |
+| `POST .../refinements/:proposal/observations` | Record attributable evaluation evidence. |
+| `POST .../refinements/:proposal/approve` | Record user/global promotion approval. |
+| `POST .../refinements/:proposal/decide` | Promote, revise, or reject. |
+| `POST .../refinements/:proposal/approve-rollback` | Separately authorize user/global rollback. |
+| `POST .../refinements/:proposal/rollback` | Roll back exact promoted versions. |
+| `GET /harness` | Current harness entries. |
+| `GET /harness/:entry/history` | Immutable version history. |
+| `GET /harness/refinements?status=...` | Proposal lifecycle records. |
+| `GET /sessions/:session/skills?branch=:branch&includeUnavailable=true` | List managed skills. |
+| `GET /sessions/:session/skills/:reference?branch=:branch` | Resolve a skill by name or ID. |
+| `POST /sessions/:session/skills/preview-import?branch=:branch` | Preview a local skill directory import. |
+| `POST /sessions/:session/skills/import?branch=:branch` | Install a local skill version. |
+| `POST /sessions/:session/skills/propose?branch=:branch` | Propose a local/workspace skill from instructions. |
+| `POST /sessions/:session/skills/:reference/enable\|disable\|remove?branch=:branch` | Manage skill availability. |
+| `POST /sessions/:session/skills/:reference/test?branch=:branch` | Run durable compile/runtime tests. |
+| `POST /sessions/:session/skills/:reference/invoke?branch=:branch` | Invoke an exact or resolved skill version. |
+| `POST /sessions/:session/specs/:entry/spawn?branch=:branch` | Admit a version-pinned reusable subagent specification. |
+
+Skill installation and enable/disable/remove are client/user management operations. Generated cells receive only list, get, propose, test, and invoke surfaces.
+
+### Synchronization, export, and deletion
+
+| Method and path | Meaning |
+|---|---|
+| `GET /sync/status` | Capabilities, replica lifecycle, conflicts, and quarantine count. |
+| `POST /sync` | Manual complete synchronization cycle. |
+| `POST /sync/reconnect` | Reconnect and run a cycle. |
+| `POST /sync/push` | Stage and perform directional push when supported. |
+| `POST /sync/pull` | Directional pull and local ingestion when supported. |
+| `POST /sync/checkpoint` | Transport checkpoint when supported. |
+| `GET /sync/stats` | Transport change-data-capture (CDC), write-ahead-log (WAL), revision, and network statistics when supported. |
+| `GET /sync/conflicts?status=unresolved\|resolved` | List conflict records. |
+| `POST /sync/conflicts/:id/resolve` | Apply an explicit `ResolveConflictInput`. |
+| `GET /sync/workspaces?refresh=1` | Replicated workspace announcements; refresh performs a pull first. |
+| `POST /sync/manifests` | Create an ownership-aware export/deletion manifest. |
+| `POST /sync/export` | Export events, redaction-safe profile data, envelopes, verified artifacts, and a manifest. |
+| `POST /sync/delete` | Perform confirmed owned-scope physical deletion and return a receipt. |
+
+`POST /sync/delete` requires `{ scopeKind, scopeId, requestedBy, confirmation, receiptDirectory? }`, where confirmation exactly equals `DELETE <scopeKind> <scopeId>`. Workspace/profile deletion requires an external receipt directory. Managed remote evidence can block deletion when authenticated administration is absent or the selected granularity is unsupported.
+
+## `AgentClient`
+
+Construct the client from a base URL or a transport:
+
+```ts
+import {
+  AgentClient,
+  InProcessProtocolTransport,
+} from "@prime-agent/runtime/protocol";
+
+const httpClient = new AgentClient(
+  "http://127.0.0.1:3131",
+  managedBearerToken,
+);
+
+const embeddedClient = new AgentClient(
+  new InProcessProtocolTransport(protocolServer),
+);
+```
+
+The client exposes typed methods for all route groups:
+
+- discovery and service: `health`, `capabilities`, `serviceStatus`, `shutdownService`, `serviceAgents`;
+- product catalog/configuration: `productSessions`, `productSelect`, `productRename`, `productConfig`, `productSetModel`, `productSetProviderKey`, `productCredentialReference`, `modelProviders`;
+- session lifecycle: `createSession`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
+- autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `respondToRun`, `cancelRun`, `turn`, `cell`;
+- streaming: `stream`, `watchBranch`, `abortPendingRequests`;
+- context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
+- agents and recursive work: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mailbox methods, follow-up/cancel methods, documents, input sets, recursive model methods;
+- goals and wakes: goal, heartbeat, schedule, and wake methods;
+- memory and refinement: memory, review, policy, proposal, approval, decision, and rollback methods;
+- skill management: `listSkills`, `getSkill`, `previewSkillImport`, `installSkill`, `proposeSkill`, `enableSkill`, `disableSkill`, `removeSkill`, `testSkill`, `invokeSkill`, and `spawnSpec`;
+- synchronization and data control: status/cycle/conflict/workspace methods plus `dataManifest`, `exportData`, and `deleteOwnedData`.
+
+`AgentClient.fork` is the supported branch helper:
+
+```ts
+const { branchId } = await client.fork(
+  sessionId,
+  parentBranchId,
+  cursor,
+  "experiment",
+  "deterministic-extractive-v1",
+);
+```
+
+All returned handles are durable JSON values unless a method documents a transport-only callback or `AbortSignal`.
+
+### Minimal run example
 
 ```ts
 import { AgentClient } from "@prime-agent/runtime/protocol";
 
-const client = new AgentClient("http://127.0.0.1:3131");
-const session = await client.createSession("demo");
-const run = await client.startRun(session.sessionId, session.branchId, {
-  task: "inspect the workspace",
+const client = new AgentClient(serviceUrl, bearerToken);
+const session = await client.createSession("example", {
+  model: { provider: "openai", model: "gpt-5.6-sol" },
+});
+
+const admitted = await client.startRun(session.sessionId, session.branchId, {
+  task: "Inspect the workspace",
   requestKey: "protocol-example-run",
 });
+
+const run = "accepted" in admitted && admitted.accepted
+  ? await client.run(session.sessionId, session.branchId, admitted.runId)
+  : admitted;
+
 if (run.status === "waiting_for_user" && run.pendingInput) {
-  await client.respondToRun(session.sessionId, session.branchId, run.runId, run.pendingInput.id, "continue");
+  await client.respondToRun(
+    session.sessionId,
+    session.branchId,
+    run.runId,
+    run.pendingInput.id,
+    { response: "continue" },
+  );
 }
-const snapshot = await client.snapshot(session.sessionId, session.branchId);
 ```
 
-`AgentClient` wraps these JSON calls with `startRun`, `run`, `resumeRun`, `respondToRun`, and `cancelRun`, plus `modelProviders()` and `stream(sessionId, branchId, afterCursor, handlers, signal?)`. Its stream helper advances its local cursor only for committed `AgentEvent` items, ignores duplicate/older committed cursors, and delivers cursorless progress through a separate optional handler. Fork helpers are not yet provided. Returned run and Slice 2 values are plain durable JSON handles and may be stored and reused after reconnect.
+The managed route returns an acceptance shape from the server even though the current `startRun` TypeScript return annotation is `AgentRunResult`. Callers that connect to managed service mode should narrow the runtime response as shown or use product-level integration code that already handles admission. This annotation mismatch is a current typing limitation.
 
-## Console cell environment
+## Snapshot then SSE
 
-A cell is transpiled as the body of an async function and receives these names:
+A correct consumer:
 
-- `session`: `{ id, branchId }`;
-- `state`: durable typed working values, including read-only discovery with `state.list()`;
-- `cells`: read-only retained cell history through `list` and `get`;
-- `artifacts`: content-addressed strings;
-- `tools`: durable effect requests plus convenience helpers;
-- `sql`: parameterized read-only tagged template;
-- `inspect`: safe bounded textual inspection;
-- `sdk`: the same `state`, `cells`, `artifacts`, `tools`, `inspect`, memory, harness, skill, and spec surfaces;
-- a cell-local `console` whose log/warn/error strings enter the cell result event.
+1. calls `snapshot` and renders the returned state;
+2. stores the cursor as an opaque string;
+3. connects to `stream` with `after=<cursor>`;
+4. applies each committed `AgentEvent` in order and advances only after successful application;
+5. deduplicates repeated or older committed cursors;
+6. treats `event: progress` as temporary display state;
+7. clears progress and reconnects from the last applied committed cursor after disconnection.
 
-### Notebook observations
+A committed frame uses:
 
-When a cell has no cell-level `return`, its last top-level expression becomes the observation:
-
-```ts
-const rows = await sql`SELECT type FROM events ORDER BY sequence`;
-rows.slice(0, 5) // observed and awaited if it is a promise
+```text
+id: <cursor>
+data: <AgentEvent JSON>
 ```
 
-An explicit `return` keeps its existing behavior, including early returns; a `return` inside a nested function does not suppress final-expression observation. A cell ending in a declaration has a `null` observation. `console.log`/`warn`/`error`, stdout, and stderr remain separate bounded logs.
+A progress frame uses:
 
-Canonical structured observations remain JSON. JSON at or below 128 KiB is committed directly. Above 128 KiB, the complete serializable JSON is placed in the content-addressed artifact store and the committed result is `{ kind: "oversized-json", artifact, byteLength, preview }`. Repeated byte-identical JSON reuses the CAS object. Circular, class-backed, accessor-backed, bigint, and other unsupported JSON results commit `{ kind: "unsupported", reason, preview }` rather than entering the worker protocol as an unsafe value.
-
-```ts
-inspect(value, { depth: 4, entries: 50, lines: 40, bytes: 8192, redact: ["internalField"] })
+```text
+event: progress
+data: <EffectProgressNotification JSON>
 ```
 
-`inspect` returns `{ kind: "inspect", preview, truncated, redacted, omittedGetters, limits }`. Defaults are depth 4, 50 total entries, 40 lines, and 8 KiB; hard maxima are depth 8, 200 entries, 100 lines, and 16 KiB. Getter invocation is always zero. Circular references and exhausted limits receive markers. Credential-shaped property names and caller-supplied exact property names are redacted. A preview is deliberately lossy and is never authoritative artifact content.
+Progress has no cursor, is not replayed, and may be bounded or dropped. For autonomous runs, model deltas encode raw typed-action JSON and must not be rendered as assistant conversation. Only a validated final action becomes an assistant message.
 
-### Working values
+The endpoint does not emit the initial snapshot, heartbeat frames, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
 
-```ts
-const stored = await state.set("plan", { step: 2, done: false });
-const restored = await state.get("plan");
-console.log(state.restored.plan);
-return restored;
-```
+`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded.
 
-`set` accepts JSON. At or below 128 KiB after JSON serialization it creates `{ kind: "json", value }`; above the threshold it writes an immutable JSON artifact and creates `{ kind: "artifact", artifactId }`. Updates are staged until the cell succeeds. Each committed name receives an increasing version. A failed or interrupted cell cannot expose staged working-value or artifact-reference events, though an unreferenced CAS object may remain physically and may be garbage-collected by future tooling.
+## Exported protocol types
 
-`state.list()` returns name, version, working-value handle, `committed`/`staged` status, and exact event provenance for committed values. It never resolves artifact content. Ordinary lexical bindings and `globalThis` are not durable and are never reconstructed; use `state.set` or retain an artifact reference for anything required by another cell or restart.
+`ProtocolCapabilities`, `ProtocolClientError`, stream/watch handler types, `SnapshotEnvelope`, and `EventEnvelope` describe active public behavior.
 
-### Cell history
+The exported `ProtocolRequest` and `ProtocolResponse` unions in `protocol/types.ts` are partial legacy types. The router and `AgentClient` do not dispatch through them, and they omit many current HTTP operations. Do not use `ProtocolRequest` as an exhaustive route registry or build a new transport around its `type` discriminator. Use `AgentClient`, `ProtocolTransport.request`, or the documented HTTP routes.
 
-```ts
-const recent = await cells.list({ limit: 20, status: "committed" });
-const prior = await cells.get(recent.items[0].cellId);
-```
+## Security and compatibility limits
 
-`cells.list` is newest-first and cursor-paginated with `beforeCursor`; its default status set is committed, failed, and abandoned. `cells.get` returns `null` outside the current branch lineage. Entries include retained source, observation, logs, status, dependencies, attempts, duration, exports/error, and the proposed/start/terminal event provenance. These operations only read retained events and never replay code or effects.
+- Protocol version 1 is trusted-local.
+- Managed authentication is owner-local bearer access, not multi-tenant authorization.
+- The embedded diagnostic server is unauthenticated.
+- No WebSocket transport, TLS termination, non-loopback deployment, or in-place protocol upgrade negotiation is provided.
+- Domain services remain authoritative; transport routing does not weaken scope, budget, ownership, gate, mailbox, or idempotency rules.
 
-### Artifacts
-
-```ts
-const reference = await artifacts.put("large body", "text/plain");
-const body = await artifacts.get(reference.artifactId);
-```
-
-`get` is limited to artifacts already registered in the branch state or staged by this cell. Artifact content is integrity-checked by the local store.
-
-### Read-only SQL
-
-```ts
-const failures = await sql`
-  SELECT type, count(*) AS occurrences
-  FROM events
-  WHERE session_id = ${session.id}
-  GROUP BY type
-`;
-```
-
-Interpolations become bound `?` arguments, not source text. The validator permits one `SELECT`, `WITH` read, `EXPLAIN SELECT/WITH`, or narrow metadata pragma (`table_info`, `index_list`, `foreign_key_list`). It rejects mutation/DDL/transactions, multiple statements, dangerous file/extension functions, private `schema_migrations`, `outbox`, and `snapshots` access, and SQLite schema/engine tables. Analytical reads use a query-only per-query connection, a 64 KiB statement cap, a 1,000-row cap, and a 2-second deadline. This is a pragmatic generated-query guard in trusted-local mode, not a complete SQL parser or hostile-input security boundary.
-
-### Tools
-
-```ts
-const shell = await tools.shell("bun test", { timeoutMs: 120_000 });
-const file = await tools.readFile("package.json");
-await tools.writeFile("notes/result.txt", "done", file.sha256);
-
-const outcome = await tools.request(
-  "file",
-  "delete",
-  { path: "notes/obsolete.txt" },
-  { idempotencyKey: "remove-obsolete-v1", idempotent: true },
-);
-```
-
-Every request commits an `EffectRequested` event before execution. Convenience helpers throw when the outcome is not `succeeded`; `tools.request` returns the four-way outcome directly. Supply a stable idempotency key when logical intent may be submitted again. Shell operations default to non-idempotent. File reads/writes/deletes default to idempotent; exact-text replace defaults to non-idempotent. These defaults do not replace caller/executor reasoning about external state.
-
-The file executor rejects lexical and resolved symlink escapes from its configured root. The shell executor constrains only its initial cwd; a shell command still has ambient OS filesystem/network authority. Neither is a sandbox.
-
-## Private worker RPC
-
-Supervisor and worker exchange structured messages over Bun's dedicated IPC channel. Stdout and stderr are not protocol: ordinary `console.*` and `process.stdout`/`process.stderr` writes become cell logs capped at 64 KiB/1,000 entries, so arbitrary or protocol-shaped output cannot spoof RPC. Cells are serialized within a worker because output streams are process-wide. Each cell has an `executionId`; every SDK call gets a separate `requestId`, so concurrent SDK calls inside the cell are routed correctly. Only the supervisor touches storage, artifacts, and executors through the RPC handler. A worker process exit rejects pending cells, and startup recovery appends branch-scoped `CellAbandoned` events where no terminal cell event committed.
-
-This framing is private implementation detail, not a versioned external extension interface. External clients should use the HTTP/event protocol or TypeScript API.
-
-
-## Slice 3 HTTP/AgentClient routes
-
-All session mutation routes require `?branch=:branch` and return durable JSON records.
-
-| Method and path | Meaning |
-|---|---|
-| `POST /sessions/:session/memory` | Create scoped semantic memory (`CreateMemoryInput`). |
-| `GET /sessions/:session/memory?query=...&scopes=...&statuses=...&tags=...&limit=...` | Deterministic results plus full retrieval provenance. |
-| `GET /sessions/:session/memory/list` | Visible memory list. |
-| `POST /sessions/:session/refinement-reviews?branch=...` | Admit a manual attributable trajectory review with optional instructions/scope/kinds/wait. |
-| `GET /sessions/:session/refinement-reviews?branch=...&status=...` | Current branch review lifecycle records. |
-| `GET /sessions/:session/refinement-reviews/:review?branch=...` | One review, with exact session/branch ownership checked. |
-| `GET /refinement-reviews?status=...` | Advanced workspace-wide review diagnostics. |
-| `POST /sessions/:session/user-corrections?branch=...` | Append a typed correction citing distinct earlier branch event IDs. |
-| `GET /refinement-policy` | Versioned profile-owned automatic-trigger policy; default automatic=false and scope=local. |
-| `PUT /refinement-policy` | `{ enabled: boolean }`; malformed values fail rather than being coerced. |
-| `POST /sessions/:session/refinements` | Advanced raw proposal path: propose typed edits/evidence/evaluation. |
-| `POST .../refinements/:proposal/validate` | Validate shapes, evidence, authority, conflicts, and CAS. |
-| `POST .../refinements/:proposal/activate` | Create/test candidates and set bounded allocation/exposure. |
-| `POST .../refinements/:proposal/allocate` | Allocate candidate to a session/branch/task. |
-| `POST .../refinements/:proposal/observations` | Record objective or supported observation. |
-| `POST .../refinements/:proposal/approve` | Record explicit user/global promotion approval. |
-| `POST .../refinements/:proposal/decide` | Promote, revise, or reject under scope policy. |
-| `POST .../refinements/:proposal/approve-rollback` | Separately authorize user/global rollback as owner/admin. |
-| `POST .../refinements/:proposal/rollback` | Roll back exact promoted versions after any required separate approval. |
-| `GET /harness` | Current harness entries. |
-| `GET /harness/:entry/history` | Immutable version history. |
-| `GET /harness/refinements?status=...` | Proposal lifecycle records. |
-| `POST /sessions/:session/skills/:entry/test` | Durable compile/runtime tests, optionally exact `versionId`. |
-| `POST /sessions/:session/skills/:entry/invoke` | Durable exact-version skill invocation. |
-| `POST /sessions/:session/specs/:entry/spawn` | Version-pinned normal subagent admission. |
-
-`AgentClient` supplies the corresponding `memoryCreate`, `memorySearch`, `memoryList`, `requestRefinement`, `refinementReviews/refinementReview`, `userCorrection`, `refinementPolicy/setAutomaticRefinement`, advanced raw `refine`, `validateRefinement`, `activateRefinement`, `allocateRefinement`, `observeRefinement`, `approveRefinement`, `decideRefinement`, `approveRollback`, `rollback`, `harnessList/history`, `invokeSkill/testSkill`, and `spawnSpec` methods.
-
-The private console RPC injects `sdk.memory`, `sdk.harness`, `sdk.skills`, and `sdk.specs`. `sdk.harness.review(instructions?)` and `reviews(options?)` use the same retained review services; `propose` remains the raw advanced proposal call. Typed `UserCorrection` creation stays client/user-owned and is deliberately absent from the model-facing SDK. These facades do not expose SQL writes or evaluator/user-owned validation, activation, allocation, observation, decision, approval, or rollback. `sdk.harness.list/history` are scope-filtered model views: active authorized entries plus only an exact exposed candidate allocation. The raw `sql` tag remains a shared trusted-local, non-confidential diagnostic read and can inspect non-private cross-workspace/candidate projections; exposure is behavioral isolation, not secrecy. Agent direct-memory creation is local-only with source-trajectory evidence. The TUI adds `/memory`, `/skills`, `/refine`, `/rollback`, `/skill-test`, and `/skill` commands. `/refine [instructions]` starts the review, `/refine status` lists branch review/proposal history, `/refine auto on|off` changes the profile preference, `/refine correct IDS -- TEXT` appends a typed correction, and `/refine propose-json JSON` preserves the raw advanced proposal diagnostic. No TUI-only mutation path exists.
-
-
-## Physical deletion route
-
-`POST /sync/delete` accepts `{ scopeKind, scopeId, requestedBy, confirmation, receiptDirectory? }`
-and returns `PhysicalDeletionReceipt`. `confirmation` must exactly equal
-`DELETE <scopeKind> <scopeId>`. The call quiesces worker/outbox admission and refuses while an effect is running or being claimed. The serving process must treat a destructive attempt as terminal for that runtime. Foreign ownership is a validation failure; durable remote evidence without authenticated, fully addressable administration and unsupported local/remote granularity are `CAPABILITY_UNAVAILABLE`. Completed/partial receipts enumerate observed removals, including all per-URL admin receipts. The typed client method is `AgentClient.deleteOwnedData`.
-
-`POST /sessions/:id/resume?branch=...` rebuilds and reattaches to a retained branch. `GET /sessions/:id/context?branch=...` inspects the effective summary, uncovered narrative estimate, and exact provenance. `POST /sessions/:id/compact?branch=...` accepts `{ strategy?: "deterministic-extractive-v1" | "model-summary-v1", instructions?, idempotencyKey?, rematerializeFromContextId? }`; the model-summary strategy uses ordinary non-idempotent outbox effects, while both strategies retain canonical sources. Typed client methods are `AgentClient.resume`, `inspectContext`, and `compact`. Branch creation may include `compactionStrategy` to rematerialize inherited exact sources on the new branch.
+See [TypeScript integration API](./api.md), [Trusted-local security boundary](./security.md), and [Crash recovery and unknown effects](./recovery.md).

@@ -11,7 +11,7 @@ The Bun console worker is a crash/lifecycle boundary only. It is **not** a secur
 The current runtime does not provide:
 
 - hostile-code isolation, syscall filtering, a microVM, or network policy;
-- authenticated/authorized HTTP, workspace tenancy, or TLS;
+- network-facing or multi-tenant HTTP authentication/authorization, workspace tenancy, or TLS;
 - complete SQL parsing against adversarial language tricks;
 - a general credential broker or proof that a credential cannot be found through ambient OS resources;
 - resource isolation for CPU, memory, process count, disk, or network;
@@ -26,7 +26,7 @@ Do not expose `ProtocolServer` directly to an untrusted network. The product-man
 
 The injected `sql` template binds interpolations and accepts only a narrow single-statement read grammar. DDL/DML/transactions, dangerous file/extension functions, mutation-capable pragmas, private operational tables, and SQLite schema/engine tables are rejected. Results are capped at 1,000 rows, statements at 64 KiB, and execution at 2 seconds. A dedicated analytical LibSQL client additionally enables `PRAGMA query_only=ON` and is closed after each query. This protects the intended SDK path from accidental canonical mutation or unbounded reads; it does not turn arbitrary generated TypeScript with OS authority into untrusted code.
 
-Raw SQL is a **trusted diagnostic channel over the shared local database**, not a workspace-confidential model view. It can inspect non-private relational projections across sessions/workspaces, including candidate rows that have not been allocated or exposed. Candidate allocation/exposure guarantees behavioral isolation in materialized context, memory retrieval, and the scope-filtered `sdk.harness.list/history` facades; it is explicitly **not a confidentiality boundary** against raw SQL or other ambient trusted-local process capabilities. Deployments requiring tenant or candidate secrecy must use separate databases/process sandboxes (or remove model SQL) rather than rely on Slice 3 scope filters.
+Raw SQL is a **trusted diagnostic channel over the shared local database**, not a workspace-confidential model view. It can inspect non-private relational projections across sessions/workspaces, including candidate rows that have not been allocated or exposed. Candidate allocation/exposure guarantees behavioral isolation in materialized context, memory retrieval, and the scope-filtered `sdk.harness.list/history` facades; it is explicitly **not a confidentiality boundary** against raw SQL or other ambient trusted-local process capabilities. Deployments requiring tenant or candidate secrecy must use separate databases/process sandboxes (or remove model SQL) rather than rely on runtime scope filters.
 
 ### Credential exposure reduction
 
@@ -52,11 +52,15 @@ The envelope digest detects corruption; it is not a signature or writer authoriz
 
 Event headers/payloads and JSON values are validated before append. Working JSON is finite, plain, acyclic JSON. Immutable-table triggers prevent update/delete even through another database connection. Typed SDK commands, not model-visible SQL, own writes.
 
+### Generated skills
+
+TypeScript skills compile and execute in disposable Bun child processes with credential-shaped environment variables removed and bounded captured output/time. Compile, test, and invocation are durable outbox effects pinned to an immutable version. `Supervisor.open({ skillPermissionAllowlist })` supplies the exact permission-name allowlist (empty by default); validation reports disallowed names and activation plus invocation recheck the configured boundary. Reopening with a narrower allowlist therefore blocks an already-active version from invocation. This is recovery/lifecycle isolation only: skill source retains the OS authority of the trusted-local runtime and may use ambient Bun APIs. Permission declarations are an enforced admission/invocation policy, not an OS capability sandbox, so operators must still sandbox the whole trusted-local runtime.
+
 ## Secrets and durable state
 
 Do not intentionally put secrets in prompts, workspace files read into context, artifact content, tool command strings, or user messages. Scrubbing cannot provide erasure guarantees after arbitrary secret transformation. Provider keys belong in the owner-only model credential file, the trusted supervisor environment, or externally managed references—not in model-visible tables.
 
-If a secret is found in retained data, stop the runtime, rotate the secret, determine all database/artifact/log replicas, and apply an ownership-approved deletion/export policy. Slice 4 manifests enumerate managed local/profile/artifact/replica resources and block unsupported Cloud administrative deletion; operators must complete and verify the physical deletion through the owning Turso administration surface rather than treating a data-client sync call as deletion.
+If a secret is found in retained data, stop the runtime, rotate the secret, determine all database/artifact/log replicas, and apply an ownership-approved deletion/export policy. Data-control manifests enumerate managed local/profile/artifact/replica resources and block unsupported Cloud administrative deletion; operators must complete and verify the physical deletion through the owning Turso administration surface rather than treating a data-client sync call as deletion.
 
 ## Operational checklist
 
@@ -68,8 +72,3 @@ If a secret is found in retained data, stop the runtime, rotate the secret, dete
 6. Treat shell and dynamic module use as full local code execution.
 7. Inspect `unknown` effects before any manual retry.
 8. Back up database and referenced artifacts together, and protect both as potentially sensitive trajectory data.
-
-
-### Generated skills
-
-Slice 3 TypeScript skills compile and execute in disposable Bun child processes with credential-shaped environment variables removed and bounded captured output/time. Compile, test, and invocation are durable outbox effects pinned to an immutable version. `Supervisor.open({ skillPermissionAllowlist })` supplies the exact permission-name allowlist (empty by default); validation reports disallowed names and activation plus invocation recheck the configured boundary. Reopening with a narrower allowlist therefore blocks an already-active version from invocation. This is recovery/lifecycle isolation only: skill source retains the OS authority of the trusted-local runtime and may use ambient Bun APIs. Permission declarations are an enforced admission/invocation policy, not an OS capability sandbox, so operators must still sandbox the whole trusted-local runtime.

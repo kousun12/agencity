@@ -1,5 +1,9 @@
 # Architecture and capability boundaries
 
+Agencity separates durable agent state from disposable computation. A local workspace database retains the event history and query projections needed to reconstruct work; content-addressed artifact storage holds larger immutable bytes; a Bun worker executes generated TypeScript without owning the agent's identity. Runtime services validate changes, execute external work through a recorded queue, and expose the same state to terminal and protocol clients.
+
+This document describes which records are authoritative, which components may be replaced, and which guarantees are unavailable. The [capability reference](./capabilities.md) provides a shorter product-level summary.
+
 ## Recovery invariant and authority
 
 At every **committed cell boundary**, state needed later must be one of:
@@ -20,7 +24,7 @@ The Bun heap, console globals, open handles, child processes, notifications, sna
              |         |          |
       storage contract |   artifact/executor contracts
              ^         |          ^
-       LibSQL adapter  |    local adapters
+       LibSQL adapter  |  placement adapters
               \        |        /
                runtime services
              /        |        \
@@ -50,17 +54,19 @@ The Bun heap, console globals, open handles, child processes, notifications, sna
 | `notifications` | yes | In-process callbacks wake subscribers after this adapter commits. This is not distributed notification. |
 | `distributedLeases` | no | Outbox claims are local DB transactions; there is no globally connected coordinator or ownership failover. |
 
-The adapter retains a supervisor write/read client and creates a short-lived query-only analytical client per generated query so a deadline can close it without poisoning canonical writes. Local file databases enable WAL and apply a connection-local `busy_timeout`. Local writes are serialized before SQLite transactions; independent processes still contend through SQLite, so complete database-only transaction and read/statement boundaries retry `SQLITE_BUSY`/`SQLITE_LOCKED` a bounded number of times with jitter. A retry always replays the whole database boundary after rollback, never an executor call or other external effect, and semantic validation/ownership conflicts are not retried. Exhausted ordinary contention becomes `DEPENDENCY_FAILURE`; exhausted process-lease contention becomes `EXECUTION_OWNERSHIP_CONFLICT` with `reason: sqlite_contention_exhausted`, rather than exposing an adapter `LibsqlError`.
+The adapter retains a supervisor write/read client and creates a short-lived query-only analytical client per generated query so a deadline can close it without poisoning canonical writes. Local file databases enable write-ahead logging (WAL) and apply a connection-local `busy_timeout`. Local writes are serialized before SQLite transactions; independent processes still contend through SQLite, so complete database-only transaction and read/statement boundaries retry `SQLITE_BUSY`/`SQLITE_LOCKED` a bounded number of times with jitter. A retry always replays the whole database boundary after rollback, never an executor call or other external effect, and semantic validation/ownership conflicts are not retried. Exhausted ordinary contention becomes `DEPENDENCY_FAILURE`; exhausted process-lease contention becomes `EXECUTION_OWNERSHIP_CONFLICT` with `reason: sqlite_contention_exhausted`, rather than exposing an adapter `LibsqlError`.
 
-Event append plus affected routing/context/outbox rows occurs in one local transaction. Before insertion, local commands are reduced against the transaction-visible branch state; nonexistent targets and invalid transitions are rejected atomically. A future sync adapter may quarantine invalid remote events rather than route them through this local command path. Event IDs are ULIDs and event cursors are zero-padded local sequence numbers. Cursors are ordering tokens, not portable timestamps.
+Event append plus affected routing/context/outbox rows occurs in one local transaction. Before insertion, local commands are reduced against the transaction-visible branch state; nonexistent targets and invalid transitions are rejected atomically. Synchronized remote envelopes use a separate ingestion path that quarantines invalid input instead of weakening local command validation. Event IDs are ULIDs and event cursors are zero-padded local sequence numbers. Cursors are ordering tokens, not portable timestamps.
 
-PostgreSQL remains deferred. Slice 4 implements optional Turso Cloud exchange through a **separate envelope replica database**, leaving the workspace database locally authoritative and complete. A raw `syncUrl` on `LibSqlStorage` is still not itself a lifecycle; `SyncService` owns staging, the native exchange, ingestion, status, quarantine, reconciliation, and interval/reconnect behavior.
+`HttpRelationalStateStore` exposes the `AgentStorage` contract through a capability-negotiated JSON/HTTP adapter. Its current protocol supports canonical and recursive operations but does not provide offline writes, commit notifications, or same-device process fencing. Local and HTTP-backed relational placements share conformance coverage. The adapter is a replaceable transport boundary; this repository does not supply hosted relational infrastructure, tenancy, or service operations.
 
-## Turso Cloud synchronization (Slice 4)
+PostgreSQL remains unavailable. Optional Turso Cloud exchange uses a **separate envelope replica database**, leaving the workspace database locally authoritative and complete. A raw `syncUrl` on `LibSqlStorage` is not a synchronization lifecycle; `SyncService` owns staging, native exchange, ingestion, status, quarantine, reconciliation, and interval/reconnect behavior.
 
-`ProfileStore` is a separate local LibSQL database containing a restart-stable device/profile identity, cross-workspace preferences, version-pinned globally installed skills, opaque credential references, and a workspace catalog. Credential values are never accepted. Each workspace retains its own canonical database and artifact directory.
+## Turso Cloud synchronization
 
-Cloud exchange uses a second local file through `TursoSyncTransport` and pinned `@tursodatabase/sync@0.7.2`. Its `connect()` URL callback returns `null` during initialization, schema creation, staging, queries, checkpointing, and stats, and returns the configured URL only during an explicit official `push()` or `pull()`. This is the installed offline-first equivalent of `bootstrapIfEmpty:false`. There is no remote schema client, client swap, legacy frame topology, or invented `sync()` wrapper. Rejected network calls leave the same local database and unsent CDC usable. Capabilities truthfully advertise directional push/pull/checkpoint/stats for this adapter; the deterministic in-process hub remains `bidirectional-only`.
+`ProfileStore` is a separate local LibSQL database containing a restart-stable device/profile identity, cross-workspace preferences, version-pinned globally installed skills, opaque credential references, and a workspace catalog. Credential values are never accepted. Each workspace retains its own canonical database and configured content-addressed artifact placement.
+
+Cloud exchange uses a second local file through `TursoSyncTransport` and pinned `@tursodatabase/sync@0.7.2`. Its `connect()` URL callback returns `null` during initialization, schema creation, staging, queries, checkpointing, and stats, and returns the configured URL only during an explicit official `push()` or `pull()`. This is the installed offline-first equivalent of `bootstrapIfEmpty:false`. Cloud exchange does not use remote schema administration, database-client swapping, frame-replication APIs, or an invented `sync()` wrapper. Rejected network calls leave the same local database and unsent change-data-capture (CDC) operations usable. Capabilities truthfully advertise directional push/pull/checkpoint/stats for this adapter; the deterministic in-process hub remains `bidirectional-only`.
 
 Only immutable, globally keyed `ReplicatedEnvelope` rows travel through the replica database. Turso Sync pushes logical CDC statements with last-push-wins conflict settlement, so physical envelope identity hashes the origin tuple plus event content; logical event ID and origin sequence are indexed claims, not transport primary keys, so colliding raw claims remain available for quarantine and reconciliation. Workspace `events.sequence`, snapshots, outbox leases, and other mutable projections never rely on libSQL's replicated last-write behavior. Envelopes carry device/origin sequence, exact event identity, source-branch parent, dependency IDs, and a stable SHA-256 digest. Ingestion validates schema/integrity, compares duplicate-event content digests, topologically orders causal parents, deterministically orders concurrent envelopes, and quarantines divergent/invalid/incomplete input before canonical append. Durable per-origin staging and terminal-ingest frontiers avoid rescanning settled history; a pending dependency stops frontier advancement and receipts/quarantine remain the correctness boundary. An immutable replica-incarnation marker detects a lost/replaced local sync file and clears only the staging frontier so canonical history is restaged.
 
@@ -74,11 +80,11 @@ Canonical events are physically guarded against update and delete. Context recor
 
 The adapter is the only code allowed to issue canonical inserts. Application state changes call `appendEvents`; the checker rejects update/delete/replace patterns for immutable tables anywhere in `src`.
 
-## Recursive sessions (Slice 2)
+## Recursive sessions and projections
 
 Root agents, delegated subagents, and isolated recursive model calls all use the same `SessionCreated` event and `AgentState`. Child creation stores `parentSessionId`, `parentBranchId`, `rootSessionId`, `depth`, and `taskId`; storage validates those fields against the parent and the task row in the same append transaction. The public composition root exposes `Supervisor.agents`, `.documents`, `.models`, `.goals`, `.heartbeats`, and `.schedules`. Their returned handles contain only JSON domain values and are returned only after the creating event batch commits.
 
-A spawn batch validates and reserves the whole batch, then records every parent task, child session/initial prompt, and admission in one local transaction. Stable idempotency keys return the original handles—including their truthful current terminal status—without duplicating work. `maxChildrenPerSession` counts active direct children, not lifetime descendants. Child limits inherit from and cannot widen their parent; admission subtracts already-spent tree usage plus remaining active sibling reservations. Terminal child token/cost/turn/wall usage is attributed to every ancestor exactly once, with unknown usage consuming the unaccounted reservation conservatively. Mail sends, deliveries, acknowledgements, and task terminal notices are paired across normal session streams, restricted by `rootSessionId` and durable task ownership. Cancellation walks all admitted descendants leaf-first and startup completes any recorded crash prefix. Current routing/status rows accelerate list/get operations, but `rebuildOperationalProjections()` can delete and reconstruct all Slice 2 tables in global cursor order without running work.
+A spawn batch validates and reserves the whole batch, then records every parent task, child session/initial prompt, and admission in one local transaction. Stable idempotency keys return the original handles—including their truthful current terminal status—without duplicating work. `maxChildrenPerSession` counts active direct children, not lifetime descendants. Child limits inherit from and cannot widen their parent; admission subtracts already-spent tree usage plus remaining active sibling reservations. Terminal child token/cost/turn/wall usage is attributed to every ancestor exactly once, with unknown usage consuming the unaccounted reservation conservatively. Mail sends, deliveries, acknowledgements, and task terminal notices are paired across normal session streams, restricted by `rootSessionId` and durable task ownership. Cancellation walks all admitted descendants leaf-first and startup completes any recorded crash prefix. Current routing/status rows accelerate list/get operations, but `rebuildOperationalProjections()` can delete and reconstruct all recursive-session projections in global cursor order without running work.
 
 Recursive model execution builds on a task plus child session; there is no second provider engine. `models.start` atomically commits task, child, prompt/materialized input, and recursive handle; `idempotencyKey` gives retries a stable handle. `startMany` admits one all-or-nothing batch and preserves input order while terminal results remain independent. The console `rlm.start/startMany/get/result/cancel` RPCs call this same service. Handles are strict JSON identities and their worker-only convenience methods are non-enumerable, so a later cell or new worker resolves the same child rather than repeating admission. Bounded inline JSON and policy-checked artifact/document/event/memory/read-only-SQL references retain an exact input hash and provenance. Oversized results become registered CAS artifacts. Every model effect (root turn, recursive call, or model-backed gate) shares the configurable `providerConcurrency` limiter, defaulting to one per provider; succeeded, failed, cancelled, budget-exceeded, and unknown remain distinct result outcomes delivered through the ordinary task/terminal path. Cancelling while queued prevents provider entry, in-flight cancellation reaches the outbox abort signal, and uncertain non-idempotent recovery becomes `unknown` without retry. Depth and direct-child limits are explicit supervisor configuration (`maxSessionDepth`, `maxChildrenPerSession`) rather than hidden process state.
 
@@ -96,16 +102,16 @@ Provider action JSON is retained in model/action events for attribution but is n
 
 ## Artifact storage
 
-`ArtifactReference` is `{ artifactId, digest, mediaType, size }`; local IDs are `sha256:<digest>`. Identity does not encode a local path. The contract supports:
+A content-addressed store (CAS) identifies bytes by digest rather than by their physical path. `ArtifactReference` is `{ artifactId, digest, mediaType, size }`; local IDs are `sha256:<digest>`. Identity does not encode a local path. The contract supports:
 
-| Shared operation | Local CAS | Semantics |
-|---|---:|---|
-| put/deduplicate | yes | Atomic placement by digest; identical bytes share one object even when media types differ. |
-| resolve/verify | yes | Validate ID/digest/size and fail visibly for missing/tampered content. |
-| range read | yes | Current adapter verifies the complete object before slicing; not an optimized remote range operation. |
-| export | yes | Verify, create destination parents, copy bytes. |
-| delete | yes | Physical deletion; higher layers must enforce scope/retention and accept broken references if misused. |
-| remote placement/replication | no | No object-store implementation or replication manifest. |
+| Shared operation | Local filesystem CAS | S3-compatible HTTP CAS | Semantics |
+|---|---:|---:|---|
+| put/deduplicate | yes | yes | Place by digest; identical bytes share one object even when media types differ. The remote adapter uses conditional create and verifies the resulting object. |
+| resolve/verify | yes | yes | Validate ID/digest/size and fail visibly for missing or tampered content. |
+| range read | yes | yes | Both adapters verify the complete object before slicing; neither implements an optimized partial-object integrity scheme. |
+| export | yes | yes | Verify, create destination parents, and write the requested bytes. |
+| delete | yes | yes | Physical deletion; higher layers must enforce scope/retention and accept broken references if misused. |
+| automatic replication | no | no | Placement selects one store. The runtime does not copy artifacts between stores or maintain a replication manifest. |
 
 Artifact registration is canonical; bytes are outside the database. A successful `put` during a later-failed cell may leave an unreferenced physical object. That is safe for projection but there is no garbage collector yet.
 
@@ -117,19 +123,19 @@ Artifact registration is canonical; bytes are outside the database. A successful
 |---|---|---|
 | `FileExecutor` | `read`, atomic `write`, exact-one `replace`, file `delete` | Root/symlink checks; rejects directory delete. Write can detect already-desired bytes and use an expected digest. This confines the typed adapter, not arbitrary process code. |
 | `ShellExecutor` | `run` with cwd and timeout | Initial cwd must be under root, output is capped/scrubbed, abort kills the child. It uses `/bin/sh -c`, not a login shell that could reload filtered credentials. The command retains ambient OS/network authority and is normally non-idempotent. |
-| `ModelExecutor` | `complete` through registered provider; optional provider streaming | Providers explicitly advertise `capabilities.streaming`; absence means false, and declaring true without a streaming implementation is rejected. OpenAI-compatible calls use incremental SSE; Echo is labeled as a non-streaming demo fixture. Calls are non-idempotent, so lost outcomes become unknown rather than a blind second generation. Live deltas are ephemeral; only the full returned response can enter the durable success batch. |
+| `ModelExecutor` | `complete` through registered provider; optional provider streaming | Providers explicitly advertise `capabilities.streaming`; absence means false, and declaring true without a streaming implementation is rejected. OpenAI-compatible calls use incremental SSE; the internal Echo test fixture is non-streaming and is unavailable through product selection. Calls are non-idempotent, so lost outcomes become unknown rather than a blind second generation. Live deltas are ephemeral; only the full returned response can enter the durable success batch. |
 
 Cancellation is best effort: an abort signal can stop an in-process executor, but external systems may already have acted. A `cancelled` record is an observed executor result, not a universal rollback.
 
-No remote sandbox executor, capability negotiation object, per-provider distributed concurrency, resource quota enforcement, or browser executor exists yet. The shared executor interface is the extension point; any remote implementation must preserve IDs, request-before-effect ordering, outcomes, cancellation disclosure, and idempotency semantics.
+`RemoteSandboxExecutor` and its HTTP server adapter provide capability negotiation, typed outcomes, and transport-level cancellation for a server-owned executor. The server operator asserts the advertised filesystem, network, and host-isolation policy; the client does not attest or independently verify that isolation. This repository supplies the adapter and conformance coverage, not hosted sandbox infrastructure. Per-provider distributed concurrency, resource quota enforcement, and browser execution remain unavailable. Every executor placement must preserve IDs, request-before-effect ordering, four-way outcomes, cancellation disclosure, and idempotency semantics.
 
 ## Retrieval and context
 
-The runtime has **context selection and Slice 2 document chunk queries**, not the later semantic-memory retrieval system. `ContextMaterializer` deterministically selects the base policy, session/branch/status, recent messages, all active working values and artifact references, budget events, and recent completed/failed activity. It records every selected source event ID, event type, schema version, reason, and a hash of the exact JSON context in immutable `context_records`. The exact bytes remain in the canonical context event/immutable record, while `AgentState.contexts` projects only provenance metadata rather than copying every historical full context into snapshots.
+`ContextMaterializer` deterministically selects the base policy, session/branch/status, recent messages, active working values and artifact references, budget events, completed/failed activity, scoped harness entries, and attributable retrieval provenance. It records every selected source event ID, event type, schema version, reason, and a hash of the exact JSON context in immutable `context_records`. The exact bytes remain in the canonical context event and immutable record, while `AgentState.contexts` projects provenance metadata rather than copying every historical full context into snapshots.
 
-Console SQL can query retained relational rows and artifact references can be resolved explicitly. The document service imports ordered chunks and creates exact input sets, while agent/recursive-model services delegate those references through normal child sessions. There is still no FTS candidate-index contract, scoped semantic memory, embeddings, semantic service, or retrieval evaluator; deterministic IDs and explicit chunk queries are the Slice 2 foundation.
+The document service imports ordered chunks and creates exact input sets; agent and recursive-model services delegate those references through normal child sessions. Relational memory and refinement are implemented through canonical harness events, rebuildable projections, and a disposable FTS5 candidate index. `HttpMemoryCandidateIndex` provides the same candidate-generation boundary over capability-negotiated HTTP. Local and HTTP candidate-index adapters return stable entry/version IDs and ranks only; authoritative scope, status, policy, conflict, and exposure filtering remains in the runtime and is recorded in context provenance.
 
-Any future retrieval adapter must return stable domain IDs plus query/rule provenance. Scope/status/policy filters remain authoritative; engine-specific scores or embedding objects must not escape its adapter.
+The runtime does not provide embedding-based retrieval or a hosted semantic index. A replacement candidate source must preserve stable domain IDs and query/rule provenance; engine-specific objects must not escape the adapter.
 
 ## Reactive interface
 
@@ -153,10 +159,10 @@ A replacement component may add capabilities but must preserve:
 - domain-shaped contracts with adapter SDK types confined to the adapter;
 - explicit `CAPABILITY_UNAVAILABLE` behavior instead of silent downgrade.
 
-Only the local implementations are tested today. A future adapter is not supported merely because it structurally implements the interface; it needs the shared conformance suite planned by the PRD.
+Local and remote relational, artifact, candidate-index, and executor placements have shared conformance coverage. Conformance establishes protocol and domain behavior; it does not provide hosted infrastructure, authenticate a deployment, or prove an advertised remote sandbox policy.
 
 
-## Slice 3 relational memory and refinement boundary
+## Relational memory and refinement boundary
 
 Harness ownership is split between immutable canonical history and rebuildable current/query state:
 
@@ -193,7 +199,7 @@ Append-only is a retention rule, not a denial of user deletion. Normal connectio
 
 Workspace/profile erasure closes handles before unlinking files and writes an external receipt when the database containing its manifest disappears. Workspace ownership is not tombstoned before fallible remote/local/CAS work; a partial attempt therefore remains reopenable. Removed lists are postcondition observations, not planned paths. Successful workspace tombstones retain only anti-reclaim identity/owner/timestamps and scrub names, placements, sync URLs, and credential references.
 
-Artifact placement is fail-closed: session erasure reference-counts retained event payloads, while whole-workspace removal requires an operator assertion that the entire CAS root is exclusive. Relational sync is not an administrative control plane. Administrative planning enumerates all historical replica-status rows, watermarks/counters and profile-catalog evidence, preserves the legacy adjacent/default replica path, and never downgrades a prior managed workspace merely because the current process lacks sync configuration. Every distinct addressable URL requires the separate authenticated adapter; an unaddressable replica or unsupported remote granularity blocks. Stable scope/owner/URL idempotency makes authenticated retries safe. Outbox admission is quiesced and running/claiming effects refuse deletion before physical data can race an executor.
+Artifact placement is fail-closed: session erasure reference-counts retained event payloads, while whole-workspace removal requires an operator assertion that the entire CAS root is exclusive. Relational sync is not an administrative control plane. Administrative planning enumerates all historical replica-status rows, watermarks/counters and profile-catalog evidence, preserves the compatibility replica path recorded by older workspace layouts, and never downgrades a previously managed workspace merely because the current process lacks sync configuration. Every distinct addressable URL requires the separate authenticated adapter; an unaddressable replica or unsupported remote granularity blocks. Stable scope/owner/URL idempotency makes authenticated retries safe. Outbox admission is quiesced and running/claiming effects refuse deletion before physical data can race an executor.
 
 ## Goal and wake orchestration
 
@@ -204,7 +210,7 @@ Artifact placement is fail-closed: session erasure reference-counts retained eve
 
 ## Context-window admission and derived compaction
 
-`ContextWindowController` is a pure admission policy shared by the legacy `ModelLoop` and `AgentRunService`. It estimates the exact provider candidate, uses provider/model capacity with typed source provenance, repeatedly asks `CompactionService` for the oldest eligible narrative prefix, and rebuilds before admitting a call. A provider overflow retry requires an adapter-supplied typed classification and a strictly smaller estimate; `AgentRunModelAttemptStarted` gives every retry a new context/call/effect identity.
+`ContextWindowController` is a pure admission policy shared by the diagnostic `ModelLoop` and `AgentRunService`. It estimates the exact provider candidate, uses provider/model capacity with typed source provenance, repeatedly asks `CompactionService` for the oldest eligible narrative prefix, and rebuilds before admitting a call. A provider overflow retry requires an adapter-supplied typed classification and a strictly smaller estimate; `AgentRunModelAttemptStarted` gives every retry a new context/call/effect identity.
 
 `CompactionService` first commits `ContextCompactionRequested` with deep-frozen ordered source envelopes, cursors, and SHA-256 digest. Deterministic extractive output is available without a provider. `model-summary-v1` partitions source material and prior effective summary into deterministic hierarchical levels; each level is a stable, non-idempotent outbox model effect with normal usage and budget debit. Success is a typed `ContextMaterialized.derivation`; failure or unknown is `ContextCompactionFailed`. Recovery resumes from the request and terminal effect records without replaying unknown work.
 

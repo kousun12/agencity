@@ -8,6 +8,7 @@ import { CLI_HELP_GROUPS, buildDataDeleteConfirmation, parseAdvancedArgv, type A
 import { createCliErrorEnvelope, createCliSuccessEnvelope, planCliOutput, type CliJsonValue } from "./cli/output.ts";
 import { CliRunInterruptCoordinator } from "./cli/run-interrupt.ts";
 import { AgentRuntimeError, ValidationError, type JsonValue, type ModelConfiguration } from "./domain/index.ts";
+import type { ModelProviderDescriptor } from "./executors/index.ts";
 import { containsCredentialMaterial, inspectModelCredentialStatuses, modelCredentialPathForProfile, scrubText } from "./security/index.ts";
 import {
   ProductCatalog,
@@ -164,18 +165,25 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       await client.productSelect(created.sessionId, created.branchId);
       summary = (await client.productSessions() as ProductBranchSummary[]).find(candidate => candidate.sessionId === created.sessionId && candidate.branchId === created.branchId)!;
     } else {
-      if (parsed.flags.has("demo") || option("model")) throw new ValidationError("A resumed branch keeps its original model. Use `agencity new --model ...` or `agencity --new --demo`");
       const target = parsed.command === "resume" || parsed.command === "attach"
         ? parsed.positionals.join(" ").trim() || undefined
         : option("session");
       selection = await selectManagedSession(client, existing, target, option("branch"), interactive, prompter);
       summary = (await client.productSessions() as ProductBranchSummary[]).find(candidate => candidate.sessionId === selection.sessionId && candidate.branchId === selection.branchId)!;
+      if (summary.model.provider === "echo" && commandRequiresUsableModel(parsed, task)) {
+        const model = await chooseManagedModel(client, parsed, interactive, prompter);
+        await client.selectModel(selection.sessionId, selection.branchId, model);
+        summary = { ...summary, model };
+      } else if (option("model")) {
+        throw new ValidationError("A resumed branch keeps its original model. Use `agencity new --model ...` to start new work with another model");
+      }
       await client.resume(selection.sessionId, selection.branchId);
     }
 
     const providers = await client.modelProviders();
-    const available = providers.some(provider => provider.name === summary.model.provider);
-    const remediation = available ? null : `Install or configure provider ${summary.model.provider}, then restart the managed service.`;
+    const provider = providers.find(candidate => candidate.name === summary.model.provider);
+    const available = provider?.usable === true;
+    const remediation = available ? null : provider?.remediation ?? `Install or configure provider ${summary.model.provider}, then restart the managed service.`;
     const opensInteractiveTerminal = interactive && ["product", "new", "resume", "attach"].includes(parsed.command);
     if (!parsed.flags.has("json") && !opensInteractiveTerminal) printStartup(workspace, summary, available, remediation);
     if (parsed.command === "branch") {
@@ -440,19 +448,14 @@ async function serviceCommand(configuration: ManagedServiceConfiguration, parsed
 async function doctorProviderStatuses(profileDatabasePath: string): Promise<Array<{
   provider: string;
   usable: boolean;
-  demo: boolean;
   credentialSource: "stored" | "environment" | "missing" | "programmatic";
 }>> {
   const statuses = await inspectModelCredentialStatuses(modelCredentialPathForProfile(profileDatabasePath));
-  return [
-    { provider: "echo", usable: true, demo: true, credentialSource: "programmatic" },
-    ...statuses.map(status => ({
-      provider: status.provider,
-      usable: status.configured,
-      demo: false,
-      credentialSource: status.source,
-    })),
-  ];
+  return statuses.map(status => ({
+    provider: status.provider,
+    usable: status.configured,
+    credentialSource: status.source,
+  }));
 }
 
 async function doctorUninitialized(workspace: { root: string; workspaceId: string | null; name: string; stateDirectory: string }, json: boolean): Promise<void> {
@@ -534,40 +537,78 @@ async function managedConfig(client: AgentClient, parsed: ParsedCliArgs): Promis
 
 async function chooseManagedModel(client: AgentClient, parsed: ParsedCliArgs, interactive: boolean, prompter: ProductPrompter): Promise<ModelConfiguration> {
   const explicit = parsed.values.get("model");
-  if (explicit && parsed.flags.has("demo")) throw new ValidationError("Use either --demo or --model, not both");
-  if (parsed.flags.has("demo")) return { provider: "echo", model: "echo-1" };
-  const providers = await client.modelProviders();
+  const providers = (await client.modelProviders()).filter(provider => provider.name !== "echo");
   if (explicit) {
     const model = parseModel(explicit);
-    if (model.provider === "echo") throw new ValidationError("Echo is a demo fixture; use --demo so demo behavior is explicit");
-    const provider = providers.find(provider => provider.name === model.provider);
-    if (!provider?.usable) throw new ValidationError(provider?.remediation ?? `Model provider is unavailable: ${model.provider}`);
+    if (model.provider === "echo") throw new ValidationError("Echo is an internal test fixture and is not available in the product");
+    let provider = providers.find(provider => provider.name === model.provider);
+    if (!provider) throw new ValidationError(`Model provider is unavailable: ${model.provider}`);
+    if (!provider.usable) {
+      if (!interactive || !["openai", "anthropic", "vercel"].includes(provider.name)) {
+        throw new ValidationError(provider.remediation ?? `Model provider is unavailable: ${model.provider}`);
+      }
+      const apiKey = await prompter.secret(`API key for ${provider.displayName} (input hidden): `);
+      if (!apiKey) throw new ValidationError("Provider API key is required");
+      await client.productSetProviderKey(provider.name, apiKey);
+      provider = (await client.modelProviders()).find(candidate => candidate.name === model.provider);
+      if (!provider?.usable) throw new ValidationError(provider?.remediation ?? `Credential unavailable for ${model.provider}`);
+    }
     await client.productSetModel(formatModel(model));
     return model;
   }
   const configured = await client.productConfig();
   if (configured.defaultModel) {
     const model = parseModel(configured.defaultModel);
-    if (model.provider !== "echo" && providers.some(provider => provider.name === model.provider && provider.usable)) return model;
+    if (providers.some(provider => provider.name === model.provider && provider.usable)) return model;
   }
-  const real = providers.filter(provider => provider.name !== "echo" && provider.usable);
-  for (const provider of real) {
+  let usable = providers.filter(provider => provider.usable);
+  for (const provider of usable) {
     const model = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`];
     if (model?.trim()) {
       await client.productSetModel(`${provider.name}:${model.trim()}`);
       return { provider: provider.name, model: model.trim() };
     }
   }
-  if (!interactive) throw new ValidationError("No usable model is selected. Pass --model PROVIDER:MODEL after configuring a provider, or use --demo explicitly");
-  if (!real.length) {
-    const answer = (await prompter.question("No real provider is usable. Start the visibly labeled Echo demo fixture? [y/N] ")).trim().toLowerCase();
-    if (answer === "y" || answer === "yes") return { provider: "echo", model: "echo-1" };
-    throw new ValidationError("No usable provider. Use /model login openai|anthropic|vercel, set the matching environment variable, or use --demo only for fixture behavior");
+  if (!interactive) {
+    throw new ValidationError("No usable model is selected. Configure provider credentials and pass --model PROVIDER:MODEL, or run Agencity in an interactive terminal");
   }
-  const modelId = (await prompter.question(`Model ID for ${real[0]!.displayName}: `)).trim();
+  if (!usable.length) {
+    const candidates = providers.filter(provider => ["openai", "anthropic", "vercel"].includes(provider.name));
+    const selected = await chooseManagedProvider(candidates, prompter, "No model provider is configured.\n");
+    const apiKey = await prompter.secret(`API key for ${selected.displayName} (input hidden): `);
+    if (!apiKey) throw new ValidationError("Provider API key is required");
+    await client.productSetProviderKey(selected.name, apiKey);
+    const refreshed = (await client.modelProviders()).filter(provider => provider.name !== "echo");
+    const configuredProvider = refreshed.find(provider => provider.name === selected.name);
+    if (!configuredProvider?.usable) throw new ValidationError(configuredProvider?.remediation ?? `Credential unavailable for ${selected.name}`);
+    usable = [configuredProvider];
+  }
+  const provider = usable.length === 1 ? usable[0]! : await chooseManagedProvider(usable, prompter);
+  const environmentModel = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`]?.trim();
+  if (environmentModel) {
+    await client.productSetModel(`${provider.name}:${environmentModel}`);
+    return { provider: provider.name, model: environmentModel };
+  }
+  const modelId = (await prompter.question(`Model ID for ${provider.displayName}: `)).trim();
   if (!modelId) throw new ValidationError("Model ID is required");
-  await client.productSetModel(`${real[0]!.name}:${modelId}`);
-  return { provider: real[0]!.name, model: modelId };
+  await client.productSetModel(`${provider.name}:${modelId}`);
+  return { provider: provider.name, model: modelId };
+}
+
+async function chooseManagedProvider(
+  providers: readonly ModelProviderDescriptor[],
+  prompter: ProductPrompter,
+  introduction = "",
+): Promise<ModelProviderDescriptor> {
+  if (!providers.length) throw new ValidationError("No supported model provider is available");
+  if (providers.length === 1) return providers[0]!;
+  const choices = providers.map((provider, index) => `${index + 1}) ${provider.displayName} [${provider.name}]`).join("\n");
+  const answer = (await prompter.question(`${introduction}Choose a provider:
+${choices}
+Provider number or ID: `)).trim();
+  const provider = providers[Number(answer) - 1] ?? providers.find(candidate => candidate.name === answer);
+  if (!provider) throw new ValidationError(`Unknown provider selection: ${answer}`);
+  return provider;
 }
 
 async function managedStatus(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
@@ -862,7 +903,14 @@ async function config(supervisor: Supervisor, workspace: ResolvedWorkspace, pars
   if (action === "set-model") {
     const requested = parsed.positionals[1] ?? parsed.values.get("model");
     if (!requested) throw new ValidationError("config set-model requires PROVIDER:MODEL");
-    await chooseNewModel({ supervisor, workspaceId: workspace.workspaceId, explicitModel: requested, demo: false, interactive, prompt: question => prompter.question(question) });
+    await chooseNewModel({
+      supervisor,
+      workspaceId: workspace.workspaceId,
+      explicitModel: requested,
+      interactive,
+      prompt: question => prompter.question(question),
+      promptSecret: question => prompter.secret(question),
+    });
     console.log(`Saved non-secret workspace model preference: ${formatModel(parseModel(requested))}`);
     return;
   }
@@ -902,7 +950,7 @@ async function doctor(supervisor: Supervisor, workspace: ResolvedWorkspace, json
     `Agencity ${report.application} · Bun ${report.bun.version} (${report.bun.compatible ? "compatible" : "unsupported"})`,
     `Workspace: ${workspace.name} (${workspace.root})`,
     `Mode: ${report.mode}`,
-    ...report.providers.map(provider => `Provider ${provider.provider}: ${provider.usable ? provider.demo ? "usable demo fixture" : "usable" : `unavailable — ${provider.remediation}`}`),
+    ...report.providers.map(provider => `Provider ${provider.provider}: ${provider.usable ? "usable" : `unavailable — ${provider.remediation}`}`),
     `Recovery: ${pending} pending/running, ${unknown} unknown`,
     `Sync: ${report.sync.configured ? report.sync.lifecycle : "local only"}`,
   ].join("\n"));
@@ -1081,13 +1129,19 @@ function taskFor(parsed: ParsedCliArgs): string | undefined {
   return task || undefined;
 }
 
+function commandRequiresUsableModel(parsed: ParsedCliArgs, task: string | undefined): boolean {
+  if (task !== undefined || ["product", "resume", "attach", "refine", "compact"].includes(parsed.command)) return true;
+  if (parsed.command === "heartbeats") return parsed.positionals[0] === "create";
+  if (parsed.command === "schedules") return ["once", "every"].includes(parsed.positionals[0] ?? "");
+  return false;
+}
+
 function printStartup(workspace: ResolvedWorkspace, session: ProductBranchSummary, providerUsable: boolean, remediation: string | null): void {
-  const demoLabel = session.model.provider === "echo" ? " [DEMO FIXTURE]" : "";
   console.log([
     "Agencity product session",
     `Workspace: ${workspace.name} (${workspace.root})`,
     `Session: ${session.sessionName} / ${session.branchName}`,
-    `Model: ${session.model.provider}:${session.model.model}${demoLabel}${providerUsable ? "" : " [UNAVAILABLE]"}`,
+    `Model: ${session.model.provider}:${session.model.model}${providerUsable ? "" : " [UNAVAILABLE]"}`,
     `Run state: ${providerUsable ? session.status : "blocked by provider configuration"}`,
     "Mode: trusted-local; generated code has this process's OS authority (not sandboxed)",
     ...(!providerUsable && remediation ? [`Remediation: ${remediation}`] : []),
@@ -1101,6 +1155,46 @@ class ProductPrompter {
     if (!this.enabled) throw new ValidationError("Interactive selection requires a terminal");
     this.#readline ??= createInterface({ input, output });
     return this.#readline.question(question);
+  }
+  async secret(question: string): Promise<string> {
+    if (!this.enabled) throw new ValidationError("Interactive credential entry requires a terminal");
+    if (typeof input.setRawMode !== "function") throw new ValidationError("This terminal cannot provide hidden credential input");
+    this.#readline?.close();
+    this.#readline = null;
+    const wasRaw = input.isRaw === true;
+    const wasPaused = input.isPaused();
+    output.write(question);
+    try {
+      input.setRawMode(true);
+      input.resume();
+      return await new Promise<string>((resolve, reject) => {
+        let answer = "";
+        const onData = (chunk: Buffer | string): void => {
+          for (const character of String(chunk)) {
+            if (character === "\r" || character === "\n") {
+              input.off("data", onData);
+              resolve(answer.trim());
+              return;
+            }
+            if (character === "\u0003" || character === "\u0004" || character === "\u001b") {
+              input.off("data", onData);
+              reject(new ValidationError("Provider credential entry was cancelled"));
+              return;
+            }
+            if (character === "\b" || character === "\u007f") {
+              answer = Array.from(answer).slice(0, -1).join("");
+              continue;
+            }
+            if (character >= " " && character !== "\u007f") answer = `${answer}${character}`.slice(0, 16_384);
+          }
+        };
+        input.on("data", onData);
+      });
+    } finally {
+      input.setRawMode(wasRaw);
+      if (wasPaused) input.pause();
+      output.write("\n");
+    }
   }
   close(): void { this.#readline?.close(); this.#readline = null; }
 }
@@ -1127,7 +1221,7 @@ function printHelp(): void {
     "",
     ...sections.flatMap((section) => [section, ""]),
     "Common product options:",
-    "  --workspace PATH --model PROVIDER:MODEL --demo --new --detach --completion-gate COMMAND --json --version --help",
+    "  --workspace PATH --model PROVIDER:MODEL --new --detach --completion-gate COMMAND --json --version --help",
     "Advanced options:",
     "  --session ID --branch ID --cursor N --db PATH --artifacts PATH --workspace-root PATH",
     "  --sync-url URL --replica PATH --scope KIND --scope-id ID --destination PATH",
@@ -1136,6 +1230,6 @@ function printHelp(): void {
     "Canonical advanced --json output is the stable agencity.cli-output v1 envelope.",
     "Exact legacy aliases remain silent and preserve their historical output during the compatibility window.",
     "Use agencity -- TASK to force command-like text through the product route.",
-    "Echo is selected only with --demo or a visibly labeled interactive choice. Provider credentials remain supervisor-side.",
+    "Interactive startup asks for provider credentials when none are configured. Provider credentials remain supervisor-side.",
   ].join("\n"));
 }
