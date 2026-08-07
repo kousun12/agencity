@@ -28,7 +28,7 @@ async function cli(executable: string, workspace: string, home: string, args: re
   return { code, stdout, stderr };
 }
 
-test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI navigates a retained child and detaches through a real pseudo-terminal", async () => {
+test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI navigates a retained child, detaches, and resumes the root through a real pseudo-terminal", async () => {
   const provider = new StrictActionFixture();
   const directory = await mkdtemp(join(tmpdir(), "agencity-opentui-pty-"));
   directories.push(directory);
@@ -150,6 +150,31 @@ if exit_code is None:
 if exit_code is None:
     os.kill(pid, signal.SIGKILL)
     os.waitpid(pid, 0)
+os.close(fd)
+resume_root = False
+resume_exit_code = None
+if exit_code == 0:
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(workspace)
+        os.environ["HOME"] = home
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 112, 0, 0))
+        os.execv(executable, [executable, "--workspace", workspace, "--profile", os.path.join(home, "profile.db")])
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 112, 0, 0))
+    os.set_blocking(fd, False)
+    resume_mark = len(output)
+    resume_root = pump(10, "1 agent: 1 working", resume_mark)
+    if resume_root:
+        os.write(fd, b"/quit\r")
+        pump(4, "workspace service will stop automatically", resume_mark)
+    resume_exit_code = wait_exit(5)
+    if resume_exit_code is None:
+        os.kill(pid, signal.SIGTERM)
+        resume_exit_code = wait_exit(2)
+    if resume_exit_code is None:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    os.close(fd)
 print(json.dumps({
     "providerPrompt": provider_prompt,
     "credentialPrompt": credential_prompt,
@@ -162,6 +187,8 @@ print(json.dumps({
     "childOpen": child_open,
     "parentOpen": parent_open,
     "exitCode": exit_code,
+    "resumeRoot": resume_root,
+    "resumeExitCode": resume_exit_code,
     "idleDetach": b"workspace service will stop automatically" in output,
     "secretHidden": b"acceptance-fixture-key" not in output,
     "outputTail": output.decode("utf-8", "replace")[-1200:],
@@ -201,6 +228,8 @@ print(json.dumps({
       childOpen: true,
       parentOpen: true,
       exitCode: 0,
+      resumeRoot: true,
+      resumeExitCode: 0,
       idleDetach: true,
       secretHidden: true,
     });
