@@ -20,6 +20,12 @@ import {
   type TerminalAgentClient,
 } from "./index.ts";
 import { buildTerminalScreen, type TerminalPresentation, type TerminalScreenView } from "./view-model.ts";
+import {
+  formatTerminalDetail,
+  type TerminalDetail,
+  type TerminalModelDetail,
+  type TerminalModelProviderDetail,
+} from "./detail-model.ts";
 
 const COLORS = {
   background: "#0d1117",
@@ -138,10 +144,58 @@ function paletteText(query: string): string {
   ].join("\n");
 }
 
+function renderModelInspector(detail: TerminalModelDetail, selectedIndex: number, entryProvider: string | null): string {
+  const currentProvider = detail.providers.find(provider => provider.name === detail.current.provider);
+  if (entryProvider) {
+    const provider = detail.providers.find(item => item.name === entryProvider);
+    return [
+      "MODEL",
+      "",
+      "Choose model",
+      provider?.displayName ?? entryProvider,
+      "Enter the exact provider model ID in the composer.",
+      provider?.name === "vercel" ? "Gateway model IDs may contain /." : "",
+      "",
+      "Current",
+      `${currentProvider?.displayName ?? detail.current.provider} · ${detail.current.model}`,
+      "",
+      "Enter save · Esc back",
+    ].filter((line, index, lines) => line || lines[index - 1] !== "").join("\n");
+  }
+  const lines = [
+    "MODEL",
+    "",
+    "Current",
+    `${currentProvider?.usable ? "✓" : "!"} ${currentProvider?.displayName ?? detail.current.provider}`,
+    `  ${detail.current.model}`,
+    `  Credential: ${currentProvider?.credentialLabel ?? "unavailable"}`,
+    "",
+    "Workspace default",
+    `  ${detail.workspaceDefault ?? "Not set"}`,
+    "",
+    "Providers",
+  ];
+  detail.providers.forEach((provider, index) => {
+    const selected = index === selectedIndex;
+    lines.push(`${selected ? ">" : " "} ${provider.usable ? "✓" : "○"} ${provider.displayName}`);
+    lines.push(`    ${provider.credentialLabel}${provider.demo ? " · DEMO FIXTURE" : ""}`);
+    if (selected && !provider.usable && provider.remediation) lines.push(`    ${provider.remediation}`);
+  });
+  lines.push("", "↑/↓ provider · Enter choose · L login · X logout", "Shift-R raw · Esc close");
+  return lines.join("\n");
+}
+
+function noticeText(notice: { text: string; tone: "normal" | "success" | "warning" | "danger" } | null): string {
+  if (!notice) return "";
+  const marker = notice.tone === "success" ? "✓" : notice.tone === "danger" ? "×" : notice.tone === "warning" ? "!" : "•";
+  return `${marker} ${notice.text}`;
+}
+
 export interface OpenTuiController {
   readonly presentation: TerminalPresentation;
   readonly detached: boolean;
   readonly pendingSecretInput?: boolean;
+  readonly pendingSecretProvider?: string | null;
   subscribePresentation(listener: (presentation: TerminalPresentation) => void): () => void;
   execute(line: string): Promise<"continue" | "detach">;
   handleInterrupt(): Promise<InterruptDecision>;
@@ -165,8 +219,16 @@ export class OpenTuiApp {
   readonly #done: Promise<void>;
   #resolveDone!: () => void;
   #view: TerminalScreenView;
-  #detailContent = "";
+  #detail: TerminalDetail | null = null;
+  #rawDetail = false;
+  #notice: { text: string; tone: "normal" | "success" | "warning" | "danger" } | null = null;
+  #noticeTimer: ReturnType<typeof setTimeout> | null = null;
+  #detailScrollTimer: ReturnType<typeof setTimeout> | null = null;
   #paletteQuery = "";
+  #paletteDraft: string | null = null;
+  #modelProviderIndex = 0;
+  #modelEntryProvider: string | null = null;
+  #resetDetailScroll = false;
   #busy = false;
   #closed = false;
   #activeOperation: Promise<void> | null = null;
@@ -226,8 +288,7 @@ export class OpenTuiApp {
       backgroundColor: COLORS.panel,
       scrollY: true,
       scrollX: false,
-      stickyScroll: true,
-      stickyStart: "bottom",
+      stickyScroll: false,
     });
     this.#detailsText = new TextRenderable(renderer, {
       id: "agencity-details-text",
@@ -256,6 +317,13 @@ export class OpenTuiApp {
       focusedBackgroundColor: COLORS.panel,
       placeholderColor: COLORS.muted,
       onSubmit: () => { void this.#submit(); },
+      onKeyDown: key => {
+        if (!this.controller.pendingSecretInput && (key.name === "escape" || key.name === "esc" || key.sequence === "\u001b")) {
+          key.preventDefault();
+          key.stopPropagation();
+          this.#dismissInspector();
+        }
+      },
     });
     this.#footer = new TextRenderable(renderer, {
       id: "agencity-footer",
@@ -298,8 +366,39 @@ export class OpenTuiApp {
     if (isRoutineTranscript(value)) return;
     const next = scrubText(value).trim();
     if (!next) return;
-    this.#detailContent = `${this.#detailContent}${this.#detailContent ? "\n" : ""}${next}`.slice(-8_000);
+    const danger = /\[(?:command|interrupt|protocol watch) (?:error|failed)|\bfailed\b/i.test(next);
+    const warning = /unknown|discarded|cancel|not confirmed|may outlive/i.test(next);
+    const success = /^(?:Saved|Selected|Removed|Returned|Switched|Assessment recorded|Cancellation requested)/i.test(next);
+    this.#notice = { text: next.slice(0, 800), tone: danger ? "danger" : warning ? "warning" : success ? "success" : "normal" };
+    if (next.startsWith("[protocol watch failed]")) {
+      if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+      this.#noticeTimer = null;
+    } else {
+      this.#scheduleNoticeDismiss(danger ? 8_000 : 4_000);
+    }
+    this.#render();
+  }
+
+  showDetail(detail: TerminalDetail | null): void {
+    if (this.#closed) return;
+    if (detail === null) {
+      this.#detail = null;
+      this.#rawDetail = false;
+      this.#modelEntryProvider = null;
+      this.#render();
+      return;
+    }
+    const previousProvider = this.#selectedModelProvider()?.name;
+    this.#detail = detail;
+    this.#rawDetail = detail.kind === "raw";
     this.#paletteQuery = "";
+    this.#paletteDraft = null;
+    this.#modelEntryProvider = null;
+    if (detail.kind === "model") {
+      const selected = detail.providers.findIndex(provider => provider.name === (previousProvider ?? detail.current.provider));
+      this.#modelProviderIndex = Math.max(0, selected);
+    }
+    this.#resetDetailScroll = true;
     this.#render();
   }
 
@@ -313,7 +412,8 @@ export class OpenTuiApp {
     if (this.#closed) return;
     for (const effectId of effectIds) this.#provisionalOutput.delete(effectId);
     if (reason !== "committed" && effectIds.length > 0) {
-      this.#detailContent = "Provisional provider output was discarded after the connection changed.";
+      this.#notice = { text: "Provisional provider output was discarded after the connection changed.", tone: "warning" };
+      this.#scheduleNoticeDismiss(6_000);
     }
     this.#render();
   }
@@ -336,12 +436,18 @@ export class OpenTuiApp {
   requestExit(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#clearSecretInput();
+    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+    if (this.#detailScrollTimer) clearTimeout(this.#detailScrollTimer);
     this.controller.abortPendingOperations?.();
     this.#resolveDone();
   }
 
   destroy(): void {
     this.#closed = true;
+    this.#clearSecretInput();
+    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+    if (this.#detailScrollTimer) clearTimeout(this.#detailScrollTimer);
     this.#unsubscribe();
     this.renderer.keyInput.off("keypress", this.#onKey);
     this.renderer.keyInput.off("paste", this.#onPaste);
@@ -350,6 +456,7 @@ export class OpenTuiApp {
   }
 
   #onResize = (): void => {
+    if (this.#activeInspector()) this.#resetDetailScroll = true;
     this.#render();
   };
 
@@ -358,23 +465,22 @@ export class OpenTuiApp {
     event.preventDefault();
     event.stopPropagation();
     const value = decodePasteBytes(event.bytes);
-    this.#secretBuffer = `${this.#secretBuffer}${value}`.slice(0, 16_385);
+    this.#secretBuffer = `${this.#secretBuffer}${value}`.slice(0, 16_384);
     this.#composer.value = "•".repeat(this.#secretBuffer.length);
   };
 
   #onKey = (key: KeyEvent): void => {
+    const escape = key.name === "escape" || key.name === "esc" || key.sequence === "\u001b";
     if (this.controller.pendingSecretInput) {
       key.preventDefault();
       key.stopPropagation();
       if (key.ctrl && key.name === "d") {
-        this.#secretBuffer = "";
-        this.#composer.value = "";
+        this.#clearSecretInput();
         this.requestExit();
         return;
       }
-      if (key.name === "escape" || key.ctrl && key.name === "c") {
-        this.#secretBuffer = "";
-        this.#composer.value = "";
+      if (escape || key.ctrl && key.name === "c") {
+        this.#clearSecretInput();
         void this.controller.execute("/cancel").finally(() => {
           if (!this.#closed) { this.#render(); this.#composer.focus(); }
         });
@@ -390,9 +496,78 @@ export class OpenTuiApp {
         return;
       }
       if (!key.ctrl && !key.meta && key.sequence && !/[\r\n\0-\x1f\x7f]/.test(key.sequence)) {
-        this.#secretBuffer += key.sequence;
+        this.#secretBuffer = `${this.#secretBuffer}${key.sequence}`.slice(0, 16_384);
         this.#composer.value = "•".repeat(this.#secretBuffer.length);
       }
+      return;
+    }
+    const modelDetail = this.#activeModelDetail();
+    if (modelDetail && !this.#paletteQuery && this.#provisionalOutput.size === 0 && !this.#rawDetail) {
+      if (this.#modelEntryProvider) {
+        if (escape) {
+          key.preventDefault();
+          key.stopPropagation();
+          this.#dismissInspector();
+          return;
+        }
+        if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
+          key.preventDefault();
+          key.stopPropagation();
+          const modelId = this.#composer.value.trim();
+          if (!modelId) {
+            this.#showNotice("Enter a model ID first.", "warning");
+            return;
+          }
+          void this.#runCommand(`/model ${this.#modelEntryProvider}:${modelId}`);
+          return;
+        }
+      } else {
+        const providers = modelDetail.providers;
+        if ((key.name === "up" || key.name === "down") && providers.length) {
+          key.preventDefault();
+          key.stopPropagation();
+          const delta = key.name === "up" ? -1 : 1;
+          this.#modelProviderIndex = (this.#modelProviderIndex + delta + providers.length) % providers.length;
+          this.#render();
+          return;
+        }
+        const provider = providers[this.#modelProviderIndex];
+        if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
+          key.preventDefault();
+          key.stopPropagation();
+          if (!provider) return;
+          if (provider.demo) {
+            this.#showNotice("Echo is a demo fixture. Start Agencity with --demo to use it explicitly.", "warning");
+            return;
+          }
+          if (!provider.usable) {
+            this.#showNotice(provider.remediation ?? `Press L to log in to ${provider.displayName}.`, "warning");
+            return;
+          }
+          this.#modelEntryProvider = provider.name;
+          this.#composer.value = provider.name === modelDetail.current.provider ? modelDetail.current.model : "";
+          this.#render();
+          return;
+        }
+        if (!key.ctrl && !key.meta && provider && (key.name === "l" || key.name === "x")) {
+          key.preventDefault();
+          key.stopPropagation();
+          if (!provider.credentialManaged) {
+            this.#showNotice(`${provider.displayName} does not use the local provider credential store.`, "warning");
+            return;
+          }
+          if (key.name === "l") void this.#runCommand(`/model login ${provider.name}`);
+          else void this.#runCommand(`/model logout ${provider.name}`);
+          return;
+        }
+      }
+    }
+    if (key.shift && key.name === "r" && this.#detail && !this.#modelEntryProvider) {
+      key.preventDefault();
+      key.stopPropagation();
+      this.#rawDetail = !this.#rawDetail;
+      this.#resetDetailScroll = true;
+      this.#render();
       return;
     }
     if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
@@ -416,6 +591,7 @@ export class OpenTuiApp {
     if (key.ctrl && key.name === "p") {
       key.preventDefault();
       key.stopPropagation();
+      this.#paletteDraft = this.#composer.value;
       this.#composer.value = "/";
       this.#paletteQuery = "/";
       this.#render();
@@ -434,18 +610,22 @@ export class OpenTuiApp {
     }
     if (key.name === "pageup") {
       key.preventDefault();
-      this.#timeline.scrollBy(-Math.max(3, this.renderer.terminalHeight - 8));
+      this.#details.stickyScroll = false;
+      const delta = -Math.max(3, this.renderer.terminalHeight - 8);
+      this.#activeInspector() ? this.#details.scrollBy({ x: 0, y: delta }) : this.#timeline.scrollBy({ x: 0, y: delta });
       return;
     }
     if (key.name === "pagedown") {
       key.preventDefault();
-      this.#timeline.scrollBy(Math.max(3, this.renderer.terminalHeight - 8));
+      this.#details.stickyScroll = false;
+      const delta = Math.max(3, this.renderer.terminalHeight - 8);
+      this.#activeInspector() ? this.#details.scrollBy({ x: 0, y: delta }) : this.#timeline.scrollBy({ x: 0, y: delta });
       return;
     }
-    if (key.name === "escape") {
-      this.#paletteQuery = "";
-      this.#detailContent = "";
-      this.#render();
+    if (escape) {
+      key.preventDefault();
+      key.stopPropagation();
+      this.#dismissInspector();
       return;
     }
     setTimeout(() => {
@@ -459,6 +639,11 @@ export class OpenTuiApp {
   #submit(): Promise<void> {
     const value = this.#composer.value.trim();
     if (!value || this.#busy) return Promise.resolve();
+    return this.#runCommand(value);
+  }
+
+  #runCommand(value: string): Promise<void> {
+    if (this.#busy) return Promise.resolve();
     const operation = this.#performSubmit(value);
     this.#activeOperation = operation;
     return operation.finally(() => {
@@ -476,7 +661,7 @@ export class OpenTuiApp {
     try {
       await this.controller.execute(secret);
     } catch (error) {
-      this.showOutput(renderTerminalError(error));
+      this.showOutput(renderTerminalError(error).split(secret).join("[REDACTED]"));
     } finally {
       this.#busy = false;
       if (!this.#closed) {
@@ -489,6 +674,7 @@ export class OpenTuiApp {
   async #performSubmit(value: string): Promise<void> {
     this.#composer.value = "";
     this.#paletteQuery = "";
+    this.#paletteDraft = null;
     this.#busy = true;
     this.#render();
     try {
@@ -503,6 +689,61 @@ export class OpenTuiApp {
         this.#composer.focus();
       }
     }
+  }
+
+  #activeModelDetail(): TerminalModelDetail | null {
+    return this.#detail?.kind === "model" ? this.#detail : null;
+  }
+
+  #selectedModelProvider(): TerminalModelProviderDetail | null {
+    return this.#activeModelDetail()?.providers[this.#modelProviderIndex] ?? null;
+  }
+
+  #activeInspector(): boolean {
+    return Boolean(
+      this.controller.pendingSecretInput
+      || this.#paletteQuery
+      || this.#provisionalOutput.size
+      || this.#detail
+      || this.#notice,
+    );
+  }
+
+  #clearSecretInput(): void {
+    this.#secretBuffer = "";
+    this.#composer.value = "";
+  }
+
+  #dismissInspector(): void {
+    if (this.#modelEntryProvider) {
+      this.#modelEntryProvider = null;
+      this.#composer.value = "";
+      this.#render();
+      return;
+    }
+    if (this.#paletteQuery) this.#composer.value = this.#paletteDraft ?? "";
+    this.#paletteQuery = "";
+    this.#paletteDraft = null;
+    this.#detail = null;
+    this.#rawDetail = false;
+    this.#notice = null;
+    this.#render();
+  }
+
+  #showNotice(text: string, tone: "normal" | "success" | "warning" | "danger" = "normal"): void {
+    this.#notice = { text: scrubText(text).slice(0, 800), tone };
+    this.#scheduleNoticeDismiss(tone === "danger" ? 8_000 : 4_000);
+    this.#render();
+  }
+
+  #scheduleNoticeDismiss(milliseconds: number): void {
+    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+    this.#noticeTimer = setTimeout(() => {
+      this.#noticeTimer = null;
+      this.#notice = null;
+      if (!this.#closed) this.#render();
+    }, milliseconds);
+    this.#noticeTimer.unref?.();
   }
 
   #interrupt(): Promise<void> {
@@ -533,16 +774,31 @@ export class OpenTuiApp {
 
   #render(): void {
     const width = this.renderer.terminalWidth;
-    const showDetails = width >= 100;
-    this.#details.visible = showDetails;
+    const wide = width >= 96;
+    const activeInspector = this.#activeInspector();
+    this.#details.visible = wide || activeInspector;
+    this.#timeline.visible = wide || !activeInspector;
+    this.#details.width = wide ? Math.min(64, Math.max(40, Math.round(width * 0.4))) : "100%";
     const provisional = [...this.#provisionalOutput.values()].join("");
-    const details = this.controller.pendingSecretInput
-      ? "PROVIDER LOGIN\nAPI key input is hidden.\nEnter saves · Esc cancels"
+    const baseDetails = this.controller.pendingSecretInput
+      ? [
+          "PROVIDER LOGIN",
+          "",
+          this.#selectedModelProvider()?.displayName ?? this.controller.pendingSecretProvider ?? "Provider",
+          "API key input is hidden.",
+          "The key is stored only in the owner-only local auth file.",
+          "",
+          "Enter saves · Esc cancels",
+        ].join("\n")
       : this.#paletteQuery
       ? paletteText(this.#paletteQuery)
       : provisional
         ? `PROVISIONAL OUTPUT\n${provisional}`
-        : this.#detailContent || [
+        : this.#detail
+          ? this.#detail.kind === "model" && !this.#rawDetail
+            ? renderModelInspector(this.#detail, this.#modelProviderIndex, this.#modelEntryProvider)
+            : formatTerminalDetail(this.#detail, { raw: this.#rawDetail })
+          : [
           "SESSION",
           this.#view.sessionName,
           "",
@@ -561,14 +817,38 @@ export class OpenTuiApp {
           "Ctrl-C stop / detach",
           "Ctrl-D detach",
           ].join("\n");
-    const compactDetails = showDetails ? "" : (this.#paletteQuery || provisional || this.#detailContent ? details : "");
+    const notice = noticeText(this.#notice);
+    const details = notice ? `${notice}\n${baseDetails ? `\n${baseDetails}` : ""}` : baseDetails;
     const history = this.#view.historicalCursor ? ` · history@${this.#view.historicalCursor}` : "";
     this.#header.content = `${this.#view.sessionName} / ${this.#view.branchName}${history}\n${this.#view.model} · ${this.#view.runState} · ${this.#view.connection}`;
     this.#header.fg = this.#view.connection === "connected" ? COLORS.text : COLORS.warning;
-    this.#timelineText.content = renderTimeline(this.#view, this.#expandedRunIds, compactDetails);
+    this.#timelineText.content = renderTimeline(this.#view, this.#expandedRunIds, "");
     this.#detailsText.content = details;
-    this.#composer.placeholder = this.#busy ? "Working…" : this.controller.pendingSecretInput ? "API key (input hidden)…" : this.#view.composerPlaceholder;
-    this.#footer.content = `${this.#view.trustLabel} · ${this.#view.recoveryLabel} · ${this.#view.attentionCount} attention · ${this.#view.budgetLabel} · Ctrl-P commands`;
+    if (this.#resetDetailScroll) {
+      this.#resetDetailScroll = false;
+      this.#details.stickyScroll = false;
+      this.#details.scrollTo({ x: 0, y: 0 });
+      this.#details.scrollTop = 0;
+      if (this.#detailScrollTimer) clearTimeout(this.#detailScrollTimer);
+      this.#detailScrollTimer = setTimeout(() => {
+        this.#detailScrollTimer = null;
+        if (this.#closed) return;
+        this.#details.stickyScroll = false;
+        this.#details.scrollTo({ x: 0, y: 0 });
+        this.#details.scrollTop = 0;
+        this.renderer.requestRender();
+      }, 0);
+      this.#detailScrollTimer.unref?.();
+    }
+    this.#composer.placeholder = this.#busy
+      ? "Working…"
+      : this.controller.pendingSecretInput
+        ? "API key (input hidden)…"
+        : this.#modelEntryProvider
+          ? `Model ID for ${this.#modelEntryProvider}…`
+          : this.#view.composerPlaceholder;
+    const inspectorHint = this.#activeModelDetail() && !this.#modelEntryProvider ? " · ↑/↓ model provider · Enter choose" : "";
+    this.#footer.content = `${this.#view.trustLabel} · ${this.#view.recoveryLabel} · ${this.#view.attentionCount} attention · ${this.#view.budgetLabel} · Ctrl-P commands${inspectorHint}`;
     this.#footer.fg = this.#view.attentionCount > 0 ? statusColor("waiting for user") : COLORS.muted;
     this.renderer.setTerminalTitle(`Agencity — ${this.#view.sessionName}`);
     this.renderer.requestRender();
@@ -590,6 +870,7 @@ export class OpenTerminalUI {
     let attached = false;
     let receivedSignal: NodeJS.Signals | null = null;
     const pendingOutput: string[] = [];
+    const pendingDetails: Array<TerminalDetail | null> = [];
     const pendingProvisional = new Map<string, string>();
     const controller = new TerminalUI(this.client, {
       ...(this.options.workspaceId ? { workspaceId: this.options.workspaceId } : {}),
@@ -598,6 +879,10 @@ export class OpenTerminalUI {
       onOutput: value => {
         if (app) app.showOutput(value);
         else pendingOutput.push(value);
+      },
+      onDetail: detail => {
+        if (app) app.showDetail(detail);
+        else pendingDetails.push(detail);
       },
       onProvisionalOutput: (effectId, value) => {
         if (app) app.showProvisional(effectId, value);
@@ -634,6 +919,7 @@ export class OpenTerminalUI {
       });
       app = new OpenTuiApp(renderer, controller);
       for (const value of pendingOutput) app.showOutput(value);
+      for (const detail of pendingDetails) app.showDetail(detail);
       for (const [effectId, value] of pendingProvisional) app.showProvisional(effectId, value);
       if (receivedSignal) app.requestExit();
       await app.run();

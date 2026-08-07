@@ -57,7 +57,7 @@ There is currently no supported registry or standalone binary channel. Do not us
 
 ## Provider setup
 
-A real model is never replaced silently by Echo. In the interactive TUI, `/model` lists the supported providers and their credential status. Store an API key with hidden input, then select any model exposed by that provider:
+A real model is never replaced silently by Echo. In the interactive TUI, `/model` opens the model inspector. Use Up/Down to select OpenAI, Anthropic, or Vercel AI Gateway; `L` starts hidden key entry, `X` removes a saved key, and Enter requests the exact model ID. The inspector shows the current branch model, workspace default, availability, and credential source without exposing credential values. The direct commands remain compatible:
 
 ```sh
 /model login openai

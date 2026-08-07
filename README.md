@@ -1,6 +1,8 @@
 # Agencity — recoverable Bun/LibSQL agent runtime
 
-Agencity implements Delivery Slices 1–4 of the [Prime Agent TypeScript/Turso rewrite PRD](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md). It runs durable root and recursive child agents against a local LibSQL database. Canonical events, explicitly checkpointed working values, task/mailbox/model handles, schedules, and content-addressed artifacts survive supervisor and console-worker restarts; the Bun heap does not.
+Agencity is a terminal-first autonomous agent runtime inspired by [Prime Agent](https://www.primeintellect.ai/blog/prime-agent) and its Recursive Language Model and Continual Harness ideas. Unlike Prime Agent's persistent Python kernel and file-based session state, Agencity stores durable agent identity, work, subagents, effects, and context in a relational event history while treating its TypeScript worker as disposable. This makes long-running work easier to recover, inspect, and resume after a process or terminal disappears.
+
+The implementation follows the [Prime Agent TypeScript/Turso rewrite PRD](./plans/2026-08-05-prime-agent-typescript-turso-rewrite-prd.md). It runs durable root and recursive child agents against a local LibSQL database. Canonical events, explicitly checkpointed working values, task/mailbox/model handles, schedules, and content-addressed artifacts survive supervisor and console-worker restarts; the Bun heap does not.
 
 > **Security boundary:** The runtime is **trusted-local only**. Model-generated TypeScript and shell commands have the operating-system authority of the runtime. The separate Bun console worker provides crash isolation, **not a security sandbox**. Read-only raw SQL is a shared, non-confidential diagnostic channel; candidate/workspace scope filters provide behavioral context isolation, not secrecy from SQL. The product-managed loopback service requires a random owner-only bearer token from `.agencity/service/manifest.json`; the advanced manually started `serve` diagnostic remains unauthenticated. Neither is a remote authorization boundary. Run only trusted workloads, keep either surface loopback-only, or put the entire runtime inside an independently managed sandbox. See [Security](./docs/security.md).
 
@@ -32,12 +34,14 @@ For a command on `PATH`, the supported unpublished workflow is `bun link` from t
 From a repository, `agencity` (or `bun run dev`) discovers the nearest `.agencity` or version-control root, canonicalizes path aliases, and creates or resumes named durable work without requiring session IDs:
 
 ```sh
-# Real provider: use the TUI's hidden credential prompt, then select any model.
+# Real provider: open the model inspector, choose a provider, log in, and enter its model ID.
 agencity
+/model
+# ↑/↓ selects a provider; L logs in; Enter accepts a model ID.
+
+# Compatible direct commands remain available; gateway IDs may contain slashes.
 /model login openai
 /model openai:gpt-5.6-sol
-
-# Gateway model IDs may contain slashes.
 /model login vercel
 /model vercel:openai/gpt-5.6-sol
 
@@ -60,7 +64,7 @@ A workspace-scoped recent branch and non-secret `provider:model` preference live
 
 The product entrypoint discovers or starts one authenticated loopback background service per workspace on demand; it is not installed as an OS boot/login service. Closing or interrupting a client only detaches. A quiescent service exits automatically after 60 seconds. Active runs, effects, schedules, heartbeats, wakes, workers, and attached clients keep it resident and are listed by `service status`; a durable run waiting only for user input does not require a resident process. `stop TARGET` durably requests run cancellation, while `service shutdown` stops admission, drains resident workers, releases leases, and leaves sessions intact. `attach`, `send`, `status`, and `agents` use names or IDs without making the client the execution owner.
 
-Interactive terminals open a full-screen OpenTUI workspace with a stable composer, grouped run/cell/agent activity, a command/details pane, and persistent branch/model/recovery/budget/trusted-local status. Echo is rendered as `[DEMO FIXTURE]`. Non-TTY commands retain a plain transcript fallback. Interactive product tasks enter this workspace while the strict `agencity.agent-action` version-1 loop runs; `agencity run TASK` remains the one-shot terminal-result command. Each model step chooses a typed final, TypeScript cell, clarification/permission request, blocked outcome, or failure. Cells use the injected SDK for all SQL, file, shell, model, subagent, memory, skill, and artifact work. Raw action JSON is retained as attributable internal history, never appended as an assistant conversation message; only a validated `final` becomes the user-visible assistant message.
+Interactive terminals open a full-screen OpenTUI workspace with a stable composer, grouped run/cell/agent activity, a responsive contextual inspector, and persistent branch/model/recovery/budget/trusted-local status. Commands replace the inspector with labeled, task-specific views instead of appending raw JSON. `/model` is a keyboard-driven provider/model picker with masked login input. `Shift-R` or `/raw` deliberately opens the latest raw diagnostic data; Escape dismisses it. Echo is rendered as `[DEMO FIXTURE]`. Non-TTY commands retain a readable plain transcript fallback. Interactive product tasks enter this workspace while the strict `agencity.agent-action` version-1 loop runs; `agencity run TASK` remains the one-shot terminal-result command. Each model step chooses a typed final, TypeScript cell, clarification/permission request, blocked outcome, or failure. Cells use the injected SDK for all SQL, file, shell, model, subagent, memory, skill, and artifact work. Raw action JSON is retained as attributable internal history, never appended as an assistant conversation message; only a validated `final` becomes the user-visible assistant message.
 
 Command-like task text is deterministic. Multi-word text such as `agencity create a parser` is treated as a task, while exact product commands such as `run`, `new`, and `resume` keep their command meaning. Quote the whole first argument or place `--` before the task to force an ambiguous spelling: `agencity -- run the benchmark`. ID-bearing `chat` and `cell` invocations remain advanced commands.
 
@@ -155,6 +159,7 @@ The architecture check validates package entrypoints, domain dependency directio
 
 ## Design documentation
 
+- [Implementation plans](./plans/README.md)
 - [Installation and executable workflows](./docs/install.md)
 - [Operator guide: setup, CLI, and TUI](./docs/operator-guide.md)
 - [TypeScript API](./docs/api.md)

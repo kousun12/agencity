@@ -115,6 +115,10 @@ Heartbeats and schedules queue durable wakes and deliver them through the ordina
 
 ```sh
 agencity
+/model
+# Up/Down chooses a provider; L logs in; Enter accepts a model ID; X logs out.
+
+# Compatible direct commands:
 /model login openai
 /model openai:gpt-5.6-sol
 /model login anthropic
@@ -124,7 +128,7 @@ agencity
 agencity --demo  # visibly labeled deterministic Echo fixture
 ```
 
-`/model login PROVIDER` accepts a key through hidden terminal input. The profile-owned `auth.json` stores OpenAI, Anthropic, and Vercel AI Gateway keys with owner-only permissions, separate from profile preferences and workspace state. `/model logout PROVIDER` removes a stored key. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY` remain environment fallbacks. `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `AI_GATEWAY_BASE_URL` may override their corresponding endpoints.
+`/model` opens a contextual inspector showing the current branch model, workspace default, provider availability, and human-readable credential source. Up/Down changes the provider selection, Enter requests an exact provider model ID, `L` starts login, `X` removes a stored key, and Escape closes the inspector. `/model login PROVIDER` accepts a key through the same hidden terminal input. Typed and bracketed-paste input remains masked. The profile-owned `auth.json` stores OpenAI, Anthropic, and Vercel AI Gateway keys with owner-only permissions, separate from profile preferences and workspace state. `/model logout PROVIDER` removes a stored key. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY` remain environment fallbacks. `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `AI_GATEWAY_BASE_URL` may override their corresponding endpoints.
 
 The real-provider path persists the selected `provider:model` identifier. The model portion may contain `/`, as in `vercel:openai/gpt-5.6-sol`. Anthropic shorthand such as `anthropic:fable-5` is normalized before persistence to `anthropic:claude-fable-5`, which is also the exact model ID recorded for provider calls. Raw credentials never enter preferences, events, logs, artifacts, or doctor output. `config credential-ref PROVIDER env:VARIABLE LABEL` records an opaque external handle, not a credential. Non-interactive new work without a usable real provider and model fails nonzero rather than choosing Echo. A resumed branch always retains its original model; an explicit model change commits `SessionModelChanged` only while no model work is active.
 
@@ -248,24 +252,28 @@ The normal TUI path is simply `agencity` or `agencity [TASK]`. On an interactive
 agencity debug tui --session <SESSION_ID> --branch <BRANCH_ID>
 ```
 
-The full-screen layout keeps the session/branch/model and connection state at the top, conversation and grouped run activity in the main viewport, a stable composer at the bottom, and recovery/attention/budget/trusted-local status in the footer. Terminals at least 100 columns also show the command/details pane; narrower terminals place command search in the main viewport. Plain text starts a typed autonomous run, or answers the pending clarification/permission request for the active run. `Ctrl-P` opens command search, `Ctrl-O` expands or collapses the latest completed activity, Page Up/Down scroll, Escape closes command/details output, and `Ctrl-D` detaches. The non-interactive product surface also supports `agencity refine [INSTRUCTIONS]`, `agencity refine status`, `agencity refine auto on|off`, and the explicitly advanced `agencity refine propose-json JSON` path. Automatic mode is a profile preference, is off by default, and version 1 can trigger only local review.
+The full-screen layout keeps the session/branch/model and connection state at the top, conversation and grouped run activity in the main viewport, a stable composer at the bottom, and recovery/attention/budget/trusted-local status in the footer. At wide sizes, the contextual inspector uses about 40 percent of the terminal with bounded minimum and maximum widths. At narrow sizes, an active inspector temporarily uses the main viewport instead of injecting command output into the conversation. Plain text starts a typed autonomous run, or answers the pending clarification/permission request for the active run. `Ctrl-P` opens command search without discarding the existing draft, `Ctrl-O` expands or collapses the latest completed activity, Page Up/Down scrolls the active inspector or conversation, Escape closes the current inspector, and `Ctrl-D` detaches.
+
+Command results replace the inspector rather than accumulating in an append-only transcript. Short success, warning, and error notices replace one another and expire. Ordinary views use labeled sections and human-readable statuses; internal IDs appear by default only when they are needed for a follow-up operation such as reconciliation. `Shift-R` toggles the current inspector into a scrubbed raw diagnostic view, and `/raw` opens raw data for the latest inspector result. Raw mode is explicit and may contain internal IDs, but never provider credential values. The plain terminal fallback renders the same structured summaries as text.
+
+The non-interactive product surface also supports `agencity refine [INSTRUCTIONS]`, `agencity refine status`, `agencity refine auto on|off`, and the explicitly advanced `agencity refine propose-json JSON` path. Automatic mode is a profile preference, is off by default, and version 1 can trigger only local review.
 
 Commands:
 
 | Command | Behavior |
 |---|---|
-| `/history [CURSOR]` / `/live` | Print canonical history, or inspect a read-only historical projection and return to the live cursor. |
-| `/model` | List OpenAI, Anthropic, Vercel AI Gateway, and demo availability without exposing credentials. |
+| `/history [CURSOR]` / `/live` | Inspect grouped canonical history, or enter a read-only historical projection and return to the live cursor. Use raw mode for complete event payloads. |
+| `/model` | Open the interactive provider/model inspector without exposing credentials. |
 | `/model login PROVIDER` / `/model logout PROVIDER` | Store a provider key through hidden input, or remove its stored value. |
 | `/model PROVIDER:MODEL` | Persist the workspace default and durably select the model for the current idle branch. |
-| `/budget` | Print current token, cost, turn, and wall-time counters/limits. |
-| `/snapshot` | Print the entire current `AgentState`. |
-| `/tree` | Print the recursive child-session tree and task status. |
-| `/agents` | Print the nuclear-family roster with names, relationships, session/task status, and retained IDs. |
-| `/mailbox` | Print receipt-rich family messages with relationship, sender/recipient, task/artifact links, and text. |
-| `/tasks` | Print durable tasks owned by the current session/branch. |
-| `/goals` | Print projected autonomous goals and completion gates. |
-| `/heartbeats` | Print projected heartbeat schedules. |
+| `/budget` | Show labeled token, cost, turn, and wall-time usage and limits. |
+| `/snapshot` | Show a concise projected-state overview; use raw mode for the complete `AgentState`. |
+| `/tree` | Show the recursive child-session tree and task status. |
+| `/agents` | Show the nuclear-family roster, relationships, task status, and mailbox summary. |
+| `/mailbox` | Show receipt-rich family messages with human sender/recipient labels and text. |
+| `/tasks` | Show durable tasks owned by the current session/branch. |
+| `/goals` | Show autonomous goals, completion criteria, and gate attention. |
+| `/heartbeats` | Show heartbeat status, intervals, prompts, and next ticks. |
 | `/memory [query]` | List visible scoped memory or run deterministic FTS retrieval with provenance. |
 | `/skills` | List current versioned TypeScript skills. |
 | `/refine [instructions]` | Run an attributable retained-trajectory review. Use `status`, `auto on|off`, `correct EVENT_IDS -- TEXT`, or advanced `propose-json JSON` subforms as needed. |
@@ -282,6 +290,7 @@ Commands:
 | `/sync` / `/sync-status` | Run a manual directional push/pull cycle or inspect truthful capabilities/lifecycle. |
 | `/conflicts` | List unresolved divergence/claim/intent reconciliation. |
 | `/resolve-conflict <id> <json>` | Record an explicit typed conflict resolution. |
+| `/raw` | Open scrubbed raw diagnostics for the latest inspector result. |
 | `/help` | Print command help. |
 | `/unknown [effect]` | List or inspect unknown effects and their append-only assessments. |
 | `/reconcile <effect> <assessment> <summary>` | Append attributable evidence; effect status remains unknown and no retry occurs. |
@@ -289,7 +298,7 @@ Commands:
 
 The product and diagnostic TUI both use `AgentClient` and the public protocol contract. Product attach uses authenticated loopback HTTP; diagnostic `debug tui`/`tui` uses `InProcessProtocolTransport`, which calls the exact same `ProtocolServer.handle` router rather than private supervisor services. The client snapshots then watches after the last successfully applied committed cursor, deduplicates on reconnect, and clears cursorless progress on commit or disconnect. `/history CURSOR` creates a read-only historical projection while live state continues observationally; `/live` returns to the latest committed state without replaying an effect.
 
-The live viewport is a concise product projection, not a canonical-event tail. It shows user/assistant conversation plus one grouped activity entry per durable run. Active runs expand their typed steps; completed runs collapse by default. Retained child tasks appear as an agent summary. Consequential command and recovery details use the details pane without replacing the composer. `/history` retains the complete cursor/event/payload audit.
+The live viewport is a concise product projection, not a canonical-event tail. It shows user/assistant conversation plus one grouped activity entry per durable run. Active runs expand their typed steps; completed runs collapse by default. Retained child tasks appear as an agent summary. Consequential command and recovery details replace the contextual inspector without replacing the composer. `/history` presents grouped event types and recent cursors by default; explicit raw mode retains the complete cursor/event/payload audit.
 
 Streaming-capable providers render bounded temporary state without exposing typed action JSON. AgentRun deltas and committed raw actions remain internal; the active run is marked working and assistant text appears only after a validated `final` action commits it. Failed or disconnected provisional progress is discarded rather than persisted. Routine SSE reconnects update the persistent connection state; a terminal watch failure remains visible in details. Echo and other non-streaming providers truthfully report committed responses only. `/unknown` and `/reconcile` inspect and append assessments without retrying or rewriting the unknown outcome. The non-interactive `agencity reconcile latest ASSESSMENT SUMMARY` form resolves the newest unknown effect inside the selected branch, so ordinary recovery does not require copying an opaque effect identifier.
 

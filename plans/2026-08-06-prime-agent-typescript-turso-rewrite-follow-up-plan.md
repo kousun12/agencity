@@ -580,7 +580,7 @@ The root guide should include:
 
 ### Completion evidence
 
-- Implementation: root [`AGENTS.md`](./AGENTS.md).
+- Implementation: root [`AGENTS.md`](../AGENTS.md).
 - The guide links the parent PRD and this follow-up plan; describes the product intention, current gaps, source layout, inherited runtime invariants, trusted-local boundary, database/event/artifact rules, test strategy, and documentation/change discipline.
 - Development commands and referenced local documents were checked against the current repository on August 6, 2026.
 - No subdirectory-specific `AGENTS.md` files currently exist.

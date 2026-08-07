@@ -12,6 +12,13 @@ import {
   type TerminalConnectionState,
   type TerminalPresentation,
 } from "./view-model.ts";
+import {
+  buildTerminalDetail,
+  buildTerminalModelDetail,
+  formatTerminalDetail,
+  formatTerminalRaw,
+  type TerminalDetail,
+} from "./detail-model.ts";
 
 export type TerminalAgentClient = Pick<AgentClient,
   "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
@@ -33,6 +40,7 @@ export interface TerminalUIOptions {
   readonly interactive?: boolean;
   readonly manageSignals?: boolean;
   readonly onOutput?: (value: string) => void;
+  readonly onDetail?: (detail: TerminalDetail | null) => void;
   readonly onProvisionalOutput?: (effectId: string, value: string) => void;
   readonly onProvisionalDiscard?: (effectIds: readonly string[], reason: "committed" | "disconnect" | "reconnect") => void;
 }
@@ -57,9 +65,9 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/stop", aliases: [], category: "product", usage: "/stop", summary: "Request durable run cancellation." },
   { name: "/quit", aliases: ["/exit"], category: "product", usage: "/quit", summary: "Detach without cancellation." },
   { name: "/info", aliases: ["/status"], category: "status", usage: "/info", summary: "Show model, recovery, trust, and protocol status." },
-  { name: "/model", aliases: [], category: "status", usage: "/model [PROVIDER:MODEL|login PROVIDER|logout PROVIDER]", summary: "Configure a provider and explicitly select the branch model." },
+  { name: "/model", aliases: [], category: "status", usage: "/model [PROVIDER:MODEL|login PROVIDER|logout PROVIDER]", summary: "Open the provider picker or use a compatible direct model command." },
   { name: "/budget", aliases: [], category: "status", usage: "/budget", summary: "Show committed budget usage." },
-  { name: "/snapshot", aliases: [], category: "status", usage: "/snapshot", summary: "Show the projected state currently being viewed." },
+  { name: "/snapshot", aliases: [], category: "status", usage: "/snapshot", summary: "Show a structured overview of the projected state." },
   { name: "/mailbox", aliases: [], category: "status", usage: "/mailbox", summary: "Show retained family messages and receipts." },
   { name: "/tasks", aliases: [], category: "status", usage: "/tasks", summary: "Show retained child tasks." },
   { name: "/cancel-task", aliases: [], category: "status", usage: "/cancel-task TASK_ID [REASON]", summary: "Request durable child-task cancellation." },
@@ -67,7 +75,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/goal", aliases: ["/goals"], category: "autonomy", usage: "/goal [create DESCRIPTION|pause|resume|clear|complete]", summary: "Inspect or manage the current goal." },
   { name: "/heartbeat", aliases: ["/heartbeats"], category: "autonomy", usage: "/heartbeat [create MS [PROMPT]|pause N|resume N|clear N]", summary: "Inspect or manage heartbeats." },
   { name: "/schedule", aliases: ["/schedules"], category: "autonomy", usage: "/schedule [once ISO PROMPT|every MS PROMPT|pause N|resume N|clear N]", summary: "Inspect or manage schedules." },
-  { name: "/history", aliases: [], category: "notebook", usage: "/history [CURSOR]", summary: "List history or enter a read-only historical projection." },
+  { name: "/history", aliases: [], category: "notebook", usage: "/history [CURSOR]", summary: "Inspect structured history or enter a read-only historical projection." },
   { name: "/live", aliases: [], category: "notebook", usage: "/live", summary: "Return from historical inspection to live committed state." },
   { name: "/cells", aliases: [], category: "notebook", usage: "/cells", summary: "Show retained notebook cells." },
   { name: "/cell", aliases: [], category: "notebook", usage: "/cell TYPESCRIPT", summary: "Execute a diagnostic TypeScript cell." },
@@ -87,6 +95,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/resolve-conflict", aliases: [], category: "operations", usage: "/resolve-conflict CONFLICT_ID JSON", summary: "Commit an explicit sync-conflict resolution." },
   { name: "/unknown", aliases: [], category: "operations", usage: "/unknown [EFFECT_ID]", summary: "Inspect unknown effects and assessments." },
   { name: "/reconcile", aliases: [], category: "operations", usage: "/reconcile EFFECT_ID ASSESSMENT SUMMARY", summary: "Append evidence without retrying or rewriting status." },
+  { name: "/raw", aliases: [], category: "operations", usage: "/raw", summary: "Open raw diagnostics for the latest inspector result." },
   { name: "/help", aliases: [], category: "product", usage: "/help", summary: "Show this command palette." },
 ]);
 
@@ -232,6 +241,7 @@ export class TerminalUI {
   #closing = false;
   #readline: ReadlineInterface | null = null;
   #pendingCredentialProvider: string | null = null;
+  #lastDetail: TerminalDetail | null = null;
 
   constructor(readonly client: TerminalAgentClient, readonly options: TerminalUIOptions = {}) {
     this.#input = options.input ?? stdin;
@@ -319,6 +329,7 @@ export class TerminalUI {
 
   get detached(): boolean { return this.#detached; }
   get pendingSecretInput(): boolean { return this.#pendingCredentialProvider !== null; }
+  get pendingSecretProvider(): string | null { return this.#pendingCredentialProvider; }
 
   abortPendingOperations(): void {
     this.#closing = true;
@@ -352,18 +363,29 @@ export class TerminalUI {
         return "continue";
       }
       const provider = this.#pendingCredentialProvider;
-      await this.client.productSetProviderKey(provider, line.trim());
+      const secret = line.trim();
+      try {
+        await this.client.productSetProviderKey(provider, secret);
+      } catch (error) {
+        throw redactSubmittedSecret(error, secret);
+      }
       this.#pendingCredentialProvider = null;
       this.#capabilities = await this.client.capabilities();
       this.#write(`Saved API key for ${provider} in the owner-only local auth file.\n`);
+      await this.#showModelDetail();
       this.#publish();
       return "continue";
     }
     if (line === "/quit" || line === "/exit") { this.#requestDetach(); return "detach"; }
     if (line === "/help") { this.#writePalette(); return "continue"; }
+    if (line === "/raw") {
+      if (!this.#lastDetail) this.#write("No inspector result is available yet.\n");
+      else this.#emitDetail({ kind: "raw", command: "/raw", title: `${this.#lastDetail.title} · raw diagnostics`, raw: this.#lastDetail.raw });
+      return "continue";
+    }
     if (line === "/live") { this.#historicalCursor = null; this.#viewState = this.#liveState; this.#write("Returned to live state.\n"); this.#publish(); return "continue"; }
     if (line === "/info" || line === "/status") { await this.#info(); return "continue"; }
-    if (line === "/sessions") { this.#json(await this.client.productSessions()); return "continue"; }
+    if (line === "/sessions") { this.#detail("/sessions", await this.client.productSessions()); return "continue"; }
     if (line.startsWith("/sessions select ")) { const target=line.slice(17).trim(); const selected=await this.client.productSelect(target); await this.#switch(selected.sessionId, selected.branchId); return "continue"; }
     if (line === "/new" || line.startsWith("/new ")) {
       const current=this.#liveState; const requestedName=line.slice(5).trim();const created=await this.client.createSession(this.options.workspaceId ?? current?.workspaceId ?? "default", current ? { model: current.model, ...(requestedName ? { sessionName: requestedName } : {}) } : {});
@@ -372,51 +394,48 @@ export class TerminalUI {
     }
     if (line === "/model" || line.startsWith("/model ")) { await this.#model(line.slice(6).trim()); return "continue"; }
     if (line === "/history" || line.startsWith("/history ")) { await this.#history(line.slice(8).trim()); return "continue"; }
-    if (line === "/snapshot") { this.#json(this.#requireState()); return "continue"; }
-    if (line === "/budget") { this.#json(this.#requireState().budget); return "continue"; }
-    if (line === "/cells") { this.#json(Object.values(this.#requireState().cells)); return "continue"; }
-    if (line.startsWith("/cell ")) { this.#json(await this.client.cell(this.#sessionId,this.#branchId,line.slice(6))); return "continue"; }
-    if (line === "/agents" || line === "/tree") { this.#json({family:await this.client.agents(this.#sessionId,this.#branchId),tasks:await this.client.tasks(this.#sessionId,this.#branchId),mailbox:await this.client.mailbox(this.#sessionId,this.#branchId,{limit:50})}); return "continue"; }
-    if (line === "/mailbox") { this.#json(await this.client.mailbox(this.#sessionId,this.#branchId,{limit:50}));return "continue"; }
-    if (line === "/tasks") { this.#json(await this.client.tasks(this.#sessionId,this.#branchId));return "continue"; }
-    if (line.startsWith("/cancel-task ")) { const [taskId,...reason]=line.slice(13).trim().split(/\s+/);if(!taskId)throw new Error("/cancel-task requires TASK_ID [REASON]");this.#json(await this.client.cancelTask(this.#sessionId,this.#branchId,taskId,reason.join(" ")||undefined));return "continue"; }
-    if (line === "/goals" || line === "/goal") { this.#json(await this.client.goals(this.#sessionId,this.#branchId)); return "continue"; }
+    if (line === "/snapshot") { this.#detail("/snapshot", this.#requireState()); return "continue"; }
+    if (line === "/budget") { this.#detail("/budget", this.#requireState().budget); return "continue"; }
+    if (line === "/cells") { this.#detail("/cells", Object.values(this.#requireState().cells)); return "continue"; }
+    if (line.startsWith("/cell ")) { this.#detail("/cell", await this.client.cell(this.#sessionId,this.#branchId,line.slice(6))); return "continue"; }
+    if (line === "/agents" || line === "/tree") { this.#detail(line, {family:await this.client.agents(this.#sessionId,this.#branchId),tasks:await this.client.tasks(this.#sessionId,this.#branchId),mailbox:await this.client.mailbox(this.#sessionId,this.#branchId,{limit:50})}); return "continue"; }
+    if (line === "/mailbox") { this.#detail("/mailbox", await this.client.mailbox(this.#sessionId,this.#branchId,{limit:50}));return "continue"; }
+    if (line === "/tasks") { this.#detail("/tasks", await this.client.tasks(this.#sessionId,this.#branchId));return "continue"; }
+    if (line.startsWith("/cancel-task ")) { const [taskId,...reason]=line.slice(13).trim().split(/\s+/);if(!taskId)throw new Error("/cancel-task requires TASK_ID [REASON]");this.#detail("/cancel-task", await this.client.cancelTask(this.#sessionId,this.#branchId,taskId,reason.join(" ")||undefined));return "continue"; }
+    if (line === "/goals" || line === "/goal") { this.#detail("/goals", await this.client.goals(this.#sessionId,this.#branchId)); return "continue"; }
     if (line.startsWith("/goal ")) { await this.#goal(line.slice(6).trim()); return "continue"; }
-    if (line === "/heartbeats" || line === "/heartbeat") { this.#json(await this.client.heartbeats(this.#sessionId,this.#branchId)); return "continue"; }
+    if (line === "/heartbeats" || line === "/heartbeat") { this.#detail("/heartbeats", await this.client.heartbeats(this.#sessionId,this.#branchId)); return "continue"; }
     if (line.startsWith("/heartbeat ")) { await this.#heartbeat(line.slice(11).trim()); return "continue"; }
-    if (line === "/schedules" || line === "/schedule") { this.#json(await this.client.schedules(this.#sessionId,this.#branchId)); return "continue"; }
+    if (line === "/schedules" || line === "/schedule") { this.#detail("/schedules", await this.client.schedules(this.#sessionId,this.#branchId)); return "continue"; }
     if (line.startsWith("/schedule ")) { await this.#schedule(line.slice(10).trim()); return "continue"; }
-    if (line === "/memory" || line.startsWith("/memory ")) { const q=line.slice(7).trim();this.#json(q?await this.client.memorySearch(this.#sessionId,this.#branchId,q):await this.client.memoryList(this.#sessionId,this.#branchId));return "continue"; }
-    if (line === "/skills") { this.#json(await this.client.listSkills(this.#sessionId,this.#branchId,true));return "continue"; }
-    if (line.startsWith("/skills ")) { const [action,reference,...rest]=line.slice(8).trim().split(/\s+/);if(action==="show"&&reference)this.#json(await this.client.getSkill(this.#sessionId,this.#branchId,reference));else if(action==="preview"&&reference){const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);this.#write(`${preview.bundle.warning.message}
-Confirmation digest: ${preview.confirmationDigest}
-`);}else if(action==="install"&&reference){const [scope,digest]=rest;if((scope!=="workspace"&&scope!=="profile")||!digest)throw new Error("/skills install requires DIRECTORY workspace|profile CONFIRMATION_DIGEST");const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);this.#write(`${preview.bundle.warning.message}
-`);if(digest!==preview.confirmationDigest)throw new Error(`Confirmation digest must equal ${preview.confirmationDigest}`);this.#json(await this.client.installSkill(this.#sessionId,this.#branchId,{directory:reference,scope,confirmationDigest:digest,installedBy:"tui-owner"}));}else if(action==="test"&&reference)this.#json(await this.client.testSkill(this.#sessionId,this.#branchId,reference));else if(action==="enable"&&reference)this.#json(await this.client.enableSkill(this.#sessionId,this.#branchId,reference));else if(action==="disable"&&reference)this.#json(await this.client.disableSkill(this.#sessionId,this.#branchId,reference));else if(action==="remove"&&reference)this.#json(await this.client.removeSkill(this.#sessionId,this.#branchId,reference));else if(action==="propose"&&reference)this.#json(await this.client.proposeSkill(this.#sessionId,this.#branchId,[reference,...rest].join(" ")));else throw new Error("/skills requires show|preview|install|test|enable|disable|remove or propose");return "continue"; }
-    if (line.startsWith("/skill-test ")) { const [entryId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires NAME_OR_ID");this.#json(await this.client.testSkill(this.#sessionId,this.#branchId,entryId));return "continue"; }
-    if (line.startsWith("/skill ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(7));if(!match)throw new Error("/skill requires ENTRY_ID JSON");this.#json(await this.client.invokeSkill(this.#sessionId,this.#branchId,match[1]!,JSON.parse(match[2]!)));return "continue"; }
-    if (line === "/refine") { this.#json(await this.client.requestRefinement(this.#sessionId,this.#branchId));return "continue"; }
-    if (line === "/refine status" || line === "/refine history") { this.#json({ reviews: await this.client.refinementReviews(this.#sessionId,this.#branchId), proposals: (await this.client.refinements()).filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId) });return "continue"; }
-    if (line === "/refine auto on" || line === "/refine auto off") { this.#json(await this.client.setAutomaticRefinement(line.endsWith(" on")));return "continue"; }
+    if (line === "/memory" || line.startsWith("/memory ")) { const q=line.slice(7).trim();this.#detail("/memory", q?await this.client.memorySearch(this.#sessionId,this.#branchId,q):await this.client.memoryList(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/skills") { this.#detail("/skills", await this.client.listSkills(this.#sessionId,this.#branchId,true));return "continue"; }
+    if (line.startsWith("/skills ")) { const [action,reference,...rest]=line.slice(8).trim().split(/\s+/);if(action==="show"&&reference)this.#detail("/skills", await this.client.getSkill(this.#sessionId,this.#branchId,reference));else if(action==="preview"&&reference){const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);this.#detail("/skills-preview", preview);}else if(action==="install"&&reference){const [scope,digest]=rest;if((scope!=="workspace"&&scope!=="profile")||!digest)throw new Error("/skills install requires DIRECTORY workspace|profile CONFIRMATION_DIGEST");const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);if(digest!==preview.confirmationDigest)throw new Error(`Confirmation digest must equal ${preview.confirmationDigest}`);this.#detail("/skills", await this.client.installSkill(this.#sessionId,this.#branchId,{directory:reference,scope,confirmationDigest:digest,installedBy:"tui-owner"}));}else if(action==="test"&&reference)this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,reference));else if(action==="enable"&&reference)this.#detail("/skills", await this.client.enableSkill(this.#sessionId,this.#branchId,reference));else if(action==="disable"&&reference)this.#detail("/skills", await this.client.disableSkill(this.#sessionId,this.#branchId,reference));else if(action==="remove"&&reference)this.#detail("/skills", await this.client.removeSkill(this.#sessionId,this.#branchId,reference));else if(action==="propose"&&reference)this.#detail("/refine", await this.client.proposeSkill(this.#sessionId,this.#branchId,[reference,...rest].join(" ")));else throw new Error("/skills requires show|preview|install|test|enable|disable|remove or propose");return "continue"; }
+    if (line.startsWith("/skill-test ")) { const [entryId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires NAME_OR_ID");this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,entryId));return "continue"; }
+    if (line.startsWith("/skill ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(7));if(!match)throw new Error("/skill requires ENTRY_ID JSON");this.#detail("/skill", await this.client.invokeSkill(this.#sessionId,this.#branchId,match[1]!,JSON.parse(match[2]!)));return "continue"; }
+    if (line === "/refine") { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/refine status" || line === "/refine history") { this.#detail("/refine", { reviews: await this.client.refinementReviews(this.#sessionId,this.#branchId), proposals: (await this.client.refinements()).filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId) });return "continue"; }
+    if (line === "/refine auto on" || line === "/refine auto off") { this.#detail("/refine", await this.client.setAutomaticRefinement(line.endsWith(" on")));return "continue"; }
     if (line.startsWith("/refine auto")) throw new Error("/refine auto requires on or off");
-    if (line.startsWith("/refine correct ")) { const match=/^([^ ]+)\s+--\s+([\s\S]+)$/.exec(line.slice(16));if(!match)throw new Error("/refine correct EVENT_ID[,EVENT_ID] -- CORRECTION");this.#json(await this.client.userCorrection(this.#sessionId,this.#branchId,match[2]!,match[1]!.split(",").filter(Boolean)));return "continue"; }
-    if (line.startsWith("/refine propose-json ")) { const proposed=await this.client.refine(this.#sessionId,this.#branchId,JSON.parse(line.slice(21)));this.#json(await this.client.validateRefinement(this.#sessionId,this.#branchId,proposed.proposalId));return "continue"; }
-    if (line.startsWith("/refine ")) { this.#json(await this.client.requestRefinement(this.#sessionId,this.#branchId,{instructions:line.slice(8)}));return "continue"; }
-    if (line.startsWith("/rollback ")) { const [proposalId,...reason]=line.slice(10).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/rollback requires PROPOSAL_ID REASON");this.#json(await this.client.rollback(this.#sessionId,this.#branchId,proposalId,reason.join(" ")));return "continue"; }
+    if (line.startsWith("/refine correct ")) { const match=/^([^ ]+)\s+--\s+([\s\S]+)$/.exec(line.slice(16));if(!match)throw new Error("/refine correct EVENT_ID[,EVENT_ID] -- CORRECTION");this.#detail("/refine", await this.client.userCorrection(this.#sessionId,this.#branchId,match[2]!,match[1]!.split(",").filter(Boolean)));return "continue"; }
+    if (line.startsWith("/refine propose-json ")) { const proposed=await this.client.refine(this.#sessionId,this.#branchId,JSON.parse(line.slice(21)));this.#detail("/refine", await this.client.validateRefinement(this.#sessionId,this.#branchId,proposed.proposalId));return "continue"; }
+    if (line.startsWith("/refine ")) { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,{instructions:line.slice(8)}));return "continue"; }
+    if (line.startsWith("/rollback ")) { const [proposalId,...reason]=line.slice(10).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/rollback requires PROPOSAL_ID REASON");this.#detail("/rollback", await this.client.rollback(this.#sessionId,this.#branchId,proposalId,reason.join(" ")));return "continue"; }
     if (line.startsWith("/branch ")) { const [,cursor,...name]=line.split(/\s+/);if(!cursor)throw new Error("/branch requires CURSOR [NAME]");const fork=await this.client.fork(this.#sessionId,this.#branchId,cursor,name.join(" ")||undefined);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,fork.branchId);await this.#switch(this.#sessionId,fork.branchId);return "continue"; }
     if (line === "/resume" || line.startsWith("/resume ")) { const branch=line.slice(7).trim()||this.#branchId;await this.client.resume(this.#sessionId,branch);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,branch);await this.#switch(this.#sessionId,branch);return "continue"; }
-    if (line === "/context") { this.#json(await this.client.inspectContext(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/context") { this.#detail("/context", await this.client.inspectContext(this.#sessionId,this.#branchId));return "continue"; }
     if (line === "/compact" || line.startsWith("/compact ")) {
       const [, strategyName, ...guidance] = line.split(/\s+/);
       const strategy = strategyName === "summary" ? "model-summary-v1" : "deterministic-extractive-v1";
       const instructions = strategyName === "summary" || strategyName === "extractive" ? guidance.join(" ") : [strategyName,...guidance].filter(Boolean).join(" ");
-      this.#json(await this.client.compact(this.#sessionId,this.#branchId,{strategy,...(instructions ? {instructions}: {})}));return "continue";
+      this.#detail("/compact", await this.client.compact(this.#sessionId,this.#branchId,{strategy,...(instructions ? {instructions}: {})}));return "continue";
     }
-    if (line === "/sync") { this.#json(await this.client.syncNow());return "continue"; }
-    if (line === "/sync-status") { this.#json(await this.client.syncStatus());return "continue"; }
-    if (line === "/conflicts") { this.#json(await this.client.syncConflicts("unresolved"));return "continue"; }
-    if (line.startsWith("/resolve-conflict ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(18));if(!match)throw new Error("/resolve-conflict requires CONFLICT_ID JSON");this.#json(await this.client.resolveSyncConflict(match[1]!,JSON.parse(match[2]!)));return "continue"; }
-    if (line === "/unknown") { this.#json(await this.client.unknownEffects(this.#sessionId,this.#branchId));return "continue"; }
-    if (line.startsWith("/unknown ")) { this.#json(await this.client.inspectUnknownEffect(this.#sessionId,this.#branchId,line.slice(9).trim()));return "continue"; }
+    if (line === "/sync") { this.#detail("/sync", await this.client.syncNow());return "continue"; }
+    if (line === "/sync-status") { this.#detail("/sync-status", await this.client.syncStatus());return "continue"; }
+    if (line === "/conflicts") { this.#detail("/conflicts", await this.client.syncConflicts("unresolved"));return "continue"; }
+    if (line.startsWith("/resolve-conflict ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(18));if(!match)throw new Error("/resolve-conflict requires CONFLICT_ID JSON");this.#detail("/resolve-conflict", await this.client.resolveSyncConflict(match[1]!,JSON.parse(match[2]!)));return "continue"; }
+    if (line === "/unknown") { this.#detail("/unknown", await this.client.unknownEffects(this.#sessionId,this.#branchId));return "continue"; }
+    if (line.startsWith("/unknown ")) { this.#detail("/unknown", await this.client.inspectUnknownEffect(this.#sessionId,this.#branchId,line.slice(9).trim()));return "continue"; }
     if (line.startsWith("/reconcile ")) { await this.#reconcile(line.slice(11));return "continue"; }
     if (line === "/stop") { await this.#stop("User requested /stop");return "continue"; }
     if (line.startsWith("/run ")) { await this.#startOrRespond(line.slice(5));return "continue"; }
@@ -573,7 +592,7 @@ Confirmation digest: ${preview.confirmationDigest}
     this.#watchController?.abort();
     await this.#watchPromise?.catch(()=>{});
     if (this.#closing) return;
-    this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#pendingCredentialProvider=null;this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();this.#visibleProgressEffectIds.clear();this.#agentProgressRunByEffect.clear();this.#agentWorkingRunIds.clear();this.#agentWorkingAnnouncementRunIds.clear();
+    this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#pendingCredentialProvider=null;this.#lastDetail=null;this.options.onDetail?.(null);this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();this.#visibleProgressEffectIds.clear();this.#agentProgressRunByEffect.clear();this.#agentWorkingRunIds.clear();this.#agentWorkingAnnouncementRunIds.clear();
     const snapshot=await this.client.snapshot(sessionId,branchId);
     if (this.#closing) return;
     this.#liveState=snapshot.state;this.#viewState=snapshot.state;
@@ -583,29 +602,17 @@ Confirmation digest: ${preview.confirmationDigest}
 
   async #history(cursor:string):Promise<void>{
     const events=await this.client.history(this.#sessionId,this.#branchId);
-    if(!cursor){events.forEach((event)=>this.#write(`${event.cursor} ${event.type} ${JSON.stringify(event.payload)}\n`));return;}
+    if(!cursor){this.#detail("/history", events);return;}
     if(!/^\d+$/.test(cursor))throw new Error("/history CURSOR requires a numeric committed cursor");
     const selected=events.filter((event)=>BigInt(event.cursor)<=BigInt(cursor));if(!selected.length)throw new Error(`No retained history at cursor ${cursor}`);
-    this.#viewState=projectEvents(selected);this.#historicalCursor=this.#viewState.cursor;this.#write(`Historical projection at ${this.#historicalCursor}; live events remain observational only. Use /live to return.\n`);this.#json(this.#viewState);this.#publish();
+    this.#viewState=projectEvents(selected);this.#historicalCursor=this.#viewState.cursor;this.#write(`Historical projection at ${this.#historicalCursor}; live events remain observational only. Use /live to return.\n`);this.#detail("/history-snapshot", this.#viewState);this.#publish();
   }
 
-  async #info():Promise<void>{const caps=await this.client.capabilities();const recovery=await this.client.recoverySummary(this.#sessionId,this.#branchId);this.#capabilities=caps;this.#write(`${renderStartupStatus(this.#requireState(),caps,recovery)}\n`);this.#publish();}
+  async #info():Promise<void>{const caps=await this.client.capabilities();const recovery=await this.client.recoverySummary(this.#sessionId,this.#branchId);this.#capabilities=caps;this.#detail("/info",{state:this.#requireState(),capabilities:caps,recovery,connection:this.#connection});this.#publish();}
   async #model(command:string):Promise<void>{
     const providers=await this.client.modelProviders();
     if(!command){
-      const config=await this.client.productConfig();
-      this.#json({
-        selected:`${this.#requireState().model.provider}:${this.#requireState().model.model}`,
-        defaultModel:config.defaultModel,
-        providers:providers.map(provider=>({
-          provider:provider.name,
-          displayName:provider.displayName,
-          usable:provider.usable,
-          credentialSource:provider.credentialSource,
-          ...(provider.remediation===undefined?{}:{remediation:provider.remediation}),
-        })),
-        usage:"/model PROVIDER:MODEL | /model login PROVIDER | /model logout PROVIDER",
-      });
+      await this.#showModelDetail(providers);
       return;
     }
     const login=/^login\s+(\S+)$/.exec(command);
@@ -622,6 +629,7 @@ Confirmation digest: ${preview.confirmationDigest}
       await this.client.productSetProviderKey(provider,null);
       this.#capabilities=await this.client.capabilities();
       this.#write(`Removed the stored API key for ${provider}. Environment credentials, if set, remain usable.\n`);
+      await this.#showModelDetail();
       this.#publish();
       return;
     }
@@ -634,6 +642,7 @@ Confirmation digest: ${preview.confirmationDigest}
     const selectedModel=selected.model??model;
     await this.client.productSetModel(formatTerminalModel(selectedModel));
     this.#write(`${selected.changed===false?"Model already selected":"Selected branch model"}: ${formatTerminalModel(selectedModel)}. Saved as this workspace's default.\n`);
+    await this.#showModelDetail(undefined,selectedModel);
   }
   async #stop(reason:string):Promise<void>{const active=this.#activeRun();if(!active){this.#write("No active run.\n");return;}await this.client.cancelRun(this.#sessionId,this.#branchId,active.id,reason);this.#write("Cancellation requested.\n");}
   async #startOrRespond(text:string):Promise<void>{
@@ -642,10 +651,10 @@ Confirmation digest: ${preview.confirmationDigest}
     else if(active){this.#write(`A run is ${active.status}; /stop requests cancellation.\n`);return;}
     else {const result=await this.client.startRun(this.#sessionId,this.#branchId,{task:text,goalMode:"auto"});if(result.status==="queued"||result.status==="running")this.#write("Run accepted.\n");}
   }
-  async #goal(command:string):Promise<void>{if(command.startsWith("create ")){this.#json(await this.client.createGoal(this.#sessionId,this.#branchId,command.slice(7)));return;}const current=await this.client.currentGoal(this.#sessionId,this.#branchId);if(!current){this.#write("No current goal.\n");return;}if(command==="pause")this.#json(await this.client.pauseGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="resume")this.#json(await this.client.resumeGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="clear")this.#json(await this.client.clearGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="complete")this.#json(await this.client.requestGoalCompletion(this.#sessionId,this.#branchId,current.goalId));else throw new Error("/goal create DESCRIPTION|pause|resume|clear|complete");}
-  async #heartbeat(command:string):Promise<void>{const create=/^create\s+(\d+)(?:\s+([\s\S]+))?$/.exec(command);if(create){this.#json(await this.client.createHeartbeat(this.#sessionId,this.#branchId,{intervalMs:Number(create[1]),...(create[2]?{prompt:create[2]}:{})}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/heartbeat create MS [PROMPT]|pause N|resume N|clear N");const item=(await this.client.heartbeats(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Heartbeat number not found");this.#json(change[1]==="pause"?await this.client.pauseHeartbeat(item.heartbeatId):change[1]==="resume"?await this.client.resumeHeartbeat(item.heartbeatId):await this.client.cancelHeartbeat(item.heartbeatId));}
-  async #schedule(command:string):Promise<void>{const once=/^once\s+(\S+)\s+([\s\S]+)$/.exec(command);const every=/^every\s+(\d+)\s+([\s\S]+)$/.exec(command);if(once){this.#json(await this.client.createSchedule(this.#sessionId,this.#branchId,{at:once[1]!,prompt:once[2]!}));return;}if(every){this.#json(await this.client.createSchedule(this.#sessionId,this.#branchId,{intervalMs:Number(every[1]),prompt:every[2]!}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/schedule once ISO PROMPT|every MS PROMPT|pause N|resume N|clear N");const item=(await this.client.schedules(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Schedule number not found");this.#json(change[1]==="pause"?await this.client.pauseSchedule(item.scheduleId):change[1]==="resume"?await this.client.resumeSchedule(item.scheduleId):await this.client.clearSchedule(item.scheduleId));}
-  async #reconcile(command:string):Promise<void>{const match=/^(\S+)\s+(succeeded|failed|no_effect|still_unknown)\s+([\s\S]+)$/.exec(command);if(!match)throw new Error("/reconcile EFFECT_ID succeeded|failed|no_effect|still_unknown SUMMARY");this.#json(await this.client.reconcileUnknownEffect(this.#sessionId,this.#branchId,match[1]!,{assessment:match[2] as "succeeded"|"failed"|"no_effect"|"still_unknown",summary:match[3]!,recordedBy:"terminal-user"}));this.#write("Assessment recorded as evidence. The durable effect remains unknown and was not retried. Start a new /run only if safe.\n");}
+  async #goal(command:string):Promise<void>{if(command.startsWith("create ")){this.#detail("/goal", await this.client.createGoal(this.#sessionId,this.#branchId,command.slice(7)));return;}const current=await this.client.currentGoal(this.#sessionId,this.#branchId);if(!current){this.#write("No current goal.\n");return;}if(command==="pause")this.#detail("/goal", await this.client.pauseGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="resume")this.#detail("/goal", await this.client.resumeGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="clear")this.#detail("/goal", await this.client.clearGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="complete")this.#detail("/goal", await this.client.requestGoalCompletion(this.#sessionId,this.#branchId,current.goalId));else throw new Error("/goal create DESCRIPTION|pause|resume|clear|complete");}
+  async #heartbeat(command:string):Promise<void>{const create=/^create\s+(\d+)(?:\s+([\s\S]+))?$/.exec(command);if(create){this.#detail("/heartbeat", await this.client.createHeartbeat(this.#sessionId,this.#branchId,{intervalMs:Number(create[1]),...(create[2]?{prompt:create[2]}:{})}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/heartbeat create MS [PROMPT]|pause N|resume N|clear N");const item=(await this.client.heartbeats(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Heartbeat number not found");this.#detail("/heartbeat", change[1]==="pause"?await this.client.pauseHeartbeat(item.heartbeatId):change[1]==="resume"?await this.client.resumeHeartbeat(item.heartbeatId):await this.client.cancelHeartbeat(item.heartbeatId));}
+  async #schedule(command:string):Promise<void>{const once=/^once\s+(\S+)\s+([\s\S]+)$/.exec(command);const every=/^every\s+(\d+)\s+([\s\S]+)$/.exec(command);if(once){this.#detail("/schedule", await this.client.createSchedule(this.#sessionId,this.#branchId,{at:once[1]!,prompt:once[2]!}));return;}if(every){this.#detail("/schedule", await this.client.createSchedule(this.#sessionId,this.#branchId,{intervalMs:Number(every[1]),prompt:every[2]!}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/schedule once ISO PROMPT|every MS PROMPT|pause N|resume N|clear N");const item=(await this.client.schedules(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Schedule number not found");this.#detail("/schedule", change[1]==="pause"?await this.client.pauseSchedule(item.scheduleId):change[1]==="resume"?await this.client.resumeSchedule(item.scheduleId):await this.client.clearSchedule(item.scheduleId));}
+  async #reconcile(command:string):Promise<void>{const match=/^(\S+)\s+(succeeded|failed|no_effect|still_unknown)\s+([\s\S]+)$/.exec(command);if(!match)throw new Error("/reconcile EFFECT_ID succeeded|failed|no_effect|still_unknown SUMMARY");this.#detail("/reconcile", await this.client.reconcileUnknownEffect(this.#sessionId,this.#branchId,match[1]!,{assessment:match[2] as "succeeded"|"failed"|"no_effect"|"still_unknown",summary:match[3]!,recordedBy:"terminal-user"}));this.#write("Assessment recorded as evidence. The durable effect remains unknown and was not retried. Start a new /run only if safe.\n");}
   #agentRunIdForEffect(effectId:string):string|null{for(const run of Object.values(this.#liveState?.agentRuns??{})){for(const step of run.steps){if(step.effectId===effectId||step.modelAttempts.some((attempt)=>attempt.effectId===effectId))return run.id;}}return null;}
   #requestDetach(decision?:Extract<InterruptDecision,{action:"detach"}>):boolean{if(this.#detached)return false;this.#detached=true;if(decision)this.#lastDetachDecision=decision;this.#removeSigintHandler();this.#detachController?.abort();this.#watchController?.abort();return true;}
   #removeSigintHandler():void{if(!this.#sigintHandler)return;process.off("SIGINT",this.#sigintHandler);this.#sigintHandler=null;}
@@ -674,8 +683,30 @@ Confirmation digest: ${preview.confirmationDigest}
     for(const listener of this.#presentationListeners)listener(presentation);
   }
   #renderError(error:unknown,context:"command"|"interrupt"):void{this.#write(`${renderTerminalError(error,context)}\n`);}
-  #json(value:unknown):void{this.#write(`${JSON.stringify(value,null,2)}\n`);}
+  #detail(command:string,value:unknown):void{
+    const detail=buildTerminalDetail(command,value);
+    this.#lastDetail=detail;
+    this.#emitDetail(detail);
+  }
+  #emitDetail(detail:TerminalDetail):void{
+    if(this.options.onDetail)this.options.onDetail(detail);
+    else if(detail.kind==="raw")this.#write(`${formatTerminalRaw(detail.raw)}\n`);
+    else this.#write(`${formatTerminalDetail(detail,{footer:false})}\n`);
+  }
+  async #showModelDetail(providers?:Awaited<ReturnType<TerminalAgentClient["modelProviders"]>>,current:ModelConfiguration=this.#requireState().model):Promise<void>{
+    const available=providers??await this.client.modelProviders();
+    const config=await this.client.productConfig();
+    const detail=buildTerminalModelDetail({current,workspaceDefault:config.defaultModel,providers:available});
+    this.#lastDetail=detail;
+    this.#emitDetail(detail);
+  }
   #writePalette():void{
+    if(this.options.onDetail){
+      const detail=buildTerminalDetail("/help",TERMINAL_COMMAND_REGISTRY);
+      this.#lastDetail=detail;
+      this.#emitDetail(detail);
+      return;
+    }
     const labels:Record<TerminalCommandCategory,string>={product:"Product",status:"Status",notebook:"Notebook/history",autonomy:"Autonomy",operations:"Operations"};
     const lines=(Object.keys(labels) as TerminalCommandCategory[]).flatMap((category)=>[
       `${labels[category]}:`,
@@ -696,3 +727,19 @@ function parseTerminalModel(value:string):ModelConfiguration{
 }
 
 function formatTerminalModel(model:ModelConfiguration):string{return`${model.provider}:${model.model}`;}
+
+function redactSubmittedSecret(error:unknown,secret:string):unknown{
+  if(!secret)return error;
+  const redact=(value:string):string=>value.split(secret).join("[REDACTED]");
+  if(error instanceof ProtocolClientError){
+    const prefix=`[${error.code}] `;
+    const message=error.message.startsWith(prefix)?error.message.slice(prefix.length):error.message;
+    return new ProtocolClientError(error.code,redact(message),error.status,null);
+  }
+  if(error instanceof Error){
+    const safe=new Error(redact(error.message));
+    safe.name=error.name;
+    return safe;
+  }
+  return new Error(redact(String(error)));
+}

@@ -11,7 +11,7 @@ import {
   type BranchWatchHandlers,
   type EffectProgressNotification,
 } from "../../src/index.ts";
-import { TERMINAL_COMMAND_REGISTRY, TerminalInterruptPolicy, TerminalUI, renderEvent } from "../../src/tui/index.ts";
+import { TERMINAL_COMMAND_REGISTRY, TerminalInterruptPolicy, TerminalUI, renderEvent, renderTerminalError } from "../../src/tui/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -109,6 +109,7 @@ describe("FU-005 protocol-backed terminal UI", () => {
     expect(source).not.toMatch(/from ["'][^"']*storage/);
     expect(source).toContain("TerminalAgentClient");
     expect(source).toContain("watchBranch");
+    expect(source).not.toContain("#json(");
   });
 
   test("loads a protocol snapshot, reports recovery/trust truthfully, and switches history/live without effects", async () => {
@@ -133,9 +134,88 @@ describe("FU-005 protocol-backed terminal UI", () => {
     await ui.execute("/live");
     expect(output).toContain("Returned to live state.");
     await ui.execute("/history");
-    expect(output).toContain(`${cursor} MessageAppended`);
+    expect(output).toContain(`Message Appended — cursor ${cursor}`);
+    expect(output).not.toContain('"messageId"');
+    await ui.execute("/raw");
+    expect(output).toContain('"type": "MessageAppended"');
     expect(output).toContain("retained message");
     expect((await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId })).filter((event) => event.type === "EffectRequested")).toHaveLength(0);
+    await supervisor.close();
+  });
+
+  test("publishes replacing structured details and reserves raw payloads for /raw", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-details-"); temps.push(temp);
+    const supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, recover: false });
+    const session = await supervisor.createSession({ workspaceId: "terminal-details", sessionName: "Structured details", branchName: "main" });
+    await supervisor.appendMessage(session.sessionId, session.branchId, "user", "retained detail evidence");
+    const client = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const details: Array<{ kind: string; title: string; raw: unknown }> = [];
+    let dismissals = 0;
+    let transcript = "";
+    const ui = new TerminalUI(client, {
+      interactive: false,
+      manageSignals: false,
+      onOutput: value => { transcript += value; },
+      onDetail: detail => { if (detail) details.push(detail); else dismissals++; },
+    });
+    await ui.attach(session.sessionId, session.branchId, false);
+    await ui.execute("/budget");
+    await ui.execute("/snapshot");
+    await ui.execute("/history");
+    expect(details.map(detail => [detail.kind, detail.title])).toEqual([
+      ["inspection", "Budget"],
+      ["inspection", "Workspace snapshot"],
+      ["inspection", "History"],
+    ]);
+    expect(transcript).not.toContain('"sessionId"');
+    await ui.execute("/raw");
+    expect(details.at(-1)).toMatchObject({ kind: "raw", title: "History · raw diagnostics" });
+    await ui.execute("/new Switched work");
+    expect(dismissals).toBe(1);
+    const afterSwitch = transcript.length;
+    await ui.execute("/raw");
+    expect(transcript.slice(afterSwitch)).toContain("No inspector result is available yet.");
+    await ui.detach(false);
+    await supervisor.close();
+  });
+
+  test("redacts a submitted provider key from protocol failures before plain or full-screen rendering", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-key-error-"); temps.push(temp);
+    const supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, recover: false });
+    const session = await supervisor.createSession({ workspaceId: "terminal-key-error" });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "productSetProviderKey") {
+          return async (_provider: string, apiKey: string) => {
+            throw new ProtocolClientError("PROVIDER_KEY_REJECTED", `Provider rejected ${apiKey}`, 400);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    let output = "";
+    const ui = new TerminalUI(client, {
+      interactive: false,
+      manageSignals: false,
+      output: { write(value: string | Uint8Array) { output += String(value); return true; } },
+    });
+    await ui.attach(session.sessionId, session.branchId, false);
+    await ui.execute("/model login openai");
+    const secret = "provider-key-not-known-to-the-redactor";
+    let rejected: unknown;
+    try {
+      await ui.execute(secret);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(ProtocolClientError);
+    expect(renderTerminalError(rejected)).toContain("PROVIDER_KEY_REJECTED");
+    expect(renderTerminalError(rejected)).toContain("[REDACTED]");
+    expect(renderTerminalError(rejected)).not.toContain(secret);
+    expect(output).not.toContain(secret);
+    await ui.detach(false);
     await supervisor.close();
   });
 
@@ -157,7 +237,7 @@ describe("FU-005 protocol-backed terminal UI", () => {
     input.write("/unknown missing-effect\n");
     await waitFor(() => output.includes("[command error:NOT_FOUND status=404]"), "typed command error");
     input.write("/info\n");
-    await waitFor(() => (output.match(/Agencity trusted-local TUI/g)?.length ?? 0) === 2, "next command after failure");
+    await waitFor(() => output.includes("WORKSPACE STATUS"), "next command after failure");
     input.end("/quit\n");
     await running;
 

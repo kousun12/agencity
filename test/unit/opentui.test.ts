@@ -36,6 +36,7 @@ describe("OpenTUI interactive terminal", () => {
       interactive: false,
       manageSignals: false,
       onOutput: value => app?.showOutput(value),
+      onDetail: detail => app?.showDetail(detail),
     });
     await controller.attach(session.sessionId, session.branchId, false);
     const proposedFinal = buildTerminalScreen({
@@ -129,12 +130,36 @@ describe("OpenTUI interactive terminal", () => {
       await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", "A committed update arrived");
       frame = await setup.waitForFrame(value => value.includes("A committed update arrived") && value.includes("draft response"));
       expect(frame).toContain("A committed update arrived");
+      for (let index = 1; index <= 28; index++) {
+        await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", `Long timeline update ${index}`);
+      }
+      frame = await setup.waitForFrame(value => value.includes("Long timeline update 28") && value.includes("draft response"));
+      expect(frame).toContain("Long timeline update 28");
 
       setup.mockInput.pressKey("u", { ctrl: true });
       await setup.mockInput.typeText("/info");
       setup.mockInput.pressEnter();
-      frame = await setup.waitForFrame(value => value.includes("Agencity trusted-local TUI"));
+      frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS"));
+      expect(frame).toContain("Snapshot resume");
+      expect(frame).not.toContain('"snapshotCursorResume"');
       expect(frame).not.toContain(" /info ");
+      setup.mockInput.pressKey("r", { shift: true });
+      frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS · RAW") && value.includes('"reducerVersion"'));
+      expect(frame).toContain("WORKSPACE STATUS · RAW");
+      setup.mockInput.pressKey("r", { shift: true });
+      frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS") && !value.includes('"snapshotCursorResume"'));
+
+      await Bun.sleep(20);
+      setup.mockInput.pressKey("\u001b[6~");
+      frame = await setup.waitForFrame(value => value.includes("Esc close") && !value.includes("WORKSPACE STATUS"));
+      await Bun.sleep(20);
+      setup.mockInput.pressKey("\u001b[5~");
+      frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS"));
+
+      app.showOutput("First obsolete command notice");
+      app.showOutput("Selected branch model: openai:gpt-test.");
+      frame = await setup.waitForFrame(value => value.includes("Selected branch model"));
+      expect(frame).not.toContain("First obsolete command notice");
 
       app.showProvisional("temporary-effect", "temporary provider prefix");
       frame = await setup.waitForFrame(value => value.includes("temporary provider prefix"));
@@ -154,7 +179,7 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressKey("u", { ctrl: true });
       await setup.mockInput.typeText("/info");
       setup.mockInput.pressEnter();
-      frame = await setup.waitForFrame(value => value.includes("Agencity trusted-local TUI"));
+      frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS"));
       expect(frame).toContain("TRUSTED-LOCAL");
 
       await setup.mockInput.typeText("slow command");
@@ -177,6 +202,153 @@ describe("OpenTUI interactive terminal", () => {
     }
   });
 
+  test("uses /model as a keyboard-driven provider picker with hidden login, durable selection, logout, and responsive dismissal", async () => {
+    const temp = await makeTempRuntime("agencity-opentui-model-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "terminal-model",
+      sessionName: "Model picker",
+      branchName: "main",
+      model: { provider: "echo", model: "echo-1" },
+    });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    let storedOpenAi = false;
+    let defaultModel: string | null = null;
+    let selectedModel = { provider: "echo", model: "echo-1" };
+    const submittedKeys: Array<string | null> = [];
+    const providers = () => [
+      {
+        name: "openai",
+        displayName: "OpenAI",
+        capabilities: { streaming: true },
+        usable: storedOpenAi,
+        credentialSource: storedOpenAi ? "stored" as const : "missing" as const,
+        ...(storedOpenAi ? {} : { remediation: "Log in to OpenAI." }),
+      },
+      {
+        name: "anthropic",
+        displayName: "Anthropic",
+        capabilities: { streaming: true },
+        usable: false,
+        credentialSource: "missing" as const,
+        remediation: "Log in to Anthropic.",
+      },
+      {
+        name: "vercel",
+        displayName: "Vercel AI Gateway",
+        capabilities: { streaming: true },
+        usable: false,
+        credentialSource: "missing" as const,
+        remediation: "Log in to Vercel AI Gateway.",
+      },
+      {
+        name: "echo",
+        displayName: "Echo (demo fixture; non-streaming)",
+        capabilities: { streaming: false },
+        usable: true,
+        credentialSource: "programmatic" as const,
+      },
+    ];
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "modelProviders") return async () => providers();
+        if (property === "capabilities") return async () => ({ ...(await base.capabilities()), providers: providers() });
+        if (property === "productConfig") return async () => ({ defaultModel, credentialReferences: [] });
+        if (property === "productSetProviderKey") return async (provider: string, apiKey: string | null) => {
+          expect(provider).toBe("openai");
+          submittedKeys.push(apiKey);
+          storedOpenAi = apiKey !== null;
+          return { provider, configured: storedOpenAi, source: storedOpenAi ? "stored" : "missing" };
+        };
+        if (property === "selectModel") return async (_sessionId: string, _branchId: string, value: typeof selectedModel) => {
+          selectedModel = value;
+          return { changed: true, model: value };
+        };
+        if (property === "productSetModel") return async (value: string | null) => {
+          defaultModel = value;
+          return { defaultModel };
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    let app: OpenTuiApp | null = null;
+    const terminal = new TerminalUI(client, {
+      interactive: false,
+      manageSignals: false,
+      onOutput: value => app?.showOutput(value),
+      onDetail: detail => app?.showDetail(detail),
+    });
+    await terminal.attach(session.sessionId, session.branchId, false);
+    const setup = await createTestRenderer({ width: 118, height: 32 });
+    app = new OpenTuiApp(setup.renderer, terminal);
+    const secret = "hidden-openai-provider-key-123456";
+    try {
+      await setup.mockInput.typeText("/model");
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      let frame = await setup.waitForFrame(value => value.includes("MODEL") && value.includes("Workspace default"));
+      expect(frame).toContain("Echo (demo fixture");
+      expect(frame).not.toContain('"credentialSource"');
+      setup.mockInput.pressEscape();
+      frame = await setup.waitForFrame(value => value.includes("Ask Agencity") && !value.includes("Providers"));
+      expect(frame).not.toContain("Workspace default");
+      await setup.mockInput.typeText("/model");
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      await setup.waitForFrame(value => value.includes("MODEL") && value.includes("Workspace default"));
+
+      setup.mockInput.pressArrow("down");
+      frame = await setup.waitForFrame(value => value.includes("> ○ OpenAI"));
+      expect(frame).toContain("not configured");
+
+      setup.mockInput.pressKey("l");
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("PROVIDER LOGIN") && value.includes("OpenAI"));
+      expect(frame).toContain("input is hidden");
+
+      await setup.mockInput.typeText(secret.slice(0, 12));
+      await setup.mockInput.pasteBracketedText(secret.slice(12));
+      frame = await setup.waitForFrame(value => value.includes("•".repeat(secret.length)));
+      expect(frame).not.toContain(secret);
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("> ✓ OpenAI") && value.includes("saved"));
+      expect(submittedKeys).toEqual([secret]);
+      expect(frame).not.toContain(secret);
+
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value => value.includes("Choose model") && value.includes("Model ID for openai"));
+      await setup.mockInput.typeText("gpt-inspector-test");
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("gpt-inspector-test") && value.includes("openai:gpt-inspector-test"));
+      expect(selectedModel).toEqual({ provider: "openai", model: "gpt-inspector-test" });
+      expect(String(defaultModel)).toBe("openai:gpt-inspector-test");
+      expect(frame).not.toContain(secret);
+
+      setup.resize(78, 24);
+      frame = await setup.waitForFrame(value => value.includes("MODEL") && value.includes("gpt-inspector-test"));
+      expect(frame).toContain("Providers");
+
+      setup.mockInput.pressKey("x");
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("> ○ OpenAI") && value.includes("not configured"));
+      expect(submittedKeys).toEqual([secret, null]);
+      expect(frame).not.toContain(secret);
+    } finally {
+      app.destroy();
+      setup.renderer.destroy();
+      await terminal.detach(false);
+      await supervisor.close();
+    }
+  });
+
   test("reports whether the resident service will idle or remain active", () => {
     expect(formatManagedDetach({
       lifecycle: "running",
@@ -189,7 +361,7 @@ describe("OpenTUI interactive terminal", () => {
     })).toBe("Detached. Service remains active: 1 active schedule.");
   });
 
-  test("masks provider API keys before sending them to the controller", async () => {
+  test("masks provider API keys and redacts a rejected value echoed by the controller", async () => {
     const temp = await makeTempRuntime("agencity-opentui-secret-"); temps.push(temp);
     const supervisor = await Supervisor.open({
       databaseUrl: temp.databaseUrl,
@@ -215,9 +387,12 @@ describe("OpenTUI interactive terminal", () => {
       get pendingSecretInput() { return pending; },
       subscribePresentation: listener => terminal.subscribePresentation(listener),
       execute: async value => {
+        if (value === "/cancel") {
+          pending = false;
+          return "continue";
+        }
         received = value;
-        pending = false;
-        return "continue";
+        throw new Error(`Provider rejected ${value}`);
       },
       handleInterrupt: () => terminal.handleInterrupt(),
     };
@@ -229,6 +404,10 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressEnter();
       expect(await app.settle()).toBe(true);
       expect(received).toBe(secret);
+      const rejected = await setup.waitForFrame(frame => frame.includes("Provider rejected [REDACTED]"));
+      expect(rejected).not.toContain(secret);
+      setup.mockInput.pressEscape();
+      await Bun.sleep(0);
       expect((await setup.captureCharFrame()).toString()).not.toContain(secret);
     } finally {
       app.destroy();

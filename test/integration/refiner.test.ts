@@ -382,9 +382,13 @@ describe("FU-016 durable RefinerService", () => {
       const ui = new TerminalUI(client, { interactive: false, output: { write(value: string | Uint8Array) { terminalOutput += String(value); return true; } } });
       await ui.run(sessionId, branchId);
       await ui.execute("/refine status");
-      await ui.execute("/refine review the retained protocol trajectory");
+      expect(terminalOutput).toContain("Protocol trajectory review — no change");
+      expect(terminalOutput).not.toContain(review.reviewId);
+      await ui.execute("/raw");
       expect(terminalOutput).toContain(review.reviewId);
       expect(terminalOutput).toContain('"status": "no_change"');
+      await ui.execute("/refine review the retained protocol trajectory");
+      expect(terminalOutput).toContain("review the retained protocol trajectory — no change");
     } finally { protocol.stop(); await supervisor.close(); }
   });
 
