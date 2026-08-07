@@ -8,6 +8,7 @@ import {
 import {
   layoutTerminalFooter,
   selectTerminalHeightLayout,
+  terminalComposerContentRows,
   terminalComposerPaddingX,
 } from "../../src/tui/layout.ts";
 
@@ -72,6 +73,13 @@ describe("structured terminal transcript", () => {
     });
     expect([terminalComposerPaddingX(7), terminalComposerPaddingX(8), terminalComposerPaddingX(40)])
       .toEqual([0, 1, 2]);
+    expect([
+      terminalComposerContentRows("one", "normal"),
+      terminalComposerContentRows("one\ntwo\nthree", "normal"),
+      terminalComposerContentRows("1\n2\n3\n4\n5\n6", "normal"),
+      terminalComposerContentRows("one\ntwo\nthree", "compact"),
+      terminalComposerContentRows("one\ntwo", "minimum"),
+    ]).toEqual([1, 3, 5, 2, 1]);
   });
 
   test("prioritizes authority, unhealthy state, and current actions in the footer", () => {

@@ -68,6 +68,12 @@ export function terminalComposerPaddingX(width: number): 0 | 1 | 2 {
   return 0;
 }
 
+export function terminalComposerContentRows(value: string, mode: TerminalHeightMode): number {
+  const logicalRows = Math.max(1, value.split(/\r\n|\r|\n/).length);
+  const maximumRows = mode === "normal" ? 5 : mode === "compact" ? 2 : 1;
+  return Math.min(logicalRows, maximumRows);
+}
+
 function joined(segments: readonly string[]): string {
   return segments.filter(Boolean).join(" · ");
 }

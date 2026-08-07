@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { CodeRenderable, MarkdownRenderable, ScrollBoxRenderable } from "@opentui/core";
+import { CodeRenderable, MarkdownRenderable, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import {
   AgentClient,
@@ -186,15 +186,18 @@ describe("OpenTUI interactive terminal", () => {
       attentionCount: 1,
       composerPlaceholder: "Answer the pending request…",
     });
-    const setup = await createTestRenderer({ width: 112, height: 30 });
+    const setup = await createTestRenderer({ width: 112, height: 30, kittyKeyboard: true });
     let releaseSlowCommand = (): void => {};
     let slowCommandAborted = false;
+    const executedLines: string[] = [];
     const slowCommand = new Promise<void>(resolve => { releaseSlowCommand = resolve; });
     const appController: OpenTuiController = {
       get presentation() { return controller.presentation; },
       get detached() { return controller.detached; },
       subscribePresentation: listener => controller.subscribePresentation(listener),
       execute: async line => {
+        executedLines.push(line);
+        if (line.startsWith("pasted first line")) return "continue";
         if (line === "slow command") {
           await slowCommand;
           return "continue";
@@ -223,6 +226,30 @@ describe("OpenTUI interactive terminal", () => {
       const composerLine = initialLines.findIndex(line => line.includes("› Ask Agencity"));
       expect(initialLines[composerLine - 1]?.trim()).toBe("");
       expect(initialLines[composerLine + 1]?.trim()).toBe("");
+      const composer = setup.renderer.root.findDescendantById("agencity-composer") as TextareaRenderable;
+
+      await setup.mockInput.pasteBracketedText("pasted first line\npasted second line\npasted third line");
+      frame = await setup.waitForFrame(value =>
+        value.includes("pasted first line")
+        && value.includes("pasted second line")
+        && value.includes("pasted third line"),
+      );
+      expect(composer.plainText).toBe("pasted first line\npasted second line\npasted third line");
+      expect(executedLines).toEqual([]);
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      expect(executedLines).toEqual(["pasted first line\npasted second line\npasted third line"]);
+      expect(composer.plainText).toBe("");
+
+      await setup.mockInput.typeText("shift first line");
+      setup.mockInput.pressEnter({ shift: true });
+      await setup.mockInput.typeText("shift second line");
+      frame = await setup.waitForFrame(value =>
+        value.includes("shift first line") && value.includes("shift second line"),
+      );
+      expect(composer.plainText).toBe("shift first line\nshift second line");
+      expect(executedLines).toEqual(["pasted first line\npasted second line\npasted third line"]);
+      composer.clear();
 
       await setup.mockInput.typeText("draft response");
       frame = await setup.waitForFrame(value => value.includes("draft response"));

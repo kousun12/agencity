@@ -3,9 +3,9 @@ import {
   CliRenderEvents,
   type CliRenderer,
   createCliRenderer,
-  InputRenderable,
   ScrollBoxRenderable,
   TextRenderable,
+  TextareaRenderable,
   type KeyEvent,
   type PasteEvent,
   decodePasteBytes,
@@ -37,6 +37,7 @@ import {
 import {
   layoutTerminalFooter,
   selectTerminalHeightLayout,
+  terminalComposerContentRows,
   terminalComposerPaddingX,
 } from "./layout.ts";
 import {
@@ -213,7 +214,7 @@ export class OpenTuiApp {
   readonly #composerBox: BoxRenderable;
   readonly #composerContent: BoxRenderable;
   readonly #composerPrompt: TextRenderable;
-  readonly #composer: InputRenderable;
+  readonly #composer: TextareaRenderable;
   readonly #familySummary: TextRenderable;
   readonly #footer: BoxRenderable;
   readonly #footerLeft: TextRenderable;
@@ -324,10 +325,12 @@ export class OpenTuiApp {
       bg: TERMINAL_THEME.raised,
       wrapMode: "none",
     });
-    this.#composer = new InputRenderable(renderer, {
+    this.#composer = new TextareaRenderable(renderer, {
       id: "agencity-composer",
       flexGrow: 1,
       minWidth: 1,
+      height: 1,
+      wrapMode: "word",
       placeholder: this.#view.composerPlaceholder,
       textColor: TERMINAL_THEME.text,
       focusedTextColor: TERMINAL_THEME.text,
@@ -335,6 +338,7 @@ export class OpenTuiApp {
       focusedBackgroundColor: TERMINAL_THEME.raised,
       placeholderColor: TERMINAL_THEME.muted,
       onSubmit: () => { void this.#submit(); },
+      onContentChange: () => { if (!this.#closed) this.#render(); },
       onKeyDown: key => {
         if (!this.controller.pendingSecretInput && (key.name === "escape" || key.name === "esc" || key.sequence === "\u001b")) {
           key.preventDefault();
@@ -532,7 +536,7 @@ export class OpenTuiApp {
     event.stopPropagation();
     const value = decodePasteBytes(event.bytes);
     this.#secretBuffer = `${this.#secretBuffer}${value}`.slice(0, 16_384);
-    this.#composer.value = "•".repeat(this.#secretBuffer.length);
+    this.#setComposerValue("•".repeat(this.#secretBuffer.length));
   };
 
   #onKey = (key: KeyEvent): void => {
@@ -558,12 +562,12 @@ export class OpenTuiApp {
       }
       if (key.name === "backspace" || key.name === "delete") {
         this.#secretBuffer = this.#secretBuffer.slice(0, -1);
-        this.#composer.value = "•".repeat(this.#secretBuffer.length);
+        this.#setComposerValue("•".repeat(this.#secretBuffer.length));
         return;
       }
       if (!key.ctrl && !key.meta && key.sequence && !/[\r\n\0-\x1f\x7f]/.test(key.sequence)) {
         this.#secretBuffer = `${this.#secretBuffer}${key.sequence}`.slice(0, 16_384);
-        this.#composer.value = "•".repeat(this.#secretBuffer.length);
+        this.#setComposerValue("•".repeat(this.#secretBuffer.length));
       }
       return;
     }
@@ -579,7 +583,7 @@ export class OpenTuiApp {
         if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
           key.preventDefault();
           key.stopPropagation();
-          const modelId = this.#composer.value.trim();
+          const modelId = this.#composerValue().trim();
           if (!modelId) {
             this.#showNotice("Enter a model ID first.", "warning");
             return;
@@ -607,7 +611,7 @@ export class OpenTuiApp {
             return;
           }
           this.#modelEntryProvider = provider.name;
-          this.#composer.value = provider.name === modelDetail.current.provider ? modelDetail.current.model : "";
+          this.#setComposerValue(provider.name === modelDetail.current.provider ? modelDetail.current.model : "");
           this.#render();
           return;
         }
@@ -675,7 +679,7 @@ export class OpenTuiApp {
         key.stopPropagation();
         const value = key.sequence;
         this.#focusComposer(false);
-        this.#composer.value = `${this.#composer.value}${value}`;
+        this.#setComposerValue(`${this.#composerValue()}${value}`);
         this.#composer.focus();
         this.#render();
         return;
@@ -683,7 +687,7 @@ export class OpenTuiApp {
     }
     if (
       this.#familyFocus === "composer"
-      && this.#composer.value.length === 0
+      && this.#composerValue().length === 0
       && !this.#familyNavigationBlockedByInspector()
     ) {
       if (key.name === "down" && this.#view.familySummary) {
@@ -707,7 +711,14 @@ export class OpenTuiApp {
       this.#render();
       return;
     }
-    if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
+    if (enter && key.shift && !key.meta && !key.ctrl) {
+      key.preventDefault();
+      key.stopPropagation();
+      this.#composer.newLine();
+      this.#render();
+      return;
+    }
+    if (enter && !key.shift && !key.meta && !key.ctrl) {
       key.preventDefault();
       key.stopPropagation();
       void this.#submit();
@@ -728,8 +739,8 @@ export class OpenTuiApp {
     if (key.ctrl && key.name === "p") {
       key.preventDefault();
       key.stopPropagation();
-      this.#paletteDraft = this.#composer.value;
-      this.#composer.value = "/";
+      this.#paletteDraft = this.#composerValue();
+      this.#setComposerValue("/");
       this.#paletteQuery = "/";
       this.#render();
       return;
@@ -767,16 +778,25 @@ export class OpenTuiApp {
     }
     setTimeout(() => {
       if (this.#closed) return;
-      const value = this.#composer.value;
+      const value = this.#composerValue();
       this.#paletteQuery = value.startsWith("/") ? value : "";
       this.#render();
     }, 0);
   };
 
   #submit(): Promise<void> {
-    const value = this.#composer.value.trim();
+    const value = this.#composerValue().trim();
     if (!value || this.#busy) return Promise.resolve();
     return this.#runCommand(value);
+  }
+
+  #composerValue(): string {
+    return this.#composer.plainText;
+  }
+
+  #setComposerValue(value: string): void {
+    this.#composer.setText(value);
+    this.#composer.gotoBufferEnd();
   }
 
   #runCommand(value: string): Promise<void> {
@@ -792,7 +812,7 @@ export class OpenTuiApp {
     if (!this.#secretBuffer || this.#busy) return;
     const secret = this.#secretBuffer;
     this.#secretBuffer = "";
-    this.#composer.value = "";
+    this.#setComposerValue("");
     this.#busy = true;
     this.#render();
     try {
@@ -809,7 +829,7 @@ export class OpenTuiApp {
   }
 
   async #performSubmit(value: string): Promise<void> {
-    this.#composer.value = "";
+    this.#setComposerValue("");
     this.#paletteQuery = "";
     this.#paletteDraft = null;
     this.#busy = true;
@@ -974,17 +994,17 @@ export class OpenTuiApp {
 
   #clearSecretInput(): void {
     this.#secretBuffer = "";
-    this.#composer.value = "";
+    this.#setComposerValue("");
   }
 
   #dismissInspector(): void {
     if (this.#modelEntryProvider) {
       this.#modelEntryProvider = null;
-      this.#composer.value = "";
+      this.#setComposerValue("");
       this.#render();
       return;
     }
-    if (this.#paletteQuery) this.#composer.value = this.#paletteDraft ?? "";
+    if (this.#paletteQuery) this.#setComposerValue(this.#paletteDraft ?? "");
     this.#paletteQuery = "";
     this.#paletteDraft = null;
     this.#detail = null;
@@ -1087,12 +1107,15 @@ export class OpenTuiApp {
     const layout = selectTerminalHeightLayout(height);
     const compact = layout.mode !== "normal";
     const activeInspector = this.#activeInspector();
+    const composerContentRows = terminalComposerContentRows(this.#composerValue(), layout.mode);
     this.#header.height = layout.headerRows;
     this.#main.minHeight = 1;
-    this.#composerBox.height = layout.composerRows;
+    this.#composerBox.height = layout.composerRows + composerContentRows - 1;
     this.#composerBox.paddingX = terminalComposerPaddingX(width);
     this.#composerBox.paddingTop = layout.composerPaddingTop;
     this.#composerBox.paddingBottom = layout.composerPaddingBottom;
+    this.#composerContent.height = composerContentRows;
+    this.#composer.height = composerContentRows;
     this.#details.padding = layout.inspectorPadding;
     this.#details.border = wide && layout.mode !== "minimum" ? ["left"] : false;
     this.#details.visible = activeInspector;
@@ -1270,6 +1293,7 @@ export class OpenTerminalUI {
         exitSignals: [],
         screenMode: "alternate-screen",
         useMouse: true,
+        useKittyKeyboard: { disambiguate: true },
         autoFocus: false,
         clearOnShutdown: true,
         consoleMode: "disabled",
