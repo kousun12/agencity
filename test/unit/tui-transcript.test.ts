@@ -47,7 +47,13 @@ describe("structured terminal transcript", () => {
     const formatted = formatTerminalCellResult({ rows: Array.from({ length: 200 }, (_, index) => `row-${index}`) });
     expect(formatted).toStartWith("{\n  \"rows\"");
     expect(formatted).toContain("output truncated");
-    expect(formatted.length).toBeLessThan(4_200);
+    expect(formatted.length).toBeLessThan(900);
+    expect(formatted.split("\n").length).toBeLessThanOrEqual(13);
+
+    const longLine = formatTerminalCellResult("x".repeat(2_000));
+    expect(longLine).toStartWith("x".repeat(100));
+    expect(longLine).toContain("output truncated");
+    expect(longLine.length).toBeLessThan(900);
   });
 
   test("selects deterministic normal, compact, and minimum height modes", () => {

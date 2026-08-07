@@ -22,8 +22,8 @@ import type {
   TerminalStepView,
 } from "./view-model.ts";
 
-const MAX_RESULT_CHARACTERS = 4_000;
-const MAX_RESULT_LINES = 80;
+const MAX_INLINE_OUTPUT_CHARACTERS = 800;
+const MAX_INLINE_OUTPUT_LINES = 12;
 
 interface TranscriptBlock {
   readonly key: string;
@@ -71,10 +71,10 @@ function truncateLine(value: string, maximum = 120): string {
 
 function boundedText(value: string): string {
   const lines = value.split("\n");
-  let bounded = lines.slice(0, MAX_RESULT_LINES).join("\n");
-  let truncated = lines.length > MAX_RESULT_LINES;
-  if (bounded.length > MAX_RESULT_CHARACTERS) {
-    bounded = bounded.slice(0, MAX_RESULT_CHARACTERS);
+  let bounded = lines.slice(0, MAX_INLINE_OUTPUT_LINES).join("\n");
+  let truncated = lines.length > MAX_INLINE_OUTPUT_LINES;
+  if (bounded.length > MAX_INLINE_OUTPUT_CHARACTERS) {
+    bounded = bounded.slice(0, MAX_INLINE_OUTPUT_CHARACTERS);
     truncated = true;
   }
   return truncated ? `${bounded}\n… output truncated; use /cells for retained diagnostics` : bounded;
@@ -478,7 +478,7 @@ export class TerminalTranscript {
       width: "100%",
       height: "auto",
       marginTop: 1,
-      fg: TERMINAL_THEME.text,
+      fg: TERMINAL_THEME.muted,
       wrapMode: "word",
       selectable: true,
     });
@@ -511,7 +511,7 @@ export class TerminalTranscript {
         marker.fg = terminalToneColor(terminalCellTone(next.status));
         summary.content = cellSummary(step, next);
         if (source.content !== next.code) source.content = next.code;
-        logs.content = next.logs.length > 0 ? `LOGS\n${next.logs.join("\n")}` : "";
+        logs.content = next.logs.length > 0 ? `LOGS\n${boundedText(next.logs.join("\n"))}` : "";
         result.content = next.status === "committed" ? `RESULT\n${formatTerminalCellResult(next.result)}` : "";
         error.content = next.error ? `ERROR\n${boundedText(next.error)}` : "";
       },
