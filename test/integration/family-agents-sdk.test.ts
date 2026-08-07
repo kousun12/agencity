@@ -110,7 +110,6 @@ describe("FU-012 retained family messaging", () => {
         value.root.branchId,
         rootEvents.at(-1)!.cursor,
         "other branch",
-        "family-exact-branch",
       );
       expect((await value.supervisor.agents.listFamily(value.root.sessionId, fork)).items).toEqual([]);
 

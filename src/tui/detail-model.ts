@@ -96,6 +96,14 @@ function displayStatus(value: unknown): string {
   return string(value, "unknown").replaceAll("_", " ");
 }
 
+function displayActivityReason(value: unknown): string {
+  const reason = string(value);
+  if (reason === "unknown") return "unknown outcome";
+  if (reason === "permission_required") return "permission required";
+  if (reason === "waiting_for_user") return "waiting for user";
+  return displayStatus(reason);
+}
+
 function titleCase(value: string): string {
   return value
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -319,7 +327,7 @@ function familyDetail(command: string, value: unknown): TerminalInspectionDetail
         const activity = string(item.activity, string(item.taskStatus, string(item.status, "unknown")));
         const detail = [
           item.task ? sentence(item.task, 180) : "",
-          item.activityReason ? displayStatus(item.activityReason) : "",
+          item.activityReason ? displayActivityReason(item.activityReason) : "",
           bool(item.cancellationRequested) ? "Cancellation requested" : "",
         ].filter(Boolean).join("\n");
         return {

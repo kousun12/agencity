@@ -111,6 +111,24 @@ The full-screen terminal interface keeps conversation and grouped run activity i
 
 Useful inspectors include `/history`, `/budget`, `/tree`, `/agents`, `/tasks`, `/goals`, `/memory`, `/skills`, `/context`, `/unknown`, and `/sync-status`.
 
+### Navigate retained child agents
+
+When the current agent has direct children, a one-line summary stays visible between the composer and footer. It counts working, idle, attention, and ended children. Waiting and unavailable children are included in the attention count so uncertain work is not presented as idle.
+
+Family navigation applies only while the composer is empty:
+
+1. Press Down to focus the family summary.
+2. Press Enter or Right to open the direct-child browser.
+3. Use Up and Down to select a child.
+4. Press Enter or Right to open the selected child's conversation.
+5. Press Left from an empty child composer to return to its exact parent branch.
+
+Up, Left, or Escape returns from the focused summary to the composer. Left or Escape closes the browser. Printable input from the focused summary returns to the composer and keeps the typed character. A non-empty draft retains normal editing and submission behavior.
+
+The header breadcrumb shows retained ancestry separately from the branch. The child browser labels each row as `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable`, with a bounded reason where attention is required. Unavailable routes remain visible but cannot be opened.
+
+Opening a family member only changes what this client observes. It does not stop, resume, cancel, retry, or re-own work, and it does not change the workspace's remembered resume selection. Family opening is disabled during `/history` inspection; use `/live` first.
+
 ## Detach and cancel
 
 Detaching closes the client without claiming that durable or external work stopped:

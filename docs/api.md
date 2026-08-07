@@ -125,6 +125,8 @@ await supervisor.agents.sendMessage(parentSessionId, parentBranchId, {
   intentKey: "priority-v1",
 });
 
+const family = await supervisor.agents.listFamily(parentSessionId, parentBranchId);
+
 const call = await supervisor.models.start(parentSessionId, parentBranchId, {
   prompt: "Summarize the selected log ranges",
   inputSetId,
@@ -136,7 +138,9 @@ const terminal = await supervisor.models.result(call.handleId, {
 });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
+`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, cancellation state, and derived `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable` activity. Its bounded reason codes distinguish user input, permission, blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state cases. Missing retained state stays unavailable instead of resolving to another branch.
+
+Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
 
 Documents and input sets provide exact bounded inputs:
 

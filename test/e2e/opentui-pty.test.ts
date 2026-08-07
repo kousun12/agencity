@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { StrictActionFixture } from "../acceptance/strict-action-fixture.ts";
+import { StrictActionFixture, action } from "../acceptance/strict-action-fixture.ts";
 
 const root = new URL("../..", import.meta.url).pathname;
 const python = Bun.which("python3");
@@ -28,7 +28,7 @@ async function cli(executable: string, workspace: string, home: string, args: re
   return { code, stdout, stderr };
 }
 
-test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI accepts a task and detaches through a real pseudo-terminal", async () => {
+test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI navigates a retained child and detaches through a real pseudo-terminal", async () => {
   const provider = new StrictActionFixture();
   const directory = await mkdtemp(join(tmpdir(), "agencity-opentui-pty-"));
   directories.push(directory);
@@ -48,6 +48,11 @@ test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI
   expect(linkCode, linkError).toBe(0);
   const executable = join(installation, "bin", "agencity");
   const task = "OpenTUI pseudo-terminal round trip";
+  const childTask = "PTY retained child";
+  provider.script(task, [
+    action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer", run: false }); return "spawned";`),
+    action("final", `fixture completed: ${task}`),
+  ]);
   const script = String.raw`
 import fcntl, json, os, pty, select, signal, struct, subprocess, sys, termios, time
 
@@ -63,7 +68,7 @@ fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 112, 0, 0))
 os.set_blocking(fd, False)
 output = bytearray()
 
-def pump(seconds, needle=None):
+def pump(seconds, needle=None, start=0):
     deadline = time.time() + seconds
     target = needle.encode() if needle else None
     while time.time() < deadline:
@@ -77,9 +82,9 @@ def pump(seconds, needle=None):
         if not chunk:
             break
         output.extend(chunk)
-        if target and target in output:
+        if target and target in output[start:]:
             return True
-    return target is None or target in output
+    return target is None or target in output[start:]
 
 def wait_exit(seconds):
     deadline = time.time() + seconds
@@ -118,6 +123,23 @@ while time.time() < deadline:
         if task_complete:
             break
     time.sleep(0.1)
+family_summary = pump(10, "1 agent: 1 working")
+summary_mark = len(output)
+if family_summary:
+    os.write(fd, b"\x1b[B")
+summary_focus = pump(5, "> 1 agent", summary_mark)
+browser_mark = len(output)
+if summary_focus:
+    os.write(fd, b"\x1b[C")
+family_browser = pump(5, "AGENT FAMILY", browser_mark) and pump(1, "PTY reviewer", browser_mark)
+child_mark = len(output)
+if family_browser:
+    os.write(fd, b"\x1b[C")
+child_open = pump(8, "PTY reviewer / unnamed branch", child_mark)
+parent_mark = len(output)
+if child_open:
+    os.write(fd, b"\x1b[D")
+parent_open = pump(8, "1 agent: 1 working", parent_mark)
 if ready:
     os.write(fd, b"/quit\r")
     pump(4, "workspace service will stop automatically")
@@ -134,6 +156,11 @@ print(json.dumps({
     "modelPrompt": model_prompt,
     "ready": ready,
     "taskComplete": task_complete,
+    "familySummary": family_summary,
+    "summaryFocus": summary_focus,
+    "familyBrowser": family_browser,
+    "childOpen": child_open,
+    "parentOpen": parent_open,
     "exitCode": exit_code,
     "idleDetach": b"workspace service will stop automatically" in output,
     "secretHidden": b"acceptance-fixture-key" not in output,
@@ -168,6 +195,11 @@ print(json.dumps({
       modelPrompt: true,
       ready: true,
       taskComplete: true,
+      familySummary: true,
+      summaryFocus: true,
+      familyBrowser: true,
+      childOpen: true,
+      parentOpen: true,
       exitCode: 0,
       idleDetach: true,
       secretHidden: true,
@@ -190,8 +222,19 @@ print(json.dumps({
       ["assistant", `fixture completed: ${task}`],
     ]);
     expect(history.runs.at(-1)?.status).toBe("succeeded");
+    const treeResult = await cli(executable, workspace, home, ["tree", "--json"]);
+    expect(treeResult.code, treeResult.stderr).toBe(0);
+    const tree = JSON.parse(treeResult.stdout);
+    expect(tree.items).toEqual([expect.objectContaining({
+      name: "PTY reviewer",
+      relationship: "child",
+      task: childTask,
+      taskStatus: "admitted",
+      cancellationRequested: false,
+      activity: "working",
+    })]);
   } finally {
     await cli(executable, workspace, home, ["service", "shutdown"]).catch(() => null);
     provider.close();
   }
-}, 30_000);
+}, 45_000);

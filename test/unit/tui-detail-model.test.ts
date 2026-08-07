@@ -11,7 +11,7 @@ describe("terminal inspector view models", () => {
     ["/sessions", [{ sessionName: "Fix parser", branchName: "main", status: "idle", model: { provider: "openai", model: "gpt-test" }, taskSummary: "Repair parsing", unresolvedWork: 0, activeGoals: 1 }], "Retained work"],
     ["/budget", { limits: { tokenLimit: 10_000, turnLimit: 20 }, tokens: 450, turns: 2, costUsd: 0.1, wallTimeMs: 2_000, exceeded: false }, "Usage"],
     ["/cells", [{ code: "return 42", status: "committed", attempts: 1, result: 42, logs: [] }], "Cells · 1"],
-    ["/agents", { family: { items: [{ name: "reviewer", relationship: "child", status: "idle", taskStatus: "completed" }] }, tasks: [{ task: "Review", status: "completed", model: { provider: "openai", model: "gpt-test" }, result: "Done" }], mailbox: { items: [] } }, "Family"],
+    ["/agents", { family: { items: [{ name: "reviewer", relationship: "child", status: "idle", taskStatus: "completed", task: "Review the patch", cancellationRequested: false, activity: "attention", activityReason: "unknown" }] }, tasks: [{ task: "Review", status: "completed", model: { provider: "openai", model: "gpt-test" }, result: "Done" }], mailbox: { items: [] } }, "unknown outcome"],
     ["/mailbox", { items: [{ senderName: "reviewer", recipientName: "root", receiptStatus: "delivered", content: "Review complete" }] }, "Review complete"],
     ["/goals", [{ description: "Ship safely", status: "active", gates: [{ status: "passed" }] }], "completion evidence"],
     ["/heartbeats", [{ intervalMs: 60_000, nextTickAt: "2026-08-07T12:00:00.000Z", status: "active", prompt: "Check progress" }], "Every 1 min"],
