@@ -123,6 +123,19 @@ while time.time() < deadline:
         if task_complete:
             break
     time.sleep(0.1)
+cell_rendered = b"TypeScript" in output
+if task_complete and not cell_rendered:
+    cell_mark = len(output)
+    os.write(fd, b"\x0f")
+    cell_rendered = pump(5, "TypeScript", cell_mark)
+post_cell_inspector = False
+if task_complete and cell_rendered:
+    inspector_mark = len(output)
+    os.write(fd, b"/info\r")
+    post_cell_inspector = pump(5, "WORKSPACE STATUS", inspector_mark)
+    if post_cell_inspector:
+        os.write(fd, b"\x1b")
+        time.sleep(0.2)
 family_summary = pump(10, "1 agent: 1 working")
 summary_mark = len(output)
 if family_summary:
@@ -181,6 +194,8 @@ print(json.dumps({
     "modelPrompt": model_prompt,
     "ready": ready,
     "taskComplete": task_complete,
+    "cellRendered": cell_rendered,
+    "postCellInspector": post_cell_inspector,
     "familySummary": family_summary,
     "summaryFocus": summary_focus,
     "familyBrowser": family_browser,
@@ -222,6 +237,8 @@ print(json.dumps({
       modelPrompt: true,
       ready: true,
       taskComplete: true,
+      cellRendered: true,
+      postCellInspector: true,
       familySummary: true,
       summaryFocus: true,
       familyBrowser: true,
@@ -251,6 +268,12 @@ print(json.dumps({
       ["assistant", `fixture completed: ${task}`],
     ]);
     expect(history.runs.at(-1)?.status).toBe("succeeded");
+    expect(history.runs.at(-1)?.steps).toHaveLength(2);
+    expect(history.cells).toEqual([expect.objectContaining({
+      code: `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer", run: false }); return "spawned";`,
+      status: "committed",
+      result: "spawned",
+    })]);
     const treeResult = await cli(executable, workspace, home, ["tree", "--json"]);
     expect(treeResult.code, treeResult.stderr).toBe(0);
     const tree = JSON.parse(treeResult.stdout);
