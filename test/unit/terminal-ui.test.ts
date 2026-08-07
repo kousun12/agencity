@@ -391,7 +391,7 @@ describe("FU-005 protocol-backed terminal UI", () => {
       expect(ui.presentation.family.children[0]?.branchId).toBe(child.branchId);
       expect(ui.presentation.family.children[0]?.relationship).toBe("child");
       expect(ui.presentation.family.children[0]?.task).toBe("Review the implementation");
-      expect(ui.presentation.family.children[0]?.activity).toBe("working");
+      expect(ui.presentation.family.children[0]?.activity).toBe("idle");
 
       await ui.openFamilyChild(child.sessionId, child.branchId);
       expect(ui.presentation.state.sessionName).toBe("Reviewer");
@@ -505,26 +505,27 @@ describe("FU-005 protocol-backed terminal UI", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const timers = new Set<{ callback: () => void }>();
+    const timers = new Set<{ callback: () => void; milliseconds: number }>();
     const scheduler = {
-      setTimeout(callback: () => void) {
-        const handle = { callback };
+      setTimeout(callback: () => void, milliseconds: number) {
+        const handle = { callback, milliseconds };
         timers.add(handle);
         return handle;
       },
       clearTimeout(handle: unknown) {
-        timers.delete(handle as { callback: () => void });
+        timers.delete(handle as { callback: () => void; milliseconds: number });
       },
     };
     const ui = new TerminalUI(client, {
       interactive: false,
       manageSignals: false,
-      familyRefreshIntervalMs: 10,
+      familyRefreshIntervalMs: 5_000,
       familyRefreshScheduler: scheduler,
     });
     try {
       await ui.attach(root.sessionId, root.branchId, false);
       await waitFor(() => ui.presentation.family.refresh === "current", "initial family refresh");
+      expect(timers.size).toBe(0);
       const baseline = calls;
       block = true;
       ui.setFamilyBrowserOpen(true);
@@ -538,6 +539,7 @@ describe("FU-005 protocol-backed terminal UI", () => {
       await waitFor(() => ui.presentation.family.refresh === "current" && concurrent === 0, "coalesced refresh completion");
       expect(calls - baseline).toBe(2);
       expect(maximumConcurrent).toBe(1);
+      expect([...timers][0]?.milliseconds).toBe(5_000);
 
       fail = true;
       ui.setFamilyBrowserOpen(true);

@@ -511,7 +511,7 @@ describe("OpenTUI interactive terminal", () => {
     const setup = await createTestRenderer({ width: 112, height: 28 });
     app = new OpenTuiApp(setup.renderer, terminal);
     try {
-      let frame = await setup.waitForFrame(value => value.includes("Root agent / main") && value.includes("1 agent: 1 working"));
+      let frame = await setup.waitForFrame(value => value.includes("Root agent / main") && value.includes("1 agent: 1 idle"));
       expect(frame).not.toContain("\nAGENTS\n");
       expect(frame).toContain("↓ agents");
 
@@ -525,7 +525,7 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressKey("a", { ctrl: true });
       setup.mockInput.pressKey("k", { ctrl: true });
       setup.mockInput.pressKey("\u001b[B");
-      frame = await setup.waitForFrame(value => value.includes("> 1 agent: 1 working"));
+      frame = await setup.waitForFrame(value => value.includes("> 1 agent: 1 idle"));
       expect(frame).toContain("Enter/→ agents");
       await setup.mockInput.typeText("x");
       frame = await setup.waitForFrame(value => value.includes("x") && value.includes("↓ agents"));
@@ -534,7 +534,7 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressKey("u", { ctrl: true });
       setup.mockInput.pressKey("\u001b[B");
       setup.mockInput.pressEnter();
-      frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("> ● Reviewer — working"));
+      frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("> ○ Reviewer — idle"));
       expect(frame).toContain("Review the implementation");
       expect(frame).toContain("echo:echo-1");
 
@@ -555,7 +555,7 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressKey("\u001b[C");
       expect(await app.settle()).toBe(true);
       frame = await setup.waitForFrame(value => value.includes("Root agent › Reviewer / unnamed branch"));
-      expect(frame).toContain("1 agent: 1 working");
+      expect(frame).toContain("1 agent: 1 idle");
       expect(frame).toContain("Esc close");
       expect(frame).not.toContain("AGENT FAMILY");
 

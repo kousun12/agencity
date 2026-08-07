@@ -825,10 +825,9 @@ export class TerminalUI {
   #scheduleFamilyRefresh(): void {
     this.#clearFamilyRefreshTimer();
     if (this.#detached || this.#closing || this.#connection !== "connected") return;
-    const nonterminalChild = this.#family.children.some(child =>
-      child.taskStatus !== null && ["pending", "admitted", "running"].includes(child.taskStatus));
-    if (!this.#familyBrowserOpen && !nonterminalChild) return;
-    const milliseconds = Math.min(1_000, Math.max(10, this.options.familyRefreshIntervalMs ?? 1_000));
+    const activeChild = this.#family.children.some(child => child.activity === "working");
+    if (!this.#familyBrowserOpen && !activeChild) return;
+    const milliseconds = Math.max(10, this.options.familyRefreshIntervalMs ?? 1_000);
     const callback = (): void => {
       this.#familyRefreshTimer = null;
       void this.#refreshFamily();

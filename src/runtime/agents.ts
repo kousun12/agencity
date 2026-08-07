@@ -7,6 +7,7 @@ import {
 } from "../storage/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
 import type { AgentRunResult, AgentRunService } from "./agent-runs.ts";
+import { ProjectionService } from "./projection.ts";
 
 export interface SpawnAgentInput {
   readonly task: string;
@@ -91,6 +92,7 @@ class AdmissionQueue {
 
 export class AgentService {
   readonly #recursive;
+  readonly #projections: ProjectionService;
   readonly #admissions = new AdmissionQueue();
   readonly #deliveries = new AdmissionQueue();
   #runs: AgentRunService | null = null;
@@ -99,6 +101,7 @@ export class AgentService {
   readonly maxMessagesPerMinute = 60;
   constructor(readonly storage: AgentStorage, readonly outbox?: OutboxRunner, readonly maxDepth = 8, readonly maxChildren = 32) {
     this.#recursive = requireRecursiveStorage(storage);
+    this.#projections = new ProjectionService(storage);
   }
 
   attachRunService(runs: AgentRunService): void {
@@ -374,9 +377,7 @@ export class AgentService {
   async listFamily(sessionId: string, branchId: string): Promise<FamilyListResult> {
     const source = await this.#recursive.getSession(sessionId);
     if (!source) throw new NotFoundError("session", sessionId);
-    const sourceEvents = await this.storage.loadEvents(sessionId, { branchId });
-    if (!sourceEvents.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
-    const sourceState = projectEvents(sourceEvents);
+    const sourceState = (await this.#projections.getSnapshot(sessionId, branchId)).state;
     const candidates: FamilyCandidate[] = [];
     if (source.parentSessionId && source.parentBranchId) {
       const parent = await this.#recursive.getSession(source.parentSessionId);
@@ -388,10 +389,10 @@ export class AgentService {
         depth: Math.max(0, source.depth - 1),
         taskId: source.taskId,
         taskFallback: null,
+        taskShapesActivity: false,
       });
-      const parentEvents = await this.storage.loadEvents(source.parentSessionId, { branchId: source.parentBranchId });
-      if (parentEvents.length) {
-        const parentState = projectEvents(parentEvents);
+      const parentState = await this.#familyState(source.parentSessionId, source.parentBranchId);
+      if (parentState) {
         for (const siblingTask of Object.values(parentState.tasks)) {
           if (siblingTask.childSessionId === source.sessionId || siblingTask.parentBranchId !== source.parentBranchId) continue;
           const sibling = await this.#recursive.getSession(siblingTask.childSessionId);
@@ -406,11 +407,14 @@ export class AgentService {
     }
     const items = await Promise.all(candidates.map(async (candidate): Promise<FamilyAgentRecord> => {
       const task = candidate.taskId ? await this.#recursive.getTask(candidate.taskId) : null;
-      const events = candidate.session
-        ? await this.storage.loadEvents(candidate.sessionId, { branchId: candidate.branchId })
-        : [];
-      const state = events.length ? projectEvents(events) : null;
-      const activity = deriveFamilyAgentActivity(state, task, candidate.taskId !== null);
+      const state = candidate.session
+        ? await this.#familyState(candidate.sessionId, candidate.branchId)
+        : null;
+      const activity = deriveFamilyAgentActivity(
+        state,
+        candidate.taskShapesActivity ? task : null,
+        candidate.taskShapesActivity && candidate.taskId !== null,
+      );
       return {
         sessionId: candidate.sessionId,
         branchId: candidate.branchId,
@@ -428,6 +432,15 @@ export class AgentService {
     }));
     items.sort((left, right) => relationshipRank(left.relationship) - relationshipRank(right.relationship) || (left.name ?? left.sessionId).localeCompare(right.name ?? right.sessionId) || left.sessionId.localeCompare(right.sessionId));
     return { items };
+  }
+
+  async #familyState(sessionId: string, branchId: string): Promise<AgentState | null> {
+    try {
+      return (await this.#projections.getSnapshot(sessionId, branchId)).state;
+    } catch (error) {
+      if (error instanceof NotFoundError) return null;
+      throw error;
+    }
   }
 
   async messages(sessionId: string, branchId: string, rawOptions: MailboxListOptions = {}): Promise<MailboxListResult> {
@@ -924,6 +937,7 @@ interface FamilyCandidate {
   readonly depth: number;
   readonly taskId: string | null;
   readonly taskFallback: string | null;
+  readonly taskShapesActivity: boolean;
 }
 
 function candidateFromTask(
@@ -940,6 +954,7 @@ function candidateFromTask(
     depth,
     taskId: task.id,
     taskFallback: task.task,
+    taskShapesActivity: true,
   };
 }
 
@@ -989,7 +1004,7 @@ export function deriveFamilyAgentActivity(
       activityReason: pending?.kind === "permission" ? "permission_required" : "waiting_for_user",
     };
   }
-  if (task && ["pending", "admitted", "running"].includes(task.status) ||
+  if (task?.status === "running" ||
       latestRun && ["queued", "running"].includes(latestRun.status) ||
       state.status === "running") {
     return { activity: "working", activityReason: null };

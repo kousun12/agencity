@@ -121,6 +121,8 @@ Useful inspectors include `/history`, `/budget`, `/tree`, `/agents`, `/tasks`, `
 
 When the current agent has direct children, a one-line summary stays visible between the composer and footer. It counts working, idle, attention, and ended children. Waiting and unavailable children are included in the attention count so uncertain work is not presented as idle.
 
+An admitted child that has no active run is idle, not working. The client refreshes continuously while the family browser is open or a child is actively working; dormant child admissions do not keep a background polling loop active.
+
 Family navigation applies only while the composer is empty:
 
 1. Press Down to focus the family summary.

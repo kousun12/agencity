@@ -35,7 +35,7 @@ function committedEventSet(events: readonly AgentEvent[], eventCount: number): A
   ];
 }
 
-test("family refresh benchmark records bounded work for 25 relatives with 5,000 events per branch", async () => {
+test("family refresh benchmark reuses projections for 25 relatives with 5,000 events per branch", async () => {
   const temp = await makeTempRuntime("agencity-family-refresh-benchmark-"); temps.push(temp);
   const supervisor = await Supervisor.open({
     databaseUrl: temp.databaseUrl,
@@ -57,14 +57,37 @@ test("family refresh benchmark records bounded work for 25 relatives with 5,000 
         run: false,
       })),
     );
-    const work = { loadEventsCalls: 0, loadedEvents: 0, getSessionCalls: 0, getTaskCalls: 0 };
+    const work = {
+      getLatestCursorCalls: 0,
+      loadSnapshotCalls: 0,
+      loadEventsCalls: 0,
+      loadedEvents: 0,
+      saveSnapshotCalls: 0,
+      getSessionCalls: 0,
+      getTaskCalls: 0,
+    };
     const instrumented = new Proxy(supervisor.storage, {
       get(target, property) {
+        if (property === "getLatestCursor") return async (sessionId: string, branchId: string) => {
+          work.getLatestCursorCalls++;
+          const events = await target.loadEvents(sessionId, { branchId });
+          if (!events.length) return null;
+          const missing = Math.max(0, 5_000 - events.length);
+          return (BigInt(events.at(-1)!.cursor) + BigInt(missing)).toString().padStart(20, "0");
+        };
+        if (property === "loadSnapshot") return async (...args: Parameters<AgentStorage["loadSnapshot"]>) => {
+          work.loadSnapshotCalls++;
+          return target.loadSnapshot(...args);
+        };
         if (property === "loadEvents") return async (...args: Parameters<AgentStorage["loadEvents"]>) => {
           work.loadEventsCalls++;
           const events = committedEventSet(await target.loadEvents(...args), 5_000);
           work.loadedEvents += events.length;
           return events;
+        };
+        if (property === "saveSnapshot") return async (...args: Parameters<AgentStorage["saveSnapshot"]>) => {
+          work.saveSnapshotCalls++;
+          return target.saveSnapshot(...args);
         };
         if (property === "getSession") return async (...args: [string]) => {
           work.getSessionCalls++;
@@ -79,20 +102,41 @@ test("family refresh benchmark records bounded work for 25 relatives with 5,000 
       },
     }) as AgentStorage;
     const service = new AgentService(instrumented);
-    const startedAt = performance.now();
+    const coldStartedAt = performance.now();
     const family = await service.listFamily(root.sessionId, root.branchId);
-    const latencyMs = Math.round((performance.now() - startedAt) * 100) / 100;
+    const coldLatencyMs = Math.round((performance.now() - coldStartedAt) * 100) / 100;
+    const coldWork = { ...work };
+
+    for (const key of Object.keys(work) as Array<keyof typeof work>) work[key] = 0;
+    const warmStartedAt = performance.now();
+    const refreshed = await service.listFamily(root.sessionId, root.branchId);
+    const warmLatencyMs = Math.round((performance.now() - warmStartedAt) * 100) / 100;
 
     console.info("[family refresh benchmark]", {
       relatives: family.items.length,
       eventsPerBranch: 5_000,
-      latencyMs,
-      ...work,
+      coldLatencyMs,
+      warmLatencyMs,
+      coldWork,
+      warmWork: work,
     });
     expect(family.items).toHaveLength(25);
-    expect(work).toEqual({
+    expect(refreshed.items).toEqual(family.items);
+    expect(coldWork).toEqual({
+      getLatestCursorCalls: 26,
+      loadSnapshotCalls: 26,
       loadEventsCalls: 26,
       loadedEvents: 130_000,
+      saveSnapshotCalls: 26,
+      getSessionCalls: 26,
+      getTaskCalls: 25,
+    });
+    expect(work).toEqual({
+      getLatestCursorCalls: 26,
+      loadSnapshotCalls: 26,
+      loadEventsCalls: 0,
+      loadedEvents: 0,
+      saveSnapshotCalls: 0,
       getSessionCalls: 26,
       getTaskCalls: 25,
     });
