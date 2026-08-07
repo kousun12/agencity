@@ -19,7 +19,7 @@ This plan adds a durable, attributable reasoning-effort setting with:
 6. call-level provenance that records the exact dispatch chosen before an outbox-backed model effect;
 7. explicit unsupported, unknown, stale, catalog-mapped, gateway-normalized, and surface-incompatible states.
 
-The default is `provider-default`. Existing retained sessions and new sessions without an explicit setting continue to omit reasoning parameters, preserving current provider behavior. Agencity does not infer support from a model name, silently clamp a level, silently drop incompatible settings, or retry a failed model call with another effort.
+The default is `provider-default`. Existing retained sessions and new sessions without an explicit setting continue to omit reasoning parameters, preserving current provider behavior. Agencity does not infer support from uncataloged naming patterns, silently clamp a level, silently drop incompatible settings, or retry a failed model call with another effort.
 
 ## Verified baseline
 
@@ -114,7 +114,7 @@ The relevant reference is Prime Agent commit [`b817a089`](https://github.com/Pri
 - **Catalog-mapped capability:** Agencity maps a named level to a reviewed, model-specific token budget because the provider exposes budget-based thinking rather than that named level.
 - **Gateway-normalized capability:** Vercel accepts a standard effort but may map it to a different backing-provider level.
 - **Surface-compatible capability:** The selected provider API format is documented to carry the requested control to the selected model. A provider-level reasoning tag alone is insufficient.
-- **Capability source:** The provider metadata, gateway contract, built-in catalog, operator configuration, or stale cache from which a normalized capability came.
+- **Capability evidence:** Field-level provenance identifying the provider metadata, gateway contract, built-in catalog, operator configuration, or stale cache from which each normalized capability field came.
 - **Reasoning dispatch:** The immutable provider-facing mode and value resolved before a model effect is appended.
 - **Catalog cache:** A non-canonical, replaceable profile record used for offline listing and bounded discovery traffic.
 
@@ -308,7 +308,7 @@ The complete dispatch is:
 - validated by the model executor;
 - used directly by the provider adapter without another discovery lookup.
 
-For `provider-default`, the dispatch mode is `omitted`, `reasoningOutput` is `provider-default`, no live discovery is required, and the provider receives no reasoning controls. Explicit effort uses `reasoningOutput: "omitted"` so adapters pin `exclude` or `display` behavior instead of returning reasoning text. For Vercel, the mode is `gateway-normalized`; the record describes the requested value and never invents an applied backing-provider value. The fingerprint covers the normalized capability fields, source revision, staleness, chosen transport, API surface, output handling, and any exact budget.
+For `provider-default`, the dispatch mode is `omitted`, `reasoningOutput` is `provider-default`, no live discovery is required, and the provider receives no reasoning controls. Explicit effort uses `reasoningOutput: "omitted"` so adapters pin `exclude` or `display` behavior instead of returning reasoning text. For Vercel, the mode is `gateway-normalized`; the record describes the requested value and never invents an applied backing-provider value. The fingerprint covers the normalized capability fields, evidence revisions, staleness, chosen transport, API surface, output handling, and any exact budget.
 
 ### Version-1 event compatibility
 
@@ -339,7 +339,7 @@ Resolution precedence for a field is:
 
 An omitted provider field is not an explicit denial. `unsupported` outranks a lower-layer positive claim only when the higher layer explicitly states unsupported behavior.
 
-The result includes source and staleness for each capability. A catalog refresh cannot mutate a branch's selected effort or a committed outbox request.
+The result includes field-level evidence and aggregate staleness for each capability. A catalog refresh cannot mutate a branch's selected effort or a committed outbox request.
 
 Official built-in catalog entries apply only to the documented official endpoint identity. A custom `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, or `AI_GATEWAY_BASE_URL` does not inherit official capability claims merely because it uses the same provider name or a compatible wire format; it needs explicit operator metadata or remains unknown.
 
@@ -469,7 +469,7 @@ Extend existing surfaces:
 
 - `POST /sessions/:session/model?branch=:branch` accepts the complete `ModelConfiguration`, including `reasoningEffort`;
 - `GET /model-catalog?provider=:provider` returns bounded normalized descriptors;
-- `GET /model-catalog?provider=:provider&refresh=1` requests a refresh and returns cached fallback plus typed refresh status when the remote request fails;
+- `POST /model-catalog/refresh` with `{ provider }` requests a refresh and returns cached fallback plus typed refresh status when the remote request fails;
 - `GET /product/config` includes per-model workspace effort preferences;
 - `POST /product/config/reasoning-effort` sets or clears `{ model: "provider:model", effort }`.
 
@@ -500,7 +500,7 @@ The selector shows:
 - current effort;
 - the documented provider/model default when known;
 - exact, catalog-mapped, or gateway-normalized levels;
-- capability source and stale state;
+- contributing capability evidence and stale state;
 - a concise explanation for unsupported or unknown control.
 
 `provider-default` is always the first option. Unsupported levels cannot receive focus. Selecting the existing level is a no-op. Historical projection and active-work guards match `/model`.
@@ -530,7 +530,7 @@ When `--model` is omitted from the config command, the current workspace default
 
 `--effort` does not silently mutate or get ignored on a resumed branch. As with the existing `--model` behavior, the ordinary entrypoint fails with guidance to use `agencity new --effort ...` or `/effort` on an idle retained branch.
 
-JSON output includes canonical effort, capability status, source, staleness, catalog-mapped semantics, surface compatibility, and gateway-normalized semantics as typed fields rather than presentation strings.
+JSON output includes canonical effort, capability status, field-level evidence, staleness, catalog-mapped semantics, surface compatibility, and gateway-normalized semantics as typed fields rather than presentation strings.
 
 ## Execution, attribution, and recovery
 
@@ -637,7 +637,7 @@ Update `docs/mutable-tables.md` for the cache classification and `docs/security.
 
 ### 6. Documentation and release evidence
 
-- Update public API, console SDK, protocol, configuration, user guide, security, mutable-table, and verification documents.
+- Update public API, console SDK, protocol, configuration, user guide, architecture, data-lifecycle, security, mutable-table, and verification documents.
 - Update `AGENTS.md` current implementation status only after the user-visible product path is implemented and verified.
 - Run the deterministic full suite and report external provider rows separately as pass, fail, or skip.
 
