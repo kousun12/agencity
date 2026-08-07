@@ -5,11 +5,12 @@ import {
   ProtocolClientError,
   type AgentClient, type BranchWatchHandlers, type ProtocolCapabilities,
 } from "../protocol/index.ts";
-import type { RecoverySummaryView } from "../runtime/index.ts";
+import type { FamilyAgentRecord, RecoverySummaryView } from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
 import type { ModelConfiguration } from "../domain/index.ts";
 import {
   type TerminalConnectionState,
+  type TerminalFamilyNavigation,
   type TerminalPresentation,
 } from "./view-model.ts";
 import {
@@ -43,6 +44,11 @@ export interface TerminalUIOptions {
   readonly onDetail?: (detail: TerminalDetail | null) => void;
   readonly onProvisionalOutput?: (effectId: string, value: string) => void;
   readonly onProvisionalDiscard?: (effectIds: readonly string[], reason: "committed" | "disconnect" | "reconnect") => void;
+  readonly familyRefreshIntervalMs?: number;
+  readonly familyRefreshScheduler?: {
+    setTimeout(callback: () => void, milliseconds: number): unknown;
+    clearTimeout(handle: unknown): void;
+  };
 }
 
 export type TerminalPresentationListener = (presentation: TerminalPresentation) => void;
@@ -209,6 +215,13 @@ export function renderEvent(event: AgentEvent): string | null {
 }
 
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]);
+const FAMILY_REFRESH_EVENT_TYPES = new Set<AgentEvent["type"]>([
+  "TaskCreated", "SubagentAdmitted", "TaskStatusChanged", "SubagentCancellationRequested",
+  "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered", "SessionNamed", "SessionStatusChanged",
+  "AgentRunRequested", "AgentRunUserInputRequested", "AgentRunUserInputReceived",
+  "AgentRunCancellationRequested", "AgentRunStatusChanged", "BudgetExceeded",
+  "EffectOutcomeRecorded", "EffectReconciliationRecorded",
+]);
 
 export class TerminalUI {
   readonly #output: Pick<NodeJS.WriteStream, "write">;
@@ -242,6 +255,22 @@ export class TerminalUI {
   #readline: ReadlineInterface | null = null;
   #pendingCredentialProvider: string | null = null;
   #lastDetail: TerminalDetail | null = null;
+  #family: TerminalFamilyNavigation = {
+    route: { sessionId: "", branchId: "" },
+    parent: null,
+    children: [],
+    ancestry: [],
+    refresh: "unavailable",
+    generation: 0,
+  };
+  #familyRefreshPromise: Promise<void> | null = null;
+  #familyRefreshQueued = false;
+  #familyResolveAncestryQueued = false;
+  #familyRefreshTimer: unknown = null;
+  #familyBrowserOpen = false;
+  #familyGeneration = 0;
+  #navigationGeneration = 0;
+  #navigationTail: Promise<void> = Promise.resolve();
 
   constructor(readonly client: TerminalAgentClient, readonly options: TerminalUIOptions = {}) {
     this.#input = options.input ?? stdin;
@@ -290,6 +319,16 @@ export class TerminalUI {
     const snapshot = await this.client.snapshot(sessionId, branchId);
     this.#liveState = snapshot.state;
     this.#viewState = snapshot.state;
+    this.#navigationGeneration++;
+    this.#family = {
+      route: { sessionId, branchId },
+      parent: null,
+      children: [],
+      ancestry: [snapshot.state.sessionName ?? "Unnamed session"],
+      refresh: "refreshing",
+      generation: ++this.#familyGeneration,
+    };
+    await this.#refreshFamily(true);
     const recovery = await this.client.recoverySummary(sessionId, branchId);
     if (announce) {
       this.#write(`${renderStartupStatus(snapshot.state, capabilities, recovery)}\n`);
@@ -316,6 +355,9 @@ export class TerminalUI {
       this.abortPendingOperations();
     }
     this.#watchController?.abort();
+    this.#familyBrowserOpen = false;
+    this.#clearFamilyRefreshTimer();
+    this.#familyGeneration++;
     this.#removeSigintHandler();
     this.#detachController?.abort();
     this.#detachController = null;
@@ -333,6 +375,8 @@ export class TerminalUI {
 
   abortPendingOperations(): void {
     this.#closing = true;
+    this.#clearFamilyRefreshTimer();
+    this.#familyGeneration++;
     this.client.abortPendingRequests?.("Terminal detached");
   }
 
@@ -344,7 +388,30 @@ export class TerminalUI {
       historicalCursor: this.#historicalCursor,
       connection: this.#connection,
       provisionalRunIds: [...this.#agentWorkingRunIds],
+      family: this.#family,
     };
+  }
+
+  async openFamilyChild(sessionId: string, branchId: string): Promise<void> {
+    this.#assertFamilyNavigationAvailable();
+    const child = this.#family.children.find(item => item.sessionId === sessionId && item.branchId === branchId);
+    if (!child) throw new Error("The selected route is not a direct child of the current agent");
+    if (child.activity === "unavailable") throw new Error("The selected child route is unavailable");
+    await this.#queueRouteTransition(sessionId, branchId);
+  }
+
+  async openFamilyParent(): Promise<void> {
+    this.#assertFamilyNavigationAvailable();
+    const parent = this.#family.parent;
+    if (!parent) throw new Error("The current agent has no retained parent route");
+    if (parent.activity === "unavailable") throw new Error("The retained parent route is unavailable");
+    await this.#queueRouteTransition(parent.sessionId, parent.branchId);
+  }
+
+  setFamilyBrowserOpen(open: boolean): void {
+    this.#familyBrowserOpen = open;
+    if (open) void this.#refreshFamily();
+    this.#scheduleFamilyRefresh();
   }
 
   subscribePresentation(listener: TerminalPresentationListener): () => void {
@@ -386,11 +453,11 @@ export class TerminalUI {
     if (line === "/live") { this.#historicalCursor = null; this.#viewState = this.#liveState; this.#write("Returned to live state.\n"); this.#publish(); return "continue"; }
     if (line === "/info" || line === "/status") { await this.#info(); return "continue"; }
     if (line === "/sessions") { this.#detail("/sessions", await this.client.productSessions()); return "continue"; }
-    if (line.startsWith("/sessions select ")) { const target=line.slice(17).trim(); const selected=await this.client.productSelect(target); await this.#switch(selected.sessionId, selected.branchId); return "continue"; }
+    if (line.startsWith("/sessions select ")) { const target=line.slice(17).trim(); const selected=await this.client.productSelect(target); await this.#queueRouteTransition(selected.sessionId, selected.branchId); return "continue"; }
     if (line === "/new" || line.startsWith("/new ")) {
       const current=this.#liveState; const requestedName=line.slice(5).trim();const created=await this.client.createSession(this.options.workspaceId ?? current?.workspaceId ?? "default", current ? { model: current.model, ...(requestedName ? { sessionName: requestedName } : {}) } : {});
       if(this.#productCatalog)await this.client.productSelect(created.sessionId, created.branchId);
-      await this.#switch(created.sessionId, created.branchId); return "continue";
+      await this.#queueRouteTransition(created.sessionId, created.branchId); return "continue";
     }
     if (line === "/model" || line.startsWith("/model ")) { await this.#model(line.slice(6).trim()); return "continue"; }
     if (line === "/history" || line.startsWith("/history ")) { await this.#history(line.slice(8).trim()); return "continue"; }
@@ -421,8 +488,8 @@ export class TerminalUI {
     if (line.startsWith("/refine propose-json ")) { const proposed=await this.client.refine(this.#sessionId,this.#branchId,JSON.parse(line.slice(21)));this.#detail("/refine", await this.client.validateRefinement(this.#sessionId,this.#branchId,proposed.proposalId));return "continue"; }
     if (line.startsWith("/refine ")) { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,{instructions:line.slice(8)}));return "continue"; }
     if (line.startsWith("/rollback ")) { const [proposalId,...reason]=line.slice(10).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/rollback requires PROPOSAL_ID REASON");this.#detail("/rollback", await this.client.rollback(this.#sessionId,this.#branchId,proposalId,reason.join(" ")));return "continue"; }
-    if (line.startsWith("/branch ")) { const [,cursor,...name]=line.split(/\s+/);if(!cursor)throw new Error("/branch requires CURSOR [NAME]");const fork=await this.client.fork(this.#sessionId,this.#branchId,cursor,name.join(" ")||undefined);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,fork.branchId);await this.#switch(this.#sessionId,fork.branchId);return "continue"; }
-    if (line === "/resume" || line.startsWith("/resume ")) { const branch=line.slice(7).trim()||this.#branchId;await this.client.resume(this.#sessionId,branch);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,branch);await this.#switch(this.#sessionId,branch);return "continue"; }
+    if (line.startsWith("/branch ")) { const [,cursor,...name]=line.split(/\s+/);if(!cursor)throw new Error("/branch requires CURSOR [NAME]");const fork=await this.client.fork(this.#sessionId,this.#branchId,cursor,name.join(" ")||undefined);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,fork.branchId);await this.#queueRouteTransition(this.#sessionId,fork.branchId);return "continue"; }
+    if (line === "/resume" || line.startsWith("/resume ")) { const branch=line.slice(7).trim()||this.#branchId;await this.client.resume(this.#sessionId,branch);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,branch);await this.#queueRouteTransition(this.#sessionId,branch);return "continue"; }
     if (line === "/context") { this.#detail("/context", await this.client.inspectContext(this.#sessionId,this.#branchId));return "continue"; }
     if (line === "/compact" || line.startsWith("/compact ")) {
       const [, strategyName, ...guidance] = line.split(/\s+/);
@@ -469,14 +536,20 @@ export class TerminalUI {
     return decision;
   }
 
-  #watchHandlers(): BranchWatchHandlers {
+  #watchHandlers(sessionId: string, branchId: string, navigationGeneration: number): BranchWatchHandlers {
+    const currentRoute = (): boolean =>
+      navigationGeneration === this.#navigationGeneration
+      && sessionId === this.#sessionId
+      && branchId === this.#branchId;
     return {
       onSnapshot: (snapshot) => {
+        if (!currentRoute()) return;
         this.#liveState = snapshot.state;
         if (this.#historicalCursor === null) this.#viewState = snapshot.state;
         this.#publish();
       },
       onEvent: (event) => {
+        if (!currentRoute()) return;
         if (!this.#liveState) return;
         this.#liveState = reduceAgentState(this.#liveState, event);
         if (event.type === "EffectOutcomeRecorded") {
@@ -515,8 +588,10 @@ export class TerminalUI {
           }
         }
         this.#publish();
+        if (FAMILY_REFRESH_EVENT_TYPES.has(event.type)) void this.#refreshFamily();
       },
       onProgress: (progress) => {
+        if (!currentRoute()) return;
         const text = progress.kind === "model-output-delta" && progress.value && typeof progress.value === "object" && "text" in progress.value
           ? String((progress.value as { text: string }).text)
           : "";
@@ -543,6 +618,7 @@ export class TerminalUI {
         this.#publish();
       },
       onProgressDiscard: (ids, reason) => {
+        if (!currentRoute()) return;
         let discardedVisibleProgress = false;
         const affectedRunIds = new Set<string>();
         for (const id of ids) {
@@ -561,12 +637,21 @@ export class TerminalUI {
         this.#publish();
       },
       onReconnect: () => {
+        if (!currentRoute()) return;
         this.#connection = "reconnecting";
         this.#publish();
+        void this.#refreshFamily();
       },
       onConnectionState: (state) => {
+        if (!currentRoute()) return;
         this.#connection = state;
         this.#publish();
+        if (state === "connected") {
+          void this.#refreshFamily();
+          this.#scheduleFamilyRefresh();
+        } else {
+          this.#clearFamilyRefreshTimer();
+        }
       },
     };
   }
@@ -578,9 +663,17 @@ export class TerminalUI {
     this.#publish();
     const controller = new AbortController();
     this.#watchController = controller;
-    this.#watchPromise = this.client.watchBranch(this.#sessionId, this.#branchId, this.#watchHandlers(), { signal: controller.signal });
+    const sessionId = this.#sessionId;
+    const branchId = this.#branchId;
+    const navigationGeneration = this.#navigationGeneration;
+    this.#watchPromise = this.client.watchBranch(
+      sessionId,
+      branchId,
+      this.#watchHandlers(sessionId, branchId, navigationGeneration),
+      { signal: controller.signal },
+    );
     void this.#watchPromise.catch((error) => {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && navigationGeneration === this.#navigationGeneration) {
         this.#connection = "disconnected";
         this.#write(`[protocol watch failed] ${scrubText(error instanceof Error ? error.message : String(error))}\n`);
         this.#publish();
@@ -588,16 +681,172 @@ export class TerminalUI {
     });
   }
 
-  async #switch(sessionId:string,branchId:string):Promise<void>{
+  #assertFamilyNavigationAvailable(): void {
+    if (this.#detached || this.#closing) throw new Error("The terminal is detached");
+    if (this.#historicalCursor !== null) throw new Error("Return to live before opening another agent");
+    if (this.#pendingCredentialProvider !== null) throw new Error("Finish or cancel provider login before opening another agent");
+  }
+
+  #queueRouteTransition(sessionId: string, branchId: string): Promise<void> {
+    const operation = this.#navigationTail.then(() => this.#transitionRoute(sessionId, branchId));
+    this.#navigationTail = operation.catch(() => {});
+    return operation;
+  }
+
+  async #transitionRoute(sessionId: string, branchId: string): Promise<void> {
+    if (this.#closing || this.#detached) throw new Error("The terminal is detached");
+    const snapshot = await this.client.snapshot(sessionId, branchId);
+    if (this.#closing || this.#detached) throw new Error("The terminal detached while opening the route");
+
     this.#watchController?.abort();
-    await this.#watchPromise?.catch(()=>{});
-    if (this.#closing) return;
-    this.#sessionId=sessionId;this.#branchId=branchId;this.#historicalCursor=null;this.#pendingCredentialProvider=null;this.#lastDetail=null;this.options.onDetail?.(null);this.#progress.clear();this.#streamedEffectIds.clear();this.#streamedCallIds.clear();this.#visibleProgressEffectIds.clear();this.#agentProgressRunByEffect.clear();this.#agentWorkingRunIds.clear();this.#agentWorkingAnnouncementRunIds.clear();
-    const snapshot=await this.client.snapshot(sessionId,branchId);
-    if (this.#closing) return;
-    this.#liveState=snapshot.state;this.#viewState=snapshot.state;
-    this.#interrupts.reset();await this.#startWatch();
-    const sessionName=snapshot.state.sessionName??"unnamed session";const branchName=snapshot.state.branch.name??"unnamed branch";this.#write(`Switched to ${sessionName}/${branchName}.\n`);this.#publish();
+    await this.#watchPromise?.catch(() => {});
+    if (this.#closing || this.#detached) throw new Error("The terminal detached while opening the route");
+
+    this.#navigationGeneration++;
+    this.#familyGeneration++;
+    this.#clearFamilyRefreshTimer();
+    this.#sessionId = sessionId;
+    this.#branchId = branchId;
+    this.#historicalCursor = null;
+    this.#pendingCredentialProvider = null;
+    this.#lastDetail = null;
+    this.options.onDetail?.(null);
+    this.#progress.clear();
+    this.#streamedEffectIds.clear();
+    this.#streamedCallIds.clear();
+    this.#visibleProgressEffectIds.clear();
+    this.#agentProgressRunByEffect.clear();
+    this.#agentWorkingRunIds.clear();
+    this.#agentWorkingAnnouncementRunIds.clear();
+    this.#liveState = snapshot.state;
+    this.#viewState = snapshot.state;
+    this.#family = {
+      route: { sessionId, branchId },
+      parent: null,
+      children: [],
+      ancestry: [snapshot.state.sessionName ?? "Unnamed session"],
+      refresh: "refreshing",
+      generation: this.#familyGeneration,
+    };
+    this.#interrupts.reset();
+    await this.#startWatch();
+    await this.#refreshFamily(true);
+    const sessionName = snapshot.state.sessionName ?? "unnamed session";
+    const branchName = snapshot.state.branch.name ?? "unnamed branch";
+    this.#write(`Switched to ${sessionName}/${branchName}.\n`);
+    this.#publish();
+  }
+
+  async #refreshFamily(resolveAncestry = false): Promise<void> {
+    if (this.#detached || this.#closing || !this.#liveState) return;
+    if (this.#familyRefreshPromise) {
+      this.#familyRefreshQueued = true;
+      this.#familyResolveAncestryQueued ||= resolveAncestry;
+      await this.#familyRefreshPromise;
+      return;
+    }
+    const operation = this.#drainFamilyRefresh(resolveAncestry);
+    this.#familyRefreshPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.#familyRefreshPromise === operation) this.#familyRefreshPromise = null;
+      this.#scheduleFamilyRefresh();
+    }
+  }
+
+  async #drainFamilyRefresh(resolveAncestry: boolean): Promise<void> {
+    let includeAncestry = resolveAncestry;
+    do {
+      this.#familyRefreshQueued = false;
+      this.#familyResolveAncestryQueued = false;
+      await this.#performFamilyRefresh(includeAncestry);
+      includeAncestry = this.#familyResolveAncestryQueued;
+    } while (this.#familyRefreshQueued && !this.#detached && !this.#closing);
+  }
+
+  async #performFamilyRefresh(resolveAncestry: boolean): Promise<void> {
+    const sessionId = this.#sessionId;
+    const branchId = this.#branchId;
+    const state = this.#liveState;
+    if (!state) return;
+    const generation = ++this.#familyGeneration;
+    this.#family = { ...this.#family, refresh: "refreshing", generation };
+    this.#publish();
+    try {
+      const family = await this.client.agents(sessionId, branchId);
+      const parent = family.items.find(item => item.relationship === "parent") ?? null;
+      const children = family.items.filter(item => item.relationship === "child");
+      const ancestry = resolveAncestry
+        ? await this.#resolveAncestry(state, parent)
+        : this.#family.ancestry;
+      if (generation !== this.#familyGeneration || sessionId !== this.#sessionId || branchId !== this.#branchId) return;
+      this.#family = {
+        route: { sessionId, branchId },
+        parent,
+        children,
+        ancestry,
+        refresh: "current",
+        generation,
+      };
+    } catch {
+      if (generation !== this.#familyGeneration || sessionId !== this.#sessionId || branchId !== this.#branchId) return;
+      const hadFamilyData = this.#family.parent !== null || this.#family.children.length > 0;
+      this.#family = {
+        ...this.#family,
+        refresh: hadFamilyData ? "stale" : "unavailable",
+        generation,
+      };
+    }
+    this.#publish();
+  }
+
+  async #resolveAncestry(state: AgentState, directParent: FamilyAgentRecord | null): Promise<string[]> {
+    const labels = [state.sessionName ?? "Unnamed session"];
+    let parentSessionId = state.parentSessionId;
+    let parentBranchId = state.parentBranchId;
+    const visited = new Set([state.sessionId]);
+    for (let depth = 0; depth < 8 && parentSessionId && parentBranchId; depth++) {
+      if (visited.has(parentSessionId)) break;
+      visited.add(parentSessionId);
+      try {
+        const snapshot = await this.client.snapshot(parentSessionId, parentBranchId);
+        labels.unshift(snapshot.state.sessionName ?? "Unnamed session");
+        parentSessionId = snapshot.state.parentSessionId;
+        parentBranchId = snapshot.state.parentBranchId;
+      } catch {
+        labels.unshift(directParent?.name ?? "Unavailable parent");
+        break;
+      }
+    }
+    return labels;
+  }
+
+  #scheduleFamilyRefresh(): void {
+    this.#clearFamilyRefreshTimer();
+    if (this.#detached || this.#closing || this.#connection !== "connected") return;
+    const nonterminalChild = this.#family.children.some(child =>
+      child.taskStatus !== null && ["pending", "admitted", "running"].includes(child.taskStatus));
+    if (!this.#familyBrowserOpen && !nonterminalChild) return;
+    const milliseconds = Math.min(1_000, Math.max(10, this.options.familyRefreshIntervalMs ?? 1_000));
+    const callback = (): void => {
+      this.#familyRefreshTimer = null;
+      void this.#refreshFamily();
+    };
+    this.#familyRefreshTimer = this.options.familyRefreshScheduler
+      ? this.options.familyRefreshScheduler.setTimeout(callback, milliseconds)
+      : setTimeout(callback, milliseconds);
+    (this.#familyRefreshTimer as { unref?: () => void } | null)?.unref?.();
+  }
+
+  #clearFamilyRefreshTimer(): void {
+    if (this.#familyRefreshTimer === null) return;
+    if (this.options.familyRefreshScheduler) {
+      this.options.familyRefreshScheduler.clearTimeout(this.#familyRefreshTimer);
+    } else {
+      clearTimeout(this.#familyRefreshTimer as ReturnType<typeof setTimeout>);
+    }
+    this.#familyRefreshTimer = null;
   }
 
   async #history(cursor:string):Promise<void>{
@@ -656,7 +905,7 @@ export class TerminalUI {
   async #schedule(command:string):Promise<void>{const once=/^once\s+(\S+)\s+([\s\S]+)$/.exec(command);const every=/^every\s+(\d+)\s+([\s\S]+)$/.exec(command);if(once){this.#detail("/schedule", await this.client.createSchedule(this.#sessionId,this.#branchId,{at:once[1]!,prompt:once[2]!}));return;}if(every){this.#detail("/schedule", await this.client.createSchedule(this.#sessionId,this.#branchId,{intervalMs:Number(every[1]),prompt:every[2]!}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/schedule once ISO PROMPT|every MS PROMPT|pause N|resume N|clear N");const item=(await this.client.schedules(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Schedule number not found");this.#detail("/schedule", change[1]==="pause"?await this.client.pauseSchedule(item.scheduleId):change[1]==="resume"?await this.client.resumeSchedule(item.scheduleId):await this.client.clearSchedule(item.scheduleId));}
   async #reconcile(command:string):Promise<void>{const match=/^(\S+)\s+(succeeded|failed|no_effect|still_unknown)\s+([\s\S]+)$/.exec(command);if(!match)throw new Error("/reconcile EFFECT_ID succeeded|failed|no_effect|still_unknown SUMMARY");this.#detail("/reconcile", await this.client.reconcileUnknownEffect(this.#sessionId,this.#branchId,match[1]!,{assessment:match[2] as "succeeded"|"failed"|"no_effect"|"still_unknown",summary:match[3]!,recordedBy:"terminal-user"}));this.#write("Assessment recorded as evidence. The durable effect remains unknown and was not retried. Start a new /run only if safe.\n");}
   #agentRunIdForEffect(effectId:string):string|null{for(const run of Object.values(this.#liveState?.agentRuns??{})){for(const step of run.steps){if(step.effectId===effectId||step.modelAttempts.some((attempt)=>attempt.effectId===effectId))return run.id;}}return null;}
-  #requestDetach(decision?:Extract<InterruptDecision,{action:"detach"}>):boolean{if(this.#detached)return false;this.#detached=true;if(decision)this.#lastDetachDecision=decision;this.#removeSigintHandler();this.#detachController?.abort();this.#watchController?.abort();return true;}
+  #requestDetach(decision?:Extract<InterruptDecision,{action:"detach"}>):boolean{if(this.#detached)return false;this.#detached=true;this.#familyGeneration++;this.#clearFamilyRefreshTimer();if(decision)this.#lastDetachDecision=decision;this.#removeSigintHandler();this.#detachController?.abort();this.#watchController?.abort();return true;}
   #removeSigintHandler():void{if(!this.#sigintHandler)return;process.off("SIGINT",this.#sigintHandler);this.#sigintHandler=null;}
   #activeRun(){return Object.values(this.#liveState?.agentRuns??{}).find((run)=>!TERMINAL_RUN_STATUSES.has(run.status));}
   #requireState():AgentState{if(!this.#viewState)throw new Error("No projected state");return this.#viewState;}

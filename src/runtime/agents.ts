@@ -1,6 +1,6 @@
 import {
   FamilyReachError, NotFoundError, ValidationError, assertJsonValue, newId, projectEvents,
-  type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type NewAgentEvent, type TaskStatus,
+  type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type NewAgentEvent, type TaskStatus,
 } from "../domain/index.ts";
 import {
   requireRecursiveStorage, type AgentStorage, type MailboxRecord, type SessionRecord, type TaskRecord,
@@ -55,7 +55,13 @@ export interface FamilyAgentRecord {
   readonly sessionId: string; readonly branchId: string; readonly name: string | null;
   readonly relationship: FamilyRelationship; readonly depth: number; readonly status: string;
   readonly taskId: string | null; readonly taskStatus: TaskStatus | null;
+  readonly task: string | null; readonly model: ModelConfiguration | null; readonly cancellationRequested: boolean;
+  readonly activity: FamilyAgentActivity; readonly activityReason: FamilyAgentActivityReason;
 }
+export type FamilyAgentActivity = "working" | "waiting" | "idle" | "attention" | "ended" | "unavailable";
+export type FamilyAgentActivityReason =
+  | "waiting_for_user" | "permission_required" | "blocked" | "failed" | "budget_exceeded"
+  | "unknown" | "cancellation_pending" | "cancelled" | "archived" | "missing_state" | null;
 export interface FamilyListResult { readonly items: FamilyAgentRecord[]; }
 export interface MailboxListOptions {
   readonly direction?: "inbound" | "outbound" | "all";
@@ -368,22 +374,57 @@ export class AgentService {
   async listFamily(sessionId: string, branchId: string): Promise<FamilyListResult> {
     const source = await this.#recursive.getSession(sessionId);
     if (!source) throw new NotFoundError("session", sessionId);
-    if (!(await this.storage.loadEvents(sessionId, { branchId })).length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
-    const candidates: Array<{ session: SessionRecord; branchId: string; relationship: FamilyRelationship }> = [];
+    const sourceEvents = await this.storage.loadEvents(sessionId, { branchId });
+    if (!sourceEvents.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
+    const sourceState = projectEvents(sourceEvents);
+    const candidates: FamilyCandidate[] = [];
     if (source.parentSessionId && source.parentBranchId) {
       const parent = await this.#recursive.getSession(source.parentSessionId);
-      if (parent) candidates.push({ session: parent, branchId: source.parentBranchId, relationship: "parent" });
-      for (const sibling of await this.#recursive.listChildren(source.parentSessionId)) {
-        if (sibling.sessionId !== source.sessionId) candidates.push({ session: sibling, branchId: sibling.initialBranchId, relationship: "sibling" });
+      candidates.push({
+        session: parent,
+        sessionId: source.parentSessionId,
+        branchId: source.parentBranchId,
+        relationship: "parent",
+        depth: Math.max(0, source.depth - 1),
+        taskId: source.taskId,
+        taskFallback: null,
+      });
+      const parentEvents = await this.storage.loadEvents(source.parentSessionId, { branchId: source.parentBranchId });
+      if (parentEvents.length) {
+        const parentState = projectEvents(parentEvents);
+        for (const siblingTask of Object.values(parentState.tasks)) {
+          if (siblingTask.childSessionId === source.sessionId || siblingTask.parentBranchId !== source.parentBranchId) continue;
+          const sibling = await this.#recursive.getSession(siblingTask.childSessionId);
+          candidates.push(candidateFromTask(sibling, siblingTask, "sibling", source.depth));
+        }
       }
     }
-    for (const child of await this.#recursive.listChildren(source.sessionId)) {
-      candidates.push({ session: child, branchId: child.initialBranchId, relationship: "child" });
+    for (const childTask of Object.values(sourceState.tasks)) {
+      if (childTask.parentSessionId !== sessionId || childTask.parentBranchId !== branchId) continue;
+      const child = await this.#recursive.getSession(childTask.childSessionId);
+      candidates.push(candidateFromTask(child, childTask, "child", source.depth + 1));
     }
-    const items = await Promise.all(candidates.map(async ({ session, branchId: targetBranch, relationship }): Promise<FamilyAgentRecord> => {
-      const state = projectEvents(await this.storage.loadEvents(session.sessionId, { branchId: targetBranch }));
-      const task = session.taskId ? await this.#recursive.getTask(session.taskId) : null;
-      return { sessionId: session.sessionId, branchId: targetBranch, name: state.sessionName ?? null, relationship, depth: session.depth, status: state.status, taskId: session.taskId, taskStatus: task?.status ?? null };
+    const items = await Promise.all(candidates.map(async (candidate): Promise<FamilyAgentRecord> => {
+      const task = candidate.taskId ? await this.#recursive.getTask(candidate.taskId) : null;
+      const events = candidate.session
+        ? await this.storage.loadEvents(candidate.sessionId, { branchId: candidate.branchId })
+        : [];
+      const state = events.length ? projectEvents(events) : null;
+      const activity = deriveFamilyAgentActivity(state, task, candidate.taskId !== null);
+      return {
+        sessionId: candidate.sessionId,
+        branchId: candidate.branchId,
+        name: state?.sessionName ?? null,
+        relationship: candidate.relationship,
+        depth: candidate.session?.depth ?? candidate.depth,
+        status: state?.status ?? "unavailable",
+        taskId: candidate.taskId,
+        taskStatus: task?.status ?? null,
+        task: task?.task ?? candidate.taskFallback,
+        model: state?.model ?? task?.model ?? null,
+        cancellationRequested: task?.cancellationRequested ?? false,
+        ...activity,
+      };
     }));
     items.sort((left, right) => relationshipRank(left.relationship) - relationshipRank(right.relationship) || (left.name ?? left.sessionId).localeCompare(right.name ?? right.sessionId) || left.sessionId.localeCompare(right.sessionId));
     return { items };
@@ -873,6 +914,87 @@ export class AgentService {
     return result;
   }
 
+}
+
+interface FamilyCandidate {
+  readonly session: SessionRecord | null;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly relationship: FamilyRelationship;
+  readonly depth: number;
+  readonly taskId: string | null;
+  readonly taskFallback: string | null;
+}
+
+function candidateFromTask(
+  session: SessionRecord | null,
+  task: AgentState["tasks"][string],
+  relationship: "child" | "sibling",
+  depth: number,
+): FamilyCandidate {
+  return {
+    session,
+    sessionId: task.childSessionId,
+    branchId: task.childBranchId,
+    relationship,
+    depth,
+    taskId: task.id,
+    taskFallback: task.task,
+  };
+}
+
+function latestAgentRun(state: AgentState): AgentRunState | null {
+  let selected: AgentRunState | null = null;
+  let selectedOrder = -1;
+  const order = new Map(state.appliedEventIds.map((eventId, index) => [eventId, index]));
+  for (const run of Object.values(state.agentRuns)) {
+    const runOrder = order.get(run.eventId) ?? -1;
+    if (runOrder > selectedOrder || runOrder === selectedOrder && run.id.localeCompare(selected?.id ?? "") > 0) {
+      selected = run;
+      selectedOrder = runOrder;
+    }
+  }
+  return selected;
+}
+
+export function deriveFamilyAgentActivity(
+  state: AgentState | null,
+  task: TaskRecord | null,
+  taskExpected = task !== null,
+): { readonly activity: FamilyAgentActivity; readonly activityReason: FamilyAgentActivityReason } {
+  if (!state || taskExpected && !task) return { activity: "unavailable", activityReason: "missing_state" };
+  const latestRun = latestAgentRun(state);
+  const unknownEffect = Object.values(state.effects).some(effect => effect.status === "unknown");
+  if (task?.cancellationRequested && !["completed", "failed", "cancelled"].includes(task.status) ||
+      latestRun?.cancellationRequested && latestRun.status !== "cancelled") {
+    return { activity: "attention", activityReason: "cancellation_pending" };
+  }
+  if (unknownEffect) return { activity: "attention", activityReason: "unknown" };
+  if (state.budget.exceeded || latestRun?.status === "budget_exceeded") {
+    return { activity: "attention", activityReason: "budget_exceeded" };
+  }
+  if (task?.status === "failed" || state.status === "failed" || latestRun?.status === "failed") {
+    return { activity: "attention", activityReason: "failed" };
+  }
+  if (latestRun?.status === "blocked") return { activity: "attention", activityReason: "blocked" };
+  if (latestRun?.status === "unknown") return { activity: "attention", activityReason: "unknown" };
+  if (task?.status === "cancelled" || latestRun?.status === "cancelled") {
+    return { activity: "ended", activityReason: "cancelled" };
+  }
+  if (state.status === "archived") return { activity: "ended", activityReason: "archived" };
+  if (latestRun?.status === "waiting_for_user") {
+    const pending = Object.values(latestRun.inputRequests).find(request => request.response === undefined);
+    return {
+      activity: "waiting",
+      activityReason: pending?.kind === "permission" ? "permission_required" : "waiting_for_user",
+    };
+  }
+  if (task && ["pending", "admitted", "running"].includes(task.status) ||
+      latestRun && ["queued", "running"].includes(latestRun.status) ||
+      state.status === "running") {
+    return { activity: "working", activityReason: null };
+  }
+  return { activity: "idle", activityReason: null };
 }
 
 

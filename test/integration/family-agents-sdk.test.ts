@@ -71,7 +71,15 @@ describe("FU-012 retained family messaging", () => {
       const handle = spawned.result as any;
       expect(handle.name).toBe("researcher");
       const roster = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.list();`);
-      expect((roster.result as any).items).toEqual([expect.objectContaining({ sessionId: handle.sessionId, name: "researcher", relationship: "child" })]);
+      expect((roster.result as any).items).toEqual([expect.objectContaining({
+        sessionId: handle.sessionId,
+        name: "researcher",
+        relationship: "child",
+        task: "wait",
+        cancellationRequested: false,
+        activity: "working",
+        activityReason: null,
+      })]);
 
       const childSend = await value.supervisor.executeCell(handle.sessionId, handle.branchId, `return sdk.agents.send({ target: "parent", content: "child reply", taskId: "${handle.taskId}" });`, [], "family-child-send");
       expect(childSend.result).toMatchObject({ fromSessionId: handle.sessionId, toSessionId: value.root.sessionId });
@@ -85,6 +93,63 @@ describe("FU-012 retained family messaging", () => {
       const duplicate = await value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "stable", intentKey: "same" });
       expect(duplicate).toMatchObject({ mailboxMessageId: retry.mailboxMessageId, existing: true });
       await expect(value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "changed", intentKey: "same" })).rejects.toThrow(/different durable meaning/i);
+    } finally { await value.supervisor.close(); }
+  });
+
+  test("family projection follows exact branch task edges and retains missing children as unavailable", async () => {
+    const value = await fixture();
+    try {
+      const child = await value.supervisor.agents.spawn(value.root.sessionId, value.root.branchId, {
+        task: "visible only from the admitting branch",
+        name: "exact child",
+        run: false,
+      });
+      const rootEvents = await value.supervisor.storage.loadEvents(value.root.sessionId, { branchId: value.root.branchId });
+      const fork = await value.supervisor.fork(
+        value.root.sessionId,
+        value.root.branchId,
+        rootEvents.at(-1)!.cursor,
+        "other branch",
+      );
+      expect((await value.supervisor.agents.listFamily(value.root.sessionId, fork)).items).toEqual([]);
+
+      await value.supervisor.storage.appendEvents([{
+        sessionId: value.root.sessionId,
+        branchId: value.root.branchId,
+        type: "TaskCreated",
+        producer: "supervisor",
+        idempotencyKey: "family-missing-child-task",
+        payload: {
+          taskId: "family-missing-task",
+          parentSessionId: value.root.sessionId,
+          parentBranchId: value.root.branchId,
+          childSessionId: "family-missing-session",
+          childBranchId: "family-missing-branch",
+          task: "State is intentionally missing",
+          model: { provider: "family-actions", model: "scripted" },
+          budget: {},
+        },
+      }]);
+      const family = await value.supervisor.agents.listFamily(value.root.sessionId, value.root.branchId);
+      expect(family.items.find(item => item.sessionId === child.sessionId)).toMatchObject({
+        branchId: child.branchId,
+        activity: "working",
+      });
+      expect(family.items.find(item => item.sessionId === "family-missing-session")).toEqual({
+        sessionId: "family-missing-session",
+        branchId: "family-missing-branch",
+        name: null,
+        relationship: "child",
+        depth: 1,
+        status: "unavailable",
+        taskId: "family-missing-task",
+        taskStatus: "pending",
+        task: "State is intentionally missing",
+        model: { provider: "family-actions", model: "scripted" },
+        cancellationRequested: false,
+        activity: "unavailable",
+        activityReason: "missing_state",
+      });
     } finally { await value.supervisor.close(); }
   });
 

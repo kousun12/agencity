@@ -15,7 +15,7 @@ Status meanings:
 | Capability | Status | Current behavior |
 |---|---|---|
 | Local terminal product | Supported | `agencity` and `bun run dev` resolve a workspace, create or resume durable work, and enter the same product flow. |
-| Full-screen terminal UI | Supported | The OpenTUI client consumes the public snapshot/event protocol, supports detach/catch-up, provider/model selection, contextual inspection, and a plain non-TTY transcript fallback. |
+| Full-screen terminal UI | Supported | The OpenTUI client consumes the public snapshot/event protocol, supports detach/catch-up, provider/model selection, contextual inspection, responsive direct-child browsing, exact parent/child branch navigation, and a plain non-TTY transcript fallback. Family opening is observational and disabled during historical inspection. |
 | Typed autonomous runs | Supported | Product tasks use strict version-1 model actions. Generated execution occurs only through validated TypeScript cells; final, clarification, permission, blocked, and failed are typed run control. |
 | Durable recovery | Supported | Canonical events, outbox effects, cells, tasks, mailboxes, goals, schedules, and recursive model handles recover at committed boundaries. |
 | Unknown-effect reconciliation | Supported | Operators can inspect and append evidence. Unknown status is not rewritten and no retry is authorized automatically. |

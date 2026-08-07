@@ -19,7 +19,14 @@ import {
   type InterruptDecision,
   type TerminalAgentClient,
 } from "./index.ts";
-import { buildTerminalScreen, type TerminalPresentation, type TerminalScreenView } from "./view-model.ts";
+import {
+  buildTerminalScreen,
+  formatTerminalBreadcrumb,
+  formatTerminalFamilySummary,
+  type TerminalFamilyChildView,
+  type TerminalPresentation,
+  type TerminalScreenView,
+} from "./view-model.ts";
 import {
   formatTerminalDetail,
   type TerminalDetail,
@@ -115,19 +122,51 @@ function renderTimeline(view: TerminalScreenView, expandedRunIds: ReadonlySet<st
     }
   }
 
-  if (view.tasks.length > 0) {
-    lines.push("AGENTS");
-    for (const task of view.tasks.slice(-8)) {
-      lines.push(`  ${task.status} — ${task.task}${task.cancellationRequested ? " · cancellation requested" : ""}`);
-      if (task.result) lines.push(`    ${task.result}`);
-    }
-    lines.push("");
-  }
-
   if (compactDetails) {
     lines.push("DETAILS", compactDetails, "");
   }
   return lines.join("\n").trimEnd();
+}
+
+function familyActivityMarker(activity: TerminalFamilyChildView["activity"]): string {
+  if (activity === "attention" || activity === "unavailable") return "!";
+  if (activity === "working") return "●";
+  if (activity === "waiting") return "◷";
+  if (activity === "ended") return "×";
+  return "○";
+}
+
+function renderFamilyBrowser(
+  view: TerminalScreenView,
+  selectedKey: string | null,
+  compact = false,
+  showModel = false,
+): string {
+  if (compact) {
+    const selected = view.familyChildren.find(child => child.key === selectedKey) ?? view.familyChildren[0];
+    return [
+      `AGENT FAMILY · ${view.sessionName}`,
+      selected ? `> ${familyActivityMarker(selected.activity)} ${selected.displayName} — ${selected.activityLabel}` : "No retained direct children.",
+    ].join("\n");
+  }
+  const lines = [
+    "AGENT FAMILY",
+    "",
+    `Current: ${view.sessionName}`,
+    view.familyRefresh === "current" ? "Direct children" : `Direct children · ${view.familyRefresh}`,
+  ];
+  for (const child of view.familyChildren) {
+    const selected = child.key === selectedKey;
+    lines.push(
+      `${selected ? ">" : " "} ${familyActivityMarker(child.activity)} ${child.displayName} — ${child.activityLabel}${showModel && child.model ? ` · ${child.model}` : ""}`,
+      `    ${child.task}`,
+    );
+    if (child.cancellationRequested) lines.push("    cancellation requested");
+    if (child.activityReasonLabel) lines.push(`    ${child.activityReasonLabel}`);
+  }
+  if (!view.familyChildren.length) lines.push("", "No retained direct children.");
+  lines.push("", "↑/↓ select · Enter/→ open · ←/Esc close · PgUp/PgDn scroll");
+  return lines.join("\n");
 }
 
 function paletteText(query: string): string {
@@ -199,6 +238,9 @@ export interface OpenTuiController {
   subscribePresentation(listener: (presentation: TerminalPresentation) => void): () => void;
   execute(line: string): Promise<"continue" | "detach">;
   handleInterrupt(): Promise<InterruptDecision>;
+  openFamilyChild?(sessionId: string, branchId: string): Promise<void>;
+  openFamilyParent?(): Promise<void>;
+  setFamilyBrowserOpen?(open: boolean): void;
   abortPendingOperations?(): void;
 }
 
@@ -212,6 +254,7 @@ export class OpenTuiApp {
   readonly #detailsText: TextRenderable;
   readonly #composerBox: BoxRenderable;
   readonly #composer: InputRenderable;
+  readonly #familySummary: TextRenderable;
   readonly #footer: TextRenderable;
   readonly #expandedRunIds = new Set<string>();
   readonly #provisionalOutput = new Map<string, string>();
@@ -233,6 +276,8 @@ export class OpenTuiApp {
   #closed = false;
   #activeOperation: Promise<void> | null = null;
   #secretBuffer = "";
+  #familyFocus: "composer" | "summary" | "browser" = "composer";
+  #familySelectedKey: string | null = null;
 
   constructor(readonly renderer: CliRenderer, readonly controller: OpenTuiController) {
     this.#view = buildTerminalScreen(controller.presentation);
@@ -325,6 +370,15 @@ export class OpenTuiApp {
         }
       },
     });
+    this.#familySummary = new TextRenderable(renderer, {
+      id: "agencity-family-summary",
+      height: 1,
+      paddingX: 1,
+      fg: COLORS.muted,
+      bg: COLORS.panel,
+      truncate: true,
+      wrapMode: "none",
+    });
     this.#footer = new TextRenderable(renderer, {
       id: "agencity-footer",
       height: 1,
@@ -343,11 +397,23 @@ export class OpenTuiApp {
     this.#root.add(this.#header);
     this.#root.add(this.#main);
     this.#root.add(this.#composerBox);
+    this.#root.add(this.#familySummary);
     this.#root.add(this.#footer);
     renderer.root.add(this.#root);
 
     this.#unsubscribe = controller.subscribePresentation(presentation => {
+      const previousIndex = this.#view.familyChildren.findIndex(child => child.key === this.#familySelectedKey);
       this.#view = buildTerminalScreen(presentation);
+      if (this.#familyFocus === "browser") {
+        const retained = this.#view.familyChildren.some(child => child.key === this.#familySelectedKey);
+        if (!retained) {
+          const nextIndex = Math.min(Math.max(0, previousIndex), Math.max(0, this.#view.familyChildren.length - 1));
+          this.#familySelectedKey = this.#view.familyChildren[nextIndex]?.key ?? null;
+        }
+        if (!this.#view.familyChildren.length) this.#focusComposer(false);
+      } else if (this.#familyFocus === "summary" && !this.#view.familySummary) {
+        this.#focusComposer(false);
+      }
       this.#render();
     });
     renderer.keyInput.on("keypress", this.#onKey);
@@ -436,6 +502,7 @@ export class OpenTuiApp {
   requestExit(): void {
     if (this.#closed) return;
     this.#closed = true;
+    if (this.#familyFocus === "browser") this.controller.setFamilyBrowserOpen?.(false);
     this.#clearSecretInput();
     if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
     if (this.#detailScrollTimer) clearTimeout(this.#detailScrollTimer);
@@ -445,6 +512,7 @@ export class OpenTuiApp {
 
   destroy(): void {
     this.#closed = true;
+    if (this.#familyFocus === "browser") this.controller.setFamilyBrowserOpen?.(false);
     this.#clearSecretInput();
     if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
     if (this.#detailScrollTimer) clearTimeout(this.#detailScrollTimer);
@@ -556,6 +624,81 @@ export class OpenTuiApp {
           else void this.#runCommand(`/model logout ${provider.name}`);
           return;
         }
+      }
+    }
+    const enter = key.name === "return" || key.name === "linefeed" || key.name === "kpenter";
+    if (this.#familyFocus === "browser" && !key.ctrl && !key.meta) {
+      if (key.name === "up" || key.name === "down") {
+        key.preventDefault();
+        key.stopPropagation();
+        this.#moveFamilySelection(key.name === "up" ? -1 : 1);
+        return;
+      }
+      if (key.name === "pageup" || key.name === "pagedown") {
+        key.preventDefault();
+        key.stopPropagation();
+        const page = Math.max(1, Math.floor((this.renderer.terminalHeight - 10) / 3));
+        this.#moveFamilySelection(key.name === "pageup" ? -page : page);
+        return;
+      }
+      if (enter || key.name === "right") {
+        key.preventDefault();
+        key.stopPropagation();
+        void this.#openSelectedFamilyChild();
+        return;
+      }
+      if (escape || key.name === "left") {
+        key.preventDefault();
+        key.stopPropagation();
+        this.#focusComposer();
+        return;
+      }
+      if (key.sequence && !/[\r\n\0-\x1f\x7f]/.test(key.sequence)) {
+        key.preventDefault();
+        key.stopPropagation();
+        return;
+      }
+    }
+    if (this.#familyFocus === "summary" && !key.ctrl && !key.meta) {
+      if (enter || key.name === "right") {
+        key.preventDefault();
+        key.stopPropagation();
+        this.#openFamilyBrowser();
+        return;
+      }
+      if (escape || key.name === "up" || key.name === "left") {
+        key.preventDefault();
+        key.stopPropagation();
+        this.#focusComposer();
+        return;
+      }
+      if (key.sequence && !/[\r\n\0-\x1f\x7f]/.test(key.sequence)) {
+        key.preventDefault();
+        key.stopPropagation();
+        const value = key.sequence;
+        this.#focusComposer(false);
+        this.#composer.value = `${this.#composer.value}${value}`;
+        this.#composer.focus();
+        this.#render();
+        return;
+      }
+    }
+    if (
+      this.#familyFocus === "composer"
+      && this.#composer.value.length === 0
+      && !this.#familyNavigationBlockedByInspector()
+    ) {
+      if (key.name === "down" && this.#view.familySummary) {
+        key.preventDefault();
+        key.stopPropagation();
+        this.#focusFamilySummary();
+        return;
+      }
+      if (key.name === "left" && this.#view.familyParent) {
+        key.preventDefault();
+        key.stopPropagation();
+        void this.#openFamilyParent();
+        return;
       }
     }
     if (key.shift && key.name === "r" && this.#detail && !this.#modelEntryProvider) {
@@ -695,13 +838,135 @@ export class OpenTuiApp {
     return this.#activeModelDetail()?.providers[this.#modelProviderIndex] ?? null;
   }
 
+  #familyNavigationBlockedByInspector(): boolean {
+    return Boolean(
+      this.controller.pendingSecretInput
+      || this.#paletteQuery
+      || this.#provisionalOutput.size
+      || this.#detail
+      || this.#modelEntryProvider
+      || this.#busy,
+    );
+  }
+
+  #focusFamilySummary(): void {
+    if (!this.#view.familySummary) return;
+    this.#familyFocus = "summary";
+    this.#composer.blur();
+    this.#render();
+  }
+
+  #openFamilyBrowser(): void {
+    if (this.#view.historicalCursor !== null) {
+      this.#showNotice("Return to live before opening another agent.", "warning");
+      return;
+    }
+    if (!this.#view.familyChildren.length) {
+      this.#focusComposer();
+      return;
+    }
+    this.#detail = null;
+    this.#rawDetail = false;
+    this.#paletteQuery = "";
+    this.#paletteDraft = null;
+    this.#familyFocus = "browser";
+    if (!this.#view.familyChildren.some(child => child.key === this.#familySelectedKey)) {
+      this.#familySelectedKey = this.#view.familyChildren[0]?.key ?? null;
+    }
+    this.controller.setFamilyBrowserOpen?.(true);
+    this.#composer.blur();
+    this.#resetDetailScroll = true;
+    this.#render();
+  }
+
+  #focusComposer(render = true): void {
+    const browserWasOpen = this.#familyFocus === "browser";
+    this.#familyFocus = "composer";
+    if (browserWasOpen) this.controller.setFamilyBrowserOpen?.(false);
+    this.#composer.focus();
+    if (render) this.#render();
+  }
+
+  #moveFamilySelection(delta: number): void {
+    const rows = this.#view.familyChildren;
+    if (!rows.length) return;
+    const current = rows.findIndex(row => row.key === this.#familySelectedKey);
+    const index = Math.min(rows.length - 1, Math.max(0, (current < 0 ? 0 : current) + delta));
+    this.#familySelectedKey = rows[index]!.key;
+    const viewportRows = Math.max(1, Math.floor((this.renderer.terminalHeight - 10) / 3));
+    const scrollTop = Math.max(0, index * 3 - Math.floor(viewportRows / 2) * 3);
+    this.#details.stickyScroll = false;
+    this.#details.scrollTo({ x: 0, y: scrollTop });
+    this.#render();
+  }
+
+  #openSelectedFamilyChild(): Promise<void> {
+    const child = this.#view.familyChildren.find(row => row.key === this.#familySelectedKey);
+    if (!child) return Promise.resolve();
+    if (!child.openable) {
+      this.#showNotice(`${child.displayName} is unavailable and cannot be opened.`, "warning");
+      return Promise.resolve();
+    }
+    if (!this.controller.openFamilyChild) {
+      this.#showNotice("Family navigation is unavailable in this terminal.", "warning");
+      return Promise.resolve();
+    }
+    return this.#runFamilyTransition(() => this.controller.openFamilyChild!(child.sessionId, child.branchId));
+  }
+
+  #openFamilyParent(): Promise<void> {
+    if (this.#view.historicalCursor !== null) {
+      this.#showNotice("Return to live before opening another agent.", "warning");
+      return Promise.resolve();
+    }
+    const parent = this.#view.familyParent;
+    if (!parent) return Promise.resolve();
+    if (parent.activity === "unavailable") {
+      this.#showNotice("The retained parent route is unavailable.", "warning");
+      return Promise.resolve();
+    }
+    if (!this.controller.openFamilyParent) {
+      this.#showNotice("Parent navigation is unavailable in this terminal.", "warning");
+      return Promise.resolve();
+    }
+    return this.#runFamilyTransition(() => this.controller.openFamilyParent!());
+  }
+
+  #runFamilyTransition(navigate: () => Promise<void>): Promise<void> {
+    if (this.#busy) return Promise.resolve();
+    const operation = this.#performFamilyTransition(navigate);
+    this.#activeOperation = operation;
+    return operation.finally(() => {
+      if (this.#activeOperation === operation) this.#activeOperation = null;
+    });
+  }
+
+  async #performFamilyTransition(navigate: () => Promise<void>): Promise<void> {
+    this.#busy = true;
+    this.#render();
+    try {
+      await navigate();
+      this.#familySelectedKey = null;
+      this.#focusComposer(false);
+    } catch (error) {
+      this.showOutput(renderTerminalError(error, "command"));
+    } finally {
+      this.#busy = false;
+      if (!this.#closed) {
+        this.#render();
+        this.#composer.focus();
+      }
+    }
+  }
+
   #activeInspector(): boolean {
     return Boolean(
       this.controller.pendingSecretInput
       || this.#paletteQuery
       || this.#provisionalOutput.size
       || this.#detail
-      || this.#notice,
+      || this.#notice
+      || this.#familyFocus === "browser",
     );
   }
 
@@ -770,8 +1035,14 @@ export class OpenTuiApp {
 
   #render(): void {
     const width = this.renderer.terminalWidth;
+    const height = this.renderer.terminalHeight;
     const wide = width >= 96;
+    const veryShort = height <= 10;
     const activeInspector = this.#activeInspector();
+    this.#main.minHeight = veryShort ? 1 : 3;
+    this.#composerBox.height = veryShort ? 2 : 3;
+    this.#composerBox.paddingTop = veryShort ? 0 : 1;
+    this.#details.padding = veryShort ? 0 : 1;
     this.#details.visible = wide || activeInspector;
     this.#timeline.visible = wide || !activeInspector;
     this.#details.width = wide ? Math.min(64, Math.max(40, Math.round(width * 0.4))) : "100%";
@@ -790,6 +1061,8 @@ export class OpenTuiApp {
       ? paletteText(this.#paletteQuery)
       : provisional
         ? `PROVISIONAL OUTPUT\n${provisional}`
+        : this.#familyFocus === "browser"
+          ? renderFamilyBrowser(this.#view, this.#familySelectedKey, veryShort, width >= 96)
         : this.#detail
           ? this.#detail.kind === "model" && !this.#rawDetail
             ? renderModelInspector(this.#detail, this.#modelProviderIndex, this.#modelEntryProvider)
@@ -816,10 +1089,25 @@ export class OpenTuiApp {
     const notice = noticeText(this.#notice);
     const details = notice ? `${notice}\n${baseDetails ? `\n${baseDetails}` : ""}` : baseDetails;
     const history = this.#view.historicalCursor ? ` · history@${this.#view.historicalCursor}` : "";
-    this.#header.content = `${this.#view.sessionName} / ${this.#view.branchName}${history}\n${this.#view.model} · ${this.#view.runState} · ${this.#view.connection}`;
+    const breadcrumb = formatTerminalBreadcrumb(
+      this.#view.ancestry,
+      this.#view.branchName,
+      Math.max(8, width - history.length - 2),
+    );
+    this.#header.content = `${breadcrumb}${history}\n${this.#view.model} · ${this.#view.runState} · ${this.#view.connection}`;
     this.#header.fg = this.#view.connection === "connected" ? COLORS.text : COLORS.warning;
     this.#timelineText.content = renderTimeline(this.#view, this.#expandedRunIds, "");
     this.#detailsText.content = details;
+    const familyRefresh = this.#view.familyRefresh === "current" ? "" : ` · ${this.#view.familyRefresh}`;
+    this.#familySummary.visible = this.#view.familySummary !== null && !(veryShort && this.#familyFocus === "browser");
+    this.#familySummary.content = this.#view.familySummary
+      ? `${this.#familyFocus === "summary" ? ">" : " "} ${formatTerminalFamilySummary(
+          this.#view.familySummary,
+          Math.max(1, width - familyRefresh.length - 3),
+        )}${familyRefresh}`
+      : "";
+    this.#familySummary.bg = this.#familyFocus === "summary" ? COLORS.border : COLORS.panel;
+    this.#familySummary.fg = this.#familyFocus === "summary" ? COLORS.text : COLORS.muted;
     if (this.#resetDetailScroll) {
       this.#resetDetailScroll = false;
       this.#details.stickyScroll = false;
@@ -844,7 +1132,26 @@ export class OpenTuiApp {
           ? `Model ID for ${this.#modelEntryProvider}…`
           : this.#view.composerPlaceholder;
     const inspectorHint = this.#activeModelDetail() && !this.#modelEntryProvider ? " · ↑/↓ model provider · Enter choose" : "";
-    this.#footer.content = `${this.#view.trustLabel} · ${this.#view.recoveryLabel} · ${this.#view.attentionCount} attention · ${this.#view.budgetLabel} · Ctrl-P commands${inspectorHint}`;
+    const familyHint = this.#familyFocus === "browser"
+      ? veryShort ? "↑/↓ · Enter/→ open · ←/Esc close" : "↑/↓ select · Enter/→ open · ←/Esc close"
+      : this.#familyFocus === "summary"
+        ? "Enter/→ agents · ↑/←/Esc composer"
+        : this.#view.historicalCursor !== null && (this.#view.familySummary || this.#view.familyParent)
+          ? "/live before agent navigation"
+          : [
+              this.#view.familyParent?.activity !== "unavailable" && this.#view.familyParent ? "← parent" : "",
+              this.#view.familySummary ? "↓ agents" : "",
+            ].filter(Boolean).join(" · ");
+    this.#footer.content = (veryShort
+      ? [this.#view.trustLabel, familyHint]
+      : [
+          this.#view.trustLabel,
+          familyHint,
+          this.#view.recoveryLabel,
+          `${this.#view.attentionCount} attention`,
+          this.#view.budgetLabel,
+          `Ctrl-P commands${inspectorHint}`,
+        ]).filter(Boolean).join(" · ");
     this.#footer.fg = this.#view.attentionCount > 0 ? statusColor("waiting for user") : COLORS.muted;
     this.renderer.setTerminalTitle(`Agencity — ${this.#view.sessionName}`);
     this.renderer.requestRender();
