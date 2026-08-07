@@ -1,8 +1,9 @@
 # Ergonomic agent-family navigation plan
 
-**Status:** Ready for implementation  
+**Status:** Implemented  
 **Date:** August 7, 2026  
 **Readiness reviewed:** August 7, 2026
+**Implementation verified:** August 7, 2026 (`bun run verify`)
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related backlog:** [FU-005 protocol-backed TUI and FU-012 durable agent families](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md)
 
