@@ -315,6 +315,8 @@ sequenceDiagram
     Client->>Client: Render state and retain C
 
     Client->>Protocol: Open SSE with after=C
+    Protocol-->>Client: Comment prelude without event data or cursor
+    Client->>Client: Mark stream connected
     Protocol->>Storage: Read committed events after C
     Storage-->>Protocol: Event at cursor C+1
     Protocol-->>Client: Committed event with id C+1
@@ -357,7 +359,9 @@ data: <EffectProgressNotification JSON>
 
 Progress has no cursor, is not replayed, and may be bounded or dropped. Structured model progress exposes only a bounded phase, a sealed tool name, or a byte count. Provider/model/call identities and provisional arguments remain private and non-executable. Text operations may still stream bounded provisional text. Only a validated terminal text result or accepted `finish` message can enter assistant conversation.
 
-The endpoint does not emit the initial snapshot, heartbeat frames, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
+The endpoint begins with the SSE comment `: connected` so a quiet branch opens immediately. The comment has no event name, data, cursor, or durable meaning, and clients ignore it after recognizing that the HTTP stream is connected. The loopback HTTP server disables Bun's request idle timeout for this route only, so a quiet attached client remains connected without periodic heartbeat frames.
+
+The endpoint does not emit the initial snapshot, periodic heartbeat frames, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
 
 `watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded.
 

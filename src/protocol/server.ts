@@ -39,6 +39,8 @@ export interface ProtocolServerOptions {
   /** Owner-only bearer read from discovery state; never accepted in a URL. */
   readonly bearerToken?: string;
   readonly service?: ProtocolServiceHooks;
+  /** Internal/test override for Bun's server-wide HTTP idle timeout. */
+  readonly httpIdleTimeoutSeconds?: number;
 }
 
 export class ProtocolServer {
@@ -51,7 +53,19 @@ export class ProtocolServer {
 
   listen(port = 0, hostname = "127.0.0.1"): ReturnType<typeof Bun.serve> {
     if (this.#server) return this.#server;
-    this.#server = Bun.serve({ port, hostname, fetch: (request) => this.handle(request) });
+    this.#server = Bun.serve({
+      port,
+      hostname,
+      ...(this.options.httpIdleTimeoutSeconds === undefined
+        ? {}
+        : { idleTimeout: this.options.httpIdleTimeoutSeconds }),
+      fetch: (request, server) => {
+        // Quiet SSE responses otherwise hit Bun's default ten-second idle
+        // timeout. Keep only the long-lived branch stream exempt.
+        if (isBranchStreamRequest(request)) server.timeout(request, 0);
+        return this.handle(request);
+      },
+    });
     return this.#server;
   }
   async stop(closeActiveConnections = false): Promise<void> {
@@ -383,6 +397,9 @@ export class ProtocolServer {
           try { controller.enqueue(encoder.encode(frame)); }
           catch { deactivate(); }
         };
+        // Flush response headers immediately even when the branch has no new
+        // events. SSE comments carry no protocol event or cursor.
+        enqueue(": connected\n\n");
         // Committed events retain their cursor ID and original data shape for
         // backwards compatibility. Progress is explicitly named and has no ID:
         // EventSource reconnect cursors therefore never advance on progress.
@@ -415,6 +432,12 @@ export class ProtocolServer {
     return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
   }
 
+}
+
+function isBranchStreamRequest(request: Request): boolean {
+  if (request.method !== "GET") return false;
+  const parts = new URL(request.url).pathname.split("/").filter(Boolean);
+  return parts.length === 3 && parts[0] === "sessions" && Boolean(parts[1]) && parts[2] === "stream";
 }
 
 function authorized(request: Request, expected: string): boolean {

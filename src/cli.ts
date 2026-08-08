@@ -327,7 +327,13 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       }
     }
 
-    if (parsed.command === "attach" || interactive || !task) await attachManagedClient(client, selection.sessionId, selection.branchId);
+    if (parsed.command === "attach" || interactive || !task) {
+      // Interactive onboarding uses readline, while OpenTUI owns stdin in raw
+      // mode. Release the prompt listener before the full-screen renderer
+      // enables terminal protocols so the two consumers cannot race.
+      prompter.close();
+      await attachManagedClient(client, selection.sessionId, selection.branchId);
+    }
   } finally {
     // Closing a client is detach-only. The resident service owns durable work.
     prompter.close();

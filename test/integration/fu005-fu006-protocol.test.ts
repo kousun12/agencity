@@ -99,6 +99,42 @@ describe("FU-005 protocol transport contract", () => {
     } finally { protocol.stop(); await supervisor.close(); }
   });
 
+  test("a quiet HTTP branch stream opens immediately and stays connected past the server idle timeout", async () => {
+    const { supervisor } = await fixture("agencity-sse-idle-");
+    const session = await supervisor.createSession({ workspaceId: "sse-idle" });
+    const after = (await supervisor.projections.getSnapshot(session.sessionId, session.branchId)).cursor;
+    const protocol = new ProtocolServer(supervisor, { httpIdleTimeoutSeconds: 1 });
+    const listener = protocol.listen(0);
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    try {
+      const response = await Promise.race([
+        fetch(`http://127.0.0.1:${listener.port}/sessions/${session.sessionId}/stream?branch=${session.branchId}&after=${after}`, {
+          signal: controller.signal,
+        }),
+        Bun.sleep(500).then(() => { throw new Error("Quiet SSE response did not open"); }),
+      ]);
+      expect(response.status).toBe(200);
+      reader = response.body!.getReader();
+      const opened = await reader.read();
+      expect(new TextDecoder().decode(opened.value)).toBe(": connected\n\n");
+
+      await Bun.sleep(1_250);
+      await supervisor.appendMessage(session.sessionId, session.branchId, "user", "after idle timeout");
+      const delivered = await Promise.race([
+        reader.read(),
+        Bun.sleep(500).then(() => { throw new Error("SSE stream disconnected while idle"); }),
+      ]);
+      expect(delivered.done).toBe(false);
+      expect(new TextDecoder().decode(delivered.value)).toContain("after idle timeout");
+    } finally {
+      controller.abort();
+      await reader?.cancel().catch(() => {});
+      await protocol.stop(true);
+      await supervisor.close();
+    }
+  });
+
   test("an SSE enqueue failure immediately unsubscribes committed-event and progress listeners", async () => {
     const { supervisor } = await fixture("agencity-sse-enqueue-failure-");
     const session = await supervisor.createSession({ workspaceId: "sse-enqueue" });
