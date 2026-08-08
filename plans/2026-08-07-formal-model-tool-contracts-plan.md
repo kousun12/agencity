@@ -15,7 +15,7 @@
 | 2. Provider-neutral response contracts | Done |
 | 3. Shared AI SDK integration | Done |
 | 4. Durable model and action events | Done |
-| 5. AgentRun integration | Not started |
+| 5. AgentRun integration | Done |
 | 6. Specialized structured outputs | Not started |
 | 7. Product and observability surfaces | Not started |
 | 8. ADRs and documentation | Not started |
@@ -83,6 +83,19 @@
 - Passed `bun run typecheck`, `bun run check:architecture`, `bun run test:core` with 793 passes and 2 documented external skips, `bun run test:acceptance` with 12 passes and 1 credential-gated real-provider skip, focused verifier suites with 35 passes, and `git diff --check`.
 - Credential-gated real-provider and live Gateway service checks were not run and remain unverified.
 - Implementation commit: `8360c88`.
+
+#### August 8, 2026 — Phase 5
+
+- Completed formal AgentRun admission and execution. Root runs and novel runnable children now reject known-unsupported required-tool-set capability before committing task messages, goals, run requests, child tasks, child sessions, prompts, model calls, or effects. Unknown exact-model capability remains admissible when the transport proves bounded formal streaming, text recursive children are unaffected, and capability is checked again before each model effect for drift.
+- Removed the transitional clarification and permission actions, textual action policy/schema/parser, pending-input events and projection state, `waiting_for_user`, run-input protocol and client methods, TUI composer interception and rendering, CLI pending-input output, family waiting reasons, workspace-material classifications, and refinement-context handling. A later user message after a blocked finish starts an ordinary new run on the same durable branch.
+- Successful `finish` retains the existing gate-first behavior: passed gates commit the exact assistant message and success; failed gates produce repair evidence without the proposed message; unknown gates terminate unknown without the proposed message. Explicit blocked finishes bypass success gates. A failed finish after an unresolved required-gate failure becomes goal-derived blocked; otherwise model-selected blocked and failed statuses remain distinct.
+- Blocked and failed finishes now append the exact submitted assistant message with stable `agent-run-final-${runId}` identity in the same event transaction as terminal status and any goal-block event. Recovery after action commit or terminal-batch commit produces no duplicate model call, message, status, goal change, or cell. Runtime cancellation, budget exhaustion, unknown effects, model failures, correction exhaustion, and interrupted cells remain status-only.
+- Kept event schema version 3 and raised the reducer version to 10 for the removed projected input state. Reducer validation binds terminal status to the accepted finish action, source, result digest, exact assistant message, stable ID, role, gate evidence, and event ordering while rejecting message-less blocked or failed terminals whenever an accepted finish is retained.
+- Updated Echo, scripted providers, acceptance fixtures, protocol/TUI/family tests, recovery fixtures, and black-box outcomes to use genuine formal calls. Raw fixture strings remain only where a missing-tool contract violation is intentional.
+- Review closed a forged-history case where a status-only failed terminal could suppress a retained blocked finish, and removed a stale TUI method name. Independent verification found and drove one further reducer fix: a forged status-only failed or blocked terminal after a successful finish with a failed required gate can no longer bypass repair. The regression reproduces the crash boundary, proves the forged events leave state unchanged, then resumes through the legitimate goal-derived blocked path.
+- Passed `bun run typecheck`, `bun run check:architecture`, `bun run test:core` with 799 passes and 2 documented external skips, `bun run test:e2e` with 3 passes, `bun run test:acceptance` with 13 passes and 1 real-provider skip, the deterministic acceptance matrix, and `git diff --check`. Two direct integration-suite runs encountered the pre-existing concurrent execution-lease timing timeout under parallel load; the test passed in isolation and the subsequent complete core run passed all deterministic tests.
+- Real-provider, official Turso Sync server, and Turso Cloud matrix rows were skipped because their credentials or external binaries were absent; they remain unverified.
+- Implementation commit: `69baa71`.
 
 ## Summary
 
