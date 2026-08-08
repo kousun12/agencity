@@ -1,10 +1,38 @@
 # Formal model tool contracts plan
 
-**Status:** Ready for implementation  
+**Status:** In implementation  
 **Date:** August 7, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Prerequisite:** [Reasoning effort and model capabilities](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md) must be complete and merged before this plan begins
 **Related plan:** [Follow-up implementation plan](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md)
+
+## Implementation status
+
+| Phase | Status |
+| --- | --- |
+| 0. Freeze the completed predecessor baseline | Done |
+| 1. Domain tool contract | Not started |
+| 2. Provider-neutral response contracts | Not started |
+| 3. Shared AI SDK integration | Not started |
+| 4. Durable model and action events | Not started |
+| 5. AgentRun integration | Not started |
+| 6. Specialized structured outputs | Not started |
+| 7. Product and observability surfaces | Not started |
+| 8. ADRs and documentation | Not started |
+
+### Implementation log
+
+#### August 8, 2026 — Phase 0
+
+- Confirmed the reasoning-effort and model-capabilities predecessor is present before implementation.
+- Recorded the pinned baseline: `ai@7.0.58`, `@ai-sdk/gateway@4.0.46`, `@ai-sdk/openai@4.0.36`, and `@ai-sdk/anthropic@4.0.36`.
+- Passed 50 focused deterministic tests covering reasoning, catalog behavior, the three product transports, streaming, context-window classification, and compaction. `bun run typecheck` also passed.
+- Verified from the pinned packages that the shared SDK surface includes declaration tools, runtime-validated JSON Schema, required tool choice, strict tool metadata, tool-input stream events, OpenAI parallel-call suppression, Anthropic parallel-call suppression, provider warnings, and normalized finish reasons. Gateway service enforcement and credential-gated real-provider behavior remain externally unverified.
+- The current Gateway catalog path has no authoritative normalized facts for formal tools, required choice, strict schemas, parallel calls, or structured streaming. Until stronger catalog evidence exists, exact model support remains `unknown` and strictness cannot be inferred from catalog absence.
+- AI SDK 7 requires an `outputSchema` on a tool declaration without an `execute` callback. The adapter will provide a static inert output schema to satisfy the pinned type contract; this does not add provider-side execution or a tool-result continuation.
+- Phase 1 will add the formal domain contract without immediately deleting clarification, permission, or pending-input types. Those removals move to Phase 5 so intermediate commits remain buildable while the existing AgentRun still depends on them.
+- Phase 4 will include the minimum formal AgentRun result handling required to ensure a version-3 writer cannot commit the old textual action provenance. Phase 5 completes product behavior and deletes the transitional input lifecycle.
+- External provider smokes were not run and are not treated as verified.
 
 ## Summary
 
