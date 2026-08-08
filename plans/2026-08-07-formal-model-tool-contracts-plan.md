@@ -16,7 +16,7 @@
 | 3. Shared AI SDK integration | Done |
 | 4. Durable model and action events | Done |
 | 5. AgentRun integration | Done |
-| 6. Specialized structured outputs | Not started |
+| 6. Specialized structured outputs | Done |
 | 7. Product and observability surfaces | Not started |
 | 8. ADRs and documentation | Not started |
 
@@ -96,6 +96,21 @@
 - Passed `bun run typecheck`, `bun run check:architecture`, `bun run test:core` with 799 passes and 2 documented external skips, `bun run test:e2e` with 3 passes, `bun run test:acceptance` with 13 passes and 1 real-provider skip, the deterministic acceptance matrix, and `git diff --check`. Two direct integration-suite runs encountered the pre-existing concurrent execution-lease timing timeout under parallel load; the test passed in isolation and the subsequent complete core run passed all deterministic tests.
 - Real-provider, official Turso Sync server, and Turso Cloud matrix rows were skipped because their credentials or external binaries were absent; they remain unverified.
 - Implementation commit: `69baa71`.
+
+#### August 8, 2026 — Phase 6
+
+- Added the sealed `agencity.refinement-review.v1` response contract with exactly one required `agencity_submit_refinement_review` provider tool. The fully required, closed transport uses explicit presence wrappers plus a lossless tagged JSON representation so absent values remain distinct from present null, empty arrays, and empty objects before normalization.
+- Extracted `validateRefinementReviewValue` from the former text parser and preserved request/review identity, total and nested byte limits, brokered-secret rejection, visible-evidence authorization, editable target and scope checks, immutable policy constraints, and decision/proposal fingerprints. Removed `parseRefinementReview`, assistant-message lookup, and every refinement fallback to structured JSON in prose.
+- Added a supervisor-only structured recursive path. Known unsupported capability fails before child or handle admission, public recursive calls remain text-only, and execution/recovery use the exact contract/capability seed retained in `RecursiveModelStarted`. The complete endpoint-bearing dispatch becomes immutable at `ModelCallRequested`; later effect execution and recovery reuse it and fail visibly on endpoint drift.
+- Structured children write no result assistant message. A successful completion derives one typed recursive result from the authoritative child `ModelEffectOutputV2` and binds it to the retained response admission, child model call, provider tool-call identity, normalized submission, input/result digests, and exact input bytes. Failed, cancelled, budget-exceeded, unknown, and contract-violation outcomes retain no fabricated structured result.
+- Reused the Phase 4 `responseAdmission` event field, migration 015, and mutable recursive-result storage; no migration or event-schema change was needed. The reducer version advanced to 11 for the stricter structured recursive projection rules.
+- The durable recursive result intentionally extends the plan's minimum field list with `providerToolCallId`, `toolName`, `modelResultDigest`, `transportInputDigest`, and `transportInputBytes`. These bounded references are required for storage to recompute and compare the normalized derivative against the exact child request, completion, and effect without copying the raw accepted transport input.
+- Review fixed recovery after failed or cancelled task terminalization so startup does not attach a recreated success result to a non-success event. It also replaced unchecked private-method casts with hard-private capabilities held in a non-barrel runtime module and expanded the transport/effort matrix to both structured contracts.
+- Independent verification drove two additional hardening changes. Custom providers are rejected with closed `stream-failed` classification when any field in the complete canonical structured output contains a registered secret or credential-shaped material, before return or persistence. Cross-session result validation now resolves only recorded sync-derived branch mappings, preserving valid structured provenance through divergent child-branch synchronization without rewriting immutable payloads.
+- Added direct failed/cancelled crash recovery, package-root authority, endpoint drift, custom-provider secret, exact normalization, result tamper, rebuild/reopen, and divergent sync/restart coverage. Pinned SDK fixtures exercise the refinement schema and every selectable reasoning effort on Gateway, direct OpenAI, and direct Anthropic adapters.
+- Passed `bun run typecheck`, `bun run check:architecture`, the full deterministic suite with 831 passes and 3 documented external skips, `bun run test:acceptance` with 13 passes and 1 real-provider skip, focused verifier suites, and `git diff --check`.
+- Real-provider strict-schema acceptance, official Turso Sync server conformance, and Turso Cloud remain externally unverified.
+- Implementation commit: `abd5bb0`.
 
 ## Summary
 
