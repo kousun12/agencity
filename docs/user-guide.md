@@ -119,7 +119,8 @@ Normal, compact, and minimum height modes reduce chrome in a fixed order. The ma
 
 - Type plain text to start a task or provide more information after a blocked result.
 - `Ctrl-P` opens command search.
-- `Ctrl-O` expands or collapses recent run activity.
+- `Ctrl-O` expands or collapses the latest run activity.
+- `Ctrl-A` expands or collapses all completed run activity while the composer is empty.
 - Page Up/Down scrolls the active view.
 - Escape closes the current inspector.
 - `Shift-R` or `/raw` opens scrubbed raw diagnostics.

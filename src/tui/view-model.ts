@@ -283,14 +283,14 @@ function stepView(state: AgentState, run: AgentRunState, ordinal: number): Termi
   } else if (action?.type === "final") {
     const accepted = run.status === "succeeded" && run.finalMessageId !== undefined && run.steps.at(-1)?.id === step.id;
     label = accepted
-      ? "Formal finish submission · response committed"
-      : "Formal finish submission · completion proposed";
+      ? "Completed successfully"
+      : "Checking completion…";
     detail = accepted ? oneLine(action.content) : null;
   } else if (action?.type === "blocked") {
-    label = "Formal finish submission · blocked";
+    label = "Stopped — needs input";
     detail = oneLine(action.reason);
   } else if (action?.type === "failed") {
-    label = "Formal finish submission · failed";
+    label = "Failed";
     detail = oneLine(action.error);
   } else if (step.rejection) {
     const violation = formalOutcome?.kind === "contract-violation"

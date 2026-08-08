@@ -137,7 +137,7 @@ function paletteText(query: string): string {
     "COMMANDS",
     ...matches.map(command => `${command.usage}\n  ${command.summary}`),
     "",
-    "Ctrl-P commands · Ctrl-O activity · PgUp/PgDn scroll · Ctrl-C stop/detach · Ctrl-D detach · Esc close",
+    "Ctrl-P commands · Ctrl-O latest activity · Ctrl-A all activity · PgUp/PgDn scroll · Ctrl-C stop/detach · Ctrl-D detach · Esc close",
   ].join("\n");
 }
 
@@ -256,6 +256,22 @@ export interface OpenTuiController {
   openFamilyParent?(): Promise<void>;
   setFamilyBrowserOpen?(open: boolean): void;
   abortPendingOperations?(): void;
+}
+
+export function toggleAllRunDetails(
+  runs: TerminalScreenView["runs"],
+  expandedRunIds: Set<string>,
+): boolean {
+  const completedRunIds = runs
+    .filter(run => !run.active && run.steps.length > 0)
+    .map(run => run.id);
+  if (completedRunIds.length === 0) return false;
+  const collapse = completedRunIds.every(runId => expandedRunIds.has(runId));
+  for (const runId of completedRunIds) {
+    if (collapse) expandedRunIds.delete(runId);
+    else expandedRunIds.add(runId);
+  }
+  return true;
 }
 
 export class OpenTuiApp {
@@ -827,6 +843,14 @@ export class OpenTuiApp {
       key.stopPropagation();
       this.requestExit();
       return;
+    }
+    if (key.ctrl && key.name === "a" && this.#composerValue().length === 0) {
+      if (toggleAllRunDetails(this.#view.runs, this.#expandedRunIds)) {
+        key.preventDefault();
+        key.stopPropagation();
+        this.#render();
+        return;
+      }
     }
     if (key.ctrl && key.name === "p") {
       key.preventDefault();

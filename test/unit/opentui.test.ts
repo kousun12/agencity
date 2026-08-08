@@ -17,7 +17,12 @@ import {
   type AgentRunState,
   type ModelConfiguration,
 } from "../../src/index.ts";
-import { OpenTuiApp, formatManagedDetach, type OpenTuiController } from "../../src/tui/opentui.ts";
+import {
+  OpenTuiApp,
+  formatManagedDetach,
+  toggleAllRunDetails,
+  type OpenTuiController,
+} from "../../src/tui/opentui.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
 import { TerminalTranscript } from "../../src/tui/transcript.ts";
 import { createTerminalSyntaxStyle } from "../../src/tui/theme.ts";
@@ -89,7 +94,7 @@ describe("OpenTUI interactive terminal", () => {
       taskMessageId: "agent-run-task-gated-run",
       finalMessageId: null,
       steps: [expect.objectContaining({
-        label: "Formal finish submission · completion proposed",
+        label: "Checking completion…",
         detail: null,
       })],
     });
@@ -909,6 +914,32 @@ describe("OpenTUI interactive terminal", () => {
 
       transcript.reconcile(view, new Set());
       await setup.waitForFrame(value => value.includes("Ctrl-O to expand latest") && !value.includes("return { value };"));
+      const latestSummary = setup.renderer.root.findDescendantById(
+        "agencity-transcript-run-summary-run-1",
+      ) as TextRenderable;
+      const latestHint = latestSummary.textNode.children.find(child =>
+        typeof child !== "string" && child.children.join("").includes("Ctrl-O to expand latest"));
+      expect(typeof latestHint === "string" ? 0 : (latestHint?.attributes ?? 0) & TextAttributes.DIM)
+        .toBe(TextAttributes.DIM);
+
+      const previousRun = {
+        ...view.runs[0]!,
+        id: "run-0",
+        taskMessageId: "missing-task-message",
+        finalMessageId: null,
+      };
+      transcript.reconcile({ ...view, runs: [previousRun, view.runs[0]!] }, new Set());
+      await setup.waitForFrame(value =>
+        value.includes("Ctrl-A to expand all") && value.includes("Ctrl-O to expand latest"));
+      const previousSummary = setup.renderer.root.findDescendantById(
+        "agencity-transcript-run-summary-run-0",
+      ) as TextRenderable;
+      const previousHint = previousSummary.textNode.children.find(child =>
+        typeof child !== "string" && child.children.join("").includes("Ctrl-A to expand all"));
+      expect(typeof previousHint === "string" ? 0 : (previousHint?.attributes ?? 0) & TextAttributes.DIM)
+        .toBe(TextAttributes.DIM);
+
+      transcript.reconcile(view, new Set());
       expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-source-agent-run-cell-action-1"))
         .toBe(source);
       transcript.reconcile(view, new Set(["run-1"]));
@@ -938,6 +969,19 @@ describe("OpenTUI interactive terminal", () => {
       lifecycle: "running",
       keepAliveReasons: [{ kind: "active_schedules", count: 1, summary: "1 active schedule" }],
     })).toBe("Detached. Service remains active: 1 active schedule.");
+  });
+
+  test("toggles every completed run while leaving active work alone", () => {
+    const expanded = new Set<string>();
+    const runs = [
+      { id: "older", active: false, steps: [{}] },
+      { id: "newer", active: false, steps: [{}] },
+      { id: "active", active: true, steps: [{}] },
+    ] as unknown as TerminalScreenView["runs"];
+    expect(toggleAllRunDetails(runs, expanded)).toBe(true);
+    expect([...expanded].sort()).toEqual(["newer", "older"]);
+    expect(toggleAllRunDetails(runs, expanded)).toBe(true);
+    expect([...expanded]).toEqual([]);
   });
 
   test("masks provider API keys and redacts a rejected value echoed by the controller", async () => {

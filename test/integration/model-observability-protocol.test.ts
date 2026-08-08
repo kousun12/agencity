@@ -126,7 +126,7 @@ describe("formal model observability protocol", () => {
         },
       });
       expect(retainedSteps?.[1]).toMatchObject({
-        label: "Formal finish submission · response committed",
+        label: "Completed successfully",
         formalOutcome: {
           kind: "formal-submission",
           tool: "finish",

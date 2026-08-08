@@ -55,6 +55,8 @@ interface RunBlock extends TranscriptBlock {
   run: TerminalRunView;
   expanded: boolean;
   inline: boolean;
+  latestExpandable: boolean;
+  allCompletedExpanded: boolean;
 }
 
 function firstMeaningfulLine(value: string): string {
@@ -164,9 +166,17 @@ function runSummary(run: TerminalRunView, inline: boolean, expanded: boolean): s
   const cancellation = run.cancellationRequested ? " · cancellation requested" : "";
   const task = inline ? "" : ` — ${run.task}`;
   const steps = !expanded && run.steps.length > 0
-    ? ` · ${run.steps.length} step${run.steps.length === 1 ? "" : "s"} (Ctrl-O to expand latest)`
+    ? ` · ${run.steps.length} step${run.steps.length === 1 ? "" : "s"}`
     : "";
   return `${run.statusLabel}${provisional}${cancellation}${task}${steps}`;
+}
+
+function runHint(block: Pick<RunBlock, "run" | "expanded" | "latestExpandable" | "allCompletedExpanded">): string {
+  if (block.run.active || block.run.steps.length === 0) return "";
+  if (block.latestExpandable) {
+    return block.expanded ? "(Ctrl-O to collapse latest)" : "(Ctrl-O to expand latest)";
+  }
+  return block.allCompletedExpanded ? "(Ctrl-A to collapse all)" : "(Ctrl-A to expand all)";
 }
 
 function cellSummary(): string {
@@ -216,6 +226,12 @@ export class TerminalTranscript {
   reconcile(view: TerminalScreenView, expandedRunIds: ReadonlySet<string>): void {
     const desired: TranscriptBlock[] = [];
     const runs = view.runs.slice(-6);
+    const latestExpandableRunId = [...runs].reverse().find(run => run.steps.length > 0)?.id ?? null;
+    const completedRunIds = runs
+      .filter(run => !run.active && run.steps.length > 0)
+      .map(run => run.id);
+    const allCompletedExpanded = completedRunIds.length > 0
+      && completedRunIds.every(runId => expandedRunIds.has(runId));
     const visibleMessageIds = new Set(view.conversation.map(message => message.id));
     const runsByTaskMessage = new Map(runs.map(run => [run.taskMessageId, run]));
     const runsByFinalMessage = new Map(
@@ -235,6 +251,8 @@ export class TerminalTranscript {
       block.run = run;
       block.expanded = run.active || expandedRunIds.has(run.id);
       block.inline = inline;
+      block.latestExpandable = run.id === latestExpandableRunId;
+      block.allCompletedExpanded = allCompletedExpanded;
       block.update();
       desired.push(block);
       placedRunIds.add(run.id);
@@ -386,11 +404,23 @@ export class TerminalTranscript {
       run,
       expanded: run.active,
       inline: false,
+      latestExpandable: false,
+      allCompletedExpanded: false,
       update: () => {
         const current = block.run;
         marker.content = terminalRunMarker(current);
         marker.fg = terminalToneColor(current.provisional ? "provisional" : terminalRunTone(current.status));
-        summary.content = runSummary(current, block.inline, block.expanded);
+        summary.clear();
+        summary.add(TextNodeRenderable.fromString(runSummary(current, block.inline, block.expanded), {
+          fg: TERMINAL_THEME.text,
+        }));
+        const hint = runHint(block);
+        if (hint) {
+          summary.add(TextNodeRenderable.fromString(` ${hint}`, {
+            fg: TERMINAL_THEME.muted,
+            attributes: TextAttributes.DIM,
+          }));
+        }
         reason.content = current.reason ?? "";
         stepsHost.visible = block.expanded;
         if (block.expanded) this.#reconcileSteps(block, current.steps.slice(-8), current.active);
