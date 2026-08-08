@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { CodeRenderable, MarkdownRenderable, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
+import {
+  CodeRenderable,
+  MarkdownRenderable,
+  ScrollBoxRenderable,
+  TextareaRenderable,
+  TextAttributes,
+  TextRenderable,
+} from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import {
   AgentClient,
@@ -129,6 +136,7 @@ describe("OpenTUI interactive terminal", () => {
             status: "running",
             attempts: 2,
             logs: ["first", "second"],
+            logStreams: ["stdout", "stderr"],
             eventId: "cell-event",
           },
           "agent-run-cell-another-action": {
@@ -137,6 +145,7 @@ describe("OpenTUI interactive terminal", () => {
             status: "failed",
             attempts: 1,
             logs: [],
+            logStreams: [],
             error: "wrong",
             eventId: "other-cell-event",
           },
@@ -150,9 +159,34 @@ describe("OpenTUI interactive terminal", () => {
       status: "running",
       attempts: 2,
       logs: ["first", "second"],
+      logStreams: ["stdout", "stderr"],
       result: null,
       error: null,
     });
+    const waitingRun: AgentRunState = {
+      ...typescriptRun,
+      id: "waiting-run",
+      requestKey: "waiting-run",
+      steps: [{
+        id: "waiting-step",
+        ordinal: 1,
+        contextId: "waiting-context",
+        callId: "waiting-call",
+        effectId: "waiting-effect",
+        actionId: "waiting-action",
+        observationEventIds: [],
+        modelAttempts: [],
+        eventId: "waiting-event",
+      }],
+    };
+    const waitingForModel = buildTerminalScreen({
+      ...controller.presentation,
+      state: {
+        ...controller.presentation.state,
+        agentRuns: { [waitingRun.id]: waitingRun },
+      },
+    });
+    expect(waitingForModel.runs[0]?.steps[0]?.label).toBe("Waiting for model response…");
     const absentActiveCell = buildTerminalScreen({
       ...controller.presentation,
       state: { ...controller.presentation.state, agentRuns: { [typescriptRun.id]: typescriptRun }, cells: {} },
@@ -756,8 +790,9 @@ describe("OpenTUI interactive terminal", () => {
             code: "const value = 42;\nreturn { value };",
             status: "committed",
             attempts: 1,
-            logs: ["computed value"],
-            result: { value: 42 },
+            logs: ["computed log", "failed log"],
+            logStreams: ["stdout", "stderr"],
+            result: { exitCode: 0, stdout: "command output", stderr: "command warning" },
             error: null,
           },
         }],
@@ -778,8 +813,8 @@ describe("OpenTUI interactive terminal", () => {
       transcript.reconcile(view, new Set(["run-1"]));
       await setup.waitForFrame(value =>
         value.includes("const value = 42;")
-        && value.includes("computed value")
-        && value.includes("2 model attempts"),
+        && value.includes("computed log")
+        && value.includes("command output"),
       );
       const message = setup.renderer.root.findDescendantById(
         "agencity-transcript-message-body-message-1",
@@ -787,8 +822,14 @@ describe("OpenTUI interactive terminal", () => {
       const source = setup.renderer.root.findDescendantById(
         "agencity-transcript-cell-source-agent-run-cell-action-1",
       ) as CodeRenderable;
+      const compactSource = setup.renderer.root.findDescendantById(
+        "agencity-transcript-cell-compact-source-agent-run-cell-action-1",
+      ) as CodeRenderable;
       expect(message).toBeInstanceOf(MarkdownRenderable);
       expect(source).toBeInstanceOf(CodeRenderable);
+      expect(compactSource).toBeInstanceOf(CodeRenderable);
+      expect(compactSource.filetype).toBe("typescript");
+      expect(compactSource.content).toEndWith("…");
       expect(message.content).toBe(view.conversation[1]!.content);
       expect(source.content).toBe(view.runs[0]!.steps[0]!.cell!.code);
       expect(host.getChildren().map(child => child.id)).toEqual([
@@ -799,7 +840,30 @@ describe("OpenTUI interactive terminal", () => {
       expect(setup.renderer.root.findDescendantById("agencity-transcript-activity-heading")).toBeUndefined();
       const logs = setup.renderer.root.findDescendantById(
         "agencity-transcript-cell-logs-agent-run-cell-action-1",
-      )!;
+      ) as TextRenderable;
+      const stdoutNode = logs.textNode.children.find(child =>
+        typeof child !== "string" && child.children.join("").includes("computed log"));
+      const stderrNode = logs.textNode.children.find(child =>
+        typeof child !== "string" && child.children.join("").includes("failed log"));
+      expect(typeof stdoutNode === "string" ? 0 : (stdoutNode?.attributes ?? 0) & TextAttributes.DIM)
+        .toBe(TextAttributes.DIM);
+      expect(typeof stderrNode === "string" ? 0 : (stderrNode?.attributes ?? 0) & TextAttributes.DIM)
+        .toBe(TextAttributes.DIM);
+      expect(typeof stdoutNode === "string" ? null : stdoutNode?.fg?.toInts().slice(0, 3))
+        .toEqual([63, 185, 80]);
+      expect(typeof stderrNode === "string" ? null : stderrNode?.fg?.toInts().slice(0, 3))
+        .toEqual([248, 81, 73]);
+      const output = setup.renderer.root.findDescendantById(
+        "agencity-transcript-cell-output-agent-run-cell-action-1",
+      ) as TextRenderable;
+      expect(output.textNode.children.some(child =>
+        typeof child !== "string" && child.children.join("").includes("command output"))).toBe(true);
+      expect(output.textNode.children.some(child =>
+        typeof child !== "string" && child.children.join("").includes("command warning"))).toBe(true);
+      const frame = (await setup.captureCharFrame()).toString();
+      expect(frame).toContain("OUTPUT");
+      expect(frame).not.toContain("exitCode");
+      expect(frame).not.toContain("\"stdout\"");
       setup.renderer.startSelection(source, source.screenX, source.screenY);
       setup.renderer.updateSelection(
         logs,
@@ -809,8 +873,39 @@ describe("OpenTUI interactive terminal", () => {
       );
       const selected = setup.renderer.getSelection()?.getSelectedText() ?? "";
       expect(selected).toContain(source.content);
-      expect(selected).toContain("computed value");
+      expect(selected).toContain("computed log");
       setup.renderer.clearSelection();
+
+      const activeView: TerminalScreenView = {
+        ...view,
+        runs: [{
+          ...view.runs[0]!,
+          finalMessageId: null,
+          status: "running",
+          statusLabel: "running",
+          active: true,
+          steps: [
+            view.runs[0]!.steps[0]!,
+            {
+              id: "step-2",
+              ordinal: 2,
+              label: "Waiting for model response…",
+              detail: null,
+              attempts: 1,
+              formalOutcome: null,
+              cell: null,
+            },
+          ],
+        }],
+      };
+      transcript.reconcile(activeView, new Set());
+      await setup.waitForFrame(value =>
+        value.includes("Waiting for model response")
+        && value.includes("const value = 42;")
+        && !value.includes("return { value };"),
+      );
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
+        .toBe(false);
 
       transcript.reconcile(view, new Set());
       await setup.waitForFrame(value => value.includes("Ctrl-O to expand latest") && !value.includes("return { value };"));

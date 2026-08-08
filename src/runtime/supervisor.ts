@@ -1072,6 +1072,7 @@ export class Supervisor {
       }
       assertJsonValue(result);
       const logs = execution.logs.map(scrubText);
+      const logStreams = [...execution.logStreams];
       const events: any[] = [];
       for (const reference of stagedArtifacts.values()) {
         events.push({
@@ -1103,6 +1104,7 @@ export class Supervisor {
           cellId,
           result,
           logs,
+          logStreams,
           durationMs: Math.round(performance.now() - started),
           exports: [...stagedValues.keys()],
         },
@@ -1112,6 +1114,7 @@ export class Supervisor {
       return { cellId, result, logs };
     } catch (error) {
       const logs = error instanceof ConsoleCellError ? error.logs.map(scrubText) : [];
+      const logStreams = error instanceof ConsoleCellError ? [...error.logStreams] : [];
       await this.storage.appendEvents([{
         sessionId,
         branchId,
@@ -1122,6 +1125,7 @@ export class Supervisor {
           cellId,
           error: scrubText(error instanceof Error ? error.message : String(error)),
           logs,
+          logStreams,
           durationMs: Math.round(performance.now() - started),
         },
       }]);

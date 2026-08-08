@@ -3,11 +3,13 @@ import {
   CodeRenderable,
   MarkdownRenderable,
   ScrollBoxRenderable,
+  TextAttributes,
+  TextNodeRenderable,
   TextRenderable,
   type CliRenderer,
   type SyntaxStyle,
 } from "@opentui/core";
-import type { JsonValue } from "../domain/index.ts";
+import type { CellLogStream, JsonValue } from "../domain/index.ts";
 import {
   TERMINAL_THEME,
   terminalCellTone,
@@ -41,7 +43,7 @@ interface StepBlock {
   readonly key: string;
   readonly root: BoxRenderable;
   step: TerminalStepView;
-  update(step: TerminalStepView): void;
+  update(step: TerminalStepView, detailed: boolean): void;
 }
 
 interface RunBlock extends TranscriptBlock {
@@ -53,10 +55,6 @@ interface RunBlock extends TranscriptBlock {
   run: TerminalRunView;
   expanded: boolean;
   inline: boolean;
-}
-
-function lineCount(value: string): number {
-  return value.length === 0 ? 0 : value.split("\n").length;
 }
 
 function firstMeaningfulLine(value: string): string {
@@ -79,9 +77,60 @@ function boundedText(value: string): string {
   return truncated ? `${bounded}\n… output truncated; use /cells for retained diagnostics` : bounded;
 }
 
-export function formatTerminalCellResult(value: JsonValue): string {
-  const serialized = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return boundedText(serialized ?? "null");
+interface TerminalLogLine {
+  readonly text: string;
+  readonly stream: CellLogStream | "meta";
+}
+
+function boundedLogLines(values: readonly string[], streams: readonly CellLogStream[]): TerminalLogLine[] {
+  const lines: TerminalLogLine[] = [];
+  let characters = 0;
+  let truncated = false;
+  outer: for (let index = 0; index < values.length; index++) {
+    const stream = streams[index] ?? "stdout";
+    for (const sourceLine of values[index]!.split("\n")) {
+      if (lines.length >= MAX_INLINE_OUTPUT_LINES || characters >= MAX_INLINE_OUTPUT_CHARACTERS) {
+        truncated = true;
+        break outer;
+      }
+      const remaining = MAX_INLINE_OUTPUT_CHARACTERS - characters;
+      const text = sourceLine.slice(0, remaining);
+      lines.push({ text, stream });
+      characters += text.length;
+      if (text.length < sourceLine.length) {
+        truncated = true;
+        break outer;
+      }
+    }
+  }
+  if (truncated) lines.push({ text: "… output truncated; use /cells for retained diagnostics", stream: "meta" });
+  return lines;
+}
+
+function renderTerminalStreams(
+  target: TextRenderable,
+  label: string,
+  values: readonly string[],
+  streams: readonly CellLogStream[],
+): void {
+  target.visible = values.length > 0;
+  target.clear();
+  if (values.length === 0) return;
+  target.add(TextNodeRenderable.fromString(`${label}\n`, {
+    fg: TERMINAL_THEME.muted,
+    attributes: TextAttributes.DIM,
+  }));
+  const lines = boundedLogLines(values, streams);
+  lines.forEach((line, index) => {
+    target.add(TextNodeRenderable.fromString(`${line.text}${index === lines.length - 1 ? "" : "\n"}`, {
+      fg: line.stream === "stderr"
+        ? TERMINAL_THEME.danger
+        : line.stream === "stdout"
+          ? TERMINAL_THEME.success
+          : TERMINAL_THEME.muted,
+      attributes: TextAttributes.DIM,
+    }));
+  });
 }
 
 export function terminalRunMarker(run: Pick<TerminalRunView, "active" | "status">): string {
@@ -120,17 +169,34 @@ function runSummary(run: TerminalRunView, inline: boolean, expanded: boolean): s
   return `${run.statusLabel}${provisional}${cancellation}${task}${steps}`;
 }
 
-function cellSummary(step: TerminalStepView, cell: TerminalCellView): string {
-  const source = truncateLine(firstMeaningfulLine(cell.code));
-  const lines = lineCount(cell.code);
-  const output = cell.error
-    ? " · error"
-    : cell.logs.length > 0 || cell.status === "committed"
-      ? " · output"
-      : "";
-  const executions = cell.attempts > 1 ? ` · ${cell.attempts} executions` : "";
-  const modelAttempts = step.attempts > 1 ? ` · ${step.attempts} model attempts` : "";
-  return `bun_console · TypeScript · ${source || "(empty source)"} · ${lines} ${lines === 1 ? "line" : "lines"}${output}${executions}${modelAttempts}`;
+function cellSummary(): string {
+  return "bun_console · TypeScript ·";
+}
+
+function compactCellSource(code: string): string {
+  const source = truncateLine(firstMeaningfulLine(code), 96);
+  if (!source) return "(empty source) …";
+  return source.endsWith("…") ? source : `${source} …`;
+}
+
+export function terminalCellReturnedOutput(
+  result: JsonValue | null,
+  logs: readonly string[],
+): { values: string[]; streams: CellLogStream[] } {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return { values: [], streams: [] };
+  const record = result as Record<string, JsonValue>;
+  const retainedLogs = logs.join("\n");
+  const values: string[] = [];
+  const streams: CellLogStream[] = [];
+  for (const stream of ["stdout", "stderr"] as const) {
+    const value = record[stream];
+    if (typeof value !== "string") continue;
+    const output = value.trimEnd();
+    if (!output || retainedLogs.includes(output.trim())) continue;
+    values.push(output);
+    streams.push(stream);
+  }
+  return { values, streams };
 }
 
 function ordinaryStepSummary(step: TerminalStepView): string {
@@ -327,14 +393,15 @@ export class TerminalTranscript {
         summary.content = runSummary(current, block.inline, block.expanded);
         reason.content = current.reason ?? "";
         stepsHost.visible = block.expanded;
-        if (block.expanded) this.#reconcileSteps(block, current.steps.slice(-8));
+        if (block.expanded) this.#reconcileSteps(block, current.steps.slice(-8), current.active);
       },
     };
     return block;
   }
 
-  #reconcileSteps(block: RunBlock, steps: readonly TerminalStepView[]): void {
+  #reconcileSteps(block: RunBlock, steps: readonly TerminalStepView[], latestOnly: boolean): void {
     const desired: StepBlock[] = [];
+    const detailedStepId = steps.at(-1)?.id;
     for (const step of steps) {
       const key = `step:${step.id}`;
       let stepBlock = block.stepBlocks.get(key);
@@ -348,7 +415,7 @@ export class TerminalTranscript {
           : this.#createOrdinaryStepBlock(key, step);
         block.stepBlocks.set(key, stepBlock);
       }
-      stepBlock.update(step);
+      stepBlock.update(step, !latestOnly || step.id === detailedStepId);
       desired.push(stepBlock);
     }
     const desiredKeys = new Set(desired.map(item => item.key));
@@ -387,7 +454,7 @@ export class TerminalTranscript {
       key,
       root,
       step: initial,
-      update: step => {
+      update: (step) => {
         block.step = step;
         text.content = ordinaryStepSummary(step);
       },
@@ -420,12 +487,34 @@ export class TerminalTranscript {
     });
     const summary = new TextRenderable(this.renderer, {
       id: `agencity-transcript-cell-summary-${cell.id}`,
-      flexGrow: 1,
-      minWidth: 1,
+      width: 27,
       height: 1,
       fg: TERMINAL_THEME.text,
       truncate: true,
       wrapMode: "none",
+    });
+    const compactSource = new CodeRenderable(this.renderer, {
+      id: `agencity-transcript-cell-compact-source-${cell.id}`,
+      flexGrow: 1,
+      minWidth: 1,
+      height: 1,
+      content: compactCellSource(cell.code),
+      filetype: "typescript",
+      syntaxStyle: this.syntaxStyle,
+      fg: TERMINAL_THEME.text,
+      bg: TERMINAL_THEME.background,
+      selectionBg: TERMINAL_THEME.selectionBackground,
+      wrapMode: "none",
+      selectable: true,
+      drawUnstyledText: true,
+      streaming: false,
+    });
+    const details = new BoxRenderable(this.renderer, {
+      id: `agencity-transcript-cell-details-${cell.id}`,
+      width: "100%",
+      height: "auto",
+      flexDirection: "column",
+      backgroundColor: TERMINAL_THEME.background,
     });
     const sourceLabel = new TextRenderable(this.renderer, {
       id: `agencity-transcript-cell-source-label-${cell.id}`,
@@ -460,8 +549,8 @@ export class TerminalTranscript {
       wrapMode: "word",
       selectable: true,
     });
-    const result = new TextRenderable(this.renderer, {
-      id: `agencity-transcript-cell-result-${cell.id}`,
+    const output = new TextRenderable(this.renderer, {
+      id: `agencity-transcript-cell-output-${cell.id}`,
       width: "100%",
       height: "auto",
       marginTop: 1,
@@ -480,26 +569,34 @@ export class TerminalTranscript {
     });
     compact.add(marker);
     compact.add(summary);
+    compact.add(compactSource);
     root.add(compact);
-    root.add(sourceLabel);
-    root.add(source);
-    root.add(logs);
-    root.add(result);
-    root.add(error);
+    details.add(sourceLabel);
+    details.add(source);
+    details.add(logs);
+    details.add(output);
+    details.add(error);
+    root.add(details);
 
     const block: StepBlock = {
       key,
       root,
       step: initial,
-      update: step => {
+      update: (step, detailed) => {
         block.step = step;
         const next = step.cell!;
         marker.content = terminalCellMarker(next.status);
         marker.fg = terminalToneColor(terminalCellTone(next.status));
-        summary.content = cellSummary(step, next);
+        summary.content = cellSummary();
+        const nextCompactSource = compactCellSource(next.code);
+        if (compactSource.content !== nextCompactSource) compactSource.content = nextCompactSource;
         if (source.content !== next.code) source.content = next.code;
-        logs.content = next.logs.length > 0 ? `LOGS\n${boundedText(next.logs.join("\n"))}` : "";
-        result.content = next.status === "committed" ? `RESULT\n${formatTerminalCellResult(next.result)}` : "";
+        details.visible = detailed;
+        renderTerminalStreams(logs, "LOGS", next.logs, next.logStreams);
+        const returnedOutput = next.status === "committed"
+          ? terminalCellReturnedOutput(next.result, next.logs)
+          : { values: [], streams: [] };
+        renderTerminalStreams(output, "OUTPUT", returnedOutput.values, returnedOutput.streams);
         error.content = next.error ? `ERROR\n${boundedText(next.error)}` : "";
       },
     };

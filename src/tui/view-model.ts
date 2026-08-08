@@ -1,4 +1,4 @@
-import type { AgentRunState, AgentState, JsonValue, MessageState } from "../domain/index.ts";
+import type { AgentRunState, AgentState, CellLogStream, JsonValue, MessageState } from "../domain/index.ts";
 import type { ProtocolCapabilities } from "../protocol/index.ts";
 import type {
   FamilyAgentActivity,
@@ -59,6 +59,7 @@ export interface TerminalCellView {
   readonly status: "pending" | "proposed" | "running" | "committed" | "failed" | "abandoned" | "missing";
   readonly attempts: number;
   readonly logs: readonly string[];
+  readonly logStreams: readonly CellLogStream[];
   readonly result: JsonValue | null;
   readonly error: string | null;
 }
@@ -259,7 +260,7 @@ function stepView(state: AgentState, run: AgentRunState, ordinal: number): Termi
   const formalOutcome = step.actionSource
     ? deriveModelContractCallDiagnostic(state, step.actionSource.modelCallId)
     : null;
-  let label = "Model decision";
+  let label = "Waiting for model response…";
   let detail: string | null = null;
   let cell: TerminalCellView | null = null;
   if (action?.type === "typescript") {
@@ -275,6 +276,7 @@ function stepView(state: AgentState, run: AgentRunState, ordinal: number): Termi
       status: projected?.status ?? (isTerminalRunStatus(run.status) ? "missing" : "pending"),
       attempts: projected?.attempts ?? 0,
       logs: projected ? [...projected.logs] : [],
+      logStreams: projected ? [...projected.logStreams] : [],
       result: projected?.result ?? null,
       error: projected?.error ?? null,
     };

@@ -1,16 +1,18 @@
 import { environmentWithoutSecrets } from "../security/index.ts";
+import type { CellLogStream } from "../domain/index.ts";
 import type { EncodedObservation } from "./inspect.ts";
 
 export interface ConsoleExecution {
   readonly observation: EncodedObservation;
   readonly logs: string[];
+  readonly logStreams: CellLogStream[];
 }
 
 export type ConsoleRpcHandler = (method: string, args: unknown[]) => Promise<unknown>;
 
 type WorkerMessage =
   | { type: "rpc"; executionId: string; requestId: string; method: string; args: unknown[] }
-  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; logs: string[] };
+  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; logs: string[]; logStreams: CellLogStream[] };
 
 interface PendingExecution {
   readonly resolve: (value: ConsoleExecution) => void;
@@ -111,11 +113,16 @@ export class ConsoleProcess {
       if (!Array.isArray(message.logs) || !message.logs.every((log) => typeof log === "string")) {
         throw new Error("Console worker emitted invalid logs");
       }
+      if (!Array.isArray(message.logStreams) ||
+          message.logStreams.length !== message.logs.length ||
+          !message.logStreams.every((stream) => stream === "stdout" || stream === "stderr")) {
+        throw new Error("Console worker emitted invalid log stream metadata");
+      }
       this.#pending.delete(message.executionId);
       if (message.ok) {
         if (!validObservation(message.observation)) throw new Error("Console worker emitted an invalid observation");
-        pending.resolve({ observation: message.observation, logs: message.logs });
-      } else pending.reject(new ConsoleCellError(message.error ?? "Console cell failed", message.logs));
+        pending.resolve({ observation: message.observation, logs: message.logs, logStreams: message.logStreams });
+      } else pending.reject(new ConsoleCellError(message.error ?? "Console cell failed", message.logs, message.logStreams));
       return;
     }
     if (typeof message.requestId !== "string" || typeof message.method !== "string" || !Array.isArray(message.args)) {
@@ -171,7 +178,7 @@ function consoleWorkerEnvironment(): Record<string, string> {
 }
 
 export class ConsoleCellError extends Error {
-  constructor(message: string, readonly logs: string[]) {
+  constructor(message: string, readonly logs: string[], readonly logStreams: CellLogStream[]) {
     super(message);
     this.name = "ConsoleCellError";
   }

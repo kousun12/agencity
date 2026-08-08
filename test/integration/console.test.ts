@@ -142,6 +142,9 @@ describe("disposable TypeScript console process", () => {
     expect(first.logs).toContain("stderr is a log");
     expect(first.logs).toContain("[console output truncated]");
     expect(new TextEncoder().encode(first.logs.join("\n")).byteLength).toBeLessThan(70_000);
+    const firstCell = projectEvents(await supervisor.storage.loadEvents(sessionId, { branchId })).cells[first.cellId];
+    expect(firstCell?.logStreams.slice(0, 2)).toEqual(["stdout", "stderr"]);
+    expect(firstCell?.logStreams).toHaveLength(first.logs.length);
 
     const second = await supervisor.executeCell(sessionId, branchId, `return { pid: process.pid, ok: true };`);
     expect(second.result).toMatchObject({ pid: (first.result as any).pid, ok: true });

@@ -65,8 +65,8 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `MessageAppended` | `{ messageId, role: "system" | "user" | "assistant" | "tool", content: string, modelCallId?: string, mailbox?: { mailboxMessageId, fromSessionId, relationship, taskId?, artifactIds?, receiptEventId } }` | Appends one conversation message. Optional mailbox provenance links a family-delivered message to its exact sender and receipt. |
 | `CellProposed` | `{ cellId, code: string, dependencies: string[] }` | Creates a proposed cell with attempt count zero. |
 | `CellStarted` | `{ cellId, attempt: positive integer }` | Moves a proposed/running cell to running. |
-| `CellCommitted` | `{ cellId, result: JsonValue, logs: string[], durationMs: nonnegative number, exports: string[] }` | Moves a running cell to committed. Working/artifact events are committed in the same append batch. |
-| `CellFailed` | `{ cellId, error: string, logs: string[], durationMs: nonnegative number }` | Moves a running cell to failed; no staged state/reference is appended. |
+| `CellCommitted` | `{ cellId, result: JsonValue, logs: string[], logStreams?: ("stdout" \| "stderr")[], durationMs: nonnegative number, exports: string[] }` | Moves a running cell to committed. Optional stream metadata must align one-to-one with `logs`; older events without it project logs as stdout. Working/artifact events are committed in the same append batch. |
+| `CellFailed` | `{ cellId, error: string, logs: string[], logStreams?: ("stdout" \| "stderr")[], durationMs: nonnegative number }` | Moves a running cell to failed; optional stream metadata follows the same alignment and compatibility rule, and no staged state/reference is appended. |
 | `CellAbandoned` | `{ cellId, reason: string }` | Recovery terminal for proposed/running cell; never implies its effects did not happen. |
 | `WorkingValueSet` | `{ name, version: positive integer, value: WorkingValue }` | Replaces active named value only when version increases. |
 | `ArtifactRegistered` | `{ artifactId, digest, mediaType, size, sourceEventId?: string }` | Registers integrity metadata; bytes remain in the artifact store. |
@@ -198,7 +198,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. Synchronized envelopes use a separate ingestion path that quarantines invalid remote rows rather than weakening local validation.
-- Snapshots include `reducerVersion: 11`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 12`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 

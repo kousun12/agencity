@@ -170,7 +170,7 @@ JSON observations at or below 128 KiB commit directly. Larger serializable obser
 
 Byte-identical content deduplicates by digest.
 
-`console.log`, `console.warn`, `console.error`, `process.stdout.write`, and `process.stderr.write` become cell logs. Logs are capped at 64 KiB and 1,000 entries. They are not protocol messages and cannot spoof worker RPC.
+`console.log` and `process.stdout.write` become stdout cell logs. `console.warn`, `console.error`, and `process.stderr.write` become stderr cell logs. The retained terminal event keeps aligned stream metadata so clients can distinguish the two without changing the public `logs: string[]` result. Older events without this optional metadata project their logs as stdout. Logs are capped at 64 KiB and 1,000 entries. They are not protocol messages and cannot spoof worker RPC.
 
 ## `inspect`
 

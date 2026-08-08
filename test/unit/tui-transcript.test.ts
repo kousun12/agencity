@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatTerminalCellResult } from "../../src/tui/transcript.ts";
+import { terminalCellReturnedOutput } from "../../src/tui/transcript.ts";
 import {
   terminalCellTone,
   terminalFamilyTone,
@@ -42,17 +42,21 @@ describe("structured terminal transcript", () => {
     ]).toEqual(["accent", "muted", "danger", "muted", "danger"]);
   });
 
-  test("bounds formatted cell results without losing the retained prefix", () => {
-    const formatted = formatTerminalCellResult({ rows: Array.from({ length: 200 }, (_, index) => `row-${index}`) });
-    expect(formatted).toStartWith("{\n  \"rows\"");
-    expect(formatted).toContain("output truncated");
-    expect(formatted.length).toBeLessThan(900);
-    expect(formatted.split("\n").length).toBeLessThanOrEqual(13);
-
-    const longLine = formatTerminalCellResult("x".repeat(2_000));
-    expect(longLine).toStartWith("x".repeat(100));
-    expect(longLine).toContain("output truncated");
-    expect(longLine.length).toBeLessThan(900);
+  test("renders returned shell streams without exposing result JSON or duplicating logs", () => {
+    const shellResult = {
+      exitCode: 0,
+      stdout: "tests passed\n",
+      stderr: "warning\n",
+    };
+    expect(terminalCellReturnedOutput(shellResult, [])).toEqual({
+      values: ["tests passed", "warning"],
+      streams: ["stdout", "stderr"],
+    });
+    expect(terminalCellReturnedOutput(shellResult, ["tests passed"])).toEqual({
+      values: ["warning"],
+      streams: ["stderr"],
+    });
+    expect(terminalCellReturnedOutput({ value: 42 }, [])).toEqual({ values: [], streams: [] });
   });
 
   test("selects deterministic normal, compact, and minimum height modes", () => {

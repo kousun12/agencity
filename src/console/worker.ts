@@ -1,4 +1,5 @@
 import type { JsonValue } from "../domain/json.ts";
+import type { CellLogStream } from "../domain/events.ts";
 import type { ConsoleSdk, SqlTag } from "./sdk.ts";
 import { encodeObservation, inspectValue, type InspectOptions } from "./inspect.ts";
 import { notebookCellBody } from "./notebook.ts";
@@ -14,30 +15,36 @@ const LOG_TRUNCATED = "[console output truncated]";
 
 class BoundedLogs {
   readonly values: string[] = [];
+  readonly streams: CellLogStream[] = [];
   #bytes = 0;
   #truncated = false;
 
-  push(value: string): void {
+  push(value: string, stream: CellLogStream): void {
     if (this.#truncated) return;
-    if (this.values.length >= MAX_LOG_LINES) return this.#truncate();
+    if (this.values.length >= MAX_LOG_LINES) return this.#truncate(stream);
     const bytes = new TextEncoder().encode(value);
     const remaining = MAX_LOG_BYTES - this.#bytes;
     if (bytes.byteLength <= remaining) {
       this.values.push(value);
+      this.streams.push(stream);
       this.#bytes += bytes.byteLength;
       return;
     }
     if (remaining > 0) {
       const prefix = new TextDecoder().decode(bytes.slice(0, remaining));
-      if (prefix) this.values.push(prefix);
+      if (prefix) {
+        this.values.push(prefix);
+        this.streams.push(stream);
+      }
     }
-    this.#truncate();
+    this.#truncate(stream);
   }
 
-  #truncate(): void {
+  #truncate(stream: CellLogStream): void {
     if (this.#truncated) return;
     this.#truncated = true;
     this.values.push(LOG_TRUNCATED);
+    this.streams.push(stream);
   }
 }
 
@@ -88,28 +95,29 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       return String(value);
     }
   };
-  const write = (chunk: unknown, ...args: unknown[]): boolean => {
-    const text = typeof chunk === "string"
-      ? chunk
-      : chunk instanceof Uint8Array
-        ? new TextDecoder().decode(chunk)
-        : String(chunk);
-    for (const line of text.replace(/\n$/, "").split("\n")) if (line) logs.push(line);
-    const callback = [...args].reverse().find((arg) => typeof arg === "function") as (() => void) | undefined;
-    if (callback) queueMicrotask(callback);
-    return true;
-  };
+  const write = (stream: CellLogStream) =>
+    (chunk: unknown, ...args: unknown[]): boolean => {
+      const text = typeof chunk === "string"
+        ? chunk
+        : chunk instanceof Uint8Array
+          ? new TextDecoder().decode(chunk)
+          : String(chunk);
+      for (const line of text.replace(/\n$/, "").split("\n")) if (line) logs.push(line, stream);
+      const callback = [...args].reverse().find((arg) => typeof arg === "function") as (() => void) | undefined;
+      if (callback) queueMicrotask(callback);
+      return true;
+    };
   const stdout = process.stdout as typeof process.stdout & { write: typeof process.stdout.write };
   const stderr = process.stderr as typeof process.stderr & { write: typeof process.stderr.write };
   const originalStdout = stdout.write;
   const originalStderr = stderr.write;
-  stdout.write = write as typeof process.stdout.write;
-  stderr.write = write as typeof process.stderr.write;
+  stdout.write = write("stdout") as typeof process.stdout.write;
+  stderr.write = write("stderr") as typeof process.stderr.write;
 
   const cellConsole = {
-    log: (...args: unknown[]) => logs.push(args.map(printable).join(" ")),
-    error: (...args: unknown[]) => logs.push(args.map(printable).join(" ")),
-    warn: (...args: unknown[]) => logs.push(args.map(printable).join(" ")),
+    log: (...args: unknown[]) => logs.push(args.map(printable).join(" "), "stdout"),
+    error: (...args: unknown[]) => logs.push(args.map(printable).join(" "), "stderr"),
+    warn: (...args: unknown[]) => logs.push(args.map(printable).join(" "), "stderr"),
   };
   const call = (method: string, args: unknown[]) => rpc(message.executionId, method, args);
   const state = {
@@ -269,5 +277,5 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     stdout.write = originalStdout;
     stderr.write = originalStderr;
   }
-  send({ ...response, logs: logs.values });
+  send({ ...response, logs: logs.values, logStreams: logs.streams });
 }

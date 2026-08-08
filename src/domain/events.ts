@@ -48,6 +48,7 @@ export const eventTypes = [
 ] as const;
 export type EventType = (typeof eventTypes)[number];
 export type Producer = "supervisor" | "console" | "model" | "executor" | "client" | "recovery" | "scheduler" | string;
+export type CellLogStream = "stdout" | "stderr";
 export type SessionStatus = "idle" | "running" | "stopped" | "failed" | "archived";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 export type EffectOutcome = "succeeded" | "failed" | "cancelled" | "unknown";
@@ -118,8 +119,8 @@ export interface EventPayloads {
   MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string; mailbox?: { mailboxMessageId: string; fromSessionId: string; relationship: FamilyRelationship; taskId?: string; artifactIds?: string[]; receiptEventId: string } };
   CellProposed: { cellId: string; code: string; dependencies: string[] };
   CellStarted: { cellId: string; attempt: number };
-  CellCommitted: { cellId: string; result: JsonValue; logs: string[]; durationMs: number; exports: string[] };
-  CellFailed: { cellId: string; error: string; logs: string[]; durationMs: number };
+  CellCommitted: { cellId: string; result: JsonValue; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; exports: string[] };
+  CellFailed: { cellId: string; error: string; logs: string[]; logStreams?: CellLogStream[]; durationMs: number };
   CellAbandoned: { cellId: string; reason: string };
   WorkingValueSet: { name: string; version: number; value: WorkingValue };
   ArtifactRegistered: ArtifactReference & { sourceEventId?: string };
@@ -309,8 +310,29 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional(), mailbox: z.object({ mailboxMessageId: id, fromSessionId: id, relationship: z.enum(["parent", "child", "sibling"]), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), receiptEventId: id }).optional() }),
   CellProposed: z.object({ cellId: id, code: z.string(), dependencies: z.array(id) }),
   CellStarted: z.object({ cellId: id, attempt: positiveInteger }),
-  CellCommitted: z.object({ cellId: id, result: jsonValueSchema, logs: z.array(z.string()), durationMs: nonnegative, exports: z.array(z.string()) }),
-  CellFailed: z.object({ cellId: id, error: z.string(), logs: z.array(z.string()), durationMs: nonnegative }),
+  CellCommitted: z.object({
+    cellId: id,
+    result: jsonValueSchema,
+    logs: z.array(z.string()),
+    logStreams: z.array(z.enum(["stdout", "stderr"])).optional(),
+    durationMs: nonnegative,
+    exports: z.array(z.string()),
+  }).superRefine((payload, context) => {
+    if (payload.logStreams && payload.logStreams.length !== payload.logs.length) {
+      context.addIssue({ code: "custom", message: "Cell log stream metadata must align with logs", path: ["logStreams"] });
+    }
+  }),
+  CellFailed: z.object({
+    cellId: id,
+    error: z.string(),
+    logs: z.array(z.string()),
+    logStreams: z.array(z.enum(["stdout", "stderr"])).optional(),
+    durationMs: nonnegative,
+  }).superRefine((payload, context) => {
+    if (payload.logStreams && payload.logStreams.length !== payload.logs.length) {
+      context.addIssue({ code: "custom", message: "Cell log stream metadata must align with logs", path: ["logStreams"] });
+    }
+  }),
   CellAbandoned: z.object({ cellId: id, reason: z.string() }),
   WorkingValueSet: z.object({ name: id, version: positiveInteger, value: workingValueSchema }),
   ArtifactRegistered: artifactSchema.extend({ sourceEventId: id.optional() }),

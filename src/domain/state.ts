@@ -1,6 +1,6 @@
 import type {
   AgentRunActionSource, AgentRunGoalMode, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
-  FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
+  CellLogStream, FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
   RefinementReviewLifecycleStatus, ScheduleStatus, SessionStatus, TaskStatus, ModelCallResult, ModelCallTermination, ModelUsageSource, Usage, WakeStatus, WorkingValue,
 } from "./events.ts";
 import type { ModelConfiguration, ModelDispatch, ModelWarning, RecursiveResponseAdmission } from "./model.ts";
@@ -8,11 +8,11 @@ import type { ModelEffectFailureCode } from "./model-response.ts";
 import type { AgentAction } from "./agent-action.ts";
 import type { JsonValue } from "./json.ts";
 
-export const REDUCER_VERSION = 11 as const;
+export const REDUCER_VERSION = 12 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
-export interface CellState { readonly id: string; readonly code: string; readonly status: "proposed" | "running" | "committed" | "failed" | "abandoned"; readonly attempts: number; readonly result?: JsonValue; readonly logs: string[]; readonly error?: string; readonly eventId: string; }
+export interface CellState { readonly id: string; readonly code: string; readonly status: "proposed" | "running" | "committed" | "failed" | "abandoned"; readonly attempts: number; readonly result?: JsonValue; readonly logs: string[]; readonly logStreams: CellLogStream[]; readonly error?: string; readonly eventId: string; }
 export interface WorkingValueState { readonly name: string; readonly version: number; readonly value: WorkingValue; readonly eventId: string; }
 export interface EffectState { readonly id: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotencyKey: string; readonly idempotent: boolean; readonly attempts: number; readonly status: "requested" | "started" | EffectOutcome; readonly output?: JsonValue; readonly error?: string; readonly modelFailure?: ModelEffectFailureCode; readonly eventId: string; }
 export interface EffectReconciliationState { readonly id: string; readonly effectId: string; readonly assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; readonly summary: string; readonly evidence?: JsonValue; readonly recordedBy: string; readonly recordedAt: string; readonly eventId: string; }
