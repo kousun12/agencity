@@ -275,6 +275,7 @@ describe("product CLI", () => {
     expect(first).toMatchObject({ code: 0, stderr: "" });
     expect(first.stdout).toContain("Session: inspect this repository / main");
     expect(first.stdout).toContain("Model: openai:openai/fixture-v1");
+    expect(first.stdout).toContain("Agent tools: bun_console + finish · unknown");
     expect(first.stdout).toContain("fixture completed: inspect this repository");
 
     const configuredEffort = await cli(["config", "set-effort", "medium", "--workspace", value.workspace, "--json"], { home: value.home });

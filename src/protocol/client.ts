@@ -11,6 +11,7 @@ import type {
   RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
   StartRefinementReviewInput, RefinementReviewRecord, RefinementTriggerPolicyV1,
   SkillManagementView, SkillImportPreview, InstallLocalSkillInput,
+  AgentToolContractCapabilityView, ModelContractDiagnosticsView,
 } from "../runtime/index.ts";
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
@@ -32,6 +33,7 @@ export interface ProtocolCapabilities {
   readonly reasoningEffortSelection?: boolean;
   readonly sync: Record<string, unknown>;
   readonly providers: ModelProviderDescriptor[];
+  readonly agentTools: AgentToolContractCapabilityView;
 }
 
 /** Typed, scrubbed protocol failure shared by both transports. */
@@ -95,6 +97,21 @@ export class AgentClient {
     }
     return this.#capabilitiesSnapshot;
   }
+  async agentToolCapability(
+    model: Pick<ModelConfigurationInput, "provider" | "model">,
+  ): Promise<AgentToolContractCapabilityView> {
+    const response = await this.#json<ProtocolCapabilities>(
+      `/capabilities?provider=${encodeURIComponent(model.provider)}&model=${encodeURIComponent(model.model)}`,
+    );
+    if (!response.agentTools?.selected) {
+      throw new ProtocolClientError(
+        "INVALID_RESPONSE",
+        "Protocol response omitted selected agent-tool capability",
+        502,
+      );
+    }
+    return response.agentTools;
+  }
   async requireCapability(capability: "reasoningEffortSelection"): Promise<void> {
     if ((await this.capabilities())[capability] !== true) {
       throw new ProtocolClientError("CAPABILITY_UNAVAILABLE", `Server does not support ${capability}`, 501);
@@ -134,6 +151,7 @@ export class AgentClient {
     return this.#post("/sessions", { workspaceId, ...options, ...(model === undefined ? {} : { model }) });
   }
   snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
+  modelContractDiagnostics(sessionId: string, branchId: string): Promise<ModelContractDiagnosticsView> { return this.#json(`/sessions/${sessionId}/model-contract-diagnostics?branch=${branchId}`); }
   message(sessionId: string, branchId: string, content: string): Promise<AgentEvent> { return this.#post(`/sessions/${sessionId}/messages?branch=${branchId}`, { content }); }
   async selectModel(sessionId: string, branchId: string, model: ModelConfigurationInput): Promise<unknown> {
     return this.#post(`/sessions/${sessionId}/model?branch=${branchId}`, { model: await this.#compatibleModel(model) });

@@ -21,6 +21,62 @@ async function setup(label: string, extra: Readonly<Record<string, string>> = {}
 }
 
 describe("FU-009 external outcome and interruption matrix", () => {
+  test("classifies narration, JSON text, and truncated formal calls without executing prose", async () => {
+    const { world, fixture, environment } = await setup("formal-classification");
+
+    const narrationTask = "fixture narration plus formal call";
+    fixture.script(narrationTask, [{
+      ...action("final", "formal narration result"),
+      narration: "This provider-only narration is diagnostic.",
+    }]);
+    const narrated = await world.command(["run", "--json", narrationTask], environment);
+    expect(narrated.code).toBe(0);
+    expect(parseSingleJson(narrated)).toMatchObject({
+      status: "succeeded",
+      final: "formal narration result",
+    });
+    expect(narrated.stdout).not.toContain("provider-only narration");
+
+    const jsonTask = "fixture JSON text is not a tool call";
+    fixture.script(jsonTask, [
+      JSON.stringify(action("typescript", "await tools.writeFile('json-text.txt', 'bad');")),
+      action("final", "JSON text was rejected before correction"),
+    ]);
+    const jsonText = await world.command(["run", "--json", jsonTask], environment);
+    expect(jsonText.code).toBe(0);
+    expect(parseSingleJson(jsonText)).toMatchObject({
+      status: "succeeded",
+      steps: 2,
+      final: "JSON text was rejected before correction",
+    });
+    expect(await Bun.file(join(world.repository, "json-text.txt")).exists()).toBe(false);
+
+    const truncatedTask = "fixture truncated formal call";
+    const truncated = {
+      ...action("typescript", "await tools.writeFile('truncated.txt', 'bad');"),
+      truncated: true,
+    };
+    fixture.script(truncatedTask, [truncated, truncated]);
+    const rejected = await world.command(["run", "--json", truncatedTask], environment);
+    expect(rejected.code).toBe(1);
+    expect(parseSingleJson(rejected)).toMatchObject({
+      status: "failed",
+      steps: 2,
+    });
+    expect(await Bun.file(join(world.repository, "truncated.txt")).exists()).toBe(false);
+    const status = await world.command(["status", "current", "--json"], environment);
+    const observed = parseSingleJson(status);
+    expect(observed.agentTools).toMatchObject({
+      tools: ["bun_console", "finish"],
+      state: "unknown",
+      admission: "allowed",
+      canRun: true,
+    });
+    expect((observed.modelContractCounters.violations as Array<{ count: number }>)
+      .reduce((total, item) => total + item.count, 0)).toBe(3);
+    expect(JSON.stringify(observed)).not.toContain("writeFile");
+  }, 120_000);
+
   test.each([
     { task: "fixture explicit failure", message: "fixture failure", status: "failed", code: 1 },
     { task: "fixture explicit block", message: "fixture block", status: "blocked", code: 4 },

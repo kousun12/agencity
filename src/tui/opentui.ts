@@ -42,6 +42,7 @@ import {
 } from "./layout.ts";
 import {
   formatTerminalDetail,
+  terminalCatalogAgentToolState,
   type TerminalDetail,
   type TerminalEffortDetail,
   type TerminalModelDetail,
@@ -176,7 +177,7 @@ function renderModelInspector(
         "Catalog",
         ...catalogModels.slice(0, 8).flatMap((model, index) => [
           `${index === selectedCatalogIndex ? ">" : " "} ${model.displayName} · ${model.model}`,
-          `  ${model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`} · ${model.reasoning.status === "listed" ? "effort" : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed"}${model.stale ? " · stale" : ""}`,
+          `  ${model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`} · ${model.reasoning.status === "listed" ? "effort" : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed"} · agent tools ${terminalCatalogAgentToolState(detail, entryProvider, model.model)}${model.stale ? " · stale" : ""}`,
         ]),
       ] : []),
       "",
@@ -193,6 +194,8 @@ function renderModelInspector(
     `${currentProvider?.usable ? "✓" : "!"} ${currentProvider?.displayName ?? detail.current.provider}`,
     `  ${detail.current.model}`,
     `  Credential: ${currentProvider?.credentialLabel ?? "unavailable"}`,
+    `  Agent tools: ${detail.currentAgentTools?.state ?? currentProvider?.agentToolState ?? "unavailable"}${detail.currentAgentTools?.canRun === false ? " · unavailable" : ""}`,
+    ...(detail.currentAgentTools?.reason ? [`  ${detail.currentAgentTools.reason}`] : []),
     "",
     "Workspace default",
     `  ${detail.workspaceDefault ?? "Not set"}`,
@@ -201,9 +204,9 @@ function renderModelInspector(
   ];
   detail.providers.forEach((provider, index) => {
     const selected = index === selectedIndex;
-    lines.push(`${selected ? ">" : " "} ${provider.usable ? "✓" : "○"} ${provider.displayName}`);
-    lines.push(`    ${provider.credentialLabel}`);
-    if (selected && !provider.usable && provider.remediation) lines.push(`    ${provider.remediation}`);
+    lines.push(`${selected ? ">" : " "} ${provider.usable && provider.agentToolAdmission === "allowed" ? "✓" : "○"} ${provider.displayName}`);
+    lines.push(`    ${provider.credentialLabel} · agent tools ${provider.agentToolState}`);
+    if (selected && (!provider.usable || provider.agentToolAdmission === "rejected") && provider.remediation) lines.push(`    ${provider.remediation}`);
   });
   if (catalogModels.length) {
     lines.push("", "Catalog models");
@@ -212,7 +215,7 @@ function renderModelInspector(
         : `$${(model.pricing.inputUsdPerToken * 1_000_000).toFixed(2)}/$${(model.pricing.outputUsdPerToken * 1_000_000).toFixed(2)} per 1M`;
       lines.push(
         `  ${model.displayName} · ${model.model}`,
-        `    ${model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`} · ${pricing} · ${model.reasoning.status === "listed" ? "effort" : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed"}${model.stale ? " · stale" : ""}`,
+        `    ${model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`} · ${pricing} · ${model.reasoning.status === "listed" ? "effort" : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed"} · agent tools ${terminalCatalogAgentToolState(detail, selectedProvider ?? "", model.model)}${model.stale ? " · stale" : ""}`,
       );
     }
   }

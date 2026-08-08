@@ -341,6 +341,41 @@ describe("model effect response-contract admission", () => {
       kind: "tool-submission",
       submission: { name: "finish", input: { outcome: { message: "Done." } } },
     });
+    const progress: Array<{ kind: string; value: unknown }> = [];
+    const executed = await executor.execute({
+      effectId: "formal-progress",
+      sessionId: "session",
+      branchId: "branch",
+      executor: "model",
+      operation: "complete",
+      input: { context: {}, modelDispatch: dispatch } as any,
+      idempotencyKey: "formal-progress",
+      idempotent: false,
+      attempt: 1,
+    }, {
+      signal: new AbortController().signal,
+      reportProgress: notification => progress.push(notification),
+    });
+    expect(executed.outcome).toBe("succeeded");
+    expect(progress).toEqual([
+      {
+        kind: "model-tool-progress",
+        value: {
+          phase: "tool-call-start",
+          name: "finish",
+        },
+      },
+      {
+        kind: "model-tool-progress",
+        value: {
+          phase: "tool-input-delta",
+          bytes: canonicalJsonByteLength({ outcome: { message: "Done." } }),
+        },
+      },
+    ]);
+    expect(JSON.stringify(progress)).not.toContain("Done.");
+    expect(JSON.stringify(progress)).not.toContain('"input":');
+    expect(JSON.stringify(progress)).not.toContain('"arguments":');
   });
 
   test.each([

@@ -995,10 +995,7 @@ export class ModelExecutor implements EffectExecutor {
             kind: "model-tool-progress",
             value: {
               phase: delta.kind,
-              callId: delta.callId,
               ...(delta.kind === "tool-call-start" ? { name: delta.name } : { bytes: delta.bytes }),
-              provider: modelDispatch.configuration.provider,
-              model: modelDispatch.configuration.model,
             },
           });
         },

@@ -42,7 +42,12 @@ import {
   type ManagedServiceStatus,
 } from "./product/index.ts";
 import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./protocol/index.ts";
-import { Supervisor, type AgentRunResult } from "./runtime/index.ts";
+import {
+  Supervisor,
+  type AgentRunResult,
+  type ModelContractDiagnosticsView,
+  type SelectedAgentToolCapabilityView,
+} from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 import { OpenTerminalUI } from "./tui/opentui.ts";
 
@@ -189,12 +194,12 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       await client.resume(selection.sessionId, selection.branchId);
     }
 
-    const providers = await client.modelProviders();
-    const provider = providers.find(candidate => candidate.name === summary.model.provider);
-    const available = provider?.usable === true;
-    const remediation = available ? null : provider?.remediation ?? `Install or configure provider ${summary.model.provider}, then restart the managed service.`;
+    const agentTools = (await client.agentToolCapability(summary.model)).selected!;
+    const available = agentTools.canRun;
+    const remediation = available ? null : agentTools.reason ??
+      `The selected ${summary.model.provider}:${summary.model.model} combination cannot run the fixed agent tool contract.`;
     const opensInteractiveTerminal = interactive && ["product", "new", "resume", "attach"].includes(parsed.command);
-    if (!parsed.flags.has("json") && !opensInteractiveTerminal) printStartup(workspace, summary, available, remediation);
+    if (!parsed.flags.has("json") && !opensInteractiveTerminal) printStartup(workspace, summary, agentTools, remediation);
     if (parsed.command === "branch") {
       const [position, ...nameParts] = parsed.positionals;
       if (position !== "head") throw new ValidationError("branch requires `head [NAME]`; low-level point-in-time forks remain under debug branch");
@@ -675,6 +680,10 @@ async function managedStatus(client: AgentClient, parsed: ParsedCliArgs): Promis
     const latest = Object.values(snapshot.state.agentRuns).at(-1);
     if (!latest) throw new ValidationError("The current branch has no agent run outcome");
     const final = latest.finalMessageId === undefined ? undefined : snapshot.state.messages.find(message => message.id === latest.finalMessageId)?.content;
+    const [agentTools, modelContracts] = await Promise.all([
+      client.agentToolCapability(snapshot.state.model),
+      client.modelContractDiagnostics(selected.sessionId, selected.branchId),
+    ]);
     printProductRunResult({
       runId: latest.id,
       sessionId: selected.sessionId,
@@ -684,7 +693,10 @@ async function managedStatus(client: AgentClient, parsed: ParsedCliArgs): Promis
       ...(latest.reason === undefined ? {} : { reason: latest.reason }),
       ...(latest.finalMessageId === undefined ? {} : { finalMessageId: latest.finalMessageId }),
       ...(final === undefined ? {} : { final }),
-    }, parsed.flags.has("json"));
+    }, parsed.flags.has("json"), {
+      agentTools: agentTools.selected!,
+      modelContracts,
+    });
     return;
   }
   const agents = await client.serviceAgents() as any[];
@@ -835,7 +847,16 @@ function productRunExitCode(status: AgentRunResult["status"]): number {
   }
 }
 
-function printProductRunResult(result: AgentRunResult, json: boolean): void {
+interface ProductRunObservability {
+  readonly agentTools: SelectedAgentToolCapabilityView;
+  readonly modelContracts: ModelContractDiagnosticsView;
+}
+
+function printProductRunResult(
+  result: AgentRunResult,
+  json: boolean,
+  observability?: ProductRunObservability,
+): void {
   const exitCode = productRunExitCode(result.status);
   if (json) {
     console.log(JSON.stringify({
@@ -846,9 +867,38 @@ function printProductRunResult(result: AgentRunResult, json: boolean): void {
       steps: result.steps,
       ...(result.final === undefined ? {} : { final: result.final }),
       ...(result.reason === undefined ? {} : { reason: result.reason }),
+      ...(observability === undefined ? {} : {
+        agentTools: {
+          contract: "agencity.agent-tools.v1",
+          tools: ["bun_console", "finish"],
+          state: observability.agentTools.state,
+          admission: observability.agentTools.admission,
+          canRun: observability.agentTools.canRun,
+          ...(observability.agentTools.reason === undefined
+            ? {}
+            : { reason: observability.agentTools.reason }),
+        },
+        modelContractCounters: observability.modelContracts.counters,
+      }),
     }));
-  } else if (result.status === "succeeded") console.log(result.final ?? "");
-  else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
+  } else {
+    if (result.status === "succeeded") console.log(result.final ?? "");
+    else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
+    if (observability) {
+      const accepted = observability.modelContracts.counters.submissions
+        .reduce((total, item) => total + item.count, 0);
+      const violations = observability.modelContracts.counters.violations
+        .reduce((total, item) => total + item.count, 0);
+      console.log(
+        `Agent tools: bun_console + finish · ${observability.agentTools.state}` +
+        `${observability.agentTools.canRun ? "" : " [UNAVAILABLE]"}`,
+      );
+      console.log(`Formal outcomes: ${accepted} accepted · ${violations} violations`);
+      if (observability.agentTools.reason) {
+        console.log(`Agent-tool detail: ${observability.agentTools.reason}`);
+      }
+    }
+  }
   process.exitCode = exitCode;
 }
 
@@ -1189,15 +1239,25 @@ function commandRequiresUsableModel(parsed: ParsedCliArgs, task: string | undefi
   return false;
 }
 
-function printStartup(workspace: ResolvedWorkspace, session: ProductBranchSummary, providerUsable: boolean, remediation: string | null): void {
+function printStartup(
+  workspace: ResolvedWorkspace,
+  session: ProductBranchSummary,
+  agentTools: SelectedAgentToolCapabilityView,
+  remediation: string | null,
+): void {
   console.log([
     "Agencity product session",
     `Workspace: ${workspace.name} (${workspace.root})`,
     `Session: ${session.sessionName} / ${session.branchName}`,
-    `Model: ${session.model.provider}:${session.model.model} · effort ${session.model.reasoningEffort}${providerUsable ? "" : " [UNAVAILABLE]"}`,
-    `Run state: ${providerUsable ? session.status : "blocked by provider configuration"}`,
+    `Model: ${session.model.provider}:${session.model.model} · effort ${session.model.reasoningEffort}${agentTools.canRun ? "" : " [UNAVAILABLE]"}`,
+    `Agent tools: bun_console + finish · ${agentTools.state}${agentTools.canRun ? "" : " [UNAVAILABLE]"}`,
+    `Run state: ${agentTools.canRun
+      ? session.status
+      : agentTools.admission === "rejected"
+        ? "blocked by selected model capability"
+        : "blocked by provider credentials"}`,
     "Mode: trusted-local; generated code has this process's OS authority (not sandboxed)",
-    ...(!providerUsable && remediation ? [`Remediation: ${remediation}`] : []),
+    ...(!agentTools.canRun && remediation ? [`Remediation: ${remediation}`] : []),
   ].join("\n"));
 }
 

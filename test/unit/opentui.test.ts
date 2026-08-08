@@ -81,7 +81,10 @@ describe("OpenTUI interactive terminal", () => {
     expect(proposedFinal.runs[0]).toMatchObject({
       taskMessageId: "agent-run-task-gated-run",
       finalMessageId: null,
-      steps: [expect.objectContaining({ label: "Completion proposed", detail: null })],
+      steps: [expect.objectContaining({
+        label: "Formal finish submission · completion proposed",
+        detail: null,
+      })],
     });
     const typescriptCode = "const rows = await sql.query('select 1');\nreturn rows;";
     const typescriptRun: AgentRunState = {
@@ -357,11 +360,18 @@ describe("OpenTUI interactive terminal", () => {
     let selectedModel: ModelConfiguration = { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" };
     let effortPreference: ModelConfiguration["reasoningEffort"] | null = null;
     const submittedKeys: Array<string | null> = [];
+    const formalCapability = {
+      status: "provider-strict" as const,
+      requiredChoice: "provider-enforced" as const,
+      parallelCalls: "provider-disabled" as const,
+      streaming: true,
+      adapter: "fixture.formal.v1",
+    };
     const providers = () => [
       {
         name: "openai",
         displayName: "OpenAI",
-        capabilities: { streaming: true },
+        capabilities: { streaming: true, requiredToolSet: formalCapability },
         usable: storedOpenAi,
         credentialSource: storedOpenAi ? "stored" as const : "missing" as const,
         ...(storedOpenAi ? {} : { remediation: "Log in to OpenAI." }),
@@ -369,7 +379,7 @@ describe("OpenTUI interactive terminal", () => {
       {
         name: "anthropic",
         displayName: "Anthropic",
-        capabilities: { streaming: true },
+        capabilities: { streaming: true, requiredToolSet: formalCapability },
         usable: false,
         credentialSource: "missing" as const,
         remediation: "Log in to Anthropic.",
@@ -377,7 +387,7 @@ describe("OpenTUI interactive terminal", () => {
       {
         name: "vercel",
         displayName: "Vercel AI Gateway",
-        capabilities: { streaming: true },
+        capabilities: { streaming: true, requiredToolSet: formalCapability },
         usable: false,
         credentialSource: "missing" as const,
         remediation: "Log in to Vercel AI Gateway.",
@@ -385,7 +395,7 @@ describe("OpenTUI interactive terminal", () => {
       {
         name: "echo",
         displayName: "Echo (internal test fixture; non-streaming)",
-        capabilities: { streaming: false },
+        capabilities: { streaming: false, requiredToolSet: formalCapability },
         usable: true,
         credentialSource: "programmatic" as const,
       },
@@ -394,6 +404,41 @@ describe("OpenTUI interactive terminal", () => {
       get(target, property) {
         if (property === "modelProviders") return async () => providers();
         if (property === "capabilities") return async () => ({ ...(await base.capabilities()), providers: providers() });
+        if (property === "agentToolCapability") return async (model: ModelConfiguration) => {
+          const global = (await base.capabilities()).agentTools;
+          const descriptor = providers().find(item => item.name === model.provider);
+          const usable = descriptor?.usable === true;
+          const remediation = descriptor && "remediation" in descriptor
+            ? descriptor.remediation
+            : undefined;
+          const transport = {
+            provider: model.provider,
+            displayName: descriptor?.displayName ?? model.provider,
+            state: "provider-strict" as const,
+            admission: "allowed" as const,
+            canRun: usable,
+            credential: descriptor?.credentialSource ?? "missing",
+            requiredChoice: "provider-enforced" as const,
+            parallelCalls: "provider-disabled" as const,
+            boundedToolInputStreaming: true,
+            adapter: "fixture.formal.v1",
+            ...(usable ? {} : { reason: remediation ?? "Provider unavailable." }),
+            provenance: { kind: "transport" as const, reportedStatus: "provider-strict" as const },
+          };
+          return {
+            ...global,
+            selected: {
+              provider: model.provider,
+              model: model.model,
+              state: "provider-strict" as const,
+              admission: "allowed" as const,
+              canRun: usable,
+              ...(usable ? {} : { reason: remediation ?? "Provider unavailable." }),
+              transport,
+              modelCatalog: null,
+            },
+          };
+        };
         if (property === "productConfig") return async () => ({
           defaultModel,
           selectedModelEffortPreference: effortPreference,
@@ -697,6 +742,14 @@ describe("OpenTUI interactive terminal", () => {
           label: "TypeScript cell",
           detail: "const value = 42;",
           attempts: 2,
+          formalOutcome: {
+            kind: "formal-submission",
+            contractId: "agencity.agent-tools.v1",
+            contractVersion: 1,
+            tool: "bun_console",
+            schemaEnforcement: "provider-strict",
+            source: "model-call",
+          },
           cell: {
             id: "agent-run-cell-action-1",
             language: "typescript",

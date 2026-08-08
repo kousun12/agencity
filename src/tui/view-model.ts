@@ -4,7 +4,9 @@ import type {
   FamilyAgentActivity,
   FamilyAgentActivityReason,
   FamilyAgentRecord,
+  ModelContractDiagnosticOutcome,
 } from "../runtime/index.ts";
+import { deriveModelContractCallDiagnostic } from "../runtime/index.ts";
 
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]);
 
@@ -47,6 +49,7 @@ export interface TerminalStepView {
   readonly detail: string | null;
   readonly attempts: number;
   readonly cell: TerminalCellView | null;
+  readonly formalOutcome: ModelContractDiagnosticOutcome | null;
 }
 
 export interface TerminalCellView {
@@ -253,11 +256,14 @@ function visibleConversation(messages: readonly MessageState[]): TerminalConvers
 function stepView(state: AgentState, run: AgentRunState, ordinal: number): TerminalStepView {
   const step = run.steps[ordinal]!;
   const action = step.action;
+  const formalOutcome = step.actionSource
+    ? deriveModelContractCallDiagnostic(state, step.actionSource.modelCallId)
+    : null;
   let label = "Model decision";
   let detail: string | null = null;
   let cell: TerminalCellView | null = null;
   if (action?.type === "typescript") {
-    label = "TypeScript cell";
+    label = "Formal bun_console submission";
     const cellId = `agent-run-cell-${step.actionId}`;
     const projected = state.cells[cellId];
     const code = projected?.code ?? action.code;
@@ -274,17 +280,24 @@ function stepView(state: AgentState, run: AgentRunState, ordinal: number): Termi
     };
   } else if (action?.type === "final") {
     const accepted = run.status === "succeeded" && run.finalMessageId !== undefined && run.steps.at(-1)?.id === step.id;
-    label = accepted ? "Final response committed" : "Completion proposed";
+    label = accepted
+      ? "Formal finish submission · response committed"
+      : "Formal finish submission · completion proposed";
     detail = accepted ? oneLine(action.content) : null;
   } else if (action?.type === "blocked") {
-    label = "Blocked";
+    label = "Formal finish submission · blocked";
     detail = oneLine(action.reason);
   } else if (action?.type === "failed") {
-    label = "Failed";
+    label = "Formal finish submission · failed";
     detail = oneLine(action.error);
   } else if (step.rejection) {
-    label = "Rejected model action";
-    detail = oneLine(step.rejection);
+    const violation = formalOutcome?.kind === "contract-violation"
+      ? formalOutcome
+      : null;
+    label = violation
+      ? `Formal contract violation · ${violation.code}`
+      : "Formal contract violation";
+    detail = oneLine(violation?.message ?? step.rejection);
   }
   return {
     id: step.id,
@@ -293,6 +306,7 @@ function stepView(state: AgentState, run: AgentRunState, ordinal: number): Termi
     detail,
     attempts: Math.max(1, step.modelAttempts.length),
     cell,
+    formalOutcome,
   };
 }
 

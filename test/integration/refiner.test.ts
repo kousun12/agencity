@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
-import { AgentClient, LibSqlStorage, ProtocolServer, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementReviewRecursiveResult, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
+import { AgentClient, LibSqlStorage, ProtocolServer, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementReviewRecursiveResult, deriveModelContractDiagnostics, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
 import { ModelProviderResponseFailureError, formalMissingToolOutput, formalOutputFromAgentAction, formalOutputFromRefinementReviewSubmission } from "../../src/executors/model-response.ts";
 import { internalStructuredModelTurn } from "../../src/runtime/internal.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
@@ -342,6 +342,54 @@ describe("FU-016 durable RefinerService", () => {
       await supervisor.storage.rebuildOperationalProjections?.();
       expect((await supervisor.models.get(review.handleId!)).result)
         .toEqual(result.value);
+    } finally { await supervisor.close(); }
+  });
+
+  test("branch diagnostics count one retained refinement submission without double counting", async () => {
+    const provider = new ReviewProvider("review-diagnostic-count");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      const review = await supervisor.refiner.request(sessionId, branchId, {});
+      expect(review.status).toBe("no_change");
+      const refinementCount = (
+        view: ReturnType<typeof deriveModelContractDiagnostics>,
+      ): number => view.counters.submissions.find(
+        (item) => item.tool === REFINEMENT_REVIEW_TOOL_NAME,
+      )!.count;
+
+      const parentState = projectEvents(
+        await supervisor.storage.loadEvents(sessionId, { branchId }),
+      );
+      const parent = deriveModelContractDiagnostics(parentState);
+      expect(refinementCount(parent)).toBe(1);
+      // The single count comes from the retained recursive result. The child's
+      // model call is committed on the child branch and is absent from the
+      // parent projection, so nothing can be counted twice.
+      expect(Object.values(parentState.modelCalls).filter((call) =>
+        call.modelDispatch.responseContract.kind === "required-tool-set" &&
+        call.modelDispatch.responseContract.contractId === REFINEMENT_REVIEW_CONTRACT_ID,
+      )).toHaveLength(0);
+      expect(parent.recentOutcomes.filter((outcome) =>
+        outcome.kind === "formal-submission" &&
+        outcome.tool === REFINEMENT_REVIEW_TOOL_NAME,
+      )).toEqual([
+        expect.objectContaining({ source: "retained-recursive-result" }),
+      ]);
+
+      const result = await supervisor.models.result(review.handleId!);
+      const child = deriveModelContractDiagnostics(projectEvents(
+        await supervisor.storage.loadEvents(result.provenance.childSessionId, {
+          branchId: result.provenance.childBranchId,
+        }),
+      ));
+      expect(refinementCount(child)).toBe(1);
+      expect(child.recentOutcomes).toEqual([
+        expect.objectContaining({
+          kind: "formal-submission",
+          tool: REFINEMENT_REVIEW_TOOL_NAME,
+          source: "model-call",
+        }),
+      ]);
     } finally { await supervisor.close(); }
   });
 
@@ -963,6 +1011,9 @@ describe("FU-016 durable RefinerService", () => {
       expect(terminalOutput).not.toContain(review.reviewId);
       await ui.execute("/raw");
       expect(terminalOutput).toContain(review.reviewId);
+      expect(terminalOutput).toContain('"kind": "formal-submission"');
+      expect(terminalOutput).toContain('"tool": "agencity_submit_refinement_review"');
+      expect(terminalOutput).not.toContain('"arguments"');
       expect(terminalOutput).toContain('"status": "no_change"');
       await ui.execute("/refine review the retained protocol trajectory");
       expect(terminalOutput).toContain("review the retained protocol trajectory — no change");

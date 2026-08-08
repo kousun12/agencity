@@ -130,7 +130,7 @@ function cellSummary(step: TerminalStepView, cell: TerminalCellView): string {
       : "";
   const executions = cell.attempts > 1 ? ` · ${cell.attempts} executions` : "";
   const modelAttempts = step.attempts > 1 ? ` · ${step.attempts} model attempts` : "";
-  return `TypeScript · ${source || "(empty source)"} · ${lines} ${lines === 1 ? "line" : "lines"}${output}${executions}${modelAttempts}`;
+  return `bun_console · TypeScript · ${source || "(empty source)"} · ${lines} ${lines === 1 ? "line" : "lines"}${output}${executions}${modelAttempts}`;
 }
 
 function ordinaryStepSummary(step: TerminalStepView): string {

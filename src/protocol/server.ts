@@ -1,7 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import { AgentRuntimeError, ValidationError } from "../domain/index.ts";
 import type { ModelConfiguration } from "../domain/index.ts";
-import type { AgentRunResult, StartAgentRunInput } from "../runtime/index.ts";
+import {
+  deriveModelContractDiagnostics,
+  describeAgentToolCapabilities,
+  type AgentRunResult,
+  type StartAgentRunInput,
+} from "../runtime/index.ts";
 import { scrubJson, scrubText } from "../security/scrub.ts";
 import type { Supervisor } from "../runtime/index.ts";
 
@@ -98,17 +103,30 @@ export class ProtocolServer {
         ...(this.options.service?.health ?? {}),
         ...(this.options.service ? { ready: this.options.service.ready?.() ?? true } : {}),
       }, { headers: { "cache-control": "no-store" } });
-      if (request.method === "GET" && url.pathname === "/capabilities") return Response.json({
-        protocol: "agencity.protocol", version: 1, mode: "trusted-local",
-        trustedLocal: true, hostileCodeSandbox: false,
-        snapshotCursorResume: true, committedEventDeduplication: true,
-        cursorlessProgress: true, historicalProjection: true,
-        managedService: Boolean(this.options.service),
-        productCatalog: Boolean(this.options.service?.productSessions),
-        reasoningEffortSelection: true,
-        sync: this.supervisor.sync.capabilities,
-        providers: this.supervisor.modelExecutor.providers(),
-      }, { headers: { "cache-control": "no-store" } });
+      if (request.method === "GET" && url.pathname === "/capabilities") {
+        const provider = url.searchParams.get("provider");
+        const model = url.searchParams.get("model");
+        if ((provider === null) !== (model === null)) {
+          throw new ValidationError(
+            "Selected agent-tool capability requires both provider and model",
+          );
+        }
+        return Response.json({
+          protocol: "agencity.protocol", version: 1, mode: "trusted-local",
+          trustedLocal: true, hostileCodeSandbox: false,
+          snapshotCursorResume: true, committedEventDeduplication: true,
+          cursorlessProgress: true, historicalProjection: true,
+          managedService: Boolean(this.options.service),
+          productCatalog: Boolean(this.options.service?.productSessions),
+          reasoningEffortSelection: true,
+          sync: this.supervisor.sync.capabilities,
+          providers: this.supervisor.modelExecutor.providers(),
+          agentTools: describeAgentToolCapabilities(
+            this.supervisor.modelExecutor,
+            provider === null || model === null ? undefined : { provider, model },
+          ),
+        }, { headers: { "cache-control": "no-store" } });
+      }
       if (request.method === "GET" && url.pathname === "/model-catalog") {
         const catalog = await this.supervisor.modelCatalog.ensureFresh();
         return Response.json({
@@ -188,6 +206,10 @@ export class ProtocolServer {
       if (parts[0] === "sessions" && parts[1]) {
         const sessionId = parts[1]; const branchId = url.searchParams.get("branch") ?? parts[3];
         if (request.method === "GET" && parts[2] === "snapshot" && branchId) return Response.json(await this.supervisor.projections.getSnapshot(sessionId, branchId));
+        if (request.method === "GET" && parts[2] === "model-contract-diagnostics" && branchId) {
+          const snapshot = await this.supervisor.projections.getSnapshot(sessionId, branchId);
+          return Response.json(deriveModelContractDiagnostics(snapshot.state));
+        }
         if (request.method === "GET" && parts[2] === "history" && branchId) return Response.json(await this.supervisor.projections.history(sessionId, branchId));
         if (request.method === "GET" && parts[2] === "stream" && branchId) return this.#stream(sessionId, branchId, url.searchParams.get("after") ?? "0", request.signal);
         if (request.method === "POST" && parts[2] === "messages" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.appendMessage(sessionId, branchId, "user", String(body.content ?? ""))); }

@@ -25,7 +25,7 @@ import {
 export type TerminalAgentClient = Pick<AgentClient,
   "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
   "createSession" | "modelProviders" | "startRun" | "run" | "cancelRun" |
-  "productConfig" | "productSetModel" | "productSetReasoningEffort" | "productSetProviderKey" | "selectModel" | "modelCatalog" |
+  "productConfig" | "productSetModel" | "productSetReasoningEffort" | "productSetProviderKey" | "selectModel" | "modelCatalog" | "agentToolCapability" | "modelContractDiagnostics" |
   "cell" | "fork" | "resume" | "inspectContext" | "compact" | "agents" | "tasks" | "mailbox" | "cancelTask" |
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
   "heartbeats" | "createHeartbeat" | "pauseHeartbeat" | "resumeHeartbeat" | "cancelHeartbeat" |
@@ -133,6 +133,7 @@ export function renderStartupStatus(
   state: AgentState,
   capabilities: ProtocolCapabilities,
   recovery: RecoverySummaryView,
+  agentTools = capabilities.agentTools?.selected,
 ): string {
   const provider = capabilities.providers.find((item) => item.name === state.model.provider);
   const streaming = provider?.capabilities.streaming ? "incremental progress" : "committed responses only";
@@ -143,6 +144,12 @@ export function renderStartupStatus(
     "Agencity trusted-local TUI (protocol-backed terminal client)",
     `Session: ${state.sessionName ?? "unnamed session"} / ${state.branch.name ?? "unnamed branch"}`,
     `Model: ${state.model.provider}:${state.model.model} · effort ${state.model.reasoningEffort} (${streaming})`,
+    // A missing selected-capability view is absence of facts, not evidence of
+    // an unavailable contract, so no state is claimed for it.
+    ...(agentTools === undefined
+      ? []
+      : [`Agent tools: bun_console + finish · ${agentTools.state}${agentTools.canRun ? "" : " [UNAVAILABLE]"}`]),
+    ...(agentTools?.reason ? [`Agent-tool detail: ${agentTools.reason}`] : []),
     "Authority: TRUSTED-LOCAL; generated code has the runtime process's OS authority (not sandboxed)",
     `Protocol: snapshot+cursor resume=${capabilities.snapshotCursorResume}; progress is ephemeral; sync=${sync}`,
     `Recovery: ${recovery.pendingEffectIds.length} pending effects, ${recovery.unknownEffects.length} unknown, ${recovery.activeChildTaskIds.length} active children, ${recovery.attentionGoalGateIds.length} failed/unknown/running gates`,
@@ -319,6 +326,7 @@ export class TerminalUI {
     this.#capabilities = capabilities;
     this.#productCatalog = capabilities.productCatalog;
     const snapshot = await this.client.snapshot(sessionId, branchId);
+    const agentTools = await this.client.agentToolCapability(snapshot.state.model);
     this.#liveState = snapshot.state;
     this.#viewState = snapshot.state;
     this.#navigationGeneration++;
@@ -333,7 +341,7 @@ export class TerminalUI {
     await this.#refreshFamily(true);
     const recovery = await this.client.recoverySummary(sessionId, branchId);
     if (announce) {
-      this.#write(`${renderStartupStatus(snapshot.state, capabilities, recovery)}\n`);
+      this.#write(`${renderStartupStatus(snapshot.state, capabilities, recovery, agentTools.selected)}\n`);
       if (recovery.unknownEffects.length) this.#write("Unknown effects require inspection with /unknown and evidence-only /reconcile; resume never retries them.\n");
       this.#write("/help opens the command palette. /quit detaches without cancellation.\n");
     }
@@ -448,8 +456,16 @@ export class TerminalUI {
     if (line === "/quit" || line === "/exit") { this.#requestDetach(); return "detach"; }
     if (line === "/help") { this.#writePalette(); return "continue"; }
     if (line === "/raw") {
-      if (!this.#lastDetail) this.#write("No inspector result is available yet.\n");
-      else this.#emitDetail({ kind: "raw", command: "/raw", title: `${this.#lastDetail.title} · raw diagnostics`, raw: this.#lastDetail.raw });
+      const modelContracts = await this.client.modelContractDiagnostics(this.#sessionId, this.#branchId);
+      this.#emitDetail({
+        kind: "raw",
+        command: "/raw",
+        title: `${this.#lastDetail?.title ?? "Branch"} · raw diagnostics`,
+        raw: {
+          ...(this.#lastDetail ? { inspector: this.#lastDetail.raw } : {}),
+          modelContracts,
+        },
+      });
       return "continue";
     }
     if (line === "/live") { this.#historicalCursor = null; this.#viewState = this.#liveState; this.#write("Returned to live state.\n"); this.#publish(); return "continue"; }
@@ -877,7 +893,18 @@ export class TerminalUI {
     this.#viewState=projectEvents(selected);this.#historicalCursor=this.#viewState.cursor;this.#write(`Historical projection at ${this.#historicalCursor}; live events remain observational only. Use /live to return.\n`);this.#detail("/history-snapshot", this.#viewState);this.#publish();
   }
 
-  async #info():Promise<void>{const caps=await this.client.capabilities();const recovery=await this.client.recoverySummary(this.#sessionId,this.#branchId);this.#capabilities=caps;this.#detail("/info",{state:this.#requireState(),capabilities:caps,recovery,connection:this.#connection});this.#publish();}
+  async #info():Promise<void>{
+    const state=this.#requireState();
+    const [caps,recovery,agentTools,modelContracts]=await Promise.all([
+      this.client.capabilities(),
+      this.client.recoverySummary(this.#sessionId,this.#branchId),
+      this.client.agentToolCapability(state.model),
+      this.client.modelContractDiagnostics(this.#sessionId,this.#branchId),
+    ]);
+    this.#capabilities=caps;
+    this.#detail("/info",{state,capabilities:caps,recovery,agentTools,modelContracts,connection:this.#connection});
+    this.#publish();
+  }
   async #model(command:string):Promise<void>{
     const providers=await this.client.modelProviders();
     if(!command){
@@ -1001,11 +1028,18 @@ export class TerminalUI {
   }
   async #showModelDetail(providers?:Awaited<ReturnType<TerminalAgentClient["modelProviders"]>>,current:ModelConfiguration=this.#requireState().model):Promise<void>{
     const available=providers??await this.client.modelProviders();
-    const [config,catalog]=await Promise.all([
+    const [config,catalog,agentTools]=await Promise.all([
       this.client.productConfig(),
       this.client.modelCatalog().catch(()=>({descriptors:[]})),
+      this.client.agentToolCapability(current),
     ]);
-    const detail=buildTerminalModelDetail({current,workspaceDefault:config.defaultModel,providers:available,catalogModels:catalog.descriptors});
+    const detail=buildTerminalModelDetail({
+      current,
+      workspaceDefault:config.defaultModel,
+      providers:available,
+      catalogModels:catalog.descriptors,
+      ...(agentTools.selected===undefined?{}:{currentAgentTools:agentTools.selected}),
+    });
     this.#lastDetail=detail;
     this.#emitDetail(detail);
   }

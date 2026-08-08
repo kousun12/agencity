@@ -4,6 +4,9 @@ export interface FixtureProbe {
   readonly streaming: boolean;
   readonly model: string;
   readonly lastUserText: string;
+  readonly toolNames: readonly string[];
+  readonly toolChoice: string | null;
+  readonly parallelToolCalls: boolean | null;
 }
 
 type Reply = string | Record<string, unknown>;
@@ -90,7 +93,14 @@ export class StrictActionFixture {
     if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const authorization = request.headers.get("authorization");
     if (authorization !== "Bearer acceptance-fixture-key") return new Response("unauthorized", { status: 401 });
-    const body = await request.json() as { model?: unknown; stream?: unknown; messages?: Array<{ role?: unknown; content?: unknown }>; tools?: unknown };
+    const body = await request.json() as {
+      model?: unknown;
+      stream?: unknown;
+      messages?: Array<{ role?: unknown; content?: unknown }>;
+      tools?: Array<{ function?: { name?: unknown } }>;
+      tool_choice?: unknown;
+      parallel_tool_calls?: unknown;
+    };
     if (typeof body.model !== "string" || !Array.isArray(body.messages)) return new Response("invalid request", { status: 400 });
     const lastUser = [...body.messages].reverse().find(item => item.role === "user");
     const lastUserText = messageText(lastUser?.content);
@@ -101,6 +111,14 @@ export class StrictActionFixture {
       streaming: body.stream === true,
       model: body.model,
       lastUserText,
+      toolNames: Array.isArray(body.tools)
+        ? body.tools.flatMap(tool =>
+            typeof tool.function?.name === "string" ? [tool.function.name] : [])
+        : [],
+      toolChoice: typeof body.tool_choice === "string" ? body.tool_choice : null,
+      parallelToolCalls: typeof body.parallel_tool_calls === "boolean"
+        ? body.parallel_tool_calls
+        : null,
     };
     this.requests.push({ ...probe, receivedAt: new Date().toISOString(), authorization });
     const gate = durable ? this.gates.get(this.key(durable.task, durable.stepOrdinal)) : undefined;
@@ -130,6 +148,13 @@ export class StrictActionFixture {
     const reply = typeof selected === "function" ? selected(probe) : selected ?? fallback;
     const text = typeof reply === "string" ? reply : JSON.stringify(reply);
     const toolCall = Array.isArray(body.tools) && typeof reply !== "string" ? formalToolCall(reply) : null;
+    const narration = typeof reply !== "string" && typeof reply.narration === "string"
+      ? reply.narration
+      : null;
+    const truncatedArguments = typeof reply !== "string" && reply.truncated === true &&
+      toolCall !== null
+      ? toolCall.arguments.slice(0, -1)
+      : toolCall?.arguments;
     if (body.stream !== true) return Response.json({
       id: "fixture-completion",
       object: "chat.completion",
@@ -138,13 +163,13 @@ export class StrictActionFixture {
       choices: [{
         index: 0,
         message: toolCall
-          ? { role: "assistant", content: null, tool_calls: [{ index: 0, id: `fixture-tool-${durable?.stepOrdinal ?? 1}`, type: "function", function: toolCall }] }
+          ? { role: "assistant", content: narration, tool_calls: [{ index: 0, id: `fixture-tool-${durable?.stepOrdinal ?? 1}`, type: "function", function: { ...toolCall, arguments: truncatedArguments } }] }
           : { role: "assistant", content: text },
         finish_reason: toolCall ? "tool_calls" : "stop",
       }],
       usage: { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4), total_tokens: 7 + Math.ceil(text.length / 4) },
     });
-    const chunks = split(toolCall?.arguments ?? text, 3);
+    const chunks = split(truncatedArguments ?? text, 3);
     return new Response(new ReadableStream<Uint8Array>({
       start(controller) {
         const encoder = new TextEncoder();
@@ -156,6 +181,9 @@ export class StrictActionFixture {
           choices,
           ...(usage === undefined ? {} : { usage }),
         });
+        if (toolCall && narration) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta: { content: narration }, finish_reason: null }]))}\n\n`));
+        }
         for (const [index, chunk] of chunks.entries()) {
           const delta = toolCall
             ? { tool_calls: [{ index: 0, ...(index === 0 ? { id: `fixture-tool-${durable?.stepOrdinal ?? 1}`, type: "function" } : {}), function: { ...(index === 0 ? { name: toolCall.name } : {}), arguments: chunk } }] }

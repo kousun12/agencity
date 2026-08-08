@@ -34,6 +34,12 @@ describe("FU-009 installed satellite product surfaces", () => {
     const reviewed = await world.command(["refine", "review the frozen acceptance trajectory", "--json"], environment);
     expect(reviewed.code).toBe(0);
     expect(reviewed.stdout).toContain('"status": "no_change"');
+    expect(fixture.requests.find(item =>
+      item.toolNames.includes("agencity_submit_refinement_review"))).toMatchObject({
+      toolNames: ["agencity_submit_refinement_review"],
+      toolChoice: "required",
+      parallelToolCalls: false,
+    });
     const reviews = await world.command(["refine", "status", "--json"], environment);
     expect(reviews.code).toBe(0);
     expect(reviews.stdout).toContain('"reviews"');

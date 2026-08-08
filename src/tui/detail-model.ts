@@ -1,5 +1,11 @@
 import type { AgentEvent, AgentState, ModelConfiguration, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
+import {
+  describeCatalogAgentToolState,
+  describeTransportAgentToolState,
+  type AgentToolCapabilityState,
+  type SelectedAgentToolCapabilityView,
+} from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
 
 export type TerminalDetailTone = "normal" | "success" | "warning" | "danger" | "muted";
@@ -33,6 +39,8 @@ export interface TerminalModelProviderDetail {
   readonly credentialLabel: string;
   readonly remediation?: string;
   readonly credentialManaged: boolean;
+  readonly agentToolState: AgentToolCapabilityState;
+  readonly agentToolAdmission: "allowed" | "rejected";
 }
 
 export interface TerminalModelDetail {
@@ -43,6 +51,8 @@ export interface TerminalModelDetail {
   readonly workspaceDefault: string | null;
   readonly providers: readonly TerminalModelProviderDetail[];
   readonly catalogModels: readonly ModelDescriptor[];
+  readonly currentAgentTools?: SelectedAgentToolCapabilityView;
+  readonly catalogAgentToolStates: Readonly<Record<string, AgentToolCapabilityState>>;
   readonly raw: unknown;
 }
 
@@ -108,7 +118,7 @@ function sentence(value: unknown, max = 300): string {
 }
 
 function displayStatus(value: unknown): string {
-  return string(value, "unknown").replaceAll("_", " ");
+  return string(value, "unknown").replaceAll("_", " ").replaceAll("-", " ");
 }
 
 function displayActivityReason(value: unknown): string {
@@ -693,6 +703,14 @@ function infoDetail(value: unknown): TerminalInspectionDetail {
   const recovery = record(source.recovery);
   const provider = records(capabilities.providers).find(item => item.name === record(state.model).provider);
   const sync = record(capabilities.sync);
+  const agentTools = record(source.agentTools);
+  const selectedAgentTools = record(agentTools.selected);
+  const diagnostics = record(source.modelContracts);
+  const counters = record(diagnostics.counters);
+  const submissions = records(counters.submissions);
+  const violations = records(counters.violations);
+  const submissionCount = submissions.reduce((total, item) => total + (number(item.count) ?? 0), 0);
+  const violationCount = violations.reduce((total, item) => total + (number(item.count) ?? 0), 0);
   const pending = Array.isArray(recovery.pendingEffectIds) ? recovery.pendingEffectIds.length : 0;
   const unknown = Array.isArray(recovery.unknownEffects) ? recovery.unknownEffects.length : 0;
   const children = Array.isArray(recovery.activeChildTaskIds) ? recovery.activeChildTaskIds.length : 0;
@@ -722,6 +740,26 @@ function infoDetail(value: unknown): TerminalInspectionDetail {
       rows: [
         { label: "Snapshot resume", value: bool(capabilities.snapshotCursorResume) ? "available" : "unavailable" },
         { label: "Sync", value: bool(sync.configured) ? "configured" : "local only" },
+        {
+          label: "Formal agent tools",
+          value: displayStatus(selectedAgentTools.state),
+          detail: [
+            Array.isArray(record(agentTools.contract).tools)
+              ? (record(agentTools.contract).tools as unknown[]).map(String).join(" + ")
+              : "bun_console + finish",
+            selectedAgentTools.canRun === true
+              ? "Selected model is admissible."
+              : sentence(selectedAgentTools.reason, 240),
+          ].filter(Boolean).join("\n"),
+          tone: selectedAgentTools.canRun === true
+            ? selectedAgentTools.state === "unknown" ? "warning" : "success"
+            : "danger",
+        },
+        {
+          label: "Formal outcomes",
+          value: `${submissionCount} accepted · ${violationCount} violations`,
+          tone: violationCount ? "warning" : "normal",
+        },
         { label: "Authority", value: "TRUSTED-LOCAL · not sandboxed", tone: "warning" },
       ],
     }],
@@ -780,22 +818,45 @@ export function buildTerminalModelDetail(input: {
   readonly workspaceDefault: string | null;
   readonly providers: readonly ModelProviderDescriptor[];
   readonly catalogModels?: readonly ModelDescriptor[];
+  readonly currentAgentTools?: SelectedAgentToolCapabilityView;
 }): TerminalModelDetail {
-  const providers = input.providers.filter(provider => provider.name !== "echo").map(provider => ({
-    name: provider.name,
-    displayName: provider.displayName,
-    usable: provider.usable,
-    credentialSource: provider.credentialSource,
-    credentialLabel: provider.credentialSource === "stored"
-      ? "saved"
-      : provider.credentialSource === "environment"
-        ? "environment"
-        : provider.credentialSource === "programmatic"
-          ? "available"
-          : "not configured",
-    ...(provider.remediation === undefined ? {} : { remediation: provider.remediation }),
-    credentialManaged: ["openai", "anthropic", "vercel"].includes(provider.name),
-  }));
+  const visibleProviderDescriptors = input.providers.filter(provider => provider.name !== "echo");
+  const providers = visibleProviderDescriptors.map(provider => {
+    const capability = provider.capabilities.requiredToolSet;
+    return {
+      name: provider.name,
+      displayName: provider.displayName,
+      usable: provider.usable,
+      credentialSource: provider.credentialSource,
+      credentialLabel: provider.credentialSource === "stored"
+        ? "saved"
+        : provider.credentialSource === "environment"
+          ? "environment"
+          : provider.credentialSource === "programmatic"
+            ? "available"
+            : "not configured",
+      ...(provider.remediation === undefined ? {} : { remediation: provider.remediation }),
+      credentialManaged: ["openai", "anthropic", "vercel"].includes(provider.name),
+      agentToolState: describeTransportAgentToolState(capability),
+      agentToolAdmission: capability !== undefined &&
+        capability.status !== "unsupported" &&
+        capability.requiredChoice !== "unsupported" &&
+        capability.parallelCalls !== "unsupported" &&
+        capability.streaming
+        ? "allowed" as const
+        : "rejected" as const,
+    };
+  });
+  const catalogModels = Object.freeze([...(input.catalogModels ?? [])]);
+  const catalogAgentToolStates = Object.freeze(Object.fromEntries(
+    visibleProviderDescriptors.flatMap(provider =>
+      catalogModels
+        .filter(model => provider.name === "vercel" || model.model.startsWith(`${provider.name}/`))
+        .map(model => [
+          catalogCapabilityKey(provider.name, model.model),
+          describeCatalogAgentToolState(provider, model),
+        ])),
+  ));
   return {
     kind: "model",
     command: "/model",
@@ -803,16 +864,22 @@ export function buildTerminalModelDetail(input: {
     current: input.current,
     workspaceDefault: input.workspaceDefault,
     providers,
-    catalogModels: Object.freeze([...(input.catalogModels ?? [])]),
+    catalogModels,
+    ...(input.currentAgentTools === undefined ? {} : { currentAgentTools: input.currentAgentTools }),
+    catalogAgentToolStates,
     raw: {
       current: `${input.current.provider}:${input.current.model}`,
       workspaceDefault: input.workspaceDefault,
       catalogModels: input.catalogModels ?? [],
+      ...(input.currentAgentTools === undefined ? {} : { agentTools: input.currentAgentTools }),
+      catalogAgentToolStates,
       providers: providers.map(provider => ({
         name: provider.name,
         displayName: provider.displayName,
         usable: provider.usable,
         credentialSource: provider.credentialSource,
+        agentToolState: provider.agentToolState,
+        agentToolAdmission: provider.agentToolAdmission,
         ...(provider.remediation === undefined ? {} : { remediation: provider.remediation }),
       })),
     },
@@ -892,16 +959,21 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
       `${currentProvider?.usable ? "✓" : "!"} ${currentProvider?.displayName ?? detail.current.provider}`,
       `  ${detail.current.model}`,
       `  Credential: ${currentProvider?.credentialLabel ?? "unavailable"}`,
+      `  Agent tools: ${detail.currentAgentTools?.state ?? currentProvider?.agentToolState ?? "unavailable"}${detail.currentAgentTools?.canRun === false ? " · unavailable" : ""}`,
+      ...(detail.currentAgentTools?.reason ? [`  ${detail.currentAgentTools.reason}`] : []),
       "",
       "Workspace default",
       `  ${detail.workspaceDefault ?? "Not set"}`,
       "",
       "Providers",
-      ...detail.providers.map(provider => `${provider.usable ? "✓" : "○"} ${provider.displayName} — ${provider.credentialLabel}`),
+      ...detail.providers.map(provider => `${provider.usable && provider.agentToolAdmission === "allowed" ? "✓" : "○"} ${provider.displayName} — ${provider.credentialLabel} · agent tools ${provider.agentToolState}`),
       ...(catalogModels.length ? [
         "",
         "Catalog models",
-        ...catalogModels.slice(0, 12).map(formatCatalogModel),
+        ...catalogModels.slice(0, 12).map(model => formatCatalogModel(
+          model,
+          terminalCatalogAgentToolState(detail, detail.current.provider, model.model),
+        )),
       ] : []),
     ];
     if (options.footer !== false) lines.push("", "Enter choose · L login · X logout · Shift-R raw · Esc close");
@@ -935,11 +1007,24 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
   return lines.join("\n");
 }
 
-function formatCatalogModel(model: ModelDescriptor): string {
+function formatCatalogModel(model: ModelDescriptor, agentTools: AgentToolCapabilityState): string {
   const capacity = model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`;
   const reasoning = model.reasoning.status === "listed" ? "effort"
     : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed";
   const price = model.pricing === null ? "price unknown"
     : `$${(model.pricing.inputUsdPerToken * 1_000_000).toFixed(2)}/$${(model.pricing.outputUsdPerToken * 1_000_000).toFixed(2)} per 1M`;
-  return `• ${model.displayName} — ${model.model}\n  ${capacity} · ${price} · ${reasoning}${model.stale ? " · stale" : ""}`;
+  return `• ${model.displayName} — ${model.model}\n  ${capacity} · ${price} · ${reasoning} · agent tools ${agentTools}${model.stale ? " · stale" : ""}`;
+}
+
+function catalogCapabilityKey(provider: string, model: string): string {
+  return `${provider}\u0000${model}`;
+}
+
+export function terminalCatalogAgentToolState(
+  detail: TerminalModelDetail,
+  provider: string,
+  model: string,
+): AgentToolCapabilityState {
+  return detail.catalogAgentToolStates[catalogCapabilityKey(provider, model)] ??
+    "unavailable";
 }

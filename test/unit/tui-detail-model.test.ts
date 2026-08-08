@@ -40,16 +40,115 @@ describe("terminal inspector view models", () => {
       providers: [{
         name: "vercel",
         displayName: "Vercel AI Gateway",
-        capabilities: { streaming: true },
+        capabilities: {
+          streaming: true,
+          requiredToolSet: {
+            status: "unknown",
+            requiredChoice: "provider-enforced",
+            parallelCalls: "runtime-rejected",
+            streaming: true,
+            adapter: "fixture.ai-sdk.v1",
+            reason: "Catalog evidence remains unknown.",
+          },
+        },
         usable: true,
         credentialSource: "stored",
+      }],
+      currentAgentTools: {
+        provider: "vercel",
+        model: "openai/gpt-test",
+        state: "unknown",
+        admission: "allowed",
+        canRun: true,
+        reason: "Catalog evidence remains unknown.",
+        capabilityReason: "Catalog evidence remains unknown.",
+        transport: {
+          provider: "vercel",
+          displayName: "Vercel AI Gateway",
+          state: "unknown",
+          admission: "allowed",
+          canRun: true,
+          credential: "stored",
+          requiredChoice: "provider-enforced",
+          parallelCalls: "runtime-rejected",
+          boundedToolInputStreaming: true,
+          adapter: "fixture.ai-sdk.v1",
+          provenance: { kind: "transport", reportedStatus: "unknown" },
+        },
+        modelCatalog: {
+          status: "unknown",
+          strictSchema: "unknown",
+          requiredChoice: "unknown",
+          digest: "a".repeat(64),
+          endpointId: "b".repeat(64),
+          stale: false,
+        },
+      },
+      catalogModels: [{
+        model: "openai/unsupported-test",
+        displayName: "Unsupported test model",
+        contextWindowTokens: null,
+        maxOutputTokens: null,
+        pricing: null,
+        reasoning: { status: "unsupported", levels: [] },
+        requiredToolSet: {
+          status: "unsupported",
+          strictSchema: "unsupported",
+          requiredChoice: "unsupported",
+        },
+        catalogDigest: "c".repeat(64),
+        catalogEndpointId: "d".repeat(64),
+        stale: false,
       }],
     });
     const output = formatTerminalDetail(detail);
     expect(output).toContain("Vercel AI Gateway");
     expect(output).toContain("Credential: saved");
     expect(output).toContain("openai/gpt-test");
+    expect(output).toContain("Agent tools: unknown");
+    expect(output).toContain("Catalog evidence remains unknown.");
+    expect(output).toContain("agent tools unavailable");
     expect(output).not.toContain('"credentialSource"');
+  });
+
+  test("workspace status shows selected formal capability and bounded counters", () => {
+    const detail = buildTerminalDetail("/info", {
+      state: {
+        sessionName: "Formal status",
+        branch: { name: "main" },
+        model: { provider: "openai", model: "openai/gpt-test" },
+      },
+      capabilities: {
+        snapshotCursorResume: true,
+        sync: { configured: false },
+        providers: [{ name: "openai", capabilities: { streaming: true } }],
+      },
+      recovery: {
+        pendingEffectIds: [],
+        unknownEffects: [],
+        activeChildTaskIds: [],
+        attentionGoalGateIds: [],
+      },
+      agentTools: {
+        contract: { tools: ["bun_console", "finish"] },
+        selected: {
+          state: "runtime-validated",
+          canRun: true,
+        },
+      },
+      modelContracts: {
+        counters: {
+          submissions: [{ count: 3 }],
+          violations: [{ count: 1 }],
+        },
+      },
+      connection: "connected",
+    });
+    const output = formatTerminalDetail(detail, { footer: false });
+    expect(output).toContain("Formal agent tools — runtime validated");
+    expect(output).toContain("bun_console + finish");
+    expect(output).toContain("Formal outcomes — 3 accepted · 1 violations");
+    expect(output).not.toContain("sessionId");
   });
 
   test("reasoning effort status distinguishes unverified catalog choices", () => {

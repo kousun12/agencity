@@ -78,8 +78,18 @@ describe("FU-009 installed no-ID release transcript", () => {
     expect(outcome.final).toContain("answer repaired to 42");
     expect(await readFile(join(world.repository, "answer.txt"), "utf8")).toBe("42\n");
     expect(fixture.requests.filter(item => item.task === task).every(item => item.streaming)).toBe(true);
+    expect(fixture.requests.filter(item => item.task === task).every(item =>
+      JSON.stringify(item.toolNames) === JSON.stringify(["bun_console", "finish"]) &&
+      item.toolChoice === "required" &&
+      item.parallelToolCalls === false)).toBe(true);
     expect(fixture.requests.find(item => item.task === task && item.step === 4)?.lastUserText).toContain("AgentRunGoalCheckRecorded");
+    const childInitial = await fixture.waitFor("acceptance child initial");
     expect(fixture.count("acceptance child initial")).toBe(1);
+    expect(childInitial).toMatchObject({
+      toolNames: ["bun_console", "finish"],
+      toolChoice: "required",
+      parallelToolCalls: false,
+    });
     await fixture.waitFor("acceptance child follow-up");
     expect(fixture.count("acceptance child follow-up")).toBe(1);
 

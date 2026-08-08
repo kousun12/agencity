@@ -170,9 +170,17 @@ describe("FU-005 protocol-backed terminal UI", () => {
     expect(details.at(-1)).toMatchObject({ kind: "raw", title: "History · raw diagnostics" });
     await ui.execute("/new Switched work");
     expect(dismissals).toBe(1);
-    const afterSwitch = transcript.length;
     await ui.execute("/raw");
-    expect(transcript.slice(afterSwitch)).toContain("No inspector result is available yet.");
+    expect(details.at(-1)).toMatchObject({
+      kind: "raw",
+      title: "Branch · raw diagnostics",
+      raw: {
+        modelContracts: {
+          protocol: "agencity.model-contract-diagnostics",
+          version: 1,
+        },
+      },
+    });
     await ui.detach(false);
     await supervisor.close();
   });
