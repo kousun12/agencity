@@ -12,7 +12,7 @@
 | --- | --- |
 | 0. Freeze the completed predecessor baseline | Done |
 | 1. Domain tool contract | Done |
-| 2. Provider-neutral response contracts | Not started |
+| 2. Provider-neutral response contracts | Done |
 | 3. Shared AI SDK integration | Not started |
 | 4. Durable model and action events | Not started |
 | 5. AgentRun integration | Not started |
@@ -43,6 +43,19 @@
 - Passed 59 focused domain and AgentRun tests, all 350 unit tests, 213 integration tests with the documented 30-second timeout, `bun run typecheck`, `bun run check:architecture`, lint checks, and `git diff --check`.
 - Review fixed the premature runtime prompt cutover and found no remaining Phase 1 blocker.
 - Implementation commit: `edd2123`.
+
+#### August 8, 2026 — Phase 2
+
+- Added explicit text and required-tool-set response contracts, the sealed built-in contract registry, immutable contract/capability validation, response-aware dispatch version 2, transport-keyed execution descriptors, and the supervisor-owned `ModelEffectAdmissionService`.
+- Added complete and guard-aborted normalized responses, evidence-only response blocks, exact tool submissions, bounded contract violations, closed model-effect failure codes, result digests, total response/evidence bounds, and strict `ModelEffectOutputV2` relation validation.
+- Kept one authoritative durable copy of accepted tool input in `ModelEffectOutputV2`. Response blocks retain only the provider call ID, tool name, canonical input digest, and exact canonical input byte count; later event shapes must reference the result digest instead of copying the input.
+- Added catalog facts that preserve absent formal-tool metadata as `unknown`, transport capability validation, typed pre-admission unavailability, proven-streaming requirements, reasoning/catalog/endpoint provenance checks, and rejection of reserved response-contract fields on public inputs.
+- The live workspace-schema-2 writer remains on dispatch version 1. Phase 3 supplies the shared AI SDK structured-stream implementation, and Phase 4 changes the authoritative `ModelDispatch` alias and durable writers atomically.
+- The normalized provider-neutral response is named `ModelResponseV2` while the transitional text-provider result keeps the existing `ModelResponse` name. Phase 4 removes the text-only ambiguity during the writer cutover.
+- Review tightened fail-closed validation for required contract/capability arguments, unsupported primitives, catalog-digest format, provider declaration consistency, raw finish reasons, and violation evidence.
+- Independent verification found and drove fixes for two additional gaps: accepted input byte provenance is now exact, and every completed non-guard violation code must be proved by matching termination and block evidence. The verifier confirmed both adversarial cases reject after the fixes.
+- Passed 40 focused Phase 2 tests, all 390 unit tests, 213 integration tests with the documented 30-second timeout, `bun run typecheck`, `bun run check:architecture`, lint checks, and `git diff --check`.
+- Implementation commit: `3516100`.
 
 ## Summary
 
