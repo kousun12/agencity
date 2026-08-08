@@ -11,7 +11,7 @@
 | Phase | Status |
 | --- | --- |
 | 0. Freeze the completed predecessor baseline | Done |
-| 1. Domain tool contract | Not started |
+| 1. Domain tool contract | Done |
 | 2. Provider-neutral response contracts | Not started |
 | 3. Shared AI SDK integration | Not started |
 | 4. Durable model and action events | Not started |
@@ -33,6 +33,16 @@
 - Phase 1 will add the formal domain contract without immediately deleting clarification, permission, or pending-input types. Those removals move to Phase 5 so intermediate commits remain buildable while the existing AgentRun still depends on them.
 - Phase 4 will include the minimum formal AgentRun result handling required to ensure a version-3 writer cannot commit the old textual action provenance. Phase 5 completes product behavior and deletes the transitional input lifecycle.
 - External provider smokes were not run and are not treated as verified.
+
+#### August 8, 2026 — Phase 1
+
+- Added the immutable `agencity.agent-tools.v1` contract with ordered `bun_console` and `finish` definitions, portable strict input schemas, pinned schema and contract digests, and deep-frozen built-in meaning.
+- Added stable canonical JSON encoding and digest utilities, exact formal-input and canonical-action byte bounds, strict tool-submission validation, and pure conversion to the existing canonical `AgentAction`.
+- Added the formal tool-selection policy as a domain export for the later runtime cutover.
+- Kept the active AgentRun prompt, textual parser, clarification and permission variants, and pending-input lifecycle unchanged. A review found that switching the prompt before provider tools were supplied would make the intermediate runtime unsatisfiable; the provider-context and correction-prompt cutover therefore remains in Phase 5 as recorded in the Phase 0 deviation.
+- Passed 59 focused domain and AgentRun tests, all 350 unit tests, 213 integration tests with the documented 30-second timeout, `bun run typecheck`, `bun run check:architecture`, lint checks, and `git diff --check`.
+- Review fixed the premature runtime prompt cutover and found no remaining Phase 1 blocker.
+- Implementation commit: `edd2123`.
 
 ## Summary
 
