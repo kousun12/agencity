@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ValidationError } from "./errors.ts";
-import type { JsonValue } from "./json.ts";
+import { canonicalJsonByteLength, type JsonValue } from "./json.ts";
 
 export const AGENT_ACTION_PROTOCOL = "agencity.agent-action" as const;
 export const AGENT_ACTION_VERSION = 1 as const;
@@ -22,7 +22,7 @@ export const agentActionSchema = z.discriminatedUnion("type", [
 export type AgentAction = z.infer<typeof agentActionSchema>;
 export type AgentActionType = AgentAction["type"];
 
-/** Portable schema placed verbatim in every agent-run provider context. */
+/** Transitional textual-action schema retained until the Phase 5 runtime cutover. */
 export const AGENT_ACTION_JSON_SCHEMA: JsonValue = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   title: "Agencity agent action v1",
@@ -36,6 +36,7 @@ export const AGENT_ACTION_JSON_SCHEMA: JsonValue = {
   ],
 };
 
+/** Transitional textual policy for the text-parsing AgentRun path retained until the Phase 5 runtime cutover. */
 export const AGENT_ACTION_POLICY = [
   "Return exactly one JSON object matching agencity.agent-action version 1.",
   "Do not use Markdown fences, prose outside the object, comments, or unknown fields.",
@@ -43,7 +44,36 @@ export const AGENT_ACTION_POLICY = [
   "Streamed deltas are display-only. Only the provider's authoritative final response is parsed or executed.",
 ].join(" ");
 
-/** Parses one bounded authoritative response. JSON.parse rejects prefixes/suffixes and concatenated objects. */
+export function validateAgentActionValue(
+  value: unknown,
+  options: { readonly encodedBytes: number },
+): AgentAction {
+  if (!Number.isSafeInteger(options.encodedBytes) || options.encodedBytes < 0) {
+    throw new ValidationError("Agent action encoded byte count must be a non-negative safe integer");
+  }
+  if (options.encodedBytes > MAX_AGENT_ACTION_BYTES) {
+    throw new ValidationError(`Agent action exceeds ${MAX_AGENT_ACTION_BYTES} bytes`);
+  }
+  const actualBytes = canonicalJsonByteLength(value);
+  if (actualBytes > MAX_AGENT_ACTION_BYTES) {
+    throw new ValidationError(`Agent action exceeds ${MAX_AGENT_ACTION_BYTES} bytes`);
+  }
+  if (actualBytes !== options.encodedBytes) {
+    throw new ValidationError("Agent action encoded byte count does not match its canonical JSON encoding", {
+      expected: actualBytes,
+      received: options.encodedBytes,
+    });
+  }
+  const parsed = agentActionSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new ValidationError("Agent action does not match agencity.agent-action v1", {
+      issues: parsed.error.issues,
+    });
+  }
+  return parsed.data;
+}
+
+/** Transitional parser retained only while the textual AgentRun path remains buildable. */
 export function parseAgentAction(raw: string): AgentAction {
   if (typeof raw !== "string") throw new ValidationError("Agent action must be a JSON string");
   const bytes = new TextEncoder().encode(raw).byteLength;
