@@ -541,10 +541,18 @@ export class TerminalTranscript {
     });
     const details = new BoxRenderable(this.renderer, {
       id: `agencity-transcript-cell-details-${cell.id}`,
-      width: "100%",
       height: "auto",
       flexDirection: "column",
-      backgroundColor: TERMINAL_THEME.background,
+      alignSelf: "stretch",
+      marginTop: 1,
+      marginLeft: 1,
+      marginRight: 1,
+      paddingX: 1,
+      paddingBottom: 1,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: TERMINAL_THEME.border,
+      backgroundColor: TERMINAL_THEME.raised,
     });
     const sourceLabel = new TextRenderable(this.renderer, {
       id: `agencity-transcript-cell-source-label-${cell.id}`,

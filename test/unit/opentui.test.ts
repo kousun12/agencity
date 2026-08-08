@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  BoxRenderable,
   CodeRenderable,
   MarkdownRenderable,
   ScrollBoxRenderable,
@@ -830,9 +831,20 @@ describe("OpenTUI interactive terminal", () => {
       const compactSource = setup.renderer.root.findDescendantById(
         "agencity-transcript-cell-compact-source-agent-run-cell-action-1",
       ) as CodeRenderable;
+      const details = setup.renderer.root.findDescendantById(
+        "agencity-transcript-cell-details-agent-run-cell-action-1",
+      ) as BoxRenderable;
+      const cellRoot = setup.renderer.root.findDescendantById(
+        "agencity-transcript-step-step-1",
+      ) as BoxRenderable;
       expect(message).toBeInstanceOf(MarkdownRenderable);
       expect(source).toBeInstanceOf(CodeRenderable);
       expect(compactSource).toBeInstanceOf(CodeRenderable);
+      expect(details).toBeInstanceOf(BoxRenderable);
+      expect(details.border).toBe(true);
+      expect(details.borderStyle).toBe("rounded");
+      expect(details.screenX).toBeGreaterThan(cellRoot.screenX);
+      expect((await setup.captureCharFrame()).toString()).toContain("╭");
       expect(compactSource.filetype).toBe("typescript");
       expect(compactSource.content).toEndWith("…");
       expect(message.content).toBe(view.conversation[1]!.content);
