@@ -13,7 +13,7 @@
 | 0. Freeze the completed predecessor baseline | Done |
 | 1. Domain tool contract | Done |
 | 2. Provider-neutral response contracts | Done |
-| 3. Shared AI SDK integration | Not started |
+| 3. Shared AI SDK integration | Done |
 | 4. Durable model and action events | Not started |
 | 5. AgentRun integration | Not started |
 | 6. Specialized structured outputs | Not started |
@@ -56,6 +56,19 @@
 - Independent verification found and drove fixes for two additional gaps: accepted input byte provenance is now exact, and every completed non-guard violation code must be proved by matching termination and block evidence. The verifier confirmed both adversarial cases reject after the fixes.
 - Passed 40 focused Phase 2 tests, all 390 unit tests, 213 integration tests with the documented 30-second timeout, `bun run typecheck`, `bun run check:architecture`, lint checks, and `git diff --check`.
 - Implementation commit: `3516100`.
+
+#### August 8, 2026 — Phase 3
+
+- Extended the single shared AI SDK adapter core with declaration-only retained tools compiled through runtime-validated JSON Schema, the pinned SDK's required inert output schema, required tool choice, retained strictness, and direct OpenAI/Anthropic parallel-call suppression.
+- Every structured request uses one `streamText` generation and consumes bounded AI SDK stream parts. It has no `execute` callback, explicit `stopWhen`, tool-result continuation, provider-hosted execution, or second request. The pinned SDK's default one-step behavior supplies the terminal boundary.
+- Added first-source guard and external-cancellation composition, private tool-input delta accounting, exact accepted-input normalization, evidence-only invalid calls, bounded supplemental text and metadata, conservative incomplete-stream handling, normalized usage/warnings/Gateway cost, and typed provider failure classification.
+- Added formal response implementations for Echo and scripted fixtures while retaining their textual methods until the schema and AgentRun cutovers.
+- Added pinned-package wire fixtures for Gateway, direct OpenAI, and direct Anthropic across every selectable reasoning effort. They prove canonical/native model identity, required choice, retained strictness, direct parallel suppression, top-level reasoning preservation, and the absence of provider-managed tool execution.
+- Review removed an explicit `stopWhen` that contradicted the plan and was redundant with the pinned SDK default. It also changed cyclic, proxy, and non-plain custom-provider inputs into closed `invalid-tool-input` violations instead of unclassified failures.
+- Independent verification passed duplicate-call and throwing-proxy adversarial probes in addition to the committed fixture matrix.
+- Passed 20 focused provider tests, all 390 unit tests, all 233 integration tests with the documented 30-second timeout, `bun run typecheck`, `bun run check:architecture`, lint checks, and `git diff --check`.
+- Credential-gated real-provider and live Gateway service checks were not run and remain unverified.
+- Implementation commit: `7f304e3`.
 
 ## Summary
 
