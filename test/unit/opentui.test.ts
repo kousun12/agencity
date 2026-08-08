@@ -70,7 +70,6 @@ describe("OpenTUI interactive terminal", () => {
               action: { protocol: "agencity.agent-action", version: 1, type: "final", content: "Unaccepted gated text" },
               eventId: "event",
             }],
-            inputRequests: {},
             goalChecks: {},
             cancellationRequested: false,
             requestEventId: "request",
@@ -110,7 +109,6 @@ describe("OpenTUI interactive terminal", () => {
         },
         eventId: "event",
       }],
-      inputRequests: {},
       goalChecks: {},
       cancellationRequested: false,
       requestEventId: "request",
@@ -166,28 +164,6 @@ describe("OpenTUI interactive terminal", () => {
       },
     });
     expect(absentTerminalCell.runs[0]?.steps[0]?.cell?.status).toBe("missing");
-    const waitingForUser = buildTerminalScreen({
-      ...controller.presentation,
-      state: {
-        ...controller.presentation.state,
-        agentRuns: {
-          "waiting-run": {
-            id: "waiting-run",
-            task: "Need a choice",
-            status: "waiting_for_user",
-            steps: [],
-            inputRequests: {
-              "choice-request": { question: "Which option?", response: undefined },
-            },
-            cancellationRequested: false,
-          } as any,
-        },
-      },
-    });
-    expect(waitingForUser).toMatchObject({
-      attentionCount: 1,
-      composerPlaceholder: "Answer the pending request…",
-    });
     const setup = await createTestRenderer({ width: 112, height: 30, kittyKeyboard: true });
     let releaseSlowCommand = (): void => {};
     let slowCommandAborted = false;
@@ -715,7 +691,6 @@ describe("OpenTUI interactive terminal", () => {
         provisional: false,
         cancellationRequested: false,
         reason: null,
-        pendingInput: null,
         steps: [{
           id: "step-1",
           ordinal: 1,

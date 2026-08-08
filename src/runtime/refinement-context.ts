@@ -497,8 +497,7 @@ function validateAndDescribeTrigger(
       const payload = recordPayload(event.payload);
       const explicitlyTyped = event.type === "UserCorrection";
       const retainedUserMessage = event.type === "MessageAppended" && payload.role === "user";
-      const userRunInput = event.type === "AgentRunUserInputReceived";
-      if (!explicitlyTyped && !retainedUserMessage && !userRunInput) {
+      if (!explicitlyTyped && !retainedUserMessage) {
         throw new RefinementContextError("invalid-trigger", `Correction evidence ${id} is not an explicitly identified user input event`);
       }
       if (explicitlyTyped) {

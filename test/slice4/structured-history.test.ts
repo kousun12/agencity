@@ -55,4 +55,47 @@ describe("Slice 4 structured version-3 history boundaries", () => {
     expect(replicated.agentRuns[run.id]).toMatchObject({ status: "succeeded", finalMessageId: run.finalMessageId! });
     expect((await b.supervisor.sync.status()).quarantineCount).toBe(0);
   });
+
+  test("a blocked finish message rebuilds, forks, and synchronizes exactly", async () => {
+    root = await makeRoot();
+    const hub = new DeterministicSyncHub();
+    const provider = new ScriptedAgentActionProvider([{
+      protocol: "agencity.agent-action",
+      version: 1,
+      type: "blocked",
+      reason: "Replica-visible external requirement.",
+    }], "structured-blocked-sync-actions");
+    a = await openReplica(root, "a", hub, { modelProviders: [provider] });
+    b = await openReplica(root, "b", hub);
+    const session = await a.supervisor.createSession({
+      workspaceId: "workspace",
+      model: { provider: provider.name, model: "structured-v1" },
+    });
+    const result = await a.supervisor.runs.start(session.sessionId, session.branchId, "Retain a blocked finish");
+    expect(result).toMatchObject({
+      status: "blocked",
+      final: "Replica-visible external requirement.",
+      finalMessageId: `agent-run-final-${result.runId}`,
+    });
+
+    const sourceEvents = await a.supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+    const source = projectEvents(sourceEvents);
+    const run = source.agentRuns[result.runId]!;
+    const finalMessage = source.messages.find(message => message.id === run.finalMessageId)!;
+    const forkedBranchId = await a.supervisor.fork(session.sessionId, session.branchId, sourceEvents.at(-1)!.cursor);
+    const forked = projectEvents(await a.supervisor.storage.loadEvents(session.sessionId, { branchId: forkedBranchId }));
+    expect(forked.agentRuns[run.id]).toEqual(run);
+    expect(forked.messages.find(message => message.id === run.finalMessageId)).toEqual(finalMessage);
+
+    const rebuilt = await a.supervisor.projections.rebuild(session.sessionId, session.branchId);
+    expect(rebuilt.agentRuns[run.id]).toEqual(run);
+    expect(rebuilt.messages.find(message => message.id === run.finalMessageId)).toEqual(finalMessage);
+
+    await a.supervisor.sync.sync();
+    await b.supervisor.sync.sync();
+    const replicated = projectEvents(await b.supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
+    expect(replicated.agentRuns[run.id]).toEqual(run);
+    expect(replicated.messages.find(message => message.id === run.finalMessageId)).toEqual(finalMessage);
+    expect((await b.supervisor.sync.status()).quarantineCount).toBe(0);
+  });
 });

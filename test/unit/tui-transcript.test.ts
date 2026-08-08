@@ -17,14 +17,13 @@ describe("structured terminal transcript", () => {
     expect([
       terminalRunTone("queued"),
       terminalRunTone("running"),
-      terminalRunTone("waiting_for_user"),
       terminalRunTone("succeeded"),
       terminalRunTone("blocked"),
       terminalRunTone("failed"),
       terminalRunTone("cancelled"),
       terminalRunTone("budget_exceeded"),
       terminalRunTone("unknown"),
-    ]).toEqual(["accent", "accent", "warning", "success", "danger", "danger", "muted", "warning", "danger"]);
+    ]).toEqual(["accent", "accent", "success", "danger", "danger", "muted", "warning", "danger"]);
     expect([
       terminalCellTone("pending"),
       terminalCellTone("proposed"),
@@ -37,11 +36,10 @@ describe("structured terminal transcript", () => {
     expect([
       terminalFamilyTone("working"),
       terminalFamilyTone("idle"),
-      terminalFamilyTone("waiting"),
       terminalFamilyTone("attention"),
       terminalFamilyTone("ended"),
       terminalFamilyTone("unavailable"),
-    ]).toEqual(["accent", "muted", "warning", "danger", "muted", "danger"]);
+    ]).toEqual(["accent", "muted", "danger", "muted", "danger"]);
   });
 
   test("bounds formatted cell results without losing the retained prefix", () => {

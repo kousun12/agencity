@@ -335,6 +335,9 @@ export class Supervisor {
       maxChildrenPerSession,
       (model) => modelExecutor.normalizeConfiguration(model),
       (model) => modelExecutor.normalizeConfigurationIdentity(model),
+      (model) => modelExecutor.assertRequiredToolSetAdmission(
+        modelExecutor.resolveExecutionDescriptor(model),
+      ),
     );
     this.skills = new SkillService(storage, outbox, skillPermissionAllowlist, userScopeKey);
     this.harness = new HarnessService(storage, this.skills, userScopeKey);

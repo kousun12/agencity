@@ -71,7 +71,6 @@ export interface TerminalRunView {
   readonly provisional: boolean;
   readonly cancellationRequested: boolean;
   readonly reason: string | null;
-  readonly pendingInput: string | null;
   readonly steps: readonly TerminalStepView[];
 }
 
@@ -132,15 +131,12 @@ function oneLine(value: string, max = 180): string {
 const FAMILY_ACTIVITY_PRIORITY: Readonly<Record<FamilyAgentActivity, number>> = {
   attention: 0,
   unavailable: 1,
-  waiting: 2,
-  working: 3,
-  idle: 4,
-  ended: 5,
+  working: 2,
+  idle: 3,
+  ended: 4,
 };
 
 const FAMILY_REASON_LABELS: Readonly<Record<Exclude<FamilyAgentActivityReason, null>, string>> = {
-  waiting_for_user: "waiting for user",
-  permission_required: "permission required",
   blocked: "blocked",
   failed: "failed",
   budget_exceeded: "budget exceeded",
@@ -186,7 +182,7 @@ export function buildTerminalFamilySummary(children: readonly TerminalFamilyChil
   if (!children.length) return null;
   const working = children.filter(child => child.activity === "working").length;
   const idle = children.filter(child => child.activity === "idle").length;
-  const attention = children.filter(child => ["attention", "waiting", "unavailable"].includes(child.activity)).length;
+  const attention = children.filter(child => ["attention", "unavailable"].includes(child.activity)).length;
   const ended = children.filter(child => child.activity === "ended").length;
   const counts = [
     working ? `${working} working` : "",
@@ -280,12 +276,6 @@ function stepView(state: AgentState, run: AgentRunState, ordinal: number): Termi
     const accepted = run.status === "succeeded" && run.finalMessageId !== undefined && run.steps.at(-1)?.id === step.id;
     label = accepted ? "Final response committed" : "Completion proposed";
     detail = accepted ? oneLine(action.content) : null;
-  } else if (action?.type === "clarification") {
-    label = "Clarification requested";
-    detail = oneLine(action.question);
-  } else if (action?.type === "permission") {
-    label = "Permission requested";
-    detail = oneLine(action.question);
   } else if (action?.type === "blocked") {
     label = "Blocked";
     detail = oneLine(action.reason);
@@ -307,7 +297,6 @@ function stepView(state: AgentState, run: AgentRunState, ordinal: number): Termi
 }
 
 function runView(state: AgentState, run: AgentRunState, provisionalRunIds: ReadonlySet<string>): TerminalRunView {
-  const pending = Object.values(run.inputRequests).find(request => request.response === undefined);
   return {
     id: run.id,
     task: run.task,
@@ -319,7 +308,6 @@ function runView(state: AgentState, run: AgentRunState, provisionalRunIds: Reado
     provisional: provisionalRunIds.has(run.id),
     cancellationRequested: run.cancellationRequested,
     reason: run.reason ?? run.cancellationReason ?? null,
-    pendingInput: pending?.question ?? null,
     steps: run.steps.map((_, index) => stepView(state, run, index)),
   };
 }
@@ -341,10 +329,7 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
   const attentionGates = Object.values(state.goals).flatMap(goal => Object.values(goal.gates))
     .filter(gate => ["failed", "unknown", "running"].includes(gate.status)).length;
   const cancellationPending = Object.values(state.agentRuns).filter(run => run.cancellationRequested && !isTerminalRunStatus(run.status)).length;
-  const pendingUserInputs = Object.values(state.agentRuns)
-    .flatMap(run => Object.values(run.inputRequests))
-    .filter(request => request.response === undefined).length;
-  const attentionCount = unknownEffects + attentionGates + cancellationPending + pendingUserInputs;
+  const attentionCount = unknownEffects + attentionGates + cancellationPending;
   const streaming = provider?.capabilities.streaming ? "incremental" : "committed";
   const recoveryCount = pendingEffects + unknownEffects + activeTasks + attentionGates;
 
@@ -364,11 +349,9 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
     familySummary: buildTerminalFamilySummary(familyChildren),
     familyRefresh: presentation.family.refresh,
     runState: activeRun?.statusLabel ?? [...runs].at(-1)?.statusLabel ?? "idle",
-    composerPlaceholder: activeRun?.pendingInput
-      ? "Answer the pending request…"
-      : activeRun
-        ? "Run in progress — /stop to cancel"
-        : "Ask Agencity…",
+    composerPlaceholder: activeRun
+      ? "Run in progress — /stop to cancel"
+      : "Ask Agencity…",
     attentionCount,
     recoveryLabel: recoveryCount === 0
       ? "recovery healthy"

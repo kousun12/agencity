@@ -17,6 +17,7 @@ import {
   type ModelConfiguration,
   type ModelDispatch,
   type ModelEffectOutputV2,
+  type ModelProvider,
   type TextModelResponse,
 } from "../../src/index.ts";
 import { consumeRequiredToolStream, ModelProviderResponseFailureError, ModelResponseGuard } from "../../src/executors/model-response.ts";
@@ -129,6 +130,20 @@ class FailingFormalActions extends GuardAbortActions {
   }
 }
 
+function textOnlyProvider(name = "text-only-agent-run"): ModelProvider {
+  return {
+    name,
+    capabilities: { streaming: false, reasoningControl: "none" },
+    async complete(): Promise<TextModelResponse> {
+      return {
+        text: "text-only response",
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+      };
+    },
+  };
+}
+
 async function fixture(script: readonly (AgentAction | string)[], budget: Record<string, number> = {}) {
   const temp = await makeTempRuntime("agencity-agent-run-"); temps.push(temp);
   const provider = new RecordingActions(script, "run-fixture");
@@ -191,7 +206,129 @@ function crashAfterActionRejection(supervisor: Supervisor, occurrence = 1): () =
   return () => Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: appendEvents });
 }
 
+function crashAfterGoalCheck(supervisor: Supervisor): () => void {
+  const appendEvents = supervisor.storage.appendEvents.bind(supervisor.storage);
+  let crashed = false;
+  Object.defineProperty(supervisor.storage, "appendEvents", {
+    configurable: true,
+    value: async (events: Parameters<typeof appendEvents>[0]) => {
+      const appended = await appendEvents(events);
+      if (!crashed && events.some(event => event.type === "AgentRunGoalCheckRecorded")) {
+        crashed = true;
+        throw new Error("simulated crash after AgentRunGoalCheckRecorded");
+      }
+      return appended;
+    },
+  });
+  return () => Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: appendEvents });
+}
+
 describe("autonomous durable agent runs", () => {
+  test("rejects a known unsupported root run before task, goal, run, model, or effect events", async () => {
+    const temp = await makeTempRuntime("agencity-agent-unsupported-root-"); temps.push(temp);
+    const provider = textOnlyProvider();
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "unsupported-root",
+      model: { provider: provider.name, model: "text-v1" },
+    });
+    try {
+      const before = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      await expect(supervisor.runs.admit(session.sessionId, session.branchId, {
+        task: "Must not become durable",
+        requestKey: "unsupported-root-run",
+        goalMode: "create",
+      })).rejects.toMatchObject({ code: "MODEL_RESPONSE_CONTRACT_UNAVAILABLE" });
+      const after = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      expect(after.map(event => event.id)).toEqual(before.map(event => event.id));
+      expect(after.some(event => [
+        "MessageAppended", "GoalCreated", "AgentRunRequested", "ModelCallRequested",
+        "EffectRequested",
+      ].includes(event.type))).toBe(false);
+    } finally { await supervisor.close(); }
+  });
+
+  test("rejects a known unsupported runnable child before task, session, message, or run events", async () => {
+    const temp = await makeTempRuntime("agencity-agent-unsupported-child-"); temps.push(temp);
+    const provider = textOnlyProvider("text-only-child");
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const root = await supervisor.createSession({
+      workspaceId: "unsupported-child",
+      model: { provider: provider.name, model: "text-v1" },
+    });
+    try {
+      const before = await supervisor.storage.loadEvents(root.sessionId, { branchId: root.branchId });
+      const branchesBefore = await supervisor.storage.listBranches();
+      await expect(supervisor.agents.spawnRunnable(root.sessionId, root.branchId, {
+        task: "Must not create a runnable child",
+        idempotencyKey: "unsupported-runnable-child",
+      })).rejects.toMatchObject({ code: "MODEL_RESPONSE_CONTRACT_UNAVAILABLE" });
+      const after = await supervisor.storage.loadEvents(root.sessionId, { branchId: root.branchId });
+      expect(after.map(event => event.id)).toEqual(before.map(event => event.id));
+      expect((await supervisor.storage.listBranches()).map(branch => `${branch.sessionId}/${branch.branchId}`))
+        .toEqual(branchesBefore.map(branch => `${branch.sessionId}/${branch.branchId}`));
+      expect(after.some(event => ["TaskCreated", "SubagentAdmitted", "AgentRunRequested"].includes(event.type))).toBe(false);
+
+      const recursive = await supervisor.models.start(root.sessionId, root.branchId, {
+        prompt: "Text recursive work remains admissible",
+        idempotencyKey: "text-recursive-still-admissible",
+        run: false,
+      });
+      expect(recursive).toMatchObject({
+        status: "pending",
+        responseAdmission: {
+          responseContract: { kind: "text" },
+          responseCapability: { kind: "text" },
+        },
+      });
+    } finally { await supervisor.close(); }
+  });
+
+  test("rechecks formal capability drift before committing a model effect", async () => {
+    const temp = await makeTempRuntime("agencity-agent-capability-drift-"); temps.push(temp);
+    const provider = new RecordingActions([
+      action({ type: "final", content: "Must not be called." }),
+    ], "capability-drift-actions");
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "capability-drift",
+      model: { provider: provider.name, model: "v1" },
+    });
+    try {
+      const admitted = await supervisor.runs.admit(session.sessionId, session.branchId, "Do not execute after drift");
+      (provider as any).capabilities.requiredToolSet = {
+        status: "unsupported",
+        requiredChoice: "unsupported",
+        parallelCalls: "unsupported",
+        streaming: false,
+        adapter: "agencity.capability-drift.unsupported.v1",
+      };
+      await expect(supervisor.runs.advance(session.sessionId, session.branchId, admitted.runId))
+        .rejects.toMatchObject({ code: "MODEL_RESPONSE_CONTRACT_UNAVAILABLE" });
+      const history = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      expect(provider.calls).toBe(0);
+      expect(history.some(event => event.type === "ModelCallRequested" || event.type === "EffectRequested")).toBe(false);
+    } finally { await supervisor.close(); }
+  });
+
   test("executes typed TypeScript actions and delivers every cell observation once to the dependent context", async () => {
     const value = await fixture([
       action({ type: "typescript", code: `
@@ -418,6 +555,8 @@ describe("autonomous durable agent runs", () => {
       expect(await Bun.file(`${value.temp.workspaceRoot}/owned`).exists()).toBe(false);
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
       expect(Object.values(state.cells)).toEqual([]);
+      expect(state.messages.map(message => message.role)).toEqual(["user"]);
+      expect(state.agentRuns[result.runId]?.finalMessageId).toBeUndefined();
       expect(state.agentRuns[result.runId]?.steps.map(step => step.rejection)).toEqual([
         expect.stringContaining("without calling a required tool"),
         expect.stringContaining("without calling a required tool"),
@@ -436,6 +575,8 @@ describe("autonomous durable agent runs", () => {
       expect(value.provider.calls).toBe(1);
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
       expect(state.agentRuns[result.runId]?.steps[0]?.rejection).toContain("without calling a required tool");
+      expect(state.messages.map(message => message.role)).toEqual(["user"]);
+      expect(state.agentRuns[result.runId]?.finalMessageId).toBeUndefined();
     } finally { await value.supervisor.close(); }
   });
 
@@ -553,21 +694,140 @@ describe("autonomous durable agent runs", () => {
     } finally { await value.supervisor.close(); }
   });
 
-  test("keeps clarification and permission actions unreachable under the formal tool contract", async () => {
+  test("materializes a blocked finish exactly and accepts a later instruction as a new run", async () => {
     const value = await fixture([
-      action({ type: "clarification", question: "Which filename should I create?" }),
-      action({ type: "permission", permission: "write workspace file", question: "May I create chosen.txt?" }),
+      action({ type: "blocked", reason: "Which filename should I create?" }),
     ]);
     try {
       const result = await value.supervisor.runs.start(value.sessionId, value.branchId, "Create the requested file");
-      expect(result).toMatchObject({ status: "failed", steps: 2 });
-      expect(result.pendingInput).toBeUndefined();
-      const run = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId })).agentRuns[result.runId]!;
-      expect(Object.values(run.inputRequests)).toEqual([]);
-      expect(run.steps.every(step => step.action === undefined && step.rejection !== undefined)).toBe(true);
-      await expect(value.supervisor.runs.respond(value.sessionId, value.branchId, result.runId, "unreachable", "answer"))
-        .rejects.toThrow();
+      expect(result).toMatchObject({
+        status: "blocked",
+        final: "Which filename should I create?",
+        finalMessageId: `agent-run-final-${result.runId}`,
+      });
+      const history = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
+      const run = projectEvents(history).agentRuns[result.runId]!;
+      expect("inputRequests" in run).toBe(false);
+      expect("respond" in value.supervisor.runs).toBe(false);
+      expect(history.some(event => event.type.startsWith("AgentRunUserInput"))).toBe(false);
+      const finalMessage = history.find(event => event.type === "MessageAppended" &&
+        (event.payload as { messageId?: string }).messageId === `agent-run-final-${result.runId}`)!;
+      const terminal = history.find(event => event.type === "AgentRunStatusChanged" &&
+        (event.payload as { runId?: string }).runId === result.runId)!;
+      expect(BigInt(terminal.cursor) - BigInt(finalMessage.cursor)).toBe(1n);
+
+      const next = await value.supervisor.runs.admit(value.sessionId, value.branchId, {
+        task: "Use chosen.txt",
+        requestKey: "ordinary-follow-up",
+      });
+      expect(next.status).toBe("queued");
+      const after = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
+      expect(after.messages.at(-1)).toMatchObject({ role: "user", content: "Use chosen.txt" });
     } finally { await value.supervisor.close(); }
+  });
+
+  test("rejects tampered non-success terminal message, status, and source combinations", async () => {
+    const value = await fixture([
+      action({ type: "blocked", reason: "Exact blocked response." }),
+    ]);
+    const restore = crashAfterNextActionCommit(value.supervisor);
+    try {
+      await expect(value.supervisor.runs.start(value.sessionId, value.branchId, "Retain the blocked finish"))
+        .rejects.toThrow("simulated crash after AgentRunActionCommitted");
+      restore();
+      const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
+      const run = Object.values(state.agentRuns)[0]!;
+      expect(run.status).toBe("running");
+
+      for (const status of ["blocked", "failed"] as const) {
+        await expect(value.supervisor.storage.appendEvents([{
+          sessionId: value.sessionId,
+          branchId: value.branchId,
+          type: "AgentRunStatusChanged",
+          producer: "supervisor",
+          idempotencyKey: `tampered-${status}-without-message`,
+          payload: { runId: run.id, status, reason: "Exact blocked response." },
+        }])).rejects.toThrow();
+      }
+
+      for (const [label, content, status] of [
+        ["wrong-content", "Altered blocked response.", "blocked"],
+        ["wrong-status", "Exact blocked response.", "failed"],
+      ] as const) {
+        const messageId = `agent-run-final-${run.id}`;
+        await expect(value.supervisor.storage.appendEvents([{
+          sessionId: value.sessionId,
+          branchId: value.branchId,
+          type: "MessageAppended",
+          producer: "supervisor",
+          idempotencyKey: `tampered-${label}-message`,
+          payload: { messageId, role: "assistant", content },
+        }, {
+          sessionId: value.sessionId,
+          branchId: value.branchId,
+          type: "AgentRunStatusChanged",
+          producer: "supervisor",
+          idempotencyKey: `tampered-${label}-status`,
+          payload: { runId: run.id, status, reason: content, finalMessageId: messageId },
+        }])).rejects.toThrow();
+      }
+
+      const recovered = await value.supervisor.runs.advance(value.sessionId, value.branchId, run.id);
+      expect(recovered).toMatchObject({
+        status: "blocked",
+        final: "Exact blocked response.",
+        finalMessageId: `agent-run-final-${run.id}`,
+      });
+    } finally { restore(); await value.supervisor.close(); }
+  });
+
+  test("rejects a forged status-only terminal while a successful finish has a failed required gate", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "Claimed complete" }),
+      action({ type: "failed", error: "I could not repair the required gate." }),
+    ]);
+    const restore = crashAfterGoalCheck(value.supervisor);
+    try {
+      const goal = await value.supervisor.goals.create(value.sessionId, value.branchId, {
+        description: "Pass the required gate",
+        gates: [{ name: "always fails", executor: "shell", operation: "run", input: { command: "exit 7" }, idempotent: true, required: true }],
+      });
+      await expect(value.supervisor.runs.start(value.sessionId, value.branchId, {
+        task: "Finish safely", goalId: goal.goalId, requestKey: "forged-terminal-after-failed-gate",
+      })).rejects.toThrow("simulated crash after AgentRunGoalCheckRecorded");
+      restore();
+
+      const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
+      const run = Object.values(state.agentRuns)[0]!;
+      expect(run.status).toBe("running");
+      expect(run.steps.at(-1)?.action?.type).toBe("final");
+      expect(Object.values(run.goalChecks).at(-1)?.status).toBe("failed");
+      expect(state.goals[goal.goalId]?.status).toBe("active");
+
+      for (const status of ["failed", "blocked"] as const) {
+        await expect(value.supervisor.storage.appendEvents([{
+          sessionId: value.sessionId,
+          branchId: value.branchId,
+          type: "AgentRunStatusChanged",
+          producer: "supervisor",
+          idempotencyKey: `forged-${status}-after-failed-gate`,
+          payload: { runId: run.id, status, reason: "Forged terminal without gate repair" },
+        }])).rejects.toThrow();
+      }
+      const unforged = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
+      expect(unforged.agentRuns[run.id]?.status).toBe("running");
+      expect(unforged.goals[goal.goalId]?.status).toBe("active");
+
+      const recovered = await value.supervisor.runs.advance(value.sessionId, value.branchId, run.id);
+      expect(recovered).toMatchObject({
+        status: "blocked",
+        final: "I could not repair the required gate.",
+        finalMessageId: `agent-run-final-${run.id}`,
+      });
+      expect(recovered.reason).toContain("Goal repair stopped after a failed required gate");
+      const terminalState = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
+      expect(terminalState.goals[goal.goalId]?.status).toBe("blocked");
+    } finally { restore(); await value.supervisor.close(); }
   });
 
   test("stops new effect admission at the durable turn-budget boundary but accepts an already-generated final", async () => {
@@ -654,8 +914,11 @@ describe("autonomous durable agent runs", () => {
     } finally { await supervisor.close(); }
   });
 
-  test("does not accept a final response while a required completion gate fails", async () => {
-    const value = await fixture([action({ type: "final", content: "Claimed complete" })]);
+  test("a failed finish after an unresolved required gate becomes goal-derived blocked", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "Claimed complete" }),
+      action({ type: "failed", error: "I could not repair the required gate." }),
+    ]);
     try {
       const goal = await value.supervisor.goals.create(value.sessionId, value.branchId, {
         description: "Pass the required gate",
@@ -663,10 +926,44 @@ describe("autonomous durable agent runs", () => {
       });
       const result = await value.supervisor.runs.start(value.sessionId, value.branchId, { task: "Finish safely", goalId: goal.goalId });
       expect(result.status).toBe("blocked");
-      expect(result.final).toBeUndefined();
+      expect(result.final).toBe("I could not repair the required gate.");
+      expect(result.reason).toContain("Goal repair stopped after a failed required gate");
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
       expect(state.goals[goal.goalId]?.status).toBe("blocked");
-      expect(state.agentRuns[result.runId]?.finalMessageId).toBeUndefined();
+      expect(state.agentRuns[result.runId]?.finalMessageId).toBe(`agent-run-final-${result.runId}`);
+      expect(state.messages.some(message => message.content === "Claimed complete")).toBe(false);
+    } finally { await value.supervisor.close(); }
+  });
+
+  test("a blocked finish bypasses required completion gates", async () => {
+    const value = await fixture([
+      action({ type: "blocked", reason: "A required external credential is missing." }),
+    ]);
+    try {
+      const goal = await value.supervisor.goals.create(value.sessionId, value.branchId, {
+        description: "Do not evaluate while externally blocked",
+        gates: [{
+          name: "must not run",
+          executor: "shell",
+          operation: "run",
+          input: { command: "printf ran > blocked-gate-ran" },
+          idempotent: true,
+          required: true,
+        }],
+      });
+      const result = await value.supervisor.runs.start(value.sessionId, value.branchId, {
+        task: "Stop for the external requirement",
+        goalId: goal.goalId,
+      });
+      expect(result).toMatchObject({
+        status: "blocked",
+        final: "A required external credential is missing.",
+      });
+      expect(await Bun.file(`${value.temp.workspaceRoot}/blocked-gate-ran`).exists()).toBe(false);
+      const history = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
+      expect(history.some(event => event.type === "GoalCompletionRequested" ||
+        event.type === "GoalGateEvaluationRecorded")).toBe(false);
+      expect(projectEvents(history).goals[goal.goalId]?.status).toBe("active");
     } finally { await value.supervisor.close(); }
   });
 
@@ -744,22 +1041,29 @@ describe("autonomous durable agent runs", () => {
     } finally { restore(); await supervisor.close(); }
   });
 
-  test("never commits a clarification action or pending input under schema three", async () => {
+  test("recovers a committed failed finish with one exact message and no repeated model call", async () => {
     const temp = await makeTempRuntime("agencity-agent-input-action-recovery-"); temps.push(temp);
     const provider = new RecordingActions([
-      action({ type: "clarification", question: "Which retained choice?" }),
+      action({ type: "failed", error: "The retained attempt failed safely." }),
     ], "input-action-recover-actions");
     let supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
     const session = await supervisor.createSession({ workspaceId: "input-action-recovery", model: { provider: provider.name, model: "v1" } });
+    const restore = crashAfterNextActionCommit(supervisor);
     try {
-      const result = await supervisor.runs.start(session.sessionId, session.branchId, "Ask the retained question");
-      expect(result).toMatchObject({ status: "failed", steps: 2 });
+      await expect(supervisor.runs.start(session.sessionId, session.branchId, "Fail without fabricating success"))
+        .rejects.toThrow("simulated crash after AgentRunActionCommitted");
+      restore();
+      expect(provider.calls).toBe(1);
+      await supervisor.close();
+      supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: true });
       const history = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
-      const run = projectEvents(history).agentRuns[result.runId]!;
-      expect(Object.values(run.inputRequests)).toHaveLength(0);
-      expect(history.filter(event => event.type === "AgentRunActionCommitted")).toHaveLength(0);
-      expect(history.filter(event => event.type === "AgentRunActionRejected")).toHaveLength(2);
-    } finally { await supervisor.close(); }
+      const run = Object.values(projectEvents(history).agentRuns)[0]!;
+      expect(run).toMatchObject({ status: "failed", finalMessageId: `agent-run-final-${run.id}` });
+      expect(provider.calls).toBe(1);
+      expect(history.filter(event => event.type === "MessageAppended" &&
+        (event.payload as { messageId?: string }).messageId === `agent-run-final-${run.id}`)).toHaveLength(1);
+      expect(history.filter(event => event.type === "AgentRunStatusChanged")).toHaveLength(1);
+    } finally { restore(); await supervisor.close(); }
   });
 
   test("marks a stable cell interrupted after action commit as unknown and never replays it or calls the provider", async () => {
@@ -995,10 +1299,13 @@ describe("autonomous durable agent runs", () => {
     try {
       expect(await supervisor.runs.get(session.sessionId, session.branchId, runId)).toMatchObject({ status: "unknown" });
       expect(provider.calls).toBe(0);
+      const state = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
+      expect(state.messages.map(message => message.role)).toEqual(["user"]);
+      expect(state.agentRuns[runId]?.finalMessageId).toBeUndefined();
     } finally { await supervisor.close(); }
   });
 
-  test("exposes formal runs while the transitional response route remains unreachable", async () => {
+  test("exposes formal runs without a run-input client method or route", async () => {
     const value = await fixture([
       action({ type: "blocked", reason: "A required external decision is missing." }),
     ]);
@@ -1007,7 +1314,12 @@ describe("autonomous durable agent runs", () => {
     try {
       const blocked = await client.startRun(value.sessionId, value.branchId, "Protocol task");
       expect(await client.run(value.sessionId, value.branchId, blocked.runId)).toMatchObject({ status: "blocked" });
-      await expect(client.respondToRun(value.sessionId, value.branchId, blocked.runId, "unreachable", "continue")).rejects.toThrow();
+      expect("respondToRun" in client).toBe(false);
+      const removedRoute = await fetch(
+        `http://${server.hostname}:${server.port}/sessions/${value.sessionId}/runs/${blocked.runId}/input/unreachable?branch=${value.branchId}`,
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ response: "continue" }) },
+      );
+      expect(removedRoute.status).toBe(404);
       // This remains callable as a separate diagnostic surface.
       const legacy = await client.turn(value.sessionId, value.branchId) as { outcome: string };
       expect(legacy.outcome).toBe("succeeded");

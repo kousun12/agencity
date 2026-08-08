@@ -22,14 +22,42 @@ async function setup(label: string, extra: Readonly<Record<string, string>> = {}
 
 describe("FU-009 external outcome and interruption matrix", () => {
   test.each([
-    { task: "fixture explicit failure", reply: action("failed", "fixture failure"), status: "failed", code: 1 },
-    { task: "fixture explicit block", reply: action("blocked", "fixture block"), status: "blocked", code: 4 },
+    { task: "fixture explicit failure", message: "fixture failure", status: "failed", code: 1 },
+    { task: "fixture explicit block", message: "fixture block", status: "blocked", code: 4 },
   ])("reports $status as strict JSON with a distinct process status", async row => {
     const { world, fixture, environment } = await setup(row.status);
-    fixture.script(row.task, [row.reply]);
+    fixture.script(row.task, [action(row.status as "failed" | "blocked", row.message)]);
     const result = await world.command(["run", "--json", row.task], environment);
     expect(result.code).toBe(row.code);
-    expect(parseSingleJson(result)).toMatchObject({ protocol: "agencity.run-result", version: 1, status: row.status, exitCode: row.code });
+    expect(parseSingleJson(result)).toMatchObject({
+      protocol: "agencity.run-result",
+      version: 1,
+      status: row.status,
+      final: row.message,
+      exitCode: row.code,
+    });
+  }, 120_000);
+
+  test("a blocked question is followed by an ordinary new instruction on the same branch", async () => {
+    const { world, fixture, environment } = await setup("blocked-follow-up");
+    const blockedTask = "fixture needs a filename";
+    const followUpTask = "fixture use chosen filename";
+    fixture.script(blockedTask, [action("blocked", "Which filename should I use?")]);
+    fixture.script(followUpTask, [action("final", "Used chosen.txt.")]);
+
+    const blocked = await world.command(["run", "--json", blockedTask], environment);
+    expect(blocked.code).toBe(4);
+    expect(parseSingleJson(blocked)).toMatchObject({
+      status: "blocked",
+      final: "Which filename should I use?",
+    });
+
+    const followedUp = await world.command(["run", "--json", followUpTask], environment);
+    expect(followedUp.code).toBe(0);
+    expect(parseSingleJson(followedUp)).toMatchObject({
+      status: "succeeded",
+      final: "Used chosen.txt.",
+    });
   }, 120_000);
 
   test("reports the bounded-step outcome distinctly", async () => {

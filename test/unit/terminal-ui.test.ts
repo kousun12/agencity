@@ -88,7 +88,6 @@ describe("FU-005 protocol-backed terminal UI", () => {
       renderEvent(event("MessageAppended", { messageId: "message-internal-id", role: "assistant", content: "Validated answer" })),
       renderEvent(event("CellCommitted", { cellId: "cell-internal-id", result: { summary: "tests passed" } })),
       renderEvent(event("CellFailed", { cellId: "cell-internal-id", error: "typecheck failed" })),
-      renderEvent(event("AgentRunUserInputRequested", { runId: "run-internal-id", requestId: "request-internal-id", actionId: "action-internal-id", kind: "clarification", question: "Which package?" })),
       renderEvent(event("AgentRunStatusChanged", { runId: "run-internal-id", status: "unknown", reason: "The external operation may have completed" })),
       renderEvent(event("EffectOutcomeRecorded", { effectId: "effect-internal-id", outcome: "unknown" })),
     ];
@@ -96,7 +95,6 @@ describe("FU-005 protocol-backed terminal UI", () => {
       "assistant: Validated answer",
       "[cell complete] {\"summary\":\"tests passed\"}",
       "[cell failed] typecheck failed",
-      "[input needed] Which package?",
       "[run outcome unknown] — The external operation may have completed",
       "[operation outcome unknown] Inspect with /unknown before retrying.",
     ]);

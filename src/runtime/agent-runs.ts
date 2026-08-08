@@ -14,7 +14,6 @@ import {
   type AgentAction,
   type AgentEvent,
   type AgentRunGoalMode,
-  type AgentRunInputRequestState,
   type AgentRunState,
   type AgentRunStatus,
   type AgentState,
@@ -67,13 +66,6 @@ export interface AgentRunResult {
   readonly reason?: string;
   readonly final?: string;
   readonly finalMessageId?: string;
-  readonly pendingInput?: AgentRunInputRequestState;
-}
-
-export interface AgentRunUserResponse {
-  readonly response: string;
-  /** Required for permission requests and ignored for clarification requests. */
-  readonly approved?: boolean;
 }
 
 type ExecuteCell = (
@@ -100,7 +92,7 @@ const OBSERVATION_TYPES = new Set([
   "TaskStatusChanged", "MailboxMessageSent", "MailboxMessageDelivered",
   "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged", "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered",
   "RecursiveModelStarted", "RecursiveModelStatusChanged", "SkillInvocationRecorded",
-  "SubagentSpecInvoked", "AgentRunUserInputReceived", "AgentRunGoalCheckRecorded",
+  "SubagentSpecInvoked", "AgentRunGoalCheckRecorded",
   "AgentRunActionRejected", "RefinementObservationRecorded", "RefinementDecided",
 ]);
 
@@ -157,7 +149,7 @@ export class AgentRunService {
 
   async start(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> {
     const admitted = await this.admit(sessionId, branchId, input);
-    if (isTerminal(admitted.status) || admitted.status === "waiting_for_user") return admitted;
+    if (isTerminal(admitted.status)) return admitted;
     return this.advance(sessionId, branchId, admitted.runId);
   }
 
@@ -195,6 +187,9 @@ export class AgentRunService {
       }
       const active = Object.values(state.agentRuns).find((run) => !isTerminal(run.status));
       if (active) throw new ValidationError(`Agent run ${active.id} is already ${active.status}`);
+      // Resolve the required formal contract before goal preparation or any
+      // initiating run event is allowed to become durable.
+      this.#agentDispatch(state);
       const runId = normalized.requestedRunId ?? newId();
       const currentGoal = Object.values(state.goals).find((goal) => !["completed", "failed", "cancelled"].includes(goal.status));
       let goalId = normalized.goalId;
@@ -251,54 +246,6 @@ export class AgentRunService {
     const run = state.agentRuns[runId];
     if (!run) throw new NotFoundError("agent run", runId);
     return this.#result(state, run);
-  }
-
-  async respond(
-    sessionId: string,
-    branchId: string,
-    runId: string,
-    requestId: string,
-    input: AgentRunUserResponse | string,
-  ): Promise<AgentRunResult> {
-    if (typeof input !== "string" && (!input || typeof input !== "object" || Array.isArray(input))) {
-      throw new ValidationError("Agent run response must be a string or object");
-    }
-    const normalized = typeof input === "string" ? { response: input } : input;
-    if (typeof normalized.response !== "string") throw new ValidationError("Agent run response must be a string");
-    if (normalized.approved !== undefined && typeof normalized.approved !== "boolean") {
-      throw new ValidationError("Agent run approved value must be boolean");
-    }
-    const result = await this.#runs.run(`${sessionId}/${branchId}`, async () => {
-      const state = await this.#state(sessionId, branchId);
-      const run = state.agentRuns[runId];
-      if (!run) throw new NotFoundError("agent run", runId);
-      const request = run.inputRequests[requestId];
-      if (!request) throw new NotFoundError("agent run input request", requestId);
-      const approved = request.kind === "permission" ? normalized.approved : undefined;
-      if (request.response !== undefined) {
-        if (request.response !== normalized.response || request.approved !== approved) {
-          throw new ValidationError(`Agent run input request ${requestId} was already answered differently`);
-        }
-        return this.#result(state, run);
-      }
-      if (run.status !== "waiting_for_user") {
-        throw new ValidationError(`Agent run input request ${requestId} is not awaiting a response`);
-      }
-      if (request.kind === "permission" && typeof approved !== "boolean") {
-        throw new ValidationError("Permission responses require approved=true or approved=false");
-      }
-      await this.storage.appendEvents([{
-        sessionId, branchId, type: "AgentRunUserInputReceived", producer: "client",
-        idempotencyKey: `agent-run-input-response:${requestId}`,
-        payload: {
-          runId, requestId, response: normalized.response,
-          ...(request.kind === "permission" ? { approved: approved! } : {}),
-        },
-      }]);
-      return this.#advance(sessionId, branchId, runId);
-    });
-    await this.#notifyTerminal(result);
-    return result;
   }
 
   /** Cancellation intent is committed outside the run queue so it can abort an admitted effect. */
@@ -360,7 +307,7 @@ export class AgentRunService {
     await this.#assertExecutionOwner(sessionId);
     while (true) {
       let { state, events, run } = await this.#load(sessionId, branchId, runId);
-      if (isTerminal(run.status) || run.status === "waiting_for_user") return this.#result(state, run);
+      if (isTerminal(run.status)) return this.#result(state, run);
       if (run.cancellationRequested) {
         await this.#terminal(sessionId, branchId, run, "cancelled", run.cancellationReason ?? "Cancellation requested");
         continue;
@@ -371,12 +318,12 @@ export class AgentRunService {
         const cell = action.type === "typescript" ? state.cells[`agent-run-cell-${step.actionId}`] : undefined;
         const interruptedCell = cell && ["proposed", "running", "abandoned"].includes(cell.status);
         // A retained action is already admitted model output. Reconcile it before
-        // admitting another model call. Effectful/user-input actions still honor
+        // admitting another model call. Effectful actions still honor
         // a budget reached by the call that produced them, while an interrupted
         // stable cell is an explicit unknown outcome rather than a budget result.
         if (!interruptedCell &&
             (state.budget.exceeded || budgetReached(state.budget.limits, state.budget)) &&
-            ["typescript", "clarification", "permission"].includes(action.type)) {
+            action.type === "typescript") {
           await this.#terminal(sessionId, branchId, run, "budget_exceeded", "Session budget boundary reached before action execution");
           continue;
         }
@@ -386,7 +333,8 @@ export class AgentRunService {
       }
       if (step?.rejection && consecutiveActionRejections(run) > MAX_ACTION_CORRECTION_ATTEMPTS) {
         const failedCheck = Object.values(run.goalChecks).at(-1);
-        await this.#terminal(sessionId, branchId, run, failedCheck?.status === "failed" ? "blocked" : "failed", failedCheck?.status === "failed" ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}` : `Rejected model action: ${step.rejection}`);
+        const goalRepairUnresolved = hasUnresolvedFailedGoalCheck(state, run);
+        await this.#terminal(sessionId, branchId, run, goalRepairUnresolved ? "blocked" : "failed", goalRepairUnresolved ? `Goal repair stopped after a failed required gate: ${failedCheck!.summary}` : `Rejected model action: ${step.rejection}`);
         continue;
       }
       if (state.budget.exceeded || budgetReached(state.budget.limits, state.budget)) {
@@ -431,13 +379,13 @@ export class AgentRunService {
         step = run.steps.at(-1)!;
       }
 
-      if (isTerminal(run.status) || run.status === "waiting_for_user") continue;
+      if (isTerminal(run.status)) continue;
       if (run.cancellationRequested) continue;
       if (step.rejection) continue;
       const action = step.action!;
       // The already-admitted model action is retained at the exact budget
       // boundary. Only non-effect run-control actions may be processed there.
-      if (state.budget.exceeded && ["typescript", "clarification", "permission"].includes(action.type)) {
+      if (state.budget.exceeded && action.type === "typescript") {
         await this.#terminal(sessionId, branchId, run, "budget_exceeded", "Session budget boundary reached before action execution");
         continue;
       }
@@ -562,6 +510,9 @@ export class AgentRunService {
     if (!admittedCall) throw new ValidationError("Agent run attempt is missing its atomically retained model call");
     const retainedDispatch = admittedCall.modelDispatch;
     if (!current.effects[attempt.effectId]) {
+      // Catalog and transport support can drift after run/step admission.
+      // Recheck immediately before committing each new model effect.
+      this.#agentDispatch(current);
       const requestedEffectId = await this.outbox.request({
         sessionId, branchId, executor: "model", operation: "complete",
         input: { callId: attempt.callId, context, modelDispatch: retainedDispatch as unknown as JsonValue },
@@ -610,6 +561,7 @@ export class AgentRunService {
             rejectedEstimatedInputTokens: attempt.estimatedInputTokens, nextEstimatedInputTokens: nextEstimate,
           });
           if (retry.retry) {
+            this.#agentDispatch(current);
             const callId = `${step.id}-call-attempt-${nextAttempt}`;
             const retryEffectKey = `agent-run-model:${run.id}:${step.ordinal}:attempt:${nextAttempt}`;
             const effectId = stableEffectId(sessionId, retryEffectKey);
@@ -641,7 +593,8 @@ export class AgentRunService {
       }
       const runNow = current.agentRuns[run.id]!;
       const failedCheck = Object.values(runNow.goalChecks).at(-1);
-      const status = call.status === "unknown" ? "unknown" : call.status === "cancelled" || runNow.cancellationRequested ? "cancelled" : failedCheck?.status === "failed" ? "blocked" : "failed";
+      const goalRepairUnresolved = hasUnresolvedFailedGoalCheck(current, runNow);
+      const status = call.status === "unknown" ? "unknown" : call.status === "cancelled" || runNow.cancellationRequested ? "cancelled" : goalRepairUnresolved ? "blocked" : "failed";
       if (status === "cancelled" && !runNow.cancellationRequested) await this.storage.appendEvents([{
         sessionId, branchId, type: "AgentRunCancellationRequested", producer: "supervisor",
         idempotencyKey: `agent-run-effect-cancel:${run.id}`, payload: { runId: run.id, reason: call.error ?? "Model call cancelled" },
@@ -699,11 +652,6 @@ export class AgentRunService {
       const status = state.cells[`agent-run-cell-${actionId}`]?.status;
       return status === "committed" || status === "failed";
     }
-    if (action.type === "clarification" || action.type === "permission") {
-      const request = run.inputRequests[`agent-run-input-${actionId}`];
-      return request?.actionId === actionId && request.kind === action.type && request.question === action.question &&
-        (action.type === "clarification" || request.permission === action.permission);
-    }
     if (action.type === "final") {
       const messageId = `agent-run-final-${run.id}`;
       const message = state.messages.find((candidate) => candidate.id === messageId);
@@ -711,8 +659,20 @@ export class AgentRunService {
       const check = run.goalChecks[actionId];
       return check?.status === "failed" || (check?.status === "unknown" && run.status === "unknown");
     }
-    if (action.type === "blocked") return run.status === "blocked" && run.reason === action.reason;
-    return run.status === "failed" && run.reason === action.error;
+    const messageId = `agent-run-final-${run.id}`;
+    const message = state.messages.find((candidate) => candidate.id === messageId);
+    if (run.finalMessageId !== messageId || message?.role !== "assistant") return false;
+    if (action.type === "blocked") {
+      return run.status === "blocked" && run.reason === action.reason && message.content === action.reason;
+    }
+    const failedCheck = Object.values(run.goalChecks).at(-1);
+    const goalBlocked = failedCheck?.status === "failed" &&
+      run.goalId !== null && state.goals[run.goalId]?.status === "blocked";
+    const expectedReason = goalBlocked
+      ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}`
+      : action.error;
+    return run.status === (goalBlocked ? "blocked" : "failed") &&
+      run.reason === expectedReason && message.content === action.error;
   }
 
   async #applyAction(
@@ -744,28 +704,12 @@ export class AgentRunService {
       }
       return true;
     }
-    if (action.type === "clarification" || action.type === "permission") {
-      const requestId = `agent-run-input-${actionId}`;
-      await this.storage.appendEvents([{
-        sessionId, branchId, type: "AgentRunUserInputRequested", producer: "supervisor",
-        idempotencyKey: `agent-run-input-request:${requestId}`,
-        payload: {
-          runId: run.id, requestId, actionId, kind: action.type, question: action.question,
-          ...(action.type === "permission" ? { permission: action.permission } : {}),
-        },
-      }, {
-        sessionId, branchId, type: "AgentRunStatusChanged", producer: "supervisor",
-        idempotencyKey: `agent-run-waiting:${requestId}`,
-        payload: { runId: run.id, status: "waiting_for_user", reason: action.question },
-      }]);
-      return false;
-    }
     if (action.type === "blocked") {
-      await this.#terminal(sessionId, branchId, run, "blocked", action.reason);
+      await this.#finishNonSuccess(sessionId, branchId, run, "blocked", action.reason);
       return true;
     }
     if (action.type === "failed") {
-      await this.#terminal(sessionId, branchId, run, "failed", action.error);
+      await this.#finishNonSuccess(sessionId, branchId, run, "failed", action.error);
       return true;
     }
 
@@ -854,11 +798,51 @@ export class AgentRunService {
       : fallbackDispatch(state);
   }
 
+  async #finishNonSuccess(
+    sessionId: string,
+    branchId: string,
+    run: AgentRunState,
+    declaredStatus: "blocked" | "failed",
+    message: string,
+  ): Promise<void> {
+    const state = await this.#state(sessionId, branchId);
+    const current = state.agentRuns[run.id];
+    if (!current || isTerminal(current.status)) return;
+    const failedCheck = declaredStatus === "failed"
+      ? Object.values(current.goalChecks).at(-1)
+      : undefined;
+    const goal = current.goalId ? state.goals[current.goalId] : undefined;
+    const goalDerived = failedCheck?.status === "failed" && goal?.status === "active";
+    const status = goalDerived ? "blocked" as const : declaredStatus;
+    const reason = goalDerived
+      ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}`
+      : message;
+    const events: any[] = [];
+    if (goalDerived && goal?.status === "active") {
+      events.push({
+        sessionId, branchId, type: "GoalStatusChanged", producer: "supervisor",
+        idempotencyKey: `agent-run-goal-bounded:${run.id}`,
+        payload: { goalId: goal.id, status: "blocked", reason },
+      });
+    }
+    const messageId = `agent-run-final-${run.id}`;
+    events.push({
+      sessionId, branchId, type: "MessageAppended", producer: "supervisor",
+      idempotencyKey: `agent-run-final-message:${run.id}`,
+      payload: { messageId, role: "assistant", content: message },
+    }, {
+      sessionId, branchId, type: "AgentRunStatusChanged", producer: "supervisor",
+      idempotencyKey: `agent-run-terminal:${run.id}`,
+      payload: { runId: run.id, status, reason, finalMessageId: messageId },
+    });
+    await this.storage.appendEvents(events);
+  }
+
   async #terminal(
     sessionId: string,
     branchId: string,
     run: AgentRunState,
-    status: Exclude<AgentRunStatus, "queued" | "running" | "waiting_for_user" | "succeeded">,
+    status: Exclude<AgentRunStatus, "queued" | "running" | "succeeded">,
     reason: string,
   ): Promise<void> {
     const state = await this.#state(sessionId, branchId);
@@ -870,9 +854,11 @@ export class AgentRunService {
     const events: any[] = [];
     const goal = current.goalId ? state.goals[current.goalId] : undefined;
     const failedCheck = Object.values(current.goalChecks).at(-1);
-    const effectiveStatus = status === "failed" && failedCheck?.status === "failed" ? "blocked" : status;
-    const effectiveReason = effectiveStatus === "blocked" && failedCheck?.status === "failed" ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}` : reason;
-    if (effectiveStatus === "blocked" && goal?.status === "active" && failedCheck?.status === "failed") {
+    const goalRepairUnresolved = status === "failed" &&
+      failedCheck?.status === "failed" && goal?.status === "active";
+    const effectiveStatus = goalRepairUnresolved ? "blocked" : status;
+    const effectiveReason = goalRepairUnresolved ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}` : reason;
+    if (goalRepairUnresolved) {
       events.push({ sessionId, branchId, type: "GoalStatusChanged", producer: "supervisor", idempotencyKey: `agent-run-goal-bounded:${run.id}`, payload: { goalId: goal.id, status: "blocked", reason: effectiveReason } });
     }
     events.push({
@@ -1003,14 +989,12 @@ export class AgentRunService {
 
   #result(state: AgentState, run: AgentRunState): AgentRunResult {
     const finalMessage = run.finalMessageId ? state.messages.find((message) => message.id === run.finalMessageId) : undefined;
-    const pendingInput = Object.values(run.inputRequests).find((request) => request.response === undefined);
     return {
       runId: run.id, sessionId: state.sessionId, branchId: state.branch.id,
       status: run.status, steps: run.steps.length,
       ...(run.reason === undefined ? {} : { reason: run.reason }),
       ...(finalMessage === undefined ? {} : { final: finalMessage.content }),
       ...(run.finalMessageId === undefined ? {} : { finalMessageId: run.finalMessageId }),
-      ...(pendingInput === undefined ? {} : { pendingInput }),
     };
   }
 }
@@ -1194,6 +1178,13 @@ function consecutiveActionRejections(run: AgentRunState): number {
   const firstNonRejectedOffset = [...run.steps].reverse()
     .findIndex((step) => step.rejection === undefined);
   return firstNonRejectedOffset === -1 ? run.steps.length : firstNonRejectedOffset;
+}
+
+function hasUnresolvedFailedGoalCheck(state: AgentState, run: AgentRunState): boolean {
+  const latest = Object.values(run.goalChecks).at(-1);
+  return latest?.status === "failed" &&
+    run.goalId !== null &&
+    state.goals[run.goalId]?.status === "active";
 }
 
 function isTerminal(status: AgentRunStatus): boolean { return TERMINAL_RUN_STATUSES.includes(status); }

@@ -30,7 +30,7 @@ class ReviewProvider implements ModelProvider {
     const reviewId = JSON.stringify(context).match(/refinement-review-[a-f0-9]{32}/)?.[0];
     if (!reviewId) {
       this.runCalls++;
-      return { text: JSON.stringify({ protocol: "agencity.agent-action", version: 1, type: "final", content: "done" }), finishReason: "stop", usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 } };
+      return { text: "done", finishReason: "stop", usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 } };
     }
     this.calls++;
     let text: string;

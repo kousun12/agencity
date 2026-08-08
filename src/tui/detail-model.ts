@@ -114,8 +114,6 @@ function displayStatus(value: unknown): string {
 function displayActivityReason(value: unknown): string {
   const reason = string(value);
   if (reason === "unknown") return "unknown outcome";
-  if (reason === "permission_required") return "permission required";
-  if (reason === "waiting_for_user") return "waiting for user";
   return displayStatus(reason);
 }
 
@@ -131,7 +129,7 @@ function markerTone(status: unknown): TerminalDetailTone {
   const normalized = string(status).toLowerCase();
   if (["succeeded", "completed", "active", "online", "connected", "passed", "validated", "promoted", "enabled"].includes(normalized)) return "success";
   if (["failed", "blocked", "unknown", "error", "quarantined", "rejected"].includes(normalized)) return "danger";
-  if (["pending", "running", "waiting_for_user", "completion_requested", "offline", "paused", "revision_required"].includes(normalized)) return "warning";
+  if (["pending", "running", "completion_requested", "offline", "paused", "revision_required"].includes(normalized)) return "warning";
   return "normal";
 }
 
@@ -351,7 +349,7 @@ function familyDetail(command: string, value: unknown): TerminalInspectionDetail
           ...(detail ? { detail } : {}),
           tone: ["attention", "unavailable"].includes(activity)
             ? "danger" as const
-            : ["working", "waiting"].includes(activity)
+            : activity === "working"
               ? "warning" as const
               : activity === "ended"
                 ? "muted" as const

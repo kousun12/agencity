@@ -853,7 +853,7 @@ describe("formal AI SDK model responses", () => {
     expect(JSON.stringify(oversizedReasoning)).not.toContain("rrrrrrrr");
   });
 
-  test("Echo and scripted fixtures produce formal submissions while preserving text completion", async () => {
+  test("Echo and scripted fixtures produce formal submissions without textual action JSON", async () => {
     const action = {
       protocol: "agencity.agent-action",
       version: 1,
@@ -878,11 +878,13 @@ describe("formal AI SDK model responses", () => {
         new AbortController().signal,
       );
       expect(output.result.kind).toBe("tool-submission");
-      expect((await provider.complete(
+      const text = (await provider.complete(
         { run: { stepOrdinal: 1, task: "fixture" } },
         { provider: provider.name, model: "fixture/model", reasoningEffort: "provider-default" },
         new AbortController().signal,
-      )).text).toContain("agencity.agent-action");
+      )).text;
+      expect(text.length).toBeGreaterThan(0);
+      expect(text).not.toContain("agencity.agent-action");
     }
   });
 });

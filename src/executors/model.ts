@@ -149,13 +149,7 @@ export class EchoModelProvider implements ModelProvider {
         if (last && typeof last === "object" && !Array.isArray(last) && typeof last.content === "string") text = `Echo: ${last.content}`;
       }
     }
-    const runContext = context && typeof context === "object" && !Array.isArray(context) &&
-      context.run && typeof context.run === "object" && !Array.isArray(context.run) ? context.run : undefined;
-    const isAgentRun = runContext !== undefined;
-    const runTask = typeof runContext?.task === "string" ? runContext.task : undefined;
-    const output = isAgentRun
-      ? JSON.stringify({ protocol: AGENT_ACTION_PROTOCOL, version: AGENT_ACTION_VERSION, type: "final", content: runTask ? `Echo: ${runTask}` : "Echo model completed." } satisfies AgentAction)
-      : text || "Echo model completed.";
+    const output = text || "Echo model completed.";
     return { text: output, finishReason: "stop", usage: { inputTokens: Math.ceil(JSON.stringify(context).length / 4), outputTokens: Math.ceil(output.length / 4), costUsd: 0 } };
   }
   async streamResponse(
@@ -208,15 +202,16 @@ export class ScriptedAgentActionProvider implements ModelProvider {
   constructor(
     readonly script: Readonly<Record<number, AgentAction | string>> | readonly (AgentAction | string)[],
     name = "structured-action",
-  ) { this.name = name; this.displayName = `${name} (deterministic agent-action fixture)`; }
+  ) { this.name = name; this.displayName = `${name} (deterministic formal-tool fixture)`; }
   async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     const ordinal = context && typeof context === "object" && !Array.isArray(context) && context.run &&
       typeof context.run === "object" && !Array.isArray(context.run) && typeof context.run.stepOrdinal === "number"
       ? context.run.stepOrdinal : 1;
     const selected = Array.isArray(this.script) ? this.script[ordinal - 1] : this.script[ordinal];
-    const fallback: AgentAction = { protocol: AGENT_ACTION_PROTOCOL, version: AGENT_ACTION_VERSION, type: "failed", error: `No scripted agent action for durable step ${ordinal}` };
-    const text = typeof selected === "string" ? selected : JSON.stringify(selected ?? fallback);
+    const text = typeof selected === "string"
+      ? selected
+      : `Scripted formal-tool fixture step ${ordinal}`;
     return { text, finishReason: "stop", usage: { inputTokens: Math.ceil(JSON.stringify(context).length / 4), outputTokens: Math.ceil(text.length / 4), costUsd: 0 } };
   }
   async streamResponse(

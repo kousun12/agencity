@@ -47,7 +47,6 @@ interface StepBlock {
 interface RunBlock extends TranscriptBlock {
   readonly marker: TextRenderable;
   readonly summary: TextRenderable;
-  readonly pending: TextRenderable;
   readonly reason: TextRenderable;
   readonly stepsHost: BoxRenderable;
   readonly stepBlocks: Map<string, StepBlock>;
@@ -89,7 +88,6 @@ export function terminalRunMarker(run: Pick<TerminalRunView, "active" | "status"
   if (run.active) return "●";
   switch (run.status) {
     case "succeeded": return "✓";
-    case "waiting_for_user": return "◷";
     case "budget_exceeded": return "!";
     case "failed":
     case "blocked":
@@ -289,14 +287,6 @@ export class TerminalTranscript {
       truncate: true,
       wrapMode: "none",
     });
-    const pending = new TextRenderable(this.renderer, {
-      id: `agencity-transcript-run-pending-${run.id}`,
-      width: "100%",
-      height: "auto",
-      paddingLeft: 2,
-      fg: TERMINAL_THEME.warning,
-      wrapMode: "word",
-    });
     const reason = new TextRenderable(this.renderer, {
       id: `agencity-transcript-run-reason-${run.id}`,
       width: "100%",
@@ -316,7 +306,6 @@ export class TerminalTranscript {
     header.add(marker);
     header.add(summary);
     root.add(header);
-    root.add(pending);
     root.add(reason);
     root.add(stepsHost);
 
@@ -325,7 +314,6 @@ export class TerminalTranscript {
       root,
       marker,
       summary,
-      pending,
       reason,
       stepsHost,
       stepBlocks: new Map(),
@@ -337,7 +325,6 @@ export class TerminalTranscript {
         marker.content = terminalRunMarker(current);
         marker.fg = terminalToneColor(current.provisional ? "provisional" : terminalRunTone(current.status));
         summary.content = runSummary(current, block.inline, block.expanded);
-        pending.content = current.pendingInput ? `needs input: ${current.pendingInput}` : "";
         reason.content = current.reason ?? "";
         stepsHost.visible = block.expanded;
         if (block.expanded) this.#reconcileSteps(block, current.steps.slice(-8));

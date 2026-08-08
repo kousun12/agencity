@@ -201,6 +201,9 @@ describe("FU-014 product autonomy", () => {
         (event.payload as { status?: string }).status)).toEqual(["unknown"]);
       expect(history.filter(event => event.type === "AgentRunGoalCheckRecorded").map(event =>
         (event.payload as { status?: string }).status)).toEqual(["unknown"]);
+      const state = projectEvents(history);
+      expect(state.agentRuns[runId]?.finalMessageId).toBeUndefined();
+      expect(state.messages.some(message => message.content === "must remain provisional")).toBe(false);
     } finally { restore(); await supervisor.close(); }
   });
 

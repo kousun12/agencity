@@ -7,7 +7,7 @@ import type {
   SpawnAgentInput, StartRecursiveModelInput, SubagentHandle, CreateMemoryInput,
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
-  StartAgentRunInput, AgentRunResult, AgentRunUserResponse, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
+  StartAgentRunInput, AgentRunResult, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
   RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
   StartRefinementReviewInput, RefinementReviewRecord, RefinementTriggerPolicyV1,
   SkillManagementView, SkillImportPreview, InstallLocalSkillInput,
@@ -145,7 +145,6 @@ export class AgentClient {
   startRun(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs?branch=${branchId}`, typeof input === "string" ? { task: input } : input); }
   run(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#json(`/sessions/${sessionId}/runs/${runId}?branch=${branchId}`); }
   resumeRun(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/resume?branch=${branchId}`); }
-  respondToRun(sessionId: string, branchId: string, runId: string, requestId: string, input: AgentRunUserResponse | string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/input/${requestId}?branch=${branchId}`, typeof input === "string" ? { response: input } : input); }
   cancelRun(sessionId: string, branchId: string, runId: string, reason?: string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }
   /** Retained diagnostic one-turn chat. Product tasks use startRun. */
   turn(sessionId: string, branchId: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/turns?branch=${branchId}`); }

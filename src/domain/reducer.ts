@@ -1,6 +1,6 @@
 import { EVENT_SCHEMA_VERSION, type AgentEvent, type EventPayloads, type ModelCallResult, type TaskStatus } from "./events.ts";
 import type {
-  AgentRunInputRequestState, AgentRunState, AgentRunStepState, AgentState, CellState, DocumentChunkState, EffectState, GoalGateState,
+  AgentRunState, AgentRunStepState, AgentState, CellState, DocumentChunkState, EffectState, GoalGateState,
   MailboxMessageState, ModelCallState, RecursiveModelState, TaskState, TerminalNoticeState,
 } from "./state.ts";
 import { REDUCER_VERSION } from "./state.ts";
@@ -485,7 +485,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       }
       const run: AgentRunState = {
         id: p.runId, task: p.task, requestKey: p.requestKey, goalId: p.goalId ?? null, goalMode: p.goalMode ?? (p.goalId ? "current" : "none"), wakeId: p.wakeId ?? null, status: "queued",
-        steps: [], inputRequests: {}, goalChecks: {}, cancellationRequested: false, requestEventId: event.id, eventId: event.id,
+        steps: [], goalChecks: {}, cancellationRequested: false, requestEventId: event.id, eventId: event.id,
       };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: run } };
     }
@@ -557,23 +557,6 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       if (!run || run.status !== "running" || !step?.action || step.action.type !== "final" || step.actionId !== p.actionId || run.goalId !== p.goalId || run.goalChecks[p.actionId]) throw new InvalidTransitionError("agentRunGoalCheck", run?.status ?? "missing-run", p.status);
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, goalChecks: { ...run.goalChecks, [p.actionId]: { actionId: p.actionId, goalId: p.goalId, requestId: p.requestId, status: p.status, summary: p.summary, gateEvaluationEventIds: [...p.gateEvaluationEventIds], eventId: event.id } }, eventId: event.id } } };
     }
-    case "AgentRunUserInputRequested": {
-      const p = event.payload as EventPayloads["AgentRunUserInputRequested"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
-      const matchesAction = step?.action?.type === p.kind && step.action.question === p.question &&
-        (p.kind === "permission" ? step.action.type === "permission" && step.action.permission === p.permission : p.permission === undefined);
-      if (!run || run.status !== "running" || !step?.action || step.actionId !== p.actionId || run.inputRequests[p.requestId] || !matchesAction) {
-        throw new InvalidTransitionError("agentRunInput", run?.status ?? "missing-run", "requested");
-      }
-      const request: AgentRunInputRequestState = { id: p.requestId, actionId: p.actionId, kind: p.kind, question: p.question, ...(p.permission === undefined ? {} : { permission: p.permission }), requestedEventId: event.id };
-      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, inputRequests: { ...run.inputRequests, [p.requestId]: request }, eventId: event.id } } };
-    }
-    case "AgentRunUserInputReceived": {
-      const p = event.payload as EventPayloads["AgentRunUserInputReceived"]; const run = state.agentRuns[p.runId]; const request = run?.inputRequests[p.requestId];
-      const approvalValid = request?.kind === "permission" ? typeof p.approved === "boolean" : p.approved === undefined;
-      if (!run || run.status !== "waiting_for_user" || !request || request.response !== undefined || !approvalValid) throw new InvalidTransitionError("agentRunInput", request?.response === undefined ? run?.status ?? "missing-run" : "received", "received");
-      const updated = { ...request, response: p.response, ...(p.approved === undefined ? {} : { approved: p.approved }), receivedEventId: event.id };
-      return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, status: "running", inputRequests: { ...run.inputRequests, [p.requestId]: updated }, eventId: event.id } } };
-    }
     case "AgentRunCancellationRequested": {
       const p = event.payload as EventPayloads["AgentRunCancellationRequested"]; const run = state.agentRuns[p.runId];
       if (!run || ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status) || run.cancellationRequested) throw new InvalidTransitionError("agentRun", run?.status ?? "missing", "cancellation_requested");
@@ -582,15 +565,60 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "AgentRunStatusChanged": {
       const p = event.payload as EventPayloads["AgentRunStatusChanged"]; const run = state.agentRuns[p.runId];
       const terminal = ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"];
-      const finalMessage = p.finalMessageId === undefined ? undefined : state.messages.find((message) => message.id === p.finalMessageId);
-      const finalAction = run?.steps.at(-1)?.action;
-      const finalLinkValid = p.status === "succeeded"
-        ? finalAction?.type === "final" && finalMessage?.role === "assistant" && finalMessage.content === finalAction.content
-        : p.finalMessageId === undefined;
-      const valid = run && !terminal.includes(run.status) && finalLinkValid && (
-        (p.status === "waiting_for_user" && run.status === "running" && Object.values(run.inputRequests).some((request) => request.response === undefined)) ||
+      const step = run?.steps.at(-1);
+      const finalAction = step?.action;
+      const acceptedFinish = step?.actionSource?.kind === "tool-submission" &&
+        finalAction !== undefined && ["final", "blocked", "failed"].includes(finalAction.type);
+      const expectedMessageId = run ? `agent-run-final-${run.id}` : "";
+      const matchingMessages = p.finalMessageId === undefined
+        ? []
+        : state.messages.filter((message) => message.id === p.finalMessageId);
+      const finalMessage = matchingMessages[0];
+      const expectedContent = finalAction?.type === "final" ? finalAction.content
+        : finalAction?.type === "blocked" ? finalAction.reason
+        : finalAction?.type === "failed" ? finalAction.error
+        : undefined;
+      // A retained accepted finish action owns its blocked/failed terminal
+      // meaning: a successful finish repairs failed gates or later maps to
+      // goal-derived blocked, and blocked/failed finishes carry their exact
+      // message. Status-only blocked/failed terminals are runtime-originated
+      // and are valid only when no finish action is the retained last action.
+      const finalLinkValid = p.finalMessageId === undefined
+        ? p.status !== "succeeded" &&
+          !(acceptedFinish && (p.status === "blocked" || p.status === "failed"))
+        : acceptedFinish &&
+          ["succeeded", "blocked", "failed"].includes(p.status) &&
+          p.finalMessageId === expectedMessageId &&
+          matchingMessages.length === 1 &&
+          finalMessage?.role === "assistant" &&
+          finalMessage.modelCallId === null &&
+          finalMessage.content === expectedContent &&
+          finalMessage.eventId === state.appliedEventIds.at(-1);
+      const latestCheck = run ? Object.values(run.goalChecks).at(-1) : undefined;
+      const unresolvedFailedGate = latestCheck?.status === "failed" &&
+        run?.goalId !== null && run?.goalId !== undefined &&
+        state.goals[run.goalId]?.status === "active";
+      const goalDerivedFailure = latestCheck?.status === "failed" &&
+        run?.goalId !== null && run?.goalId !== undefined &&
+        state.goals[run.goalId]?.status === "blocked";
+      const goalDerivedReason = goalDerivedFailure
+        ? `Goal repair stopped after a failed required gate: ${latestCheck.summary}`
+        : undefined;
+      const finishStatusValid = p.finalMessageId === undefined || (
+        finalAction?.type === "final"
+          ? p.status === "succeeded" && p.reason === undefined &&
+            (run?.goalId === null || run?.goalChecks[step!.actionId]?.status === "passed")
+          : finalAction?.type === "blocked"
+            ? p.status === "blocked" && p.reason === finalAction.reason
+            : finalAction?.type === "failed" && goalDerivedFailure
+              ? p.status === "blocked" && p.reason === goalDerivedReason &&
+                run?.goalId !== null
+              : finalAction?.type === "failed" && !unresolvedFailedGate &&
+                p.status === "failed" && p.reason === finalAction.error
+      );
+      const valid = run && !terminal.includes(run.status) && finalLinkValid && finishStatusValid && (
         (p.status === "cancelled" && run.cancellationRequested) ||
-        (terminal.includes(p.status) && p.status !== "cancelled")
+        (p.status !== "cancelled")
       );
       if (!run || !valid) throw new InvalidTransitionError("agentRun", run?.status ?? "missing", p.status);
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, status: p.status, ...(p.reason === undefined ? {} : { reason: p.reason }), ...(p.finalMessageId === undefined ? {} : { finalMessageId: p.finalMessageId }), eventId: event.id } } };
@@ -731,8 +759,6 @@ function sameAgentAction(left: AgentAction, right: AgentAction): boolean {
   if (left.type !== right.type) return false;
   if (left.type === "typescript" && right.type === "typescript") return left.code === right.code;
   if (left.type === "final" && right.type === "final") return left.content === right.content;
-  if (left.type === "clarification" && right.type === "clarification") return left.question === right.question;
-  if (left.type === "permission" && right.type === "permission") return left.permission === right.permission && left.question === right.question;
   if (left.type === "blocked" && right.type === "blocked") return left.reason === right.reason;
   if (left.type === "failed" && right.type === "failed") return left.error === right.error;
   return false;

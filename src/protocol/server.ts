@@ -212,7 +212,6 @@ export class ProtocolServer {
               : Response.json(await this.supervisor.runs.start(sessionId, branchId, input));
           }
           if (request.method === "GET" && parts[3] && parts.length === 4) return Response.json(await this.supervisor.runs.get(sessionId, branchId, parts[3]));
-          if (request.method === "POST" && parts[3] && parts[4] === "input" && parts[5]) return Response.json(await this.supervisor.runs.respond(sessionId, branchId, parts[3], parts[5], await jsonBody(request) as any));
           if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.runs.cancel(sessionId, branchId, parts[3], typeof body.reason === "string" ? body.reason : undefined)); }
           if (request.method === "POST" && parts[3] && parts[4] === "resume") return Response.json(await this.supervisor.runs.advance(sessionId, branchId, parts[3]));
         }

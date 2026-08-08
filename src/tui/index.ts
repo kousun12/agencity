@@ -24,7 +24,7 @@ import {
 
 export type TerminalAgentClient = Pick<AgentClient,
   "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
-  "createSession" | "modelProviders" | "startRun" | "run" | "respondToRun" | "cancelRun" |
+  "createSession" | "modelProviders" | "startRun" | "run" | "cancelRun" |
   "productConfig" | "productSetModel" | "productSetReasoningEffort" | "productSetProviderKey" | "selectModel" | "modelCatalog" |
   "cell" | "fork" | "resume" | "inspectContext" | "compact" | "agents" | "tasks" | "mailbox" | "cancelTask" |
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
@@ -199,10 +199,6 @@ export function renderEvent(event: AgentEvent): string | null {
       return Array.isArray(payload.warnings) && payload.warnings.length
         ? payload.warnings.map((warning) => `[model warning] ${conciseValue((warning as { message?: unknown }).message)}`).join("\n")
         : null;
-    case "AgentRunUserInputRequested":
-      return payload.kind === "permission"
-        ? `[permission needed: ${conciseValue(payload.permission)}] ${conciseValue(payload.question)}`
-        : `[input needed] ${conciseValue(payload.question)}`;
     case "AgentRunStatusChanged": {
       const reason = payload.reason ? ` — ${conciseValue(payload.reason)}` : "";
       switch (payload.status) {
@@ -224,7 +220,7 @@ const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancel
 const FAMILY_REFRESH_EVENT_TYPES = new Set<AgentEvent["type"]>([
   "TaskCreated", "SubagentAdmitted", "TaskStatusChanged", "SubagentCancellationRequested",
   "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered", "SessionNamed", "SessionStatusChanged",
-  "AgentRunRequested", "AgentRunUserInputRequested", "AgentRunUserInputReceived",
+  "AgentRunRequested",
   "AgentRunCancellationRequested", "AgentRunStatusChanged", "BudgetExceeded",
   "EffectOutcomeRecorded", "EffectReconciliationRecorded",
 ]);
@@ -532,9 +528,9 @@ export class TerminalUI {
     if (line.startsWith("/unknown ")) { this.#detail("/unknown", await this.client.inspectUnknownEffect(this.#sessionId,this.#branchId,line.slice(9).trim()));return "continue"; }
     if (line.startsWith("/reconcile ")) { await this.#reconcile(line.slice(11));return "continue"; }
     if (line === "/stop") { await this.#stop("User requested /stop");return "continue"; }
-    if (line.startsWith("/run ")) { await this.#startOrRespond(line.slice(5));return "continue"; }
+    if (line.startsWith("/run ")) { await this.#startTask(line.slice(5));return "continue"; }
     if (line.startsWith("/")) { this.#write("Unknown command. Use /help.\n");return "continue"; }
-    await this.#startOrRespond(line);
+    await this.#startTask(line);
     return "continue";
   }
 
@@ -602,10 +598,8 @@ export class TerminalUI {
           const callId = String((event.payload as { callId?: string }).callId ?? "");
           if (callId) this.#streamedCallIds.delete(callId);
         }
-        if (event.type === "AgentRunStatusChanged" && (
-          TERMINAL_RUN_STATUSES.has(String((event.payload as { status?: string }).status))
-          || String((event.payload as { status?: string }).status) === "waiting_for_user"
-        )) {
+        if (event.type === "AgentRunStatusChanged" &&
+          TERMINAL_RUN_STATUSES.has(String((event.payload as { status?: string }).status))) {
           const runId = String((event.payload as { runId?: string }).runId ?? "");
           this.#interrupts.reset();
           this.#agentWorkingRunIds.delete(runId);
@@ -957,11 +951,11 @@ export class TerminalUI {
     const value=detail((selected.model??model).reasoningEffort);this.#lastDetail=value;this.#emitDetail(value);
   }
   async #stop(reason:string):Promise<void>{const active=this.#activeRun();if(!active){this.#write("No active run.\n");return;}await this.client.cancelRun(this.#sessionId,this.#branchId,active.id,reason);this.#write("Cancellation requested.\n");}
-  async #startOrRespond(text:string):Promise<void>{
+  async #startTask(text:string):Promise<void>{
     const active=this.#activeRun();
-    if(active?.status==="waiting_for_user"){const request=Object.values(active.inputRequests).find((item)=>item.response===undefined);if(!request)throw new Error("Waiting run has no pending request");const approved=request.kind==="permission"?/^(y|yes|approve|approved)$/i.test(text):undefined;const result=await this.client.respondToRun(this.#sessionId,this.#branchId,active.id,request.id,{response:text,...(approved===undefined?{}:{approved})});if(result.status==="queued"||result.status==="running")this.#write("Response accepted.\n");}
-    else if(active){this.#write(`A run is ${active.status}; /stop requests cancellation.\n`);return;}
-    else {const result=await this.client.startRun(this.#sessionId,this.#branchId,{task:text,goalMode:"auto"});if(result.status==="queued"||result.status==="running")this.#write("Run accepted.\n");}
+    if(active){this.#write(`A run is ${active.status}; /stop requests cancellation.\n`);return;}
+    const result=await this.client.startRun(this.#sessionId,this.#branchId,{task:text,goalMode:"auto"});
+    if(result.status==="queued"||result.status==="running")this.#write("Run accepted.\n");
   }
   async #goal(command:string):Promise<void>{if(command.startsWith("create ")){this.#detail("/goal", await this.client.createGoal(this.#sessionId,this.#branchId,command.slice(7)));return;}const current=await this.client.currentGoal(this.#sessionId,this.#branchId);if(!current){this.#write("No current goal.\n");return;}if(command==="pause")this.#detail("/goal", await this.client.pauseGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="resume")this.#detail("/goal", await this.client.resumeGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="clear")this.#detail("/goal", await this.client.clearGoal(this.#sessionId,this.#branchId,current.goalId));else if(command==="complete")this.#detail("/goal", await this.client.requestGoalCompletion(this.#sessionId,this.#branchId,current.goalId));else throw new Error("/goal create DESCRIPTION|pause|resume|clear|complete");}
   async #heartbeat(command:string):Promise<void>{const create=/^create\s+(\d+)(?:\s+([\s\S]+))?$/.exec(command);if(create){this.#detail("/heartbeat", await this.client.createHeartbeat(this.#sessionId,this.#branchId,{intervalMs:Number(create[1]),...(create[2]?{prompt:create[2]}:{})}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/heartbeat create MS [PROMPT]|pause N|resume N|clear N");const item=(await this.client.heartbeats(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Heartbeat number not found");this.#detail("/heartbeat", change[1]==="pause"?await this.client.pauseHeartbeat(item.heartbeatId):change[1]==="resume"?await this.client.resumeHeartbeat(item.heartbeatId):await this.client.cancelHeartbeat(item.heartbeatId));}

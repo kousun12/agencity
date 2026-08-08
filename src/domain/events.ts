@@ -44,7 +44,7 @@ export const eventTypes = [
   "RefinementDecided", "RefinementApproved", "RefinementRollbackApproved", "RefinementRolledBack",
   "SkillImported", "SkillAvailabilityChanged", "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
   "AgentRunRequested", "AgentRunStepStarted", "AgentRunModelAttemptStarted", "AgentRunActionCommitted", "AgentRunActionRejected", "AgentRunGoalCheckRecorded",
-  "AgentRunUserInputRequested", "AgentRunUserInputReceived", "AgentRunCancellationRequested", "AgentRunStatusChanged",
+  "AgentRunCancellationRequested", "AgentRunStatusChanged",
 ] as const;
 export type EventType = (typeof eventTypes)[number];
 export type Producer = "supervisor" | "console" | "model" | "executor" | "client" | "recovery" | "scheduler" | string;
@@ -65,8 +65,7 @@ export type WakeStatus = "queued" | "claimed" | "delivered" | "unknown";
 export type AgentRunGoalMode = "none" | "auto" | "current" | "create";
 export type RecursiveModelStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type RecursiveModelOutcome = "succeeded" | "failed" | "cancelled" | "budget-exceeded" | "unknown";
-export type AgentRunStatus = "queued" | "running" | "waiting_for_user" | "succeeded" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown";
-export type AgentRunInputKind = "clarification" | "permission";
+export type AgentRunStatus = "queued" | "running" | "succeeded" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown";
 export type RefinementReviewLifecycleStatus = "requested" | "running" | "no_change" | "candidate" | "revision_required" | "failed" | "cancelled" | "unknown";
 export type ContextCompactionStrategy = "deterministic-extractive-v1" | "model-summary-v1";
 export type ContextCompactionReason = "user-request" | "agent-request" | "automatic-threshold" | "provider-overflow" | "rematerialize";
@@ -209,8 +208,6 @@ export interface EventPayloads {
   AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; action: AgentAction };
   AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "contract-violation" }>; error: string };
   AgentRunGoalCheckRecorded: { runId: string; actionId: string; goalId: string; requestId: string; status: "passed" | "failed" | "unknown"; summary: string; gateEvaluationEventIds: string[] };
-  AgentRunUserInputRequested: { runId: string; requestId: string; actionId: string; kind: AgentRunInputKind; question: string; permission?: string };
-  AgentRunUserInputReceived: { runId: string; requestId: string; response: string; approved?: boolean };
   AgentRunCancellationRequested: { runId: string; reason?: string };
   AgentRunStatusChanged: { runId: string; status: Exclude<AgentRunStatus, "queued" | "running">; reason?: string; finalMessageId?: string };
 }
@@ -412,10 +409,8 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceSubmissionSchema, action: agentActionSchema }).strict(),
   AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceViolationSchema, error: z.string().min(1) }).strict(),
   AgentRunGoalCheckRecorded: z.object({ runId: id, actionId: id, goalId: id, requestId: id, status: z.enum(["passed", "failed", "unknown"]), summary: z.string().min(1).max(65536), gateEvaluationEventIds: z.array(id) }).strict(),
-  AgentRunUserInputRequested: z.object({ runId: id, requestId: id, actionId: id, kind: z.enum(["clarification", "permission"]), question: z.string().min(1), permission: z.string().min(1).optional() }).strict(),
-  AgentRunUserInputReceived: z.object({ runId: id, requestId: id, response: z.string(), approved: z.boolean().optional() }).strict(),
   AgentRunCancellationRequested: z.object({ runId: id, reason: z.string().optional() }).strict(),
-  AgentRunStatusChanged: z.object({ runId: id, status: z.enum(["waiting_for_user", "succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]), reason: z.string().optional(), finalMessageId: id.optional() }).strict(),
+  AgentRunStatusChanged: z.object({ runId: id, status: z.enum(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]), reason: z.string().optional(), finalMessageId: id.optional() }).strict(),
 };
 
 export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): void {

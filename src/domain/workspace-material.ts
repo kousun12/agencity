@@ -98,8 +98,6 @@ export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   AgentRunActionCommitted: "non-material",
   AgentRunActionRejected: "non-material",
   AgentRunGoalCheckRecorded: "non-material",
-  AgentRunUserInputRequested: "non-material",
-  AgentRunUserInputReceived: "non-material",
   AgentRunCancellationRequested: "non-material",
   AgentRunStatusChanged: "non-material",
 } as const satisfies Record<EventType, WorkspaceMaterialEventClass>;

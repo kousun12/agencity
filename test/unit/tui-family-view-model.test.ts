@@ -44,7 +44,6 @@ describe("terminal family view model", () => {
     const rows = buildTerminalFamilyChildren([
       family("idle", "idle"),
       family("working", "working"),
-      family("waiting", "waiting", { activityReason: "permission_required" }),
       family("unavailable", "unavailable", { activityReason: "missing_state" }),
       family("ended", "ended", { activityReason: "cancelled" }),
       family("attention-b", "attention", { name: "Same", activityReason: "failed" }),
@@ -55,32 +54,29 @@ describe("terminal family view model", () => {
       "attention-a",
       "attention-b",
       "unavailable",
-      "waiting",
       "working",
       "task-fallback",
       "idle",
       "ended",
     ]);
     expect(rows.find(row => row.sessionId === "task-fallback")?.displayName).toBe("Fallback task");
-    expect(rows.find(row => row.sessionId === "waiting")?.activityReasonLabel).toBe("permission required");
     expect(rows.find(row => row.sessionId === "unavailable")?.openable).toBe(false);
   });
 
-  test("groups waiting and unavailable as attention while retaining ended-only families", () => {
+  test("groups unavailable as attention while retaining ended-only families", () => {
     const summary = buildTerminalFamilySummary(buildTerminalFamilyChildren([
       family("working", "working"),
-      family("waiting", "waiting"),
       family("unavailable", "unavailable"),
       family("attention", "attention"),
       family("ended", "ended"),
     ]));
     expect(summary).toEqual({
-      total: 5,
+      total: 4,
       working: 1,
       idle: 0,
-      attention: 3,
+      attention: 2,
       ended: 1,
-      label: "5 agents: 1 working · 3 attention · 1 ended   Enter or → to open",
+      label: "4 agents: 1 working · 2 attention · 1 ended   Enter or → to open",
     });
     expect(buildTerminalFamilySummary(buildTerminalFamilyChildren([family("ended", "ended")]))?.label)
       .toBe("1 agent: 1 ended   Enter or → to open");

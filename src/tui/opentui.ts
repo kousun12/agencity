@@ -82,7 +82,6 @@ function isRoutineTranscript(value: string): boolean {
   return trimmed === "[agent working…]"
     || trimmed === "[run complete]"
     || trimmed === "Run accepted."
-    || trimmed === "Response accepted."
     || trimmed.startsWith("[cell complete]")
     || trimmed.startsWith("assistant:");
 }
@@ -90,7 +89,6 @@ function isRoutineTranscript(value: string): boolean {
 function familyActivityMarker(activity: TerminalFamilyChildView["activity"]): string {
   if (activity === "attention" || activity === "unavailable") return "!";
   if (activity === "working") return "●";
-  if (activity === "waiting") return "◷";
   if (activity === "ended") return "×";
   return "○";
 }

@@ -39,7 +39,6 @@ export type TerminalCellStatus =
 const RUN_TONES: Readonly<Record<AgentRunState["status"], TerminalTone>> = {
   queued: "accent",
   running: "accent",
-  waiting_for_user: "warning",
   succeeded: "success",
   blocked: "danger",
   failed: "danger",
@@ -61,7 +60,6 @@ const CELL_TONES: Readonly<Record<TerminalCellStatus, TerminalTone>> = {
 const FAMILY_TONES: Readonly<Record<FamilyAgentActivity, TerminalTone>> = {
   working: "accent",
   idle: "muted",
-  waiting: "warning",
   attention: "danger",
   ended: "muted",
   unavailable: "danger",

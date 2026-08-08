@@ -72,7 +72,6 @@ function run(status: AgentRunState["status"], overrides: Partial<AgentRunState> 
     wakeId: null,
     status,
     steps: [],
-    inputRequests: {},
     goalChecks: {},
     cancellationRequested: false,
     requestEventId: "run-request",
@@ -87,43 +86,10 @@ describe("family activity projection", () => {
     expect(deriveFamilyAgentActivity(state(), null, true)).toEqual({ activity: "unavailable", activityReason: "missing_state" });
   });
 
-  test("derives working, waiting, idle, and ended states", () => {
+  test("derives working, idle, and ended states", () => {
     expect(deriveFamilyAgentActivity(state(), task())).toEqual({ activity: "idle", activityReason: null });
     expect(deriveFamilyAgentActivity(state(), task({ status: "running" })))
       .toEqual({ activity: "working", activityReason: null });
-    expect(deriveFamilyAgentActivity(state({
-      appliedEventIds: ["created", "run-event"],
-      agentRuns: {
-        run: run("waiting_for_user", {
-          inputRequests: {
-            request: {
-              id: "request",
-              actionId: "action",
-              kind: "clarification",
-              question: "Which package?",
-              requestedEventId: "input-event",
-            },
-          },
-        }),
-      },
-    }), task())).toEqual({ activity: "waiting", activityReason: "waiting_for_user" });
-    expect(deriveFamilyAgentActivity(state({
-      appliedEventIds: ["created", "run-event"],
-      agentRuns: {
-        run: run("waiting_for_user", {
-          inputRequests: {
-            request: {
-              id: "request",
-              actionId: "action",
-              kind: "permission",
-              question: "May I publish?",
-              permission: "publish",
-              requestedEventId: "input-event",
-            },
-          },
-        }),
-      },
-    }), task())).toEqual({ activity: "waiting", activityReason: "permission_required" });
     expect(deriveFamilyAgentActivity(state({ status: "stopped" }), task({ status: "completed" })))
       .toEqual({ activity: "idle", activityReason: null });
     expect(deriveFamilyAgentActivity(state({ status: "stopped" }), task({ status: "cancelled" })))

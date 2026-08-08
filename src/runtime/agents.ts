@@ -59,9 +59,9 @@ export interface FamilyAgentRecord {
   readonly task: string | null; readonly model: ModelConfiguration | null; readonly cancellationRequested: boolean;
   readonly activity: FamilyAgentActivity; readonly activityReason: FamilyAgentActivityReason;
 }
-export type FamilyAgentActivity = "working" | "waiting" | "idle" | "attention" | "ended" | "unavailable";
+export type FamilyAgentActivity = "working" | "idle" | "attention" | "ended" | "unavailable";
 export type FamilyAgentActivityReason =
-  | "waiting_for_user" | "permission_required" | "blocked" | "failed" | "budget_exceeded"
+  | "blocked" | "failed" | "budget_exceeded"
   | "unknown" | "cancellation_pending" | "cancelled" | "archived" | "missing_state" | null;
 export interface FamilyListResult { readonly items: FamilyAgentRecord[]; }
 export interface MailboxListOptions {
@@ -111,6 +111,7 @@ export class AgentService {
         : model.reasoningEffort === "off" ? "none" : model.reasoningEffort,
     }),
     readonly normalizeModelIdentity: (model: ModelConfigurationInput) => ModelConfiguration = normalizeModel,
+    readonly assertRunnableModel: (model: ModelConfiguration) => void = () => {},
   ) {
     this.#recursive = requireRecursiveStorage(storage);
     this.#projections = new ProjectionService(storage);
@@ -151,7 +152,7 @@ export class AgentService {
             requestKey: `agent-spawn:${item.handle.taskId}`,
           },
         };
-      }));
+      }), { requireAgentToolSet: true });
     this.#scheduleSpawnAdvance(handle!);
     return handle!;
   }
@@ -171,6 +172,7 @@ export class AgentService {
     parentBranchId: string,
     rawInputs: readonly (SpawnAgentInput | string)[],
     extend: (items: readonly SpawnAdmissionItem[]) => readonly NewAgentEvent[],
+    options: { readonly requireAgentToolSet?: boolean } = {},
   ): Promise<SubagentHandle[]> {
     return this.#admissions.run(`${parentSessionId}/${parentBranchId}`, async () => {
       const inputs = rawInputs.map((input): SpawnAgentInput => typeof input === "string" ? { task: input } : input);
@@ -250,6 +252,9 @@ export class AgentService {
       if (activeDirect.length + novel.length > this.maxChildren) throw new ValidationError(`Maximum active child count ${this.maxChildren} exceeded`);
 
       for (const item of novel) assertChildPolicy(parentState.model, parentState.budget.limits, item.model, item.budget);
+      if (options.requireAgentToolSet) {
+        for (const item of novel) this.assertRunnableModel(item.model);
+      }
       const activeTasks = directTasks.filter((task) => task.parentBranchId === parentBranchId && !["completed", "failed", "cancelled"].includes(task.status));
       const activeReservations = await Promise.all(activeTasks.map((task) => this.#remainingTaskReservation(task)));
       assertBudgetReservations(parentState.budget.limits, parentState.budget, [...activeReservations, ...novel.map((item) => item.budget)]);
@@ -1023,13 +1028,6 @@ export function deriveFamilyAgentActivity(
     return { activity: "ended", activityReason: "cancelled" };
   }
   if (state.status === "archived") return { activity: "ended", activityReason: "archived" };
-  if (latestRun?.status === "waiting_for_user") {
-    const pending = Object.values(latestRun.inputRequests).find(request => request.response === undefined);
-    return {
-      activity: "waiting",
-      activityReason: pending?.kind === "permission" ? "permission_required" : "waiting_for_user",
-    };
-  }
   if (task?.status === "running" ||
       latestRun && ["queued", "running"].includes(latestRun.status) ||
       state.status === "running") {

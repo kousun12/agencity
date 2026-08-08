@@ -318,7 +318,6 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       } else {
         const result = await startAndWaitForRun(client, selection.sessionId, selection.branchId, input);
         if (result.status === "succeeded") console.log(result.final ?? "");
-        else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
         else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
       }
     }
@@ -830,7 +829,6 @@ function productRunExitCode(status: AgentRunResult["status"]): number {
     case "blocked": return 4;
     case "budget_exceeded": return 5;
     case "unknown": return 7;
-    case "waiting_for_user":
     case "queued":
     case "running": return 8;
     case "cancelled": return 130;
@@ -848,10 +846,8 @@ function printProductRunResult(result: AgentRunResult, json: boolean): void {
       steps: result.steps,
       ...(result.final === undefined ? {} : { final: result.final }),
       ...(result.reason === undefined ? {} : { reason: result.reason }),
-      ...(result.pendingInput === undefined ? {} : { pendingInput: { kind: result.pendingInput.kind, question: result.pendingInput.question, permission: result.pendingInput.permission } }),
     }));
   } else if (result.status === "succeeded") console.log(result.final ?? "");
-  else if (result.status === "waiting_for_user") console.log(`[waiting_for_user] ${result.pendingInput?.question ?? result.reason ?? "User input required"}`);
   else console.error(`Run ${result.status}: ${result.reason ?? "no terminal reason recorded"}`);
   process.exitCode = exitCode;
 }

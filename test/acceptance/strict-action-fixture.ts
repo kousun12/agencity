@@ -110,7 +110,7 @@ export class StrictActionFixture {
     const selected = durable ? this.scripts.get(durable.task)?.[durable.stepOrdinal - 1] : undefined;
     const reviewId = JSON.stringify(body.messages).match(/refinement-review-[a-f0-9]{32}/)?.[0];
     const fallback: Reply = durable
-      ? { protocol: "agencity.agent-action", version: 1, type: "final", content: `fixture completed: ${durable.task}` }
+      ? action("final", `fixture completed: ${durable.task}`)
       : reviewId
         ? { protocol: "agencity.refinement-review", version: 1, reviewId, status: "no_change", reason: "The frozen trajectory does not justify an evidence-backed change.", evidenceEventIds: [] }
         : `fixture recursive response: ${lastUserText.slice(-200)}`;
@@ -190,26 +190,15 @@ function split(text: string, parts: number): string[] {
 }
 
 function formalToolCall(reply: Record<string, unknown>): { name: "bun_console" | "finish"; arguments: string } | null {
-  if (reply.protocol !== "agencity.agent-action" || reply.version !== 1) return null;
-  if (reply.type === "typescript" && typeof reply.code === "string") {
-    return { name: "bun_console", arguments: JSON.stringify({ source: reply.code }) };
-  }
-  if (reply.type === "final" && typeof reply.content === "string") {
-    return { name: "finish", arguments: JSON.stringify({ outcome: { message: reply.content } }) };
-  }
-  if (reply.type === "blocked" && typeof reply.reason === "string") {
-    return { name: "finish", arguments: JSON.stringify({ outcome: { status: "blocked", message: reply.reason } }) };
-  }
-  if (reply.type === "failed" && typeof reply.error === "string") {
-    return { name: "finish", arguments: JSON.stringify({ outcome: { status: "failed", message: reply.error } }) };
+  if ((reply.name === "bun_console" || reply.name === "finish") &&
+      reply.input && typeof reply.input === "object" && !Array.isArray(reply.input)) {
+    return { name: reply.name, arguments: JSON.stringify(reply.input) };
   }
   return null;
 }
 
 export function action(type: "final" | "failed" | "blocked" | "typescript", value: string): Record<string, unknown> {
-  const base = { protocol: "agencity.agent-action", version: 1, type };
-  if (type === "final") return { ...base, content: value };
-  if (type === "failed") return { ...base, error: value };
-  if (type === "blocked") return { ...base, reason: value };
-  return { ...base, code: value };
+  if (type === "typescript") return { name: "bun_console", input: { source: value } };
+  if (type === "final") return { name: "finish", input: { outcome: { message: value } } };
+  return { name: "finish", input: { outcome: { status: type, message: value } } };
 }

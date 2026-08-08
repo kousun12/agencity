@@ -3,10 +3,11 @@ import {
   AGENT_ACTION_PROTOCOL,
   AGENT_ACTION_VERSION,
   MAX_AGENT_ACTION_BYTES,
-  parseAgentAction,
+  canonicalJsonByteLength,
+  validateAgentActionValue,
 } from "../../src/index.ts";
 
-const valid = (extra: Record<string, unknown> = {}) => JSON.stringify({
+const valid = (extra: Record<string, unknown> = {}) => ({
   protocol: AGENT_ACTION_PROTOCOL,
   version: AGENT_ACTION_VERSION,
   type: "typescript",
@@ -15,8 +16,9 @@ const valid = (extra: Record<string, unknown> = {}) => JSON.stringify({
 });
 
 describe("agent action protocol", () => {
-  test("accepts exactly one strict versioned JSON object", () => {
-    expect(parseAgentAction(valid())).toEqual({
+  test("accepts one strict canonical action value", () => {
+    const value = valid();
+    expect(validateAgentActionValue(value, { encodedBytes: canonicalJsonByteLength(value) })).toEqual({
       protocol: "agencity.agent-action",
       version: 1,
       type: "typescript",
@@ -25,26 +27,26 @@ describe("agent action protocol", () => {
   });
 
   test.each([
-    ["markdown fence", `\`\`\`json\n${valid()}\n\`\`\``],
-    ["leading prose", `execute this: ${valid()}`],
-    ["trailing object", `${valid()}${valid()}`],
     ["wrong protocol", valid({ protocol: "other" })],
     ["unsupported version", valid({ version: 2 })],
     ["unknown field", valid({ tool: "shell" })],
-    ["missing executable source", JSON.stringify({ protocol: AGENT_ACTION_PROTOCOL, version: 1, type: "typescript" })],
-    ["parallel tool shape", JSON.stringify({ protocol: AGENT_ACTION_PROTOCOL, version: 1, type: "shell", command: "touch owned" })],
-  ])("rejects %s", (_name, raw) => {
-    expect(() => parseAgentAction(raw)).toThrow();
+    ["missing executable source", { protocol: AGENT_ACTION_PROTOCOL, version: 1, type: "typescript" }],
+    ["parallel tool shape", { protocol: AGENT_ACTION_PROTOCOL, version: 1, type: "shell", command: "touch owned" }],
+    ["removed clarification", { protocol: AGENT_ACTION_PROTOCOL, version: 1, type: "clarification", question: "Which file?" }],
+    ["removed permission", { protocol: AGENT_ACTION_PROTOCOL, version: 1, type: "permission", permission: "write", question: "Proceed?" }],
+  ])("rejects %s", (_name, value) => {
+    expect(() => validateAgentActionValue(value, { encodedBytes: canonicalJsonByteLength(value) })).toThrow();
   });
 
-  test("rejects a response above the byte bound before schema admission", () => {
-    const raw = JSON.stringify({
+  test("rejects an action above the byte bound before schema admission", () => {
+    const value = {
       protocol: AGENT_ACTION_PROTOCOL,
       version: AGENT_ACTION_VERSION,
       type: "final",
       content: "x".repeat(MAX_AGENT_ACTION_BYTES),
-    });
-    expect(new TextEncoder().encode(raw).byteLength).toBeGreaterThan(MAX_AGENT_ACTION_BYTES);
-    expect(() => parseAgentAction(raw)).toThrow(`exceeds ${MAX_AGENT_ACTION_BYTES} bytes`);
+    };
+    expect(canonicalJsonByteLength(value)).toBeGreaterThan(MAX_AGENT_ACTION_BYTES);
+    expect(() => validateAgentActionValue(value, { encodedBytes: canonicalJsonByteLength(value) }))
+      .toThrow(`exceeds ${MAX_AGENT_ACTION_BYTES} bytes`);
   });
 });

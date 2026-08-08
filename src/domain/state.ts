@@ -1,5 +1,5 @@
 import type {
-  AgentRunActionSource, AgentRunGoalMode, AgentRunInputKind, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
+  AgentRunActionSource, AgentRunGoalMode, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
   FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
   RefinementReviewLifecycleStatus, ScheduleStatus, SessionStatus, TaskStatus, ModelCallResult, ModelCallTermination, ModelUsageSource, Usage, WakeStatus, WorkingValue,
 } from "./events.ts";
@@ -8,7 +8,7 @@ import type { ModelEffectFailureCode } from "./model-response.ts";
 import type { AgentAction } from "./agent-action.ts";
 import type { JsonValue } from "./json.ts";
 
-export const REDUCER_VERSION = 9 as const;
+export const REDUCER_VERSION = 10 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
@@ -87,15 +87,10 @@ export interface AgentRunStepState {
   readonly effectId: string; readonly actionId: string; readonly observationEventIds: string[]; readonly modelAttempts: AgentRunModelAttemptState[];
   readonly action?: AgentAction; readonly actionSource?: AgentRunActionSource; readonly rejection?: string; readonly eventId: string;
 }
-export interface AgentRunInputRequestState {
-  readonly id: string; readonly actionId: string; readonly kind: AgentRunInputKind; readonly question: string;
-  readonly permission?: string; readonly response?: string; readonly approved?: boolean; readonly requestedEventId: string;
-  readonly receivedEventId?: string;
-}
 export interface AgentRunGoalCheckState { readonly actionId: string; readonly goalId: string; readonly requestId: string; readonly status: "passed" | "failed" | "unknown"; readonly summary: string; readonly gateEvaluationEventIds: string[]; readonly eventId: string; }
 export interface AgentRunState {
   readonly id: string; readonly task: string; readonly requestKey: string; readonly goalId: string | null; readonly goalMode: AgentRunGoalMode; readonly wakeId: string | null;
-  readonly status: AgentRunStatus; readonly steps: AgentRunStepState[]; readonly inputRequests: Record<string, AgentRunInputRequestState>; readonly goalChecks: Record<string, AgentRunGoalCheckState>;
+  readonly status: AgentRunStatus; readonly steps: AgentRunStepState[]; readonly goalChecks: Record<string, AgentRunGoalCheckState>;
   readonly cancellationRequested: boolean; readonly cancellationReason?: string; readonly reason?: string;
   readonly finalMessageId?: string; readonly requestEventId: string; readonly eventId: string;
 }
