@@ -2,6 +2,7 @@ export * from "./supervisor.ts";
 export * from "./projection.ts";
 export * from "./context.ts";
 export * from "./model-loop.ts";
+export * from "./model-effect-admission.ts";
 export * from "./model-catalog.ts";
 export * from "./outbox.ts";
 export * from "./execution-leases.ts";

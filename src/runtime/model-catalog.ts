@@ -14,6 +14,11 @@ const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
 const MAX_CATALOG_MODELS = 10_000;
 const MAX_TEXT = 16_384;
 const SELECTABLE = new Set<RequestedReasoningEffort>(STANDARD_UNVERIFIED_REASONING_LEVELS);
+const UNKNOWN_REQUIRED_TOOL_SET = Object.freeze({
+  status: "unknown" as const,
+  strictSchema: "unknown" as const,
+  requiredChoice: "unknown" as const,
+});
 
 export interface ModelCatalogRefreshResult {
   readonly status: "refreshed" | "cached-fallback" | "unavailable";
@@ -89,6 +94,7 @@ export class ModelCatalog {
       maxOutputTokens: null,
       pricing: null,
       reasoning: { status: "unverified" as const, levels: STANDARD_UNVERIFIED_REASONING_LEVELS },
+      requiredToolSet: UNKNOWN_REQUIRED_TOOL_SET,
       catalogEndpointId: this.endpointId,
       stale: this.#expiresAt === null || Date.now() >= Date.parse(this.#expiresAt),
     };
@@ -258,6 +264,10 @@ function normalizeDescriptor(record: Record<string, unknown>, endpointId: string
     maxOutputTokens: boundedIntegerOrNull(record.max_tokens, "maximum output"),
     pricing: normalizePricing(record.pricing),
     reasoning,
+    // The current Gateway catalog has no authoritative normalized formal-tool
+    // fields. Unrecognized provider-specific keys must not imply support or
+    // lack of support.
+    requiredToolSet: UNKNOWN_REQUIRED_TOOL_SET,
     catalogEndpointId: endpointId,
     stale: false,
     ...(unsupported.length ? { unsupportedReasoningValues: Object.freeze(unsupported.slice(0, 16)) } : {}),
@@ -291,6 +301,7 @@ function parseCachedDescriptor(value: JsonValue, endpointId: string): ModelDescr
     maxOutputTokens: boundedIntegerOrNull(value.maxOutputTokens, "cached maximum output"),
     pricing,
     reasoning: { status: status as ModelDescriptor["reasoning"]["status"], levels: Object.freeze(rawLevels as RequestedReasoningEffort[]) },
+    requiredToolSet: parseCachedRequiredToolSet(value.requiredToolSet),
     catalogEndpointId: endpointId,
     stale: false,
     ...(unsupportedReasoningValues?.length
@@ -300,6 +311,18 @@ function parseCachedDescriptor(value: JsonValue, endpointId: string): ModelDescr
   const catalogDigest = sha256(stableJson(normalized));
   if (value.catalogDigest !== catalogDigest) throw new ValidationError("Cached model descriptor digest is corrupt");
   return Object.freeze({ ...normalized, catalogDigest });
+}
+
+function parseCachedRequiredToolSet(
+  value: JsonValue | undefined,
+): NonNullable<ModelDescriptor["requiredToolSet"]> {
+  if (value === undefined) return UNKNOWN_REQUIRED_TOOL_SET;
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      value.status !== "unknown" || value.strictSchema !== "unknown" ||
+      value.requiredChoice !== "unknown" || Object.keys(value).length !== 3) {
+    throw new ValidationError("Cached model formal-tool capability is invalid");
+  }
+  return UNKNOWN_REQUIRED_TOOL_SET;
 }
 
 async function readBoundedBody(body: ReadableStream<Uint8Array> | null, maximum: number, signal: AbortSignal): Promise<Uint8Array> {

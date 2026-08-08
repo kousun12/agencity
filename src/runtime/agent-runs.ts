@@ -2,6 +2,7 @@ import {
   AGENT_ACTION_JSON_SCHEMA,
   AGENT_ACTION_POLICY,
   parseAgentAction,
+  assertNoReservedModelDispatchInputFields,
   newId,
   CapabilityUnavailableError,
   NotFoundError,
@@ -164,6 +165,10 @@ export class AgentRunService {
     if (typeof input !== "string" && (!input || typeof input !== "object" || Array.isArray(input))) {
       throw new ValidationError("Agent run input must be a task string or object");
     }
+    assertNoReservedModelDispatchInputFields(
+      input,
+      "Public agent run input",
+    );
     const normalized: StartAgentRunInput = typeof input === "string" ? { task: input, goalMode: "none" } : input;
     if (typeof normalized.task !== "string") throw new ValidationError("Agent run task must be a string");
     const task = normalized.task.trim();

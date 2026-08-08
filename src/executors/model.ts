@@ -2,23 +2,35 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGateway } from "@ai-sdk/gateway";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, streamText, type LanguageModel, type ModelMessage } from "ai";
-import type { JsonValue } from "../domain/json.ts";
+import { canonicalJsonDigest, type JsonValue } from "../domain/json.ts";
 import {
   AGENT_ACTION_PROTOCOL,
   AGENT_ACTION_VERSION,
+  ModelResponseContractUnavailableError,
   STANDARD_UNVERIFIED_REASONING_LEVELS,
+  TEXT_MODEL_RESPONSE_CONTRACT,
   ValidationError,
+  assertNoReservedModelDispatchInputFields,
   assertReasoningSelection,
+  createModelEffectOutputV2,
   normalizeReasoningEffort,
   resolveModelDispatch,
   validateModelDispatch,
+  validateModelDispatchV2,
+  validateModelEffectOutputV2,
   type AgentAction,
+  type CompleteModelResponse,
   type ModelConfiguration,
   type ModelConfigurationInput,
   type ModelDescriptor,
   type ModelDispatch,
+  type ModelDispatchV2,
+  type ModelEffectOutputV2,
+  type ProviderNeutralModelOutputDelta as ResponseContractOutputDelta,
   type ModelReasoningCapability,
   type ModelWarning,
+  type RequiredToolSetCapability,
+  type ResolvedModelExecutionDescriptor,
   type Usage,
 } from "../domain/index.ts";
 import type { EffectExecutor, ExecutionResult } from "./contract.ts";
@@ -35,10 +47,29 @@ export interface ModelResponse {
   readonly usage: Usage;
   readonly warnings?: readonly ModelWarning[];
 }
+export type TextModelResponse = ModelResponse;
 export interface ModelOutputDelta { readonly text: string; }
+export interface ModelProviderRequiredToolSetCapabilities {
+  readonly status:
+    | "provider-strict"
+    | "runtime-validated"
+    | "unsupported"
+    | "unknown";
+  readonly requiredChoice: "provider-enforced" | "unknown" | "unsupported";
+  readonly parallelCalls:
+    | "provider-disabled"
+    | "runtime-rejected"
+    | "unknown"
+    | "unsupported";
+  /** True only when bounded tool-input streaming is a proven transport primitive. */
+  readonly streaming: boolean;
+  readonly adapter: string;
+  readonly reason?: string;
+}
 export interface ModelProviderCapabilities {
   readonly streaming: boolean;
   readonly reasoningControl?: "none" | "normalized";
+  readonly requiredToolSet?: ModelProviderRequiredToolSetCapabilities;
   readonly contextWindowTokens?: number;
   readonly contextCapacitySource?: "provider-metadata" | "model-catalog" | "operator-configuration";
 }
@@ -60,13 +91,28 @@ export interface ModelProvider {
   readonly productTransport?: boolean;
   availability?(): Pick<ModelProviderDescriptor, "usable" | "credentialSource" | "remediation">;
   normalizeModel?(model: string): string;
-  complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse>;
+  complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse>;
   stream?(
     context: JsonValue,
     configuration: ModelConfiguration,
     signal: AbortSignal,
     onDelta: (delta: ModelOutputDelta) => void,
-  ): Promise<ModelResponse>;
+  ): Promise<TextModelResponse>;
+  /**
+   * Provider-neutral response-contract primitives. Phase 3 supplies these for
+   * the shared AI SDK adapter; custom providers may implement them directly.
+   */
+  completeResponse?(
+    context: JsonValue,
+    dispatch: ModelDispatchV2,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2>;
+  streamResponse?(
+    context: JsonValue,
+    dispatch: ModelDispatchV2,
+    signal: AbortSignal,
+    onDelta: (delta: ResponseContractOutputDelta) => void,
+  ): Promise<ModelEffectOutputV2>;
 }
 
 export interface ModelCatalogSnapshot {
@@ -84,7 +130,7 @@ export class EchoModelProvider implements ModelProvider {
     contextCapacitySource: "model-catalog",
   } as const;
   availability() { return { usable: true, credentialSource: "programmatic" as const }; }
-  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     let text = "";
     if (context && typeof context === "object" && !Array.isArray(context)) {
@@ -119,7 +165,7 @@ export class ScriptedAgentActionProvider implements ModelProvider {
     readonly script: Readonly<Record<number, AgentAction | string>> | readonly (AgentAction | string)[],
     name = "structured-action",
   ) { this.name = name; this.displayName = `${name} (deterministic agent-action fixture)`; }
-  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     const ordinal = context && typeof context === "object" && !Array.isArray(context) && context.run &&
       typeof context.run === "object" && !Array.isArray(context.run) && typeof context.run.stepOrdinal === "number"
@@ -157,7 +203,7 @@ class AiSdkModelProvider implements ModelProvider {
   readonly name: AiSdkTransport;
   readonly displayName: string;
   readonly productTransport = true;
-  readonly capabilities = { streaming: true, reasoningControl: "normalized" } as const;
+  readonly capabilities: ModelProviderCapabilities;
   readonly executionEndpointId: string;
   readonly executionOrigin: string;
   readonly #baseUrl: string;
@@ -168,6 +214,24 @@ class AiSdkModelProvider implements ModelProvider {
     this.#baseUrl = executionBaseUrl(options.transport, options.origin);
     this.executionOrigin = this.#baseUrl;
     this.executionEndpointId = digest(this.#baseUrl);
+    this.capabilities = Object.freeze({
+      streaming: true,
+      reasoningControl: "normalized",
+      requiredToolSet: Object.freeze({
+        // Pinned AI SDK packages prove the formal streaming primitives. The
+        // exact model remains unknown until authoritative catalog evidence is
+        // available.
+        status: "unknown",
+        requiredChoice: "provider-enforced",
+        parallelCalls: this.name === "vercel"
+          ? "runtime-rejected"
+          : "provider-disabled",
+        streaming: true,
+        adapter: "agencity.vercel-ai-sdk.v7",
+        reason:
+          "The selected transport has proven bounded formal streaming, but the catalog does not authoritatively classify this model.",
+      }),
+    });
   }
 
   availability() {
@@ -191,7 +255,7 @@ class AiSdkModelProvider implements ModelProvider {
     return canonical;
   }
 
-  async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     const sdk = await generateText({
       ...this.#callOptions(context, configuration, signal),
       model: this.#model(configuration),
@@ -204,7 +268,7 @@ class AiSdkModelProvider implements ModelProvider {
     configuration: ModelConfiguration,
     signal: AbortSignal,
     onDelta: (delta: ModelOutputDelta) => void,
-  ): Promise<ModelResponse> {
+  ): Promise<TextModelResponse> {
     const sdk = streamText({
       ...this.#callOptions(context, configuration, signal),
       model: this.#model(configuration),
@@ -278,7 +342,7 @@ class AiSdkModelProvider implements ModelProvider {
     usage: unknown,
     warnings: unknown,
     providerMetadata: unknown,
-  ): ModelResponse {
+  ): TextModelResponse {
     const mappedWarnings = normalizeWarnings(warnings);
     return {
       text,
@@ -493,6 +557,10 @@ export class ModelExecutor implements EffectExecutor {
       if (provider.capabilities?.streaming === true && typeof provider.stream !== "function") {
         throw new ValidationError(`Model provider ${provider.name} declares streaming without a stream implementation`);
       }
+      validateProviderRequiredToolSetCapabilities(
+        provider.name,
+        provider.capabilities?.requiredToolSet,
+      );
       if (this.#providers.has(provider.name)) throw new ValidationError(`Duplicate model provider: ${provider.name}`);
       this.#providers.set(provider.name, provider);
     }
@@ -523,6 +591,9 @@ export class ModelExecutor implements EffectExecutor {
         capabilities: {
           streaming: provider.capabilities?.streaming === true,
           reasoningControl: provider.capabilities?.reasoningControl ?? "none",
+          ...(provider.capabilities?.requiredToolSet === undefined ? {} : {
+            requiredToolSet: provider.capabilities.requiredToolSet,
+          }),
           ...(provider.capabilities?.contextWindowTokens === undefined ? {} : {
             contextWindowTokens: provider.capabilities.contextWindowTokens,
             contextCapacitySource: provider.capabilities.contextCapacitySource ?? "provider-metadata",
@@ -541,6 +612,10 @@ export class ModelExecutor implements EffectExecutor {
   }
 
   normalizeConfigurationIdentity(configuration: ModelConfigurationInput): ModelConfiguration {
+    assertNoReservedModelDispatchInputFields(
+      configuration,
+      "Public model configuration",
+    );
     if (!configuration || typeof configuration.provider !== "string" || !configuration.provider.trim() ||
         typeof configuration.model !== "string" || !configuration.model.trim()) {
       throw new ValidationError("Model configuration requires provider and model");
@@ -568,19 +643,161 @@ export class ModelExecutor implements EffectExecutor {
     const normalized = this.normalizeConfiguration(configuration);
     const provider = this.#providers.get(normalized.provider);
     if (!provider) throw new ValidationError(`Unknown model provider: ${normalized.provider}`);
-    const descriptor = provider.productTransport ? this.#catalog?.descriptor(normalized.model) : undefined;
+    const descriptor = this.#descriptor(provider, normalized.model);
     const capability = this.#capability(provider, normalized.model);
-    const catalogDigest = descriptor?.catalogDigest ?? digest(JSON.stringify({
-      provider: normalized.provider,
-      model: normalized.model,
-      reasoningControl: provider.capabilities?.reasoningControl ?? "none",
-    }));
     return resolveModelDispatch({
       configuration: normalized,
       capability,
-      catalogDigest,
+      catalogDigest: descriptor.catalogDigest,
       ...(provider.executionEndpointId === undefined ? {} : { executionEndpointId: provider.executionEndpointId }),
     });
+  }
+
+  resolveExecutionDescriptor(
+    configuration: ModelConfigurationInput,
+  ): ResolvedModelExecutionDescriptor {
+    const normalized = this.normalizeConfiguration(configuration);
+    const provider = this.#providers.get(normalized.provider);
+    if (!provider) {
+      throw new ValidationError(
+        `Unknown model provider: ${normalized.provider}`,
+      );
+    }
+    const catalog = this.#descriptor(provider, normalized.model);
+    return Object.freeze({
+      transport: normalized.provider,
+      model: normalized.model,
+      catalog,
+      requiredAgentToolSet: Object.freeze(
+        this.#requiredToolSetCapability(provider, catalog),
+      ),
+    });
+  }
+
+  assertRequiredToolSetAdmission(
+    descriptor: ResolvedModelExecutionDescriptor,
+  ): void {
+    const capability = descriptor.requiredAgentToolSet;
+    if (
+      capability.status === "unsupported" ||
+      capability.requiredChoice === "unsupported" ||
+      capability.parallelCalls === "unsupported" ||
+      !capability.streaming
+    ) {
+      throw new ModelResponseContractUnavailableError(
+        descriptor.transport,
+        descriptor.model,
+        capability.reason ??
+          "the selected transport does not prove bounded required-tool streaming",
+        {
+          status: capability.status,
+          requiredChoice: capability.requiredChoice,
+          parallelCalls: capability.parallelCalls,
+          streaming: capability.streaming,
+          catalogDigest: capability.catalogDigest,
+        },
+      );
+    }
+  }
+
+  /**
+   * Provider-neutral execution used after a response-aware dispatch has been
+   * durably admitted. The live v1 event writer does not call this method.
+   */
+  async executeResponseAware(
+    context: JsonValue,
+    dispatch: ModelDispatchV2,
+    signal: AbortSignal,
+    onDelta?: (delta: ResponseContractOutputDelta) => void,
+  ): Promise<ModelEffectOutputV2> {
+    validateModelDispatchV2(dispatch);
+    const provider = this.#providers.get(dispatch.configuration.provider);
+    if (!provider) {
+      throw new ValidationError(
+        `Unknown model provider: ${dispatch.configuration.provider}`,
+      );
+    }
+    if (provider.executionEndpointId !== dispatch.executionEndpointId) {
+      throw new ValidationError(
+        "Retained model dispatch endpoint differs from the current configured transport origin",
+      );
+    }
+    const release = await this.#limiter.acquire(
+      dispatch.configuration.provider,
+      signal,
+    );
+    try {
+      if (dispatch.responseContract.kind === "required-tool-set") {
+        if (!provider.streamResponse) {
+          throw new ModelResponseContractUnavailableError(
+            dispatch.configuration.provider,
+            dispatch.configuration.model,
+            "the configured adapter has not installed its bounded formal-stream normalizer",
+          );
+        }
+        const output = await provider.streamResponse(
+          context,
+          dispatch,
+          signal,
+          onDelta ?? (() => {}),
+        );
+        return validateModelEffectOutputV2(output, {
+          responseContract: dispatch.responseContract,
+          responseCapability: dispatch.responseCapability,
+          configuredProvider: dispatch.configuration.provider,
+        });
+      }
+      const textResponse = provider.capabilities?.streaming === true
+        ? await provider.stream!(
+            context,
+            dispatch.configuration,
+            signal,
+            (delta) =>
+              onDelta?.({ kind: "text", text: delta.text }),
+          )
+        : await provider.complete(
+            context,
+            dispatch.configuration,
+            signal,
+          );
+      const normalized = normalizeModelResponse(textResponse);
+      const rawReason = boundedText(
+        scrubProviderText(normalized.finishReason),
+        256,
+      );
+      const response: CompleteModelResponse = {
+        kind: "complete",
+        blocks: [{ type: "text", text: normalized.text }],
+        termination: {
+          kind: normalizedTextTermination(normalized.finishReason),
+          // An empty scrubbed reason must stay absent: retained "other"
+          // termination without a raw reason is the conservative
+          // incomplete-response signal.
+          ...(rawReason ? { rawReason } : {}),
+        },
+        usage: normalized.usage,
+        warnings: normalized.warnings ?? [],
+        transport: {
+          provider: dispatch.configuration.provider,
+          adapter:
+            provider.capabilities?.requiredToolSet?.adapter ??
+            "agencity.model-provider.text.v1",
+        },
+      };
+      return createModelEffectOutputV2({
+        response,
+        result: {
+          kind: "text",
+          text: normalized.text,
+          textDigest: canonicalTextDigest(normalized.text),
+        },
+        responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+        responseCapability: { kind: "text" },
+        configuredProvider: dispatch.configuration.provider,
+      });
+    } finally {
+      release();
+    }
   }
 
   contextCapacity(configuration: ModelConfiguration): Readonly<{ provider: string; model: string; source: "provider-metadata" | "model-catalog" | "operator-configuration" | "unknown"; contextWindowTokens: number | null }> {
@@ -653,9 +870,82 @@ export class ModelExecutor implements EffectExecutor {
     };
     return { status: "unsupported", levels: [] };
   }
+
+  #descriptor(provider: ModelProvider, model: string): ModelDescriptor {
+    if (provider.productTransport) {
+      return this.#catalog?.descriptor(model) ?? synthesizedDescriptor(
+        provider,
+        model,
+      );
+    }
+    return synthesizedDescriptor(provider, model);
+  }
+
+  #requiredToolSetCapability(
+    provider: ModelProvider,
+    descriptor: ModelDescriptor,
+  ): RequiredToolSetCapability {
+    const transport = provider.capabilities?.requiredToolSet;
+    if (!transport || transport.status === "unsupported") {
+      return {
+        status: "unsupported",
+        requiredChoice: "unsupported",
+        parallelCalls: "unsupported",
+        streaming: false,
+        catalogDigest: descriptor.catalogDigest,
+        adapter:
+          transport?.adapter ?? "agencity.model-provider.text.v1",
+        reason:
+          transport?.reason ??
+          "The configured provider implements explicit text completion only.",
+      };
+    }
+    const catalog = descriptor.requiredToolSet;
+    if (provider.productTransport && catalog?.status === "unsupported") {
+      return {
+        status: "unsupported",
+        requiredChoice: "unsupported",
+        parallelCalls: "unsupported",
+        streaming: false,
+        catalogDigest: descriptor.catalogDigest,
+        adapter: transport.adapter,
+        reason:
+          "The authoritative model catalog marks formal required tools unsupported.",
+      };
+    }
+    if (!transport.streaming) {
+      return {
+        status: "unsupported",
+        requiredChoice: "unsupported",
+        parallelCalls: "unsupported",
+        streaming: false,
+        catalogDigest: descriptor.catalogDigest,
+        adapter: transport.adapter,
+        reason:
+          transport.reason ??
+          "The configured transport has no proven bounded tool-input stream.",
+      };
+    }
+    const status: RequiredToolSetCapability["status"] =
+      provider.productTransport && (catalog?.status ?? "unknown") === "unknown"
+        ? "unknown"
+        : catalog?.status === "supported" &&
+            catalog.strictSchema === "unsupported"
+          ? "runtime-validated"
+          : transport.status;
+    return {
+      status,
+      requiredChoice: transport.requiredChoice,
+      parallelCalls: transport.parallelCalls,
+      streaming: true,
+      catalogDigest: descriptor.catalogDigest,
+      adapter: transport.adapter,
+      ...(transport.reason === undefined ? {} : { reason: transport.reason }),
+    };
+  }
 }
 
-function normalizeModelResponse(value: ModelResponse): ModelResponse {
+function normalizeModelResponse(value: TextModelResponse): TextModelResponse {
   if (!value || typeof value.text !== "string" || typeof value.finishReason !== "string") {
     throw new ValidationError("Model provider returned an invalid response");
   }
@@ -730,4 +1020,133 @@ function digest(value: string): string {
   const hash = new Bun.CryptoHasher("sha256");
   hash.update(value);
   return hash.digest("hex");
+}
+
+function canonicalTextDigest(value: string): `sha256:${string}` {
+  return canonicalJsonDigest(value);
+}
+
+function normalizedTextTermination(
+  value: string,
+): CompleteModelResponse["termination"]["kind"] {
+  const normalized = value.trim().toLowerCase();
+  if (["stop", "end_turn", "text-stop"].includes(normalized)) {
+    return "text-stop";
+  }
+  if (["length", "max_tokens", "output-limit"].includes(normalized)) {
+    return "output-limit";
+  }
+  if (["content-filter", "content_filter"].includes(normalized)) {
+    return "content-filter";
+  }
+  if (normalized === "refusal") return "refusal";
+  if (["tool-calls", "tool_calls", "tool-use", "tool_use"].includes(normalized)) {
+    return "tool-calls";
+  }
+  return "other";
+}
+
+function synthesizedDescriptor(
+  provider: ModelProvider,
+  model: string,
+): ModelDescriptor {
+  const transport = provider.capabilities?.requiredToolSet;
+  const requiredToolSet = {
+    status: provider.productTransport
+      ? "unknown" as const
+      : transport?.status === "unsupported"
+        ? "unsupported" as const
+        : transport?.status === "provider-strict" ||
+            transport?.status === "runtime-validated"
+          ? "supported" as const
+          : "unknown" as const,
+    strictSchema: provider.productTransport
+      ? "unknown" as const
+      : transport?.status === "provider-strict"
+        ? "supported" as const
+        : transport?.status === "runtime-validated"
+          ? "unsupported" as const
+          : "unknown" as const,
+    requiredChoice: provider.productTransport
+      ? "unknown" as const
+      : transport?.requiredChoice === "provider-enforced"
+        ? "supported" as const
+        : transport?.requiredChoice === "unsupported"
+          ? "unsupported" as const
+          : "unknown" as const,
+  };
+  const normalized = {
+    model,
+    displayName: model,
+    contextWindowTokens: provider.capabilities?.contextWindowTokens ?? null,
+    maxOutputTokens: null,
+    pricing: null,
+    reasoning: provider.capabilities?.reasoningControl === "normalized"
+      ? {
+          status: "unverified" as const,
+          levels: STANDARD_UNVERIFIED_REASONING_LEVELS,
+        }
+      : { status: "unsupported" as const, levels: Object.freeze([]) },
+    requiredToolSet,
+    catalogEndpointId:
+      provider.executionEndpointId ?? digest(`provider:${provider.name}`),
+    stale: false,
+  };
+  return Object.freeze({
+    ...normalized,
+    catalogDigest: digest(JSON.stringify(normalized)),
+  });
+}
+
+function validateProviderRequiredToolSetCapabilities(
+  provider: string,
+  capability: ModelProviderRequiredToolSetCapabilities | undefined,
+): void {
+  if (!capability) return;
+  if (
+    ![
+      "provider-strict",
+      "runtime-validated",
+      "unsupported",
+      "unknown",
+    ].includes(capability.status) ||
+    !["provider-enforced", "unknown", "unsupported"].includes(
+      capability.requiredChoice,
+    ) ||
+    ![
+      "provider-disabled",
+      "runtime-rejected",
+      "unknown",
+      "unsupported",
+    ].includes(capability.parallelCalls) ||
+    typeof capability.streaming !== "boolean" ||
+    !capability.adapter.trim()
+  ) {
+    throw new ValidationError(
+      `Model provider ${provider} declares an invalid required-tool-set capability`,
+    );
+  }
+  if (
+    capability.status === "unsupported" &&
+    (capability.streaming ||
+      capability.requiredChoice !== "unsupported" ||
+      capability.parallelCalls !== "unsupported")
+  ) {
+    throw new ValidationError(
+      `Model provider ${provider} has contradictory required-tool-set capability`,
+    );
+  }
+  if (
+    (capability.status === "provider-strict" ||
+      capability.status === "runtime-validated") &&
+    (!capability.streaming ||
+      capability.requiredChoice !== "provider-enforced" ||
+      !["provider-disabled", "runtime-rejected"].includes(
+        capability.parallelCalls,
+      ))
+  ) {
+    throw new ValidationError(
+      `Model provider ${provider} has contradictory required-tool-set capability`,
+    );
+  }
 }

@@ -51,6 +51,22 @@ export class CapabilityUnavailableError extends AgentRuntimeError {
   }
 }
 
+/** A selected model transport cannot prove the requested response contract. */
+export class ModelResponseContractUnavailableError extends AgentRuntimeError {
+  constructor(
+    provider: string,
+    model: string,
+    reason: string,
+    details: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(
+      "MODEL_RESPONSE_CONTRACT_UNAVAILABLE",
+      `Model ${provider}/${model} cannot admit the required response contract: ${reason}`,
+      { provider, model, reason, ...details },
+    );
+  }
+}
+
 export class InvalidTransitionError extends AgentRuntimeError {
   constructor(entity: string, from: string, to: string) {
     super("INVALID_TRANSITION", `Invalid ${entity} transition: ${from} -> ${to}`, {

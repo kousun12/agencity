@@ -13,6 +13,7 @@ import {
 } from "../console/index.ts";
 import {
   CapabilityUnavailableError,
+  assertNoReservedModelDispatchInputFields,
   assertJsonValue,
   jsonBytes,
   MAX_WORKING_JSON_BYTES,
@@ -72,6 +73,7 @@ import { RefinerService } from "./refiner.ts";
 import { SkillManagementService } from "./skill-management.ts";
 import { CompactionService, type CompactContextInput, type ContextCompactionView, type ContextInspection } from "./context-compaction.ts";
 import { ModelCatalog, type ModelCatalogOptions } from "./model-catalog.ts";
+import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -292,6 +294,7 @@ export class Supervisor {
   readonly refiner: RefinerService;
   /** Process-local executor/provider catalog; descriptors contain no credential material. */
   readonly modelExecutor: ModelExecutor;
+  readonly modelEffectAdmission: ModelEffectAdmissionService;
   readonly modelCatalog: ModelCatalog;
   readonly restartConsoleAfterCell: boolean;
   readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
@@ -338,6 +341,7 @@ export class Supervisor {
     this.memory = new MemoryService(storage, undefined, userScopeKey);
     this.specs = new SubagentSpecService(storage, this.agents, userScopeKey);
     this.modelExecutor = modelExecutor;
+    this.modelEffectAdmission = new ModelEffectAdmissionService(modelExecutor);
     this.modelCatalog = modelCatalog;
     this.executionLeases = executionLeases;
     this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
@@ -572,6 +576,14 @@ export class Supervisor {
   }
 
   async createSession(options: CreateSessionOptions): Promise<{ sessionId: string; branchId: string }> {
+    assertNoReservedModelDispatchInputFields(
+      options,
+      "Public session input",
+    );
+    assertNoReservedModelDispatchInputFields(
+      options.model,
+      "Public model configuration",
+    );
     if (this.sync.capabilities.configured && options.workspaceId !== this.sync.workspaceId) {
       throw new ValidationError(`Configured cloud replica belongs to workspace ${this.sync.workspaceId}, not ${options.workspaceId}`);
     }

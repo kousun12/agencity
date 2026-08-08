@@ -29,6 +29,9 @@ function catalogBody() {
         max_tokens: 128_000,
         pricing: { input: "0.00000175", output: "0.000014" },
         tags: ["reasoning"],
+        supports_tools: false,
+        tool_calling: false,
+        strict_tools: true,
         reasoning_options: [
           { type: "toggle" },
           { type: "effort", values: ["low", "medium", "high", "xhigh", "max"] },
@@ -82,6 +85,8 @@ describe("Vercel AI Gateway model catalog", () => {
 
     const refreshed = await catalog.refresh();
     expect(refreshed.status).toBe("refreshed");
+    expect((await profile.getModelCatalogCache(catalog.endpointId))?.schemaVersion)
+      .toBe(1);
     expect(catalog.gatewayOrigin).toBe("https://gateway.ai.cloudflare.test");
     expect(refreshed.descriptors.map(item => item.model)).toEqual([
       "anthropic/claude-sonnet-4.5",
@@ -95,6 +100,11 @@ describe("Vercel AI Gateway model catalog", () => {
       levels: ["none", "low", "medium", "high", "xhigh"],
     });
     expect(refreshed.descriptors[1]?.unsupportedReasoningValues).toEqual(["max"]);
+    expect(refreshed.descriptors[1]?.requiredToolSet).toEqual({
+      status: "unknown",
+      strictSchema: "unknown",
+      requiredChoice: "unknown",
+    });
     expect(refreshed.descriptors[2]?.reasoning).toEqual({
       status: "unverified",
       levels: ["none", "minimal", "low", "medium", "high", "xhigh"],

@@ -1,6 +1,8 @@
 import {
   NotFoundError,
+  RESERVED_MODEL_DISPATCH_INPUT_FIELDS,
   ValidationError,
+  assertNoReservedModelDispatchInputFields,
   assertJsonValue,
   jsonBytes,
   newId,
@@ -24,6 +26,8 @@ import type { OutboxRunner } from "./outbox.ts";
 export const MAX_RECURSIVE_INPUT_BYTES = 256 * 1024;
 export const MAX_RECURSIVE_RESULT_BYTES = 64 * 1024;
 export const MAX_RECURSIVE_SQL_ROWS = 100;
+export const RESERVED_PUBLIC_MODEL_DISPATCH_FIELDS =
+  RESERVED_MODEL_DISPATCH_INPUT_FIELDS;
 
 export type RecursiveModelInputReference =
   | { readonly kind: "artifact"; readonly artifactId: string; readonly start?: number; readonly end?: number }
@@ -119,6 +123,7 @@ export class RecursiveModelService {
       admissionKey: string;
     }> = [];
     for (const raw of rawInputs) {
+      assertNoReservedPublicModelDispatchFields(raw);
       const normalized: StartRecursiveModelInput = typeof raw === "string" ? { prompt: raw } : raw;
       const prompt = normalized.prompt ?? normalized.task;
       if (!prompt?.trim()) throw new ValidationError("Recursive model prompt cannot be empty");
@@ -647,6 +652,22 @@ export class RecursiveModelService {
     if (!result) throw new NotFoundError("recursive model", id);
     return result;
   }
+}
+
+export function assertNoReservedPublicModelDispatchFields(
+  value: StartRecursiveModelInput | string | unknown,
+): void {
+  assertNoReservedModelDispatchInputFields(
+    value,
+    "Public recursive model input",
+  );
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const record = value as Record<string, unknown>;
+  const model = record.model;
+  assertNoReservedModelDispatchInputFields(
+    model,
+    "Public model configuration",
+  );
 }
 
 function inputIntentHash(input: StartRecursiveModelInput): string | undefined {

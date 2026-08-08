@@ -135,15 +135,39 @@ describe("FU-013 model-facing durable rlm API", () => {
     const supervisor = await open(temp);
     try {
       const root = await supervisor.createSession({ workspaceId: "policy" });
+      await expect(supervisor.createSession({
+        workspaceId: "policy",
+        responseContract: { kind: "text" },
+      } as any)).rejects.toThrow(/reserved dispatch field responseContract/i);
+      await expect(supervisor.runs.admit(root.sessionId, root.branchId, {
+        task: "arbitrary run tools",
+        toolChoice: "required",
+      } as any)).rejects.toThrow(/reserved dispatch field toolChoice/i);
       const request = { task: "stable", input: { chunk: 1 }, run: false, idempotencyKey: "same-intent" } as const;
       const first = await supervisor.models.start(root.sessionId, root.branchId, request);
       const second = await supervisor.models.start(root.sessionId, root.branchId, request);
       expect(second.handleId).toBe(first.handleId);
       expect((await supervisor.agents.listTasks(root.sessionId))).toHaveLength(1);
       await expect(supervisor.models.start(root.sessionId, root.branchId, { ...request, input: { chunk: 2 } })).rejects.toThrow(/different request/i);
+      await expect(supervisor.models.start(root.sessionId, root.branchId, {
+        task: "arbitrary tools",
+        run: false,
+        responseContract: { kind: "required-tool-set", tools: [] },
+      } as any)).rejects.toThrow(/reserved dispatch field responseContract/i);
+      await expect(supervisor.agents.spawn(root.sessionId, root.branchId, {
+        task: "arbitrary child tools",
+        run: false,
+        tools: [{ name: "shell" }],
+      } as any)).rejects.toThrow(/reserved dispatch field tools/i);
       await expect(supervisor.executeCell(root.sessionId, root.branchId, `
         return await rlm.start({ task: "override", model: { provider: "other", model: "forbidden" } });
       `)).rejects.toThrow(/parent model policy/i);
+      await expect(supervisor.executeCell(root.sessionId, root.branchId, `
+        return await rlm.start({ task: "arbitrary tools", responseCapability: { kind: "text" } });
+      `)).rejects.toThrow(/reserved dispatch field responseCapability/i);
+      await expect(supervisor.executeCell(root.sessionId, root.branchId, `
+        return await sdk.agents.spawn({ task: "arbitrary child tools", toolSchemas: [] });
+      `)).rejects.toThrow(/reserved dispatch field toolSchemas/i);
       expect((await supervisor.agents.listTasks(root.sessionId))).toHaveLength(1);
     } finally { await supervisor.close(); }
   });

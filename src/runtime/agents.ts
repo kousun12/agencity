@@ -1,5 +1,5 @@
 import {
-  FamilyReachError, NotFoundError, ValidationError, assertJsonValue, newId, projectEvents,
+  FamilyReachError, NotFoundError, ValidationError, assertJsonValue, assertNoReservedModelDispatchInputFields, newId, projectEvents,
   type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type ModelConfigurationInput, type NewAgentEvent, type TaskStatus,
 } from "../domain/index.ts";
 import {
@@ -176,6 +176,14 @@ export class AgentService {
       const inputs = rawInputs.map((input): SpawnAgentInput => typeof input === "string" ? { task: input } : input);
       if (inputs.length === 0) return [];
       for (const input of inputs) {
+        assertNoReservedModelDispatchInputFields(
+          input,
+          "Public subagent input",
+        );
+        assertNoReservedModelDispatchInputFields(
+          input.model,
+          "Public model configuration",
+        );
         if (!input.task.trim()) throw new ValidationError("Subagent task cannot be empty");
         if (input.idempotencyKey !== undefined && !input.idempotencyKey.trim()) throw new ValidationError("Subagent idempotencyKey cannot be empty");
         if (input.name !== undefined && (!input.name.trim() || new TextEncoder().encode(input.name).byteLength > 128)) throw new ValidationError("Subagent name must be 1 to 128 UTF-8 bytes");
