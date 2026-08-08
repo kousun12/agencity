@@ -128,7 +128,7 @@ Normal, compact, and minimum height modes reduce chrome in a fixed order. The ma
 - `Shift-R` or `/raw` opens scrubbed raw diagnostics.
 - `/help` lists commands.
 
-Useful inspectors include `/history`, `/budget`, `/tree`, `/agents`, `/tasks`, `/goals`, `/memory`, `/skills`, `/context`, `/unknown`, and `/sync-status`.
+Useful inspectors include `/history`, `/budget`, `/tree`, `/tasks`, `/goals`, `/memory`, `/skills`, `/context`, `/unknown`, and `/sync-status`. `/agents` opens the workspace root selector described below.
 
 ### Navigate retained child agents
 
@@ -149,6 +149,21 @@ Up, Left, or Escape returns from the focused summary to the composer. Left or Es
 The header breadcrumb shows retained ancestry separately from the branch. The child browser highlights the selected child, dims other options, and keeps names, status, tasks, and model metadata to bounded single-line rows with ellipses. It labels activity as `working`, `idle`, `attention`, `ended`, or `unavailable`, with a bounded reason where attention is required. Unavailable routes remain visible but cannot be opened.
 
 Opening a family member only changes what this client observes. It does not stop, resume, cancel, retry, or re-own work, and it does not change the workspace's remembered resume selection. Family opening is disabled during `/history` inspection; use `/live` first.
+
+### Navigate retained workspace roots
+
+Left from an empty top-level root composer opens the full-screen Agents view. `/agents` opens the same view from any live root or nested conversation. Historical inspection cannot open it; use `/live` first.
+
+The view contains only retained root branches in the current workspace. Rows are grouped as Running, Idle, Stopped, Failed, and Archived, then sorted by most recent update. Each row uses human-readable session and branch names and may show model, task, unresolved-work and active-goal counts, and update time as space permits. Child sessions do not appear. Failed and archived roots remain visible but cannot be opened.
+
+- Type to search visible names, task text, model, or status.
+- Use Up and Down to move one row, or Page Up and Page Down to move by a visible page.
+- Press Enter or Right to open a resumable row.
+- Press Ctrl-R to refresh without clearing the search.
+- Press Escape once to clear a non-empty search, or with an empty search to return to the conversation that opened the view.
+- Left remains at workspace scope.
+
+Opening the view has no durable effect and does not change the remembered branch. Opening a row uses exact retained route identity and updates the workspace's remembered resume selection. A later no-argument `agencity` therefore resumes the selected root. The catalog loads on open, on explicit refresh, and after selection; it does not poll while the view is open. A failed refresh keeps prior rows visible and marks them stale.
 
 ## Detach and cancel
 

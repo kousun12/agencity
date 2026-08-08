@@ -70,7 +70,7 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 | `GET /service/status` | Managed-only lifecycle, recovery, idle deadline, attached clients, keep-alive reasons, and resident root workers. |
 | `POST /service/shutdown` | Managed-only accepted graceful drain. It does not cancel sessions. |
 | `GET /service/agents` | Managed-only named root sessions and resident worker states. |
-| `GET /product/sessions` | Managed-only human-readable product session/branch catalog. |
+| `GET /product/sessions` | Managed-only `ProductBranchSummary[]` catalog for every retained workspace branch, including exact IDs, names, model, status, task summary, counts, timestamps, and root classification. |
 | `POST /product/select` | Managed-only `{ target?, branchId? }` selection; returns `{ sessionId, branchId }`. |
 | `POST /product/rename` | Managed-only `{ sessionId, branchId?, name }`. |
 | `GET /product/config?model=CREATOR%2FMODEL` | Managed-only workspace default model, normalized catalog/execution origins, the model-specific effort preference, opaque credential references, and secret-free provider descriptors. |
@@ -80,6 +80,8 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 | `POST /product/config/credential-reference` | Managed-only `{ provider, reference, label }`; stores an opaque reference, not credential bytes. |
 
 The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Echo can appear in low-level descriptors because it is installed for deterministic tests, but product onboarding, selection, help, and status must exclude it.
+
+`GET /product/sessions` is a read-only catalog operation and does not change the remembered workspace route. Clients use `root === true` to select top-level work while retaining every branch of each root session. `failed` and `archived` rows remain in the response even though the terminal product does not open them. An exact `POST /product/select` changes the remembered route used by later no-argument product resume.
 
 Selected capability query values must be nonblank UTF-8 strings. Provider is limited to 256 bytes and model to 512 bytes. The response state is exactly `provider-strict`, `runtime-validated`, `unknown`, or `unavailable`. Credential usability is reported separately from formal-contract capability, and this route never calls a provider. The shipped transports prove the formal primitives, while exact public-catalog model support normally remains `unknown` because the catalog has no authoritative formal-tool fields.
 
