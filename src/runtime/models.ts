@@ -1,19 +1,23 @@
 import {
   NotFoundError,
+  REFINEMENT_REVIEW_CONTRACT_ID,
   RESERVED_MODEL_DISPATCH_INPUT_FIELDS,
   TEXT_MODEL_RESPONSE_CONTRACT,
   ValidationError,
   assertNoReservedModelDispatchInputFields,
   assertJsonValue,
+  createRefinementReviewRecursiveResult,
   jsonBytes,
   newId,
   projectEvents,
+  validateModelEffectOutputV2,
   type ArtifactReference,
   type BudgetLimits,
   type JsonValue,
   type ModelConfiguration,
   type ModelConfigurationInput,
   type NewAgentEvent,
+  type ModelEffectOutputV2,
   type RecursiveModelOutcome,
   type RecursiveResponseAdmission,
 } from "../domain/index.ts";
@@ -23,6 +27,11 @@ import { requireRecursiveStorage, type AgentStorage, type RecursiveModelRecord }
 import type { AgentService } from "./agents.ts";
 import type { MemoryService } from "./memory.ts";
 import type { ModelLoop } from "./model-loop.ts";
+import {
+  registerRefinementReviewStarter,
+  type StructuredModelTurnRunner,
+} from "./internal.ts";
+import type { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import type { OutboxRunner } from "./outbox.ts";
 
 export const MAX_RECURSIVE_INPUT_BYTES = 256 * 1024;
@@ -84,6 +93,25 @@ export interface RecursiveModelResult {
   };
 }
 
+export interface PublicRecursiveModelService {
+  start(
+    parentSessionId: string,
+    parentBranchId: string,
+    input: StartRecursiveModelInput | string,
+  ): Promise<RecursiveModelHandle>;
+  startMany(
+    parentSessionId: string,
+    parentBranchId: string,
+    inputs: readonly (StartRecursiveModelInput | string)[],
+  ): Promise<RecursiveModelHandle[]>;
+  get(handleId: string): Promise<RecursiveModelHandle>;
+  result(
+    handleId: string,
+    options?: { readonly wait?: boolean; readonly timeoutMs?: number },
+  ): Promise<RecursiveModelResult>;
+  cancel(handleId: string, reason?: string): Promise<RecursiveModelHandle>;
+}
+
 interface MaterializedInput {
   readonly value?: JsonValue;
   readonly provenance?: JsonValue;
@@ -105,17 +133,106 @@ export class RecursiveModelService {
     readonly storage: AgentStorage,
     readonly agents: AgentService,
     readonly modelLoop: ModelLoop,
+    readonly runStructuredModelTurn: StructuredModelTurnRunner,
+    readonly modelEffectAdmission: ModelEffectAdmissionService,
     readonly outbox: OutboxRunner,
     readonly artifacts?: ArtifactStore,
     readonly memory?: MemoryService,
-  ) { this.#recursive = requireRecursiveStorage(storage); }
+  ) {
+    this.#recursive = requireRecursiveStorage(storage);
+    // Supervisor-only structured refinement start stays behind the non-barrel
+    // internal capability registry; see src/runtime/internal.ts.
+    registerRefinementReviewStarter(this, (parentSessionId, parentBranchId, input) =>
+      this.#startRefinementReview(parentSessionId, parentBranchId, input));
+  }
 
   start(parentSessionId: string, parentBranchId: string, input: StartRecursiveModelInput | string): Promise<RecursiveModelHandle> {
     return this.startMany(parentSessionId, parentBranchId, [input]).then((handles) => handles[0]!);
   }
 
   async startMany(parentSessionId: string, parentBranchId: string, rawInputs: readonly (StartRecursiveModelInput | string)[]): Promise<RecursiveModelHandle[]> {
+    return this.#startManyWithAdmissions(
+      parentSessionId,
+      parentBranchId,
+      rawInputs,
+      rawInputs.map(() => PUBLIC_RECURSIVE_RESPONSE_ADMISSION),
+    );
+  }
+
+  /**
+   * Sealed supervisor operation reachable only through the registered
+   * `internalRefinementReviewStarter` capability. Public recursive inputs never
+   * select response contracts or provider tools.
+   */
+  async #startRefinementReview(
+    parentSessionId: string,
+    parentBranchId: string,
+    input: StartRecursiveModelInput,
+  ): Promise<RecursiveModelHandle> {
+    if (!input.idempotencyKey?.trim()) {
+      throw new ValidationError(
+        "Structured refinement review requires a stable idempotency key",
+      );
+    }
+    const existing = await this.#recursive.getRecursiveModel(
+      stableRecursiveHandleId(
+        parentSessionId,
+        parentBranchId,
+        input.idempotencyKey,
+      ),
+    );
+    let responseAdmission: RecursiveResponseAdmission;
+    if (existing) {
+      if (existing.responseAdmission.responseContract.kind !==
+          "required-tool-set" ||
+          existing.responseAdmission.responseContract.contractId !==
+            REFINEMENT_REVIEW_CONTRACT_ID) {
+        throw new ValidationError(
+          "Structured refinement idempotency key belongs to another response contract",
+        );
+      }
+      responseAdmission = existing.responseAdmission;
+    } else {
+      const events = await this.storage.loadEvents(parentSessionId, {
+        branchId: parentBranchId,
+      });
+      if (!events.length) {
+        throw new NotFoundError(
+          "parent branch",
+          `${parentSessionId}/${parentBranchId}`,
+        );
+      }
+      const parent = projectEvents(events);
+      const admitted = this.modelEffectAdmission.requestBuiltInStructured(
+        REFINEMENT_REVIEW_CONTRACT_ID,
+        input.model ?? parent.model,
+      ).modelDispatch;
+      responseAdmission = Object.freeze({
+        responseContract: admitted.responseContract,
+        responseCapability: admitted.responseCapability,
+      });
+    }
+    const [handle] = await this.#startManyWithAdmissions(
+      parentSessionId,
+      parentBranchId,
+      [input],
+      [responseAdmission],
+    );
+    return handle!;
+  }
+
+  async #startManyWithAdmissions(
+    parentSessionId: string,
+    parentBranchId: string,
+    rawInputs: readonly (StartRecursiveModelInput | string)[],
+    responseAdmissions: readonly RecursiveResponseAdmission[],
+  ): Promise<RecursiveModelHandle[]> {
     if (rawInputs.length === 0) return [];
+    if (responseAdmissions.length !== rawInputs.length) {
+      throw new ValidationError(
+        "Recursive model response admission count does not match inputs",
+      );
+    }
     const parentEvents = await this.storage.loadEvents(parentSessionId, { branchId: parentBranchId });
     if (!parentEvents.length) throw new NotFoundError("parent branch", `${parentSessionId}/${parentBranchId}`);
     const parent = projectEvents(parentEvents);
@@ -127,8 +244,10 @@ export class RecursiveModelService {
       prompt: string;
       materialized: MaterializedInput;
       admissionKey: string;
+      responseAdmission: RecursiveResponseAdmission;
     }> = [];
-    for (const raw of rawInputs) {
+    for (let inputIndex = 0; inputIndex < rawInputs.length; inputIndex++) {
+      const raw = rawInputs[inputIndex]!;
       assertNoReservedPublicModelDispatchFields(raw);
       const normalized: StartRecursiveModelInput = typeof raw === "string" ? { prompt: raw } : raw;
       const prompt = normalized.prompt ?? normalized.task;
@@ -159,7 +278,13 @@ export class RecursiveModelService {
         } else materialized = await this.#materializeInput(parentSessionId, parentBranchId, parentRecord.rootSessionId, normalized);
       } else materialized = await this.#materializeInput(parentSessionId, parentBranchId, parentRecord.rootSessionId, normalized);
       const commandKey = normalized.idempotencyKey ?? newId();
-      plans.push({ normalized, prompt: prompt.trim(), materialized, admissionKey: `recursive-model:${commandKey}` });
+      plans.push({
+        normalized,
+        prompt: prompt.trim(),
+        materialized,
+        admissionKey: `recursive-model:${commandKey}`,
+        responseAdmission: responseAdmissions[inputIndex]!,
+      });
     }
 
     const children = await this.agents.spawnManyWithEvents(parentSessionId, parentBranchId, plans.map((plan) => ({
@@ -190,7 +315,7 @@ export class RecursiveModelService {
             childSessionId: child.sessionId,
             childBranchId: child.branchId,
             model,
-            responseAdmission: PUBLIC_RECURSIVE_RESPONSE_ADMISSION,
+            responseAdmission: plan.responseAdmission,
             ...(plan.normalized.inputSetId === undefined ? {} : { inputSetId: plan.normalized.inputSetId }),
             ...(plan.materialized.value === undefined ? {} : { input: plan.materialized.value }),
             ...(plan.materialized.provenance === undefined ? {} : { inputProvenance: plan.materialized.provenance }),
@@ -227,7 +352,7 @@ export class RecursiveModelService {
           !Bun.deepEquals(handle.input, plan.materialized.value) ||
           !Bun.deepEquals(handle.inputProvenance, plan.materialized.provenance) ||
           !Bun.deepEquals(handle.model, expectedModel) ||
-          !Bun.deepEquals(handle.responseAdmission, PUBLIC_RECURSIVE_RESPONSE_ADMISSION)) {
+          !Bun.deepEquals(handle.responseAdmission, plan.responseAdmission)) {
         throw new ValidationError("Recursive model idempotency key was reused with a different request");
       }
       committed.push(handle);
@@ -281,7 +406,12 @@ export class RecursiveModelService {
       const task = await this.#recursive.getTask(handle.taskId);
       if (task && (task.status === "completed" || task.status === "failed" || task.status === "cancelled")) {
         const outcome = taskOutcome(task.status, task.error);
-        const result = task.result ?? await this.#resultFromChild(handle);
+        // A structured typed result is valid only on a successful completion.
+        // Recovery of a failed or cancelled task must not attach the recreated
+        // child submission, or the terminal event would be rejected.
+        const result = isStructuredHandle(handle) && outcome !== "succeeded"
+          ? undefined
+          : task.result ?? await this.#resultFromChild(handle);
         const artifactId = resultArtifactId(result);
         const terminalError = task.error ?? task.reason;
         await this.storage.appendEvents([{
@@ -306,8 +436,12 @@ export class RecursiveModelService {
       const latest = Object.values(child.modelCalls).at(-1);
       if (handle.status === "running" && latest && ["succeeded", "failed", "cancelled", "unknown"].includes(latest.status)) {
         if (latest.status === "succeeded") {
-          const response = child.messages.find((message) => message.id === latest.responseMessageId);
-          await this.#finish(handle, { outcome: "succeeded", ...(response === undefined ? {} : { message: response.content }) });
+          if (isStructuredHandle(handle)) {
+            await this.#finishStructuredCompletion(handle, latest.id);
+          } else {
+            const response = child.messages.find((message) => message.id === latest.responseMessageId);
+            await this.#finish(handle, { outcome: "succeeded", ...(response === undefined ? {} : { message: response.content }) });
+          }
         } else if (latest.status === "failed" || latest.status === "cancelled" || latest.status === "unknown") {
           await this.#finish(handle, { outcome: latest.status, ...(latest.error === undefined ? {} : { error: latest.error }) });
         }
@@ -363,6 +497,10 @@ export class RecursiveModelService {
         await this.#finish(handle, { outcome: "budget-exceeded", error: "Recursive model wall-time budget exceeded before execution" });
         return;
       }
+      if (isStructuredHandle(handle)) {
+        await this.#runStructuredTurn(handle, remaining);
+        return;
+      }
       const turn = this.modelLoop.turn(handle.childSessionId, handle.childBranchId);
       if (remaining === undefined) {
         await this.#finish(handle, await turn);
@@ -388,6 +526,56 @@ export class RecursiveModelService {
         error: message,
       });
     }
+  }
+
+  async #runStructuredTurn(
+    handle: RecursiveModelHandle,
+    remaining: number | undefined,
+  ): Promise<void> {
+    const turn = this.runStructuredModelTurn(
+      handle.childSessionId,
+      handle.childBranchId,
+      handle.responseAdmission,
+    );
+    const timed = remaining === undefined
+      ? { kind: "result" as const, result: await turn }
+      : await Promise.race([
+          turn.then((result) => ({ kind: "result" as const, result })),
+          Bun.sleep(remaining).then(() => ({ kind: "timeout" as const })),
+        ]);
+    if (timed.kind === "timeout") {
+      const child = projectEvents(await this.storage.loadEvents(
+        handle.childSessionId,
+        { branchId: handle.childBranchId },
+      ));
+      for (const effect of Object.values(child.effects)) {
+        if (["requested", "started"].includes(effect.status)) {
+          this.outbox.cancel(effect.id);
+        }
+      }
+      const task = await this.#recursive.getTask(handle.taskId);
+      await this.#finish(handle, {
+        outcome: "budget-exceeded",
+        error: `Recursive model wall-time budget ${task?.budget.wallTimeLimitMs ?? remaining}ms exceeded`,
+      });
+      return;
+    }
+    const result = timed.result;
+    if (result.outcome !== "succeeded") {
+      await this.#finish(handle, {
+        outcome: result.outcome,
+        ...(result.error === undefined ? {} : { error: result.error }),
+      });
+      return;
+    }
+    if (!result.output || !result.modelCallId) {
+      await this.#finish(handle, {
+        outcome: "failed",
+        error: "Structured model turn completed without durable result provenance",
+      });
+      return;
+    }
+    await this.#finishStructuredCompletion(handle, result.modelCallId);
   }
 
   async #finish(handle: RecursiveModelHandle, value: { outcome: "succeeded" | "failed" | "cancelled" | "unknown" | "budget-exceeded"; message?: string; error?: string }): Promise<void> {
@@ -450,6 +638,137 @@ export class RecursiveModelService {
     }]);
   }
 
+  async #finishStructured(
+    handle: RecursiveModelHandle,
+    modelCallId: string,
+  ): Promise<void> {
+    const current = await this.#load(handle.handleId);
+    if (TERMINAL.has(current.status)) return;
+    if (!isStructuredHandle(current)) {
+      throw new ValidationError(
+        "Text recursive model cannot complete with a structured result",
+      );
+    }
+    const childState = projectEvents(await this.storage.loadEvents(
+      current.childSessionId,
+      { branchId: current.childBranchId },
+    ));
+    const call = childState.modelCalls[modelCallId];
+    if (!call || call.status !== "succeeded" ||
+        call.modelDispatch.responseContract.kind !== "required-tool-set" ||
+        !Bun.deepEquals(
+          {
+            responseContract: call.modelDispatch.responseContract,
+            responseCapability: call.modelDispatch.responseCapability,
+          },
+          current.responseAdmission,
+        )) {
+      throw new ValidationError(
+        "Structured recursive result does not match its admitted child model call",
+      );
+    }
+    const effect = childState.effects[call.effectId];
+    if (!effect || effect.status !== "succeeded" || effect.output === undefined) {
+      throw new ValidationError(
+        "Structured recursive result is missing its successful model effect",
+      );
+    }
+    const output = validateModelEffectOutputV2(effect.output, {
+      responseContract: call.modelDispatch.responseContract,
+      responseCapability: call.modelDispatch.responseCapability,
+      configuredProvider: call.modelDispatch.configuration.provider,
+    });
+    if (output.result.kind !== "tool-submission") {
+      throw new ValidationError(
+        "Structured recursive child did not produce a tool submission",
+      );
+    }
+    const submission = output.result.submission;
+    const result = createRefinementReviewRecursiveResult({
+      contractDigest: call.modelDispatch.responseContract.contractDigest,
+      modelCallId,
+      providerToolCallId: submission.providerToolCallId,
+      modelResultDigest: output.resultDigest,
+      transportInput: submission.input,
+      transportInputDigest: submission.inputDigest,
+      transportInputBytes: submission.inputBytes,
+    });
+    if (childState.budget.exceeded) {
+      const error =
+        "[budget-exceeded] Structured recursive model completed after exhausting its delegated budget";
+      try {
+        await this.agents.failTask(handle.taskId, { error });
+      } catch {
+        // Concurrent cancellation owns the terminal task.
+      }
+      const after = await this.#load(handle.handleId);
+      if (!TERMINAL.has(after.status)) {
+        await this.storage.appendEvents([{
+          sessionId: handle.parentSessionId,
+          branchId: handle.parentBranchId,
+          type: "RecursiveModelStatusChanged",
+          producer: "supervisor",
+          idempotencyKey: `recursive-model-budget-exceeded:${handle.handleId}`,
+          payload: {
+            handleId: handle.handleId,
+            status: "failed",
+            outcome: "budget-exceeded",
+            error,
+          },
+        }]);
+      }
+      return;
+    }
+    await this.agents.completeTask(handle.taskId, {});
+    await this.storage.appendEvents([{
+      sessionId: handle.parentSessionId,
+      branchId: handle.parentBranchId,
+      type: "RecursiveModelStatusChanged",
+      producer: "supervisor",
+      idempotencyKey: `recursive-model-completed:${handle.handleId}`,
+      payload: {
+        handleId: handle.handleId,
+        status: "completed",
+        outcome: "succeeded",
+        result: result as unknown as JsonValue,
+      },
+    }]);
+  }
+
+  async #finishStructuredCompletion(
+    handle: RecursiveModelHandle,
+    modelCallId: string,
+  ): Promise<void> {
+    const child = projectEvents(await this.storage.loadEvents(
+      handle.childSessionId,
+      { branchId: handle.childBranchId },
+    ));
+    const call = child.modelCalls[modelCallId];
+    const effect = call ? child.effects[call.effectId] : undefined;
+    if (!call || call.status !== "succeeded" ||
+        !effect || effect.status !== "succeeded" ||
+        effect.output === undefined) {
+      throw new ValidationError(
+        "Structured recursive completion is missing durable model provenance",
+      );
+    }
+    const output = validateModelEffectOutputV2(effect.output, {
+      responseContract: call.modelDispatch.responseContract,
+      responseCapability: call.modelDispatch.responseCapability,
+      configuredProvider: call.modelDispatch.configuration.provider,
+    });
+    if (output.result.kind === "tool-submission") {
+      await this.#finishStructured(handle, modelCallId);
+      return;
+    }
+    await this.#finish(handle, {
+      outcome: "failed",
+      error: output.result.kind === "contract-violation"
+        ? output.result.violation.message
+        : "Structured model turn returned text",
+    });
+  }
+
   async #boundedResult(handle: RecursiveModelHandle, raw: string, messageId?: string): Promise<JsonValue> {
     const text = scrubText(raw);
     const bytes = new TextEncoder().encode(text);
@@ -477,7 +796,10 @@ export class RecursiveModelService {
     const outcome = handle.outcome ?? (handle.status === "completed" ? "succeeded" : handle.status === "cancelled" ? "cancelled" : handle.status === "failed" ? inferOutcome(handle.error) : undefined);
     const childEvents = await this.storage.loadEvents(handle.childSessionId, { branchId: handle.childBranchId });
     const child = projectEvents(childEvents);
-    const value = handle.result ?? await this.#resultFromChild(handle);
+    const value = handle.result ??
+      (isStructuredHandle(handle)
+        ? undefined
+        : await this.#resultFromChild(handle));
     const contextIds = Object.keys(child.contexts);
     const modelCallIds = Object.keys(child.modelCalls);
     const providerAttemptEffectIds = [...new Set(childEvents.filter((event) => event.type === "EffectAttemptStarted").map((event) => (event.payload as { effectId: string }).effectId))];
@@ -521,6 +843,39 @@ export class RecursiveModelService {
 
   async #resultFromChild(handle: RecursiveModelRecord): Promise<JsonValue | undefined> {
     const child = projectEvents(await this.storage.loadEvents(handle.childSessionId, { branchId: handle.childBranchId }));
+    if (isStructuredHandle(handle)) {
+      const call = Object.values(child.modelCalls).reverse()
+        .find((candidate) => candidate.status === "succeeded");
+      if (!call || call.modelDispatch.responseContract.kind !==
+          "required-tool-set" ||
+          !Bun.deepEquals({
+            responseContract: call.modelDispatch.responseContract,
+            responseCapability: call.modelDispatch.responseCapability,
+          }, handle.responseAdmission)) {
+        return undefined;
+      }
+      const effect = child.effects[call.effectId];
+      if (!effect || effect.status !== "succeeded" ||
+          effect.output === undefined) {
+        return undefined;
+      }
+      const output = validateModelEffectOutputV2(effect.output, {
+        responseContract: call.modelDispatch.responseContract,
+        responseCapability: call.modelDispatch.responseCapability,
+        configuredProvider: call.modelDispatch.configuration.provider,
+      });
+      if (output.result.kind !== "tool-submission") return undefined;
+      const submission = output.result.submission;
+      return createRefinementReviewRecursiveResult({
+        contractDigest: call.modelDispatch.responseContract.contractDigest,
+        modelCallId: call.id,
+        providerToolCallId: submission.providerToolCallId,
+        modelResultDigest: output.resultDigest,
+        transportInput: submission.input,
+        transportInputDigest: submission.inputDigest,
+        transportInputBytes: submission.inputBytes,
+      }) as unknown as JsonValue;
+    }
     const response = [...child.messages].reverse().find((message) => message.role === "assistant");
     if (!response) return undefined;
     return this.#boundedResult(handle, response.content, response.id);
@@ -719,6 +1074,13 @@ function resultArtifactId(result: JsonValue | undefined): string | undefined {
   if (!result || typeof result !== "object" || Array.isArray(result) || result.kind !== "artifact") return undefined;
   const artifact = result.artifact;
   return artifact && typeof artifact === "object" && !Array.isArray(artifact) && typeof artifact.artifactId === "string" ? artifact.artifactId : undefined;
+}
+
+function isStructuredHandle(
+  handle: Pick<RecursiveModelRecord, "responseAdmission">,
+): boolean {
+  return handle.responseAdmission.responseContract.kind ===
+    "required-tool-set";
 }
 
 function asStringArray(value: JsonValue, label: string): string[] {

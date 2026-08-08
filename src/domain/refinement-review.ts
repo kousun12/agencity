@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ValidationError } from "./errors.ts";
 import type { HarnessContent, HarnessEdit, HarnessKind, HarnessScope, ObjectiveEvaluation } from "./harness.ts";
-import type { JsonValue } from "./json.ts";
+import { assertJsonValue, canonicalJsonByteLength, type JsonValue } from "./json.ts";
 
 /** Authoritative provider response protocol for trajectory refinement reviews. */
 export const REFINEMENT_REVIEW_PROTOCOL = "agencity.refinement-review" as const;
@@ -266,9 +266,10 @@ export interface RefinementSensitiveValues {
 }
 
 export const REFINEMENT_REVIEW_POLICY = [
-  `Return exactly one JSON object matching ${REFINEMENT_REVIEW_PROTOCOL} version ${REFINEMENT_REVIEW_VERSION}.`,
-  "Return status=no_change or one status=propose decision; never return multiple proposals.",
-  "Do not use Markdown fences, prose outside the object, comments, duplicate identifiers, or unknown fields.",
+  "Call the required refinement-review submission tool exactly once.",
+  `Submit one decision matching ${REFINEMENT_REVIEW_PROTOCOL} version ${REFINEMENT_REVIEW_VERSION}.`,
+  "Submit status=no_change or one status=propose decision; never submit multiple proposals.",
+  "Follow the tool schema's explicit presence and lossless JSON-value encodings exactly.",
   "A proposal must cite only source event IDs visible in the review request and must remain within requestedScope and allowedKinds.",
   "Replace or retire only an editable target and use its exact currentVersionId as expectedVersionId.",
   "Never include credentials, brokered secret values, or instructions that change the immutable base policy or permission boundary.",
@@ -391,20 +392,21 @@ export function validateRefinementReviewRequest(
   return request as RefinementReviewRequest;
 }
 
-/** JSON.parse rejects fences, prefixes, suffixes, and concatenated objects. Zod rejects arrays and unknown fields. */
-export function parseRefinementReview(
-  raw: string,
+/** Validates one already-decoded formal refinement submission. */
+export function validateRefinementReviewValue(
+  value: unknown,
   request: RefinementReviewRequest,
-  sensitive: RefinementSensitiveValues = {},
+  sensitive: RefinementSensitiveValues,
+  encodedBytes: number,
 ): ValidatedRefinementReview {
-  if (typeof raw !== "string") throw new ValidationError("Refinement review must be a JSON string");
-  const bytes = byteLength(raw);
-  if (bytes === 0) throw new ValidationError("Refinement review response is empty");
-  if (bytes > MAX_REFINEMENT_REVIEW_BYTES) throw new ValidationError(`Refinement review exceeds ${MAX_REFINEMENT_REVIEW_BYTES} bytes`);
+  if (!Number.isSafeInteger(encodedBytes) || encodedBytes < 1) {
+    throw new ValidationError("Refinement review encoded byte count must be a positive safe integer");
+  }
+  if (encodedBytes > MAX_REFINEMENT_REVIEW_BYTES) {
+    throw new ValidationError(`Refinement review exceeds ${MAX_REFINEMENT_REVIEW_BYTES} bytes`);
+  }
   validateRefinementReviewRequest(request, sensitive);
-  let value: unknown;
-  try { value = JSON.parse(raw); }
-  catch { throw new ValidationError("Refinement review must be exactly one JSON object with no fences or trailing content"); }
+  assertJsonValue(value);
   const parsed = refinementReviewResponseSchema.safeParse(value);
   if (!parsed.success) {
     throw new ValidationError(`Refinement review does not match ${REFINEMENT_REVIEW_PROTOCOL} v${REFINEMENT_REVIEW_VERSION}`, {
@@ -412,6 +414,9 @@ export function parseRefinementReview(
     });
   }
   const decision = parsed.data as RefinementReviewDecision;
+  if (canonicalJsonByteLength(decision as unknown as JsonValue) > encodedBytes) {
+    throw new ValidationError("Refinement review encoded byte count is smaller than its canonical JSON encoding");
+  }
   if (decision.reviewId !== request.reviewId) throw new ValidationError("Refinement review does not match its request reviewId");
   assertDecisionByteBounds(decision);
   assertNoCredentialMaterial(decision as unknown as JsonValue, sensitive.brokeredCredentialValues ?? [], "Refinement review");

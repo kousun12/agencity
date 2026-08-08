@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   AGENT_TOOL_CONTRACT_ID,
+  REFINEMENT_REVIEW_CONTRACT_ID,
+  REFINEMENT_REVIEW_INPUT_SCHEMA_DIGEST,
   MAX_MODEL_CONTRACT_EVIDENCE_BYTES,
   MAX_MODEL_FORMAL_RESPONSE_BYTES,
   MAX_MODEL_RESPONSE_BLOCKS,
@@ -56,7 +58,7 @@ const transport = {
 } as const;
 
 describe("provider-neutral model response contracts", () => {
-  test("pins explicit text and both sealed agent contract definitions", () => {
+  test("pins explicit text and both sealed structured contract definitions", () => {
     expect(TEXT_MODEL_RESPONSE_CONTRACT).toEqual({ kind: "text", version: 1 });
     expect(Object.isFrozen(TEXT_MODEL_RESPONSE_CONTRACT)).toBe(true);
     expect(contract.tools.map((tool) => tool.name)).toEqual([
@@ -77,12 +79,25 @@ describe("provider-neutral model response contracts", () => {
     expect(validateModelResponseContract(contract)).toBe(contract);
     expect(Object.isFrozen(contract)).toBe(true);
     expect(Object.isFrozen(contract.tools)).toBe(true);
-    expect(() =>
-      resolveBuiltInModelResponseContract(
-        "agencity.refinement-review.v1",
-        "runtime-validated",
-      )
-    ).toThrow("does not provide");
+    const refinement = resolveBuiltInModelResponseContract(
+      REFINEMENT_REVIEW_CONTRACT_ID,
+      "runtime-validated",
+    );
+    expect(refinement.tools.map((tool) => tool.name)).toEqual([
+      "agencity_submit_refinement_review",
+    ]);
+    expect(refinement.tools[0]!.schemaDigest).toBe(
+      REFINEMENT_REVIEW_INPUT_SCHEMA_DIGEST,
+    );
+    expect(refinement.contractDigest).toBe(
+      "sha256:d967e8ea9c6638d59b02a8bbad331ec6355778f44ada9b3ae4792449c10c2310",
+    );
+    expect(resolveBuiltInModelResponseContract(
+      REFINEMENT_REVIEW_CONTRACT_ID,
+      "provider-strict",
+    ).contractDigest).toBe(
+      "sha256:c3cbe2f7c0c5d2f284038d0904e1919a0ae0d88a55cb49785534663c34f1e13b",
+    );
   });
 
   test.each([

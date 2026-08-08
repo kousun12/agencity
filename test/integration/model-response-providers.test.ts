@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   AGENT_TOOL_CONTRACT_ID,
+  REFINEMENT_REVIEW_CONTRACT_ID,
+  REFINEMENT_REVIEW_TOOL_NAME,
   MAX_AGENT_TOOL_INPUT_BYTES,
   MAX_MODEL_FORMAL_RESPONSE_BYTES,
   MAX_MODEL_RESPONSE_BLOCKS,
@@ -11,12 +13,16 @@ import {
   ModelEffectAdmissionService,
   ModelExecutor,
   canonicalJsonByteLength,
+  canonicalJsonDigest,
   createAnthropicModelProvider,
+  createModelEffectOutputV2,
   createOpenAIModelProvider,
   createVercelModelProvider,
+  encodeRefinementReviewTransportValue,
   registerBrokeredSecret,
   resolveBuiltInModelResponseContract,
   modelDispatchWithResponseAdmission,
+  type JsonValue,
   type ModelDispatch,
   type ModelProvider,
 } from "../../src/index.ts";
@@ -74,6 +80,105 @@ describe("formal AI SDK model responses", () => {
     // forbids stopWhen, loop, and continuation options on formal requests.
     expect(Object.keys(requiredToolGenerationOptions(contract)))
       .toEqual(["tools", "toolChoice"]);
+  });
+
+  test("compiles the sealed refinement schema in strict and runtime-validated modes", async () => {
+    const decision = {
+      protocol: "agencity.refinement-review",
+      version: 1,
+      reviewId: "refinement-review-fixture",
+      status: "no_change",
+      reason: "No attributable change is justified.",
+      evidenceEventIds: [],
+    } as const;
+    const transportInput = encodeRefinementReviewTransportValue(decision);
+    for (const mode of ["provider-strict", "runtime-validated"] as const) {
+      const contract = resolveBuiltInModelResponseContract(
+        REFINEMENT_REVIEW_CONTRACT_ID,
+        mode,
+      );
+      const tools = compileRequiredToolSet(contract);
+      expect(Object.keys(tools)).toEqual([REFINEMENT_REVIEW_TOOL_NAME]);
+      const declaration = tools[REFINEMENT_REVIEW_TOOL_NAME] as any;
+      expect(declaration.strict).toBe(
+        mode === "provider-strict" ? true : undefined,
+      );
+      expect(await declaration.inputSchema.validate(transportInput))
+        .toMatchObject({ success: true });
+      expect(await declaration.inputSchema.validate({
+        ...(transportInput as Record<string, JsonValue>),
+        extra: true,
+      })).toMatchObject({ success: false });
+    }
+  });
+
+  test("sends exactly one refinement tool through every pinned transport without changing reasoning", async () => {
+    for (const transport of ["vercel", "openai", "anthropic"] as const) {
+      let body: Record<string, any> | undefined;
+      const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        body = await request.json() as Record<string, any>;
+        return Response.json(
+          { error: { message: "fixture request rejected" } },
+          { status: 500 },
+        );
+      }) as typeof globalThis.fetch;
+      const provider = transport === "vercel"
+        ? createVercelModelProvider({
+            origin: "https://gateway.example.test",
+            apiKey: () => "key-gateway",
+            fetch,
+          })
+        : transport === "openai"
+          ? createOpenAIModelProvider({
+              origin: "https://openai.example.test",
+              apiKey: () => "key-openai",
+              fetch,
+            })
+          : createAnthropicModelProvider({
+              origin: "https://anthropic.example.test",
+              apiKey: () => "key-anthropic",
+              fetch,
+            });
+      const executor = new ModelExecutor([provider]);
+      const model = transport === "anthropic"
+        ? "anthropic/claude-fable-5"
+        : transport === "openai"
+          ? "openai/gpt-5.4"
+          : "openai/gpt-5.6-sol";
+      const dispatch = new ModelEffectAdmissionService(executor)
+        .requestBuiltInStructured(REFINEMENT_REVIEW_CONTRACT_ID, {
+          provider: transport,
+          model,
+          reasoningEffort: "high",
+        }).modelDispatch;
+      await executor.executeResponseAware(
+        { messages: [{ role: "user", content: "review" }] },
+        dispatch,
+        new AbortController().signal,
+      ).catch(() => {});
+      const tools = transport === "openai"
+        ? body!.tools.map((item: any) => item.function)
+        : body!.tools;
+      expect(tools.map((item: any) => item.name)).toEqual([
+        REFINEMENT_REVIEW_TOOL_NAME,
+      ]);
+      if (transport === "vercel") expect(body!.reasoning).toBe("high");
+      else if (transport === "openai") {
+        expect(body!.reasoning_effort).toBe("high");
+        expect(body!.parallel_tool_calls).toBe(false);
+      } else {
+        expect(body!.thinking).toEqual({
+          type: "adaptive",
+          display: "summarized",
+        });
+        expect(body!.output_config?.effort).toBe("high");
+        expect(body!.tool_choice).toEqual({
+          type: "any",
+          disable_parallel_tool_use: true,
+        });
+      }
+    }
   });
 
   test("sends declaration-only required tools through direct OpenAI and accepts one completed call", async () => {
@@ -220,9 +325,13 @@ describe("formal AI SDK model responses", () => {
     });
   });
 
-  test("pins structured options, native IDs, reasoning, and parallel suppression on every transport and effort", async () => {
+  test("pins structured options, native IDs, reasoning, and parallel suppression on every transport, effort, and sealed contract", async () => {
     for (const transport of ["vercel", "openai", "anthropic"] as const) {
       for (const effort of efforts) {
+      for (const contractId of [
+        AGENT_TOOL_CONTRACT_ID,
+        REFINEMENT_REVIEW_CONTRACT_ID,
+      ] as const) {
         let body: Record<string, any> | undefined;
         let modelHeader: string | null = null;
         const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -257,7 +366,7 @@ describe("formal AI SDK model responses", () => {
           : transport === "openai"
             ? "openai/gpt-5.4"
             : "openai/gpt-5.6-sol";
-        const dispatch = admittedDispatch(executor, transport, model, effort);
+        const dispatch = admittedDispatch(executor, transport, model, effort, contractId);
         await executor.executeResponseAware(
           { messages: [{ role: "user", content: "test options" }] },
           dispatch,
@@ -265,14 +374,18 @@ describe("formal AI SDK model responses", () => {
         ).catch(() => {});
 
         expect(body).toBeDefined();
+        const expectedToolNames = contractId === AGENT_TOOL_CONTRACT_ID
+          ? ["bun_console", "finish"]
+          : [REFINEMENT_REVIEW_TOOL_NAME];
+        const sentTools = transport === "openai"
+          ? body!.tools.map((item: any) => item.function)
+          : body!.tools;
+        expect(sentTools.map((item: any) => item.name)).toEqual(expectedToolNames);
         if (transport === "vercel") {
           expect(modelHeader as string | null).toBe(model);
           expect(body).toMatchObject({
             toolChoice: { type: "required" },
-            tools: [
-              { type: "function", name: "bun_console" },
-              { type: "function", name: "finish" },
-            ],
+            tools: expectedToolNames.map((name) => ({ type: "function", name })),
           });
           expect(body!.providerOptions).toBeUndefined();
           expect(body!.reasoning).toBe(
@@ -312,6 +425,7 @@ describe("formal AI SDK model responses", () => {
         }
         expect(JSON.stringify(body)).not.toContain('"execute"');
         expect(JSON.stringify(body)).not.toContain("tool-result");
+      }
       }
     }
   });
@@ -358,6 +472,98 @@ describe("formal AI SDK model responses", () => {
         : body!.tools;
       expect(tools.map((item: any) => item.strict)).toEqual([true, true]);
     }
+  });
+
+  test.each([
+    ["a registered secret in the submitted tool input", true, "input"],
+    ["an unregistered credential in termination.rawReason", false, "raw-reason"],
+    ["an unregistered credential in a provider warning", false, "warning"],
+    ["an unregistered credential in supplemental text", false, "supplemental"],
+  ] as const)(
+    "a custom provider cannot hand structured output with %s to executor callers",
+    async (_label, registered, placement) => {
+    const secret = "sk-live-Section31DeepCover0042";
+    const release = registered ? registerBrokeredSecret(secret) : undefined;
+    try {
+      const provider: ModelProvider = {
+        name: "secret-fixture",
+        capabilities: {
+          streaming: false,
+          requiredToolSet: {
+            status: "provider-strict",
+            requiredChoice: "provider-enforced",
+            parallelCalls: "provider-disabled",
+            streaming: true,
+            adapter: "fixture.ai-sdk.v7",
+          },
+        },
+        complete: async () => ({
+          text: "",
+          finishReason: "stop",
+          usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        }),
+        streamResponse: async (_context, dispatch) =>
+          secretPlacementOutput(dispatch, secret, placement),
+      };
+      const executor = new ModelExecutor([provider]);
+      const dispatch = new ModelEffectAdmissionService(executor)
+        .requestBuiltInStructured(REFINEMENT_REVIEW_CONTRACT_ID, {
+          provider: "secret-fixture",
+          model: "fixture/model",
+        }).modelDispatch;
+      const rejection = await executor.executeResponseAware(
+        { messages: [{ role: "user", content: "review" }] },
+        dispatch,
+        new AbortController().signal,
+      ).then(
+        () => { throw new Error("secret-bearing structured output must not be returned"); },
+        (error: unknown) => error as { code?: string; message?: string },
+      );
+      expect(rejection.code).toBe("stream-failed");
+      expect(rejection.message ?? "").not.toContain(secret);
+    } finally {
+      release?.();
+    }
+  });
+
+  test("a retained structured dispatch fails visibly when the configured transport endpoint changed", async () => {
+    const calls = { count: 0 };
+    const makeProvider = (endpoint: string): ModelProvider => ({
+      name: "endpoint-fixture",
+      executionEndpointId: endpoint,
+      capabilities: {
+        streaming: false,
+        requiredToolSet: {
+          status: "provider-strict",
+          requiredChoice: "provider-enforced",
+          parallelCalls: "provider-disabled",
+          streaming: true,
+          adapter: "fixture.ai-sdk.v7",
+        },
+      },
+      complete: async () => ({
+        text: "",
+        finishReason: "stop",
+        usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+      }),
+      streamResponse: async () => {
+        calls.count++;
+        throw new Error("a drifted endpoint must never execute");
+      },
+    });
+    const admitted = new ModelEffectAdmissionService(
+      new ModelExecutor([makeProvider("endpoint-original")]),
+    ).requestBuiltInStructured(REFINEMENT_REVIEW_CONTRACT_ID, {
+      provider: "endpoint-fixture",
+      model: "fixture/model",
+    }).modelDispatch;
+    const drifted = new ModelExecutor([makeProvider("endpoint-drifted")]);
+    await expect(drifted.executeResponseAware(
+      { messages: [{ role: "user", content: "endpoint" }] },
+      admitted,
+      new AbortController().signal,
+    )).rejects.toThrow(/Retained model dispatch endpoint differs/);
+    expect(calls.count).toBe(0);
   });
 
   test("classifies a provider rejection of strict tools without a text downgrade", async () => {
@@ -479,6 +685,82 @@ describe("formal AI SDK model responses", () => {
   ) => {
     const output = await consume(parts);
     expect(output.result.kind).toBe(resultKind);
+  });
+
+  test("accepts one refinement submission and rejects text, wrong, multiple, and malformed calls without fallback", async () => {
+    const transportInput = encodeRefinementReviewTransportValue({
+      protocol: "agencity.refinement-review",
+      version: 1,
+      reviewId: "refinement-review-fixture",
+      status: "no_change",
+      reason: "No attributable change is justified.",
+      evidenceEventIds: [],
+    });
+    const dispatch = refinementFixtureDispatch();
+    const valid = await consumeWithDispatch([
+      ...formalCall(
+        "review-call",
+        REFINEMENT_REVIEW_TOOL_NAME,
+        JSON.stringify(transportInput),
+      ),
+      ...finishParts("tool-calls", "tool_calls"),
+    ], dispatch);
+    expect(valid.result).toMatchObject({
+      kind: "tool-submission",
+      submission: {
+        name: REFINEMENT_REVIEW_TOOL_NAME,
+        input: transportInput,
+      },
+    });
+
+    const textOnly = await consumeWithDispatch([
+      part("text-start", { id: "text" }),
+      part("text-delta", {
+        id: "text",
+        text: JSON.stringify(transportInput),
+      }),
+      ...finishParts("stop", "stop"),
+    ], dispatch);
+    expect(textOnly.result).toMatchObject({
+      kind: "contract-violation",
+      violation: { code: "required-tool-missing" },
+    });
+
+    const wrong = await consumeWithDispatch([
+      part("tool-input-start", { id: "wrong", toolName: "finish" }),
+    ], dispatch);
+    expect(wrong.result).toMatchObject({
+      violation: { code: "unexpected-tool" },
+    });
+
+    const multiple = await consumeWithDispatch([
+      part("tool-input-start", {
+        id: "one",
+        toolName: REFINEMENT_REVIEW_TOOL_NAME,
+      }),
+      part("tool-input-start", {
+        id: "two",
+        toolName: REFINEMENT_REVIEW_TOOL_NAME,
+      }),
+    ], dispatch);
+    expect(multiple.result).toMatchObject({
+      violation: { code: "multiple-tool-calls" },
+    });
+
+    const malformed = await consumeWithDispatch([
+      ...formalCall(
+        "malformed",
+        REFINEMENT_REVIEW_TOOL_NAME,
+        JSON.stringify({
+          ...(transportInput as Record<string, JsonValue>),
+          extra: true,
+        }),
+      ),
+      ...finishParts("tool-calls", "tool_calls"),
+    ], dispatch);
+    expect(malformed.result).toMatchObject({
+      violation: { code: "invalid-tool-input" },
+    });
   });
 
   test("rejects wrong, multiple, malformed, truncated, and oversized calls without retaining arguments", async () => {
@@ -894,9 +1176,12 @@ function admittedDispatch(
   provider: string,
   model: string,
   reasoningEffort: typeof efforts[number] = "provider-default",
+  contractId:
+    | typeof AGENT_TOOL_CONTRACT_ID
+    | typeof REFINEMENT_REVIEW_CONTRACT_ID = AGENT_TOOL_CONTRACT_ID,
 ): ModelDispatch {
   return new ModelEffectAdmissionService(executor)
-    .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, {
+    .requestBuiltInStructured(contractId, {
       provider,
       model,
       reasoningEffort,
@@ -958,6 +1243,110 @@ async function consume(
   });
 }
 
+async function consumeWithDispatch(
+  parts: readonly RequiredToolStreamPart[],
+  dispatch: ModelDispatch,
+) {
+  const guard = new ModelResponseGuard(new AbortController().signal);
+  return consumeRequiredToolStream({
+    stream: {
+      fullStream: (async function* () {
+        for (const item of parts) {
+          if (guard.signal.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
+          yield item;
+        }
+      })(),
+    },
+    dispatch,
+    guard,
+    onDelta: () => {},
+    gatewayCost: () => 0,
+  });
+}
+
+/** Structurally valid refinement output carrying a credential in one retained field. */
+function secretPlacementOutput(
+  dispatch: ModelDispatch,
+  secret: string,
+  placement: "input" | "raw-reason" | "warning" | "supplemental",
+) {
+  const contract = dispatch.responseContract;
+  if (contract.kind !== "required-tool-set") throw new Error("unexpected contract");
+  const input = encodeRefinementReviewTransportValue({
+    protocol: "agencity.refinement-review",
+    version: 1,
+    reviewId: "refinement-review-secret",
+    status: "no_change",
+    reason: placement === "input"
+      ? `Continue with credential ${secret} attached.`
+      : "No attributable change is justified.",
+    evidenceEventIds: [],
+  });
+  const inputDigest = canonicalJsonDigest(input);
+  const inputBytes = canonicalJsonByteLength(input);
+  const termination = {
+    kind: "tool-calls" as const,
+    rawReason: placement === "raw-reason" ? `stop:${secret}` : "tool_calls",
+  };
+  const transport = { provider: "secret-fixture", adapter: "fixture.ai-sdk.v7" };
+  const text = placement === "supplemental"
+    ? `Applying ${secret} for the caller.`
+    : "";
+  return createModelEffectOutputV2({
+    response: {
+      kind: "complete",
+      blocks: [
+        ...(text ? [{ type: "text" as const, text }] : []),
+        {
+          type: "tool-call",
+          callId: "secret-call-1",
+          name: REFINEMENT_REVIEW_TOOL_NAME,
+          inputDigest,
+          inputBytes,
+        },
+      ],
+      termination,
+      usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+      warnings: placement === "warning"
+        ? [{ kind: "provider", message: `provider notice ${secret}` }]
+        : [],
+      transport,
+    },
+    result: {
+      kind: "tool-submission",
+      submission: {
+        providerToolCallId: "secret-call-1",
+        name: REFINEMENT_REVIEW_TOOL_NAME,
+        input,
+        inputDigest,
+        inputBytes,
+        responseContract: {
+          contractId: contract.contractId,
+          version: contract.version,
+          contractDigest: contract.contractDigest,
+        },
+        transport,
+        termination,
+        ...(text
+          ? {
+              supplementalText: {
+                kind: "content" as const,
+                text,
+                textDigest: canonicalJsonDigest(text),
+                textBytes: new TextEncoder().encode(text).byteLength,
+              },
+            }
+          : {}),
+      },
+    },
+    responseContract: contract,
+    responseCapability: dispatch.responseCapability,
+    configuredProvider: "secret-fixture",
+  });
+}
+
 function fixtureDispatch(): ModelDispatch {
   const provider: ModelProvider = {
     name: "fixture",
@@ -982,6 +1371,34 @@ function fixtureDispatch(): ModelDispatch {
   return new ModelEffectAdmissionService(executor)
     .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, {
       provider: "fixture",
+      model: "fixture/model",
+    }).modelDispatch;
+}
+
+function refinementFixtureDispatch(): ModelDispatch {
+  const provider: ModelProvider = {
+    name: "refinement-fixture",
+    executionEndpointId: "endpoint",
+    capabilities: {
+      streaming: false,
+      requiredToolSet: {
+        status: "provider-strict",
+        requiredChoice: "provider-enforced",
+        parallelCalls: "provider-disabled",
+        streaming: true,
+        adapter: "fixture.ai-sdk.v7",
+      },
+    },
+    complete: async () => ({
+      text: "",
+      finishReason: "stop",
+      usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+    }),
+  };
+  const executor = new ModelExecutor([provider]);
+  return new ModelEffectAdmissionService(executor)
+    .requestBuiltInStructured(REFINEMENT_REVIEW_CONTRACT_ID, {
+      provider: provider.name,
       model: "fixture/model",
     }).modelDispatch;
 }

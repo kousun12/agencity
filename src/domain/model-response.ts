@@ -5,6 +5,13 @@ import {
   MAX_AGENT_TOOL_INPUT_BYTES,
   validateAgentToolSubmissionValue,
 } from "./agent-tool-contract.ts";
+import {
+  REFINEMENT_REVIEW_CONTRACT_ID,
+  REFINEMENT_REVIEW_CONTRACT_VERSION,
+  REFINEMENT_REVIEW_TOOL_SET,
+  normalizeRefinementReviewTransportValue,
+} from "./refinement-review-contract.ts";
+import { MAX_REFINEMENT_REVIEW_BYTES } from "./refinement-review.ts";
 import { MAX_AGENT_ACTION_BYTES } from "./agent-action.ts";
 import { CapabilityUnavailableError, ValidationError } from "./errors.ts";
 import {
@@ -21,7 +28,6 @@ import type { Usage } from "./events.ts";
 export const MODEL_RESPONSE_CONTRACT_VERSION = 1 as const;
 export const MODEL_RESPONSE_CONTRACT_SELECTION = "exactly-one-of" as const;
 export const MODEL_RESPONSE_CONTRACT_SUPPLEMENTAL_TEXT = "diagnostic-only" as const;
-export const REFINEMENT_REVIEW_CONTRACT_ID = "agencity.refinement-review.v1" as const;
 export const RESERVED_MODEL_DISPATCH_INPUT_FIELDS = Object.freeze([
   "modelDispatch",
   "responseAdmission",
@@ -36,7 +42,9 @@ export const RESERVED_MODEL_DISPATCH_INPUT_FIELDS = Object.freeze([
 export type BuiltInStructuredContractId =
   | typeof AGENT_TOOL_CONTRACT_ID
   | typeof REFINEMENT_REVIEW_CONTRACT_ID;
-export type RegisteredBuiltInStructuredContractId = typeof AGENT_TOOL_CONTRACT_ID;
+export type RegisteredBuiltInStructuredContractId =
+  | typeof AGENT_TOOL_CONTRACT_ID
+  | typeof REFINEMENT_REVIEW_CONTRACT_ID;
 export type ModelSchemaEnforcement = "provider-strict" | "runtime-validated";
 
 export interface TextModelResponseContract {
@@ -115,15 +123,31 @@ const AGENT_STRUCTURED_CONTRACT_TEMPLATE: StructuredContractTemplate =
     })),
   });
 
+const REFINEMENT_STRUCTURED_CONTRACT_TEMPLATE: StructuredContractTemplate =
+  deepFreeze({
+    contractId: REFINEMENT_REVIEW_CONTRACT_ID,
+    version: REFINEMENT_REVIEW_CONTRACT_VERSION,
+    tools: REFINEMENT_REVIEW_TOOL_SET.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      schemaDigest: tool.schemaDigest,
+    })),
+  });
+
 const STRUCTURED_CONTRACT_REGISTRY: Readonly<
   Record<RegisteredBuiltInStructuredContractId, StructuredContractTemplate>
 > = deepFreeze({
   [AGENT_TOOL_CONTRACT_ID]: AGENT_STRUCTURED_CONTRACT_TEMPLATE,
+  [REFINEMENT_REVIEW_CONTRACT_ID]: REFINEMENT_STRUCTURED_CONTRACT_TEMPLATE,
 });
 
 export const REGISTERED_BUILT_IN_STRUCTURED_CONTRACT_IDS:
   readonly RegisteredBuiltInStructuredContractId[] =
-    Object.freeze([AGENT_TOOL_CONTRACT_ID]);
+    Object.freeze([
+      AGENT_TOOL_CONTRACT_ID,
+      REFINEMENT_REVIEW_CONTRACT_ID,
+    ]);
 
 const RESOLVED_STRUCTURED_CONTRACT_REGISTRY = deepFreeze({
   [AGENT_TOOL_CONTRACT_ID]: {
@@ -133,6 +157,16 @@ const RESOLVED_STRUCTURED_CONTRACT_REGISTRY = deepFreeze({
     ),
     "runtime-validated": buildStructuredContract(
       AGENT_STRUCTURED_CONTRACT_TEMPLATE,
+      "runtime-validated",
+    ),
+  },
+  [REFINEMENT_REVIEW_CONTRACT_ID]: {
+    "provider-strict": buildStructuredContract(
+      REFINEMENT_STRUCTURED_CONTRACT_TEMPLATE,
+      "provider-strict",
+    ),
+    "runtime-validated": buildStructuredContract(
+      REFINEMENT_STRUCTURED_CONTRACT_TEMPLATE,
       "runtime-validated",
     ),
   },
@@ -730,6 +764,15 @@ export function validateModelToolSubmission(
       { name: record.name, input: record.input },
       { encodedBytes: record.inputBytes as number },
     );
+  } else if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
+    if (record.name !== REFINEMENT_REVIEW_TOOL_SET[0].name) {
+      throw new ValidationError(
+        "Refinement review submission has the wrong tool name",
+      );
+    }
+    normalizeRefinementReviewTransportValue(record.input, {
+      encodedBytes: record.inputBytes as number,
+    });
   } else {
     throw new CapabilityUnavailableError(
       `tool submission validation for ${contract.contractId}`,
@@ -753,6 +796,21 @@ export function validateModelToolSubmission(
     );
   }
   return value as unknown as ModelToolSubmission;
+}
+
+export function modelResponseContractInputByteLimit(
+  contract: RequiredToolSetModelResponseContract,
+): number {
+  if (contract.contractId === AGENT_TOOL_CONTRACT_ID) {
+    return MAX_AGENT_TOOL_INPUT_BYTES;
+  }
+  if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
+    return MAX_REFINEMENT_REVIEW_BYTES;
+  }
+  throw new CapabilityUnavailableError(
+    `tool input limit for ${contract.contractId}`,
+    "the current sealed contract registry",
+  );
 }
 
 export function validateModelContractViolation(

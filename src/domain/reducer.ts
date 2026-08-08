@@ -12,6 +12,7 @@ import {
   type ModelEffectOutputV2,
 } from "./model-response.ts";
 import { validateModelDispatch, type ModelDispatch } from "./model.ts";
+import { validateRefinementReviewRecursiveResult } from "./refinement-review-contract.ts";
 
 function withBase(state: AgentState, event: AgentEvent): AgentState {
   return { ...state, cursor: event.cursor, appliedEventIds: [...state.appliedEventIds, event.id] };
@@ -474,6 +475,28 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; const old = state.recursiveModels[p.handleId];
       const valid = old && ((old.status === "pending" && ["running", "completed", "failed", "cancelled"].includes(p.status)) || (old.status === "running" && ["completed", "failed", "cancelled"].includes(p.status)));
       if (!old || !valid) throw new InvalidTransitionError("recursiveModel", old?.status ?? "missing", p.status);
+      if (old.responseAdmission.responseContract.kind === "required-tool-set") {
+        if (p.resultMessageId !== undefined || p.resultArtifactId !== undefined) {
+          throw new ValidationError(
+            "Structured recursive results cannot reference assistant messages or artifacts",
+          );
+        }
+        if (p.status === "completed") {
+          if (p.outcome !== "succeeded" || p.result === undefined) {
+            throw new ValidationError(
+              "Successful structured recursive completion requires one typed result",
+            );
+          }
+          validateRefinementReviewRecursiveResult(p.result, {
+            contractDigest:
+              old.responseAdmission.responseContract.contractDigest,
+          });
+        } else if (p.result !== undefined) {
+          throw new ValidationError(
+            "Non-successful structured recursive status cannot retain a result",
+          );
+        }
+      }
       const updated: RecursiveModelState = { ...old, status: p.status, eventId: event.id, ...(p.outcome === undefined ? {} : { outcome: p.outcome }), ...(p.resultMessageId === undefined ? {} : { resultMessageId: p.resultMessageId }), ...(p.result === undefined ? {} : { result: p.result }), ...(p.resultArtifactId === undefined ? {} : { resultArtifactId: p.resultArtifactId }), ...(p.error === undefined ? {} : { error: p.error }) };
       return { ...next, recursiveModels: { ...state.recursiveModels, [p.handleId]: updated } };
     }

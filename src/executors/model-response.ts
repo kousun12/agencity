@@ -6,7 +6,6 @@ import {
 } from "ai";
 import {
   AGENT_TOOL_CONTRACT_ID,
-  MAX_AGENT_TOOL_INPUT_BYTES,
   MAX_MODEL_FORMAL_RESPONSE_BYTES,
   MAX_MODEL_RESPONSE_BLOCKS,
   MAX_MODEL_SUPPLEMENTAL_TEXT_BYTES,
@@ -19,6 +18,10 @@ import {
   canonicalJsonDigest,
   canonicalJsonStringify,
   createModelEffectOutputV2,
+  modelResponseContractInputByteLimit,
+  normalizeRefinementReviewTransportValue,
+  REFINEMENT_REVIEW_CONTRACT_ID,
+  REFINEMENT_REVIEW_TOOL_NAME,
   validateAgentToolSubmissionValue,
   type AgentAction,
   type CompleteModelResponse,
@@ -244,6 +247,32 @@ export function formalOutputFromAgentAction(input: {
     callId: input.providerToolCallId,
     name: submission.name,
     value: submission.input,
+    usage: input.usage,
+    warnings: [],
+  });
+}
+
+/** Deterministic provider-fixture helper for the sealed refinement contract. */
+export function formalOutputFromRefinementReviewSubmission(input: {
+  readonly transportInput: JsonValue;
+  readonly dispatch: ModelDispatch;
+  readonly providerToolCallId: string;
+  readonly provider: string;
+  readonly adapter: string;
+  readonly usage: Usage;
+}): ModelEffectOutputV2 {
+  const contract = requiredContract(input.dispatch);
+  if (contract.contractId !== REFINEMENT_REVIEW_CONTRACT_ID) {
+    throw new Error("Refinement review output requires its sealed response contract");
+  }
+  return acceptedSubmissionOutput({
+    dispatch: input.dispatch,
+    contract,
+    provider: input.provider,
+    adapter: input.adapter,
+    callId: input.providerToolCallId,
+    name: REFINEMENT_REVIEW_TOOL_NAME,
+    value: input.transportInput,
     usage: input.usage,
     warnings: [],
   });
@@ -564,7 +593,7 @@ class FormalStreamState {
     const bytes = byteLength(delta);
     call.rawInputBytes += bytes;
     this.#observeResponseBytes(bytes);
-    if (call.rawInputBytes > MAX_AGENT_TOOL_INPUT_BYTES) {
+    if (call.rawInputBytes > modelResponseContractInputByteLimit(this.contract)) {
       call.invalid = "oversized-arguments";
       this.guard.guard("oversized-tool-input");
       return;
@@ -637,7 +666,7 @@ class FormalStreamState {
       part.dynamic === true ||
       !isJsonValue(rawInput)
     ) {
-      call.invalid = call.rawInputBytes > MAX_AGENT_TOOL_INPUT_BYTES
+      call.invalid = call.rawInputBytes > modelResponseContractInputByteLimit(this.contract)
         ? "oversized-arguments"
         : "malformed-arguments";
       return;
@@ -651,7 +680,7 @@ class FormalStreamState {
       call.invalid = "malformed-arguments";
       return;
     }
-    if (canonicalBytes > MAX_AGENT_TOOL_INPUT_BYTES) {
+    if (canonicalBytes > modelResponseContractInputByteLimit(this.contract)) {
       call.rawInputBytes = canonicalBytes;
       call.invalid = "oversized-arguments";
       this.guard.guard("oversized-tool-input");
@@ -831,6 +860,10 @@ function validateToolInputValue(
       { name, input: value },
       { encodedBytes: inputBytes },
     ).input as unknown as JsonValue;
+  }
+  if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
+    normalizeRefinementReviewTransportValue(value, { encodedBytes: inputBytes });
+    return value;
   }
   throw new Error(`No runtime validator for ${contract.contractId}`);
 }

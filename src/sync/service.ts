@@ -97,7 +97,7 @@ export class SyncService {
     if(!this.transport)throw unavailable("stage");
     const watermarks=await this.storage.listSyncOriginWatermarks(this.replicaId);const old=watermarks.find(x=>x.originDeviceId===this.device.deviceId);const after=old?.stagedSequence??0;
     const scanned=await this.storage.listOriginEvents(this.device.deviceId,after);const envelopes:ReplicatedEnvelope[]=[];
-    for(const event of scanned){if(event.producer==="sync-derived")continue;const session=await this.storage.getSession?.(event.sessionId);if(session?.workspaceId!==this.workspaceId)continue;envelopes.push(this.#envelope(event));}
+    for(const event of scanned){if(event.producer==="sync-derived")continue;const session=await this.storage.getSession?.(event.sessionId);if(session?.workspaceId!==this.workspaceId)continue;envelopes.push(await this.#envelope(event));}
     const staged=await this.transport.putEnvelopes(envelopes);const announcement:WorkspaceAnnouncement={announcementId:deterministicId("workspace",this.workspaceId,this.device.deviceId),workspaceId:this.workspaceId,name:this.workspaceName,ownerProfileId:this.device.profileId,deviceId:this.device.deviceId,updatedAt:this.#iso()};await this.transport.putWorkspaceAnnouncement(announcement);
     const scannedThrough=scanned.reduce((maximum,event)=>Math.max(maximum,event.originSequence),after);if(scannedThrough>after)await this.storage.putSyncOriginWatermark({replicaId:this.replicaId,originDeviceId:this.device.deviceId,stagedSequence:scannedThrough,ingestedSequence:old?.ingestedSequence??0,updatedAt:this.#iso()});
     if(staged)await this.#save({stagedEnvelopes:this.#status.stagedEnvelopes+staged});return staged;
@@ -324,8 +324,25 @@ export class SyncService {
     }catch(error){await this.#networkFailed(error);throw error;}
   }
 
-  #envelope(event:AgentEvent):ReplicatedEnvelope{
-    const dependencies=[...new Set([event.streamParentId,event.causationId].filter((x):x is string=>x!==null))].sort();const body={id:event.id,sessionId:event.sessionId,branchId:event.branchId,causationId:event.causationId,correlationId:event.correlationId,type:event.type,schemaVersion:event.schemaVersion,committedAt:event.committedAt,producer:event.producer,idempotencyKey:event.idempotencyKey,payload:event.payload as JsonValue,streamParentId:event.streamParentId};
+  async #envelope(event:AgentEvent):Promise<ReplicatedEnvelope>{
+    const crossSessionDependencies:string[]=[];
+    if(event.type==="RecursiveModelStatusChanged"){
+      const payload=event.payload as EventPayloads["RecursiveModelStatusChanged"];
+      const result=payload.result&&typeof payload.result==="object"&&!Array.isArray(payload.result)
+        ? payload.result as Record<string,JsonValue>
+        : undefined;
+      if(payload.status==="completed"&&result?.kind==="tool-submission"&&typeof result.modelCallId==="string"){
+        const parent=await this.storage.loadEvents(event.sessionId,{branchId:event.branchId});
+        const started=[...parent].reverse().find(candidate=>candidate.type==="RecursiveModelStarted"&&(candidate.payload as EventPayloads["RecursiveModelStarted"]).handleId===payload.handleId);
+        const admission=started?.payload as EventPayloads["RecursiveModelStarted"]|undefined;
+        if(admission){
+          const child=await this.storage.loadEvents(admission.childSessionId,{branchId:admission.childBranchId});
+          const completion=child.find(candidate=>candidate.type==="ModelCallCompleted"&&(candidate.payload as EventPayloads["ModelCallCompleted"]).callId===result.modelCallId);
+          if(completion)crossSessionDependencies.push(completion.id);
+        }
+      }
+    }
+    const dependencies=[...new Set([event.streamParentId,event.causationId,...crossSessionDependencies].filter((x):x is string=>x!==null))].sort();const body={id:event.id,sessionId:event.sessionId,branchId:event.branchId,causationId:event.causationId,correlationId:event.correlationId,type:event.type,schemaVersion:event.schemaVersion,committedAt:event.committedAt,producer:event.producer,idempotencyKey:event.idempotencyKey,payload:event.payload as JsonValue,streamParentId:event.streamParentId};
     // Event IDs are logical identity, not physical row identity. Including the
     // origin tuple and content digest lets two writers retain colliding raw
     // claims for reconciliation instead of wedging the append-only transport.

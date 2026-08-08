@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
-import { AgentClient, LibSqlStorage, ProtocolServer, Supervisor, TerminalUI, projectEvents, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse } from "../../src/index.ts";
-import { formalOutputFromAgentAction } from "../../src/executors/model-response.ts";
+import { AgentClient, LibSqlStorage, ProtocolServer, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementReviewRecursiveResult, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
+import { ModelProviderResponseFailureError, formalMissingToolOutput, formalOutputFromAgentAction, formalOutputFromRefinementReviewSubmission } from "../../src/executors/model-response.ts";
+import { internalStructuredModelTurn } from "../../src/runtime/internal.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -25,32 +26,89 @@ class ReviewProvider implements ModelProvider {
   targetEntryId = "";
   targetVersionId = "";
   constructor(readonly name: string, readonly decision: "no_change" | "propose" | "replace" | "malformed" | "overscope" | "no_evidence" = "no_change") {}
-  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
+  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-    const reviewId = JSON.stringify(context).match(/refinement-review-[a-f0-9]{32}/)?.[0];
-    if (!reviewId) {
-      this.runCalls++;
-      return { text: "done", finishReason: "stop", usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 } };
-    }
-    this.calls++;
-    let text: string;
-    if (this.decision === "malformed") text = `not-json ${reviewId}`;
-    else if (this.decision === "no_change") text = JSON.stringify({ protocol: "agencity.refinement-review", version: 1, reviewId, status: "no_change", reason: "No evidence-backed update is necessary.", evidenceEventIds: [] });
-    else {
-      const evidenceIds = this.decision === "no_evidence" ? [] : [this.evidenceEventId];
-      text = JSON.stringify({
-      protocol: "agencity.refinement-review", version: 1, reviewId, status: "propose",
-      trigger: "Retained user evidence supports a small prompt note", predictedEffect: "Keep future work tied to retained evidence",
-      edits: this.decision === "replace"
-        ? [{ operation: "replace", entryId: this.targetEntryId, expectedVersionId: this.targetVersionId, content: { kind: "memory", memoryKind: "claim", text: "Use the corrected retained fact." }, evidenceEventIds: evidenceIds }]
-        : [{ operation: "create", kind: "prompt_note", scope: this.decision === "overscope" ? "global" : "local", scopeKey: this.decision === "overscope" ? "global" : this.requestedScopeKey, name: "evidence-discipline", content: { kind: "prompt_note", text: "Cite retained evidence before claiming completion." }, evidenceEventIds: evidenceIds }],
-      evidenceEventIds: evidenceIds, evaluation: { kind: "objective", name: "retained-evidence-check", metric: "verification command succeeds", target: true },
-    });
-    }
-    return { text, finishReason: "stop", usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 } };
+    return { text: "done", finishReason: "stop", usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 } };
   }
   async streamResponse(context: JsonValue, dispatch: ModelDispatch, signal: AbortSignal): Promise<ModelEffectOutputV2> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    if (dispatch.responseContract.kind === "required-tool-set" &&
+        dispatch.responseContract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
+      this.calls++;
+      const reviewId = JSON.stringify(context).match(/refinement-review-[a-f0-9]{32}/)?.[0];
+      if (!reviewId) throw new Error("missing review ID");
+      const usage = { inputTokens: 2, outputTokens: 2, costUsd: 0 };
+      if (this.decision === "malformed") {
+        return formalMissingToolOutput({
+          dispatch,
+          provider: this.name,
+          adapter: this.capabilities.requiredToolSet.adapter,
+          text: `not-a-formal-call ${reviewId}`,
+          usage,
+        });
+      }
+      const evidenceIds = this.decision === "no_evidence"
+        ? ["event-not-visible"]
+        : [this.evidenceEventId];
+      const decision: RefinementReviewDecision = this.decision === "no_change"
+        ? {
+            protocol: "agencity.refinement-review",
+            version: 1,
+            reviewId,
+            status: "no_change",
+            reason: "No evidence-backed update is necessary.",
+            evidenceEventIds: [],
+          }
+        : {
+            protocol: "agencity.refinement-review",
+            version: 1,
+            reviewId,
+            status: "propose",
+            trigger: "Retained user evidence supports a small prompt note",
+            predictedEffect: "Keep future work tied to retained evidence",
+            edits: this.decision === "replace"
+              ? [{
+                  operation: "replace",
+                  entryId: this.targetEntryId,
+                  expectedVersionId: this.targetVersionId,
+                  content: {
+                    kind: "memory",
+                    memoryKind: "claim",
+                    text: "Use the corrected retained fact.",
+                  },
+                  evidenceEventIds: evidenceIds,
+                }]
+              : [{
+                  operation: "create",
+                  kind: "prompt_note",
+                  scope: this.decision === "overscope" ? "global" : "local",
+                  scopeKey: this.decision === "overscope"
+                    ? "global"
+                    : this.requestedScopeKey,
+                  name: "evidence-discipline",
+                  content: {
+                    kind: "prompt_note",
+                    text: "Cite retained evidence before claiming completion.",
+                  },
+                  evidenceEventIds: evidenceIds,
+                }],
+            evidenceEventIds: evidenceIds,
+            evaluation: {
+              kind: "objective",
+              name: "retained-evidence-check",
+              metric: "verification command succeeds",
+              target: true,
+            },
+          };
+      return formalOutputFromRefinementReviewSubmission({
+        transportInput: encodeRefinementReviewTransportValue(decision),
+        dispatch,
+        providerToolCallId: `refinement-review-${this.calls}`,
+        provider: this.name,
+        adapter: this.capabilities.requiredToolSet.adapter,
+        usage,
+      });
+    }
     this.runCalls++;
     return formalOutputFromAgentAction({
       action: { protocol: "agencity.agent-action", version: 1, type: "final", content: "done" },
@@ -60,6 +118,131 @@ class ReviewProvider implements ModelProvider {
       adapter: this.capabilities.requiredToolSet.adapter,
       usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 },
     });
+  }
+}
+
+class FailingReviewProvider extends ReviewProvider {
+  override async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (dispatch.responseContract.kind === "required-tool-set" &&
+        dispatch.responseContract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
+      throw new ModelProviderResponseFailureError(
+        "provider-request-failed",
+        this.name,
+        dispatch.configuration.model,
+        "fixture provider rejected refinement",
+      );
+    }
+    return super.streamResponse(context, dispatch, signal);
+  }
+}
+
+class BlockingReviewProvider extends ReviewProvider {
+  active = false;
+  override async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (dispatch.responseContract.kind === "required-tool-set" &&
+        dispatch.responseContract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
+      this.active = true;
+      try {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      } finally {
+        this.active = false;
+      }
+    }
+    return super.streamResponse(context, dispatch, signal);
+  }
+}
+
+class SecretReviewProvider extends ReviewProvider {
+  constructor(
+    name: string,
+    readonly secret: string,
+    readonly placement: "input" | "raw-reason" = "input",
+  ) { super(name); }
+  override async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (dispatch.responseContract.kind === "required-tool-set" &&
+        dispatch.responseContract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
+      const contract = dispatch.responseContract;
+      // Hand-built structurally valid output that bypasses the product
+      // adapters' input acceptance checks, exactly like a hostile or buggy
+      // custom provider could.
+      const input = encodeRefinementReviewTransportValue({
+        protocol: "agencity.refinement-review",
+        version: 1,
+        reviewId: "refinement-review-secret",
+        status: "no_change",
+        reason: this.placement === "input"
+          ? `Continue with credential ${this.secret} attached.`
+          : "No attributable change is justified.",
+        evidenceEventIds: [],
+      });
+      const inputDigest = canonicalJsonDigest(input);
+      const inputBytes = canonicalJsonByteLength(input);
+      const termination = {
+        kind: "tool-calls" as const,
+        rawReason: this.placement === "raw-reason"
+          ? `stop:${this.secret}`
+          : "tool_calls",
+      };
+      const transport = {
+        provider: this.name,
+        adapter: this.capabilities.requiredToolSet.adapter,
+      };
+      return createModelEffectOutputV2({
+        response: {
+          kind: "complete",
+          blocks: [{
+            type: "tool-call",
+            callId: "secret-call-1",
+            name: REFINEMENT_REVIEW_TOOL_NAME,
+            inputDigest,
+            inputBytes,
+          }],
+          termination,
+          usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+          warnings: [],
+          transport,
+        },
+        result: {
+          kind: "tool-submission",
+          submission: {
+            providerToolCallId: "secret-call-1",
+            name: REFINEMENT_REVIEW_TOOL_NAME,
+            input,
+            inputDigest,
+            inputBytes,
+            responseContract: {
+              contractId: contract.contractId,
+              version: contract.version,
+              contractDigest: contract.contractDigest,
+            },
+            transport,
+            termination,
+          },
+        },
+        responseContract: contract,
+        responseCapability: dispatch.responseCapability,
+        configuredProvider: this.name,
+      });
+    }
+    return super.streamResponse(context, dispatch, signal);
   }
 }
 
@@ -116,7 +299,289 @@ describe("FU-016 durable RefinerService", () => {
       expect(events.filter((event) => event.type === "RefinementReviewRequested")).toHaveLength(1);
       expect(events.filter((event) => event.type === "RefinementReviewChildLinked")).toHaveLength(1);
       expect(projectEvents(events).refinementReviews[review.reviewId]?.status).toBe("no_change");
+      const result = await supervisor.models.result(review.handleId!);
+      expect(result.value).toMatchObject({
+        kind: "tool-submission",
+        contractId: REFINEMENT_REVIEW_CONTRACT_ID,
+        toolName: "agencity_submit_refinement_review",
+        submission: { reviewId: review.reviewId, status: "no_change" },
+      });
+      expect(result.resultMessageId).toBeUndefined();
+      expect(result.resultArtifactId).toBeUndefined();
+      const childEvents = await supervisor.storage.loadEvents(
+        result.provenance.childSessionId,
+        { branchId: result.provenance.childBranchId },
+      );
+      expect(childEvents.filter((event) =>
+        event.type === "MessageAppended" &&
+        (event.payload as { role?: string }).role === "assistant"
+      )).toHaveLength(0);
+      expect(childEvents.find((event) =>
+        event.type === "ModelCallCompleted"
+      )?.payload).toMatchObject({
+        result: {
+          kind: "tool-submission",
+          name: "agencity_submit_refinement_review",
+        },
+      });
+      const terminal = [...events].reverse().find((event) =>
+        event.type === "RecursiveModelStatusChanged" &&
+        (event.payload as { handleId?: string }).handleId === review.handleId
+      )!;
+      const fork = await supervisor.fork(
+        sessionId,
+        branchId,
+        terminal.cursor,
+        "structured-result-fork",
+      );
+      const forked = projectEvents(await supervisor.storage.loadEvents(
+        sessionId,
+        { branchId: fork },
+      )).recursiveModels[review.handleId!];
+      expect(forked?.result).toEqual(result.value);
+      await supervisor.storage.rebuildOperationalProjections?.();
+      expect((await supervisor.models.get(review.handleId!)).result)
+        .toEqual(result.value);
     } finally { await supervisor.close(); }
+  });
+
+  test("rejects unsupported structured admission before child history exists", async () => {
+    const temp = await makeTempRuntime("agencity-refiner-unsupported-");
+    temps.push(temp);
+    const provider: ModelProvider = {
+      name: "refinement-text-only",
+      capabilities: { streaming: false },
+      complete: async () => ({
+        text: "text only",
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+      }),
+    };
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    try {
+      const root = await supervisor.createSession({
+        workspaceId: "unsupported-refinement",
+        model: { provider: provider.name, model: "text-only" },
+      });
+      await expect((supervisor.refiner as any).startStructuredRefinementModel(
+        root.sessionId,
+        root.branchId,
+        {
+          prompt: "review",
+          idempotencyKey: "unsupported-refinement",
+          run: false,
+        },
+      )).rejects.toMatchObject({
+        code: "MODEL_RESPONSE_CONTRACT_UNAVAILABLE",
+      });
+      expect(await supervisor.agents.listTasks(
+        root.sessionId,
+        root.branchId,
+      )).toHaveLength(0);
+      const parentEvents = await supervisor.storage.loadEvents(
+        root.sessionId,
+        { branchId: root.branchId },
+      );
+      expect(parentEvents.some((event) =>
+        event.type === "RecursiveModelStarted"
+      )).toBe(false);
+      expect(await supervisor.storage.listBranches()).toHaveLength(1);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("rejects a structured result without its exact child completion", async () => {
+    const provider = new ReviewProvider("review-binding");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      const handle = await (supervisor.refiner as any).startStructuredRefinementModel(
+        sessionId,
+        branchId,
+        {
+          prompt: "review",
+          idempotencyKey: "binding-check",
+          run: false,
+        },
+      );
+      const contract = handle.responseAdmission.responseContract;
+      if (contract.kind !== "required-tool-set") {
+        throw new Error("expected structured admission");
+      }
+      const transportInput = encodeRefinementReviewTransportValue({
+        protocol: "agencity.refinement-review",
+        version: 1,
+        reviewId: "refinement-review-binding",
+        status: "no_change",
+        reason: "No change.",
+        evidenceEventIds: [],
+      });
+      const result = createRefinementReviewRecursiveResult({
+        contractDigest: contract.contractDigest,
+        modelCallId: "missing-child-call",
+        providerToolCallId: "missing-provider-call",
+        modelResultDigest: `sha256:${"1".repeat(64)}`,
+        transportInput,
+        transportInputDigest: canonicalJsonDigest(transportInput),
+        transportInputBytes: canonicalJsonByteLength(transportInput),
+      });
+      await expect(supervisor.storage.appendEvents([{
+        sessionId,
+        branchId,
+        type: "RecursiveModelStatusChanged",
+        producer: "supervisor",
+        idempotencyKey: "forged-structured-result",
+        payload: {
+          handleId: handle.handleId,
+          status: "completed",
+          outcome: "succeeded",
+          result: result as unknown as JsonValue,
+        },
+      }])).rejects.toThrow(/response admission|child model completion/i);
+      expect((await supervisor.models.get(handle.handleId)).status).toBe("pending");
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test.each([
+    ["cancelled", "cancelled", "cancelled"],
+    ["failed", "failed", "failed"],
+  ] as const)(
+    "recovers a terminal %s task without attaching the completed structured child result",
+    async (kind, expectedStatus, expectedOutcome) => {
+    const provider = new ReviewProvider(`review-crash-recovery-${kind}`);
+    const { temp, supervisor, sessionId, branchId } = await fixture(provider);
+    let active: Supervisor | undefined = supervisor;
+    try {
+      const handle = await (supervisor.refiner as any).startStructuredRefinementModel(
+        sessionId,
+        branchId,
+        {
+          prompt: `review refinement-review-${"a".repeat(32)}`,
+          idempotencyKey: `crash-boundary-recovery-${kind}`,
+          run: false,
+        },
+      );
+      const turn = await internalStructuredModelTurn(supervisor.modelLoop)(
+        handle.childSessionId,
+        handle.childBranchId,
+        handle.responseAdmission,
+      );
+      expect(turn.outcome).toBe("succeeded");
+      // Simulate a crash between the terminal task transition and the handle
+      // status commit: the task is already terminal while the child retains a
+      // successful structured tool submission.
+      if (kind === "cancelled") {
+        await supervisor.agents.cancel(
+          handle.taskId,
+          "simulated crash before status commit",
+        );
+      } else {
+        await supervisor.agents.failTask(handle.taskId, {
+          error: "simulated crash before status commit",
+        });
+      }
+      expect((await supervisor.models.get(handle.handleId)).status).toBe("pending");
+      await supervisor.close();
+      active = undefined;
+      const reopened = await Supervisor.open({
+        databaseUrl: temp.databaseUrl,
+        artifactDirectory: temp.artifactDirectory,
+        workspaceRoot: temp.workspaceRoot,
+        modelProviders: [provider],
+        recover: true,
+      });
+      active = reopened;
+      const recovered = await reopened.models.get(handle.handleId);
+      expect(recovered.status).toBe(expectedStatus);
+      expect(recovered.outcome).toBe(expectedOutcome);
+      expect(recovered.result).toBeUndefined();
+      expect(recovered.resultMessageId).toBeUndefined();
+      // A second recovery pass must not terminalize the handle again.
+      await reopened.recoverExecution();
+      const terminal = (await reopened.storage.loadEvents(sessionId, { branchId }))
+        .filter((event) =>
+          event.type === "RecursiveModelStatusChanged" &&
+          (event.payload as { handleId?: string; status?: string }).handleId === handle.handleId &&
+          (event.payload as { status?: string }).status !== "running");
+      expect(terminal).toHaveLength(1);
+      expect((terminal[0]!.payload as { result?: unknown }).result).toBeUndefined();
+    } finally {
+      await active?.close();
+    }
+  });
+
+  test.each([
+    ["a registered secret in the submitted tool input", true, "input"],
+    ["an unregistered credential in termination.rawReason", false, "raw-reason"],
+  ] as const)(
+    "a custom provider cannot push %s through the real outbox",
+    async (_label, registered, placement) => {
+    const secret = "sk-live-Section31DeepCover0042";
+    const release = registered ? registerBrokeredSecret(secret) : undefined;
+    const provider = new SecretReviewProvider(
+      `review-secret-leak-${placement}`,
+      secret,
+      placement,
+    );
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      const progress: string[] = [];
+      const stopProgress = supervisor.outbox.onProgress((notification) =>
+        progress.push(JSON.stringify(notification)));
+      const handle = await (supervisor.refiner as any).startStructuredRefinementModel(
+        sessionId,
+        branchId,
+        {
+          prompt: `review refinement-review-${"a".repeat(32)}`,
+          idempotencyKey: `secret-structured-output-${placement}`,
+          run: false,
+        },
+      );
+      const turn = await internalStructuredModelTurn(supervisor.modelLoop)(
+        handle.childSessionId,
+        handle.childBranchId,
+        handle.responseAdmission,
+      );
+      stopProgress();
+      expect(turn.outcome).toBe("failed");
+      expect(turn.error ?? "").not.toContain(secret);
+      const childEvents = await supervisor.storage.loadEvents(
+        handle.childSessionId,
+        { branchId: handle.childBranchId },
+      );
+      const child = projectEvents(childEvents);
+      expect(Object.values(child.modelCalls).at(-1)).toMatchObject({
+        status: "failed",
+        failureCode: "stream-failed",
+      });
+      const outcome = childEvents.find((event) =>
+        event.type === "EffectOutcomeRecorded")!;
+      expect((outcome.payload as { outcome?: string }).outcome).toBe("failed");
+      expect((outcome.payload as { output?: unknown }).output).toBeUndefined();
+      expect((outcome.payload as { modelFailure?: { code?: string } }).modelFailure)
+        .toEqual({ code: "stream-failed" });
+      const parentEvents = await supervisor.storage.loadEvents(sessionId, { branchId });
+      expect(JSON.stringify([...childEvents, ...parentEvents])).not.toContain(secret);
+      expect(progress.join("")).not.toContain(secret);
+      const effectId = (childEvents.find((event) => event.type === "EffectRequested")!
+        .payload as { effectId: string }).effectId;
+      expect(JSON.stringify(await supervisor.storage.getOutbox(effectId) ?? {}))
+        .not.toContain(secret);
+      await supervisor.storage.rebuildOperationalProjections?.();
+      expect(JSON.stringify(await supervisor.models.get(handle.handleId)))
+        .not.toContain(secret);
+    } finally {
+      release?.();
+      await supervisor.close();
+    }
   });
 
   test("strictly parses, proposes with stable identity, validates, activates, and allocates without promotion", async () => {
@@ -174,9 +639,98 @@ describe("FU-016 durable RefinerService", () => {
       try {
         const review = await supervisor.refiner.request(sessionId, branchId);
         expect(review.status).toBe("failed");
-        expect(review.reason).toMatch(kind === "malformed" ? /exactly one JSON object/i : /outside requested scope/i);
+        expect(review.reason).toMatch(kind === "malformed" ? /required tool/i : /outside requested scope/i);
         expect(await supervisor.harness.proposals()).toHaveLength(0);
       } finally { await supervisor.close(); }
+    }
+  });
+
+  test("keeps structured provider failure, cancellation, and budget exhaustion distinct", async () => {
+    {
+      const provider = new FailingReviewProvider("review-provider-failure");
+      const { supervisor, sessionId, branchId } = await fixture(provider);
+      try {
+        const review = await supervisor.refiner.request(sessionId, branchId);
+        expect(review.status).toBe("failed");
+        const handle = await supervisor.models.get(review.handleId!);
+        expect(handle.outcome).toBe("failed");
+        const child = projectEvents(await supervisor.storage.loadEvents(
+          handle.childSessionId,
+          { branchId: handle.childBranchId },
+        ));
+        expect(Object.values(child.modelCalls).at(-1)).toMatchObject({
+          status: "failed",
+          failureCode: "provider-request-failed",
+        });
+      } finally {
+        await supervisor.close();
+      }
+    }
+
+    {
+      const provider = new BlockingReviewProvider("review-cancelled");
+      const { supervisor, sessionId, branchId } = await fixture(provider);
+      try {
+        const admitted = await supervisor.refiner.request(
+          sessionId,
+          branchId,
+          { wait: false },
+        );
+        await waitFor(async () => {
+          const review = await supervisor.refiner.get(admitted.reviewId);
+          return review.handleId !== null && provider.active;
+        }, "blocking refinement provider");
+        const running = await supervisor.refiner.get(admitted.reviewId);
+        await supervisor.models.cancel(running.handleId!, "cancel review");
+        await waitFor(async () =>
+          (await supervisor.refiner.get(admitted.reviewId)).status ===
+            "cancelled", "cancelled refinement");
+        const cancelled = await supervisor.refiner.get(admitted.reviewId);
+        expect(cancelled.status).toBe("cancelled");
+        expect((await supervisor.models.get(cancelled.handleId!)).outcome)
+          .toBe("cancelled");
+      } finally {
+        await supervisor.close();
+      }
+    }
+
+    {
+      const provider = new ReviewProvider("review-budget");
+      const temp = await makeTempRuntime("agencity-refiner-budget-");
+      temps.push(temp);
+      const supervisor = await Supervisor.open({
+        databaseUrl: temp.databaseUrl,
+        artifactDirectory: temp.artifactDirectory,
+        workspaceRoot: temp.workspaceRoot,
+        modelProviders: [provider],
+        recover: false,
+      });
+      try {
+        const root = await supervisor.createSession({
+          workspaceId: "refiner-budget",
+          model: { provider: provider.name, model: "scripted-v1" },
+          budget: { turnLimit: 1 },
+        });
+        const evidence = await supervisor.appendMessage(
+          root.sessionId,
+          root.branchId,
+          "user",
+          "Retained evidence",
+        );
+        provider.evidenceEventId = evidence.id;
+        provider.requestedScopeKey = root.sessionId;
+        const review = await supervisor.refiner.request(
+          root.sessionId,
+          root.branchId,
+        );
+        expect(review.status).toBe("failed");
+        const handle = await supervisor.models.get(review.handleId!);
+        expect(handle.outcome).toBe("budget-exceeded");
+        expect(handle.result).toBeUndefined();
+        expect(handle.resultMessageId).toBeUndefined();
+      } finally {
+        await supervisor.close();
+      }
     }
   });
 

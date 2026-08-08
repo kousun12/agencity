@@ -2,7 +2,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGateway } from "@ai-sdk/gateway";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, streamText, type LanguageModel, type ModelMessage } from "ai";
-import { canonicalJsonDigest, type JsonValue } from "../domain/json.ts";
+import { canonicalJsonDigest, canonicalJsonStringify, type JsonValue } from "../domain/json.ts";
 import {
   AGENT_ACTION_PROTOCOL,
   AGENT_ACTION_VERSION,
@@ -33,7 +33,7 @@ import {
 } from "../domain/index.ts";
 import type { EffectExecutor, ExecutionResult } from "./contract.ts";
 import { result } from "./contract.ts";
-import { scrubText } from "../security/index.ts";
+import { containsBrokeredSecret, containsCredentialMaterial, scrubText } from "../security/index.ts";
 import {
   ModelProviderResponseFailureError,
   ModelResponseGuard,
@@ -885,11 +885,13 @@ export class ModelExecutor implements EffectExecutor {
           signal,
           onDelta ?? (() => {}),
         );
-        return validateModelEffectOutputV2(output, {
+        const validated = validateModelEffectOutputV2(output, {
           responseContract: dispatch.responseContract,
           responseCapability: dispatch.responseCapability,
           configuredProvider: dispatch.configuration.provider,
         });
+        assertNoSecretStructuredOutput(validated, dispatch);
+        return validated;
       }
       const textResponse = provider.capabilities?.streaming === true
         ? await provider.stream!(
@@ -1136,6 +1138,39 @@ function normalizeRetainedWarnings(value: readonly ModelWarning[] | undefined): 
     normalized[7] = { kind: "truncated", message: `Additional provider warnings were omitted (${value.length - 7} hidden)` };
   }
   return normalized;
+}
+
+/**
+ * Defense-in-depth boundary for structured provider output. The product
+ * adapters already reject credential material while validating tool input and
+ * scrub every retained diagnostic string; this gate ensures a custom
+ * `streamResponse` implementation cannot hand a secret-bearing structured
+ * output back to any caller through any retained field, including submission
+ * input, termination reasons, warnings, supplemental text, and violation
+ * evidence. It scans the canonical encoding of the complete validated output:
+ * registered brokered values match anywhere, and the generic credential-shape
+ * heuristics cannot false-positive on retained digest fields because those are
+ * hex-and-colon `sha256:` strings without the required token shapes. Safe
+ * output is returned untouched, so exact digests are preserved, and the
+ * failure never echoes the observed value.
+ */
+function assertNoSecretStructuredOutput(
+  output: ModelEffectOutputV2,
+  dispatch: ModelDispatch,
+): void {
+  const secretBearing =
+    containsBrokeredSecret(output as unknown as JsonValue) ||
+    containsCredentialMaterial(
+      canonicalJsonStringify(output as unknown as JsonValue),
+    );
+  if (secretBearing) {
+    throw new ModelProviderResponseFailureError(
+      "stream-failed",
+      dispatch.configuration.provider,
+      dispatch.configuration.model,
+      "Model provider returned brokered credential material in structured output",
+    );
+  }
 }
 
 function retainedModelIdentity(input: JsonValue): { provider: string; model: string } {

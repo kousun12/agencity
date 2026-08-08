@@ -61,7 +61,14 @@ import { DocumentService } from "./documents.ts";
 import { GoalService } from "./goals.ts";
 import { HeartbeatService } from "./heartbeats.ts";
 import { ScheduleService } from "./schedules.ts";
-import { RecursiveModelService } from "./models.ts";
+import {
+  RecursiveModelService,
+  type PublicRecursiveModelService,
+} from "./models.ts";
+import {
+  internalRefinementReviewStarter,
+  internalStructuredModelTurn,
+} from "./internal.ts";
 import { MemoryService } from "./memory.ts";
 import { HarnessService } from "./harness.ts";
 import { SkillService } from "./skills.ts";
@@ -280,7 +287,8 @@ export class Supervisor {
   readonly modelLoop: ModelLoop;
   readonly agents: AgentService;
   readonly documents: DocumentService;
-  readonly models: RecursiveModelService;
+  readonly models: PublicRecursiveModelService;
+  readonly #recursiveModels: RecursiveModelService;
   readonly goals: GoalService;
   readonly heartbeats: HeartbeatService;
   readonly schedules: ScheduleService;
@@ -354,11 +362,28 @@ export class Supervisor {
     this.goals = new GoalService(storage, outbox);
     this.heartbeats = new HeartbeatService(storage);
     this.schedules = new ScheduleService(storage);
-    this.models = new RecursiveModelService(storage, this.agents, this.modelLoop, outbox, artifacts, this.memory);
+    this.#recursiveModels = new RecursiveModelService(
+      storage,
+      this.agents,
+      this.modelLoop,
+      internalStructuredModelTurn(this.modelLoop),
+      this.modelEffectAdmission,
+      outbox,
+      artifacts,
+      this.memory,
+    );
+    this.models = this.#recursiveModels;
     this.restartConsoleAfterCell = restartConsoleAfterCell;
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), acceptanceAgentRunMaxSteps(), this.compactions, modelExecutor);
     this.effectReconciliation = new EffectReconciliationService(storage);
-    this.refiner = new RefinerService(storage, this.models, this.harness, profile, userScopeKey);
+    this.refiner = new RefinerService(
+      storage,
+      this.#recursiveModels,
+      internalRefinementReviewStarter(this.#recursiveModels),
+      this.harness,
+      profile,
+      userScopeKey,
+    );
     this.skillManagement = new SkillManagementService(storage, profile, this.harness, this.skills, this.refiner, userScopeKey, device.profileId);
     this.skills.attachCatalog(this.skillManagement);
     this.contexts.attachSkillCatalog(this.skillManagement);
@@ -530,7 +555,7 @@ export class Supervisor {
     await this.modelLoop.recoverIncomplete();
     await this.modelLoop.reconcileRunningSessions();
     await this.goals.recoverIncomplete();
-    await this.models.recoverIncomplete();
+    await this.#recursiveModels.recoverIncomplete();
     await this.refiner.recoverIncomplete();
     await this.agents.recoverDeliveries();
     await this.runs.recoverIncomplete();
@@ -553,7 +578,7 @@ export class Supervisor {
     await this.schedules.close();
     await this.console.stop();
     await this.refiner.close();
-    await this.models.close();
+    await this.#recursiveModels.close();
     await this.sync.stop();
     await this.executionLeases?.close();
     this.storage.close();
@@ -568,7 +593,7 @@ export class Supervisor {
     await this.schedules.close();
     await this.console.stop();
     await this.refiner.close();
-    await this.models.close();
+    await this.#recursiveModels.close();
     await this.outbox.quiesceForDeletion();
     try { return await this.sync.deleteOwnedData(input); }
     finally {

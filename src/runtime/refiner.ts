@@ -2,8 +2,9 @@ import {
   REFINEMENT_REVIEW_POLICY,
   ValidationError,
   createRefinementReviewRequest,
-  parseRefinementReview,
   projectEvents,
+  validateRefinementReviewRecursiveResult,
+  validateRefinementReviewValue,
   type HarnessKind,
   type HarnessScope,
   type JsonValue,
@@ -15,7 +16,8 @@ import { containsBrokeredSecret, isSensitiveEnvironmentKey, scrubText } from "..
 import type { AgentStorage } from "../storage/index.ts";
 import type { ProfileDatabase } from "../sync/index.ts";
 import type { HarnessService } from "./harness.ts";
-import type { RecursiveModelService, RecursiveModelResult } from "./models.ts";
+import type { PublicRecursiveModelService } from "./models.ts";
+import type { StructuredRefinementReviewStarter } from "./internal.ts";
 import {
   buildRefinementTrajectorySnapshot,
   type RefinementEvaluationCandidateStatus,
@@ -105,7 +107,9 @@ export class RefinerService {
 
   constructor(
     readonly storage: AgentStorage,
-    readonly models: RecursiveModelService,
+    private readonly models: PublicRecursiveModelService,
+    private readonly startStructuredRefinementModel:
+      StructuredRefinementReviewStarter,
     readonly harness: HarnessService,
     readonly profile: ProfileDatabase,
     readonly userScopeKey = "default-user",
@@ -329,10 +333,14 @@ export class RefinerService {
       if (record.handleId === null) {
         const source = await this.#requestEvent(record);
         const request = source.request as unknown as RefinementReviewRequest;
-        const handle = await this.models.start(record.sessionId, record.branchId, {
+        const handle = await this.startStructuredRefinementModel(
+          record.sessionId,
+          record.branchId,
+          {
           prompt: refinerPrompt(request), input: { request: source.request, snapshot: source.snapshot },
           idempotencyKey: `refinement-review:${record.reviewId}`, run: true,
-        });
+          },
+        );
         await this.storage.appendEvents([{
           sessionId: record.sessionId, branchId: record.branchId, type: "RefinementReviewChildLinked", producer: "supervisor",
           idempotencyKey: `refinement-review-child:${record.reviewId}`,
@@ -361,9 +369,14 @@ export class RefinerService {
         const status = result.outcome === "unknown" ? "unknown" : result.outcome === "cancelled" ? "cancelled" : "failed";
         await this.#terminal(record, status, { reason: result.error ?? `Refiner child ended ${result.outcome}` }); return;
       }
-      const raw = await this.#rawResult(result);
       const request = (await this.#requestEvent(record)).request as unknown as RefinementReviewRequest;
-      const decision = parseRefinementReview(raw, request, { brokeredCredentialValues: knownSecretValues() });
+      const structured = validateRefinementReviewRecursiveResult(result.value);
+      const decision = validateRefinementReviewValue(
+        structured.submission,
+        request,
+        { brokeredCredentialValues: knownSecretValues() },
+        structured.transportInputBytes,
+      );
       if (decision.status === "no_change") {
         await this.#terminal(record, "no_change", { decisionFingerprint: decision.decisionFingerprint, reason: decision.reason }); return;
       }
@@ -426,17 +439,6 @@ export class RefinerService {
     const payload = event.payload as { request: JsonValue; snapshot?: JsonValue };
     if (payload.snapshot === undefined) throw new ValidationError("Refinement review has no retained trajectory snapshot and cannot be resumed safely");
     return { request: payload.request, snapshot: payload.snapshot };
-  }
-
-  async #rawResult(result: RecursiveModelResult): Promise<string> {
-    if (result.resultMessageId !== undefined) {
-      const events = await this.storage.loadEvents(result.provenance.childSessionId, { branchId: result.provenance.childBranchId });
-      const event = events.find((item) => item.type === "MessageAppended" && (item.payload as { messageId?: string }).messageId === result.resultMessageId);
-      if (event) return String((event.payload as { content: string }).content);
-    }
-    const value = result.value;
-    if (value && typeof value === "object" && !Array.isArray(value) && value.kind === "text" && typeof value.text === "string") return value.text;
-    throw new ValidationError("Refinement result has no attributable textual response");
   }
 
   async #snapshot(workspaceId: string, sessionId: string, branchId: string, throughCursor: string, requestedScope: HarnessScope, requestedScopeKey: string, allowedKinds: readonly HarnessKind[], trigger: RefinementTrajectoryTriggerInput): Promise<RefinementTrajectorySnapshot> {

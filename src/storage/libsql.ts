@@ -1,6 +1,6 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, ValidationError, canonicalSkillDigest, newId, projectEvents, reduceAgentState, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateRefinementReviewRequest } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, ValidationError, canonicalSkillDigest, createRefinementReviewRecursiveResult, newId, projectEvents, reduceAgentState, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
@@ -137,6 +137,29 @@ function rowToReceipt(row: Row): SyncIngestReceiptRecord { return { envelopeId:S
 function rowToOriginWatermark(row: Row): SyncOriginWatermarkRecord { return { replicaId:String(row.replica_id),originDeviceId:String(row.origin_device_id),stagedSequence:Number(row.staged_sequence),ingestedSequence:Number(row.ingested_sequence),updatedAt:String(row.updated_at) }; }
 function rowToQuarantine(row: Row): SyncQuarantineRecord { return { envelopeId:String(row.envelope_id),workspaceId:String(row.workspace_id),originDeviceId:row.origin_device_id===null?null:String(row.origin_device_id),originSequence:row.origin_sequence===null?null:Number(row.origin_sequence),reasonCode:String(row.reason_code),reason:String(row.reason),envelope:JSON.parse(String(row.envelope_json)) as JsonValue,digest:row.digest===null?null:String(row.digest),status:String(row.status) as SyncQuarantineRecord["status"],firstSeenAt:String(row.first_seen_at),lastSeenAt:String(row.last_seen_at) }; }
 function rowToMapping(row: Row): SyncBranchMappingRecord { return { mappingId:String(row.mapping_id),originDeviceId:String(row.origin_device_id),sessionId:String(row.session_id),sourceBranchId:String(row.source_branch_id),forkEventId:String(row.fork_event_id),derivedBranchId:String(row.derived_branch_id),lastSourceEventId:row.last_source_event_id===null?null:String(row.last_source_event_id),createdAt:String(row.created_at) }; }
+/**
+ * Physical branch set for one canonical branch reference. Sync divergence
+ * preserves both writers by placing valid incoming events on a sync-derived
+ * branch while immutable payloads keep their origin branch identity, so
+ * cross-event validation accepts the canonical branch plus its recorded
+ * derived branches. Without sync mappings this is exactly the canonical
+ * branch, keeping local command validation strict.
+ */
+async function syncBranchLineage(
+  tx: Transaction,
+  sessionId: string,
+  canonicalBranchId: string,
+): Promise<string[]> {
+  const mapped = await tx.execute({
+    sql: "SELECT derived_branch_id FROM sync_branch_mappings WHERE session_id=? AND source_branch_id=? ORDER BY created_at,mapping_id",
+    args: [sessionId, canonicalBranchId],
+  });
+  return [
+    canonicalBranchId,
+    ...mapped.rows.map((row) => String(row.derived_branch_id)),
+  ];
+}
+
 function rowToSyncConflict(row: Row): SyncConflictRecord { const resolution=row.resolution_json===null?undefined:JSON.parse(String(row.resolution_json)) as JsonValue; return { conflictId:String(row.conflict_id),kind:String(row.kind) as SyncConflictRecord["kind"],workspaceId:String(row.workspace_id),sessionId:row.session_id===null?null:String(row.session_id),taskId:row.task_id===null?null:String(row.task_id),eventIds:JSON.parse(String(row.event_ids_json)) as string[],originDeviceIds:JSON.parse(String(row.origin_device_ids_json)) as string[],details:JSON.parse(String(row.details_json)) as JsonValue,status:String(row.status) as SyncConflictRecord["status"],...(resolution===undefined?{}:{resolution}),detectedAt:String(row.detected_at),resolvedAt:row.resolved_at===null?null:String(row.resolved_at) }; }
 function rowToManifest(row: Row): DataManifestRecord { return { manifestId:String(row.manifest_id),operation:String(row.operation) as DataManifestRecord["operation"],scopeKind:String(row.scope_kind) as DataManifestRecord["scopeKind"],scopeId:String(row.scope_id),requestedBy:String(row.requested_by),owned:Number(row.owned)===1,resources:JSON.parse(String(row.resources_json)) as JsonValue,replicaStatus:JSON.parse(String(row.replica_status_json)) as JsonValue,status:String(row.status) as DataManifestRecord["status"],createdAt:String(row.created_at),completedAt:row.completed_at===null?null:String(row.completed_at) }; }
 
@@ -715,6 +738,124 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const inputSet = payload.inputSetId === undefined ? { rows: [{}] } : await tx.execute({ sql: "SELECT input_set_id FROM input_sets WHERE input_set_id=?", args: [payload.inputSetId] });
       if (!taskRow || String(taskRow.child_session_id) !== payload.childSessionId || String(taskRow.child_branch_id) !== payload.childBranchId || String(taskRow.parent_branch_id) !== payload.parentBranchId || payload.parentSessionId !== event.sessionId || !Bun.deepEquals(JSON.parse(String(taskRow.model_json)), payload.model) || !inputSet.rows.length) throw new ValidationError("Recursive model handle does not match its child task and input set");
     }
+    if (event.type === "RecursiveModelStatusChanged") {
+      const payload = event.payload as EventPayloads["RecursiveModelStatusChanged"];
+      const selected = await tx.execute({
+        sql: "SELECT session_id,branch_id,payload_json FROM events WHERE type='RecursiveModelStarted' AND json_extract(payload_json,'$.handleId')=? ORDER BY sequence DESC LIMIT 1",
+        args: [payload.handleId],
+      });
+      const row = selected.rows[0];
+      const started = row
+        ? JSON.parse(String(row.payload_json)) as
+          EventPayloads["RecursiveModelStarted"]
+        : undefined;
+      const parentLineage = started
+        ? await syncBranchLineage(tx, event.sessionId, started.parentBranchId)
+        : [];
+      if (!row || !started || String(row.session_id) !== event.sessionId ||
+          !parentLineage.includes(String(row.branch_id)) ||
+          started.parentSessionId !== event.sessionId ||
+          !parentLineage.includes(event.branchId)) {
+        throw new ValidationError(
+          "Recursive model status does not match its durable parent handle",
+        );
+      }
+      const admission = started.responseAdmission;
+      if (admission.responseContract.kind === "required-tool-set" &&
+          payload.status === "completed") {
+        const result = validateRefinementReviewRecursiveResult(payload.result, {
+          contractDigest: admission.responseContract.contractDigest,
+        });
+        const childLineage = await syncBranchLineage(
+          tx,
+          started.childSessionId,
+          started.childBranchId,
+        );
+        const childMarks = childLineage.map(() => "?").join(",");
+        const requested = await tx.execute({
+          sql: `SELECT payload_json FROM events WHERE session_id=? AND branch_id IN (${childMarks}) AND type='ModelCallRequested' AND json_extract(payload_json,'$.callId')=? ORDER BY sequence DESC LIMIT 1`,
+          args: [
+            started.childSessionId,
+            ...childLineage,
+            result.modelCallId,
+          ],
+        });
+        const callRequest = requested.rows[0]
+          ? JSON.parse(String(requested.rows[0].payload_json)) as
+            EventPayloads["ModelCallRequested"]
+          : undefined;
+        if (!callRequest || !Bun.deepEquals({
+          responseContract: callRequest.modelDispatch.responseContract,
+          responseCapability: callRequest.modelDispatch.responseCapability,
+        }, admission)) {
+          throw new ValidationError(
+            "Structured recursive result call does not match retained response admission",
+          );
+        }
+        const completed = await tx.execute({
+          sql: `SELECT payload_json FROM events WHERE session_id=? AND branch_id IN (${childMarks}) AND type='ModelCallCompleted' AND json_extract(payload_json,'$.callId')=? ORDER BY sequence DESC LIMIT 1`,
+          args: [
+            started.childSessionId,
+            ...childLineage,
+            result.modelCallId,
+          ],
+        });
+        const completion = completed.rows[0]
+          ? JSON.parse(String(completed.rows[0].payload_json)) as
+            EventPayloads["ModelCallCompleted"]
+          : undefined;
+        if (!completion || completion.result.kind !== "tool-submission" ||
+            completion.responseMessageId !== undefined ||
+            completion.result.name !== result.toolName ||
+            completion.result.providerToolCallId !== result.providerToolCallId ||
+            completion.result.inputDigest !== result.transportInputDigest ||
+            completion.resultDigest !== result.modelResultDigest) {
+          throw new ValidationError(
+            "Structured recursive result does not match child model completion",
+          );
+        }
+        const outcome = await tx.execute({
+          sql: `SELECT payload_json FROM events WHERE session_id=? AND branch_id IN (${childMarks}) AND type='EffectOutcomeRecorded' AND json_extract(payload_json,'$.effectId')=? ORDER BY sequence DESC LIMIT 1`,
+          args: [
+            started.childSessionId,
+            ...childLineage,
+            callRequest.effectId,
+          ],
+        });
+        const effectOutcome = outcome.rows[0]
+          ? JSON.parse(String(outcome.rows[0].payload_json)) as
+            EventPayloads["EffectOutcomeRecorded"]
+          : undefined;
+        const output = effectOutcome?.outcome === "succeeded"
+          ? validateModelEffectOutputV2(effectOutcome.output, {
+              responseContract: callRequest.modelDispatch.responseContract,
+              responseCapability: callRequest.modelDispatch.responseCapability,
+              configuredProvider:
+                callRequest.modelDispatch.configuration.provider,
+            })
+          : undefined;
+        if (!output || output.result.kind !== "tool-submission") {
+          throw new ValidationError(
+            "Structured recursive result is missing its authoritative model effect output",
+          );
+        }
+        const submission = output.result.submission;
+        const expected = createRefinementReviewRecursiveResult({
+          contractDigest: admission.responseContract.contractDigest,
+          modelCallId: result.modelCallId,
+          providerToolCallId: submission.providerToolCallId,
+          modelResultDigest: output.resultDigest,
+          transportInput: submission.input,
+          transportInputDigest: submission.inputDigest,
+          transportInputBytes: submission.inputBytes,
+        });
+        if (!Bun.deepEquals(result, expected)) {
+          throw new ValidationError(
+            "Structured recursive result is not the normalized derivative of its model effect",
+          );
+        }
+      }
+    }
     if (event.type === "RefinementReviewRequested") {
       const payload = event.payload as EventPayloads["RefinementReviewRequested"];
       const request = validateRefinementReviewRequest(payload.request);
@@ -725,9 +866,28 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     }
     if (event.type === "RefinementReviewChildLinked") {
       const payload = event.payload as EventPayloads["RefinementReviewChildLinked"];
-      const handle = await tx.execute({ sql: "SELECT parent_session_id,parent_branch_id,child_session_id,child_branch_id FROM recursive_model_handles WHERE handle_id=?", args: [payload.handleId] });
+      const handle = await tx.execute({
+        sql: "SELECT session_id,branch_id,payload_json FROM events WHERE type='RecursiveModelStarted' AND json_extract(payload_json,'$.handleId')=? ORDER BY sequence DESC LIMIT 1",
+        args: [payload.handleId],
+      });
       const row = handle.rows[0];
-      if (!row || String(row.parent_session_id) !== event.sessionId || String(row.parent_branch_id) !== event.branchId || String(row.child_session_id) !== payload.childSessionId || String(row.child_branch_id) !== payload.childBranchId) throw new ValidationError("Refinement review child link does not match its durable recursive handle");
+      const started = row
+        ? JSON.parse(String(row.payload_json)) as
+          EventPayloads["RecursiveModelStarted"]
+        : undefined;
+      const linkLineage = started
+        ? await syncBranchLineage(tx, event.sessionId, started.parentBranchId)
+        : [];
+      if (!row || !started || String(row.session_id) !== event.sessionId ||
+          !linkLineage.includes(String(row.branch_id)) ||
+          started.parentSessionId !== event.sessionId ||
+          !linkLineage.includes(event.branchId) ||
+          started.childSessionId !== payload.childSessionId ||
+          started.childBranchId !== payload.childBranchId) {
+        throw new ValidationError(
+          "Refinement review child link does not match its durable recursive handle",
+        );
+      }
     }
     if (event.type === "RefinementReviewStatusChanged") {
       const payload = event.payload as EventPayloads["RefinementReviewStatusChanged"];
@@ -893,7 +1053,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     if (event.type === "RecursiveModelStatusChanged" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; await tx.execute({ sql: "UPDATE recursive_model_handles SET status=?,outcome=COALESCE(?,outcome),result_message_id=COALESCE(?,result_message_id),result_json=COALESCE(?,result_json),result_artifact_id=COALESCE(?,result_artifact_id),error=COALESCE(?,error),last_event_id=?,updated_at=? WHERE handle_id=?", args: [p.status,p.outcome ?? null,p.resultMessageId ?? null,p.result === undefined ? null : json(p.result),p.resultArtifactId ?? null,p.error ?? null,event.id,event.committedAt,p.handleId] }); }
     if (event.type === "UserCorrection") { const p = event.payload as EventPayloads["UserCorrection"]; await tx.execute({ sql: "INSERT INTO user_corrections(correction_id,session_id,branch_id,corrected_event_ids_json,correction_text,event_id,created_at) VALUES(?,?,?,?,?,?,?)", args: [p.correctionId,event.sessionId,event.branchId,json(p.correctedEventIds),p.correction,event.id,event.committedAt] }); }
     if (event.type === "RefinementReviewRequested") { const p = event.payload as EventPayloads["RefinementReviewRequested"]; await tx.execute({ sql: "INSERT INTO refinement_reviews(review_id,session_id,branch_id,fingerprint,mode,requested_scope,requested_scope_key,allowed_kinds_json,trigger_id,trigger_kind,trigger_fingerprint,trigger_key,nonterminal_key,trigger_evidence_through_cursor,evidence_event_ids_json,source_event_ids_json,source_snapshot_hash,source_through_cursor,instructions,request_json,snapshot_json,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'requested',?,?,?,?)", args: [p.reviewId,event.sessionId,event.branchId,p.fingerprint,p.mode,p.requestedScope,p.requestedScopeKey,json(p.allowedKinds),p.triggerId,p.triggerKind,p.triggerFingerprint,p.triggerKey ?? null,p.nonterminalKey ?? null,p.triggerEvidenceThroughCursor ?? null,json(p.evidenceEventIds),json(p.sourceEventIds),p.sourceSnapshotHash,p.sourceThroughCursor,p.instructions ?? null,json(p.request),p.snapshot === undefined ? null : json(p.snapshot),event.id,event.id,event.committedAt,event.committedAt] }); }
-    if (event.type === "RefinementReviewChildLinked") { const p = event.payload as EventPayloads["RefinementReviewChildLinked"]; await tx.execute({ sql: "UPDATE refinement_reviews SET handle_id=?,child_session_id=?,child_branch_id=?,last_event_id=?,updated_at=? WHERE review_id=? AND status='requested' AND handle_id IS NULL", args: [p.handleId,p.childSessionId,p.childBranchId,event.id,event.committedAt,p.reviewId] }); }
+    if (event.type === "RefinementReviewChildLinked" && executionOwned) { const p = event.payload as EventPayloads["RefinementReviewChildLinked"]; await tx.execute({ sql: "UPDATE refinement_reviews SET handle_id=?,child_session_id=?,child_branch_id=?,last_event_id=?,updated_at=? WHERE review_id=? AND status='requested' AND handle_id IS NULL", args: [p.handleId,p.childSessionId,p.childBranchId,event.id,event.committedAt,p.reviewId] }); }
     if (event.type === "RefinementReviewStatusChanged") { const p = event.payload as EventPayloads["RefinementReviewStatusChanged"]; const changed = await tx.execute({ sql: "UPDATE refinement_reviews SET status=?,decision_fingerprint=COALESCE(?,decision_fingerprint),proposal_id=COALESCE(?,proposal_id),reason=COALESCE(?,reason),last_event_id=?,updated_at=? WHERE review_id=? AND status=?", args: [p.status,p.decisionFingerprint ?? null,p.proposalId ?? null,p.reason ?? null,event.id,event.committedAt,p.reviewId,p.expectedStatus] }); if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Refinement review status compare-and-swap failed", { reviewId: p.reviewId, expectedStatus: p.expectedStatus }); }
     if (event.type === "RefinementTriggerConsumed") { const p = event.payload as EventPayloads["RefinementTriggerConsumed"]; await tx.execute({ sql: "INSERT INTO refinement_trigger_consumptions(session_id,branch_id,trigger_key,last_consumed_evidence_cursor,review_id,event_id,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(session_id,branch_id,trigger_key) DO UPDATE SET last_consumed_evidence_cursor=excluded.last_consumed_evidence_cursor,review_id=excluded.review_id,event_id=excluded.event_id,updated_at=excluded.updated_at WHERE CAST(excluded.last_consumed_evidence_cursor AS INTEGER)>CAST(refinement_trigger_consumptions.last_consumed_evidence_cursor AS INTEGER)", args: [event.sessionId,event.branchId,p.triggerKey,p.evidenceThroughCursor,p.reviewId,event.id,event.committedAt] }); }
     if (event.type === "HarnessVersionCreated") {

@@ -6,10 +6,18 @@ import {
   MAX_REFINEMENT_INSTRUCTIONS_BYTES,
   MAX_REFINEMENT_REVIEW_BYTES,
   MAX_REFINEMENT_SOURCE_EVENT_IDS,
+  REFINEMENT_REVIEW_CONTRACT_ID,
+  REFINEMENT_REVIEW_INPUT_SCHEMA,
+  REFINEMENT_REVIEW_INPUT_SCHEMA_DIGEST,
   REFINEMENT_REVIEW_PROTOCOL,
+  REFINEMENT_REVIEW_TOOL_NAME,
+  REFINEMENT_REVIEW_TOOL_SET,
   REFINEMENT_REVIEW_VERSION,
+  canonicalJsonByteLength,
+  canonicalJsonDigest,
   createRefinementReviewRequest,
-  parseRefinementReview,
+  encodeRefinementReviewTransportValue,
+  normalizeRefinementReviewTransportValue,
   refinementProposalFingerprint,
   refinementProposalId,
   refinementReviewFingerprint,
@@ -19,9 +27,10 @@ import {
   scrubRefinementReviewText,
   validateRefinementEditableTarget,
   validateRefinementReviewRequest,
+  validateRefinementReviewValue,
   type CreateRefinementReviewRequest,
   type RefinementReviewPropose,
-} from "../../src/domain/refinement-review.ts";
+} from "../../src/domain/index.ts";
 
 const requestInput = (overrides: Partial<CreateRefinementReviewRequest> = {}): CreateRefinementReviewRequest => ({
   mode: "manual",
@@ -69,7 +78,13 @@ const proposeObject = (reviewId: string, overrides: Record<string, unknown> = {}
   evaluation,
   ...overrides,
 });
-const parseObject = (value: unknown, req = request()) => parseRefinementReview(JSON.stringify(value), req);
+const parseObject = (value: unknown, req = request()) =>
+  validateRefinementReviewValue(
+    value,
+    req,
+    {},
+    canonicalJsonByteLength(value as any),
+  );
 
 
 describe("refinement review request", () => {
@@ -156,15 +171,197 @@ describe("refinement review response protocol", () => {
     expect(proposed.proposalFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
-  test.each([
-    ["markdown fence", (raw: string) => `\`\`\`json\n${raw}\n\`\`\``],
-    ["leading prose", (raw: string) => `result: ${raw}`],
-    ["trailing prose", (raw: string) => `${raw} done`],
-    ["concatenated object", (raw: string) => `${raw}${raw}`],
-  ])("rejects %s around an otherwise valid decision", (_name, mutate) => {
+  test("pins the sealed one-tool contract and fully-required portable schema", () => {
+    expect(REFINEMENT_REVIEW_CONTRACT_ID).toBe("agencity.refinement-review.v1");
+    expect(REFINEMENT_REVIEW_TOOL_NAME).toBe("agencity_submit_refinement_review");
+    expect(REFINEMENT_REVIEW_TOOL_SET.map((tool) => tool.name)).toEqual([
+      REFINEMENT_REVIEW_TOOL_NAME,
+    ]);
+    expect(REFINEMENT_REVIEW_INPUT_SCHEMA_DIGEST).toBe(
+      canonicalJsonDigest(REFINEMENT_REVIEW_INPUT_SCHEMA),
+    );
+    expect(REFINEMENT_REVIEW_INPUT_SCHEMA_DIGEST).toBe(
+      "sha256:b3a0bbaa3a16dc2174fc08b8dbedc64c376fc0a5b8f83fdad82fa4fef45fe947",
+    );
+    const visit = (value: unknown): void => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        if (Array.isArray(value)) for (const child of value) visit(child);
+        return;
+      }
+      const record = value as Record<string, unknown>;
+      if (record.type === "object") {
+        expect(record.additionalProperties).toBe(false);
+        expect(new Set(record.required as string[])).toEqual(
+          new Set(Object.keys(record.properties as object)),
+        );
+      }
+      for (const child of Object.values(record)) visit(child);
+    };
+    visit(REFINEMENT_REVIEW_INPUT_SCHEMA);
+  });
+
+  test("normalizes explicit absence while preserving null, empty arrays, and empty objects", () => {
     const req = request();
-    const raw = JSON.stringify(proposeObject(req.reviewId));
-    expect(() => parseRefinementReview(mutate(raw), req)).toThrow("exactly one JSON object");
+    const decision = proposeObject(req.reviewId, {
+      edits: [{
+        operation: "create",
+        kind: "skill",
+        scope: "local",
+        scopeKey: "session-1",
+        name: "lossless",
+        content: {
+          kind: "skill",
+          description: "Lossless values",
+          source: "export default () => null;",
+          inputSchema: {},
+          permissions: [],
+          tests: [
+            { name: "present-null", input: [], expected: null },
+            { name: "absent", input: {}, expectedError: "expected failure" },
+          ],
+          runtime: "bun",
+        },
+        tags: [],
+        conflictEntryIds: [],
+        evidenceEventIds: ["event-1"],
+      }],
+    }) as unknown as RefinementReviewPropose;
+    const transport = encodeRefinementReviewTransportValue(decision);
+    const normalized = normalizeRefinementReviewTransportValue(transport, {
+      encodedBytes: canonicalJsonByteLength(transport),
+    });
+    expect(normalized).toEqual(decision);
+    if (normalized.status !== "propose") throw new Error("expected proposal");
+    const edit = normalized.edits[0];
+    if (edit?.operation === "retire" || edit?.content.kind !== "skill") {
+      throw new Error("expected skill");
+    }
+    expect(edit.content.inputSchema).toEqual({});
+    expect(edit.content.tests[0]!.expected).toBeNull();
+    expect(Object.hasOwn(edit.content.tests[1]!, "expected")).toBe(false);
+    expect(edit.tags).toEqual([]);
+    expect(edit.conflictEntryIds).toEqual([]);
+  });
+
+  test("round-trips every edit and content variant with explicit optional presence", () => {
+    const req = request();
+    const decision: RefinementReviewPropose = {
+      protocol: REFINEMENT_REVIEW_PROTOCOL,
+      version: REFINEMENT_REVIEW_VERSION,
+      reviewId: req.reviewId,
+      status: "propose",
+      trigger: "Exercise every transport variant.",
+      predictedEffect: "The transport remains lossless.",
+      edits: [
+        {
+          operation: "create",
+          kind: "memory",
+          scope: "local",
+          name: "memory",
+          content: { kind: "memory", memoryKind: "claim", text: "claim" },
+        },
+        {
+          operation: "create",
+          kind: "prompt_note",
+          scope: "local",
+          scopeKey: "session-1",
+          name: "prompt",
+          content: { kind: "prompt_note", text: "note" },
+          tags: [],
+          confidence: 0,
+          evidenceEventIds: [],
+          conflictEntryIds: [],
+        },
+        {
+          operation: "create",
+          kind: "skill",
+          scope: "local",
+          scopeKey: "session-1",
+          name: "skill",
+          content: {
+            kind: "skill",
+            description: "skill",
+            source: "return null",
+            inputSchema: {},
+            permissions: [],
+            tests: [
+              { name: "null", input: null, expected: null },
+              { name: "error", input: {}, expectedError: "failure" },
+            ],
+            runtime: "bun",
+            compatibility: "v1",
+          },
+        },
+        {
+          operation: "create",
+          kind: "subagent_spec",
+          scope: "local",
+          scopeKey: "session-1",
+          name: "subagent",
+          content: {
+            kind: "subagent_spec",
+            role: "review",
+            invocationCriteria: "when needed",
+            expectedArtifact: "report",
+            prompt: "Review evidence.",
+            model: {
+              provider: "fixture",
+              model: "fixture/model",
+              maxOutputTokens: 1,
+              reasoningEffort: "none",
+            },
+            budget: { tokenLimit: 0, costLimitUsd: 0, turnLimit: 0, wallTimeLimitMs: 0 },
+            completionCriteria: "report complete",
+          },
+        },
+        {
+          operation: "replace",
+          entryId: "entry-memory",
+          expectedVersionId: "version-memory-1",
+          content: { kind: "memory", memoryKind: "observation", text: "replace" },
+        },
+        {
+          operation: "replace",
+          entryId: "entry-prompt",
+          expectedVersionId: "version-prompt-1",
+          name: "renamed",
+          content: { kind: "prompt_note", text: "replacement" },
+          confidence: 1,
+        },
+        {
+          operation: "retire",
+          entryId: "entry-one",
+          expectedVersionId: "version-one",
+        },
+        {
+          operation: "retire",
+          entryId: "entry-two",
+          expectedVersionId: "version-two",
+          evidenceEventIds: [],
+          reason: "retire",
+        },
+      ],
+      evidenceEventIds: ["event-1"],
+      evaluation: {
+        kind: "objective",
+        name: "all variants",
+        metric: "round trip",
+        target: {
+          null: null,
+          string: "",
+          number: 0,
+          boolean: false,
+          array: [],
+          object: {},
+        },
+        baseline: {},
+        testCommand: "true",
+      },
+    };
+    const transport = encodeRefinementReviewTransportValue(decision);
+    expect(normalizeRefinementReviewTransportValue(transport, {
+      encodedBytes: canonicalJsonByteLength(transport),
+    })).toEqual(decision);
   });
 
   test.each([
@@ -196,7 +393,13 @@ describe("refinement review response protocol", () => {
       evidenceEventIds: [],
     });
     expect(new TextEncoder().encode(raw).byteLength).toBeGreaterThan(MAX_REFINEMENT_REVIEW_BYTES);
-    expect(() => parseRefinementReview(raw, req)).toThrow(`exceeds ${MAX_REFINEMENT_REVIEW_BYTES} bytes`);
+    const value = JSON.parse(raw);
+    expect(() => validateRefinementReviewValue(
+      value,
+      req,
+      {},
+      new TextEncoder().encode(raw).byteLength,
+    )).toThrow(`exceeds ${MAX_REFINEMENT_REVIEW_BYTES} bytes`);
   });
 
   test("bounds edit count and individual serialized edit size", () => {
@@ -323,7 +526,12 @@ describe("determinism and adversarial material", () => {
   ])("rejects %s anywhere in model-produced content", (_name, text, sensitive) => {
     const req = request();
     const value = proposeObject(req.reviewId, { edits: [{ ...createMemory, content: { kind: "memory", memoryKind: "observation", text } }] });
-    expect(() => parseRefinementReview(JSON.stringify(value), req, sensitive)).toThrow("credential or brokered secret material");
+    expect(() => validateRefinementReviewValue(
+      value,
+      req,
+      sensitive,
+      canonicalJsonByteLength(value as any),
+    )).toThrow("credential or brokered secret material");
   });
 
   test("opaque credential handles and ordinary credential labels remain valid", () => {

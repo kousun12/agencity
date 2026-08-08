@@ -112,7 +112,20 @@ export class StrictActionFixture {
     const fallback: Reply = durable
       ? action("final", `fixture completed: ${durable.task}`)
       : reviewId
-        ? { protocol: "agencity.refinement-review", version: 1, reviewId, status: "no_change", reason: "The frozen trajectory does not justify an evidence-backed change.", evidenceEventIds: [] }
+        ? {
+            name: "agencity_submit_refinement_review",
+            input: {
+              decision: {
+                protocol: "agencity.refinement-review",
+                version: 1,
+                reviewId,
+                status: "no_change",
+                reason:
+                  "The frozen trajectory does not justify an evidence-backed change.",
+                evidenceEventIds: [],
+              },
+            },
+          }
         : `fixture recursive response: ${lastUserText.slice(-200)}`;
     const reply = typeof selected === "function" ? selected(probe) : selected ?? fallback;
     const text = typeof reply === "string" ? reply : JSON.stringify(reply);
@@ -189,8 +202,9 @@ function split(text: string, parts: number): string[] {
   return result.length ? result : [""];
 }
 
-function formalToolCall(reply: Record<string, unknown>): { name: "bun_console" | "finish"; arguments: string } | null {
-  if ((reply.name === "bun_console" || reply.name === "finish") &&
+function formalToolCall(reply: Record<string, unknown>): { name: string; arguments: string } | null {
+  if ((reply.name === "bun_console" || reply.name === "finish" ||
+      reply.name === "agencity_submit_refinement_review") &&
       reply.input && typeof reply.input === "object" && !Array.isArray(reply.input)) {
     return { name: reply.name, arguments: JSON.stringify(reply.input) };
   }

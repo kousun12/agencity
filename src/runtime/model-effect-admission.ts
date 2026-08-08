@@ -5,6 +5,7 @@ import {
   type BuiltInStructuredContractId,
   type ModelConfigurationInput,
   type ModelDispatch,
+  type RecursiveResponseAdmission,
   type ResolvedModelExecutionDescriptor,
 } from "../domain/index.ts";
 import type { ModelExecutor } from "../executors/index.ts";
@@ -12,6 +13,10 @@ import type { ModelExecutor } from "../executors/index.ts";
 export interface ModelEffectAdmission {
   readonly modelDispatch: ModelDispatch;
   readonly execution: ResolvedModelExecutionDescriptor;
+}
+
+export interface RetainedModelEffectAdmission {
+  readonly modelDispatch: ModelDispatch;
 }
 
 /**
@@ -65,5 +70,21 @@ export class ModelEffectAdmissionService {
       },
     );
     return Object.freeze({ modelDispatch, execution });
+  }
+
+  /**
+   * Reconstructs only the model/reasoning/endpoint side of a dispatch. The
+   * response contract and capability are copied from durable admission and are
+   * never resolved against current registry or catalog capability state.
+   */
+  requestRetained(
+    responseAdmission: RecursiveResponseAdmission,
+    configuration: ModelConfigurationInput,
+  ): RetainedModelEffectAdmission {
+    const modelDispatch = modelDispatchWithResponseAdmission(
+      this.modelExecutor.resolveDispatch(configuration),
+      responseAdmission,
+    );
+    return Object.freeze({ modelDispatch });
   }
 }

@@ -17,6 +17,7 @@ import {
   type ModelDispatch,
   type ModelEffectFailureCode,
   type ModelEffectOutputV2,
+  type RecursiveResponseAdmission,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import { ContextMaterializer } from "./context.ts";
@@ -33,6 +34,7 @@ import {
 } from "./context-window.ts";
 import { estimateContextWindow } from "./compaction-core.ts";
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
+import { registerStructuredModelTurn } from "./internal.ts";
 
 
 class TurnQueue {
@@ -49,6 +51,13 @@ class TurnQueue {
   }
 }
 
+export interface StructuredModelTurnResult {
+  readonly outcome: EffectOutcome;
+  readonly modelCallId?: string;
+  readonly output?: ModelEffectOutputV2;
+  readonly error?: string;
+}
+
 export class ModelLoop {
   readonly #turns = new TurnQueue();
 
@@ -58,7 +67,21 @@ export class ModelLoop {
     readonly outbox: OutboxRunner,
     readonly compactions?: CompactionService,
     readonly modelExecutor?: ModelExecutor,
-  ) {}
+  ) {
+    // Supervisor-only structured execution stays behind the non-barrel
+    // internal capability registry; see src/runtime/internal.ts.
+    registerStructuredModelTurn(this, async (sessionId, branchId, responseAdmission) => {
+      if (responseAdmission.responseContract.kind !== "required-tool-set") {
+        throw new ValidationError(
+          "Structured model turn requires a retained required-tool-set admission",
+        );
+      }
+      return this.#turns.run(
+        `${sessionId}/${branchId}`,
+        () => this.#turnStructured(sessionId, branchId, responseAdmission),
+      );
+    });
+  }
 
   async turn(
     sessionId: string,
@@ -175,6 +198,228 @@ export class ModelLoop {
       priorCallId = callId;
     }
     return { outcome: "failed", error: "Provider context-window overflow retry limit reached" };
+  }
+
+  async #turnStructured(
+    sessionId: string,
+    branchId: string,
+    responseAdmission: RecursiveResponseAdmission,
+  ): Promise<StructuredModelTurnResult> {
+    const history = await this.storage.loadEvents(sessionId, { branchId });
+    if (!history.length) {
+      throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
+    }
+    const session = await this.storage.getSession?.(sessionId);
+    if (session?.executionOwnerDeviceId && this.storage.deviceId &&
+        session.executionOwnerDeviceId !== this.storage.deviceId) {
+      throw new CapabilityUnavailableError(
+        `execution of session owned by device ${session.executionOwnerDeviceId}`,
+        `${this.storage.name} device ${this.storage.deviceId} (automatic ownership failover is unavailable)`,
+      );
+    }
+    const state = projectEvents(history);
+    assertBudgetAvailable(state);
+    if (!this.modelExecutor) {
+      throw new CapabilityUnavailableError(
+        "structured recursive model execution",
+        "a configured response-aware model executor",
+      );
+    }
+    const turnId = newId();
+    await this.storage.appendEvents([{
+      sessionId,
+      branchId,
+      type: "SessionStatusChanged",
+      producer: "supervisor",
+      idempotencyKey: `structured-turn-running:${turnId}`,
+      payload: { status: "running" },
+    }]);
+    const started = performance.now();
+    const window = this.#windowConfiguration(state);
+    let materialized;
+    if (this.compactions) {
+      const admitted = await new ContextWindowController(window.configuration).admit({
+        buildCandidate: ({ completedCompactions }) =>
+          this.contexts.materialize(sessionId, branchId, {
+            contextId: `structured-turn-${turnId}-context-${completedCompactions}`,
+            idempotencyKey: `structured-turn-context:${turnId}:${completedCompactions}`,
+          }),
+        estimate: (candidate) =>
+          estimateContextWindow(candidate.context).estimatedTokens,
+        compact: async ({ iteration }) => {
+          const compacted = await this.compactions!.compact(sessionId, branchId, {
+            strategy: "deterministic-extractive-v1",
+            reason: "automatic-threshold",
+            requestedBy: "supervisor",
+            idempotencyKey: `structured-turn-threshold:${turnId}:${iteration}`,
+            retainRecentMessages: Math.max(
+              1,
+              AUTOMATIC_COMPACTION_RECENT_MESSAGES - iteration + 1,
+            ),
+            capacity: window.provenance,
+          });
+          return compacted.status === "completed"
+            ? {
+                outcome: "compacted" as const,
+                provenance: {
+                  compactionId: compacted.compactionId,
+                  contextId: compacted.contextId,
+                  sourceDigest: compacted.sourceDigest,
+                },
+              }
+            : {
+                outcome: "protected-only" as const,
+                protectedSourceCount: Math.max(
+                  0,
+                  history.length - compacted.sourceEventIds.length,
+                ),
+              };
+        },
+      });
+      materialized = admitted.candidate;
+    } else {
+      materialized = await this.contexts.materialize(sessionId, branchId);
+    }
+
+    const modelDispatch = new ModelEffectAdmissionService(this.modelExecutor)
+      .requestRetained(responseAdmission, state.model).modelDispatch;
+    let rejectedEstimate =
+      estimateContextWindow(materialized.context).estimatedTokens;
+    let priorCallId: string | undefined;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const callId = `structured-turn-${turnId}-call-${attempt}`;
+      const effectId = `structured-turn-${turnId}-effect-${attempt}`;
+      const effectKey = `model:${callId}`;
+      await this.storage.appendEvents([{
+        sessionId,
+        branchId,
+        type: "ModelCallRequested",
+        producer: "supervisor",
+        idempotencyKey: `model-call:${callId}`,
+        payload: {
+          callId,
+          contextId: materialized.contextId,
+          effectId,
+          modelDispatch,
+          estimatedInputTokens: rejectedEstimate,
+          attempt,
+          ...(priorCallId === undefined ? {} : { retryOfCallId: priorCallId }),
+          contextWindow: window.provenance,
+        },
+      }, {
+        sessionId,
+        branchId,
+        type: "EffectRequested",
+        producer: "supervisor",
+        idempotencyKey: effectKey,
+        payload: {
+          effectId,
+          executor: "model",
+          operation: "complete",
+          input: {
+            callId,
+            context: materialized.context,
+            modelDispatch: modelDispatch as unknown as JsonValue,
+          },
+          idempotencyKey: effectKey,
+          idempotent: false,
+        },
+      }]);
+      const execution = await this.outbox.run(effectId);
+      if (execution.outcome === "succeeded") {
+        const output = modelOutput(execution.output, modelDispatch);
+        await this.#finalizeSucceeded(
+          sessionId,
+          branchId,
+          callId,
+          output,
+          Math.round(performance.now() - started),
+        );
+        return { outcome: "succeeded", modelCallId: callId, output };
+      }
+      const classification = providerClassification(
+        execution.modelFailure,
+        state.model.provider,
+        state.model.model,
+        execution.outcome,
+      );
+      const overflow = this.compactions !== undefined &&
+        classification.code ===
+          ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow;
+      await this.#finalizeTerminated(
+        sessionId,
+        branchId,
+        callId,
+        execution.outcome,
+        execution.error,
+        execution.modelFailure,
+        !overflow,
+      );
+      if (!overflow) {
+        return {
+          outcome: execution.outcome,
+          modelCallId: callId,
+          ...(execution.error === undefined ? {} : { error: execution.error }),
+        };
+      }
+      const compacted = await this.compactions!.compact(sessionId, branchId, {
+        strategy: "deterministic-extractive-v1",
+        reason: "provider-overflow",
+        requestedBy: "supervisor",
+        idempotencyKey: `structured-turn-overflow:${turnId}:${attempt}`,
+        retainRecentMessages: Math.max(
+          1,
+          AUTOMATIC_COMPACTION_RECENT_MESSAGES - attempt,
+        ),
+        capacity: window.provenance,
+      });
+      if (compacted.status !== "completed") {
+        await this.#markIdle(
+          sessionId,
+          branchId,
+          callId,
+          "provider overflow compaction failed",
+        );
+        return {
+          outcome: execution.outcome,
+          modelCallId: callId,
+          error: compacted.error ?? execution.error ??
+            "Provider overflow compaction failed",
+        };
+      }
+      const next = await this.contexts.materialize(sessionId, branchId, {
+        contextId: `structured-turn-${turnId}-overflow-context-${attempt}`,
+        idempotencyKey: `structured-turn-overflow-context:${turnId}:${attempt}`,
+      });
+      const nextEstimate = estimateContextWindow(next.context).estimatedTokens;
+      const retry = planContextWindowOverflowRetry({
+        classification,
+        retriesAlreadyAttempted: attempt - 1,
+        rejectedEstimatedInputTokens: rejectedEstimate,
+        nextEstimatedInputTokens: nextEstimate,
+      });
+      if (!retry.retry) {
+        await this.#markIdle(
+          sessionId,
+          branchId,
+          callId,
+          `provider overflow retry refused: ${retry.reason}`,
+        );
+        return {
+          outcome: execution.outcome,
+          modelCallId: callId,
+          error: execution.error ??
+            `Provider overflow retry refused: ${retry.reason}`,
+        };
+      }
+      materialized = next;
+      rejectedEstimate = nextEstimate;
+      priorCallId = callId;
+    }
+    return {
+      outcome: "failed",
+      error: "Provider context-window overflow retry limit reached",
+    };
   }
 
   async run(sessionId: string, branchId: string, maxTurns = 1): Promise<void> {
@@ -309,32 +554,41 @@ export class ModelLoop {
       ? usage!.inputTokens + usage!.outputTokens
       : call.estimatedInputTokens + (call.contextWindow?.outputReserveTokens ?? call.modelDispatch.configuration.maxOutputTokens ?? 0);
     const costUsd = usage?.costUsd ?? 0;
-    if (output.result.kind !== "text") throw new ValidationError("Text model loop received a structured response result");
-    const text = output.result.text;
-    const textDigest = output.result.textDigest;
-    const completionEvents: any[] = [{
-      sessionId,
-      branchId,
-      type: "ModelOutputChunk",
-      producer: "model",
-      idempotencyKey: `model-chunk:${callId}:0`,
-      payload: { callId, sequence: 0, text },
-    }, {
-      sessionId,
-      branchId,
-      type: "MessageAppended",
-      producer: "model",
-      idempotencyKey: `model-message:${callId}`,
-      payload: { messageId, role: "assistant", content: text, modelCallId: callId },
-    }, {
+    const completionEvents: any[] = [];
+    if (output.result.kind === "text") {
+      completionEvents.push({
+        sessionId,
+        branchId,
+        type: "ModelOutputChunk",
+        producer: "model",
+        idempotencyKey: `model-chunk:${callId}:0`,
+        payload: { callId, sequence: 0, text: output.result.text },
+      }, {
+        sessionId,
+        branchId,
+        type: "MessageAppended",
+        producer: "model",
+        idempotencyKey: `model-message:${callId}`,
+        payload: {
+          messageId,
+          role: "assistant",
+          content: output.result.text,
+          modelCallId: callId,
+        },
+      });
+    }
+    completionEvents.push({
       sessionId,
       branchId,
       type: "ModelCallCompleted",
       producer: "supervisor",
       idempotencyKey: `model-complete:${callId}`,
       payload: {
-        callId, responseMessageId: messageId,
-        result: { kind: "text", textDigest },
+        callId,
+        ...(output.result.kind === "text"
+          ? { responseMessageId: messageId }
+          : {}),
+        result: compactModelCallResult(output),
         resultDigest: output.resultDigest, termination: output.response.termination,
         usage, warnings: [...output.response.warnings], usageSource,
       },
@@ -345,7 +599,7 @@ export class ModelLoop {
       producer: "supervisor",
       idempotencyKey: `budget:${callId}`,
       payload: { callId, tokens, costUsd, turns: 1, wallTimeMs, usageSource },
-    }];
+    });
     const exceeded = budgetReached(state.budget.limits, {
       tokens: state.budget.tokens + tokens,
       costUsd: state.budget.costUsd + costUsd,
@@ -405,6 +659,30 @@ function modelOutput(value: JsonValue | undefined, dispatch: ModelDispatch): Mod
     responseCapability: dispatch.responseCapability,
     configuredProvider: dispatch.configuration.provider,
   });
+}
+
+function compactModelCallResult(
+  output: ModelEffectOutputV2,
+): EventPayloads["ModelCallCompleted"]["result"] {
+  if (output.result.kind === "text") {
+    return { kind: "text", textDigest: output.result.textDigest };
+  }
+  if (output.result.kind === "tool-submission") {
+    return {
+      kind: "tool-submission",
+      providerToolCallId: output.result.submission.providerToolCallId,
+      name: output.result.submission.name,
+      inputDigest: output.result.submission.inputDigest,
+    };
+  }
+  const providerToolCallId = output.result.violation.evidence.toolCalls
+    .find((item) => item.callId !== undefined)?.callId;
+  return {
+    kind: "contract-violation",
+    code: output.result.violation.code,
+    evidenceDigest: output.result.violation.evidenceDigest,
+    ...(providerToolCallId === undefined ? {} : { providerToolCallId }),
+  };
 }
 
 function assertBudgetAvailable(state: AgentState): void {
