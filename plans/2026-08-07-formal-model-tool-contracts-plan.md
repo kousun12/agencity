@@ -17,7 +17,7 @@
 | 4. Durable model and action events | Done |
 | 5. AgentRun integration | Done |
 | 6. Specialized structured outputs | Done |
-| 7. Product and observability surfaces | Not started |
+| 7. Product and observability surfaces | Done |
 | 8. ADRs and documentation | Not started |
 
 ### Implementation log
@@ -111,6 +111,20 @@
 - Passed `bun run typecheck`, `bun run check:architecture`, the full deterministic suite with 831 passes and 3 documented external skips, `bun run test:acceptance` with 13 passes and 1 real-provider skip, focused verifier suites, and `git diff --check`.
 - Real-provider strict-schema acceptance, official Turso Sync server conformance, and Turso Cloud remain externally unverified.
 - Implementation commit: `abd5bb0`.
+
+#### August 8, 2026 — Phase 7
+
+- Added a typed agent-tool capability view to the public protocol. It reports the fixed `bun_console`/`finish` contract, provider-strict, runtime-validated, unknown, and unavailable states, required-choice and parallel-call behavior, bounded streaming support, credential availability, catalog provenance, selected-model admission, and actionable bounded reasons without calling a provider.
+- Added pure projection-derived model-contract diagnostics. Fixed-cardinality counters cover the three sealed contract/tool combinations and nine closed violation codes; recent outcomes are capped at 32 and retain only bounded submission labels or scrubbed violation summaries. No mutable canonical table, migration, event schema, or reducer change was added.
+- Added selected capability and diagnostics client routes, CLI startup/status and JSON status fields, TUI startup, `/info`, `/model`, catalog, retained-step, and `/raw` presentation. Formal submissions and contract violations are distinct, while accepted source remains in existing retained cells and rejected argument bodies remain absent.
+- Reduced model tool progress to bounded phase, sealed tool name, or byte count. Provider, model, and call identifiers and streamed arguments remain private and never enter conversation prose.
+- Review aligned coarse transport and catalog displays with executor admission by treating any transport without proven bounded tool-input streaming as unavailable. It also separated missing credentials from capability rejection in startup text and removed an untruthful fallback that rendered missing capability facts as unavailable.
+- Independent verification drove exact UTF-8 bounds and query validation. Selected capability identity now requires a nonblank provider of at most 256 bytes and model of at most 512 bytes; oversized requests fail with a typed 400 without echoing input, and every returned identity/display/reason string is scrubbed and byte-bounded. HTTP and in-process parity, bearer authentication, cache independence, catalog-state mapping, and parent/child refinement no-double-count behavior are covered.
+- Updated linked acceptance fixtures to prove exact root and child agent tool sets, the single refinement tool, narration-plus-call acceptance, text-JSON and truncated-call rejection, distinct visible formal outcomes, and recovery without duplicate execution.
+- The planned linked-executable known-unsupported-model row cannot currently be produced truthfully: every shipped product transport proves the formal streaming primitives, while live and cached Gateway catalog normalization admits only `unknown` formal-tool facts because the catalog has no authoritative support fields. A genuine text-only provider proves typed pre-admission rejection with no messages, runs, effects, or provider call at the protocol boundary; linked rows separately prove missing-provider behavior and no text fallback. Add the linked unsupported row when a shipped transport or authoritative catalog can represent that fact.
+- Passed `bun run typecheck`, `bun run check:architecture`, `bun run test:core` with 828 passes and 2 documented external skips, `bun run test:e2e` with 3 passes, `bun run test:acceptance` with 14 passes and 1 real-provider skip, the deterministic acceptance matrix, focused verifier suites, and `git diff --check`. A direct default-timeout integration run again encountered the pre-existing concurrent execution-lease timing timeout; the test passes in isolation and in the complete core run.
+- Real-provider, official Turso Sync server, and Turso Cloud rows remain unverified.
+- Implementation commit: `aa14d76`.
 
 ## Summary
 
