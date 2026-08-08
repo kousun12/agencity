@@ -14,7 +14,7 @@
 | 1. Domain tool contract | Done |
 | 2. Provider-neutral response contracts | Done |
 | 3. Shared AI SDK integration | Done |
-| 4. Durable model and action events | Not started |
+| 4. Durable model and action events | Done |
 | 5. AgentRun integration | Not started |
 | 6. Specialized structured outputs | Not started |
 | 7. Product and observability surfaces | Not started |
@@ -69,6 +69,20 @@
 - Passed 20 focused provider tests, all 390 unit tests, all 233 integration tests with the documented 30-second timeout, `bun run typecheck`, `bun run check:architecture`, lint checks, and `git diff --check`.
 - Credential-gated real-provider and live Gateway service checks were not run and remain unverified.
 - Implementation commit: `7f304e3`.
+
+#### August 8, 2026 — Phase 4
+
+- Cut the canonical workspace writer, event schema, reducer, snapshots, model dispatch, effect output, recovery, compaction, and fixtures to schema version 3 and response-aware dispatch version 2. Version-1 and version-2 workspaces are rejected with reset guidance before migration, row decoding, projection, sync ingestion, or recovery; no compatibility alias, decoder, or upcast path remains.
+- Made `ModelEffectOutputV2` the authoritative retained model result. Model-call completion and termination events now carry digest-linked result summaries, exact termination, normalized usage and warnings, usage source, and closed failure provenance. Reducer validation ties every completion, budget debit, action commit, and action rejection back to the retained dispatch and effect outcome.
+- Preserved one full accepted tool input in the effect output rather than copying it into completion and action events. This is the Phase 2 storage decision applied to the durable schema: later events retain result digests, provider tool-call IDs, and model-call references.
+- Moved the minimum formal AgentRun request and result path into this phase so a schema-3 writer cannot commit textual action provenance. Ordinary steps now request the built-in tool set and commit either a tool-submission source or a typed contract-violation source. The unreachable clarification, permission, pending-input, and `waiting_for_user` code remains scheduled for deletion in Phase 5.
+- Added conservative guard-abort budget attribution from the retained input estimate and output reserve, with zero provider cost and an explicit usage source. Context-overflow retries reuse the exact retained dispatch, while cancelled, failed, and unknown effects keep distinct terminal semantics.
+- Pulled the required recursive `responseAdmission` seed and migration `015_recursive_model_response_admission.sql` forward from Phase 6 so schema-3 recursive starts are recoverable without a later event-shape change. The projection stores and validates the admission across migration, reopen, rebuild, idempotent start, branch fork, and replica synchronization.
+- Review aligned `EffectOutcomeRecorded.modelFailure` with the planned bounded `{ code }` event object while preserving the bare failure code in executor and projection interfaces. It also updated `AGENTS.md` for the schema-3 intermediate state and added missing tamper, legacy-envelope, branch, rebuild, and sync coverage.
+- Independent verification approved the phase after confirming rejection of altered completion termination, warnings, usage, usage source, budget debits, and both version-1 and version-2 signed sync envelopes. A structured AgentRun fixture now proves exact model/effect/action provenance across fork, snapshot rebuild, and actual replica sync.
+- Passed `bun run typecheck`, `bun run check:architecture`, `bun run test:core` with 793 passes and 2 documented external skips, `bun run test:acceptance` with 12 passes and 1 credential-gated real-provider skip, focused verifier suites with 35 passes, and `git diff --check`.
+- Credential-gated real-provider and live Gateway service checks were not run and remain unverified.
+- Implementation commit: `8360c88`.
 
 ## Summary
 
