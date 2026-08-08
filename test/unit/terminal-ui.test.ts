@@ -478,6 +478,7 @@ describe("FU-005 protocol-backed terminal UI", () => {
     let catalogCalls = 0;
     let activeWatches = 0;
     let maximumActiveWatches = 0;
+    let selectionError: Error | null = null;
     const client = new Proxy(base, {
       get(target, property) {
         if (property === "capabilities") return async () => ({
@@ -489,6 +490,7 @@ describe("FU-005 protocol-backed terminal UI", () => {
           return rows;
         };
         if (property === "productSelect") return async (sessionId?: string, branchId?: string) => {
+          if (selectionError) throw selectionError;
           selections.push([sessionId, branchId]);
           return { sessionId: sessionId!, branchId: branchId! };
         };
@@ -520,6 +522,15 @@ describe("FU-005 protocol-backed terminal UI", () => {
       await expect(ui.openWorkspaceAgent("failed-session", "failed-branch")).rejects.toThrow(/failed and cannot be opened/);
       await expect(ui.openWorkspaceAgent("archived-session", "archived-branch")).rejects.toThrow(/archived and cannot be opened/);
       expect(selections).toEqual([]);
+
+      selectionError = new Error(`Session or branch not found: ${second.sessionId}/${second.branchId}`);
+      const staleSelection = await ui.openWorkspaceAgent(second.sessionId, second.branchId).catch(error => error);
+      expect(staleSelection).toBeInstanceOf(Error);
+      expect((staleSelection as Error).message).toBe("Could not select Second root. Refresh Agents and try again.");
+      expect((staleSelection as Error).message).not.toContain(second.sessionId);
+      expect((staleSelection as Error).message).not.toContain(second.branchId);
+      expect(ui.presentation.workspaceAgents.open).toBe(true);
+      selectionError = null;
 
       await ui.openWorkspaceAgent(second.sessionId, second.branchId);
       expect(selections).toEqual([[second.sessionId, second.branchId]]);

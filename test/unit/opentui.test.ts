@@ -922,6 +922,7 @@ describe("OpenTUI interactive terminal", () => {
     });
     let app: OpenTuiApp | null = null;
     const terminal = new TerminalUI(client, {
+      workspaceLabel: "Fixture workspace",
       interactive: false,
       manageSignals: false,
       onOutput: value => app?.showOutput(value),
@@ -950,10 +951,23 @@ describe("OpenTUI interactive terminal", () => {
         && value.includes("Failed root")
         && value.includes("Archived root")
         && value.includes("Search retained root work"));
+      expect(frame).toContain("Fixture workspace");
+      expect(frame).not.toContain("terminal-workspace-agents");
       expect(frame).toContain("cannot open");
       expect(frame).toContain("TRUSTED-LOCAL");
       expect(frame).not.toMatch(/failed-internal-session|failed-internal-branch|Nested child/);
       expect(selections).toEqual([]);
+      setup.mockInput.pressKey("p", { ctrl: true });
+      frame = await setup.waitForFrame(value => value.includes("Close Agents before opening commands."));
+      expect(frame).toContain("Agents");
+      expect(frame).not.toContain("COMMANDS");
+      setup.mockInput.pressEscape();
+      frame = await setup.waitForFrame(value => value.includes("First root / main"));
+      expect(frame).not.toContain("COMMANDS");
+
+      setup.mockInput.pressKey("\u001b[D");
+      expect(await app.settle()).toBe(true);
+      await setup.waitForFrame(value => value.includes("Agents") && value.includes("First root"));
       setup.mockInput.pressKey("\u001b[6~");
       frame = await setup.waitForFrame(value => value.includes("› Archived root"));
       expect(frame).toContain("cannot open");
@@ -997,7 +1011,7 @@ describe("OpenTUI interactive terminal", () => {
       expect(await app.settle()).toBe(true);
       frame = await setup.waitForFrame(value => value.includes("Second root / main") && value.includes("← agents"));
       expect(selections).toEqual([[second.sessionId, second.branchId]]);
-      expect(catalogCalls).toBe(4);
+      expect(catalogCalls).toBe(5);
 
       setup.mockInput.pressKey("\u001b[D");
       expect(await app.settle()).toBe(true);
@@ -1013,6 +1027,9 @@ describe("OpenTUI interactive terminal", () => {
       frame = await setup.waitForFrame(value =>
         value.includes("AGENTS") && value.includes("Second root") && value.includes("TRUSTED-LOCAL"));
       expect(frame).toContain("Esc back");
+      setup.mockInput.pressKey("\u001b[6~");
+      frame = await setup.waitForFrame(value => value.includes("AGENTS") && value.includes("Failed root"));
+      expect(frame).toContain("cannot open");
     } finally {
       app.destroy();
       setup.renderer.destroy();
@@ -1036,6 +1053,7 @@ describe("OpenTUI interactive terminal", () => {
     const syntaxStyle = createTerminalSyntaxStyle();
     const view: TerminalScreenView = {
       workspaceId: "workspace",
+      workspaceLabel: "Workspace",
       sessionName: "Transcript",
       branchName: "main",
       model: "fixture:model",

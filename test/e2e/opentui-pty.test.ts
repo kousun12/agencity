@@ -255,6 +255,8 @@ if exit_code == 0:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
     os.close(fd)
+with open(os.path.join(workspace, ".agencity", "workspace-id"), "rb") as marker:
+    workspace_id = marker.read().strip()
 print(json.dumps({
     "providerPrompt": provider_prompt,
     "credentialPrompt": credential_prompt,
@@ -286,6 +288,7 @@ print(json.dumps({
     "resumeExitCode": resume_exit_code,
     "idleDetach": b"workspace service will stop automatically" in output,
     "secretHidden": b"acceptance-fixture-key" not in output,
+    "workspaceIdHidden": bool(workspace_id) and workspace_id not in output,
     "nativeSelectionAvailable": not any(sequence in output for sequence in (
         b"\x1b[?1000h",
         b"\x1b[?1002h",
@@ -350,6 +353,7 @@ print(json.dumps({
       resumeExitCode: 0,
       idleDetach: true,
       secretHidden: true,
+      workspaceIdHidden: true,
       nativeSelectionAvailable: true,
     });
 

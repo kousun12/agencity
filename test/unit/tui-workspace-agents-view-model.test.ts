@@ -148,6 +148,12 @@ describe("workspace Agents view model", () => {
     expect(selectTerminalWorkspaceAgentKey(rows, "", failedKey)).toBe(failedKey);
     expect(selectTerminalWorkspaceAgentKey(rows, "gamma", failedKey)).toBe(terminalWorkspaceAgentKey(rows[2]!));
     expect(selectTerminalWorkspaceAgentKey(rows, "missing", failedKey)).toBeNull();
+    expect(selectTerminalWorkspaceAgentKey(
+      [rows[0]!, rows[2]!],
+      "",
+      failedKey,
+      1,
+    )).toBe(terminalWorkspaceAgentKey(rows[2]!));
   });
 
   test("uses useful empty and fallback labels and progressively collapses row detail", () => {

@@ -44,6 +44,7 @@ export interface TerminalWorkspaceAgentsState {
 
 export interface TerminalPresentation {
   readonly state: AgentState;
+  readonly workspaceLabel: string;
   readonly capabilities: ProtocolCapabilities;
   readonly historicalCursor: string | null;
   readonly connection: TerminalConnectionState;
@@ -153,6 +154,7 @@ export interface TerminalWorkspaceAgentsView {
 
 export interface TerminalScreenView {
   readonly workspaceId: string;
+  readonly workspaceLabel: string;
   readonly sessionName: string;
   readonly branchName: string;
   readonly model: string;
@@ -346,6 +348,7 @@ export function selectTerminalWorkspaceAgentKey(
   summaries: readonly ProductBranchSummary[],
   query: string,
   selectedKey: string | null,
+  selectedIndexHint?: number,
 ): string | null {
   const visible = buildTerminalWorkspaceAgentRows(summaries, query);
   if (selectedKey && visible.some(row => row.key === selectedKey)) return selectedKey;
@@ -355,11 +358,12 @@ export function selectTerminalWorkspaceAgentKey(
   if (!selectedKey) return candidates[0]!.key;
   const all = buildTerminalWorkspaceAgentRows(summaries);
   const selectedIndex = all.findIndex(row => row.key === selectedKey);
-  if (selectedIndex < 0) return candidates[0]!.key;
+  const anchorIndex = selectedIndex >= 0 ? selectedIndex : selectedIndexHint;
+  if (anchorIndex === undefined || anchorIndex < 0) return candidates[0]!.key;
   return [...candidates]
     .sort((left, right) =>
-      Math.abs(all.findIndex(row => row.key === left.key) - selectedIndex)
-      - Math.abs(all.findIndex(row => row.key === right.key) - selectedIndex)
+      Math.abs(all.findIndex(row => row.key === left.key) - anchorIndex)
+      - Math.abs(all.findIndex(row => row.key === right.key) - anchorIndex)
       || all.findIndex(row => row.key === left.key) - all.findIndex(row => row.key === right.key))[0]!.key;
 }
 
@@ -579,6 +583,7 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
 
   return {
     workspaceId: state.workspaceId,
+    workspaceLabel: presentation.workspaceLabel,
     sessionName: state.sessionName ?? "Unnamed session",
     branchName: state.branch.name ?? "unnamed branch",
     model: `${state.model.provider}:${state.model.model} · ${state.model.reasoningEffort}`,

@@ -9,6 +9,7 @@ import type { FamilyAgentRecord, RecoverySummaryView } from "../runtime/index.ts
 import { scrubText } from "../security/index.ts";
 import type { ModelConfiguration } from "../domain/index.ts";
 import {
+  buildTerminalWorkspaceAgentRows,
   selectTerminalWorkspaceAgentKey,
   terminalWorkspaceAgentKey,
   type TerminalConnectionState,
@@ -40,6 +41,7 @@ export type TerminalAgentClient = Pick<AgentClient,
 
 export interface TerminalUIOptions {
   readonly workspaceId?: string;
+  readonly workspaceLabel?: string;
   readonly input?: NodeJS.ReadableStream;
   readonly output?: Pick<NodeJS.WriteStream, "write">;
   readonly interactive?: boolean;
@@ -425,6 +427,7 @@ export class TerminalUI {
     if (!this.#viewState || !this.#capabilities) throw new Error("Terminal is not attached");
     return {
       state: this.#viewState,
+      workspaceLabel: scrubText(this.options.workspaceLabel ?? "Workspace"),
       capabilities: this.#capabilities,
       historicalCursor: this.#historicalCursor,
       connection: this.#connection,
@@ -515,10 +518,13 @@ export class TerminalUI {
     try {
       const rows = await this.client.productSessions();
       if (generation !== this.#workspaceAgents.generation || this.#detached || this.#closing) return;
+      const selectedIndex = buildTerminalWorkspaceAgentRows(this.#workspaceAgents.rows)
+        .findIndex(row => row.key === this.#workspaceAgents.selectedKey);
       const selectedKey = selectTerminalWorkspaceAgentKey(
         rows,
         this.#workspaceAgents.query,
         this.#workspaceAgents.selectedKey,
+        selectedIndex,
       );
       this.#workspaceAgents = {
         ...this.#workspaceAgents,
@@ -545,11 +551,20 @@ export class TerminalUI {
     const selected = this.#workspaceAgents.rows.find(row =>
       row.root && row.sessionId === sessionId && row.branchId === branchId);
     if (!selected) throw new Error("The selected root route is no longer available");
+    const selectedName = scrubText(selected.sessionName).replace(/\s+/g, " ").trim() || "Selected root";
     if (selected.status === "failed" || selected.status === "archived") {
-      throw new Error(`${selected.sessionName} is ${selected.status} and cannot be opened`);
+      throw new Error(`${selectedName} is ${selected.status} and cannot be opened`);
     }
-    await this.client.productSelect(sessionId, branchId);
-    await this.#queueRouteTransition(sessionId, branchId);
+    try {
+      await this.client.productSelect(sessionId, branchId);
+    } catch {
+      throw new Error(`Could not select ${selectedName}. Refresh Agents and try again.`);
+    }
+    try {
+      await this.#queueRouteTransition(sessionId, branchId);
+    } catch {
+      throw new Error(`${selectedName} is selected for resume but could not be displayed. Refresh Agents and try again.`);
+    }
     this.#workspaceAgents = {
       ...this.#workspaceAgents,
       open: false,
