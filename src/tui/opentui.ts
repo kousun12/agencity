@@ -1582,7 +1582,8 @@ export class OpenTuiApp {
   #activeInspectorAction(): string {
     if (this.controller.pendingSecretInput) return "Enter save · Esc cancel";
     if (this.#view.workspaceAgents.open) {
-      return "↑/↓ select · Enter/→ open · Ctrl-R refresh · Esc back";
+      const count = this.#view.workspaceAgents.rows.length;
+      return `${count} ${count === 1 ? "agent" : "agents"} · ↑/↓ select · Enter/→ open · Ctrl-R refresh · Esc back`;
     }
     if (this.#modelEntryProvider) return "Enter save · Esc back";
     if (this.#activeModelDetail()) return "↑/↓ provider · Enter choose · Esc close";
@@ -1691,7 +1692,7 @@ export class OpenTuiApp {
     );
     const primaryHeader = workspaceAgentsActive ? "Agents" : `${breadcrumb}${history}`;
     const secondaryHeader = workspaceAgentsActive
-      ? `${this.#view.workspaceId} · ${this.#view.workspaceAgents.refresh}`
+      ? `${this.#view.workspaceId} · ${this.#view.workspaceAgents.rows.length} roots · ${this.#view.workspaceAgents.refresh}`
       : `${this.#view.model} · ${this.#view.runState} · ${this.#view.connection}`;
     this.#header.content = layout.mode === "normal"
       ? `${primaryHeader}\n${secondaryHeader}`
