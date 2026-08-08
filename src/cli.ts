@@ -7,7 +7,16 @@ import { parseCliArgs, type ParsedCliArgs } from "./cli-args.ts";
 import { CLI_HELP_GROUPS, buildDataDeleteConfirmation, parseAdvancedArgv, type AdvancedCommandPath } from "./cli/advanced.ts";
 import { createCliErrorEnvelope, createCliSuccessEnvelope, planCliOutput, type CliJsonValue } from "./cli/output.ts";
 import { CliRunInterruptCoordinator } from "./cli/run-interrupt.ts";
-import { AgentRuntimeError, ValidationError, type JsonValue, type ModelConfiguration } from "./domain/index.ts";
+import {
+  AgentRuntimeError,
+  STANDARD_UNVERIFIED_REASONING_LEVELS,
+  ValidationError,
+  assertReasoningSelection,
+  normalizeReasoningEffort,
+  type JsonValue,
+  type ModelConfiguration,
+  type ReasoningEffort,
+} from "./domain/index.ts";
 import type { ModelProviderDescriptor } from "./executors/index.ts";
 import { containsCredentialMaterial, inspectModelCredentialStatuses, modelCredentialPathForProfile, scrubText } from "./security/index.ts";
 import {
@@ -174,8 +183,8 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
         const model = await chooseManagedModel(client, parsed, interactive, prompter);
         await client.selectModel(selection.sessionId, selection.branchId, model);
         summary = { ...summary, model };
-      } else if (option("model")) {
-        throw new ValidationError("A resumed branch keeps its original model. Use `agencity new --model ...` to start new work with another model");
+      } else if (option("model") || option("effort")) {
+        throw new ValidationError("A resumed branch keeps its original model and effort. Use `agencity new --model ... --effort ...` or change /model or /effort on an idle branch");
       }
       await client.resume(selection.sessionId, selection.branchId);
     }
@@ -525,6 +534,18 @@ async function managedConfig(client: AgentClient, parsed: ParsedCliArgs): Promis
     return;
   }
   if (action === "clear-model") { printValue(await client.productSetModel(null), parsed.flags.has("json")); return; }
+  if (action === "set-effort") {
+    const value = parsed.positionals[1];
+    if (!value) throw new ValidationError("config set-effort requires LEVEL");
+    const model = await configuredEffortModel(client, parsed.values.get("model"));
+    printValue(await client.productSetReasoningEffort(model, normalizeReasoningEffort(value)), parsed.flags.has("json"));
+    return;
+  }
+  if (action === "clear-effort") {
+    const model = await configuredEffortModel(client, parsed.values.get("model"));
+    printValue(await client.productSetReasoningEffort(model, null), parsed.flags.has("json"));
+    return;
+  }
   if (action === "credential-ref") {
     const provider=parsed.positionals[1];const reference=parsed.positionals[2];const label=parsed.positionals.slice(3).join(" ");
     if(!provider||!reference||!label)throw new ValidationError("config credential-ref requires PROVIDER REFERENCE LABEL");
@@ -535,9 +556,45 @@ async function managedConfig(client: AgentClient, parsed: ParsedCliArgs): Promis
   throw new ValidationError(`Unknown config action: ${action}`);
 }
 
+async function configuredEffortModel(client: AgentClient, explicit: string | undefined): Promise<string> {
+  const configured = explicit ?? (await client.productConfig()).defaultModel;
+  if (!configured) {
+    throw new ValidationError("No workspace default model is configured; pass --model CREATOR/MODEL");
+  }
+  const model = configured.includes(":") ? parseModel(configured).model : configured.trim();
+  if (!/^[a-z0-9][a-z0-9._-]*\/[^\s/][^\s]*$/i.test(model)) {
+    throw new ValidationError("Effort preferences require a canonical creator/model ID");
+  }
+  return model;
+}
+
 async function chooseManagedModel(client: AgentClient, parsed: ParsedCliArgs, interactive: boolean, prompter: ProductPrompter): Promise<ModelConfiguration> {
   const explicit = parsed.values.get("model");
   const providers = (await client.modelProviders()).filter(provider => provider.name !== "echo");
+  const finish = async (model: ModelConfiguration): Promise<ModelConfiguration> => {
+    const explicitEffort = parsed.values.get("effort");
+    const config = await client.productConfig();
+    let effort: ReasoningEffort = "provider-default";
+    let ambient = false;
+    if (explicitEffort !== undefined) effort = normalizeReasoningEffort(explicitEffort);
+    else if (config.defaultModel === formatModel(model) && typeof config.selectedModelEffortPreference === "string") {
+      effort = config.selectedModelEffortPreference;
+      ambient = true;
+    }
+    if (explicitEffort !== undefined || ambient) try {
+      const catalog = await client.modelCatalog();
+      const capability = catalog.descriptors.find(descriptor => descriptor.model === model.model)?.reasoning ?? {
+        status: "unverified" as const,
+        levels: STANDARD_UNVERIFIED_REASONING_LEVELS,
+      };
+      assertReasoningSelection(effort, capability);
+    } catch (error) {
+      if (!ambient) throw error;
+      process.stderr.write(`Stored reasoning effort is no longer valid; using provider-default. ${error instanceof Error ? error.message : String(error)}\n`);
+      effort = "provider-default";
+    }
+    return { ...model, reasoningEffort: effort };
+  };
   if (explicit) {
     const model = parseModel(explicit);
     if (model.provider === "echo") throw new ValidationError("Echo is an internal test fixture and is not available in the product");
@@ -554,19 +611,19 @@ async function chooseManagedModel(client: AgentClient, parsed: ParsedCliArgs, in
       if (!provider?.usable) throw new ValidationError(provider?.remediation ?? `Credential unavailable for ${model.provider}`);
     }
     await client.productSetModel(formatModel(model));
-    return model;
+    return finish(model);
   }
   const configured = await client.productConfig();
   if (configured.defaultModel) {
     const model = parseModel(configured.defaultModel);
-    if (providers.some(provider => provider.name === model.provider && provider.usable)) return model;
+    if (providers.some(provider => provider.name === model.provider && provider.usable)) return finish(model);
   }
   let usable = providers.filter(provider => provider.usable);
   for (const provider of usable) {
     const model = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`];
     if (model?.trim()) {
       await client.productSetModel(`${provider.name}:${model.trim()}`);
-      return { provider: provider.name, model: model.trim() };
+      return finish({ provider: provider.name, model: model.trim(), reasoningEffort: "provider-default" });
     }
   }
   if (!interactive) {
@@ -587,12 +644,12 @@ async function chooseManagedModel(client: AgentClient, parsed: ParsedCliArgs, in
   const environmentModel = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`]?.trim();
   if (environmentModel) {
     await client.productSetModel(`${provider.name}:${environmentModel}`);
-    return { provider: provider.name, model: environmentModel };
+    return finish({ provider: provider.name, model: environmentModel, reasoningEffort: "provider-default" });
   }
   const modelId = (await prompter.question(`Model ID for ${provider.displayName}: `)).trim();
   if (!modelId) throw new ValidationError("Model ID is required");
   await client.productSetModel(`${provider.name}:${modelId}`);
-  return { provider: provider.name, model: modelId };
+  return finish({ provider: provider.name, model: modelId, reasoningEffort: "provider-default" });
 }
 
 async function chooseManagedProvider(
@@ -1141,7 +1198,7 @@ function printStartup(workspace: ResolvedWorkspace, session: ProductBranchSummar
     "Agencity product session",
     `Workspace: ${workspace.name} (${workspace.root})`,
     `Session: ${session.sessionName} / ${session.branchName}`,
-    `Model: ${session.model.provider}:${session.model.model}${providerUsable ? "" : " [UNAVAILABLE]"}`,
+    `Model: ${session.model.provider}:${session.model.model} · effort ${session.model.reasoningEffort}${providerUsable ? "" : " [UNAVAILABLE]"}`,
     `Run state: ${providerUsable ? session.status : "blocked by provider configuration"}`,
     "Mode: trusted-local; generated code has this process's OS authority (not sandboxed)",
     ...(!providerUsable && remediation ? [`Remediation: ${remediation}`] : []),
@@ -1221,7 +1278,7 @@ function printHelp(): void {
     "",
     ...sections.flatMap((section) => [section, ""]),
     "Common product options:",
-    "  --workspace PATH --model PROVIDER:MODEL --new --detach --completion-gate COMMAND --json --version --help",
+    "  --workspace PATH --model PROVIDER:CREATOR/MODEL --effort LEVEL --new --detach --completion-gate COMMAND --json --version --help",
     "Advanced options:",
     "  --session ID --branch ID --cursor N --db PATH --artifacts PATH --workspace-root PATH",
     "  --sync-url URL --replica PATH --scope KIND --scope-id ID --destination PATH",

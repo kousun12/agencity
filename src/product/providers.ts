@@ -45,7 +45,7 @@ export function parseModel(value: string): ModelConfiguration {
   const provider = trimmed.slice(0, separator);
   const model = trimmed.slice(separator + 1);
   if (!/^[a-z][a-z0-9-]*$/.test(provider) || /\s/.test(model)) throw new ValidationError("Model must use PROVIDER:MODEL format");
-  return { provider, model };
+  return { provider, model, reasoningEffort: "provider-default" };
 }
 
 export function formatModel(model: ModelConfiguration): string {

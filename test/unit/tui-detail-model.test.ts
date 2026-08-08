@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildTerminalDetail,
+  buildTerminalEffortDetail,
   buildTerminalModelDetail,
   formatTerminalDetail,
   formatTerminalRaw,
@@ -34,7 +35,7 @@ describe("terminal inspector view models", () => {
 
   test("model status uses human provider and credential labels", () => {
     const detail = buildTerminalModelDetail({
-      current: { provider: "vercel", model: "openai/gpt-test" },
+      current: { provider: "vercel", model: "openai/gpt-test", reasoningEffort: "provider-default" },
       workspaceDefault: "vercel:openai/gpt-test",
       providers: [{
         name: "vercel",
@@ -49,6 +50,23 @@ describe("terminal inspector view models", () => {
     expect(output).toContain("Credential: saved");
     expect(output).toContain("openai/gpt-test");
     expect(output).not.toContain('"credentialSource"');
+  });
+
+  test("reasoning effort status distinguishes unverified catalog choices", () => {
+    const detail = buildTerminalEffortDetail({
+      model: { provider: "vercel", model: "openai/gpt-test", reasoningEffort: "high" },
+      capability: { status: "unverified", levels: ["none", "low", "medium", "high"] },
+      catalog: {
+        origin: "https://ai-gateway.vercel.sh",
+        stale: true,
+        error: "Gateway model catalog request failed",
+      },
+    });
+    const output = formatTerminalDetail(detail);
+    expect(output).toContain("Capability: unverified · stale catalog");
+    expect(output).toContain("> high · unverified");
+    expect(output).toContain("Gateway model catalog request failed");
+    expect(output).not.toContain('"catalog"');
   });
 
   test("raw diagnostics require an explicit formatter and redact credential fields and known values", () => {

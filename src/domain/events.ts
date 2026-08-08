@@ -4,8 +4,9 @@ import type { JsonValue } from "./json.ts";
 import { assertJsonValue } from "./json.ts";
 import { ValidationError } from "./errors.ts";
 import { agentActionSchema, type AgentAction } from "./agent-action.ts";
+import type { ModelConfiguration, ModelDispatch, ModelWarning } from "./model.ts";
 
-export const EVENT_SCHEMA_VERSION = 1 as const;
+export const EVENT_SCHEMA_VERSION = 2 as const;
 export const eventTypes = [
   "SessionCreated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
@@ -58,7 +59,6 @@ export type ContextCompactionRequester = "user" | "agent" | "supervisor";
 export type ContextCapacitySource = "provider-metadata" | "model-catalog" | "operator-configuration" | "unknown";
 
 export interface BudgetLimits { readonly tokenLimit?: number; readonly costLimitUsd?: number; readonly turnLimit?: number; readonly wallTimeLimitMs?: number; }
-export interface ModelConfiguration { readonly provider: string; readonly model: string; readonly temperature?: number; readonly maxOutputTokens?: number; }
 export interface Usage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; }
 export interface ArtifactReference { readonly artifactId: string; readonly digest: string; readonly mediaType: string; readonly size: number; }
 export type WorkingValue = { readonly kind: "json"; readonly value: JsonValue } | { readonly kind: "artifact"; readonly artifactId: string };
@@ -107,15 +107,16 @@ export interface EventPayloads {
     requestedBy: ContextCompactionRequester; instructions?: string; throughCursor: string;
     sourceEventIds: string[]; sourceDigest: string; frozenSources: FrozenContextCompactionSource[];
     capacity?: ContextCapacityProvenance; ancestorContextId?: string; rematerializedFromContextId?: string;
+    modelDispatch?: ModelDispatch;
   };
   ContextCompactionFailed: {
     compactionId: string; requestEventId: string; strategy: ContextCompactionStrategy;
     outcome: "failed" | "unknown" | "protected-only" | "no-progress"; error: string; effectId?: string;
   };
   ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue; derivation?: ContextCompactionDerivation };
-  ModelCallRequested: { callId: string; contextId: string; effectId: string; provider: string; model: string; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
+  ModelCallRequested: { callId: string; contextId: string; effectId: string; modelDispatch: ModelDispatch; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
   ModelOutputChunk: { callId: string; sequence: number; text: string };
-  ModelCallCompleted: { callId: string; responseMessageId?: string; finishReason: string; usage: Usage };
+  ModelCallCompleted: { callId: string; responseMessageId?: string; finishReason: string; usage: Usage; warnings?: ModelWarning[] };
   ModelCallTerminated: { callId: string; outcome: Exclude<EffectOutcome, "succeeded">; error?: string };
   BudgetDebited: { callId: string; tokens: number; costUsd: number; turns: number; wallTimeMs: number };
   BudgetExceeded: { dimension: "tokens" | "cost" | "turns" | "wallTime"; limit: number; spent: number };
@@ -218,7 +219,49 @@ const fingerprint = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const dateTime = z.string().datetime();
 const jsonValueSchema = z.custom<JsonValue>((value) => { try { assertJsonValue(value); return true; } catch { return false; } }, "Expected a JSON value");
 const budgetSchema = z.object({ tokenLimit: nonnegative.optional(), costLimitUsd: nonnegative.optional(), turnLimit: nonnegative.optional(), wallTimeLimitMs: nonnegative.optional() });
-const modelSchema = z.object({ provider: id, model: id, temperature: z.number().finite().optional(), maxOutputTokens: nonnegative.optional() });
+const reasoningEffortSchema = z.enum(["provider-default", "none", "minimal", "low", "medium", "high", "xhigh"]);
+const modelSchema = z.object({ provider: id, model: id, temperature: z.number().finite().optional(), maxOutputTokens: nonnegative.optional(), reasoningEffort: reasoningEffortSchema }).strict();
+const reasoningLevelSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+const modelReasoningCapabilitySchema = z.object({
+  status: z.enum(["listed", "unverified", "unsupported"]),
+  levels: z.array(reasoningLevelSchema).max(6),
+  catalogDigest: digest,
+}).strict();
+const modelDispatchSchema = z.object({
+  configuration: modelSchema,
+  reasoning: z.object({
+    requestedEffort: reasoningEffortSchema,
+    mode: z.enum(["omitted", "requested"]),
+    capability: modelReasoningCapabilitySchema,
+    resolverId: z.literal("agencity.reasoning-dispatch.v1"),
+  }).strict(),
+  executionEndpointId: digest.optional(),
+  dispatchVersion: z.literal("agencity.model-dispatch.v1"),
+}).strict().superRefine((value, context) => {
+  if (value.configuration.reasoningEffort !== value.reasoning.requestedEffort) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "dispatch effort must match configuration" });
+  }
+  const expectedMode = value.configuration.reasoningEffort === "provider-default" ? "omitted" : "requested";
+  if (value.reasoning.mode !== expectedMode) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "dispatch mode must match requested effort" });
+  }
+  if (value.reasoning.capability.status === "unsupported" && value.configuration.reasoningEffort !== "provider-default") {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "unsupported models permit only provider-default" });
+  }
+  if (value.reasoning.capability.status === "listed" &&
+      value.configuration.reasoningEffort !== "provider-default" &&
+      !value.reasoning.capability.levels.includes(value.configuration.reasoningEffort)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "requested effort is not listed for this model" });
+  }
+});
+const boundedWarningMessage = z.string().min(1).refine(
+  (value) => new TextEncoder().encode(value).byteLength <= 1_024,
+  "warning message exceeds 1024 UTF-8 bytes",
+);
+const modelWarningSchema = z.object({
+  kind: z.enum(["coerced", "unsupported", "provider", "truncated"]),
+  message: boundedWarningMessage,
+}).strict();
 const usageSchema = z.object({ inputTokens: nonnegative, outputTokens: nonnegative, costUsd: nonnegative });
 const artifactSchema = z.object({ artifactId: id, digest, mediaType: id, size: nonnegative });
 const workingValueSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("json"), value: jsonValueSchema }), z.object({ kind: z.literal("artifact"), artifactId: id })]);
@@ -268,10 +311,14 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     requestedBy: z.enum(["user", "agent", "supervisor"]), instructions: z.string().max(8192).optional(), throughCursor: z.string().regex(/^\d+$/),
     sourceEventIds: z.array(id), sourceDigest: digest, frozenSources: z.array(frozenCompactionSourceSchema),
     capacity: capacityProvenanceSchema.optional(), ancestorContextId: id.optional(), rematerializedFromContextId: id.optional(),
+    modelDispatch: modelDispatchSchema.optional(),
   }).strict().superRefine((value, context) => {
     const frozenIds = value.frozenSources.map((source) => source.eventId);
     if (new Set(frozenIds).size !== frozenIds.length || frozenIds.length !== value.sourceEventIds.length || frozenIds.some((sourceId, index) => sourceId !== value.sourceEventIds[index])) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "frozen sources must exactly match sourceEventIds" });
+    }
+    if ((value.strategy === "model-summary-v1") !== (value.modelDispatch !== undefined)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "model-summary compaction requires one pinned dispatch and deterministic compaction must omit it" });
     }
   }),
   ContextCompactionFailed: z.object({
@@ -279,9 +326,9 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     outcome: z.enum(["failed", "unknown", "protected-only", "no-progress"]), error: z.string().min(1), effectId: id.optional(),
   }).strict(),
   ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional(), derivation: compactionDerivationSchema.optional() }),
-  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, provider: id, model: id, attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }),
+  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, modelDispatch: modelDispatchSchema, attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }).strict(),
   ModelOutputChunk: z.object({ callId: id, sequence: z.number().int().nonnegative(), text: z.string() }),
-  ModelCallCompleted: z.object({ callId: id, responseMessageId: id.optional(), finishReason: z.string(), usage: usageSchema }),
+  ModelCallCompleted: z.object({ callId: id, responseMessageId: id.optional(), finishReason: z.string(), usage: usageSchema, warnings: z.array(modelWarningSchema).max(8).optional() }).strict(),
   ModelCallTerminated: z.object({ callId: id, outcome: z.enum(["failed", "cancelled", "unknown"]), error: z.string().optional() }),
   BudgetDebited: z.object({ callId: id, tokens: nonnegative, costUsd: nonnegative, turns: nonnegative, wallTimeMs: nonnegative }),
   BudgetExceeded: z.object({ dimension: z.enum(["tokens", "cost", "turns", "wallTime"]), limit: nonnegative, spent: nonnegative }),

@@ -17,7 +17,7 @@ describe("FU-009 installed satellite product surfaces", () => {
     const fixture = new StrictActionFixture(); fixtures.push(fixture);
     const world = await AcceptanceWorld.create("satellites"); worlds.push(world);
     const environment = fixture.environment();
-    expect((await world.command(["config", "set-model", "openai:fixture-v1", "--json"], environment)).code).toBe(0);
+    expect((await world.command(["config", "set-model", "openai:openai/fixture-v1", "--json"], environment)).code).toBe(0);
 
     const seedTask = "satellite streaming seed";
     fixture.script(seedTask, [action("final", "streaming seed completed")]);

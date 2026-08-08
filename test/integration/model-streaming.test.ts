@@ -3,7 +3,6 @@ import {
   AgentClient,
   EchoModelProvider,
   ModelExecutor,
-  OpenAICompatibleProvider,
   ProtocolServer,
   Supervisor,
   ValidationError,
@@ -177,7 +176,7 @@ describe("provider output streaming", () => {
     const turn = supervisor.modelLoop.turn(sessionId, branchId);
     await provider.firstDelta.promise;
     provider.release.resolve();
-    expect(await turn).toEqual({ outcome: "failed", error: "stream interrupted by provider" });
+    expect(await turn).toEqual({ outcome: "failed", error: "Model provider request failed" });
     unsubscribe();
 
     const events = await supervisor.storage.loadEvents(sessionId, { branchId });
@@ -186,7 +185,7 @@ describe("provider output streaming", () => {
     expect(events.filter((event) => event.type === "EffectOutcomeRecorded")).toHaveLength(1);
     expect(events.filter((event) => event.type === "ModelOutputChunk")).toHaveLength(0);
     expect(state.messages.filter((message) => message.role === "assistant")).toHaveLength(0);
-    expect(Object.values(state.modelCalls)[0]).toMatchObject({ status: "failed", error: "stream interrupted by provider" });
+    expect(Object.values(state.modelCalls)[0]).toMatchObject({ status: "failed", error: "Model provider request failed" });
     expect(JSON.stringify(events)).not.toContain("partial-alpha");
     await supervisor.close();
   });
@@ -366,88 +365,6 @@ describe("provider output streaming", () => {
     }])).toThrow(ValidationError);
   });
 
-  test("parses OpenAI-compatible SSE incrementally and requires a terminal marker", async () => {
-    const requests: Record<string, unknown>[] = [];
-    const server = Bun.serve({
-      port: 0,
-      async fetch(request) {
-        requests.push(await request.json() as Record<string, unknown>);
-        const encoder = new TextEncoder();
-        return new Response(new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(encoder.encode(`data: {"choices":[{"delta":{"content":"hello "},"finish_reason":null}]}\n`));
-            controller.enqueue(encoder.encode(`\ndata: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}\n\n`));
-            controller.enqueue(encoder.encode(`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2},"cost_usd":0.02}\n\n`));
-            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-            controller.close();
-          },
-        }), { headers: { "content-type": "text/event-stream" } });
-      },
-    });
-    try {
-      const provider = new OpenAICompatibleProvider({ baseUrl: `http://${server.hostname}:${server.port}/v1`, apiKey: () => "test-key", providerName: "openai-test" });
-      const deltas: string[] = [];
-      const response = await provider.stream!({}, { provider: provider.name, model: "gpt-test" }, new AbortController().signal, (delta) => deltas.push(delta.text));
-      expect(requests[0]).toMatchObject({ model: "gpt-test", stream: true, stream_options: { include_usage: true } });
-      expect(deltas).toEqual(["hello ", "world"]);
-      expect(response).toEqual({ text: "hello world", finishReason: "stop", usage: { inputTokens: 3, outputTokens: 2, costUsd: 0.02 } });
-    } finally { server.stop(true); }
-
-    const incomplete = Bun.serve({
-      port: 0,
-      fetch() { return new Response(`data: {"choices":[{"delta":{"content":"orphan"}}]}\n\n`, { headers: { "content-type": "text/event-stream" } }); },
-    });
-    try {
-      const provider = new OpenAICompatibleProvider({ baseUrl: `http://${incomplete.hostname}:${incomplete.port}`, apiKey: () => "test-key" });
-      await expect(provider.stream!({}, { provider: "openai", model: "gpt-test" }, new AbortController().signal, () => {}))
-        .rejects.toThrow("Model stream ended before [DONE]");
-    } finally { incomplete.stop(true); }
-  });
-
-  test("explicitly disables OpenAI-compatible streaming without fallback", async () => {
-    const requests: Record<string, unknown>[] = [];
-    const server = Bun.serve({
-      port: 0,
-      async fetch(request) {
-        requests.push(await request.json() as Record<string, unknown>);
-        return Response.json({
-          choices: [{ message: { content: "non-streaming endpoint response" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 2, completion_tokens: 3 },
-        });
-      },
-    });
-    const provider = new OpenAICompatibleProvider({
-      baseUrl: `http://${server.hostname}:${server.port}/v1`,
-      apiKey: () => "test-key",
-      providerName: "openai-no-stream",
-      streaming: false,
-    });
-    let supervisor: Supervisor | undefined;
-    try {
-      const opened = await openWith(provider);
-      supervisor = opened.supervisor;
-      const { sessionId, branchId } = opened;
-      expect(supervisor.modelProviders.find((item) => item.name === provider.name)).toMatchObject({
-        displayName: "openai-no-stream (OpenAI-compatible; non-streaming)",
-        capabilities: { streaming: false },
-      });
-      const progress: EffectProgressNotification[] = [];
-      const unsubscribe = supervisor.outbox.onProgress((item) => progress.push(item));
-      try {
-        expect(await supervisor.modelLoop.turn(sessionId, branchId)).toEqual({
-          outcome: "succeeded",
-          message: "non-streaming endpoint response",
-        });
-      } finally { unsubscribe(); }
-      expect(requests).toHaveLength(1);
-      expect(requests[0]).not.toHaveProperty("stream");
-      expect(progress).toHaveLength(0);
-    } finally {
-      await supervisor?.close();
-      server.stop(true);
-    }
-  });
-
   test("SSE clients receive progress without a cursor and reconnect through committed history only", async () => {
     const provider = new ControlledStreamingProvider("protocol-stream");
     const { supervisor, sessionId, branchId } = await openWith(provider);
@@ -456,7 +373,7 @@ describe("provider output streaming", () => {
     const base = `http://${server.hostname}:${server.port}`;
     const client = new AgentClient(base);
     try {
-      expect(await client.modelProviders()).toContainEqual(expect.objectContaining({ name: provider.name, capabilities: { streaming: true } }));
+      expect(await client.modelProviders()).toContainEqual(expect.objectContaining({ name: provider.name, capabilities: expect.objectContaining({ streaming: true }) }));
       const snapshot = await client.snapshot(sessionId, branchId);
       const controller = new AbortController();
       const committed: string[] = [];

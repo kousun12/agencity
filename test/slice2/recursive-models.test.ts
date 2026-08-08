@@ -88,6 +88,7 @@ describe("Slice 2 recursive model concurrency, cancellation, and recovery", () =
     const handle = await supervisor.models.start(root.sessionId, root.branchId, { prompt: "ambiguous call", run: false });
     const effectId = "lost-provider-effect";
     const callId = "lost-provider-call";
+    const modelDispatch = supervisor.modelExecutor.resolveDispatch({ provider: provider.name, model: "model", reasoningEffort: "provider-default" });
     await supervisor.storage.appendEvents([{
       sessionId: root.sessionId, branchId: root.branchId, type: "RecursiveModelStatusChanged", producer: "supervisor",
       idempotencyKey: `test-running:${handle.handleId}`, payload: { handleId: handle.handleId, status: "running" },
@@ -96,11 +97,11 @@ describe("Slice 2 recursive model concurrency, cancellation, and recovery", () =
       idempotencyKey: "test-context:lost-context", payload: { contextId: "lost-context", records: [], contentHash: "0".repeat(64), context: {} },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ModelCallRequested", producer: "supervisor",
-      idempotencyKey: `test-call:${callId}`, payload: { callId, contextId: "lost-context", effectId, provider: provider.name, model: "model" },
+      idempotencyKey: `test-call:${callId}`, payload: { callId, contextId: "lost-context", effectId, modelDispatch },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor",
       idempotencyKey: `test-effect:${effectId}`, payload: {
-        effectId, executor: "model", operation: "complete", input: { context: {}, configuration: { provider: provider.name, model: "model" } },
+        effectId, executor: "model", operation: "complete", input: { context: {}, callId, modelDispatch } as any,
         idempotencyKey: `test-effect:${effectId}`, idempotent: false,
       },
     }, {

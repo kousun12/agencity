@@ -6,7 +6,9 @@ import {
   InProcessProtocolTransport,
   ProtocolServer,
   Supervisor,
+  projectEvents,
   type AgentRunState,
+  type ModelConfiguration,
 } from "../../src/index.ts";
 import { OpenTuiApp, formatManagedDetach, type OpenTuiController } from "../../src/tui/opentui.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
@@ -376,7 +378,8 @@ describe("OpenTUI interactive terminal", () => {
     const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
     let storedOpenAi = false;
     let defaultModel: string | null = null;
-    let selectedModel = { provider: "echo", model: "echo-1" };
+    let selectedModel: ModelConfiguration = { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" };
+    let effortPreference: ModelConfiguration["reasoningEffort"] | null = null;
     const submittedKeys: Array<string | null> = [];
     const providers = () => [
       {
@@ -415,7 +418,30 @@ describe("OpenTUI interactive terminal", () => {
       get(target, property) {
         if (property === "modelProviders") return async () => providers();
         if (property === "capabilities") return async () => ({ ...(await base.capabilities()), providers: providers() });
-        if (property === "productConfig") return async () => ({ defaultModel, credentialReferences: [] });
+        if (property === "productConfig") return async () => ({
+          defaultModel,
+          selectedModelEffortPreference: effortPreference,
+          credentialReferences: [],
+        });
+        if (property === "modelCatalog") return async () => ({
+          endpointId: "a".repeat(64),
+          origin: "https://ai-gateway.vercel.sh",
+          descriptors: [{
+            model: "openai/gpt-inspector-test",
+            displayName: "GPT Inspector Test",
+            contextWindowTokens: 100_000,
+            maxOutputTokens: 10_000,
+            pricing: null,
+            reasoning: { status: "listed", levels: ["low", "high"] },
+            catalogDigest: "b".repeat(64),
+            catalogEndpointId: "a".repeat(64),
+            stale: false,
+          }],
+        });
+        if (property === "productSetReasoningEffort") return async (_model: string, effort: ModelConfiguration["reasoningEffort"] | null) => {
+          effortPreference = effort;
+          return { effort };
+        };
         if (property === "productSetProviderKey") return async (provider: string, apiKey: string | null) => {
           expect(provider).toBe("openai");
           submittedKeys.push(apiKey);
@@ -423,7 +449,15 @@ describe("OpenTUI interactive terminal", () => {
           return { provider, configured: storedOpenAi, source: storedOpenAi ? "stored" : "missing" };
         };
         if (property === "selectModel") return async (_sessionId: string, _branchId: string, value: typeof selectedModel) => {
+          const previousModel = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId })).model;
           selectedModel = value;
+          await supervisor.storage.appendEvents([{
+            sessionId: session.sessionId,
+            branchId: session.branchId,
+            type: "SessionModelChanged",
+            producer: "client",
+            payload: { previousModel, model: value, selectedBy: "user" },
+          }]);
           return { changed: true, model: value };
         };
         if (property === "productSetModel") return async (value: string | null) => {
@@ -480,23 +514,46 @@ describe("OpenTUI interactive terminal", () => {
 
       setup.mockInput.pressEnter();
       frame = await setup.waitForFrame(value => value.includes("Choose model") && value.includes("Model ID for openai"));
-      await setup.mockInput.typeText("gpt-inspector-test");
+      await setup.mockInput.typeText("Inspector");
+      await setup.waitForFrame(value => value.includes("> GPT Inspector Test"));
       setup.mockInput.pressEnter();
       expect(await app.settle()).toBe(true);
-      frame = await setup.waitForFrame(value => value.includes("gpt-inspector-test") && value.includes("openai:gpt-inspector-test"));
-      expect(selectedModel).toEqual({ provider: "openai", model: "gpt-inspector-test" });
-      expect(String(defaultModel)).toBe("openai:gpt-inspector-test");
+      frame = await setup.waitForFrame(value => value.includes("gpt-inspector-test") && value.includes("openai:openai/gpt-inspector-test"));
+      expect(selectedModel as unknown).toEqual({ provider: "openai", model: "openai/gpt-inspector-test", reasoningEffort: "provider-default" });
+      expect(String(defaultModel)).toBe("openai:openai/gpt-inspector-test");
       expect(frame).not.toContain(secret);
 
-      setup.resize(78, 24);
-      frame = await setup.waitForFrame(value => value.includes("MODEL") && value.includes("gpt-inspector-test"));
-      expect(frame).toContain("Providers");
+      setup.mockInput.pressEscape();
+      await Bun.sleep(50);
+      await setup.waitForFrame(value => !value.includes("MODEL"));
+      await setup.mockInput.typeText("/effort");
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("REASONING EFFORT") && value.includes("> provider-default"));
+      expect(frame).toContain("Capability: listed");
+      setup.mockInput.pressArrow("down");
+      frame = await setup.waitForFrame(value => value.includes("> low"));
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("REASONING EFFORT") && value.includes("> low"));
+      expect(String(effortPreference)).toBe("low");
+      expect((selectedModel as unknown as { reasoningEffort: string }).reasoningEffort).toBe("low");
 
+      setup.mockInput.pressEscape();
+      await Bun.sleep(50);
+      await setup.mockInput.typeText("/model");
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      await setup.waitForFrame(value => value.includes("MODEL") && value.includes("OpenAI"));
       setup.mockInput.pressKey("x");
       expect(await app.settle()).toBe(true);
       frame = await setup.waitForFrame(value => value.includes("> ○ OpenAI") && value.includes("not configured"));
       expect(submittedKeys).toEqual([secret, null]);
       expect(frame).not.toContain(secret);
+
+      setup.resize(78, 24);
+      frame = await setup.waitForFrame(value => value.includes("MODEL") && value.includes("gpt-inspector-test"));
+      expect(frame).toContain("Providers");
     } finally {
       app.destroy();
       setup.renderer.destroy();

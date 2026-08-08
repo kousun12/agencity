@@ -190,6 +190,10 @@ A filesystem or administration failure produces a partial result. Workspace owne
 
 ## Upgrades and migrations
 
+- The reasoning-effort/model-capability release is a pre-release data cutover. It accepts event schema version 2 only and does not upcast version-1 workspace events or an unversioned legacy profile database.
+- The accepted formal model-tool cutover will replace that workspace schema with version 3 only. It will reject version-1/version-2 workspaces with reset guidance and will not decode, upcast, synchronize, project, or recover their sessions. Profile model-catalog caches may be discarded and rebuilt.
+- Opening incompatible state fails before applying product migrations to its retained rows and reports reset guidance. The runtime does not delete the old database.
+- Before using this revision, back up or move aside each affected workspace's `.agencity` directory and the selected profile directory (normally `~/.agencity`). Starting again creates fresh version-2 workspace and profile stores. A workspace reset does not by itself reset the separate profile, and a profile reset does not remove workspace state.
 - Back up databases, sidecars, artifacts, profile data, and replicas before changing to a source revision with new migrations.
 - Run only one runtime version against a given writable workspace at a time.
 - Do not downgrade a migrated database unless that repository revision explicitly supports it.

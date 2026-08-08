@@ -55,9 +55,10 @@ bun run test:acceptance
 
 Each case creates an isolated Bun install root, temporary home directory, and fresh external repository. It runs `bun link` and invokes only the resulting `agencity` executable from outside the source checkout. A source guard rejects acceptance tests that import runtime internals, open LibSQL directly, use private runtime clients, or supply opaque session, branch, or history coordinates.
 
-The suite uses a local OpenAI-compatible fixture that implements the strict version-1 action protocol and streaming transport. It covers:
+The suite uses a local OpenAI API fixture reached through the Vercel AI SDK transport and implements the strict version-1 action protocol and streaming transport. It covers:
 
 - truthful missing-provider behavior and explicit provider/model selection;
+- canonical catalog model IDs and durable reasoning-effort selection;
 - autonomous TypeScript cells and typed file or shell effects;
 - durable recursive calls, child agents, messages, and retained follow-up;
 - failed completion-gate repair;
@@ -71,7 +72,9 @@ This acceptance suite is intentionally non-interactive. The `test:core` groups s
 
 The agent-run integration suite verifies that malformed action text never executes, its exact rejection is delivered once to one correction step, a second consecutive rejection terminates the run, and recovery after a committed rejection does not duplicate the model call or observation.
 
-The integration suite also records a focused family-projection benchmark with 25 relatives and branch histories expanded to 5,000 canonical event records at the storage boundary. It proves that a cold read projects each route once and that a warm refresh reuses current snapshots without replaying the 130,000 retained events. Controller tests separately prove that periodic refresh requests are coalesced, never overlap, do not accumulate a timer backlog, and stop when the browser is closed and no child is actively working.
+The integration suite also verifies the AI SDK OpenAI, Anthropic, and Gateway transport factories; normalized reasoning mapping; authoritative streaming; bounded warnings and errors; model-catalog normalization, endpoint-keyed cache isolation, stale fallback, and malformed-record rejection; dispatch equality; and pre-cutover data rejection without deletion.
+
+It records a focused family-projection benchmark with 25 relatives and branch histories expanded to 5,000 canonical event records at the storage boundary. It proves that a cold read projects each route once and that a warm refresh reuses current snapshots without replaying the 130,000 retained events. Controller tests separately prove that periodic refresh requests are coalesced, never overlap, do not accumulate a timer backlog, and stop when the browser is closed and no child is actively working.
 
 The package is private. This verifies the documented source and `bun link` workflow; it is not evidence of a package-registry or standalone-binary release.
 
@@ -116,7 +119,7 @@ AGENCITY_ACCEPTANCE_REAL_MODEL=... \
 bun run test:acceptance:external
 ```
 
-Set `OPENAI_BASE_URL` when testing another compatible endpoint. This is a credential-gated installed-product smoke against the selected live model. It does not verify every supported provider or model.
+`AGENCITY_ACCEPTANCE_REAL_MODEL` uses the canonical `openai/...` catalog ID. Set `OPENAI_BASE_URL` to a path-free HTTP(S) origin when testing another compatible endpoint. This is a credential-gated installed-product smoke against the selected live model. It does not verify every supported provider or model.
 
 The same row can be included in the release matrix:
 

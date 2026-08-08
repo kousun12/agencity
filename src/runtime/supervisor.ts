@@ -18,6 +18,7 @@ import {
   MAX_WORKING_JSON_BYTES,
   newId,
   NotFoundError,
+  normalizeReasoningEffort,
   projectEvents,
   ValidationError,
   type AgentEvent,
@@ -25,16 +26,18 @@ import {
   type BudgetLimits,
   type JsonValue,
   type ModelConfiguration,
+  type ModelConfigurationInput,
   type WorkingValue,
 } from "../domain/index.ts";
 import {
   EchoModelProvider,
-  AnthropicCompatibleProvider,
   FileExecutor,
   ModelExecutor,
-  OpenAICompatibleProvider,
   ShellExecutor,
   SkillExecutor,
+  createAnthropicModelProvider,
+  createOpenAIModelProvider,
+  createVercelModelProvider,
   type ModelProvider,
   type ProviderConcurrency,
 } from "../executors/index.ts";
@@ -68,6 +71,7 @@ import { EffectReconciliationService } from "./effect-reconciliation.ts";
 import { RefinerService } from "./refiner.ts";
 import { SkillManagementService } from "./skill-management.ts";
 import { CompactionService, type CompactContextInput, type ContextCompactionView, type ContextInspection } from "./context-compaction.ts";
+import { ModelCatalog, type ModelCatalogOptions } from "./model-catalog.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -77,6 +81,8 @@ export interface SupervisorOptions {
   readonly workspaceRoot?: string;
   readonly restartConsoleAfterCell?: boolean;
   readonly modelProviders?: readonly ModelProvider[];
+  /** Model-catalog transport controls; fetch injection is intended for deterministic conformance tests. */
+  readonly modelCatalog?: ModelCatalogOptions;
   readonly recover?: boolean;
   readonly maxSessionDepth?: number;
   readonly maxChildrenPerSession?: number;
@@ -122,7 +128,7 @@ export interface SupervisorOptions {
 
 export interface CreateSessionOptions {
   readonly workspaceId: string;
-  readonly model?: ModelConfiguration;
+  readonly model?: ModelConfigurationInput;
   readonly budget?: BudgetLimits;
   readonly sessionId?: string;
   readonly branchId?: string;
@@ -286,6 +292,7 @@ export class Supervisor {
   readonly refiner: RefinerService;
   /** Process-local executor/provider catalog; descriptors contain no credential material. */
   readonly modelExecutor: ModelExecutor;
+  readonly modelCatalog: ModelCatalog;
   readonly restartConsoleAfterCell: boolean;
   readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
   readonly #cells = new BranchQueue();
@@ -306,6 +313,7 @@ export class Supervisor {
     userScopeKey: string,
     skillPermissionAllowlist: readonly string[],
     modelExecutor: ModelExecutor,
+    modelCatalog: ModelCatalog,
     executionLeases: ManagedExecutionLeaseCoordinator | null,
   ) {
     this.storage = storage;
@@ -317,12 +325,20 @@ export class Supervisor {
     this.console = consoleProcess;
     this.outbox = outbox;
     this.projections = new ProjectionService(storage);
-    this.agents = new AgentService(storage, outbox, maxSessionDepth, maxChildrenPerSession);
+    this.agents = new AgentService(
+      storage,
+      outbox,
+      maxSessionDepth,
+      maxChildrenPerSession,
+      (model) => modelExecutor.normalizeConfiguration(model),
+      (model) => modelExecutor.normalizeConfigurationIdentity(model),
+    );
     this.skills = new SkillService(storage, outbox, skillPermissionAllowlist, userScopeKey);
     this.harness = new HarnessService(storage, this.skills, userScopeKey);
     this.memory = new MemoryService(storage, undefined, userScopeKey);
     this.specs = new SubagentSpecService(storage, this.agents, userScopeKey);
     this.modelExecutor = modelExecutor;
+    this.modelCatalog = modelCatalog;
     this.executionLeases = executionLeases;
     this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
     this.compactions = new CompactionService(storage, outbox, modelExecutor);
@@ -349,6 +365,11 @@ export class Supervisor {
     const profileDatabaseUrl=options.profileDatabaseUrl??adjacentFileUrl(options.databaseUrl,".profile.db");
     if(profileDatabaseUrl.startsWith("file:"))await mkdir(dirname(fileURLToPath(new URL(profileDatabaseUrl))),{recursive:true});
     const profile = await ProfileStore.open(profileDatabaseUrl);
+    const modelCatalog = new ModelCatalog(profile, {
+      ...(process.env.AI_GATEWAY_BASE_URL === undefined ? {} : { gatewayOrigin: process.env.AI_GATEWAY_BASE_URL }),
+      ...options.modelCatalog,
+    });
+    await modelCatalog.hydrate();
     let credentials: ModelCredentialStore;
     try {
       if (!options.modelCredentialPath && !profileDatabaseUrl.startsWith("file:")) {
@@ -432,27 +453,22 @@ export class Supervisor {
         ...(status.configured ? {} : { remediation: `Use /model login ${provider} or set ${status.environmentVariable}.` }),
       };
     };
-    if (!configuredNames.has("openai")) providers.push(new OpenAICompatibleProvider({
-      baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
-      apiKey: () => credentials.resolve("openai"),
-      displayName: "OpenAI",
-      availability: () => availability("openai"),
-    }));
-    if (!configuredNames.has("anthropic")) providers.push(new AnthropicCompatibleProvider({
-      baseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
-      apiKey: () => credentials.resolve("anthropic"),
-      displayName: "Anthropic",
-      normalizeModel: model => model.startsWith("claude-") ? model : `claude-${model}`,
-      availability: () => availability("anthropic"),
-    }));
-    if (!configuredNames.has("vercel")) providers.push(new AnthropicCompatibleProvider({
-      baseUrl: process.env.AI_GATEWAY_BASE_URL ?? "https://ai-gateway.vercel.sh",
+    if (!configuredNames.has("vercel")) providers.push(createVercelModelProvider({
+      origin: modelCatalog.gatewayOrigin,
       apiKey: () => credentials.resolve("vercel"),
-      providerName: "vercel",
-      displayName: "Vercel AI Gateway",
       availability: () => availability("vercel"),
     }));
-    const modelExecutor = new ModelExecutor(providers, options.providerConcurrency ?? 1);
+    if (!configuredNames.has("openai")) providers.push(createOpenAIModelProvider({
+      origin: process.env.OPENAI_BASE_URL ?? "https://api.openai.com",
+      apiKey: () => credentials.resolve("openai"),
+      availability: () => availability("openai"),
+    }));
+    if (!configuredNames.has("anthropic")) providers.push(createAnthropicModelProvider({
+      origin: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
+      apiKey: () => credentials.resolve("anthropic"),
+      availability: () => availability("anthropic"),
+    }));
+    const modelExecutor = new ModelExecutor(providers, options.providerConcurrency ?? 1, modelCatalog);
     const executors = [
       new ShellExecutor(workspaceRoot),
       new FileExecutor(workspaceRoot),
@@ -474,6 +490,7 @@ export class Supervisor {
       options.userScopeKey ?? "default-user",
       options.skillPermissionAllowlist ?? [],
       modelExecutor,
+      modelCatalog,
       executionLeases,
     );
     if (options.recover !== false) await supervisor.recoverExecution({ drainPending: executionLeases === null });
@@ -485,8 +502,16 @@ export class Supervisor {
   get modelProviders() { return this.modelExecutor.providers(); }
 
   /** Resolves provider-defined shorthand before model identity becomes durable. */
-  normalizeModelConfiguration(model: ModelConfiguration): ModelConfiguration {
+  normalizeModelConfiguration(model: ModelConfigurationInput): ModelConfiguration {
     return this.modelExecutor.normalizeConfiguration(model);
+  }
+
+  async #normalizeSelectedModel(model: ModelConfigurationInput): Promise<ModelConfiguration> {
+    if (this.modelExecutor.isProductTransport(model.provider) &&
+        normalizeReasoningEffort(model.reasoningEffort) !== "provider-default") {
+      await this.modelCatalog.ensureFresh();
+    }
+    return this.normalizeModelConfiguration(model);
   }
 
   /** Reconciles retained work only after managed lease admission. */
@@ -559,7 +584,7 @@ export class Supervisor {
     if (!catalog) await this.profile.putWorkspace({ workspaceId: options.workspaceId, name: options.workspaceId, databaseUrl: this.sync.databaseUrl, replicaUrl: null, syncUrl: null, credentialReference: null, ownerProfileId: this.device.profileId, createdAt: now, updatedAt: now, deletedAt: null });
     const sessionId = options.sessionId ?? newId();
     const branchId = options.branchId ?? newId();
-    const model = this.normalizeModelConfiguration(options.model ?? { provider: "echo", model: "echo-1" });
+    const model = await this.#normalizeSelectedModel(options.model ?? { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" });
     await this.storage.appendEvents([{
       sessionId,
       branchId,
@@ -579,14 +604,14 @@ export class Supervisor {
   }
 
   /** Explicitly changes the durable branch model while no model work is active. */
-  async selectModel(sessionId: string, branchId: string, model: ModelConfiguration): Promise<{
+  async selectModel(sessionId: string, branchId: string, model: ModelConfigurationInput): Promise<{
     readonly changed: boolean;
     readonly previousModel: ModelConfiguration;
     readonly model: ModelConfiguration;
     readonly eventId?: string;
     readonly cursor?: string;
   }> {
-    const normalizedModel = this.normalizeModelConfiguration(model);
+    const normalizedModel = await this.#normalizeSelectedModel(model);
     const descriptor = this.modelExecutor.providers().find(provider => provider.name === normalizedModel.provider);
     if (!descriptor || normalizedModel.provider === "echo") {
       throw new ValidationError(normalizedModel.provider === "echo"
@@ -944,6 +969,7 @@ export class Supervisor {
       if (method === "tools.request") {
         const [executor, operation, input, rawOptions] = args;
         if (typeof executor !== "string" || typeof operation !== "string") throw new ValidationError("Invalid tool request");
+        if (executor === "model") throw new CapabilityUnavailableError("generic model executor access", "use rlm.start or sdk.agents.spawn so model admission and dispatch provenance are retained");
         assertJsonValue(input);
         const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
           ? rawOptions as Record<string, unknown>

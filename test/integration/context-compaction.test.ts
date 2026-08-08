@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { makeTempRuntime, openTempStorage, removeTempRuntime, seedSession } from "../helpers.ts";
 import { ContextMaterializer, CompactionService, OutboxRunner, ProjectionService, Supervisor, stableEffectId } from "../../src/runtime/index.ts";
 import { EchoModelProvider, ModelExecutor, ModelProviderContextWindowOverflowError, type ModelProvider } from "../../src/executors/index.ts";
-import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, projectEvents, type AgentEvent, type JsonValue } from "../../src/domain/index.ts";
+import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, projectEvents, resolveModelDispatch, type AgentEvent, type JsonValue } from "../../src/domain/index.ts";
 import { AgentClient, ProtocolServer } from "../../src/protocol/index.ts";
 import { createExactSourceManifest, planCompactionSources } from "../../src/runtime/compaction-core.ts";
 
@@ -12,9 +12,10 @@ afterEach(async () => { while (temps.length) await removeTempRuntime(temps.pop()
 async function fixture(provider: ModelProvider = new EchoModelProvider()) {
   const temp = await makeTempRuntime("agencity-compaction-"); temps.push(temp);
   const storage = await openTempStorage(temp);
-  const root = await seedSession(storage, { model: { provider: provider.name, model: "test" } });
-  const outbox = new OutboxRunner(storage, [new ModelExecutor([provider])]);
-  return { temp, storage, root, outbox, service: new CompactionService(storage, outbox) };
+  const root = await seedSession(storage, { model: { provider: provider.name, model: "test", reasoningEffort: "provider-default" } });
+  const executor = new ModelExecutor([provider]);
+  const outbox = new OutboxRunner(storage, [executor]);
+  return { temp, storage, root, outbox, service: new CompactionService(storage, outbox, executor) };
 }
 
 async function messages(storage: any, sessionId: string, branchId: string, count = 28) {
@@ -31,12 +32,19 @@ async function appendPendingModelRequest(storage: any, sessionId: string, branch
   const sources = events.filter((event) => event.type === "MessageAppended").slice(0, -4);
   const plan = planCompactionSources(sources.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: BigInt(event.cursor).toString(), type: event.type, schemaVersion: event.schemaVersion, payload: event.payload })), { sessionId, branchId, throughCursor });
   const manifest = createExactSourceManifest(plan.compactable, { sessionId, branchId, throughCursor });
+  const configuration = projectEvents(events).model;
+  const modelDispatch = resolveModelDispatch({
+    configuration,
+    capability: { status: "unsupported", levels: [] },
+    catalogDigest: "0".repeat(64),
+  });
   const [request] = await storage.appendEvents([{
     sessionId, branchId, type: "ContextCompactionRequested", producer: "supervisor",
     idempotencyKey: `context-compaction-request:${compactionId}`,
     payload: {
       compactionId, strategy: "model-summary-v1", reason: "user-request", requestedBy: "user", throughCursor,
       sourceEventIds: [...manifest.sourceEventIds], sourceDigest: manifest.sourceDigest,
+      modelDispatch,
       frozenSources: plan.compactable.map((source) => ({ eventId: source.eventId, sessionId: source.sessionId, branchId: source.branchId, cursor: source.cursor, type: source.type, schemaVersion: source.schemaVersion, payload: source.payload, disposition: "compactable", classificationReason: source.classificationReason, payloadUtf8Bytes: source.payloadUtf8Bytes })),
     },
   }]);
@@ -71,6 +79,29 @@ describe("FU-019 durable context compaction", () => {
     const rebuilt = await new ProjectionService(storage).rebuild(root.sessionId, root.branchId);
     expect(rebuilt.compactions[compacted.compactionId]?.status).toBe("completed");
     expect(rebuilt.messages).toHaveLength(28);
+    storage.close();
+  });
+
+  test("rejects a pinned compaction dispatch that differs from the branch model", async () => {
+    const { storage, root } = await fixture();
+    await messages(storage, root.sessionId, root.branchId, 8);
+    const request = await appendPendingModelRequest(storage, root.sessionId, root.branchId, "valid-pinned");
+    const payload = request.payload;
+    await expect(storage.appendEvents([{
+      sessionId: root.sessionId,
+      branchId: root.branchId,
+      type: "ContextCompactionRequested",
+      producer: "supervisor",
+      idempotencyKey: "context-compaction-request:mismatched-pinned",
+      payload: {
+        ...payload,
+        compactionId: "mismatched-pinned",
+        modelDispatch: {
+          ...payload.modelDispatch!,
+          configuration: { ...payload.modelDispatch!.configuration, model: "different-model" },
+        },
+      },
+    }])).rejects.toThrow("must match the committed branch configuration");
     storage.close();
   });
 
@@ -152,6 +183,56 @@ describe("FU-019 durable context compaction", () => {
     await supervisor.close();
   });
 
+  test("keeps a diagnostic turn running across overflow compaction so its pinned dispatch cannot change", async () => {
+    let calls = 0;
+    const provider: ModelProvider = {
+      name: "diagnostic-overflow",
+      capabilities: { streaming: false },
+      async complete(_context, configuration) {
+        calls++;
+        if (calls === 1) throw new ModelProviderContextWindowOverflowError("diagnostic-overflow", configuration.model);
+        return { text: "retried diagnostic turn", finishReason: "stop", usage: { inputTokens: 10, outputTokens: 3, costUsd: 0 } };
+      },
+    };
+    const temp = await makeTempRuntime("agencity-diagnostic-overflow-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const root = await supervisor.createSession({
+      workspaceId: "diagnostic-overflow",
+      model: { provider: provider.name, model: "overflow" },
+    });
+    await messages(supervisor.storage, root.sessionId, root.branchId, 30);
+    let announceCompaction!: () => void;
+    let releaseCompaction!: () => void;
+    const compactionStarted = new Promise<void>((resolve) => { announceCompaction = resolve; });
+    const compactionGate = new Promise<void>((resolve) => { releaseCompaction = resolve; });
+    const compact = supervisor.compactions.compact.bind(supervisor.compactions);
+    (supervisor.compactions as any).compact = async (...args: any[]) => {
+      announceCompaction();
+      await compactionGate;
+      return (compact as any)(...args);
+    };
+    const turn = supervisor.modelLoop.turn(root.sessionId, root.branchId);
+    await compactionStarted;
+    try {
+      await expect(supervisor.selectModel(root.sessionId, root.branchId, {
+        provider: provider.name,
+        model: "overflow",
+        temperature: 0.2,
+      })).rejects.toThrow(/active/);
+    } finally {
+      releaseCompaction();
+    }
+    await expect(turn).resolves.toMatchObject({ outcome: "succeeded", message: "retried diagnostic turn" });
+    expect(calls).toBe(2);
+    await supervisor.close();
+  });
+
 
   test("recovers request/effect crash boundaries and makes a lost model summary explicitly unknown", async () => {
     let calls = 0;
@@ -171,9 +252,9 @@ describe("FU-019 durable context compaction", () => {
     calls = 0;
     const second = await fixture(provider);
     await messages(second.storage, second.root.sessionId, second.root.branchId, 26);
-    await appendPendingModelRequest(second.storage, second.root.sessionId, second.root.branchId, "crash-after-effect");
+    const secondRequest = await appendPendingModelRequest(second.storage, second.root.sessionId, second.root.branchId, "crash-after-effect");
     const effectKey = "context-compaction-model:crash-after-effect:level:0:chunk:0";
-    const effectId = await second.outbox.request({ sessionId: second.root.sessionId, branchId: second.root.branchId, executor: "model", operation: "complete", input: { context: { messages: [] }, configuration: { provider: provider.name, model: "test" } }, idempotencyKey: effectKey, idempotent: false });
+    const effectId = await second.outbox.request({ sessionId: second.root.sessionId, branchId: second.root.branchId, executor: "model", operation: "complete", input: { context: { messages: [] }, compactionId: "crash-after-effect", modelDispatch: secondRequest.payload.modelDispatch } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
     expect(await second.outbox.run(effectId)).toMatchObject({ outcome: "succeeded" });
     expect(calls).toBe(1);
     expect(await second.service.recoverIncomplete()).toBe(1);
@@ -185,7 +266,7 @@ describe("FU-019 durable context compaction", () => {
     await messages(third.storage, third.root.sessionId, third.root.branchId, 26);
     const request = await appendPendingModelRequest(third.storage, third.root.sessionId, third.root.branchId, "crash-unknown");
     const unknownKey = "context-compaction-model:crash-unknown:level:0:chunk:0";
-    const unknownEffectId = await third.outbox.request({ sessionId: third.root.sessionId, branchId: third.root.branchId, executor: "model", operation: "complete", input: { context: { messages: [] }, configuration: { provider: provider.name, model: "test" } }, idempotencyKey: unknownKey, idempotent: false });
+    const unknownEffectId = await third.outbox.request({ sessionId: third.root.sessionId, branchId: third.root.branchId, executor: "model", operation: "complete", input: { context: { messages: [] }, compactionId: "crash-unknown", modelDispatch: request.payload.modelDispatch } as unknown as JsonValue, idempotencyKey: unknownKey, idempotent: false });
     expect(unknownEffectId).toBe(stableEffectId(third.root.sessionId, unknownKey));
     await third.storage.appendEvents([{ sessionId: third.root.sessionId, branchId: third.root.branchId, type: "EffectAttemptStarted", producer: "executor", idempotencyKey: `effect-attempt:${unknownEffectId}:1`, payload: { effectId: unknownEffectId, attempt: 1 } }]);
     const recovered = await third.outbox.recover();

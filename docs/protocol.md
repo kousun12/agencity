@@ -63,7 +63,9 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 | Method and path | Result |
 |---|---|
 | `GET /health` | Managed authenticated identity/version/config/readiness, or basic embedded health. |
-| `GET /capabilities` | Protocol version, trusted-local mode, snapshot/resume, progress, historical projection, managed-service/catalog availability, sync capabilities, and raw provider descriptors. |
+| `GET /capabilities` | Protocol version, trusted-local mode, snapshot/resume, progress, historical projection, managed-service/catalog availability, reasoning-effort support, sync capabilities, and raw provider descriptors. |
+| `GET /model-catalog` | Normalized Gateway language-model descriptors, catalog endpoint identity, origin, freshness, capacity, pricing, and reasoning capability. It refreshes an absent or stale cache and reports cached fallback or unavailability explicitly. |
+| `POST /model-catalog/refresh` | Bounded public Gateway catalog refresh, with an explicit cached-fallback or unavailable result. |
 | `GET /model-providers` | Secret-free raw supervisor provider descriptors. Product UIs must apply product policy; Echo is an internal test fixture, not a product-selectable provider. |
 | `GET /service/status` | Managed-only lifecycle, recovery, idle deadline, attached clients, keep-alive reasons, and resident root workers. |
 | `POST /service/shutdown` | Managed-only accepted graceful drain. It does not cancel sessions. |
@@ -71,8 +73,9 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 | `GET /product/sessions` | Managed-only human-readable product session/branch catalog. |
 | `POST /product/select` | Managed-only `{ target?, branchId? }` selection; returns `{ sessionId, branchId }`. |
 | `POST /product/rename` | Managed-only `{ sessionId, branchId?, name }`. |
-| `GET /product/config` | Managed-only workspace default model, opaque credential references, and secret-free provider descriptors. |
-| `POST /product/config/model` | Managed-only `{ model: "provider:model" \| null }`. |
+| `GET /product/config?model=CREATOR%2FMODEL` | Managed-only workspace default model, normalized catalog/execution origins, the model-specific effort preference, opaque credential references, and secret-free provider descriptors. |
+| `POST /product/config/model` | Managed-only `{ model: "provider:creator/model" \| null }`. |
+| `POST /product/config/reasoning-effort` | Managed-only `{ model: "creator/model", effort: ReasoningEffort \| null }`; sets or clears the workspace/catalog/model preference. |
 | `POST /product/config/provider-key` | Managed-only `{ provider, apiKey: string \| null }`; stores or removes a supported key and returns status without the value. |
 | `POST /product/config/credential-reference` | Managed-only `{ provider, reference, label }`; stores an opaque reference, not credential bytes. |
 
@@ -82,8 +85,8 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 
 | Method and path | Input and result |
 |---|---|
-| `POST /sessions` | `{ workspaceId?, model?, budget?, sessionName?, branchName? }` → `{ sessionId, branchId }`. |
-| `POST /sessions/:session/model?branch=:branch` | `{ model: { provider, model } }` → explicit idle-branch model change. |
+| `POST /sessions` | `{ workspaceId?, model?, budget?, sessionName?, branchName? }` → `{ sessionId, branchId }`; product model configuration includes `reasoningEffort`. |
+| `POST /sessions/:session/model?branch=:branch` | `{ model: { provider, model, reasoningEffort? } }` → explicit idle-branch model or effort change. |
 | `GET /sessions/:session/snapshot?branch=:branch` | `{ cursor, state }`. |
 | `GET /sessions/:session/history?branch=:branch` | Ordered branch-lineage `AgentEvent[]`. |
 | `GET /sessions/:session/stream?branch=:branch&after=:cursor` | Committed-event SSE plus cursorless progress. |
@@ -91,7 +94,7 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 | `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalMode?, goalId? }` → run result or managed acceptance. |
 | `GET /sessions/:session/runs/:run?branch=:branch` | Current retained `AgentRunResult`. |
 | `POST /sessions/:session/runs/:run/resume?branch=:branch` | Advance the retained run. |
-| `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | `{ response, approved? }`; permission requires boolean `approved`. |
+| `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | Transitional pre-release route for the current clarification/permission implementation; removed by the formal-tool cutover. |
 | `POST /sessions/:session/runs/:run/cancel?branch=:branch` | `{ reason? }` → cancellation-reconciled result. |
 | `POST /sessions/:session/stop?branch=:branch` | Managed-only `{ reason? }` → cancel the active run, if any. |
 | `POST /sessions/:session/turns?branch=:branch` | Advanced diagnostic one-turn model result. |
@@ -105,7 +108,9 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 | `GET /sessions/:session/effects/:effect/reconciliation?branch=:branch` | One unknown effect and assessment history. |
 | `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | Append `{ reconciliationId?, assessment, summary, evidence?, recordedBy }`; durable effect status remains unknown. |
 
-Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start` and holds the request through the next terminal or user-waiting boundary.
+Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start`. The current pre-release server may also stop at its older user-waiting boundary; [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) removes that boundary and the input route. Missing information becomes a blocked `finish`, and a later user message starts an ordinary new run.
+
+`reasoningEffort` is `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Clients that send an effort configuration first require `reasoningEffortSelection` from `/capabilities`; an older server fails with `CAPABILITY_UNAVAILABLE` rather than ignoring the field. Existing clients remain compatible because omitted effort normalizes to `provider-default`.
 
 Reconciliation is evidence-only. It never rewrites an unknown effect, reports a retry, or executes a successor operation.
 
@@ -144,7 +149,7 @@ Reconciliation is evidence-only. It never rewrites an unknown effect, reports a 
 | `GET /sessions/:session/schedules/wakes?branch=:branch&status=...` | Durable wake records. |
 | `POST /schedules/:id/tick\|pause\|resume\|clear` | Schedule lifecycle operation. |
 
-The family roster is an additive deterministic read projection. Each item contains the exact `sessionId` and `branchId`, display name, relationship, depth, session status, related task identity and status, task summary, model configuration, cancellation-request flag, activity, and bounded activity reason. Activity is one of `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable`. Reasons are `waiting_for_user`, `permission_required`, `blocked`, `failed`, `budget_exceeded`, `unknown`, `cancellation_pending`, `cancelled`, `archived`, `missing_state`, or `null`.
+The family roster is an additive deterministic read projection. Each item contains the exact `sessionId` and `branchId`, display name, relationship, depth, session status, related task identity and status, task summary, model configuration, cancellation-request flag, activity, and bounded activity reason. The current pre-release projection can report `waiting`, `waiting_for_user`, and `permission_required`; the formal-tool cutover removes those values. The target activities are `working`, `idle`, `attention`, `ended`, or `unavailable`, with reasons `blocked`, `failed`, `budget_exceeded`, `unknown`, `cancellation_pending`, `cancelled`, `archived`, `missing_state`, or `null`.
 
 `working` requires a running task, queued/running agent run, or running session. An admitted child with no active run is `idle`. A parent row retains the task edge that relates it to the current child, but its activity is derived from the parent route rather than from that child task.
 
@@ -235,7 +240,7 @@ The client exposes typed methods for all route groups:
 - discovery and service: `health`, `capabilities`, `serviceStatus`, `shutdownService`, `serviceAgents`;
 - product catalog/configuration: `productSessions`, `productSelect`, `productRename`, `productConfig`, `productSetModel`, `productSetProviderKey`, `productCredentialReference`, `modelProviders`;
 - session lifecycle: `createSession`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
-- autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `respondToRun`, `cancelRun`, `turn`, `cell`;
+- autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`; the current pre-release client also exposes transitional `respondToRun`, which the formal-tool cutover removes;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
 - agents and recursive work: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mailbox methods, follow-up/cancel methods, documents, input sets, recursive model methods;
@@ -265,7 +270,11 @@ import { AgentClient } from "@prime-agent/runtime/protocol";
 
 const client = new AgentClient(serviceUrl, bearerToken);
 const session = await client.createSession("example", {
-  model: { provider: "openai", model: "gpt-5.6-sol" },
+  model: {
+    provider: "openai",
+    model: "openai/gpt-5.6-sol",
+    reasoningEffort: "high",
+  },
 });
 
 const admitted = await client.startRun(session.sessionId, session.branchId, {
@@ -277,14 +286,11 @@ const run = "accepted" in admitted && admitted.accepted
   ? await client.run(session.sessionId, session.branchId, admitted.runId)
   : admitted;
 
-if (run.status === "waiting_for_user" && run.pendingInput) {
-  await client.respondToRun(
-    session.sessionId,
-    session.branchId,
-    run.runId,
-    run.pendingInput.id,
-    { response: "continue" },
-  );
+if (run.status === "blocked") {
+  await client.startRun(session.sessionId, session.branchId, {
+    task: "Here is the missing information: continue.",
+    requestKey: "protocol-example-follow-up",
+  });
 }
 ```
 
@@ -360,6 +366,7 @@ The exported `ProtocolRequest` and `ProtocolResponse` unions in `protocol/types.
 ## Security and compatibility limits
 
 - Protocol version 1 is trusted-local.
+- Additive capabilities are negotiated through `/capabilities`; effort-aware clients must not send an effort field when `reasoningEffortSelection` is absent.
 - Managed authentication is owner-local bearer access, not multi-tenant authorization.
 - The embedded diagnostic server is unauthenticated.
 - No WebSocket transport, TLS termination, non-loopback deployment, or in-place protocol upgrade negotiation is provided.

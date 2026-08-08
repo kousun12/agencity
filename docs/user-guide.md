@@ -44,33 +44,39 @@ Open the provider and model inspector at any time:
 /model
 ```
 
-Use Up/Down to select a provider, `L` to enter a key, `X` to remove a stored key, and Enter to enter a model ID. Direct forms are also available:
+Use Up/Down to select a provider, `L` to enter a key, and `X` to remove a stored key. Press Enter on a usable provider, type to filter its catalog models, use Up/Down to choose a match, and press Enter to select it. An exact canonical model ID remains accepted when the catalog has no match. Direct forms are also available:
 
 ```text
 /model login openai
-/model openai:gpt-5.6-sol
+/model openai:openai/gpt-5.6-sol
 /model login vercel
 /model vercel:openai/gpt-5.6-sol
 ```
 
-Model identifiers use `provider:model`. The model part may contain `/`. A session branch retains its selected model; starting Agencity again does not silently replace it. Create new work to use a different model:
+Model identifiers use `provider:creator/model`. The model part is the canonical Vercel AI Gateway catalog ID. A session branch retains its selected model; starting Agencity again does not silently replace it. Create new work to use a different model:
 
 ```sh
-agencity new --model openai:gpt-5.6-sol "start a separate review"
+agencity new --model openai:openai/gpt-5.6-sol --effort high "start a separate review"
 ```
+
+Reasoning effort is retained with the branch model. Open the effort inspector with `/effort` (or `/thinking`), use Up/Down and Enter to select a catalog-supported level, or enter a direct command such as `/effort high`. `/effort refresh` refreshes the public Gateway catalog. `provider-default` omits an explicit reasoning override and lets the selected provider decide.
+
+The inspector distinguishes catalog-listed, unverified, unsupported, and stale capability data. An explicit unsupported selection fails. A stored choice that becomes invalid falls back visibly to `provider-default`. The available levels are `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
 Agencity has no product demo mode or credential-free fallback. Internal deterministic providers are test-only and do not appear in product selection.
 
 ## Tasks and runs
 
-A task is the instruction you give Agencity. A run is one durable attempt to carry that task forward. During a run, the model returns typed actions such as:
+A task is the instruction you give Agencity. A run is one durable attempt to carry that task forward. The current pre-release checkout uses strict textual actions and may expose clarification/permission input states. Those surfaces are transitional and carry no compatibility commitment.
 
-- a TypeScript cell that uses the console SDK for files, shell commands, SQL, models, subagents, memory, skills, or artifacts;
-- a clarification or permission request;
-- a final answer;
-- an explicit blocked or failed result.
+The accepted formal-tool architecture replaces them with two model choices:
 
-Every response must contain exactly one valid versioned action. If validation rejects a response, Agencity retains it without executing its code and gives the model one bounded correction step with the exact error. A second consecutive rejection ends the run. Normal budget and step limits also apply to the correction.
+- `bun_console`, which submits a TypeScript cell using the console SDK for files, shell commands, SQL, models, subagents, memory, skills, or artifacts;
+- `finish`, which returns a successful answer or an explicit blocked or failed result.
+
+Every autonomous response must contain exactly one valid call from that set. If validation rejects a response, Agencity retains it without executing its code and gives the model one bounded correction step with the exact error. A second consecutive rejection ends the run. Normal budget and step limits also apply to the correction.
+
+There is no clarification, permission, request-input, or waiting-for-user run state after this cutover. If information is missing, `finish` returns a blocked response containing the question. Your later message starts an ordinary new run on the same branch.
 
 Agencity records a requested external effect before executing it. A dependent model step starts only after the result is committed. A final answer may also be checked by a completion gate:
 
@@ -109,7 +115,7 @@ The conversation uses the full main width while no contextual inspector is activ
 
 Normal, compact, and minimum height modes reduce chrome in a fixed order. The main view always retains usable space, while very short terminals omit the optional family summary and reduce an active inspector to its required control.
 
-- Type plain text to start a task or answer a pending clarification.
+- Type plain text to start a task or provide more information after a blocked result.
 - `Ctrl-P` opens command search.
 - `Ctrl-O` expands or collapses recent run activity.
 - Page Up/Down scrolls the active view.

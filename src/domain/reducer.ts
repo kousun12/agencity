@@ -46,7 +46,8 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "SessionModelChanged": {
       const p = event.payload as EventPayloads["SessionModelChanged"];
       if (!Bun.deepEquals(p.previousModel, state.model)) throw new InvalidTransitionError("sessionModel", `${state.model.provider}:${state.model.model}`, `${p.model.provider}:${p.model.model}`);
-      if (Object.values(state.agentRuns).some(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status)) ||
+      if (state.status === "running" ||
+          Object.values(state.agentRuns).some(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status)) ||
           Object.values(state.modelCalls).some(call => call.status === "requested")) {
         throw new InvalidTransitionError("sessionModel", "active", `${p.model.provider}:${p.model.model}`);
       }
@@ -60,7 +61,13 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "CellAbandoned": { const p = event.payload as EventPayloads["CellAbandoned"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status)) throw new InvalidTransitionError("cell", old?.status ?? "missing", "abandoned"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "abandoned", error: p.reason, eventId: event.id } } }; }
     case "WorkingValueSet": { const p = event.payload as EventPayloads["WorkingValueSet"]; const old = state.workingValues[p.name]; if (old && p.version <= old.version) throw new ValidationError(`Working value version must increase for ${p.name}`); return { ...next, workingValues: { ...state.workingValues, [p.name]: { name: p.name, version: p.version, value: p.value, eventId: event.id } } }; }
     case "ArtifactRegistered": { const p = event.payload as EventPayloads["ArtifactRegistered"]; return { ...next, artifacts: { ...state.artifacts, [p.artifactId]: { artifactId: p.artifactId, digest: p.digest, mediaType: p.mediaType, size: p.size } } }; }
-    case "EffectRequested": { const p = event.payload as EventPayloads["EffectRequested"]; if (state.effects[p.effectId]) throw new InvalidTransitionError("effect", state.effects[p.effectId]!.status, "requested"); const effect: EffectState = { id: p.effectId, executor: p.executor, operation: p.operation, input: p.input, idempotencyKey: p.idempotencyKey, idempotent: p.idempotent, attempts: 0, status: "requested", eventId: event.id }; return { ...next, effects: { ...state.effects, [p.effectId]: effect } }; }
+    case "EffectRequested": {
+      const p = event.payload as EventPayloads["EffectRequested"];
+      if (state.effects[p.effectId]) throw new InvalidTransitionError("effect", state.effects[p.effectId]!.status, "requested");
+      if (p.executor === "model") validateModelEffectRelation(state, p);
+      const effect: EffectState = { id: p.effectId, executor: p.executor, operation: p.operation, input: p.input, idempotencyKey: p.idempotencyKey, idempotent: p.idempotent, attempts: 0, status: "requested", eventId: event.id };
+      return { ...next, effects: { ...state.effects, [p.effectId]: effect } };
+    }
     case "EffectAttemptStarted": { const p = event.payload as EventPayloads["EffectAttemptStarted"]; const old = state.effects[p.effectId]; if (!old || !["requested", "started"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("effect", old?.status ?? "missing", "started"); return { ...next, effects: { ...state.effects, [p.effectId]: { ...old, status: "started", attempts: p.attempt, eventId: event.id } } }; }
     case "EffectOutcomeRecorded": { const p = event.payload as EventPayloads["EffectOutcomeRecorded"]; const old = state.effects[p.effectId]; if (!old || !["requested", "started"].includes(old.status) || p.attempt < Math.max(1, old.attempts)) throw new InvalidTransitionError("effect", old?.status ?? "missing", p.outcome); const updated: EffectState = { ...old, status: p.outcome, attempts: Math.max(old.attempts, p.attempt), eventId: event.id, ...(p.output === undefined ? {} : { output: p.output }), ...(p.error === undefined ? {} : { error: p.error }) }; return { ...next, effects: { ...state.effects, [p.effectId]: updated } }; }
     case "EffectReconciliationRecorded": {
@@ -89,6 +96,9 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       })) {
         throw new ValidationError("Context compaction sources must be exact unique retained prior narrative events at or before throughCursor");
       }
+      if (p.modelDispatch !== undefined && !Bun.deepEquals(p.modelDispatch.configuration, state.model)) {
+        throw new ValidationError("Context compaction dispatch configuration must match the committed branch configuration");
+      }
       return { ...next, compactions: { ...state.compactions, [p.compactionId]: {
         id: p.compactionId, strategy: p.strategy, reason: p.reason, requestedBy: p.requestedBy,
         ...(p.instructions === undefined ? {} : { instructions: p.instructions }), throughCursor: p.throughCursor,
@@ -97,6 +107,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         ...(p.capacity === undefined ? {} : { capacity: { ...p.capacity } }),
         ...(p.ancestorContextId === undefined ? {} : { ancestorContextId: p.ancestorContextId }),
         ...(p.rematerializedFromContextId === undefined ? {} : { rematerializedFromContextId: p.rematerializedFromContextId }),
+        ...(p.modelDispatch === undefined ? {} : { modelDispatch: p.modelDispatch }),
         status: "requested", requestEventId: event.id, eventId: event.id,
       } } };
     }
@@ -118,7 +129,20 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       }
       return { ...next, compactions, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records.map((record) => ({ ...record })), contentHash: p.contentHash, ...(p.derivation === undefined ? {} : { derivation: p.derivation }), eventId: event.id } } };
     }
-    case "ModelCallRequested": { const p = event.payload as EventPayloads["ModelCallRequested"]; if (!state.contexts[p.contextId] || state.modelCalls[p.callId]) throw new InvalidTransitionError("modelCall", state.modelCalls[p.callId]?.status ?? "missing-context", "requested"); const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, provider: p.provider, model: p.model, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id }; return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } }; }
+    case "ModelCallRequested": {
+      const p = event.payload as EventPayloads["ModelCallRequested"];
+      if (!state.contexts[p.contextId] || state.modelCalls[p.callId]) throw new InvalidTransitionError("modelCall", state.modelCalls[p.callId]?.status ?? "missing-context", "requested");
+      if (Object.values(state.modelCalls).some((call) => call.effectId === p.effectId)) {
+        throw new ValidationError("A model effect can belong to only one model call");
+      }
+      if (!Bun.deepEquals(p.modelDispatch.configuration, state.model)) throw new ValidationError("Model call dispatch configuration must match the committed branch configuration");
+      if (p.retryOfCallId !== undefined) {
+        const prior = state.modelCalls[p.retryOfCallId];
+        if (!prior || !Bun.deepEquals(prior.modelDispatch, p.modelDispatch)) throw new ValidationError("Model overflow retries must reuse the complete prior dispatch");
+      }
+      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
+      return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } };
+    }
     case "ModelOutputChunk": { const p = event.payload as EventPayloads["ModelOutputChunk"]; const old = state.modelCalls[p.callId]; if (!old || old.status !== "requested" || p.sequence !== old.chunks.length) throw new InvalidTransitionError("modelCall", old?.status ?? "missing", "streaming"); return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, chunks: [...old.chunks, p.text], eventId: event.id } } }; }
     case "ModelCallCompleted": {
       const p = event.payload as EventPayloads["ModelCallCompleted"]; const old = state.modelCalls[p.callId];
@@ -129,7 +153,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
           (!agentRunOwned && (!response || response.role !== "assistant" || response.modelCallId !== p.callId))) {
         throw new InvalidTransitionError("modelCall", old?.status ?? "missing", "succeeded");
       }
-      return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, status: "succeeded", ...(p.responseMessageId === undefined ? {} : { responseMessageId: p.responseMessageId }), finishReason: p.finishReason, usage: p.usage, eventId: event.id } } };
+      return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, status: "succeeded", ...(p.responseMessageId === undefined ? {} : { responseMessageId: p.responseMessageId }), finishReason: p.finishReason, usage: p.usage, ...(p.warnings === undefined ? {} : { warnings: p.warnings.map((warning) => ({ ...warning })) }), eventId: event.id } } };
     }
     case "ModelCallTerminated": { const p = event.payload as EventPayloads["ModelCallTerminated"]; const old = state.modelCalls[p.callId]; if (!old || old.status !== "requested") throw new InvalidTransitionError("modelCall", old?.status ?? "missing", p.outcome); return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, status: p.outcome, ...(p.error === undefined ? {} : { error: p.error }), eventId: event.id } } }; }
     case "BudgetDebited": { const p = event.payload as EventPayloads["BudgetDebited"]; return { ...next, budget: { ...state.budget, tokens: state.budget.tokens + p.tokens, costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns, wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs } }; }
@@ -475,6 +499,38 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "SkillTestRecorded":
     case "SubagentSpecInvoked":
       return next;
+  }
+}
+
+function validateModelEffectRelation(
+  state: AgentState,
+  payload: EventPayloads["EffectRequested"],
+): void {
+  if (payload.operation !== "complete" || !payload.input || typeof payload.input !== "object" ||
+      Array.isArray(payload.input)) {
+    throw new ValidationError("Model effects require a complete admitted model input");
+  }
+  const input = payload.input;
+  const callId = typeof input.callId === "string" ? input.callId : undefined;
+  const compactionId = typeof input.compactionId === "string" ? input.compactionId : undefined;
+  const dispatch = input.modelDispatch;
+  if (!dispatch || typeof dispatch !== "object" || Array.isArray(dispatch)) {
+    throw new ValidationError("Model effects require a complete immutable model dispatch");
+  }
+  if ((callId === undefined) === (compactionId === undefined)) {
+    throw new ValidationError("Model effects must belong to exactly one admitted call or compaction");
+  }
+  if (callId !== undefined) {
+    const call = state.modelCalls[callId];
+    if (!call || call.effectId !== payload.effectId || !Bun.deepEquals(call.modelDispatch, dispatch)) {
+      throw new ValidationError("Model effect does not agree with its admitted model call");
+    }
+    return;
+  }
+  const compaction = state.compactions[compactionId!];
+  if (!compaction || compaction.strategy !== "model-summary-v1" ||
+      !compaction.modelDispatch || !Bun.deepEquals(compaction.modelDispatch, dispatch)) {
+    throw new ValidationError("Model effect does not agree with its pinned compaction dispatch");
   }
 }
 

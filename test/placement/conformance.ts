@@ -15,7 +15,7 @@ export async function relationalStateConformance(storage: AgentStorage, suffix: 
     producer: "supervisor",
     idempotencyKey: `placement-session:${suffix}`,
     committedAt: "2026-08-05T00:00:00.000Z",
-    payload: { workspaceId: `workspace-${suffix}`, initialBranchId: branchId, model: { provider: "echo", model: "echo" }, budget: {} },
+    payload: { workspaceId: `workspace-${suffix}`, initialBranchId: branchId, model: { provider: "echo", model: "echo", reasoningEffort: "provider-default" }, budget: {} },
   }, {
     id: `placement-message-${suffix}`,
     sessionId,

@@ -1,6 +1,6 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, DependencyFailureError, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, ValidationError, canonicalSkillDigest, newId, projectEvents, reduceAgentState, validateNewEvent, validateRefinementReviewRequest } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, ValidationError, canonicalSkillDigest, newId, projectEvents, reduceAgentState, validateNewEvent, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
@@ -243,6 +243,19 @@ export class LibSqlStorage implements AgentStorage {
       // WAL lets readers proceed beside the single SQLite writer. busy_timeout is
       // connection-local, so every retry boundary reapplies it before work begins.
       if (this.#client.protocol === "file") await this.#execute("PRAGMA journal_mode=WAL", "configure WAL");
+      const retainedEventTable = await this.#execute(
+        "SELECT 1 AS present FROM sqlite_schema WHERE type='table' AND name='events' LIMIT 1",
+        "inspect retained event table",
+      );
+      if (retainedEventTable.rows.length) {
+        const retainedVersions = await this.#execute("SELECT DISTINCT schema_version FROM events ORDER BY schema_version", "inspect retained event schema");
+        const incompatible = retainedVersions.rows.map((row) => Number(row.schema_version)).filter((version) => version !== EVENT_SCHEMA_VERSION);
+        if (incompatible.length) {
+          throw new ValidationError(
+            `This workspace contains pre-cutover event schema version(s) ${incompatible.join(", ")}. Reset local Agencity state before using schema version ${EVENT_SCHEMA_VERSION}; the runtime did not delete any data.`,
+          );
+        }
+      }
       // Migration files are immutable. Apply each once so ALTER statements remain
       // safe when a runtime reopens an existing local database.
       await this.#execute("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)", "bootstrap migrations");
@@ -488,7 +501,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       causationId: candidate.causationId ?? null,
       correlationId: candidate.correlationId ?? null,
       type: candidate.type,
-      schemaVersion: candidate.schemaVersion ?? 1,
+      schemaVersion: candidate.schemaVersion ?? EVENT_SCHEMA_VERSION,
       committedAt,
       producer: candidate.producer,
       idempotencyKey: candidate.idempotencyKey ?? null,
@@ -499,7 +512,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     };
     await this.#validateCanonicalAppend(tx, pending);
     const result = await tx.execute({ sql: `INSERT INTO events(id,session_id,branch_id,causation_id,correlation_id,type,schema_version,committed_at,producer,idempotency_key,payload_json,origin_device_id,origin_sequence,stream_parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      args: [id,candidate.sessionId,candidate.branchId,candidate.causationId ?? null,candidate.correlationId ?? null,candidate.type,candidate.schemaVersion ?? 1,committedAt,candidate.producer,candidate.idempotencyKey ?? null,json(candidate.payload),originDeviceId,originSequence,streamParentId] });
+      args: [id,candidate.sessionId,candidate.branchId,candidate.causationId ?? null,candidate.correlationId ?? null,candidate.type,candidate.schemaVersion ?? EVENT_SCHEMA_VERSION,committedAt,candidate.producer,candidate.idempotencyKey ?? null,json(candidate.payload),originDeviceId,originSequence,streamParentId] });
     const event: AgentEvent = { ...pending, cursor: cursorOf(Number(result.lastInsertRowid)) };
     await this.#applyOperationalRows(tx, event);
     return event;

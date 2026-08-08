@@ -38,12 +38,12 @@ describe("durable model configuration", () => {
       });
       const selected = await supervisor.selectModel(session.sessionId, session.branchId, {
         provider: "openai",
-        model: "gpt-5.6-sol",
+        model: "openai/gpt-5.6-sol",
       });
       expect(selected.changed).toBe(true);
       const events = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
       expect(events.filter(event => event.type === "SessionModelChanged")).toHaveLength(1);
-      expect(projectEvents(events).model).toEqual({ provider: "openai", model: "gpt-5.6-sol" });
+      expect(projectEvents(events).model).toEqual({ provider: "openai", model: "openai/gpt-5.6-sol", reasoningEffort: "provider-default" });
       expect(JSON.stringify(events)).not.toContain(secret);
       expect(await Bun.file(temp.databaseUrl.slice("file:".length)).text()).not.toContain(secret);
     } finally { await supervisor.close(); }
@@ -77,14 +77,14 @@ describe("durable model configuration", () => {
       const session = await supervisor.createSession({ workspaceId: "models" });
       await expect(supervisor.selectModel(session.sessionId, session.branchId, {
         provider: "anthropic",
-        model: "fable-5",
+        model: "anthropic/claude.fable.5",
       })).rejects.toThrow("/model login anthropic");
 
       await supervisor.credentials.set("anthropic", "anthropic-provider-secret-123456");
       await supervisor.runs.admit(session.sessionId, session.branchId, { task: "queued work", goalMode: "none" });
       await expect(supervisor.selectModel(session.sessionId, session.branchId, {
         provider: "anthropic",
-        model: "fable-5",
+        model: "anthropic/claude.fable.5",
       })).rejects.toThrow("model work is active");
     } finally { await supervisor.close(); }
   });

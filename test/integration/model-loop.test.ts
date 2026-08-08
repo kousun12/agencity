@@ -6,6 +6,7 @@ import {
   Supervisor,
   ValidationError,
   projectEvents,
+  resolveModelDispatch,
   type JsonValue,
   type ModelConfiguration,
   type ModelProvider,
@@ -85,6 +86,7 @@ describe("context provenance and model loop", () => {
       text: "deterministic answer",
       finishReason: "stop",
       usage: { inputTokens: 7, outputTokens: 3, costUsd: 0.01 },
+      warnings: [{ kind: "coerced", message: "Provider adjusted one optional setting" }],
     });
     const { supervisor, sessionId, branchId } = await openWithProvider(provider, { tokenLimit: 100 });
     const userEvent = await supervisor.appendMessage(sessionId, branchId, "user", "Please inspect durable state");
@@ -100,9 +102,13 @@ describe("context provenance and model loop", () => {
     const state = projectEvents(events);
     const contextEvent = events.find((event) => event.type === "ContextMaterialized");
     const callEvent = events.find((event) => event.type === "ModelCallRequested");
+    const modelEffect = events.find((event) =>
+      event.type === "EffectRequested" &&
+      (event.payload as { executor?: string }).executor === "model");
     const completion = events.find((event) => event.type === "ModelCallCompleted");
     expect(contextEvent).toBeDefined();
     expect(callEvent).toBeDefined();
+    expect(modelEffect).toBeDefined();
     expect(completion).toBeDefined();
     const contextPayload = contextEvent!.payload as {
       contextId: string;
@@ -111,6 +117,8 @@ describe("context provenance and model loop", () => {
       context: JsonValue;
     };
     expect((callEvent!.payload as { contextId: string }).contextId).toBe(contextPayload.contextId);
+    expect((modelEffect!.payload as unknown as { input: { modelDispatch: unknown } }).input.modelDispatch)
+      .toEqual((callEvent!.payload as { modelDispatch: unknown }).modelDispatch);
     expect(provider.contexts[0]).toEqual(contextPayload.context);
     expect(contextPayload.contentHash).toBe(sha256(JSON.stringify(contextPayload.context)));
     expect(contextPayload.records.length).toBeGreaterThanOrEqual(5);
@@ -146,6 +154,10 @@ describe("context provenance and model loop", () => {
       status: "succeeded",
       chunks: ["deterministic answer"],
       usage: { inputTokens: 7, outputTokens: 3, costUsd: 0.01 },
+      warnings: [{ kind: "coerced", message: "Provider adjusted one optional setting" }],
+    });
+    expect(completion!.payload).toMatchObject({
+      warnings: [{ kind: "coerced", message: "Provider adjusted one optional setting" }],
     });
     expect(state.messages.at(-1)).toMatchObject({
       role: "assistant", content: "deterministic answer", modelCallId: callId,
@@ -185,14 +197,14 @@ describe("context provenance and model loop", () => {
     const { supervisor, sessionId, branchId } = await openWithProvider(provider, { tokenLimit: 100 });
     await supervisor.appendMessage(sessionId, branchId, "user", "trigger failure");
     expect(await supervisor.modelLoop.turn(sessionId, branchId)).toEqual({
-      outcome: "failed", error: "deterministic provider outage",
+      outcome: "failed", error: "Model provider request failed",
     });
     const state = projectEvents(await supervisor.storage.loadEvents(sessionId, { branchId }));
     expect(state.budget).toMatchObject({ tokens: 0, costUsd: 0, turns: 0, exceeded: false });
     expect(state.messages.filter((message) => message.role === "assistant")).toHaveLength(0);
     expect(Object.values(state.modelCalls)).toHaveLength(1);
     expect(Object.values(state.modelCalls)[0]).toMatchObject({
-      status: "failed", error: "deterministic provider outage",
+      status: "failed", error: "Model provider request failed",
     });
     expect(state.status).toBe("idle");
     await supervisor.close();
@@ -239,9 +251,14 @@ describe("context provenance and model loop", () => {
     temps.push(temp);
     const storage = await openTempStorage(temp);
     const { sessionId, branchId } = await seedSession(storage, {
-      model: { provider: "not-installed", model: "durable-only" },
+      model: { provider: "not-installed", model: "durable-only", reasoningEffort: "provider-default" },
     });
     const context: JsonValue = { basePolicy: "test", messages: [] };
+    const modelDispatch = resolveModelDispatch({
+      configuration: { provider: "not-installed", model: "durable-only", reasoningEffort: "provider-default" },
+      capability: { status: "unverified", levels: ["none", "minimal", "low", "medium", "high", "xhigh"] },
+      catalogDigest: "0".repeat(64),
+    });
     await storage.appendEvents([{
       sessionId, branchId, type: "ContextMaterialized", producer: "supervisor",
       idempotencyKey: "context:recovery", payload: {
@@ -250,14 +267,13 @@ describe("context provenance and model loop", () => {
     }, {
       sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
       idempotencyKey: "model-call:recovery", payload: {
-        callId: "call-recovery", contextId: "context-recovery", effectId: "effect-recovery",
-        provider: "not-installed", model: "durable-only",
+        callId: "call-recovery", contextId: "context-recovery", effectId: "effect-recovery", modelDispatch,
       },
     }, {
       sessionId, branchId, type: "EffectRequested", producer: "supervisor",
       idempotencyKey: "model:recovery", payload: {
         effectId: "effect-recovery", executor: "model", operation: "complete",
-        input: { context, configuration: { provider: "not-installed", model: "durable-only" } },
+        input: { context, callId: "call-recovery", modelDispatch } as unknown as JsonValue,
         idempotencyKey: "model:recovery", idempotent: false,
       },
     }, {
@@ -285,6 +301,44 @@ describe("context provenance and model loop", () => {
       (event.payload as { modelCallId?: string }).modelCallId === "call-recovery")).toHaveLength(1);
     expect(events.filter((event) => event.type === "BudgetDebited")).toHaveLength(1);
     expect(projectEvents(events).budget).toMatchObject({ tokens: 6, turns: 1, costUsd: 0.02 });
+    storage.close();
+  });
+
+  test("rejects assigning one model effect to multiple calls", async () => {
+    const temp = await makeTempRuntime("agencity-model-effect-relation-");
+    temps.push(temp);
+    const storage = await openTempStorage(temp);
+    const { sessionId, branchId } = await seedSession(storage);
+    const context: JsonValue = { messages: [] };
+    const state = projectEvents(await storage.loadEvents(sessionId, { branchId }));
+    const modelDispatch = resolveModelDispatch({
+      configuration: state.model,
+      capability: { status: "unsupported", levels: [] },
+      catalogDigest: "0".repeat(64),
+    });
+    await storage.appendEvents([{
+      sessionId,
+      branchId,
+      type: "ContextMaterialized",
+      producer: "supervisor",
+      idempotencyKey: "context:shared-effect",
+      payload: { contextId: "context-shared-effect", records: [], contentHash: sha256(JSON.stringify(context)), context },
+    }, {
+      sessionId,
+      branchId,
+      type: "ModelCallRequested",
+      producer: "supervisor",
+      idempotencyKey: "model-call:first-shared-effect",
+      payload: { callId: "call-first", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch },
+    }]);
+    await expect(storage.appendEvents([{
+      sessionId,
+      branchId,
+      type: "ModelCallRequested",
+      producer: "supervisor",
+      idempotencyKey: "model-call:second-shared-effect",
+      payload: { callId: "call-second", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch },
+    }])).rejects.toThrow("only one model call");
     storage.close();
   });
 });

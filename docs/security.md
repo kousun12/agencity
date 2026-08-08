@@ -33,6 +33,8 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 - Credential-shaped environment variables are removed from the console worker.
 - The shell executor receives an environment with credential-shaped names removed.
 - OpenAI, Anthropic, and Vercel AI Gateway providers resolve stored or environment keys in the supervisor.
+- Provider execution uses the Vercel AI SDK inside the supervisor; provider keys are not passed to the TypeScript console worker.
+- The public Gateway model-catalog request sends no provider credential. Custom provider origins receive execution prompts and authentication and must be treated as trusted network destinations.
 - TUI-stored model keys live in a profile-owned `auth.json` written with mode `0600`, separate from canonical events and profile preferences.
 - Inputs containing an actual known environment or stored model secret value are rejected before durable append.
 - Known secret byte strings are redacted from executor outputs, logs, and errors before they become durable.

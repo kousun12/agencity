@@ -71,21 +71,23 @@ Credentials saved through first-run setup or `/model login PROVIDER` take preced
 
 Endpoint overrides:
 
-- `OPENAI_BASE_URL`, default `https://api.openai.com/v1`
+- `OPENAI_BASE_URL`, default `https://api.openai.com`
 - `ANTHROPIC_BASE_URL`, default `https://api.anthropic.com`
 - `AI_GATEWAY_BASE_URL`, default `https://ai-gateway.vercel.sh`
 
-These endpoint variables affect provider network destinations. Treat a custom endpoint as part of the same trust boundary as the provider because it receives prompts and model traffic.
+These values must be HTTP(S) origins without credentials, a path, query, or fragment. Agencity derives the provider API path from the origin. They affect provider network destinations, so treat a custom endpoint as part of the same trust boundary as the provider because it receives prompts and model traffic.
 
 ### Model selection
 
-Model identifiers use `provider:model`, for example:
+Model identifiers use `provider:creator/model`, for example:
 
 ```text
-openai:gpt-5.6-sol
-anthropic:claude-fable-5
+openai:openai/gpt-5.6-sol
+anthropic:anthropic/claude-fable-5
 vercel:openai/gpt-5.6-sol
 ```
+
+The model part is the Vercel AI Gateway catalog's canonical `creator/model` ID for every product transport. Direct OpenAI and Anthropic execution remove the matching creator prefix only when calling the native provider API. A direct transport rejects a model owned by another creator.
 
 For new work, selection order is:
 
@@ -99,6 +101,23 @@ Model environment variables are `OPENAI_MODEL`, `ANTHROPIC_MODEL`, and `VERCEL_M
 First interactive startup asks for a provider key through hidden input and then asks for the model ID. Non-interactive new work fails when no usable credential and model can be selected.
 
 `agencity config set-model PROVIDER:MODEL` changes the default for new work. `agencity config clear-model` clears that preference. A branch already created with another model retains its committed model.
+
+### Reasoning effort
+
+Reasoning effort is part of the durable branch model configuration. Supported values are `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; `default` and `off` are input aliases for `provider-default` and `none`.
+
+- `--effort LEVEL` selects an effort when creating new work.
+- `/effort` or `/thinking` opens the current model's keyboard-driven effort inspector.
+- `/effort LEVEL` changes the model configuration only at an idle model boundary.
+- `/effort refresh` refreshes the Gateway catalog before showing the inspector.
+- `agencity config set-effort LEVEL [--model CREATOR/MODEL]` sets the workspace preference for one canonical model.
+- `agencity config clear-effort [--model CREATOR/MODEL]` removes that preference.
+
+When `--model` is omitted, the workspace default model is required and supplies the canonical model ID.
+
+An explicit unsupported choice fails. A stale stored preference falls back visibly to `provider-default` rather than silently selecting another non-default level. Preferences are keyed by workspace, normalized Gateway catalog endpoint, and canonical model ID so custom Gateway origins do not share capability assumptions.
+
+Agencity fetches language-model metadata from the Vercel AI Gateway public `/v1/models` catalog and stores a bounded, digest-checked profile cache. Catalog metadata supplies context capacity, output limits, prices, and reasoning choices. Missing reasoning metadata is shown as unverified; it is not treated as proof that a model rejects the standard effort vocabulary. A failed refresh may use a visibly stale cache. It never changes a dispatch already committed for a model call.
 
 ### Opaque credential references
 
@@ -128,6 +147,7 @@ Turso data-plane credentials do not grant administrative deletion authority. The
 
 - `--new` forces creation of a new root session.
 - `--model PROVIDER:MODEL` selects the model for new work.
+- `--effort LEVEL` selects reasoning effort for new work.
 - `--goal auto|current|create` controls goal selection for a task. `auto` is the default.
 - `--completion-gate COMMAND` adds a required shell verification gate to a newly selected goal. It cannot be combined with `--goal current`.
 - `--detach` returns after durable run admission while the managed service continues.

@@ -43,6 +43,7 @@ import {
 import {
   formatTerminalDetail,
   type TerminalDetail,
+  type TerminalEffortDetail,
   type TerminalModelDetail,
   type TerminalModelProviderDetail,
 } from "./detail-model.ts";
@@ -141,22 +142,50 @@ function paletteText(query: string): string {
   ].join("\n");
 }
 
-function renderModelInspector(detail: TerminalModelDetail, selectedIndex: number, entryProvider: string | null): string {
+function catalogModelsForProvider(
+  detail: TerminalModelDetail,
+  provider: string | null | undefined,
+  query = "",
+): readonly TerminalModelDetail["catalogModels"][number][] {
+  const normalized = query.trim().toLowerCase();
+  return detail.catalogModels.filter(model =>
+    (provider === "vercel" || model.model.startsWith(`${provider}/`))
+    && (!normalized || model.model.toLowerCase().includes(normalized) || model.displayName.toLowerCase().includes(normalized)));
+}
+
+function renderModelInspector(
+  detail: TerminalModelDetail,
+  selectedIndex: number,
+  entryProvider: string | null,
+  catalogIndex: number,
+  query: string,
+): string {
   const currentProvider = detail.providers.find(provider => provider.name === detail.current.provider);
+  const selectedProvider = entryProvider ?? detail.providers[selectedIndex]?.name;
+  const catalogModels = catalogModelsForProvider(detail, selectedProvider, entryProvider ? query : "");
   if (entryProvider) {
     const provider = detail.providers.find(item => item.name === entryProvider);
+    const selectedCatalogIndex = catalogModels.length ? catalogIndex % catalogModels.length : -1;
     return [
       "MODEL",
       "",
       "Choose model",
       provider?.displayName ?? entryProvider,
-      "Enter the exact provider model ID in the composer.",
+      "Type to filter the catalog, or enter an exact provider model ID.",
       provider?.name === "vercel" ? "Gateway model IDs may contain /." : "",
+      ...(catalogModels.length ? [
+        "",
+        "Catalog",
+        ...catalogModels.slice(0, 8).flatMap((model, index) => [
+          `${index === selectedCatalogIndex ? ">" : " "} ${model.displayName} · ${model.model}`,
+          `  ${model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`} · ${model.reasoning.status === "listed" ? "effort" : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed"}${model.stale ? " · stale" : ""}`,
+        ]),
+      ] : []),
       "",
       "Current",
       `${currentProvider?.displayName ?? detail.current.provider} · ${detail.current.model}`,
       "",
-      "Enter save · Esc back",
+      "↑/↓ model · Enter save · Esc back",
     ].filter((line, index, lines) => line || lines[index - 1] !== "").join("\n");
   }
   const lines = [
@@ -178,8 +207,34 @@ function renderModelInspector(detail: TerminalModelDetail, selectedIndex: number
     lines.push(`    ${provider.credentialLabel}`);
     if (selected && !provider.usable && provider.remediation) lines.push(`    ${provider.remediation}`);
   });
+  if (catalogModels.length) {
+    lines.push("", "Catalog models");
+    for (const model of catalogModels.slice(0, 6)) {
+      const pricing = model.pricing === null ? "price unknown"
+        : `$${(model.pricing.inputUsdPerToken * 1_000_000).toFixed(2)}/$${(model.pricing.outputUsdPerToken * 1_000_000).toFixed(2)} per 1M`;
+      lines.push(
+        `  ${model.displayName} · ${model.model}`,
+        `    ${model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`} · ${pricing} · ${model.reasoning.status === "listed" ? "effort" : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed"}${model.stale ? " · stale" : ""}`,
+      );
+    }
+  }
   lines.push("", "↑/↓ provider · Enter choose · L login · X logout", "Shift-R raw · Esc close");
   return lines.join("\n");
+}
+
+function renderEffortInspector(detail: TerminalEffortDetail, selectedIndex: number): string {
+  return [
+    "REASONING EFFORT",
+    "",
+    `Model: ${detail.model}`,
+    `Capability: ${detail.capability}${detail.stale ? " · stale catalog" : ""}`,
+    ...(detail.catalogError ? [`Catalog: ${detail.catalogError}`] : []),
+    "",
+    ...detail.options.map((effort, index) =>
+      `${index === selectedIndex ? ">" : " "} ${effort}${detail.capability === "unverified" && effort !== "provider-default" ? " · unverified" : ""}`),
+    "",
+    "↑/↓ effort · Enter select · Shift-R raw · Esc close",
+  ].join("\n");
 }
 
 function noticeText(notice: { text: string; tone: "normal" | "success" | "warning" | "danger" } | null): string {
@@ -234,6 +289,8 @@ export class OpenTuiApp {
   #paletteDraft: string | null = null;
   #modelProviderIndex = 0;
   #modelEntryProvider: string | null = null;
+  #modelCatalogIndex = 0;
+  #effortIndex = 0;
   #resetDetailScroll = false;
   #busy = false;
   #closed = false;
@@ -461,9 +518,12 @@ export class OpenTuiApp {
     this.#paletteQuery = "";
     this.#paletteDraft = null;
     this.#modelEntryProvider = null;
+    this.#modelCatalogIndex = 0;
     if (detail.kind === "model") {
       const selected = detail.providers.findIndex(provider => provider.name === (previousProvider ?? detail.current.provider));
       this.#modelProviderIndex = Math.max(0, selected);
+    } else if (detail.kind === "effort") {
+      this.#effortIndex = Math.max(0, detail.options.indexOf(detail.current));
     }
     this.#resetDetailScroll = true;
     this.#render();
@@ -528,6 +588,7 @@ export class OpenTuiApp {
   #onResize = (): void => {
     if (this.#activeInspector()) this.#resetDetailScroll = true;
     this.#render();
+    if (this.#familyFocus === "composer") this.#composer.focus();
   };
 
   #onPaste = (event: PasteEvent): void => {
@@ -574,6 +635,15 @@ export class OpenTuiApp {
     const modelDetail = this.#activeModelDetail();
     if (modelDetail && !this.#paletteQuery && this.#provisionalOutput.size === 0 && !this.#rawDetail) {
       if (this.#modelEntryProvider) {
+        const catalogModels = catalogModelsForProvider(modelDetail, this.#modelEntryProvider, this.#composerValue());
+        if ((key.name === "up" || key.name === "down") && catalogModels.length) {
+          key.preventDefault();
+          key.stopPropagation();
+          const delta = key.name === "up" ? -1 : 1;
+          this.#modelCatalogIndex = (this.#modelCatalogIndex + delta + catalogModels.length) % catalogModels.length;
+          this.#render();
+          return;
+        }
         if (escape) {
           key.preventDefault();
           key.stopPropagation();
@@ -583,7 +653,9 @@ export class OpenTuiApp {
         if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
           key.preventDefault();
           key.stopPropagation();
-          const modelId = this.#composerValue().trim();
+          const query = this.#composerValue().trim();
+          const exact = catalogModels.find(model => model.model.toLowerCase() === query.toLowerCase());
+          const modelId = exact?.model ?? catalogModels[this.#modelCatalogIndex % Math.max(1, catalogModels.length)]?.model ?? query;
           if (!modelId) {
             this.#showNotice("Enter a model ID first.", "warning");
             return;
@@ -611,7 +683,8 @@ export class OpenTuiApp {
             return;
           }
           this.#modelEntryProvider = provider.name;
-          this.#setComposerValue(provider.name === modelDetail.current.provider ? modelDetail.current.model : "");
+          this.#modelCatalogIndex = 0;
+          this.#setComposerValue("");
           this.#render();
           return;
         }
@@ -626,6 +699,24 @@ export class OpenTuiApp {
           else void this.#runCommand(`/model logout ${provider.name}`);
           return;
         }
+      }
+    }
+    const effortDetail = this.#activeEffortDetail();
+    if (effortDetail && !this.#paletteQuery && this.#provisionalOutput.size === 0 && !this.#rawDetail) {
+      if ((key.name === "up" || key.name === "down") && effortDetail.options.length) {
+        key.preventDefault();
+        key.stopPropagation();
+        const delta = key.name === "up" ? -1 : 1;
+        this.#effortIndex = (this.#effortIndex + delta + effortDetail.options.length) % effortDetail.options.length;
+        this.#render();
+        return;
+      }
+      if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
+        key.preventDefault();
+        key.stopPropagation();
+        const effort = effortDetail.options[this.#effortIndex];
+        if (effort) void this.#runCommand(`/effort ${effort}`);
+        return;
       }
     }
     const enter = key.name === "return" || key.name === "linefeed" || key.name === "kpenter";
@@ -850,6 +941,10 @@ export class OpenTuiApp {
 
   #activeModelDetail(): TerminalModelDetail | null {
     return this.#detail?.kind === "model" ? this.#detail : null;
+  }
+
+  #activeEffortDetail(): TerminalEffortDetail | null {
+    return this.#detail?.kind === "effort" ? this.#detail : null;
   }
 
   #selectedModelProvider(): TerminalModelProviderDetail | null {
@@ -1140,8 +1235,10 @@ export class OpenTuiApp {
           ? renderFamilyBrowser(this.#view, this.#familySelectedKey, compact, width >= 96)
         : this.#detail
           ? this.#detail.kind === "model" && !this.#rawDetail
-            ? renderModelInspector(this.#detail, this.#modelProviderIndex, this.#modelEntryProvider)
-            : formatTerminalDetail(this.#detail, { raw: this.#rawDetail })
+            ? renderModelInspector(this.#detail, this.#modelProviderIndex, this.#modelEntryProvider, this.#modelCatalogIndex, this.#composerValue())
+            : this.#detail.kind === "effort" && !this.#rawDetail
+              ? renderEffortInspector(this.#detail, this.#effortIndex)
+              : formatTerminalDetail(this.#detail, { raw: this.#rawDetail })
           : "";
     const notice = noticeText(this.#notice);
     const fullDetails = notice ? `${notice}\n${baseDetails ? `\n${baseDetails}` : ""}` : baseDetails;

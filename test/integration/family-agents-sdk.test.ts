@@ -126,7 +126,7 @@ describe("FU-012 retained family messaging", () => {
           childSessionId: "family-missing-session",
           childBranchId: "family-missing-branch",
           task: "State is intentionally missing",
-          model: { provider: "family-actions", model: "scripted" },
+          model: { provider: "family-actions", model: "scripted", reasoningEffort: "provider-default" },
           budget: {},
         },
       }]);
@@ -153,7 +153,7 @@ describe("FU-012 retained family messaging", () => {
         taskId: "family-missing-task",
         taskStatus: "pending",
         task: "State is intentionally missing",
-        model: { provider: "family-actions", model: "scripted" },
+        model: { provider: "family-actions", model: "scripted", reasoningEffort: "provider-default" },
         cancellationRequested: false,
         activity: "unavailable",
         activityReason: "missing_state",

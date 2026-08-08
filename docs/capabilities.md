@@ -16,7 +16,7 @@ Status meanings:
 |---|---|---|
 | Local terminal product | Supported | `agencity` and `bun run dev` resolve a workspace, create or resume durable work, and enter the same product flow. |
 | Full-screen terminal UI | Supported | The OpenTUI client consumes the public snapshot/event protocol and renders committed Markdown plus syntax-aware fenced code and retained TypeScript cells. It interleaves each compact run status after its initiating user task, provides expandable bounded cell outcomes, a prompted multiline composer with line-preserving paste and `Shift-Enter`, width-prioritized status/action hints, an idle full-width conversation, contextual wide/narrow inspectors, explicit height modes, responsive direct-child browsing, exact parent/child branch navigation, detach/catch-up, and a plain non-TTY transcript fallback. Unsupported fenced languages use plain-code rendering. Family opening is observational and disabled during historical inspection. |
-| Typed autonomous runs | Supported | Product tasks use strict version-1 model actions. Generated execution occurs only through validated TypeScript cells; final, clarification, permission, blocked, and failed are typed run control. |
+| Typed autonomous runs | Supported, with a pre-release transport cutover pending | Product tasks currently use strict textual version-1 model actions. [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) replaces that transport with exactly `bun_console` and `finish`, removes clarification/permission and waiting-for-user states, and uses blocked `finish` for missing information. The older surfaces carry no compatibility commitment. |
 | Durable recovery | Supported | Canonical events, outbox effects, cells, tasks, mailboxes, goals, schedules, and recursive model handles recover at committed boundaries. |
 | Unknown-effect reconciliation | Supported | Operators can inspect and append evidence. Unknown status is not rewritten and no retry is authorized automatically. |
 | Managed local workspace service | Supported | The product discovers or starts an authenticated loopback service with same-device process fencing, resident run advancement, recovery, schedules, and graceful idle shutdown. |
@@ -27,9 +27,11 @@ Status meanings:
 
 | Capability | Status | Current behavior |
 |---|---|---|
-| OpenAI | Conditional | Built-in OpenAI-compatible provider; requires a stored/programmatic key or `OPENAI_API_KEY` and an explicit model ID. |
-| Anthropic | Conditional | Built-in Anthropic-compatible provider; requires a stored/programmatic key or `ANTHROPIC_API_KEY` and an explicit model ID. |
-| Vercel AI Gateway | Conditional | Built-in gateway provider; requires a stored/programmatic key or `AI_GATEWAY_API_KEY` and an explicit gateway model ID, which may contain `/`. |
+| OpenAI | Conditional | Built-in Vercel AI SDK OpenAI transport; requires a stored/programmatic key or `OPENAI_API_KEY` and a canonical `openai/...` model ID. |
+| Anthropic | Conditional | Built-in Vercel AI SDK Anthropic transport; requires a stored/programmatic key or `ANTHROPIC_API_KEY` and a canonical `anthropic/...` model ID. |
+| Vercel AI Gateway | Conditional | Built-in Vercel AI SDK Gateway transport; requires a stored/programmatic key or `AI_GATEWAY_API_KEY` and a canonical `creator/model` ID. |
+| Public model catalog | Conditional | The Gateway `/v1/models` catalog is normalized and cached for capacity, output limits, pricing, and reasoning metadata. Offline refresh uses a visibly stale digest-checked cache when available; model execution remains credential-gated. |
+| Reasoning-effort selection | Supported | `--effort`, `/effort`, the product protocol, and `ModelConfiguration` support provider-default, none, minimal, low, medium, high, and xhigh. Explicit unsupported choices fail; unverified catalog choices remain labeled. |
 | Custom embedded provider | Conditional | An embedding host can pass `modelProviders` to `Supervisor.open`; the provider must implement the model contract and truthful capabilities. |
 | Provider streaming | Conditional | Used only when a provider declares streaming and implements `stream`. Deltas are cursorless temporary progress; the full terminal response remains atomic. |
 | Provider/model onboarding | Supported | Interactive missing configuration offers OpenAI, Anthropic, or Vercel, hides key input, and asks for the exact model ID. Non-interactive missing configuration fails with setup guidance. |

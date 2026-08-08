@@ -268,14 +268,18 @@ describe("product CLI", () => {
   test("configured provider run creates named durable work, resumes it, selects, and renames without IDs for normal use", async () => {
     const value = await fixture();
     const provider = new StrictActionFixture(); modelFixtures.push(provider);
-    const first = await cli(["run", "--workspace", value.workspace, "--model", "openai:fixture-v1", "inspect this repository"], {
+    const first = await cli(["run", "--workspace", value.workspace, "--model", "openai:openai/fixture-v1", "--effort", "high", "inspect this repository"], {
       home: value.home,
       extraEnv: provider.environment(),
     });
     expect(first).toMatchObject({ code: 0, stderr: "" });
     expect(first.stdout).toContain("Session: inspect this repository / main");
-    expect(first.stdout).toContain("Model: openai:fixture-v1");
+    expect(first.stdout).toContain("Model: openai:openai/fixture-v1");
     expect(first.stdout).toContain("fixture completed: inspect this repository");
+
+    const configuredEffort = await cli(["config", "set-effort", "medium", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(configuredEffort.code).toBe(0);
+    expect(JSON.parse(configuredEffort.stdout)).toMatchObject({ effort: "medium" });
 
     const resumed = await cli(["run", "--workspace", value.workspace, "continue inspection"], { home: value.home });
     expect(resumed.code).toBe(0);
@@ -283,9 +287,9 @@ describe("product CLI", () => {
     expect(resumed.stdout).toContain("fixture completed: continue inspection");
 
     const listed = await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home });
-    const rows = JSON.parse(listed.stdout) as Array<{ sessionId: string; branchId: string; sessionName: string; taskSummary: string; model: { provider: string } }>;
+    const rows = JSON.parse(listed.stdout) as Array<{ sessionId: string; branchId: string; sessionName: string; taskSummary: string; model: { provider: string; reasoningEffort: string } }>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ sessionName: "inspect this repository", taskSummary: "inspect this repository", model: { provider: "openai" } });
+    expect(rows[0]).toMatchObject({ sessionName: "inspect this repository", taskSummary: "inspect this repository", model: { provider: "openai", reasoningEffort: "high" } });
 
     const renamed = await cli(["sessions", "--workspace", value.workspace, "--session", rows[0]!.sessionId, "--name", "Repository inspection", "--json"], { home: value.home });
     expect(renamed.code).toBe(0);
@@ -298,7 +302,7 @@ describe("product CLI", () => {
   test("multiple equally plausible roots require explicit selection rather than row order", async () => {
     const value = await fixture();
     const provider = new StrictActionFixture(); modelFixtures.push(provider);
-    expect((await cli(["run", "--workspace", value.workspace, "--model", "openai:fixture-v1", "first root"], {
+    expect((await cli(["run", "--workspace", value.workspace, "--model", "openai:openai/fixture-v1", "first root"], {
       home: value.home,
       extraEnv: provider.environment(),
     })).code).toBe(0);
@@ -329,7 +333,7 @@ describe("product CLI", () => {
     const value = await fixture();
     const invokeTui = async (extraEnv: Record<string, string>) => {
       const { OPENAI_API_KEY: _key, ...clean } = process.env;
-      const child = Bun.spawn([process.execPath, "run", join(root, "src/cli.ts"), "--workspace", value.workspace, "--model", "openai:test-model"], {
+      const child = Bun.spawn([process.execPath, "run", join(root, "src/cli.ts"), "--workspace", value.workspace, "--model", "openai:openai/test-model"], {
         cwd: root, env: { ...clean, HOME: value.home, ...extraEnv }, stdout: "pipe", stderr: "pipe", stdin: "pipe",
       });
       child.stdin.write("/quit\n"); child.stdin.end();
@@ -339,11 +343,11 @@ describe("product CLI", () => {
     expect(createdCode).toBe(0);
     const resumed = await cli(["run", "--workspace", value.workspace, "work while unavailable"], { home: value.home });
     expect(resumed.code).toBe(1);
-    expect(resumed.stdout).toContain("Model: openai:test-model");
+    expect(resumed.stdout).toContain("Model: openai:openai/test-model");
     expect(resumed.stderr).toContain("Run failed");
     expect(resumed.stdout).not.toContain("[UNAVAILABLE]");
-    const rows = JSON.parse((await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home })).stdout) as Array<{ model: { provider: string; model: string } }>;
-    expect(rows[0]!.model).toEqual({ provider: "openai", model: "test-model" });
+    const rows = JSON.parse((await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home })).stdout) as Array<{ model: { provider: string; model: string; reasoningEffort: string } }>;
+    expect(rows[0]!.model).toEqual({ provider: "openai", model: "openai/test-model", reasoningEffort: "provider-default" });
   });
 
   test("doctor is a read-only observer and does not initialize a fresh workspace", async () => {

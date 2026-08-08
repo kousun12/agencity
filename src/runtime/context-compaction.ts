@@ -15,6 +15,7 @@ import {
   type EventPayloads,
   type FrozenContextCompactionSource,
   type JsonValue,
+  type ModelDispatch,
   type Usage,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
@@ -97,7 +98,10 @@ export class CompactionService {
   constructor(
     readonly storage: AgentStorage,
     readonly outbox: OutboxRunner,
-    readonly capacities?: { contextCapacity(configuration: AgentState["model"]): Readonly<{ provider: string; model: string; source: ContextCapacityProvenance["source"]; contextWindowTokens: number | null }> },
+    readonly capacities?: {
+      contextCapacity(configuration: AgentState["model"]): Readonly<{ provider: string; model: string; source: ContextCapacityProvenance["source"]; contextWindowTokens: number | null }>;
+      resolveDispatch(configuration: AgentState["model"]): ModelDispatch;
+    },
   ) {}
 
   async inspect(sessionId: string, branchId: string): Promise<ContextInspection> {
@@ -169,6 +173,12 @@ export class CompactionService {
     }
     const exact = createExactSourceManifest(selected, { sessionId, branchId, throughCursor, allowLineageBranches: true });
     const frozenSources = selected.map(toDomainSource);
+    const modelDispatch = strategy === MODEL_SUMMARY_STRATEGY
+      ? this.capacities?.resolveDispatch(state.model)
+      : undefined;
+    if (strategy === MODEL_SUMMARY_STRATEGY && modelDispatch === undefined) {
+      throw new CapabilityUnavailableError("model-summary compaction dispatch", "model executor is unavailable");
+    }
     const requestEvents = await this.storage.appendEvents([{
       sessionId, branchId, type: "ContextCompactionRequested", producer: requestedBy === "user" ? "client" : "supervisor",
       idempotencyKey: `context-compaction-request:${compactionId}`,
@@ -180,6 +190,7 @@ export class CompactionService {
         ...(input.capacity === undefined ? {} : { capacity: input.capacity }),
         ...(effective?.contextId === undefined ? {} : { ancestorContextId: effective.contextId }),
         ...(rematerializedFromContextId === undefined ? {} : { rematerializedFromContextId }),
+        ...(modelDispatch === undefined ? {} : { modelDispatch }),
       },
     }]);
     const requestEvent = requestEvents[0] as AgentEvent<"ContextCompactionRequested"> | undefined;
@@ -295,9 +306,10 @@ export class CompactionService {
         const effectId = stableEffectId(requestEvent.sessionId, key);
         const prompt = summaryPrompt(request, level, index, groups[index]!);
         if (!current.effects[effectId]) {
+          if (!request.modelDispatch) throw new ValidationError("Model-summary compaction is missing its pinned model dispatch");
           const requested = await this.outbox.request({
             sessionId: requestEvent.sessionId, branchId: requestEvent.branchId, executor: "model", operation: "complete",
-            input: { callId: `compaction-${request.compactionId}-${level}-${index}`, context: prompt, configuration: current.model as unknown as JsonValue },
+            input: { compactionId: request.compactionId, context: prompt, modelDispatch: request.modelDispatch as unknown as JsonValue },
             idempotencyKey: key, idempotent: false,
           });
           if (requested !== effectId) throw new ValidationError("Compaction model effect identity is not stable");

@@ -15,50 +15,8 @@ import {
   type ReplicatedEnvelope, type SyncTransport, type SyncTransportStats,
   type WorkspaceAnnouncement, type WorkspaceCatalogEntry,
 } from "../sync/types.ts";
+import { PROFILE_SCHEMA_MIGRATIONS } from "./profile-migrations.ts";
 
-const PROFILE_SCHEMA = `
-PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS profile_identity(profile_id TEXT PRIMARY KEY,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS devices(device_id TEXT PRIMARY KEY,profile_id TEXT NOT NULL,display_name TEXT NOT NULL,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS credential_references(reference TEXT PRIMARY KEY,provider TEXT NOT NULL,label TEXT NOT NULL,metadata_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS profile_skill_versions(
- version_id TEXT PRIMARY KEY,
- skill_id TEXT NOT NULL,
- name TEXT NOT NULL,
- definition_json TEXT NOT NULL,
- digest TEXT NOT NULL,
- created_at TEXT NOT NULL,
- definition_format TEXT NOT NULL DEFAULT 'legacy' CHECK(definition_format IN ('legacy','typescript-v1')),
- provenance_json TEXT,
- test_report_json TEXT,
- effect_ref TEXT
-);
-CREATE INDEX IF NOT EXISTS profile_skill_versions_skill ON profile_skill_versions(skill_id,created_at,version_id);
-CREATE TABLE IF NOT EXISTS profile_skills(
- skill_id TEXT PRIMARY KEY,
- current_version_id TEXT NOT NULL,
- name TEXT NOT NULL,
- updated_at TEXT NOT NULL,
- availability TEXT NOT NULL DEFAULT 'enabled' CHECK(availability IN ('enabled','disabled','removed')),
- FOREIGN KEY(current_version_id) REFERENCES profile_skill_versions(version_id)
-);
-CREATE TABLE IF NOT EXISTS profile_skill_actions(
- action_id TEXT PRIMARY KEY,
- skill_id TEXT NOT NULL,
- version_id TEXT NOT NULL,
- digest TEXT NOT NULL,
- action TEXT NOT NULL CHECK(action IN ('legacy-installed','staged','status-changed')),
- previous_availability TEXT CHECK(previous_availability IS NULL OR previous_availability IN ('enabled','disabled','removed')),
- availability TEXT NOT NULL CHECK(availability IN ('enabled','disabled','removed')),
- effect_ref TEXT,
- idempotency_key TEXT NOT NULL UNIQUE,
- request_digest TEXT NOT NULL,
- created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS profile_skill_actions_history ON profile_skill_actions(skill_id,created_at,action_id);
-CREATE TABLE IF NOT EXISTS workspace_catalog(workspace_id TEXT PRIMARY KEY,name TEXT NOT NULL,database_url TEXT NOT NULL,replica_url TEXT,sync_url TEXT,credential_reference TEXT,owner_profile_id TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,deleted_at TEXT);
-`;
 const TRANSPORT_SCHEMA = `
 CREATE TABLE IF NOT EXISTS replicated_envelopes(
  envelope_id TEXT PRIMARY KEY,
@@ -94,6 +52,11 @@ CREATE TRIGGER IF NOT EXISTS replica_incarnations_no_delete BEFORE DELETE ON rep
 `;
 
 function parseJson(value: unknown): JsonValue { return JSON.parse(String(value)) as JsonValue; }
+function profileMigrationDigest(statements: readonly string[]): string {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(statements.join("\n-- statement boundary --\n"));
+  return hash.digest("hex");
+}
 function assertSafeRemoteUrl(value:string):void{let url:URL;try{url=new URL(value);}catch{throw new ValidationError("Sync URL is invalid");}for(const key of url.searchParams.keys())if(/token|secret|password|key/i.test(key))throw new ValidationError("Sync URL cannot contain credential query parameters; pass authToken in memory");if(url.username||url.password)throw new ValidationError("Sync URL cannot contain credentials");}
 const SENSITIVE_METADATA_KEY = /pass(word)?|secret|api[_-]?key|auth[_-]?token|access[_-]?token|private[_-]?key|credential/i;
 const OPAQUE_REFERENCE_KEY = /(?:reference|ref|handle|identifier|_id)$/i;
@@ -121,6 +84,8 @@ const PROFILE_SKILL_TEST_FIELDS = new Set(["name","input","expected","expectedEr
 const PROFILE_SKILL_REPORT_FIELDS = new Set(["testId","versionId","digest","testedAt","compiled","passed","failed","outcome"]);
 
 function profileSkillDigest(value:JsonValue):string{const hash=new Bun.CryptoHasher("sha256");hash.update(stableJson(value));return hash.digest("hex");}
+function normalizeProfileCatalogOrigin(value:string):string{let url:URL;try{url=new URL(value);}catch{throw new ValidationError("Model catalog origin must be an absolute HTTP(S) origin");}if(!["http:","https:"].includes(url.protocol)||url.username||url.password||url.search||url.hash||(url.pathname!=="/"&&url.pathname!==""))throw new ValidationError("Model catalog origin must not contain credentials, path, query, or fragment");return url.origin;}
+function profileCatalogEndpointId(origin:string):string{const hash=new Bun.CryptoHasher("sha256");hash.update(origin);return hash.digest("hex");}
 function assertProfileSkillId(value:unknown,label:string):asserts value is string{if(typeof value!=="string"||!PROFILE_SKILL_ID.test(value))throw new ValidationError(`${label} is invalid`);}
 function assertProfileSkillName(value:unknown):asserts value is string{if(typeof value!=="string"||value.length>64||!PROFILE_SKILL_NAME.test(value))throw new ValidationError("Global skill name must use bounded lower-kebab-case");}
 function assertProfileSkillDigest(value:unknown,label="Global skill digest"):asserts value is string{if(typeof value!=="string"||!PROFILE_SKILL_DIGEST.test(value))throw new ValidationError(`${label} is invalid`);}
@@ -203,6 +168,18 @@ function rowToWorkspace(row: Row): WorkspaceCatalogEntry { return {
 }; }
 
 class ProfileWriteQueue { #tail=Promise.resolve();async run<T>(operation:()=>Promise<T>):Promise<T>{const previous=this.#tail;let release!:()=>void;this.#tail=new Promise<void>((resolve)=>{release=resolve});await previous.catch(()=>{});try{return await operation();}finally{release();}} }
+const profileMigrationQueues=new Map<string,ProfileWriteQueue>();
+function profileMigrationQueue(url:string):ProfileWriteQueue{let queue=profileMigrationQueues.get(url);if(!queue){queue=new ProfileWriteQueue();profileMigrationQueues.set(url,queue);}return queue;}
+
+export interface ProfileModelCatalogCacheRecord {
+  readonly endpointId: string;
+  readonly catalogOrigin: string;
+  readonly descriptors: JsonValue;
+  readonly revisionDigest: string;
+  readonly fetchedAt: string;
+  readonly expiresAt: string;
+  readonly schemaVersion: 1;
+}
 
 /** LibSQL-backed profile DB. It stores opaque credential references, never credential values. */
 export class ProfileStore implements ProfileDatabase {
@@ -210,30 +187,66 @@ export class ProfileStore implements ProfileDatabase {
   readonly #writes=new ProfileWriteQueue();
   #closed = false;
   constructor(readonly url: string) { this.#client=createClient({url}); }
-  static async open(url: string): Promise<ProfileStore> { const value=new ProfileStore(url);await value.migrate();return value; }
+  static async open(url: string): Promise<ProfileStore> { const value=new ProfileStore(url);try{await profileMigrationQueue(url).run(()=>value.migrate());return value;}catch(error){value.close();throw error;} }
   async migrate():Promise<void>{
-    await this.#client.executeMultiple(PROFILE_SCHEMA);
-    const versionColumns=new Set((await this.#client.execute("PRAGMA table_info(profile_skill_versions)")).rows.map(row=>String(row.name)));
-    if(!versionColumns.has("definition_format"))await this.#client.execute("ALTER TABLE profile_skill_versions ADD COLUMN definition_format TEXT NOT NULL DEFAULT 'legacy'");
-    if(!versionColumns.has("provenance_json"))await this.#client.execute("ALTER TABLE profile_skill_versions ADD COLUMN provenance_json TEXT");
-    if(!versionColumns.has("test_report_json"))await this.#client.execute("ALTER TABLE profile_skill_versions ADD COLUMN test_report_json TEXT");
-    if(!versionColumns.has("effect_ref"))await this.#client.execute("ALTER TABLE profile_skill_versions ADD COLUMN effect_ref TEXT");
-    const skillColumns=new Set((await this.#client.execute("PRAGMA table_info(profile_skills)")).rows.map(row=>String(row.name)));
-    if(!skillColumns.has("availability"))await this.#client.execute("ALTER TABLE profile_skills ADD COLUMN availability TEXT NOT NULL DEFAULT 'enabled'");
-    await this.#client.execute({sql:"UPDATE profile_skill_versions SET definition_format='legacy',provenance_json=? WHERE provenance_json IS NULL",args:[stableJson({source:"legacy"})]});
-    await this.#client.execute("UPDATE profile_skills SET availability='enabled' WHERE availability IS NULL");
-    const legacy=(await this.#client.execute("SELECT s.skill_id,s.current_version_id,s.availability,s.updated_at,v.digest FROM profile_skills s JOIN profile_skill_versions v ON v.version_id=s.current_version_id WHERE NOT EXISTS (SELECT 1 FROM profile_skill_actions a WHERE a.skill_id=s.skill_id)")).rows;
-    for(const row of legacy){
-      const idempotencyKey=`legacy-migration:${String(row.skill_id)}:${String(row.current_version_id)}`;
-      const requestDigest=profileSkillRequestDigest({action:"legacy-installed",skillId:String(row.skill_id),versionId:String(row.current_version_id),digest:String(row.digest),availability:String(row.availability)});
-      await this.#client.execute({sql:"INSERT OR IGNORE INTO profile_skill_actions(action_id,skill_id,version_id,digest,action,previous_availability,availability,effect_ref,idempotency_key,request_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",args:[newId(),String(row.skill_id),String(row.current_version_id),String(row.digest),"legacy-installed",null,String(row.availability),null,idempotencyKey,requestDigest,String(row.updated_at)]});
+    await this.#client.execute("PRAGMA busy_timeout=5000");
+    await this.#client.execute("PRAGMA foreign_keys=ON");
+    const tx=await this.#client.transaction("write");
+    try{
+      const initialTables=await tx.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+      );
+      const initialNames=initialTables.rows.map((row)=>String(row.name));
+      if(!initialNames.includes("profile_schema_migrations")&&initialNames.length>0){
+        throw new ValidationError(
+          "This profile database predates the reasoning/model-capability schema cutover. Reset local Agencity state before using this version; the runtime did not delete any data.",
+          {tables:initialNames},
+        );
+      }
+      await tx.execute(`CREATE TABLE IF NOT EXISTS profile_schema_migrations(
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        source_digest TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      )`);
+      const applied=await tx.execute("SELECT version,name,source_digest FROM profile_schema_migrations ORDER BY version");
+      if(applied.rows.length===0){
+        const existing=await tx.execute(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'profile_schema_migrations' ORDER BY name",
+        );
+        if(existing.rows.length>0){
+          throw new ValidationError(
+            "This profile database predates the reasoning/model-capability schema cutover. Reset local Agencity state before using this version; the runtime did not delete any data.",
+            {tables:existing.rows.map((row)=>String(row.name))},
+          );
+        }
+      }
+      for(let index=0;index<applied.rows.length;index++){
+        const row=applied.rows[index]!;
+        const version=Number(row.version);
+        const expected=PROFILE_SCHEMA_MIGRATIONS[index];
+        if(!expected||version!==index+1||expected.version!==version){
+          throw new ValidationError("Profile migration ledger contains an unknown or non-contiguous version");
+        }
+        if(String(row.name)!==expected.name||String(row.source_digest)!==profileMigrationDigest(expected.statements)){
+          throw new ValidationError(`Profile migration ${version} no longer matches its immutable applied source`);
+        }
+      }
+      for(let index=applied.rows.length;index<PROFILE_SCHEMA_MIGRATIONS.length;index++){
+        const migration=PROFILE_SCHEMA_MIGRATIONS[index]!;
+        for(const statement of migration.statements)await tx.execute(statement);
+        await tx.execute({
+          sql:"INSERT INTO profile_schema_migrations(version,name,source_digest,applied_at) VALUES(?,?,?,?)",
+          args:[migration.version,migration.name,profileMigrationDigest(migration.statements),new Date().toISOString()],
+        });
+      }
+      await tx.commit();
+    }catch(error){
+      if(!tx.closed)await tx.rollback();
+      throw error;
+    }finally{
+      tx.close();
     }
-    await this.#client.executeMultiple(`
-CREATE TRIGGER IF NOT EXISTS profile_skill_versions_no_update BEFORE UPDATE ON profile_skill_versions BEGIN SELECT RAISE(ABORT,'profile skill versions are append-only'); END;
-CREATE TRIGGER IF NOT EXISTS profile_skill_versions_no_delete BEFORE DELETE ON profile_skill_versions BEGIN SELECT RAISE(ABORT,'profile skill versions are append-only'); END;
-CREATE TRIGGER IF NOT EXISTS profile_skill_actions_no_update BEFORE UPDATE ON profile_skill_actions BEGIN SELECT RAISE(ABORT,'profile skill actions are append-only'); END;
-CREATE TRIGGER IF NOT EXISTS profile_skill_actions_no_delete BEFORE DELETE ON profile_skill_actions BEGIN SELECT RAISE(ABORT,'profile skill actions are append-only'); END;
-`);
   }
   async getOrCreateDeviceIdentity(displayName=`${process.platform}-${process.arch}`):Promise<DeviceIdentity>{
     const now=new Date().toISOString();
@@ -251,6 +264,31 @@ CREATE TRIGGER IF NOT EXISTS profile_skill_actions_no_delete BEFORE DELETE ON pr
   async getPreference(key:string):Promise<ProfilePreference|null>{const r=await this.#client.execute({sql:"SELECT * FROM preferences WHERE key=?",args:[key]});const row=r.rows[0];return row?{key:String(row.key),value:parseJson(row.value_json),updatedAt:String(row.updated_at)}:null;}
   async setPreference(key:string,value:JsonValue):Promise<ProfilePreference>{if(!key.trim())throw new ValidationError("Preference key is required");const updatedAt=new Date().toISOString();await this.#client.execute({sql:"INSERT INTO preferences(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",args:[key,JSON.stringify(value),updatedAt]});return{key,value,updatedAt};}
   async listPreferences():Promise<ProfilePreference[]>{const r=await this.#client.execute("SELECT * FROM preferences ORDER BY key");return r.rows.map(row=>({key:String(row.key),value:parseJson(row.value_json),updatedAt:String(row.updated_at)}));}
+  async getModelCatalogCache(endpointId:string):Promise<ProfileModelCatalogCacheRecord|null>{
+    if(!/^[a-f0-9]{64}$/.test(endpointId))throw new ValidationError("Model catalog endpoint ID is invalid");
+    const row=(await this.#client.execute({sql:"SELECT * FROM model_catalog_cache WHERE endpoint_id=?",args:[endpointId]})).rows[0];
+    if(!row)return null;
+    const descriptors=parseJson(row.descriptors_json),revisionDigest=String(row.revision_digest),fetchedAt=String(row.fetched_at),expiresAt=String(row.expires_at),schemaVersion=Number(row.schema_version);
+    if(!/^[a-f0-9]{64}$/.test(revisionDigest)||profileSkillDigest(descriptors)!==revisionDigest||schemaVersion!==1)throw new ValidationError("Model catalog cache digest or schema is corrupt");
+    assertProfileSkillTimestamp(fetchedAt,"Model catalog fetchedAt");assertProfileSkillTimestamp(expiresAt,"Model catalog expiresAt");
+    if(Date.parse(expiresAt)<Date.parse(fetchedAt))throw new ValidationError("Model catalog cache expiry precedes its fetch time");
+    const catalogOrigin=normalizeProfileCatalogOrigin(String(row.catalog_origin));
+    if(profileCatalogEndpointId(catalogOrigin)!==endpointId)throw new ValidationError("Model catalog cache endpoint provenance is corrupt");
+    return{endpointId:String(row.endpoint_id),catalogOrigin,descriptors,revisionDigest,fetchedAt,expiresAt,schemaVersion:1};
+  }
+  async putModelCatalogCache(record:ProfileModelCatalogCacheRecord):Promise<void>{
+    if(!/^[a-f0-9]{64}$/.test(record.endpointId)||!/^[a-f0-9]{64}$/.test(record.revisionDigest)||record.schemaVersion!==1)throw new ValidationError("Model catalog cache metadata is invalid");
+    assertProfileSkillTimestamp(record.fetchedAt,"Model catalog fetchedAt");assertProfileSkillTimestamp(record.expiresAt,"Model catalog expiresAt");
+    if(Date.parse(record.expiresAt)<Date.parse(record.fetchedAt))throw new ValidationError("Model catalog cache expiry precedes its fetch time");
+    const descriptors=stableJson(record.descriptors);
+    if(new TextEncoder().encode(descriptors).byteLength>8*1024*1024)throw new ValidationError("Model catalog cache exceeds its byte bound");
+    if(profileSkillDigest(record.descriptors)!==record.revisionDigest)throw new ValidationError("Model catalog cache revision digest does not match its descriptors");
+    if(credentialMaterial(record.descriptors))throw new ValidationError("Model catalog cache cannot contain credential material");
+    const catalogOrigin=normalizeProfileCatalogOrigin(record.catalogOrigin);
+    if(profileCatalogEndpointId(catalogOrigin)!==record.endpointId)throw new ValidationError("Model catalog cache endpoint does not match its origin");
+    await this.#client.execute({sql:"INSERT INTO model_catalog_cache(endpoint_id,catalog_origin,descriptors_json,revision_digest,fetched_at,expires_at,schema_version) VALUES(?,?,?,?,?,?,?) ON CONFLICT(endpoint_id) DO UPDATE SET catalog_origin=excluded.catalog_origin,descriptors_json=excluded.descriptors_json,revision_digest=excluded.revision_digest,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at,schema_version=excluded.schema_version",args:[record.endpointId,catalogOrigin,descriptors,record.revisionDigest,record.fetchedAt,record.expiresAt,record.schemaVersion]});
+  }
+  async deleteModelCatalogCache(endpointId:string):Promise<void>{if(!/^[a-f0-9]{64}$/.test(endpointId))throw new ValidationError("Model catalog endpoint ID is invalid");await this.#client.execute({sql:"DELETE FROM model_catalog_cache WHERE endpoint_id=?",args:[endpointId]});}
   async putCredentialReference(input:Omit<CredentialReference,"createdAt"|"updatedAt">):Promise<CredentialReference>{if(!input.reference.trim()||!input.provider.trim()||!input.label.trim())throw new ValidationError("Credential reference fields are required");if(containsCredentialMaterial(input.reference)||containsCredentialMaterial(input.label))throw new ValidationError("Credential references and labels must be non-secret opaque identifiers");if(credentialMaterial(input.metadata))throw new ValidationError("Credential metadata may describe a handle but cannot contain credential material");const old=await this.getCredentialReference(input.reference);const now=new Date().toISOString();const result={...input,createdAt:old?.createdAt??now,updatedAt:now};await this.#client.execute({sql:"INSERT INTO credential_references(reference,provider,label,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(reference) DO UPDATE SET provider=excluded.provider,label=excluded.label,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at",args:[result.reference,result.provider,result.label,JSON.stringify(result.metadata),result.createdAt,result.updatedAt]});return result;}
   async getCredentialReference(reference:string):Promise<CredentialReference|null>{const r=await this.#client.execute({sql:"SELECT * FROM credential_references WHERE reference=?",args:[reference]});const row=r.rows[0];return row?{reference:String(row.reference),provider:String(row.provider),label:String(row.label),metadata:parseJson(row.metadata_json),createdAt:String(row.created_at),updatedAt:String(row.updated_at)}:null;}
   async listCredentialReferences():Promise<CredentialReference[]>{const r=await this.#client.execute("SELECT * FROM credential_references ORDER BY reference");return r.rows.map(row=>({reference:String(row.reference),provider:String(row.provider),label:String(row.label),metadata:parseJson(row.metadata_json),createdAt:String(row.created_at),updatedAt:String(row.updated_at)}));}

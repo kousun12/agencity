@@ -61,6 +61,34 @@ describe("Slice 2 atomic and policy-bounded subagent admission", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("an explicit-model retry reuses the retained child configuration without re-resolving capability data", async () => {
+    const provider = {
+      name: "reasoning-retry-fixture",
+      capabilities: { streaming: false, reasoningControl: "normalized" as const },
+      normalizeModel(model: string) { return model === "alias-model" ? "canonical-model" : model; },
+      async complete() {
+        return { text: "unused", finishReason: "stop", usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } };
+      },
+    };
+    const supervisor = await open({ modelProviders: [provider] });
+    try {
+      const root = await supervisor.createSession({
+        workspaceId: "model-retry",
+        model: { provider: provider.name, model: "alias-model", reasoningEffort: "high" },
+      });
+      const request = {
+        task: "stable explicit model",
+        idempotencyKey: "stable-explicit-model",
+        model: { provider: provider.name, model: "alias-model", reasoningEffort: "high" as const },
+      };
+      const first = await supervisor.agents.spawn(root.sessionId, root.branchId, request);
+      (supervisor.agents as any).normalizeModel = () => {
+        throw new Error("catalog changed");
+      };
+      await expect(supervisor.agents.spawn(root.sessionId, root.branchId, request)).resolves.toEqual(first);
+    } finally { await supervisor.close(); }
+  });
+
   test("a child with no explicit budget inherits the bounded parent budget", async () => {
     const supervisor = await open();
     try {
@@ -71,6 +99,34 @@ describe("Slice 2 atomic and policy-bounded subagent admission", () => {
       expect(state.budget.limits).toEqual(budget);
       const task = (await supervisor.agents.listTasks(root.sessionId))[0];
       expect(task?.budget).toEqual(budget);
+    } finally { await supervisor.close(); }
+  });
+
+  test("omitted child models inherit effort exactly while explicit effort is normalized independently", async () => {
+    const provider = {
+      name: "reasoning-fixture",
+      capabilities: { streaming: false, reasoningControl: "normalized" as const },
+      async complete() {
+        return {
+          text: "unused",
+          finishReason: "stop",
+          usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        };
+      },
+    };
+    const supervisor = await open({ modelProviders: [provider] });
+    try {
+      const root = await supervisor.createSession({
+        workspaceId: "reasoning-inheritance",
+        model: { provider: provider.name, model: "same-model", reasoningEffort: "high" },
+      });
+      const inherited = await supervisor.agents.spawn(root.sessionId, root.branchId, "inherit exact effort");
+      const explicit = await supervisor.agents.spawn(root.sessionId, root.branchId, {
+        task: "use an explicit lower effort",
+        model: { provider: provider.name, model: "same-model", reasoningEffort: "low" },
+      });
+      expect(projectEvents(await supervisor.storage.loadEvents(inherited.sessionId, { branchId: inherited.branchId })).model.reasoningEffort).toBe("high");
+      expect(projectEvents(await supervisor.storage.loadEvents(explicit.sessionId, { branchId: explicit.branchId })).model.reasoningEffort).toBe("low");
     } finally { await supervisor.close(); }
   });
 

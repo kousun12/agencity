@@ -1,4 +1,5 @@
 export * from "./errors.ts";
+export * from "./model.ts";
 export * from "./events.ts";
 export * from "./agent-action.ts";
 export * from "./refinement-review.ts";

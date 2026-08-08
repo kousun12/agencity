@@ -1,13 +1,13 @@
 import { resolve } from "node:path";
 import { access } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { ValidationError, newId, projectEvents } from "../domain/index.ts";
+import { REASONING_EFFORTS, ValidationError, newId, projectEvents, type ReasoningEffort } from "../domain/index.ts";
 import { AgentClient, ProtocolServer } from "../protocol/index.ts";
-import { Supervisor, type AgentRunResult, type StartAgentRunInput } from "../runtime/index.ts";
+import { Supervisor, type AgentRunResult, type StartAgentRunInput, type SupervisorOptions } from "../runtime/index.ts";
 import { LibSqlStorage } from "../storage/index.ts";
 import { scrubText } from "../security/index.ts";
 import { ProductCatalog } from "./catalog.ts";
-import { workspacePreferenceKey, type ResolvedWorkspace } from "./workspace.ts";
+import { modelEffortPreferenceKey, workspacePreferenceKey, type ResolvedWorkspace } from "./workspace.ts";
 import { formatModel, parseModel } from "./providers.ts";
 import {
   assessService,
@@ -248,7 +248,11 @@ export class ManagedWorkspaceService {
     this.#attachmentCountProbe = attachmentCountProbe;
   }
 
-  static async open(config: ManagedServiceConfiguration, appVersion: string): Promise<ManagedWorkspaceService> {
+  static async open(
+    config: ManagedServiceConfiguration,
+    appVersion: string,
+    options: Pick<SupervisorOptions, "modelCatalog"> = {},
+  ): Promise<ManagedWorkspaceService> {
     const normalized = normalizedConfiguration(config);
     const instanceId = `service-${newId()}`;
     let service: ManagedWorkspaceService | null = null;
@@ -261,6 +265,7 @@ export class ManagedWorkspaceService {
       restartConsoleAfterCell: normalized.restartConsoleAfterCell ?? false,
       recover: false,
       startWakeSchedulers: false,
+      ...options,
       executionLease: {
         workspaceId: normalized.workspace.workspaceId,
         ownerProcessId: instanceId,
@@ -302,16 +307,43 @@ export class ManagedWorkspaceService {
         productSessions: () => catalog.list(),
         productSelect: (target?: string, branchId?: string) => catalog.select(target, branchId),
         productRename: async (sessionId: string, branchId: string | undefined, name: string) => { await catalog.rename(sessionId, branchId, name); return { renamed: true }; },
-        productConfig: async () => {
+        productConfig: async (requestedModel?: string) => {
           const model = await supervisor.profile.getPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"));
+          const selected = typeof model?.value === "string" ? parseModel(model.value) : null;
+          const preferenceModel = requestedModel?.trim() || selected?.model;
+          const effortPreference = preferenceModel
+            ? await supervisor.profile.getPreference(modelEffortPreferenceKey(normalized.workspace.workspaceId, supervisor.modelCatalog.endpointId, preferenceModel))
+            : null;
           const credentialReferences = (await supervisor.profile.listCredentialReferences()).map(({ reference, provider, label, createdAt, updatedAt }) => ({ reference, provider, label, createdAt, updatedAt }));
-          return { defaultModel: typeof model?.value === "string" ? model.value : null, credentialReferences, providers: supervisor.modelProviders };
+          return {
+            defaultModel: typeof model?.value === "string" ? model.value : null,
+            catalogEndpointId: supervisor.modelCatalog.endpointId,
+            catalogOrigin: supervisor.modelCatalog.gatewayOrigin,
+            executionOrigins: supervisor.modelExecutor.executionOrigins(),
+            selectedModelEffortPreference: typeof effortPreference?.value === "string" && REASONING_EFFORTS.includes(effortPreference.value as ReasoningEffort)
+              ? effortPreference.value : null,
+            credentialReferences,
+            providers: supervisor.modelProviders,
+          };
         },
         productSetModel: async (model: string | null) => {
           if (model !== null && !model.trim()) throw new ValidationError("Model preference is required");
           const normalizedModel = model === null ? null : formatModel(supervisor.normalizeModelConfiguration(parseModel(model)));
           await supervisor.profile.setPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"), normalizedModel);
           return { defaultModel: normalizedModel };
+        },
+        productSetReasoningEffort: async (model: string, effort: string | null) => {
+          if (!model.trim() || /\s/.test(model)) throw new ValidationError("Canonical model ID is required");
+          const key = modelEffortPreferenceKey(normalized.workspace.workspaceId, supervisor.modelCatalog.endpointId, model);
+          if (effort === null) {
+            await supervisor.profile.setPreference(key, null);
+            return { model, effort: null, catalogEndpointId: supervisor.modelCatalog.endpointId };
+          }
+          if (!REASONING_EFFORTS.includes(effort as ReasoningEffort)) throw new ValidationError("Reasoning effort must use a canonical level");
+          if (effort !== "provider-default") await supervisor.modelCatalog.ensureFresh();
+          const configuration = supervisor.normalizeModelConfiguration({ provider: "vercel", model, reasoningEffort: effort as ReasoningEffort });
+          await supervisor.profile.setPreference(key, configuration.reasoningEffort);
+          return { model, effort: configuration.reasoningEffort, descriptor: supervisor.modelCatalog.descriptor(model) };
         },
         productSetProviderKey: async (provider: string, apiKey: string | null) => {
           const status = apiKey === null

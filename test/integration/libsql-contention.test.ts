@@ -72,7 +72,7 @@ describe("LibSQL contention boundaries", () => {
           id: "contention-root-created", sessionId: "contention-root", branchId: "main",
           type: "SessionCreated", producer: "test", idempotencyKey: "contention-root-created",
           committedAt: "2026-08-06T00:00:00.000Z",
-          payload: { workspaceId: "contention-workspace", initialBranchId: "main", model: { provider: "echo", model: "echo" }, budget: {} },
+          payload: { workspaceId: "contention-workspace", initialBranchId: "main", model: { provider: "echo", model: "echo", reasoningEffort: "provider-default" }, budget: {} },
         }]);
         for (let index = 0; index < 12; index++) {
           const suffix = workerId + "-" + index;

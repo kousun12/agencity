@@ -42,7 +42,7 @@ async function seedCandidateData(storage: AgentStorage): Promise<void> {
   await storage.appendEvents([{
     id: "candidate-session-created", sessionId: "candidate-session", branchId: "main", type: "SessionCreated",
     producer: "supervisor", idempotencyKey: "candidate-session", committedAt: "2026-08-05T00:00:00.000Z",
-    payload: { workspaceId: "candidate-workspace", initialBranchId: "main", model: { provider: "echo", model: "echo" }, budget: {} },
+    payload: { workspaceId: "candidate-workspace", initialBranchId: "main", model: { provider: "echo", model: "echo", reasoningEffort: "provider-default" }, budget: {} },
   }, {
     id: "candidate-memory-allowed", sessionId: "candidate-session", branchId: "main", type: "HarnessVersionCreated",
     producer: "client", idempotencyKey: "candidate-memory-allowed", committedAt: "2026-08-05T00:00:01.000Z",

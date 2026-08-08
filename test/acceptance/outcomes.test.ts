@@ -15,7 +15,7 @@ async function setup(label: string, extra: Readonly<Record<string, string>> = {}
   const fixture = new StrictActionFixture(); fixtures.push(fixture);
   const world = await AcceptanceWorld.create(label); worlds.push(world);
   const environment = { ...fixture.environment(), ...extra };
-  const configured = await world.command(["config", "set-model", "openai:fixture-v1", "--json"], environment);
+  const configured = await world.command(["config", "set-model", "openai:openai/fixture-v1", "--json"], environment);
   expect(configured.code).toBe(0);
   return { world, fixture, environment };
 }

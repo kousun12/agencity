@@ -1,4 +1,5 @@
-import type { BudgetLimits, ModelConfiguration } from "./events.ts";
+import type { BudgetLimits } from "./events.ts";
+import type { ModelConfiguration } from "./model.ts";
 import type { JsonValue } from "./json.ts";
 
 export const harnessKinds = ["memory", "prompt_note", "skill", "subagent_spec"] as const;

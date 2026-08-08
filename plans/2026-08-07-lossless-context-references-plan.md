@@ -1,8 +1,10 @@
 # Lossless context-reference storage plan
 
-**Status:** Ready for implementation  
+**Status:** Deferred until the formal model-tool cutover; requires a new readiness review
 **Date:** August 7, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)
+
+The former mixed-version compatibility design is superseded by [ADR 0010](../docs/decisions/0010-formal-model-tool-contracts.md). This revision targets one current workspace schema, rejects older workspaces with reset guidance, and contains no per-event version registry, mixed-history projection, old inline-effect execution, or dual-version client requirement. The context-fragment exactness and storage goals require a fresh readiness review after the formal model-tool cutover establishes the implementation baseline.
 
 ## Summary
 
@@ -17,7 +19,7 @@ This plan replaces expanded context storage for new events with:
 
 The first event that uses a fragment stores its exact JSON value. Later visible events reference the fragment's digest and source event. Fragment definitions remain inside canonical events rather than the external artifact store. This keeps context dependencies available to current event synchronization, export, branch replay, and owned-scope deletion without requiring general artifact replication.
 
-Version-1 events remain unchanged and readable. New referenced contexts use a version-2 `ContextMaterialized` payload after the runtime gains explicit per-event schema-version support. Retained history is never rewritten.
+The revised implementation must use one uniform workspace event schema. Referenced contexts replace the inline `ContextMaterialized` shape in that schema. Older pre-release workspaces are rejected with reset guidance and are not decoded, upcast, imported, synchronized, projected, or recovered.
 
 The change is storage-internal. Context selection, provider inputs, model behavior, context hashes, attribution, compaction, recovery, CLI/TUI behavior, and trusted-local authority remain unchanged.
 
@@ -41,16 +43,16 @@ For a growing conversation, repeated expanded contexts can approach quadratic st
 
 ## Goals
 
-- Reconstruct the exact materialized `JsonValue` for every version-2 context.
+- Reconstruct the exact materialized `JsonValue` for every referenced context.
 - Preserve the existing `contentHash` over the exact `JSON.stringify(context)` bytes.
 - Store repeatable context content once per visible session history and represent later occurrences with small references.
 - Remove the complete expanded context copy from new `ContextMaterialized` event payloads and `context_records` rows.
 - Store only a context identity and hash in new model-effect requests backed by `ContextMaterialized` so outbox rows, effect projections, snapshots, sync envelopes, protocol history, and exports do not copy the expanded value. Context-independent model effects, including model-summary compaction prompts, remain inline.
 - Preserve exact source-event, harness, compaction, model-attempt, and context-capacity provenance.
 - Preserve local-first operation, offline writes, divergent branches, and current event-envelope synchronization.
-- Open, replay, inspect, export, synchronize, branch, and delete databases containing any mixture of version-1 and version-2 context events.
+- Open, replay, inspect, export, synchronize, branch, and delete fresh databases using the one current referenced-context schema.
 - Fail before model-effect admission when any referenced fragment is missing, malformed, out of scope, or digest-mismatched.
-- Measure total database savings and context-resolution costs with reproducible fixtures before making version-2 writes the default.
+- Measure total database savings and context-resolution costs with reproducible fixtures before making referenced writes the default.
 
 ## Non-goals
 
@@ -60,15 +62,15 @@ For a growing conversation, repeated expanded contexts can approach quadratic st
 - Implementing general artifact synchronization.
 - Replacing the frozen source payloads in `ContextCompactionRequested`; those forensic compaction inputs require a separate measured optimization.
 - Sharing context fragments across independent sessions or root-agent families.
-- Retrofitting version-1 events into version-2 payloads.
-- Parent-plus-delta manifests, Merkle trees, or other structural sharing between manifests. Each version-2 event carries a complete manifest; structural sharing can be evaluated later if manifest bytes become material.
+- Importing or converting older pre-release workspace events.
+- Parent-plus-delta manifests, Merkle trees, or other structural sharing between manifests. Each referenced event carries a complete manifest; structural sharing can be evaluated later if manifest bytes become material.
 - Garbage-collecting canonical fragment definitions while events that reference them remain retained.
 
 ## Required invariants
 
 ### Exact reconstruction
 
-Resolving a version-2 context produces a value for which:
+Resolving a referenced context produces a value for which:
 
 ```ts
 JSON.stringify(resolvedContext) === originalSerializedContext
@@ -101,11 +103,11 @@ The runtime fully resolves and verifies a context before:
 
 A missing or corrupt fragment is an explicit dependency failure. It is never interpreted as an empty value, regenerated from current state, or repaired by repeating a model call.
 
-### Retained version 1 remains immutable
+### Pre-release schema cutover is uniform
 
-Existing version-1 `ContextMaterialized` events keep their current payload and meaning. Mixed histories project deterministically. No migration edits `events.payload_json`, changes a retained content hash, or requires a version-1 context to be refragmented.
+The context-reference cutover targets the current workspace schema at implementation time and accepts no older pre-release event shape. It does not add a per-event version registry or mixed-history reader. Opening an older workspace fails before projection with reset guidance.
 
-Version-1 `contentHash` values remain historical assertions because the current append path validates their shape but does not recompute them. Version-2 append and resolution paths verify fragment digests and the final context hash.
+Referenced-context append and resolution verify fragment digests and the final context hash.
 
 ## Terminology
 
@@ -120,7 +122,7 @@ Version-1 `contentHash` values remain historical assertions because the current 
 
 ### Canonical fragment definitions live in context events
 
-Version-2 context events store only:
+Version-3 context events store only:
 
 - the context identity and source-record provenance;
 - the expected full-context hash;
@@ -195,10 +197,7 @@ The manifest is complete rather than expressed as a delta from a prior manifest.
 
 ### Derived rows contain references, not expanded context
 
-A new migration changes `context_records` so mixed rows can represent:
-
-- version 1: existing `context_json`, records, provenance, and derivation;
-- version 2: manifest, fragment sources, records, provenance references, derivation, codec version, and content hash, with no expanded `context_json`.
+A new migration changes `context_records` so current rows store manifest, fragment sources, records, provenance references, derivation, codec version, and content hash, with no expanded `context_json`.
 
 The migration also adds a rebuildable `context_fragment_index` containing:
 
@@ -212,21 +211,17 @@ The index does not copy fragment values. Resolution loads the canonical source e
 
 `docs/mutable-tables.md` must classify the fragment index as a rebuildable projection. The immutable fragment bytes remain canonical event payloads.
 
-## Event-version evolution
+## Event-schema cutover
 
-The current runtime accepts a single global event schema version and has no upcaster registry. This plan must not weaken version validation or silently change the released version-1 payload.
+Before referenced context writes are enabled:
 
-Before version-2 context writes are enabled:
+1. Allocate one new uniform pre-release workspace schema if the then-current schema still contains inline contexts.
+2. Accept only that schema at storage, protocol, synchronization, export, and projection boundaries.
+3. Reject older workspaces with reset guidance before applying product migrations or projecting events.
+4. Add deterministic referenced-context projection and resolution paths.
+5. Do not add an upcaster, old inline-context reader, per-event registry, or mixed-history tests.
 
-1. Replace the single uniform event validator with an explicit `(event type, schema version)` registry.
-2. Continue accepting version 1 for every existing event.
-3. Accept version 2 only for `ContextMaterialized`.
-4. Add deterministic version-specific projection and resolution paths.
-5. Preserve the original version number on storage reads, protocol events, sync envelopes, and exports.
-6. Reject unsupported type/version pairs with a typed compatibility error.
-7. Add retained version-1 fixtures and mixed version-1/version-2 replay tests.
-
-Upcasting must not inflate every version-2 event back into a full inline payload during ordinary event loading. Reducers need only context identity, records, hash, and derivation. Callers that need the body use the context resolver explicitly.
+Reducers need only context identity, records, hash, and derivation. Callers that need the body use the context resolver explicitly.
 
 ## Write path
 
@@ -267,8 +262,7 @@ interface ContextResolver {
 
 Resolution behavior:
 
-- Version 1 returns `payload.context` unchanged. Its `contentHash` remains a historical assertion and is not newly recomputed as an enforcing read-time check; this preserves the meaning and readability of retained version-1 history.
-- Version 2 loads the complete manifest and every canonical fragment source, verifies each fragment, decodes the context, and verifies `contentHash`.
+- The current referenced shape loads the complete manifest and every canonical fragment source, verifies each fragment, decodes the context, and verifies `contentHash`.
 - Resolution rejects references outside the session or visible branch ancestry.
 - Missing source events, invalid ordinals, changed encodings, size mismatches, and hash mismatches produce typed dependency failures.
 - Rebuild reconstructs `context_records` and `context_fragment_index` solely from events, then resolves representative contexts to prove the index is not authority.
@@ -301,10 +295,10 @@ The model executor receives a `ContextResolver` dependency. After the outbox has
 
 For context-backed calls, the durable effect request, outbox row, reducer `EffectState`, and snapshots retain the reference input rather than the expanded context. Sync and protocol streams therefore carry the reference-shaped effect as well.
 
-The executor permanently supports both forms:
+The executor supports:
 
-- inline model effects with `input.context`, including retained version-1 requests and new context-independent requests;
-- referenced context-backed model effects with `inputFormat: "context-reference-v1"`.
+- referenced context-backed model effects with `inputFormat: "context-reference-v1"`;
+- inline context-independent model effects that have no `ContextMaterialized` identity, such as model-summary compaction prompts.
 
 Model-summary compaction effects construct bounded prompts that do not have a `ContextMaterialized.contextId`. They remain inline model effects. Their frozen source payloads and any separate optimization of those forensic inputs remain outside this plan. The executor dispatches by input shape and does not require a context resolver for inline effects.
 
@@ -312,16 +306,15 @@ The reference form does not change outbox ordering, idempotency, attempt account
 
 ## Synchronization
 
-Version-2 context events continue to use event envelopes. No separate blob transport is introduced.
+Referenced context events continue to use event envelopes. No separate blob transport is introduced.
 
-The envelope dependency extractor adds every earlier fragment source event ID from a version-2 manifest to `dependencies`, alongside stream-parent and causation dependencies. Ingestion must:
+The envelope dependency extractor adds every earlier fragment source event ID from a referenced manifest to `dependencies`, alongside stream-parent and causation dependencies. Ingestion must:
 
-1. retain version-1 envelope behavior;
-2. wait until all fragment-source event envelopes are present;
-3. validate branch remapping without changing stable source event IDs;
-4. resolve and hash-check the context before accepting its derived projection;
-5. quarantine missing, invisible, malformed, or digest-mismatched references;
-6. preserve independently defined equal fragments on divergent branches without inventing a conflict.
+1. wait until all fragment-source event envelopes are present;
+2. validate branch remapping without changing stable source event IDs;
+3. resolve and hash-check the context before accepting its derived projection;
+4. quarantine missing, invisible, malformed, or digest-mismatched references;
+5. preserve independently defined equal fragments on divergent branches without inventing a conflict.
 
 A synchronized context is usable only when all canonical definitions are present. Transport success alone is not reported as complete context availability.
 
@@ -333,20 +326,15 @@ Because fragment definitions remain in canonical events:
 - no new sidecar directory is required for context recovery;
 - database backup remains sufficient for context records, while existing general artifact backup requirements remain unchanged.
 
-Export verification must resolve every exported version-2 context and report a partial export if any definition is unavailable or corrupt. Export manifests should include counts and logical bytes for contexts, unique fragments, and references.
+Export verification must resolve every exported referenced context and report a partial export if any definition is unavailable or corrupt. Export manifests should include counts and logical bytes for contexts, unique fragments, and references.
 
 Independent-session deletion remains safe because cross-session fragment references are forbidden. Deletion removes the session's events and derived fragment index rows through the existing guarded process. Shared artifact deletion behavior is unchanged.
 
-## Protocol and API compatibility
+## Protocol and API
 
 Snapshots continue exposing context provenance rather than full historical bodies. Context inspection endpoints return the same expanded values after resolving them server-side.
 
-Committed event streams preserve each event's actual schema version. Protocol clients must either:
-
-- support version-2 `ContextMaterialized` payloads; or
-- treat unknown context payload versions as opaque non-state-changing activity while relying on snapshots for projected state.
-
-The protocol compatibility range and TypeScript event types must make this explicit. The bundled CLI, TUI, managed service, and client library ship dual-version support before version-2 writes become the default.
+Committed event streams expose only the one accepted workspace schema. The bundled CLI, TUI, managed service, and client library ship the referenced-context types together. An older client/server combination fails compatibility negotiation instead of receiving a second context payload version.
 
 No public caller should need to understand fragment manifests to request a model turn or inspect a context. A low-level diagnostic may expose the manifest and deduplication statistics separately.
 
@@ -374,12 +362,12 @@ No public caller should need to understand fragment manifests to request a model
   - materialization and recovery-resolution latency.
 - Record results by workload and context turn. Do not infer savings from event counts.
 
-### Phase 1 — Event-version foundation
+### Phase 1 — Uniform schema cutover
 
-- Add the per-event schema-version registry.
-- Preserve every existing version-1 fixture.
-- Add explicit unsupported-version errors, mixed-history reducer tests, protocol tests, and sync-envelope tests.
-- Update `docs/events.md` before introducing version-2 writes.
+- Allocate the one current pre-release workspace schema for referenced contexts.
+- Reject every older workspace schema with reset guidance before projection.
+- Add explicit unsupported-version errors plus current-schema reducer, protocol, and sync-envelope tests.
+- Update `docs/events.md` before introducing referenced writes.
 
 ### Phase 2 — Pure fragment codec
 
@@ -390,38 +378,36 @@ No public caller should need to understand fragment manifests to request a model
 
 ### Phase 3 — Relational projection and resolver
 
-- Add the numbered migration for mixed `context_records` rows and `context_fragment_index`.
+- Add the numbered migration for referenced `context_records` rows and `context_fragment_index`.
 - Extend storage contracts for visible-fragment lookup and context resolution.
-- Rebuild both projections from mixed histories.
+- Rebuild both projections from current-schema histories.
 - Add bounded verified-fragment caching only after uncached correctness passes.
 
-### Phase 4 — Dual-read runtime integration
+### Phase 4 — Runtime integration
 
 - Route every complete-context read through the resolver.
-- Add dual-format model effect execution and change new context-backed model-effect inputs to context references while preserving inline requests for retained history and context-independent calls such as model-summary compaction.
-- Keep version-1 writes as the default.
-- Exercise agent runs, one-turn calls, compaction, refinement, recursive models, context inspection, restart, and recovery against both formats.
-- Remove direct runtime assumptions that `payload.context` always exists, and make model execution dispatch explicitly between inline and referenced inputs.
+- Change every context-backed model-effect input to a context reference while preserving inline context-independent calls such as model-summary compaction.
+- Exercise agent runs, one-turn calls, compaction, refinement, recursive models, context inspection, restart, and recovery against the referenced format.
+- Remove direct runtime assumptions that `payload.context` exists.
 
-### Phase 5 — Version-2 write and sync integration
+### Phase 5 — Referenced write and sync integration
 
-- Enable version-2 writes behind an internal compatibility gate.
+- Enable referenced writes in the one current schema.
 - Add fragment dependencies to sync envelopes and validate them during ingestion.
-- Update export, deletion, protocol, TUI/client compatibility, and diagnostics.
+- Update export, deletion, protocol, TUI/client types, and diagnostics.
 - Run offline, divergent-branch, missing-dependency, export/import, and crash-boundary tests.
 
 ### Phase 6 — Default and documentation
 
-- Compare fresh version-1 and version-2 fixture databases.
-- Make version-2 writes the default only when:
-  - every exactness and compatibility gate passes;
+- Compare fresh inline and referenced fixture databases produced by isolated source revisions.
+- Keep referenced writes enabled only when:
+  - every exactness and current-schema gate passes;
   - context-attributable durable bytes fall by at least 50% on the growing-conversation and stable-large-harness fixtures;
   - total fresh-workspace durable bytes improve materially;
   - context resolution does not create a material model-admission latency regression.
-- Retain dual readers permanently.
 - Update `AGENTS.md`, README status where appropriate, `docs/architecture.md`, `docs/events.md`, `docs/mutable-tables.md`, `docs/recovery.md`, `docs/protocol.md`, and verification evidence.
 
-If the 50% context-byte target is missed, keep version-1 writes as the default and use the measurements to decide whether long-string chunking is warranted. Do not add manifest deltas or a Merkle tree without separate evidence.
+If the 50% context-byte target is missed, do not ship this cutover. Use the measurements to decide whether long-string chunking is warranted. Do not add manifest deltas or a Merkle tree without separate evidence.
 
 ## Verification matrix
 
@@ -436,8 +422,7 @@ If the 50% context-byte target is missed, keep version-1 writes as the default a
 
 ### Events, storage, and replay
 
-- Version-1-only, version-2-only, and mixed retained histories.
-- A retained version-1 context with a shape-valid but mismatched historical `contentHash` remains readable and is not reinterpreted as a version-2 integrity failure.
+- Current-schema referenced histories plus explicit rejection of every older workspace schema.
 - Duplicate application remains a true no-op.
 - A committed idempotent materialization retry returns the retained event before encoding, without changing local definitions into prior references or producing a conflict.
 - Same-source concurrent attempts for one stable materialization intent append at most one event; payload disagreement remains an explicit conflict.
@@ -454,7 +439,7 @@ If the 50% context-byte target is missed, keep version-1 writes as the default a
 - Restart after context append but before model request resolves the retained context and admits one model request.
 - Restart after model request does not rematerialize context or duplicate the effect.
 - Missing or corrupt fragments block before a provider effect.
-- New context-backed model effect events, outbox rows, reducer state, and snapshots contain only the context reference; retained and context-independent inline model effects still execute correctly.
+- Context-backed model effect events, outbox rows, reducer state, and snapshots contain only the context reference; context-independent inline model effects still execute correctly.
 - A resolver failure records a dependency failure without contacting the provider or producing an unknown provider outcome.
 - Context-window estimation and overflow retries use resolved exact contexts.
 - Deterministic and model-summary compaction retain their current source and derivation semantics.
@@ -462,7 +447,7 @@ If the 50% context-byte target is missed, keep version-1 writes as the default a
 
 ### Sync and branches
 
-- Version-1 envelopes remain accepted.
+- Older-schema envelopes are rejected before ingestion.
 - Fragment-source dependencies arriving after the referencing envelope remain pending and later ingest.
 - Permanently missing or corrupt sources remain explicit quarantine states.
 - Offline writers defining equal fragments do not lose either branch.
@@ -478,10 +463,10 @@ If the 50% context-byte target is missed, keep version-1 writes as the default a
 
 ### Protocol and product
 
-- Snapshot-plus-stream clients handle mixed event versions and cursor resume.
+- Snapshot-plus-stream clients handle the current event schema and cursor resume.
 - TUI rendering and context inspection remain unchanged.
 - No context event replay repeats a model call.
-- Installed-product acceptance covers task, detach, service restart, resume, branch, and history on version-2 writes.
+- Installed-product acceptance covers task, detach, service restart, resume, branch, and history on referenced writes.
 
 ### Security
 
@@ -502,14 +487,14 @@ If the 50% context-byte target is missed, keep version-1 writes as the default a
 - `src/domain/reducer.ts` and `src/domain/state.ts` — version-aware metadata projection.
 - `src/domain/context-fragments.ts` — pure codec, bounds, digest, and manifest types.
 - `src/storage/contract.ts` — fragment lookup and context-resolution contracts.
-- `src/storage/libsql.ts` — append validation, projections, rebuild, and mixed-row reads.
-- `src/storage/migrations/015_context_references.sql` — mixed context records and fragment index.
+- `src/storage/libsql.ts` — append validation, projections, rebuild, and referenced-row reads.
+- `src/storage/migrations/015_context_references.sql` — referenced context records and fragment index.
 - `src/runtime/context.ts` — encode on materialization.
 - `src/runtime/agent-runs.ts` and model-loop code — write reference-shaped model effects and resolve before use.
-- `src/executors/model.ts` and outbox wiring — dual-format effect input and resolver-backed provider execution.
+- `src/executors/model.ts` and outbox wiring — referenced context-backed effect input and resolver-backed provider execution.
 - Context compaction services — resolve referenced contexts while retaining current frozen-source semantics.
 - `src/sync/types.ts` and `src/sync/service.ts` — source dependencies and ingestion validation.
-- `src/protocol/` and `src/tui/` — mixed-version compatibility.
+- `src/protocol/` and `src/tui/` — current-schema context types.
 - `test/` — codec, storage, replay, recovery, sync, export/deletion, protocol, security, and benchmark coverage.
 - `docs/` and `AGENTS.md` — event evolution, table classification, recovery, placement, and verification claims.
 
@@ -517,12 +502,12 @@ If the 50% context-byte target is missed, keep version-1 writes as the default a
 
 The work is complete when:
 
-1. New contexts default to the referenced format and old contexts remain readable.
-2. Every model provider receives the same context value as the inline implementation for the same retained history.
+1. Every context uses the referenced format and older workspace schemas fail with reset guidance before projection.
+2. Every model provider receives the same context value as the inline implementation for the same fresh-workspace fixture.
 3. New model effects backed by `ContextMaterialized`, together with their outbox rows, effect projections, snapshots, sync envelopes, and exports, contain context references rather than expanded context copies. Context-independent effects such as model-summary compaction prompts remain inline.
 4. Recovery never depends on a live heap, projection-only bytes, or an unreplicated artifact.
 5. Missing or corrupt references prevent dependent model effects and remain visible.
-6. Mixed histories rebuild, sync, export, branch, and delete correctly.
+6. Current-schema histories rebuild, sync, export, branch, and delete correctly.
 7. Context-attributable durable bytes meet the benchmark target without hiding bytes in an uncounted side store.
 8. Typecheck, architecture checks, relevant unit/integration/E2E/acceptance suites, and the full `bun run verify` gate pass.
-9. Documentation describes the new format, compatibility boundary, measured savings, and remaining limitations without claiming structural sharing or general artifact replication.
+9. Documentation describes the new format, reset boundary, measured savings, and remaining limitations without claiming structural sharing or general artifact replication.

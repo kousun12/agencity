@@ -1,6 +1,6 @@
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { AgentRuntimeError, projectEvents, reduceAgentState, type AgentEvent, type AgentState } from "../domain/index.ts";
+import { AgentRuntimeError, normalizeReasoningEffort, projectEvents, reduceAgentState, type AgentEvent, type AgentState } from "../domain/index.ts";
 import {
   ProtocolClientError,
   type AgentClient, type BranchWatchHandlers, type ProtocolCapabilities,
@@ -19,12 +19,13 @@ import {
   formatTerminalDetail,
   formatTerminalRaw,
   type TerminalDetail,
+  type TerminalEffortDetail,
 } from "./detail-model.ts";
 
 export type TerminalAgentClient = Pick<AgentClient,
   "capabilities" | "snapshot" | "watchBranch" | "history" | "productSessions" | "productSelect" |
   "createSession" | "modelProviders" | "startRun" | "run" | "respondToRun" | "cancelRun" |
-  "productConfig" | "productSetModel" | "productSetProviderKey" | "selectModel" |
+  "productConfig" | "productSetModel" | "productSetReasoningEffort" | "productSetProviderKey" | "selectModel" | "modelCatalog" |
   "cell" | "fork" | "resume" | "inspectContext" | "compact" | "agents" | "tasks" | "mailbox" | "cancelTask" |
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
   "heartbeats" | "createHeartbeat" | "pauseHeartbeat" | "resumeHeartbeat" | "cancelHeartbeat" |
@@ -72,6 +73,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/quit", aliases: ["/exit"], category: "product", usage: "/quit", summary: "Detach without cancellation." },
   { name: "/info", aliases: ["/status"], category: "status", usage: "/info", summary: "Show model, recovery, trust, and protocol status." },
   { name: "/model", aliases: [], category: "status", usage: "/model [PROVIDER:MODEL|login PROVIDER|logout PROVIDER]", summary: "Open the provider picker or use a compatible direct model command." },
+  { name: "/effort", aliases: ["/thinking"], category: "status", usage: "/effort [provider-default|none|minimal|low|medium|high|xhigh|refresh]", summary: "Inspect or change reasoning effort on an idle branch." },
   { name: "/budget", aliases: [], category: "status", usage: "/budget", summary: "Show committed budget usage." },
   { name: "/snapshot", aliases: [], category: "status", usage: "/snapshot", summary: "Show a structured overview of the projected state." },
   { name: "/mailbox", aliases: [], category: "status", usage: "/mailbox", summary: "Show retained family messages and receipts." },
@@ -140,7 +142,7 @@ export function renderStartupStatus(
   return [
     "Agencity trusted-local TUI (protocol-backed terminal client)",
     `Session: ${state.sessionName ?? "unnamed session"} / ${state.branch.name ?? "unnamed branch"}`,
-    `Model: ${state.model.provider}:${state.model.model} (${streaming})`,
+    `Model: ${state.model.provider}:${state.model.model} · effort ${state.model.reasoningEffort} (${streaming})`,
     "Authority: TRUSTED-LOCAL; generated code has the runtime process's OS authority (not sandboxed)",
     `Protocol: snapshot+cursor resume=${capabilities.snapshotCursorResume}; progress is ephemeral; sync=${sync}`,
     `Recovery: ${recovery.pendingEffectIds.length} pending effects, ${recovery.unknownEffects.length} unknown, ${recovery.activeChildTaskIds.length} active children, ${recovery.attentionGoalGateIds.length} failed/unknown/running gates`,
@@ -193,6 +195,10 @@ export function renderEvent(event: AgentEvent): string | null {
       return null;
     case "EffectReconciliationRecorded":
       return `[unknown outcome assessed as ${String(payload.assessment)}; the durable outcome remains unknown]`;
+    case "ModelCallCompleted":
+      return Array.isArray(payload.warnings) && payload.warnings.length
+        ? payload.warnings.map((warning) => `[model warning] ${conciseValue((warning as { message?: unknown }).message)}`).join("\n")
+        : null;
     case "AgentRunUserInputRequested":
       return payload.kind === "permission"
         ? `[permission needed: ${conciseValue(payload.permission)}] ${conciseValue(payload.question)}`
@@ -455,11 +461,32 @@ export class TerminalUI {
     if (line === "/sessions") { this.#detail("/sessions", await this.client.productSessions()); return "continue"; }
     if (line.startsWith("/sessions select ")) { const target=line.slice(17).trim(); const selected=await this.client.productSelect(target); await this.#queueRouteTransition(selected.sessionId, selected.branchId); return "continue"; }
     if (line === "/new" || line.startsWith("/new ")) {
-      const current=this.#liveState; const requestedName=line.slice(5).trim();const created=await this.client.createSession(this.options.workspaceId ?? current?.workspaceId ?? "default", current ? { model: current.model, ...(requestedName ? { sessionName: requestedName } : {}) } : {});
+      const current=this.#liveState;
+      const requestedName=line.slice(5).trim();
+      let model:ModelConfiguration|undefined=current?{...current.model,reasoningEffort:"provider-default"}:undefined;
+      if(model){
+        try {
+          const config=await this.client.productConfig(model.model);
+          model={...model,reasoningEffort:config.selectedModelEffortPreference??"provider-default"};
+        } catch(error) {
+          if(!(error instanceof ProtocolClientError)||!["NOT_FOUND","CAPABILITY_UNAVAILABLE"].includes(error.code))throw error;
+        }
+      }
+      let created;
+      try {
+        created=await this.client.createSession(this.options.workspaceId ?? current?.workspaceId ?? "default", model ? { model, ...(requestedName ? { sessionName: requestedName } : {}) } : {});
+      } catch (error) {
+        if(!model||model.reasoningEffort==="provider-default"||!isReasoningSelectionError(error))throw error;
+        model={...model,reasoningEffort:"provider-default"};
+        created=await this.client.createSession(this.options.workspaceId ?? current?.workspaceId ?? "default",{model,...(requestedName?{sessionName:requestedName}:{})});
+        this.#write(`Stored reasoning effort is no longer valid for ${model.model}; using provider-default.\n`);
+      }
       if(this.#productCatalog)await this.client.productSelect(created.sessionId, created.branchId);
       await this.#queueRouteTransition(created.sessionId, created.branchId); return "continue";
     }
     if (line === "/model" || line.startsWith("/model ")) { await this.#model(line.slice(6).trim()); return "continue"; }
+    if (line === "/effort" || line.startsWith("/effort ")) { await this.#effort(line.slice(7).trim()); return "continue"; }
+    if (line === "/thinking" || line.startsWith("/thinking ")) { await this.#effort(line.slice(9).trim()); return "continue"; }
     if (line === "/history" || line.startsWith("/history ")) { await this.#history(line.slice(8).trim()); return "continue"; }
     if (line === "/snapshot") { this.#detail("/snapshot", this.#requireState()); return "continue"; }
     if (line === "/budget") { this.#detail("/budget", this.#requireState().budget); return "continue"; }
@@ -886,11 +913,48 @@ export class TerminalUI {
     const descriptor=providers.find(provider=>provider.name===model.provider);
     if(!descriptor)throw new Error(`Unknown model provider: ${model.provider}`);
     if(!descriptor.usable)throw new Error(descriptor.remediation??`Use /model login ${model.provider} first`);
-    const selected=await this.client.selectModel(this.#sessionId,this.#branchId,model) as {changed?:boolean;model?:ModelConfiguration};
-    const selectedModel=selected.model??model;
+    const config=await this.client.productConfig(model.model);
+    const configuredModel={...model,reasoningEffort:config.selectedModelEffortPreference??"provider-default"} as ModelConfiguration;
+    let selected:{changed?:boolean;model?:ModelConfiguration};
+    try {
+      selected=await this.client.selectModel(this.#sessionId,this.#branchId,configuredModel) as {changed?:boolean;model?:ModelConfiguration};
+    } catch (error) {
+      if(config.selectedModelEffortPreference===null||!isReasoningSelectionError(error))throw error;
+      selected=await this.client.selectModel(this.#sessionId,this.#branchId,{...configuredModel,reasoningEffort:"provider-default"}) as {changed?:boolean;model?:ModelConfiguration};
+      this.#write(`Stored reasoning effort is no longer valid for ${model.model}; using provider-default.\n`);
+    }
+    const selectedModel=selected.model??configuredModel;
     await this.client.productSetModel(formatTerminalModel(selectedModel));
-    this.#write(`${selected.changed===false?"Model already selected":"Selected branch model"}: ${formatTerminalModel(selectedModel)}. Saved as this workspace's default.\n`);
+    this.#write(`${selected.changed===false?"Model already selected":"Selected branch model"}: ${formatTerminalModel(selectedModel)}. Reasoning effort: ${selectedModel.reasoningEffort}. Saved as this workspace's default.\n`);
     await this.#showModelDetail(undefined,selectedModel);
+  }
+  async #effort(command:string):Promise<void>{
+    const state=this.#requireState();
+    const refresh=command==="refresh";
+    const catalog=await this.client.modelCatalog(refresh);
+    if(refresh)command="";
+    const descriptor=catalog.descriptors.find(item=>item.model===state.model.model)??null;
+    const capability=descriptor?.reasoning??{status:"unverified" as const,levels:["none","minimal","low","medium","high","xhigh"] as const};
+    const detail=(current:ModelConfiguration["reasoningEffort"]):TerminalEffortDetail=>({
+      kind:"effort",command:"/effort",title:"Reasoning effort",current,model:state.model.model,
+      capability:capability.status,
+      options:capability.status==="unsupported"?["provider-default"]:["provider-default",...capability.levels],
+      stale:descriptor?.stale??true,
+      ...(catalog.origin?{catalogOrigin:catalog.origin}:{}),
+      ...(catalog.error?{catalogError:catalog.error}:{}),
+      raw:{model:state.model,descriptor,catalog},
+    });
+    if(!command){
+      const value=detail(state.model.reasoningEffort);this.#lastDetail=value;this.#emitDetail(value);
+      return;
+    }
+    if(this.#historicalCursor!==null)throw new Error("Return to /live before changing reasoning effort");
+    const effort=normalizeReasoningEffort(command);
+    const model={...state.model,reasoningEffort:effort};
+    const selected=await this.client.selectModel(this.#sessionId,this.#branchId,model) as {changed?:boolean;model?:ModelConfiguration};
+    await this.client.productSetReasoningEffort(state.model.model,effort);
+    this.#write(`${selected.changed===false?"Reasoning effort already selected":"Selected reasoning effort"}: ${effort}. Saved for ${state.model.model} in this workspace.\n`);
+    const value=detail((selected.model??model).reasoningEffort);this.#lastDetail=value;this.#emitDetail(value);
   }
   async #stop(reason:string):Promise<void>{const active=this.#activeRun();if(!active){this.#write("No active run.\n");return;}await this.client.cancelRun(this.#sessionId,this.#branchId,active.id,reason);this.#write("Cancellation requested.\n");}
   async #startOrRespond(text:string):Promise<void>{
@@ -943,8 +1007,11 @@ export class TerminalUI {
   }
   async #showModelDetail(providers?:Awaited<ReturnType<TerminalAgentClient["modelProviders"]>>,current:ModelConfiguration=this.#requireState().model):Promise<void>{
     const available=providers??await this.client.modelProviders();
-    const config=await this.client.productConfig();
-    const detail=buildTerminalModelDetail({current,workspaceDefault:config.defaultModel,providers:available});
+    const [config,catalog]=await Promise.all([
+      this.client.productConfig(),
+      this.client.modelCatalog().catch(()=>({descriptors:[]})),
+    ]);
+    const detail=buildTerminalModelDetail({current,workspaceDefault:config.defaultModel,providers:available,catalogModels:catalog.descriptors});
     this.#lastDetail=detail;
     this.#emitDetail(detail);
   }
@@ -971,10 +1038,15 @@ function parseTerminalModel(value:string):ModelConfiguration{
   const provider=value.slice(0,separator);
   const model=value.slice(separator+1);
   if(!/^[a-z][a-z0-9-]*$/.test(provider)||/\s/.test(model))throw new Error("Model must use PROVIDER:MODEL format");
-  return{provider,model};
+  return{provider,model,reasoningEffort:"provider-default"};
 }
 
 function formatTerminalModel(model:ModelConfiguration):string{return`${model.provider}:${model.model}`;}
+
+function isReasoningSelectionError(error: unknown): boolean {
+  const message=error instanceof Error?error.message:String(error);
+  return /reasoning effort|reasoning control|available levels/i.test(message);
+}
 
 function redactSubmittedSecret(error:unknown,secret:string):unknown{
   if(!secret)return error;

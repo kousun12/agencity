@@ -47,7 +47,11 @@ async function usingRuntime() {
   try {
     const { sessionId, branchId } = await supervisor.createSession({
       workspaceId: "example",
-      model: { provider: "openai", model: "gpt-5.6-sol" },
+      model: {
+        provider: "openai",
+        model: "openai/gpt-5.6-sol",
+        reasoningEffort: "high",
+      },
       budget: { tokenLimit: 10_000, turnLimit: 20 },
     });
 
@@ -76,11 +80,15 @@ Do not run an embedded supervisor against a workspace database currently owned b
 
 ## Model providers
 
-The product supports OpenAI, Anthropic, and Vercel AI Gateway. Stored owner keys take precedence over `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY`. The corresponding base URL environment variables can replace the default endpoints. Model identity is durable as separate `{ provider, model }` fields and is formatted as `provider:model` at product boundaries; the model portion may contain `/`.
+The product supports OpenAI, Anthropic, and Vercel AI Gateway through one shared Vercel AI SDK execution core with thin transport factories. Stored owner keys take precedence over `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY`. The corresponding base origin environment variables can replace the default endpoints. Model identity is durable as `{ provider, model, reasoningEffort }` and is formatted as `provider:creator/model` at product boundaries.
+
+`reasoningEffort` is `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. `provider-default` leaves the provider override absent. `ModelExecutor.resolveDispatch` resolves the complete configuration, reasoning capability decision, catalog digest, and execution endpoint identity once before the request is committed. Recovery executes that retained `ModelDispatch`; it does not reinterpret a changed catalog or endpoint.
+
+`ModelCatalog` fetches the public Vercel AI Gateway `/v1/models` catalog, normalizes only language models, and stores a bounded digest-checked cache in the profile database. `ModelExecutor.contextCapacity()` uses the descriptor for the exact canonical model and reports explicit unknown capacity when the catalog has none.
 
 The Echo provider exists inside the low-level runtime as a deterministic test fixture. It is not a selectable product provider or demo mode. Product onboarding, model selection, help, and status must not present Echo as usable product configuration. Low-level provider descriptor lists can include injected or internal providers, so an external product UI must apply product provider policy rather than treating every descriptor as selectable.
 
-`ModelProvider.complete` is the required provider contract. A provider may also declare `capabilities.streaming: true` and implement `stream`. The stream callback emits bounded, process-local progress; the returned full `ModelResponse` is the only value used for the durable terminal outcome. Missing capability metadata means unsupported. A provider that declares streaming without implementing it is rejected.
+`ModelProvider.complete` is the required provider contract. A provider may also declare `capabilities.streaming: true` and implement `stream`. The stream callback emits bounded, process-local progress; the returned full `ModelResponse` is the only value used for the durable terminal outcome. AI SDK provider warnings are normalized into bounded durable warning records. Missing capability metadata means unsupported. A provider that declares streaming without implementing it is rejected.
 
 `ModelExecutor.providers()` and `Supervisor.modelProviders` return secret-free descriptors with names, display labels, capabilities, usability, credential source, and remediation. `ModelExecutor.contextCapacity()` reports exact provider/operator metadata or an explicit unknown value; it does not guess model capacity.
 
@@ -95,15 +103,17 @@ The Echo provider exists inside the low-level runtime as a deterministic test fi
 
 Product tasks use the strict autonomous-run service:
 
-- `runs.start` admits a task and advances it through typed model actions, cells, observations, inputs, budget accounting, goals, and a terminal or waiting boundary.
+- `runs.start` admits a task and advances it through typed model actions, cells, observations, budget accounting, goals, and a terminal boundary.
 - `runs.get` reads the retained run.
 - `runs.advance` resumes a retained run without inventing action identity.
-- `runs.respond` records a clarification or permission response. Permission responses require an explicit boolean decision.
+- `runs.respond` is a transitional pre-release method for the current clarification/permission implementation.
 - `runs.cancel` commits cancellation intent before aborting admitted work.
 
 An exact `requestKey` retry returns the same run; reuse with changed durable meaning conflicts. `unknown`, `cancelled`, `budget_exceeded`, `blocked`, and `failed` are distinct outcomes.
 
-Agent actions are strict `agencity.agent-action` version-1 JSON values. Only the `typescript` variant executes generated work. Shell, file, SQL, model, subagent, memory, skill, and artifact operations are typed APIs inside the cell. The supervisor never heuristically executes prose. See [Generated TypeScript console SDK](./console-sdk.md).
+The accepted architecture replaces textual action JSON with exactly two formal provider tools: `bun_console` and `finish`. Only `bun_console` executes generated work. Shell, file, SQL, model, subagent, memory, skill, and artifact operations are typed APIs inside the cell. `finish` ends the run as successful, blocked, or failed; missing information uses blocked `finish` and a later ordinary run. The supervisor never heuristically executes prose. See [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) and [Generated TypeScript console SDK](./console-sdk.md).
+
+The current pre-release implementation still exposes textual version-1 actions and `runs.respond`. The formal-tool cutover removes clarification, permission, request-input, and waiting-for-user types and methods without a compatibility layer.
 
 `modelLoop.turn` and `modelLoop.run` remain low-level diagnostic paths. They are not substitutes for `runs` in a product task integration.
 
@@ -138,7 +148,7 @@ const terminal = await supervisor.models.result(call.handleId, {
 });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable` activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Its bounded reason codes distinguish user input, permission, blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state cases. Missing retained state stays unavailable instead of resolving to another branch.
+`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. The current pre-release projection includes waiting/input/permission reasons; the formal-tool cutover removes them. The target values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 
 Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
 

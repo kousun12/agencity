@@ -23,8 +23,9 @@ export interface ProtocolServiceHooks {
   readonly productSessions?: () => Promise<unknown>;
   readonly productSelect?: (target?: string, branchId?: string) => Promise<unknown>;
   readonly productRename?: (sessionId: string, branchId: string | undefined, name: string) => Promise<unknown>;
-  readonly productConfig?: () => Promise<unknown>;
+  readonly productConfig?: (model?: string) => Promise<unknown>;
   readonly productSetModel?: (model: string | null) => Promise<unknown>;
+  readonly productSetReasoningEffort?: (model: string, effort: string | null) => Promise<unknown>;
   readonly productSetProviderKey?: (provider: string, apiKey: string | null) => Promise<unknown>;
   readonly productCredentialReference?: (provider: string, reference: string, label: string) => Promise<unknown>;
 }
@@ -104,9 +105,25 @@ export class ProtocolServer {
         cursorlessProgress: true, historicalProjection: true,
         managedService: Boolean(this.options.service),
         productCatalog: Boolean(this.options.service?.productSessions),
+        reasoningEffortSelection: true,
         sync: this.supervisor.sync.capabilities,
         providers: this.supervisor.modelExecutor.providers(),
       }, { headers: { "cache-control": "no-store" } });
+      if (request.method === "GET" && url.pathname === "/model-catalog") {
+        const catalog = await this.supervisor.modelCatalog.ensureFresh();
+        return Response.json({
+          endpointId: this.supervisor.modelCatalog.endpointId,
+          origin: this.supervisor.modelCatalog.gatewayOrigin,
+          ...catalog,
+        });
+      }
+      if (request.method === "POST" && url.pathname === "/model-catalog/refresh") {
+        return Response.json({
+          endpointId: this.supervisor.modelCatalog.endpointId,
+          origin: this.supervisor.modelCatalog.gatewayOrigin,
+          ...await this.supervisor.modelCatalog.refresh(),
+        });
+      }
       if (this.options.service) {
         if (request.method === "GET" && url.pathname === "/service/status") return Response.json(await this.options.service.status());
         if (request.method === "POST" && url.pathname === "/service/shutdown") return Response.json(await this.options.service.shutdown(), { status: 202 });
@@ -114,8 +131,9 @@ export class ProtocolServer {
         if (request.method === "GET" && url.pathname === "/product/sessions" && this.options.service.productSessions) return Response.json(await this.options.service.productSessions());
         if (request.method === "POST" && url.pathname === "/product/select" && this.options.service.productSelect) { const body=await jsonBody(request); return Response.json(await this.options.service.productSelect(typeof body.target === "string" ? body.target : undefined, typeof body.branchId === "string" ? body.branchId : undefined)); }
         if (request.method === "POST" && url.pathname === "/product/rename" && this.options.service.productRename) { const body=await jsonBody(request); return Response.json(await this.options.service.productRename(String(body.sessionId ?? ""), typeof body.branchId === "string" ? body.branchId : undefined, String(body.name ?? ""))); }
-        if (request.method === "GET" && url.pathname === "/product/config" && this.options.service.productConfig) return Response.json(await this.options.service.productConfig());
+        if (request.method === "GET" && url.pathname === "/product/config" && this.options.service.productConfig) return Response.json(await this.options.service.productConfig(url.searchParams.get("model") ?? undefined));
         if (request.method === "POST" && url.pathname === "/product/config/model" && this.options.service.productSetModel) { const body=await jsonBody(request); return Response.json(await this.options.service.productSetModel(body.model === null ? null : String(body.model ?? ""))); }
+        if (request.method === "POST" && url.pathname === "/product/config/reasoning-effort" && this.options.service.productSetReasoningEffort) { const body=await jsonBody(request); return Response.json(await this.options.service.productSetReasoningEffort(String(body.model ?? ""), body.effort === null ? null : String(body.effort ?? ""))); }
         if (request.method === "POST" && url.pathname === "/product/config/provider-key" && this.options.service.productSetProviderKey) { const body=await jsonBody(request); return Response.json(await this.options.service.productSetProviderKey(String(body.provider ?? ""), body.apiKey === null ? null : String(body.apiKey ?? ""))); }
         if (request.method === "POST" && url.pathname === "/product/config/credential-reference" && this.options.service.productCredentialReference) { const body=await jsonBody(request); return Response.json(await this.options.service.productCredentialReference(String(body.provider ?? ""), String(body.reference ?? ""), String(body.label ?? ""))); }
       }

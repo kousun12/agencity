@@ -113,6 +113,7 @@ const modelConfigurationSchema = z.object({
   model: z.string().min(1).max(256).refine(nonBlank, "must not be blank"),
   temperature: z.number().finite().min(0).max(2).optional(),
   maxOutputTokens: z.number().int().positive().max(10_000_000).optional(),
+  reasoningEffort: z.enum(["provider-default", "none", "minimal", "low", "medium", "high", "xhigh"]),
 }).strict();
 const budgetLimitsSchema = z.object({
   tokenLimit: z.number().finite().nonnegative().optional(),

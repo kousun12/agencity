@@ -26,7 +26,7 @@ function event(type: AgentEvent["type"], payload: Record<string, unknown>, curso
     causationId: null,
     correlationId: null,
     type,
-    schemaVersion: 1,
+    schemaVersion: 2,
     committedAt: "2026-08-07T00:00:00.000Z",
     producer: "supervisor",
     idempotencyKey: null,

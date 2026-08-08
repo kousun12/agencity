@@ -1,6 +1,6 @@
 import {
   FamilyReachError, NotFoundError, ValidationError, assertJsonValue, newId, projectEvents,
-  type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type NewAgentEvent, type TaskStatus,
+  type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type ModelConfigurationInput, type NewAgentEvent, type TaskStatus,
 } from "../domain/index.ts";
 import {
   requireRecursiveStorage, type AgentStorage, type MailboxRecord, type SessionRecord, type TaskRecord,
@@ -12,7 +12,7 @@ import { ProjectionService } from "./projection.ts";
 export interface SpawnAgentInput {
   readonly task: string;
   readonly completionCriteria?: string;
-  readonly model?: ModelConfiguration;
+  readonly model?: ModelConfigurationInput;
   readonly budget?: BudgetLimits;
   /** Stable command identity. Reusing it with the same request returns the original handle. */
   readonly idempotencyKey?: string;
@@ -28,7 +28,7 @@ export interface SubagentHandle {
   readonly parentSessionId: string; readonly parentBranchId: string; readonly rootSessionId: string;
   readonly depth: number; readonly status: TaskStatus; readonly name?: string;
 }
-export interface SpawnAdmissionItem { readonly input: SpawnAgentInput; readonly handle: SubagentHandle; readonly existing: boolean; }
+export interface SpawnAdmissionItem { readonly input: SpawnAgentInput; readonly handle: SubagentHandle; readonly model: ModelConfiguration; readonly budget: BudgetLimits; readonly existing: boolean; }
 export interface SendMessageInput {
   /** Model-facing target: session ID, exact family name, or the literal "parent". */
   readonly target?: string;
@@ -99,7 +99,19 @@ export class AgentService {
   readonly maxMessageBytes = 32 * 1024;
   readonly maxPendingMessages = 100;
   readonly maxMessagesPerMinute = 60;
-  constructor(readonly storage: AgentStorage, readonly outbox?: OutboxRunner, readonly maxDepth = 8, readonly maxChildren = 32) {
+  constructor(
+    readonly storage: AgentStorage,
+    readonly outbox?: OutboxRunner,
+    readonly maxDepth = 8,
+    readonly maxChildren = 32,
+    readonly normalizeModel: (model: ModelConfigurationInput) => ModelConfiguration = (model) => ({
+      ...model,
+      reasoningEffort: model.reasoningEffort === "default" || model.reasoningEffort === undefined
+        ? "provider-default"
+        : model.reasoningEffort === "off" ? "none" : model.reasoningEffort,
+    }),
+    readonly normalizeModelIdentity: (model: ModelConfigurationInput) => ModelConfiguration = normalizeModel,
+  ) {
     this.#recursive = requireRecursiveStorage(storage);
     this.#projections = new ProjectionService(storage);
   }
@@ -181,7 +193,7 @@ export class AgentService {
         const taskId = stable === undefined ? newId() : `task-${stable}`;
         const childSessionId = input.sessionId ?? (stable === undefined ? newId() : `session-${stable}`);
         const childBranchId = input.branchId ?? (stable === undefined ? newId() : `branch-${stable}`);
-        const model = input.model ?? parentState.model;
+        const model = parentState.model;
         const budget = input.budget ?? inheritedBudget;
         return { input, taskId, childSessionId, childBranchId, model, budget };
       });
@@ -195,7 +207,13 @@ export class AgentService {
       // retry must not reinterpret them against a now-smaller remaining budget.
       for (let index = 0; index < existing.length; index++) {
         const task = existing[index]; const item = prepared[index]!;
-        if (task && item.input.model === undefined) item.model = task.model;
+        if (task && item.input.model !== undefined) {
+          if (!Bun.deepEquals(this.normalizeModelIdentity(item.input.model), task.model)) {
+            throw new ValidationError("Subagent idempotency key was reused with a different model configuration");
+          }
+          item.model = task.model;
+        } else if (task) item.model = task.model;
+        else if (item.input.model !== undefined) item.model = this.normalizeModel(item.input.model);
         if (task && item.input.budget === undefined) item.budget = task.budget;
       }
       for (let index = 0; index < existing.length; index++) {
@@ -234,7 +252,7 @@ export class AgentService {
         parentSessionId, parentBranchId, rootSessionId, depth, status: existing[index]?.status ?? "admitted",
         ...(prepared[index]!.input.name === undefined ? {} : { name: prepared[index]!.input.name!.trim() }),
       }));
-      const admissionItems = prepared.map((item, index): SpawnAdmissionItem => ({ input: item.input, handle: handles[index]!, existing: existing[index] !== null }));
+      const admissionItems = prepared.map((item, index): SpawnAdmissionItem => ({ input: item.input, handle: handles[index]!, model: item.model, budget: item.budget, existing: existing[index] !== null }));
       const now = new Date().toISOString(); const events: NewAgentEvent[] = [];
       for (let index = 0; index < prepared.length; index++) {
         if (existing[index]) continue;

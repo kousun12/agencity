@@ -97,13 +97,13 @@ def wait_exit(seconds):
 
 provider_prompt = pump(10, "Provider number or ID:")
 if provider_prompt:
-    os.write(fd, b"1\r")
+    os.write(fd, b"openai\r")
 credential_prompt = pump(5, "API key for OpenAI")
 if credential_prompt:
     os.write(fd, b"acceptance-fixture-key\r")
 model_prompt = pump(5, "Model ID for OpenAI:")
 if model_prompt:
-    os.write(fd, b"fixture-v1\r")
+    os.write(fd, b"openai/fixture-v1\r")
 ready = pump(10, "Ask Agencity")
 if ready:
     os.write(fd, task.encode() + b"\r")

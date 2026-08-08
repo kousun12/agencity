@@ -4,125 +4,206 @@
 **Date:** August 7, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related terminal work:** [Rich terminal rendering and layout](./2026-08-07-rich-terminal-rendering-and-layout-plan.md)
+**Later provider-contract work:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md)
 
 ## Summary
 
-Agencity lets a user select a provider and model, but `ModelConfiguration` has no reasoning setting, provider descriptors do not describe model-specific reasoning capabilities, and the provider adapters never send reasoning parameters. A user therefore cannot choose how much reasoning a supported model performs.
+Agencity lets a user select a provider and model, but `ModelConfiguration` has no reasoning setting and the provider adapters never send reasoning parameters. A user cannot choose how much reasoning a supported model performs.
 
-This plan adds a durable, attributable reasoning-effort setting with:
+This plan delivers reasoning-effort selection by consolidating model execution onto one implementation:
 
-1. a provider-neutral effort vocabulary;
-2. model-specific capability discovery backed by provider metadata, a versioned built-in catalog, and a bounded profile cache;
-3. exact provider request mappings for OpenAI, Anthropic, and Vercel AI Gateway;
-4. `/effort` and `/thinking` terminal commands plus non-interactive configuration;
-5. inheritance through root, child, and recursive sessions;
-6. call-level provenance that records the exact dispatch chosen before an outbox-backed model effect;
-7. explicit unsupported, unknown, stale, catalog-mapped, gateway-normalized, and surface-incompatible states.
+1. **All product model execution goes through the Vercel AI SDK.** One shared adapter core behind the existing `ModelProvider` contract replaces the three hand-written HTTP adapters (OpenAI-compatible, Anthropic-compatible, and the gateway instantiated through the Anthropic adapter). Three thin transport factories instantiate the core: the Vercel AI Gateway (`@ai-sdk/gateway`, the recommended default), direct OpenAI (`@ai-sdk/openai`), and direct Anthropic (`@ai-sdk/anthropic`).
+2. **The gateway's public model catalog is the single source of model and capability metadata for every transport** — model IDs, display names, context windows, output limits, pricing, and per-model reasoning levels. Agencity maintains no hand-written model catalog, no per-provider level maps, and no per-provider discovery adapters.
+3. **A durable** `reasoningEffort` **setting** on `ModelConfiguration`, selected through `/effort` (alias `/thinking`), `--effort`, and the public protocol, inherited by child and recursive sessions, and recorded with the complete model configuration in an immutable per-call dispatch before any outbox-backed model effect.
 
-The default is `provider-default`. Existing retained sessions and new sessions without an explicit setting continue to omit reasoning parameters, preserving current provider behavior. Agencity does not infer support from a model name, silently clamp a level, silently drop incompatible settings, or retry a failed model call with another effort.
+Direct OpenAI and Anthropic access is included rather than deferred because the AI SDK makes each additional transport thin: the call interface, normalized reasoning parameter, warning semantics, catalog identities, dispatch, and recovery machinery are shared, so a direct transport adds only a credential path, a deterministic native-ID derivation, and recorded wire fixtures. Canonical model identity is the gateway's namespaced `creator/model` form for every provider (verified below).
 
-## Verified baseline
+The default effort is `provider-default`: Agencity omits all reasoning controls and the provider behaves exactly as it does today. This is a pre-release schema cutover: pre-feature workspace and profile data are not migrated and must be reset before running the new version.
 
-The current implementation has the following relevant behavior:
+## Decision and rationale
 
-- `ModelConfiguration` contains only `provider`, `model`, optional `temperature`, and optional `maxOutputTokens`.
-- `SessionCreated`, `SessionModelChanged`, `TaskCreated`, and `RecursiveModelStarted` retain that configuration in canonical events.
-- a child or recursive model call inherits the parent's complete model configuration when no override is supplied;
-- `ModelCallRequested` records provider and model but no reasoning configuration or capability provenance;
-- `EffectRequested.input.configuration` carries the projected model configuration into the shared model executor;
-- `ModelProviderCapabilities` describes only streaming and an optional provider-wide context window;
-- OpenAI-compatible requests use `/chat/completions` without `reasoning_effort`;
-- Anthropic-compatible requests use `/v1/messages` without `thinking` or `output_config.effort`;
-- Vercel AI Gateway is currently instantiated through the Anthropic-compatible adapter;
-- the public protocol accepts the existing `ModelConfiguration` through `POST /sessions/:session/model`;
-- the OpenTUI `/model` inspector selects a provider and accepts a manually entered model ID;
-- the workspace profile retains a default `provider:model` string, while an existing branch retains its own committed model configuration.
 
-The implementation has three model-effect admission paths: the ordinary typed autonomous run in `src/runtime/agent-runs.ts`, the retained diagnostic turn in `src/runtime/model-loop.ts`, and model-summary compaction in `src/runtime/context-compaction.ts`. The first two append `ModelCallRequested`; compaction currently requests a model effect directly. All three must use the same reasoning resolver and put the same immutable dispatch shape in the outbox input.
 
-Model-bearing durable commands also enter through root creation and model selection, direct and batch agent spawn, recursive-model start, pinned subagent specifications, and refinement-review children. Omitted child models currently inherit the complete parent configuration. Explicit child configurations are constrained to the parent's provider/model by `assertChildPolicy`, but they do not all pass through `Supervisor.normalizeModelConfiguration`; this feature must close that validation gap without widening the existing child model policy.
+### Why the AI SDK is the single model interface
 
-## Provider discovery facts
+An earlier design for this feature kept three hand-written direct provider adapters and added per-provider reasoning dispatch: OpenAI `reasoning_effort`, Anthropic `thinking`/`output_config.effort` with reviewed token-budget maps, and a dedicated surface-aware gateway adapter. That design required a reviewed built-in capability catalog, a catalog validation script, a multi-source capability resolver with field-level provenance merging, and per-provider API-surface compatibility analysis. Those were the most fragile, highest-maintenance parts of the plan.
 
-Provider model-list endpoints are useful but do not expose one uniform capability schema.
+The AI SDK (version 7 and later) provides a normalized top-level `reasoning` parameter — `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` — and owns the translation to each provider's native reasoning API, through the gateway and through the direct provider packages alike. The gateway's public model catalog provides model-specific reasoning capability metadata. Together they eliminate the hand-maintained catalog and all hand-written wire code.
 
-### OpenAI
+The gateway is the recommended default transport because it adds capabilities the direct paths lack: one key for every listed model, optional response cost metadata (making `Usage.costUsd` meaningful), and optional caching. Model calls always require network access; local-first in `AGENTS.md` governs canonical state, storage, and artifacts, all of which remain local. The `ModelProvider` executor contract remains the seam for internal test providers, programmatic providers, and any future transports.
 
-OpenAI's [`GET /v1/models`](https://platform.openai.com/docs/api-reference/models/list) lists model identities and ownership metadata. It does not provide a dependable list of supported reasoning levels or defaults. Agencity must merge the returned IDs with a reviewed, versioned catalog derived from official model documentation.
+### Why direct transports are included and cheap
 
-An OpenAI model returned by `/v1/models` but absent from the catalog remains available for manual selection, with reasoning support marked `unknown`. Only `provider-default` is selectable until exact reasoning metadata is available.
+Under the AI SDK, a transport is a factory rather than an adapter. Direct OpenAI and Anthropic execution is in scope because every substantial surface is shared and written once:
 
-### Anthropic
+- **Same call interface.** `generateText`/`streamText`, message shapes, streaming parts, warnings, and usage are identical across `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic`. The shared adapter core — options building, stream consumption, reasoning-part discard, warning normalization, error classification — has one implementation.
+- **Same reasoning semantics.** The top-level `reasoning` parameter is documented for the direct provider packages with the same coercion-and-warning behavior used through the gateway, so the effort vocabulary, capability tiers, dispatch shape, and provenance are transport-independent.
+- **Same model identities.** Canonical `creator/model` IDs drive every transport. The canonical-to-native derivation is deterministic: OpenAI native IDs are the suffix verbatim; Anthropic native IDs replace dots with dashes in the version segment.
+- **Same metadata.** The public gateway catalog describes the models themselves, not the transport, so its descriptors, reasoning tiers, capacity, and pricing apply to direct transports without a second catalog or per-provider discovery adapters.
 
-Anthropic's [`GET /v1/models`](https://docs.anthropic.com/en/api/models-list) provides model metadata and, for current models, structured capabilities including supported effort levels and thinking modes. Agencity should use those fields when present.
+What a direct transport adds: a credential path that already exists in the credential store and environment fallbacks (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), a native-ID derivation, a trusted-local base-URL override used chiefly by test fixtures, and recorded wire fixtures for the pinned provider package. What it does not add: reasoning maps, capability sources, dispatch modes, recovery rules, or event schema changes.
 
-The response must still be normalized through a local schema. Missing capability fields mean `unknown`, not `unsupported`. A capability is `unsupported` only when Anthropic states that explicitly or a reviewed catalog entry does.
+Direct transports return no response cost metadata; their calls record the documented `Usage.costUsd` fallback of `0`, and cost remains best-effort telemetry.
 
-### Vercel AI Gateway
 
-Vercel's [`GET /v1/models`](https://vercel.com/docs/ai-gateway/sdks-and-apis/rest-api#list-models) exposes available model IDs and capability tags. [`GET /v1/models/{creator}/{model}/endpoints`](https://vercel.com/docs/ai-gateway/sdks-and-apis/rest-api#get-model-endpoints) exposes endpoint-specific `supported_parameters`, including whether `reasoning` is accepted. That parameter flag is coarse: it does not prove an exact level set or that every Gateway API format can carry the requested control to every backing model.
 
-Vercel's [normalized reasoning contract](https://vercel.com/docs/ai-gateway/models-and-providers/reasoning) accepts `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`. The gateway may coerce a level to the closest level supported by the selected backing provider. Agencity must label this behavior `gateway-normalized`; it must not present the requested level as an exact backing-provider level.
+### Rejected alternatives
 
-### Prime Agent reference
+- **Keep hand-written direct OpenAI/Anthropic adapters with per-provider reasoning dispatch.** Highest maintenance cost; requires a reviewed catalog and budget maps that the gateway catalog now provides.
+- **A gateway-only product with direct access deferred.** An intermediate revision of this plan took this shape. Rejected because operating on provider keys without a Vercel account is a supported mode, and the shared-core design reduces direct support to thin factories over the same identities, catalog, and dispatch semantics; the deferral saved almost nothing.
+- **Gateway BYOK (bring your own key) as the bridge for users holding only provider keys.** Verified facts: every gateway request still requires Vercel authentication (API key or OIDC), so BYOK does not serve a user without a Vercel key; BYOK requires a paid Vercel team; a failed BYOK request silently retries on Vercel system credentials billed to gateway credits, which is a hidden fallback that conflicts with Agencity's no-hidden-fallback invariant; BYOK spend bypasses gateway budgets. BYOK is a non-goal.
+- **Gateway REST endpoints without the AI SDK.** Keeps hand-written request/streaming/SSE code that the SDK already owns, for no capability gain.
+- **Strict reject-before-commit capability validation (previous revision).** With one normalized vocabulary and SDK-documented coercion behavior, strictness is retained where the catalog has exact data and relaxed to labeled, warning-recording behavior where it does not. This removes the failure mode where a stale or incomplete catalog makes a working model unusable.
 
-Prime Agent demonstrates the useful product pattern:
+### Sequencing with formal model tool contracts
 
-- `/effort` with `/thinking` as an alias;
-- a model-level `reasoning` capability and `thinkingLevelMap`;
-- supported-level selection and clamping;
-- session persistence;
-- provider-specific reasoning mappings.
+This plan is implemented first and preserves the current provider-neutral text response contract. The later formal-tool-contract work will extend the model dispatch and response types for required provider tool calls. It must reuse the shared AI SDK adapter core and the durable dispatch boundary introduced here rather than reintroducing hand-written OpenAI or Anthropic transports. Formal tool calling is not an implementation dependency for reasoning-effort selection.
 
-The relevant reference is Prime Agent commit [`b817a089`](https://github.com/PrimeIntellect-ai/prime-agent/tree/b817a089b23a2af7061d2ac544df00a4fd888545). Agencity adopts the command and capability concepts, but not silent clamping, process-owned session state, or Prime Agent's generated catalog format.
+
+
+## Verified external facts
+
+The following was verified against live endpoints, the package registry, and current documentation on August 7, 2026. Implementers re-verify package versions and endpoint contracts before pinning dependencies.
+
+### Gateway model catalog
+
+`GET https://ai-gateway.vercel.sh/v1/models` requires **no authentication** and returns, per model:
+
+- `id` in `creator/model` form (for example `openai/gpt-5.2`, `anthropic/claude-opus-5`);
+- `name` (display name), `description`, `context_window`, `max_tokens`, `pricing` (per-token input/output USD strings), `modalities`, `knowledge`;
+- `type`, with values such as `language`, `embedding`, `image`, `realtime`, `reranking`, `speech`, `transcription`, and `video`;
+- `tags` including `reasoning` where applicable;
+- `supported_parameters` including `reasoning` where applicable;
+- `reasoning_options`: either `null` or an array of structured entries such as `{ "type": "effort", "values": ["low", "medium", "high", "xhigh"] }`, `{ "type": "toggle" }`, and `{ "type": "budget_tokens", "min": …, "max": … }`.
+
+Observed examples:
+
+
+| Model                       | `reasoning_options`                           |
+| --------------------------- | --------------------------------------------- |
+| `openai/gpt-5.2`            | effort: `none, low, medium, high, xhigh`      |
+| `openai/gpt-5.6-sol`        | effort: `none, low, medium, high, xhigh, max` |
+| `anthropic/claude-sonnet-5` | toggle + effort: `low, medium, high, xhigh`   |
+| `anthropic/claude-opus-5`   | `null` despite the `reasoning` tag            |
+
+
+The `anthropic/claude-opus-5` row is load-bearing: **flagship models can have missing reasoning metadata**, so the design must treat `reasoning_options: null` as a normal state, not an error.
+
+### Model identifier alignment
+
+- OpenAI suffixes in the catalog are byte-identical to OpenAI's native API model IDs (`gpt-5.2`, `o3-mini`, `gpt-5.1-codex`).
+- Anthropic suffixes use dotted aliases (`claude-opus-4.5`) where Anthropic's native API uses dashed aliases (`claude-opus-4-5`); the transform is deterministic (`.` ↔ `-` in the version segment).
+
+This is why gateway-namespaced IDs are safe as Agencity's canonical durable model identity on every transport: the direct transports derive native IDs from the same stored value. The canonical-to-native direction is deterministic, and version segments without dots (for example `claude-3-haiku`) pass through unchanged.
+
+### AI SDK reasoning normalization
+
+- The AI SDK (v7+) `generateText`/`streamText` accept a top-level `reasoning` value: `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. `provider-default` is the behavior when the option is omitted.
+- Effort-based providers receive the level directly. When a model supports fewer levels, **the SDK coerces the value to the nearest supported level and emits a warning**. Budget-based providers receive a token budget derived as a documented percentage of maximum output tokens. Providers without reasoning support ignore the option and emit an `unsupported` warning.
+- Reasoning-related settings in `providerOptions` take full precedence over the top-level `reasoning` value.
+- The top-level `reasoning` parameter is documented for the direct provider packages, including `@ai-sdk/openai` and `@ai-sdk/anthropic`, with the same coercion and warning semantics as gateway execution.
+- The catalog lists `max` as an effort value for some models (for example `openai/gpt-5.6-sol`), but `max` is not in the SDK's documented top-level vocabulary. This release does not send undocumented provider-option escapes: `max` is retained in catalog diagnostics but is not selectable.
+
+### Current SDK and gateway endpoints
+
+- The latest stable package versions verified on August 7, 2026 are `ai@7.0.58` and `@ai-sdk/gateway@4.0.46`. Implementation rechecks the registry, installs the latest stable compatible versions, and pins the resolved versions exactly.
+- The direct provider packages `@ai-sdk/openai` and `@ai-sdk/anthropic` expose the same model interface consumed by `generateText`/`streamText`, with per-provider `apiKey` and `baseURL` options. Implementation resolves and pins their latest stable compatible versions alongside `ai` and `@ai-sdk/gateway`.
+- The AI SDK `createGateway` model API uses a base URL prefix whose official default is `https://ai-gateway.vercel.sh/v4/ai`.
+- Public model discovery uses `https://ai-gateway.vercel.sh/v1/models`.
+- `AI_GATEWAY_BASE_URL` remains an origin override, not an AI SDK model-API prefix. Agencity derives the model API and catalog URLs from that normalized origin.
+- `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are origin-only trusted-local execution overrides for the direct transports with the same normalization rules; they never affect the catalog origin.
+
+### Usage and cost reporting
+
+- AI SDK results provide token usage and may provide gateway cost metadata with the completed response.
+- Exact generation cost is also available through generation lookup, but that data is asynchronously ingested and may be unavailable immediately after completion.
+- This plan does not add generation polling or later cost reconciliation. `Usage.costUsd` uses a finite nonnegative cost returned directly with the completed SDK result when available and otherwise remains `0`. Cost is best-effort telemetry, not a reliable admission or enforcement boundary.
+- Direct OpenAI and Anthropic transports return no gateway cost metadata; their calls always record the `0` fallback.
+
+
+
+### Gateway authentication and BYOK
+
+- Every gateway **model call** requires Vercel authentication (AI Gateway API key or OIDC token). Only the model catalog endpoint is public.
+- BYOK exists in team-level and request-scoped (`providerOptions.gateway.byok`) forms, requires the paid tier, silently falls back to Vercel system credentials on failure by default, and bypasses gateway budgets. It is not used by this plan.
+
+
+
+## Verified codebase baseline
+
+As of this writing:
+
+- `ModelConfiguration` (`src/domain/events.ts`) contains only `provider`, `model`, optional `temperature`, and optional `maxOutputTokens`.
+- `SessionCreated`, `SessionModelChanged`, `TaskCreated`, and `RecursiveModelStarted` retain that configuration in canonical events. `ModelCallRequested` records provider and model but no reasoning data.
+- `src/executors/model.ts` contains two hand-written HTTP adapters: `OpenAICompatibleProvider` (duplicated non-streaming and streaming request builders, hand-rolled SSE parsing, `max_tokens`) and `AnthropicCompatibleProvider` (`/v1/messages`, no `thinking`). The `vercel` provider is instantiated through the Anthropic-compatible adapter against `https://ai-gateway.vercel.sh` (`src/runtime/supervisor.ts`).
+- There are four model-effect admission paths: the typed autonomous run (`src/runtime/agent-runs.ts`), the retained diagnostic turn (`src/runtime/model-loop.ts`), model-summary compaction (`src/runtime/context-compaction.ts`), and generic generated `tools.request("model", "complete", …)` access through the console SDK. The first two append `ModelCallRequested`; compaction requests one model effect per summary chunk per hierarchy level; the generic executor path currently bypasses model-call admission and must be reserved by this plan.
+- In `agent-runs.ts` a crash window exists between the committed `ModelCallRequested` and the corresponding effect request; recovery semantics below account for it.
+- Child spawn uses `input.model ?? parentState.model` and validates with `assertChildPolicy` (same provider/model as parent), but explicit child configurations do **not** pass through `Supervisor.normalizeModelConfiguration`. This validation gap must be closed without widening the child model policy.
+- `ProfileStore` (`src/storage/turso.ts`) creates its schema from an inline idempotent SQL string with ad-hoc `PRAGMA table_info` column checks. There is no numbered profile migration ledger; one must be introduced before adding a profile table.
+- `ModelExecutor.contextCapacity` resolves context-window capacity from provider-wide `ModelProviderCapabilities`; its source enum already includes `"model-catalog"`, which is used by deterministic internal fixture providers but not by a product transport. Capacity for the `vercel` provider is unknown today unless operator-configured.
+- Model usage cost (`Usage.costUsd`) is populated only when the provider response carries a cost field; otherwise it is `0`. Cost-based budget limits are therefore best-effort.
+- The current `vercel` provider has no model normalizer, so existing development data may contain either canonical namespaced IDs or bare IDs. This data is outside the supported cutover boundary and is reset rather than migrated.
+- The current reducer version is 7 (`src/domain/state.ts`); a snapshot with a mismatched reducer version is discarded and rebuilt from events.
+- Existing protocol surfaces used by this plan: `GET /capabilities`, `POST /sessions/:session/model?branch=…`, `GET /product/config`, `POST /product/config/model`, and the `agencity config` CLI family.
+- Echo is an internal deterministic test provider implementing the `ModelProvider` contract; it is filtered from product selection.
+
+
 
 ## Goals
 
-- Let a user inspect and select the reasoning effort for the current model.
-- Persist the selected effort as part of durable branch model configuration.
-- Preserve the selection across process, worker, terminal, and managed-service restarts.
+- Let a user inspect and select reasoning effort for the current model, with levels sourced from the gateway catalog.
+- Persist the selected effort as part of durable branch model configuration; preserve it across process, worker, terminal, and managed-service restarts.
 - Apply the same setting to streaming and non-streaming calls.
-- Resolve model-specific capability before a model effect is requested.
-- Place the exact resolved reasoning dispatch in the outbox input so recovery cannot reinterpret it.
-- Record bounded capability and dispatch provenance with each model call.
-- Discover current model IDs and capabilities without making live discovery a correctness dependency.
-- Preserve manual model entry and local-first startup when discovery is unavailable.
-- Keep provider credentials supervisor-side and out of events, profile metadata, caches, logs, and protocol output.
-- Make unsupported, unknown, stale, catalog-mapped, surface-incompatible, and gateway-normalized behavior visible.
+- Place the exact resolved complete model dispatch in the outbox input so recovery cannot reinterpret configuration or reasoning.
+- Replace the three hand-written provider adapters with one shared AI SDK adapter core and three thin transport factories (gateway, direct OpenAI, direct Anthropic) behind the unchanged `ModelProvider` contract.
+- Make the gateway catalog the single model/capability/pricing/capacity metadata source for every transport, cached for offline listing.
+- Give direct OpenAI and Anthropic execution the same canonical model identities, capability tiers, dispatch, provenance, and recovery semantics as the gateway, differing only in credential, execution endpoint identity, and native-ID derivation.
+- Record provider coercion and unsupported-setting warnings as bounded, attributable call provenance rather than silently accepting or silently dropping a setting.
+- Preserve directly returned gateway cost metadata when available and retain the current `0` fallback when it is not.
+- Preserve manual model entry and truthful failure when the catalog is unavailable.
+- Keep every provider credential supervisor-side, confined to its own transport, and out of events, profile metadata, caches, logs, and protocol output.
 - Preserve exact parent configuration when child and recursive work use inherited models.
 - Cover the installed product path with black-box tests.
 
+
+
 ## Non-goals
 
+- Gateway BYOK in any form.
 - Displaying hidden chain-of-thought or storing provider reasoning traces.
-- Adding a free-form reasoning-token budget to the first product interface.
-- Allowing a model to mutate its own root-session effort during active work.
+- A user-specified integer thinking-token budget.
 - Automatically choosing an effort from task complexity.
-- Comparing model quality or claiming that a higher effort is always better.
-- Normalizing provider-specific reasoning-token accounting when the provider does not expose it.
-- Replacing the current budget model or context-window admission algorithm.
-- Retrying a failed or unknown model effect with a different effort, model, endpoint, or provider.
-- Treating scope filtering, provider metadata, or the console worker as a hostile-code security boundary.
-- Copying Prime Agent's catalog or session format.
+- Allowing a model to mutate its own root-session effort during active work.
+- Retrying a failed or unknown model effect with a different effort, model, or provider.
+- Automatic transport selection, fallback between transports, or gateway `order`/`only` routing controls; a session's provider is an explicit durable choice.
+- Treating scope filtering, the gateway, or the console worker as a hostile-code security boundary.
+- Normalizing reasoning-token accounting beyond what the gateway reports.
+- Polling generation metadata, reconciling delayed cost, or making cost limits strict when a response does not contain cost.
+- Implementing formal provider tool contracts; that later plan extends the dispatch and adapter delivered here.
+
+
 
 ## Terms
 
-- **Requested effort:** The user-facing level retained in `ModelConfiguration`.
-- **Provider default:** An explicit choice to omit Agencity's reasoning control and let the provider and model choose their default.
-- **Reasoning capability:** A normalized statement about whether a model accepts an explicit effort and which levels are available.
-- **Exact capability:** Provider metadata or a reviewed catalog states the accepted level set for the selected provider/model.
-- **Catalog-mapped capability:** Agencity maps a named level to a reviewed, model-specific token budget because the provider exposes budget-based thinking rather than that named level.
-- **Gateway-normalized capability:** Vercel accepts a standard effort but may map it to a different backing-provider level.
-- **Surface-compatible capability:** The selected provider API format is documented to carry the requested control to the selected model. A provider-level reasoning tag alone is insufficient.
-- **Capability source:** The provider metadata, gateway contract, built-in catalog, operator configuration, or stale cache from which a normalized capability came.
-- **Reasoning dispatch:** The immutable provider-facing mode and value resolved before a model effect is appended.
-- **Catalog cache:** A non-canonical, replaceable profile record used for offline listing and bounded discovery traffic.
+- **Gateway:** the Vercel AI Gateway protocol, hosted by default at `ai-gateway.vercel.sh` and replaceable only through the explicit trusted-local origin override.
+- **AI SDK:** the latest stable compatible Vercel AI SDK (`ai` package, version 7 line) plus `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic`, resolved at implementation time and pinned exactly.
+- **Transport:** the durable `ModelConfiguration.provider` value a session executes through — `vercel` (gateway), `openai` (direct), or `anthropic` (direct) — all implemented by the shared AI SDK adapter core.
+- **Canonical model ID:** the gateway catalog's namespaced `creator/model` identifier stored in `ModelConfiguration.model` on every product transport.
+- **Requested effort:** the user-facing level retained in `ModelConfiguration.reasoningEffort`.
+- **Provider default:** an explicit choice to omit Agencity's reasoning control and let the gateway, provider, and model choose their default behavior.
+- **Listed capability:** the catalog's `reasoning_options` enumerates an exact selectable SDK effort set for the model after documented toggle normalization.
+- **Unverified capability:** the model carries the catalog `reasoning` tag (or is absent from the catalog entirely) but has no exact level enumeration; standard levels are offered with an unverified label, and execution may coerce, ignore, or reject the requested level.
+- **Reasoning dispatch:** the immutable record of the resolved effort decision committed before a model effect.
+- **Model dispatch:** the immutable complete model configuration, reasoning dispatch, and execution endpoint identity used by one call or pinned compaction.
+- **Catalog cache:** a non-canonical, replaceable profile record of normalized catalog entries used for offline listing and bounded discovery traffic.
 
-## Chosen product semantics
+
+
+## Product semantics
+
+
 
 ### Canonical effort vocabulary
-
-The public and durable vocabulary is:
 
 ```ts
 type ReasoningEffort =
@@ -132,615 +213,471 @@ type ReasoningEffort =
   | "low"
   | "medium"
   | "high"
-  | "xhigh"
-  | "max";
+  | "xhigh";
 ```
 
-`provider-default` means Agencity omits all reasoning controls. `none` is a real provider request to disable reasoning and is available only when the selected provider/model supports it. `max` remains distinct from `xhigh` because Anthropic and future providers may expose both.
+`provider-default` means Agencity omits all reasoning controls. All other levels are sent as the AI SDK's documented top-level `reasoning` value. Catalog-only values outside that vocabulary, including `max`, remain visible in diagnostics but are unavailable for selection.
 
-Input aliases are presentation-only:
-
-- `default` becomes `provider-default`;
-- `off` becomes `none`.
-
-Events, preferences, protocol responses, and SDK values use canonical names only.
+Input aliases are presentation-only: `default` becomes `provider-default`; `off` becomes `none`. Events, preferences, protocol responses, and SDK values use canonical names only.
 
 ### Default behavior
 
-The default is `provider-default`, not `medium` or the highest supported level. This preserves existing behavior, avoids an unannounced cost or latency increase, and gives new models a usable path before their exact capabilities are cataloged.
+The default is `provider-default`. This avoids an unannounced cost or latency change and keeps new models usable before their metadata is complete. Input boundaries may omit the setting, but normalization always writes an explicit canonical value into new durable model configurations.
 
-The absence of `reasoningEffort` in a retained version-1 event has the same effective meaning as `provider-default`. Replay never rewrites that old payload to add the field.
+### Capability tiers and selection rules
 
-### No silent clamping
+Selection behavior depends on what the catalog knows about the model:
 
-For direct OpenAI and Anthropic calls, a non-default level must be listed as supported. Unsupported explicit input fails before a new model configuration is committed.
+1. **Listed** (`reasoning_options` enumerates an effort set): the selector offers recognized documented SDK levels from the effort set plus `none` when the same entry advertises a reasoning toggle, then adds `provider-default`. An explicit level outside the normalized listed set fails at selection time with the listed alternatives named. No model call is made.
+2. **Unverified** (catalog `reasoning` tag present but `reasoning_options` is `null`, or the model is absent from the catalog, as with manual entry): the selector offers the standard SDK levels (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`) labeled **unverified**. The SDK or provider may coerce or ignore the level with a warning, or reject the request for that model. Warnings are recorded as call provenance and surfaced once in the run status; a provider rejection is a normal failed model effect. Agencity itself never substitutes a different level.
+3. **Unsupported** (catalog entry exists and has no `reasoning` tag): only `provider-default` is selectable. An explicit level fails at selection time with a clear message, because the SDK would silently ignore the parameter on every transport and the stored setting would be a lie. A catalog refresh is offered in the same message since tags can be stale.
 
-Vercel is different because normalization and possible coercion are part of the gateway's documented contract. The UI labels a supported model/surface combination `gateway-normalized`, and call provenance records that semantic. Agencity itself does not choose a substitute level or claim which backing level was applied. If the selected Gateway API format is not documented to carry effort to that model, explicit effort is unavailable on that surface rather than being silently accepted.
-
-Catalog-backed token-budget mappings are labeled `catalog-mapped`. They are inspectable product mappings, not claims that a provider natively implements Agencity's named level.
-
-An unknown model exposes only `provider-default`. The user may continue to use the model, but Agencity does not guess from name prefixes or neighboring model versions.
+This is deliberately less strict than reject-everything-unproven and more honest than accept-everything-silently: exact data gates exactly, missing data degrades to labeled normalized behavior, and explicit contradiction with catalog data fails truthfully.
 
 ### Effort is model-specific
 
-Workspace defaults are keyed by the normalized `provider:model`, not stored as one global effort. Changing from one model to another does not carry the old model's effort implicitly.
+Workspace default efforts are keyed by the normalized catalog endpoint identity and canonical model ID, not stored as one global effort. Preferences are transport-independent: the effort stored for `openai/gpt-5.2` applies whether the model runs through the gateway or the direct OpenAI transport, because the capability data is the same catalog entry. Changing models or catalog origins does not carry an old effort implicitly.
 
-Selection order for a new root session is:
+Selection order for a new root session:
 
 1. explicit `--effort`;
-2. the workspace preference for the selected normalized model;
-3. the selected provider's effort environment variable;
-4. `provider-default`.
+2. the workspace preference for the selected model;
+3. `provider-default`.
 
-Existing branches ignore changes to those defaults. An explicit branch change is required.
+There is deliberately no environment-variable effort control in the first release; per-model preferences plus `--effort` cover the automation cases, and an ambient environment variable would apply one level across models with different supported sets.
 
-Provider environment variables are:
+**Ambient defaults never hard-fail session creation.** If a stored workspace preference is no longer valid for the model (for example, the catalog's listed set changed), the session is created with `provider-default` and a visible notice; the stale preference is left intact for the user to inspect or clear. Explicit `--effort` and explicit interactive selection do fail with guidance when invalid, because the user is present in the decision.
 
-- `OPENAI_REASONING_EFFORT`;
-- `ANTHROPIC_REASONING_EFFORT`;
-- `VERCEL_REASONING_EFFORT`.
+Existing branches ignore changes to defaults. Changing a branch's effort requires an explicit model-configuration change.
 
 ### Inheritance
 
-When `sdk.agents.spawn`, `rlm.start`, or their batch forms omit `model`, the child receives the exact parent `ModelConfiguration`, including effort.
+- When `sdk.agents.spawn`, `rlm.start`, or their batch forms omit `model`, the child receives the exact parent `ModelConfiguration`, including effort.
+- When a caller supplies explicit model-configuration input, it passes through the same normalization and validation as a root selection (closing the current gap where child configurations skip `normalizeModelConfiguration`), and the existing child policy still requires the parent's provider/model. A missing effort in input means `provider-default`; workspace preferences are never injected into model-generated child or recursive calls.
+- Stable child or recursive idempotency retries reuse the already retained complete model configuration byte-for-byte.
+- Schedules, heartbeats, resumed runs, and retained follow-up use their session's committed configuration and do not re-read workspace preferences.
+- No separate delegated effort ceiling is added. An explicit child configuration may select any validated effort for the same provider/model; this is intentional and is covered by delegation authority and budget tests. Omitted configurations continue to inherit the exact parent effort.
 
-When a caller supplies another `ModelConfiguration`, that configuration passes through the same normalization and capability validation as a root selection. A missing effort means `provider-default`; profile preferences are not injected into model-generated child or recursive calls. The existing child policy still requires the same provider/model as the parent, so an explicit override may change compatible per-call configuration but does not authorize a different model.
 
-Stable child or recursive idempotency retries reuse the already retained model configuration. They do not reinterpret an omitted model or effort against newer profile defaults or capability metadata.
-
-The initial implementation does not add a separate delegated effort ceiling. Existing model-selection authority and child budgets continue to bound generated delegation. A future delegated model policy may restrict model and effort together.
-
-Schedules, heartbeats, resumed runs, and retained follow-up use their session's committed configuration. They do not re-read profile defaults.
 
 ## Domain contracts
 
-### Durable model configuration
 
-Extend the existing type compatibly:
+
+### Durable model configuration
 
 ```ts
 interface ModelConfiguration {
-  readonly provider: string;
-  readonly model: string;
+  readonly provider: string;          // transport: "vercel", "openai", or "anthropic"
+  readonly model: string;             // canonical creator/model catalog ID on every transport
   readonly temperature?: number;
   readonly maxOutputTokens?: number;
-  readonly reasoningEffort?: ReasoningEffort;
+  readonly reasoningEffort: ReasoningEffort;
 }
 ```
 
-The field remains optional so retained version-1 events preserve their exact shape. New product selections should retain the canonical value explicitly, including `provider-default`.
+Durable configurations always retain the canonical value explicitly, including `provider-default`. User, protocol, and generated SDK input types may omit the field; `normalizeModelConfiguration` accepts that input shape and returns a complete `ModelConfiguration` with `provider-default` supplied before any model-bearing event is appended.
 
-`normalizeModelConfiguration` must:
+`normalizeModelConfiguration` must: normalize provider and model identity as today; canonicalize effort aliases at input boundaries; reject unknown effort strings; reject a direct-transport configuration whose model creator prefix disagrees with its provider (`provider: "openai"` requires an `openai/…` model and `provider: "anthropic"` an `anthropic/…` model, while the gateway accepts any creator); validate numeric settings; and leave capability checks to the catalog-backed resolver. The same command-level validation must be injected into `AgentService` and applied to direct/batch spawn, recursive starts, subagent specifications, and refinement-review child creation before any model-bearing event is appended.
 
-1. normalize provider and model identity as it does today;
-2. canonicalize effort aliases at input boundaries;
-3. reject unknown effort strings;
-4. validate numeric settings;
-5. leave capability validation to the model-capability resolver.
+### Model descriptor
 
-### Model capability descriptor
-
-Add a model-specific descriptor separate from provider-wide execution capabilities:
+One normalized descriptor type, populated from the gateway catalog:
 
 ```ts
 interface ModelDescriptor {
-  readonly provider: string;
-  readonly model: string;
-  readonly displayName?: string;
-  readonly contextWindowTokens?: number;
-  readonly maxOutputTokens?: number;
-  readonly reasoning: ReasoningCapability;
-}
-
-interface ReasoningCapability {
-  readonly status: "supported" | "unsupported" | "unknown";
-  readonly levels: readonly Exclude<ReasoningEffort, "provider-default">[];
-  readonly defaultEffort?: Exclude<ReasoningEffort, "provider-default">;
-  readonly semantics: "exact" | "catalog-mapped" | "gateway-normalized" | "unknown";
-  readonly surfaceStatus: "compatible" | "incompatible" | "unknown";
-  readonly surfaceReason?: string;
-  readonly transports: readonly (
-    | "none"
-    | "openai-effort"
-    | "anthropic-adaptive-effort"
-    | "anthropic-thinking-budget"
-    | "anthropic-thinking-disabled"
-    | "vercel-chat-reasoning"
-    | "vercel-anthropic-thinking"
-  )[];
-  readonly apiSurface?: "openai-chat-completions" | "anthropic-messages";
-  readonly provenance: {
-    readonly status: CapabilityEvidence;
-    readonly levels: CapabilityEvidence;
-    readonly transports: CapabilityEvidence;
-    readonly surface: CapabilityEvidence;
-    readonly defaultEffort?: CapabilityEvidence;
+  readonly model: string;                       // canonical creator/model ID
+  readonly displayName: string;
+  readonly contextWindowTokens: number | null;
+  readonly maxOutputTokens: number | null;
+  readonly pricing: { readonly inputUsdPerToken: number; readonly outputUsdPerToken: number } | null;
+  readonly reasoning: {
+    readonly status: "listed" | "unverified" | "unsupported";
+    readonly levels: readonly Exclude<ReasoningEffort, "provider-default">[]; // exact when listed, standard set when unverified, empty when unsupported
   };
-  readonly stale: boolean;
-}
-
-interface CapabilityEvidence {
-  readonly source:
-    | "provider-metadata"
-    | "gateway-contract"
-    | "model-catalog"
-    | "operator-configuration"
-    | "stale-cache"
-    | "unknown";
-  readonly sourceRevision?: string;
-  readonly observedAt?: string;
-  readonly stale: boolean;
+  readonly catalogDigest: string;               // sha256 of the normalized entry; stable across identical fetches
+  readonly catalogEndpointId: string;           // digest of the normalized catalog origin
+  readonly stale: boolean;                      // cache entry past its freshness window
 }
 ```
 
-`levels` is empty for `unsupported` and `unknown`. `provider-default` is always a configuration option and is not repeated in capability levels. An explicit level is selectable only when `status` is `supported`, `surfaceStatus` is `compatible`, and the level appears in `levels`. `defaultEffort` is present only when an authoritative source documents it. Field-level provenance is required because live metadata may supply levels while a reviewed catalog supplies a transport or API-surface constraint. Multiple transports are required because one Anthropic model may accept adaptive effort for non-`none` levels and a distinct `thinking: { type: "disabled" }` shape for `none`.
+There is no multi-source provenance merging: the gateway catalog is the only source, so per-field evidence reduces to the endpoint identity, entry digest, and presentation-time staleness. Descriptors are transport-independent: the same entry informs selection and dispatch on the gateway and on the direct transports. Models absent from the catalog (manual entry) get a synthesized descriptor with `status: "unverified"` and `catalogDigest` of the synthesized entry.
 
-Provider descriptors remain provider-wide. Model-specific descriptors are retrieved through a new catalog contract so a provider with multiple models does not advertise one inaccurate shared level set.
+### Immutable model dispatch
 
-### Immutable reasoning dispatch
-
-Before appending `ModelCallRequested` or `EffectRequested`, resolve the selected configuration into a bounded dispatch:
+Resolved from the committed branch configuration and the current descriptor before any model effect:
 
 ```ts
 interface ReasoningDispatch {
   readonly requestedEffort: ReasoningEffort;
-  readonly mode:
-    | "omitted"
-    | "disabled"
-    | "native-effort"
-    | "adaptive-effort"
-    | "token-budget"
-    | "gateway-normalized";
-  readonly providerValue?: Exclude<ReasoningEffort, "provider-default">;
-  readonly budgetTokens?: number;
-  readonly apiSurface?: "openai-chat-completions" | "anthropic-messages";
-  readonly reasoningOutput: "provider-default" | "omitted";
+  readonly mode: "omitted" | "requested";       // omitted ⇔ provider-default
+  readonly capability: {
+    readonly status: "listed" | "unverified" | "unsupported";
+    readonly levels: readonly Exclude<ReasoningEffort, "provider-default">[];
+    readonly catalogDigest: string;
+  };
   readonly resolverId: "agencity.reasoning-dispatch.v1";
-  readonly capabilityFingerprint: `sha256:${string}`;
-  readonly capability: ReasoningCapability;
+}
+
+interface ModelDispatch {
+  readonly configuration: ModelConfiguration;
+  readonly reasoning: ReasoningDispatch;
+  readonly executionEndpointId?: string;        // required for product transports; digest of the normalized execution origin
+  readonly dispatchVersion: "agencity.model-dispatch.v1";
 }
 ```
 
-The complete dispatch is:
+Rules:
 
-- included as optional reasoning provenance in `ModelCallRequested`;
-- included in `EffectRequested.input` beside the model configuration;
-- validated by the model executor;
-- used directly by the provider adapter without another discovery lookup.
+- The dispatch contains **no timestamps, staleness flags, or other volatile fields**. Catalog fetch times and cache staleness remain presentation metadata, so byte-identical dispatch comparison is stable across recovery and retries.
+- The complete dispatch is included as a required `modelDispatch` field in `ModelCallRequested` and in `EffectRequested.input`. The executor reads configuration and reasoning only from that dispatch, passes `reasoning: requestedEffort` to the AI SDK when `mode` is `"requested"`, and omits the option when `"omitted"`.
+- The model-call admission command validates the relation between `ModelCallRequested` and its eventual `EffectRequested`: `callId`, `effectId`, complete configuration, execution endpoint identity, and reasoning dispatch must agree byte-for-byte. Compaction effects must agree with the pinned dispatch on `ContextCompactionRequested`. A malformed or mismatched relation fails before network access.
+- The dispatch is part of idempotency agreement: reusing a model-call, compaction, or effect idempotency key with a different dispatch is a conflict.
+- Before a pending product-model effect executes, the executor compares the retained `executionEndpointId` with the current normalized execution origin for the configured transport (the gateway origin for `vercel`; the official or overridden provider origin for a direct transport). Configuration drift produces a typed unavailable outcome instead of sending a request to a different endpoint.
+- A model effect without a complete dispatch is malformed and fails before network access.
 
-For `provider-default`, the dispatch mode is `omitted`, `reasoningOutput` is `provider-default`, no live discovery is required, and the provider receives no reasoning controls. Explicit effort uses `reasoningOutput: "omitted"` so adapters pin `exclude` or `display` behavior instead of returning reasoning text. For Vercel, the mode is `gateway-normalized`; the record describes the requested value and never invents an applied backing-provider value. The fingerprint covers the normalized capability fields, source revision, staleness, chosen transport, API surface, output handling, and any exact budget.
 
-### Version-1 event compatibility
 
-This feature uses compatible optional version-1 fields:
+### Pre-release schema and data cutover
 
-- `ModelConfiguration.reasoningEffort`;
-- `ModelCallRequested.reasoning`.
+This plan intentionally does not migrate pre-feature workspace events, snapshots, profile rows, cached preferences, subagent specifications, pending effects, or model identifiers. Development installations reset their local Agencity state before running this version. The runtime must detect an incompatible store and return clear reset guidance; it must not silently delete data.
 
-`ModelConfiguration` appears in `SessionCreated`, `SessionModelChanged`, `TaskCreated`, and `RecursiveModelStarted`; all four event schemas and every non-event validator that embeds the configuration, including refinement-review subagent specifications, must accept the optional field. No existing event changes meaning, and no retained payload is rewritten. Event validation must continue to accept old fixtures without these fields and reject malformed new fields. Mixed histories must rebuild, branch, synchronize, export, and project deterministically.
+The cutover:
 
-The model-call projection shape changes, so increment `REDUCER_VERSION`; a snapshot written by the prior reducer must be discarded and rebuilt from events. Stable command retries against pre-feature `SessionCreated`, `TaskCreated`, or `RecursiveModelStarted` events must reuse the retained model payload shape before exact idempotency comparison. They must not add explicit `provider-default` to an old payload and create a false conflict.
+- sets `EVENT_SCHEMA_VERSION` to `2` and accepts only version 2;
+- requires `reasoningEffort` in every durable `ModelConfiguration`;
+- requires `modelDispatch` in `ModelCallRequested` and in `ContextCompactionRequested` when the strategy is `model-summary-v1`; deterministic compaction requests omit it;
+- permits optional bounded `warnings` in `ModelCallCompleted`, because a successful call can have no warnings;
+- sets `REDUCER_VERSION` to `8` for the model-call projection change; and
+- replaces pre-feature compatibility fixtures with fresh-version replay, rebuild, branch, sync, export, and projection fixtures.
 
-The model-call projection retains reasoning provenance when present. Old calls display `provider-default / unrecorded` rather than claiming a level.
+Implementation updates `AGENTS.md`, public data-lifecycle documentation, installation guidance, and verification claims to state this pre-release reset boundary.
 
-## Capability resolution
+## Model catalog service
 
-### Catalog layers
 
-Introduce a `ModelCatalog` and `ModelCapabilityResolver` under the model execution boundary. They merge normalized fields rather than treating any one raw response as authoritative for every capability.
 
-Resolution precedence for a field is:
+### Single source, cached
 
-1. explicit operator configuration for a programmatically installed provider;
-2. explicit live provider metadata;
-3. the versioned built-in catalog;
-4. a previously normalized cache entry;
-5. `unknown`.
+Add a `ModelCatalog` service under the model execution boundary:
 
-An omitted provider field is not an explicit denial. `unsupported` outranks a lower-layer positive claim only when the higher layer explicitly states unsupported behavior.
+- Treats `AI_GATEWAY_BASE_URL` as an origin-only URL. It rejects credentials, query strings, fragments, and non-root paths; removes a trailing slash; derives `${gatewayOrigin}/v1/models` for discovery and `${gatewayOrigin}/v4/ai` for the AI SDK model API.
+- Fetches the derived catalog URL with explicit timeout, response-size limit, model-count limit, field-length and numeric bounds, duplicate-ID rejection, and schema validation. Unknown fields are discarded. Errors never expose response bodies.
+- Normalizes entries into `ModelDescriptor` values. A `reasoning_options` effort entry contributes only recognized documented SDK values; a toggle adds `none`; catalog-only values such as `max` are retained only in bounded diagnostics. An effort entry with at least one selectable value yields `"listed"`. Toggle-only, budget-only, a `reasoning` tag without selectable effort metadata, or `reasoning_options: null` yields `"unverified"`. No `reasoning` tag yields `"unsupported"`.
+- Filters to `type: "language"` models for the product picker.
+- The endpoint requires no credential; if a future change puts it behind auth, use the stored gateway key supervisor-side. Catalog responses never carry credentials.
 
-The result includes source and staleness for each capability. A catalog refresh cannot mutate a branch's selected effort or a committed outbox request.
+Custom `AI_GATEWAY_BASE_URL` values are trusted-local endpoints. Catalog data fetched from an override is keyed to that exact normalized endpoint identity and is not merged with official-endpoint data.
 
-Official built-in catalog entries apply only to the documented official endpoint identity. A custom `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, or `AI_GATEWAY_BASE_URL` does not inherit official capability claims merely because it uses the same provider name or a compatible wire format; it needs explicit operator metadata or remains unknown.
+Catalog metadata is transport-independent, and catalog fetches never send any provider credential. Direct transports execute against their official origins by default; `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are origin-only trusted-local execution overrides with the same normalization rules, used chiefly by test fixtures. Execution overrides never change the catalog origin, which is controlled only by `AI_GATEWAY_BASE_URL`.
 
-### Built-in catalog
+### Profile cache and migration ledger
 
-Add a reviewed catalog with:
+Add a profile-local `model_catalog_cache` operational table keyed by the normalized endpoint identity digest, storing bounded normalized descriptors, revision metadata, fetch time, expiry, and schema version.
 
-- exact provider and model IDs or documented family rules;
-- supported levels and documented defaults;
-- reasoning transport;
-- adaptive-thinking or budget mapping data where required;
-- the provider API surface on which each mapping is valid;
-- context and output limits only when the source is authoritative;
-- source URLs;
-- a catalog revision and review date.
+`ProfileStore` currently applies an inline schema string. **Before adding the table, introduce a separate `profile_schema_migrations` ledger** with immutable numbered profile migration sources. Because old profile data is outside the cutover boundary, the baseline targets only a fresh profile: one migration creates the current profile schema and a later migration adds `model_catalog_cache`. Each migration runs under one write transaction and is recorded only after every statement succeeds. Concurrent/repeated opens must either observe the committed migration or serialize behind it; a partial migration is never marked complete.
 
-Model-family rules are allowed only when official provider documentation defines behavior for the whole family and fixtures cover positive and negative IDs. Arbitrary prefix inference is prohibited.
+Extend `scripts/check-architecture.ts` with a profile-migration inventory separate from workspace migrations. Extend `docs/mutable-tables.md` with profile-table classifications for the migration ledger and operational catalog cache.
 
-The catalog must have a validation script that rejects duplicate keys, unsorted levels, invalid defaults, unrecognized transports or API surfaces, missing source links, and budget maps that violate provider minimums or model output limits.
+The cache: contains no credentials or raw responses; is not canonical; is safe to delete and rebuild; is not synchronized through workspace envelopes; is excluded from profile export; is deleted with the owning profile; defaults to a 24-hour freshness window; and supports explicit refresh from the model picker, `/effort refresh`, and the protocol. Stale entries remain usable and visibly labeled. Staleness is not part of the immutable dispatch and never causes Agencity to choose a different level.
 
-### Live discovery
+### Context-window capacity integration
 
-Provider discovery adapters normalize and bound remote data:
+The catalog's `context_window` and `max_tokens` feed a model-keyed capacity resolver, replacing today's one-static-window-per-provider lookup for all product transports. `ModelCatalog` hydrates a bounded in-memory descriptor snapshot from the profile cache before execution recovery; refresh atomically swaps that snapshot. `ModelExecutor.contextCapacity(configuration)` remains synchronous but delegates product model configurations on any transport to the model-keyed snapshot and returns `"unknown"` when that exact catalog endpoint/model has no descriptor. It never mutates one provider-wide capacity from the last model fetched. Echo and programmatic providers continue using their declared provider capabilities and do not inherit catalog metadata.
 
-- OpenAI: authenticated `/v1/models` for IDs and availability; reasoning comes from the built-in catalog.
-- Anthropic: authenticated `/v1/models`; use explicit effort and thinking capability fields when present, then merge catalog fallbacks.
-- Vercel: unauthenticated `/v1/models` plus the per-model `/endpoints` route; use reasoning tags and `supported_parameters` as coarse evidence, then require a reviewed Gateway API-surface mapping before exposing explicit levels.
+This is a **deliberate behavior change**: context-window admission and compaction triggers begin operating on real per-model capacity values for catalog-listed models on every transport. Add tests with two catalog models with different windows in one process (covering both a gateway and a direct-transport session) plus admission and automatic compaction before and after capacity becomes known. Capacity provenance flows through the existing `ContextCapacityProvenance` mechanism unchanged.
 
-Discovery uses fixed built-in endpoints or the user's trusted-local base URL override. Requests have explicit timeouts, response-size limits, model-count limits, and schema validation. Unknown fields are discarded. Errors do not expose response bodies that may contain secrets or infrastructure details. Capability data fetched from an override is keyed to that exact normalized endpoint identity and is not merged with official-endpoint claims unless an operator explicitly configures that relationship.
+## Execution
 
-Manual model IDs remain accepted. Live discovery is an enhancement to selection, not an onboarding dependency.
 
-### Profile cache
 
-Add a profile-local `model_catalog_cache` operational table keyed by provider and a digest of the normalized endpoint identity. Store only bounded normalized descriptors, ETag or equivalent revision metadata, fetch time, expiry, and schema version.
+### The shared AI SDK adapter core and transport factories
 
-`ProfileStore` currently creates its separate schema from an inline idempotent schema string rather than the workspace migration directory. Before adding the table, introduce a numbered, reopen-safe profile migration ledger. Extend the architecture checker and the registry in `docs/mutable-tables.md` so profile tables are classified without being confused with workspace tables.
+Replace `OpenAICompatibleProvider`, `AnthropicCompatibleProvider`, and the Anthropic-instantiated `vercel` provider with one shared `AiSdkModelProvider` core implementing the existing `ModelProvider` contract, instantiated by three thin transport factories:
 
-The cache:
+- **`vercel`** — the pinned SDK's documented `createGateway` API with the derived `${gatewayOrigin}/v4/ai` model API base URL (never the origin-only override directly) and the gateway credential; passes canonical `creator/model` IDs through unchanged and accepts any creator.
+- **`openai`** — `createOpenAI` with the OpenAI credential and the official or overridden origin; requires an `openai/…` canonical ID and derives the native ID by stripping the creator prefix.
+- **`anthropic`** — `createAnthropic` with the Anthropic credential and the official or overridden origin; requires an `anthropic/…` canonical ID and derives the native ID by stripping the creator prefix and replacing dots with dashes in the version segment.
 
-- contains no credentials or raw provider response;
-- is not canonical agent history;
-- is safe to delete and rebuild;
-- is not synchronized through workspace event envelopes;
-- is excluded from profile export unless export support is deliberately added later;
-- is deleted with the owning profile;
-- defaults to a 24-hour freshness period;
-- supports an explicit refresh from the model picker and protocol.
+A factory contributes instantiation only: model construction, credential resolution, execution endpoint identity, and native-ID derivation. Every request behavior lives once in the shared core:
+- `complete` uses `generateText`; `stream` uses `streamText`. One shared pure options builder serves both, so model, temperature, maximum output, and reasoning options cannot diverge.
+- Streaming consumes the SDK's authoritative full stream. Only text deltas reach the existing provisional `onDelta` callback; reasoning and protocol parts do not. The adapter awaits final text, finish reason, usage, warnings, and gateway metadata. Any stream error, cancellation, malformed terminal data, or incomplete termination fails the effect, and no provisional prefix becomes durable.
+- While a high-effort model produces no text, the existing model-working run status remains visible. Reasoning content is never relayed as progress; a dedicated reasoning-progress indicator is deferred.
+- The dispatch's `requestedEffort` maps to the SDK's top-level `reasoning` option (`mode: "omitted"` omits it). No reasoning-related `providerOptions` are set, and catalog-only `max` is unavailable.
+- **Reasoning content is never persisted.** Reasoning parts in SDK responses and streams are discarded; only final text enters `ModelResponse.text`, committed messages, and cursorless progress. This feature controls effort, not chain-of-thought storage.
+- **Warnings are provenance.** SDK warnings are converted at the adapter boundary into a stable internal `ModelWarning` shape with kind (`coerced`, `unsupported`, `provider`, or `truncated`) and bounded scrubbed message. Retain at most eight warnings of at most 1,024 UTF-8 bytes each. They remain in the effect outcome and are copied to optional `ModelCallCompleted.warnings` for ordinary calls, visible in `/raw`, and surfaced once by committed event identity. They never mutate branch configuration.
+- **Usage and cost:** token usage maps from the completed SDK result. A directly returned finite nonnegative gateway cost populates `Usage.costUsd`; missing or malformed cost becomes `0`, and direct transports always record `0`. The adapter does not call generation lookup. Provider-reported reasoning tokens are debited once inside total output usage, as today.
+- **Errors are bounded and classified.** Convert SDK failures into a closed internal classification without retaining raw response bodies, headers, prompts, or provider payloads. Only a positively identified context-limit error becomes `ModelProviderContextWindowOverflowError`; authentication, rate limit, routing, malformed-response, and generic transport failures never trigger overflow retry.
+- Each transport's credential resolves through the existing supervisor-side credential store and environment fallbacks (`AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) and is passed to the SDK per call. A credential is used only by its own transport and never enters events, cache rows, logs, or errors.
+- Resolve the latest stable compatible `ai`, `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic` packages at implementation start and pin their exact versions in `package.json` and the lockfile. Record the versions in fixture provenance. AI SDK types must not leak through the `ModelProvider` contract or into domain/storage code.
 
-Stale entries remain visible with a stale label. They may support a previously valid explicit selection, but the call records `stale-cache` provenance and a provider rejection remains a normal failed effect. Stale data never causes Agencity to choose another level.
+Echo remains unchanged behind the same contract. Extend provider capabilities with an explicit internal reasoning-control declaration (`"none"` or `"normalized"`). Programmatic provider registration remains supported for tests and trusted integrations; absent capability means `"none"` and permits only `provider-default`. All three product transports declare `"normalized"`. Catalog fallback never grants reasoning control to an unrelated custom provider.
 
-## Provider dispatch
+### Providers, onboarding, and data cutover
 
-### OpenAI
+- Product provider selection offers `vercel` (recommended and listed first), `openai`, and `anthropic`. The existing three-provider onboarding, hidden credential entry, and environment fallbacks are retained. What changes: the hand-written wire adapters behind these providers are deleted; model selection and manual entry use canonical `creator/model` IDs on every transport; and the picker filters the catalog to the transport's creator namespace for direct providers while the gateway shows all listed models.
+- The credential store's recognized provider keys are unchanged. Credential-file reads and writes preserve unknown or historical records byte-for-byte at their logical field values; this plan deletes no credential. `docs/configuration.md` documents the credential and override environment variables per transport.
+- Product state created before this cutover is unsupported and must be reset by the operator. There is no branch, profile-preference, pending-effect, or retained-subagent-spec canonicalization path. New model selections always write canonical `creator/model` IDs.
 
-Use the direct OpenAI Chat Completions request shape already owned by the adapter:
 
-- omit the reasoning field for `provider-default`;
-- map an exact explicit level to top-level `reasoning_effort`;
-- reject unsupported levels before effect admission;
-- validate whether the selected reasoning model permits `temperature`;
-- use `max_completion_tokens` for reasoning models, and retain catalog-backed compatibility only where a model still requires another documented Chat Completions field.
 
-Streaming and non-streaming request builders must call one shared pure payload builder. Response usage must continue to count provider-reported reasoning tokens inside total output usage when OpenAI includes them there.
+## Execution paths, attribution, and recovery
 
-### Anthropic
+Model dispatch resolution happens after context-window admission and before `ModelCallRequested`/`EffectRequested` are appended:
 
-Choose the transport from the resolved capability:
+1. **Agent runs and diagnostic turns:** read the retained branch configuration → resolve and validate the complete dispatch → append `ModelCallRequested` with that dispatch → request the outbox effect with the byte-identical dispatch → validate the call/effect relation → execute from the outbox input only → retain normal response, usage, warnings, budget, and terminal outcome events.
+2. **Model-summary compaction:** resolve the complete dispatch **once per compaction request** and pin it in `ContextCompactionRequested.modelDispatch`. Every chunk effect across all hierarchy levels uses that exact model configuration, endpoint identity, and reasoning dispatch, even if the branch model or catalog changes while compaction runs. Recovery also uses the pinned dispatch.
+3. **Generated console code:** generic `tools.request` may not address the reserved `model` executor. Recursive calls continue through `rlm` and child-session services, which perform normal model admission. A direct generic model request fails before `EffectRequested` is appended.
 
-- adaptive models use `thinking: { type: "adaptive" }` and `output_config: { effort }`;
-- budget-only extended-thinking models use `thinking: { type: "enabled", budget_tokens }` with a reviewed, versioned model-specific level map and `catalog-mapped` semantics;
-- a budget-mode model receives `output_config.effort` as well only when provider metadata or the reviewed catalog explicitly says that combination is supported, and the complete pair is pinned in the dispatch;
-- `none` uses `thinking: { type: "disabled" }` and omits `output_config.effort` only when the selected model explicitly supports disabled thinking under its omitted effort default;
-- `provider-default` omits both;
-- thinking display is set to `omitted` where supported so reasoning text is not returned.
+Recovery does not: query the catalog to reinterpret a committed effect; apply a refreshed catalog to a pending dispatch; downgrade a level; or retry a non-idempotent unknown model effect. Specifically:
 
-The resolver validates:
+- A crash after `ModelCallRequested` but before the effect request: recovery copies that call's retained complete dispatch into the new `EffectRequested` input without re-resolving.
+- A pending first-attempt effect drains from its committed input; a started non-idempotent effect with no durable outcome becomes `unknown` under existing outbox rules.
+- Context-window overflow retries reuse the exact prior complete dispatch byte-for-byte under a new call/effect identity; only context and context-window provenance change. Compaction cannot change model settings.
+- Console-worker restarts do not affect effort; the setting lives in durable state only.
 
-- supported levels;
-- any incompatibility with `temperature`;
-- integer budgets of at least Anthropic's documented minimum;
-- `budget_tokens < max_tokens`;
-- enough remaining output capacity for a visible answer.
-
-The exact token budget is retained in the reasoning dispatch. Recovery never recalculates it from a newer catalog.
-
-Thinking blocks are not appended to the conversation or exposed as cursorless progress. The final text blocks remain the model response. This feature controls effort; it does not add chain-of-thought storage.
-
-### Vercel AI Gateway
-
-Replace the current Anthropic-compatible gateway instantiation with a dedicated Vercel adapter that selects a documented API surface per model. OpenAI Chat Completions is preferred only when its `reasoning` object reaches the selected backing model. Current Gateway documentation explicitly says that this surface does not carry adaptive `output_config.effort` to some newer Anthropic models; those models must use the Gateway's Anthropic Messages surface or expose only `provider-default`.
-
-On a surface-compatible OpenAI Chat Completions request, send:
-
-```json
-{
-  "reasoning": {
-    "effort": "high",
-    "exclude": true
-  }
-}
-```
-
-`exclude: true` keeps internal reasoning out of the response while retaining final text. On the Anthropic Messages surface, use the resolved `thinking` and `output_config` shape and request omitted thinking display where supported. `provider-default` omits all reasoning controls on either surface.
-
-The adapter accepts the gateway's normalized levels through `xhigh` only for model/surface combinations backed by the reviewed contract; it rejects `max` unless Vercel's contract adds it. Endpoint `supported_parameters` alone does not authorize a level. Provider routing does not authorize Agencity to retry or fall back after an unknown outcome. Gateway routing and any provider-side coercion remain visible through `gateway-normalized` provenance.
-
-### Programmatic providers
-
-Extend the provider contract with optional model discovery and reasoning resolution. A custom provider that implements neither remains usable with `provider-default` only. It cannot inherit reasoning behavior by claiming OpenAI or Anthropic compatibility in its display name.
-
-Operator-supplied exact capability metadata is allowed for trusted-local integrations and is labeled `operator-configuration`.
+If the gateway or a direct provider rejects a retained request (for example, capabilities changed after selection), that is a normal failed model effect with model/effort context. Agencity does not change the branch configuration, retry at another level, or reroute to another transport.
 
 ## Selection, protocol, and SDK
 
+
+
 ### Supervisor
 
-`Supervisor.createSession` and `Supervisor.selectModel` normalize the complete configuration and validate explicit effort against the resolved model descriptor. The same command-level validator must be injected into `AgentService` and used by direct/batch spawn, recursive starts, subagent specifications, and refinement-review child creation before any model-bearing event is appended.
-
-The existing rule remains: branch model configuration cannot change while model work is active. Changing only effort is a model-configuration change and uses the same guard.
-
-`SessionModelChanged` continues to retain the previous and next complete configuration. A same-model effort change therefore remains explicit and attributable without adding a second overlapping event type.
+`Supervisor.createSession` and `Supervisor.selectModel` normalize the complete configuration and apply the capability tier rules against the current descriptor. Changing only effort is a model-configuration change: it uses the same active-work guard as `/model`, and `SessionModelChanged` retains the previous and next complete configurations, so a same-model effort change is explicit and attributable without a new event type.
 
 ### Public protocol
 
-Extend existing surfaces:
+Additive changes; `agencity.protocol` stays version 1 with capability negotiation:
 
-- `POST /sessions/:session/model?branch=:branch` accepts the complete `ModelConfiguration`, including `reasoningEffort`;
-- `GET /model-catalog?provider=:provider` returns bounded normalized descriptors;
-- `GET /model-catalog?provider=:provider&refresh=1` requests a refresh and returns cached fallback plus typed refresh status when the remote request fails;
-- `GET /product/config` includes per-model workspace effort preferences;
-- `POST /product/config/reasoning-effort` sets or clears `{ model: "provider:model", effort }`.
+- `GET /capabilities` advertises `reasoningEffortSelection: true`;
+- `POST /sessions/:session/model?branch=…` accepts `reasoningEffort` in the configuration;
+- `GET /model-catalog` returns bounded normalized descriptors plus cache staleness; `POST /model-catalog/refresh` refreshes and returns the cached fallback with a typed refresh status on remote failure;
+- `GET /product/config` includes the current catalog endpoint identity, the per-transport execution origins, and the selected model's workspace effort preference; `POST /product/config/reasoning-effort` sets or clears `{ model, effort }` for the server's current catalog endpoint identity.
 
-The managed and in-process transports return the same types and errors. These are additive routes and optional fields, so `agencity.protocol` remains version 1; compatibility tests must prove old snapshots/events without effort still decode and new clients handle its absence.
-
-Add corresponding `AgentClient` methods and public API types. Client code does not parse raw provider payloads.
+A client must not send explicit effort to a server whose capabilities omit `reasoningEffortSelection`; it fails with a typed unavailable error instead of letting an older server silently strip the field. Add a shared `AgentClient.requireCapability("reasoningEffortSelection")` guard backed by the validated attach-time capability snapshot and use it in every effort-bearing model/configuration method. TUI and CLI commands call those guarded methods rather than posting raw configurations. Managed and in-process transports return identical types and errors; clients never parse raw catalog responses.
 
 ### Console SDK
 
-The existing `ModelConfiguration` extension flows through `sdk.agents` and `rlm` inputs. Documentation and generated declarations show the supported canonical values.
-
-The console cannot change the current root session's effort through a side channel. Root selection remains a user/protocol operation.
+The `ModelConfiguration` extension flows through `sdk.agents` and `rlm` inputs; generated declarations document the canonical values. The console cannot change the current root session's effort; root selection remains a user/protocol operation.
 
 ## Product interfaces
 
-### Terminal commands
 
-Add:
+
+### Terminal commands
 
 - `/effort` — open the effort selector for the current model;
 - `/effort LEVEL` — select one canonical level;
-- `/thinking`, `/thinking LEVEL`, and `/thinking refresh` — exact aliases;
-- `/effort refresh` — refresh current-model capability metadata.
+- `/effort refresh` — refresh the current endpoint's catalog, then redisplay metadata for the current model;
+- `/thinking`, `/thinking LEVEL`, `/thinking refresh` — exact aliases.
 
-The selector shows:
+The selector shows the current model, current effort, the listed/unverified/unsupported tier with its levels, staleness, and a one-line explanation for unavailable control. `provider-default` is always first. Unavailable levels cannot receive focus. Selecting the current level is a no-op. Historical-projection and active-work guards match `/model`.
 
-- current provider and model;
-- current effort;
-- the documented provider/model default when known;
-- exact, catalog-mapped, or gateway-normalized levels;
-- capability source and stale state;
-- a concise explanation for unsupported or unknown control.
+The model picker is enriched from the catalog: display names, context window, pricing, and a reasoning badge — `effort` (listed), `effort (unverified)`, or `fixed` (unsupported). Manual model entry remains available when the catalog is unavailable or a model is missing; manual entries behave as unverified.
 
-`provider-default` is always the first option. Unsupported levels cannot receive focus. Selecting the existing level is a no-op. Historical projection and active-work guards match `/model`.
-
-The model picker is enriched with discovered models and a reasoning badge:
-
-- `effort` for exact control;
-- `gateway effort` for normalized Vercel control;
-- `mapped effort` for catalog-backed token-budget control;
-- `fixed` for explicitly unsupported control;
-- `unavailable here` when the provider supports reasoning but the selected API surface cannot carry it;
-- `unknown` when metadata is insufficient.
-
-Manual model entry remains available when discovery fails or a model is not listed.
-
-After selection, the transcript reports both model and effort. `/info`, `/model`, the header when width permits, and plain non-TTY output show the effective value without exposing capability internals by default. Raw capability provenance remains available through `/raw` and protocol diagnostics.
+After selection, the transcript reports model and effort. `/info`, `/model`, the header when width permits, and plain non-TTY output show the effective value. Raw capability data and recorded warnings remain available through `/raw` and protocol diagnostics.
 
 ### CLI and configuration
 
-Add:
+- `--effort LEVEL` for newly created work; on a resumed branch the ordinary entrypoint fails with guidance to use `agencity new --effort …` or `/effort` on an idle branch (matching `--model` behavior);
+- `agencity config set-effort LEVEL [--model MODEL]` and `agencity config clear-effort [--model MODEL]`; when `--model` is omitted the current workspace default model is required, and configuration fails clearly when none resolves.
 
-- `--effort LEVEL` for newly created work;
-- `agencity config set-effort LEVEL [--model PROVIDER:MODEL]`;
-- `agencity config clear-effort [--model PROVIDER:MODEL]`.
-
-When `--model` is omitted from the config command, the current workspace default model is required. Configuration fails clearly when no model can be resolved.
-
-`--effort` does not silently mutate or get ignored on a resumed branch. As with the existing `--model` behavior, the ordinary entrypoint fails with guidance to use `agencity new --effort ...` or `/effort` on an idle retained branch.
-
-JSON output includes canonical effort, capability status, source, staleness, catalog-mapped semantics, surface compatibility, and gateway-normalized semantics as typed fields rather than presentation strings.
-
-## Execution, attribution, and recovery
-
-For ordinary agent runs and diagnostic turns, reasoning dispatch resolution happens after context-window admission but before `ModelCallRequested` and `EffectRequested` are appended. Model-summary compaction resolves once before each model effect is requested because it has no `ModelCallRequested` event today.
-
-The two `ModelCallRequested` paths follow this order:
-
-1. read the retained branch model configuration;
-2. resolve and validate a reasoning dispatch;
-3. append `ModelCallRequested` with that dispatch;
-4. append or request the outbox model effect with the same dispatch;
-5. execute the provider request from the outbox input only;
-6. retain normal response, usage, budget, and terminal outcome events.
-
-Model-summary compaction follows the same resolver and outbox rules, retaining its dispatch in `EffectRequested.input` and its existing effect/usage provenance. It must not become a side channel that bypasses effort validation.
-
-The dispatch is part of idempotency agreement. Reusing a model-call or effect idempotency key with another effort, transport, budget, capability fingerprint, or stale state is a conflict.
-
-Recovery does not:
-
-- query discovery to reinterpret a committed effect;
-- recalculate an Anthropic thinking budget;
-- apply a newly released catalog;
-- downgrade an unsupported level;
-- retry a non-idempotent unknown model effect.
-
-If a crash occurs after `ModelCallRequested` but before the corresponding effect request, recovery copies that call's retained dispatch into the new `EffectRequested` input rather than resolving again. A pending first-attempt effect is drained from its committed input; a started non-idempotent effect with no durable outcome becomes `unknown` under the existing outbox rules.
-
-For compatibility, a retained pre-feature model effect may have neither `configuration.reasoningEffort` nor a reasoning dispatch. The executor interprets that exact old input as omitted/provider-default without discovery or event rewriting. A new effect with explicit effort but no dispatch is malformed and fails before network access.
-
-Context-window overflow retries keep the exact prior reasoning dispatch, including transport, API surface, token budget, capability fingerprint, and stale state. A retry gets a new call/effect identity and a byte-identical dispatch; only context and context-window provenance change. Compaction cannot change effort.
+JSON output includes canonical effort, capability tier, levels, staleness, and recorded warnings as typed fields.
 
 ## Validation and failure behavior
 
-Reject before model configuration commit:
+Reject before a model configuration commits:
 
-- unknown effort strings;
-- a non-default level for an unsupported or unknown model;
-- a level outside its declared exact, mapped, or gateway-normalized capability set;
-- a level whose selected provider API surface cannot carry it;
-- `max` through a gateway contract that supports only through `xhigh`;
-- invalid reasoning-budget catalog data;
-- incompatible `temperature`, output-token, or thinking-budget combinations.
+- unknown effort strings (after alias canonicalization);
+- an explicit level outside a listed set (message names the listed levels);
+- an explicit level for a catalog-unsupported model (message offers refresh and `provider-default`).
 
-If provider capabilities change after selection, the provider may reject the retained request. That rejection is a normal failed model effect with provider/model/effort context. Agencity does not change the branch configuration or retry at another level.
+Never rejected: `provider-default` (always available); any standard level on an unverified model (labeled, warning-recording).
 
-Discovery failure does not make a retained session disappear. The UI presents cached or built-in metadata when available and otherwise marks capability unknown.
+Ambient workspace preferences that fail these rules at session creation degrade to `provider-default` with a visible notice rather than blocking session creation.
+
+Catalog unavailability does not make a retained session disappear or block execution; the UI presents cached data when available and otherwise marks capability unverified. Selection remains possible; execution proceeds with the resolved dispatch.
 
 ## Security and data classification
 
-- Provider keys remain in the owner-only credential store or environment.
-- Discovery uses supervisor-side credential access and returns only normalized, secret-free descriptors.
-- Provider response bodies are bounded, schema-validated, and excluded from errors and canonical history.
-- The built-in catalog is source code and contains no credentials.
-- `model_catalog_cache` is a mutable operational profile cache, not canonical state; its profile migration and classification are architecture-checked.
-- Selected effort is canonical because it changes model behavior.
-- Call reasoning dispatch is canonical provenance because it explains the exact requested effect.
-- Outbox input contains no credential material.
-- Custom base URLs remain trusted-local network destinations and receive the same prompts and credentials as completion requests.
+- Provider API keys (gateway, OpenAI, Anthropic) remain in the owner-only credential store or environment; each is passed to the AI SDK per call supervisor-side, is used only by its own transport, and never enters events, cache rows, sync envelopes, logs, protocol output, or error messages.
+- Network paths are per transport: with the `vercel` transport, **all model traffic for that session — prompts, context, and generated text — transits Vercel's AI Gateway**; with a direct transport it goes to that provider's API. State this plainly in `docs/security.md`. Note the gateway's prompt-training opt-out setting as operator guidance.
+- Catalog responses are bounded, schema-validated, secret-free, and excluded from errors and canonical history.
+- `model_catalog_cache` is a mutable operational profile cache; its migration and classification are architecture-checked.
+- Selected effort is canonical (it changes model behavior). The complete model dispatch is canonical provenance. Recorded warnings are bounded effect-outcome data.
+- Custom `AI_GATEWAY_BASE_URL`, `OPENAI_BASE_URL`, and `ANTHROPIC_BASE_URL` values replace the corresponding official origin as the trusted-local network destination for that transport and receive that transport's credential and model traffic. The public catalog request omits credentials unless a future authenticated-catalog contract is explicitly implemented.
 
-Update `docs/mutable-tables.md` for the cache classification and `docs/security.md` for discovery and credential handling.
+Update `docs/mutable-tables.md` for the cache classification and `docs/security.md` for the transit and credential statements.
 
 ## Implementation sequence
 
-### 1. Domain vocabulary and compatibility
+### 0. Pin the SDK and wire contract
 
-- Add `ReasoningEffort`, validators, aliases at input boundaries, and `effectiveReasoningEffort`.
-- Extend `ModelConfiguration` and event schemas with compatible optional fields.
-- Increment `REDUCER_VERSION`, extend model-call projection and diagnostic views with optional reasoning provenance, and rebuild stale snapshots.
-- Add retained old-event and mixed-history fixtures.
-- Update every embedded model schema, including refinement-review subagent specifications.
+- Recheck the package registry and official AI SDK 7 documentation; install the latest stable compatible `ai`, `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic` versions and pin them exactly.
+- Record the resolved package versions and capture the documented `createGateway`/`createOpenAI`/`createAnthropic` APIs, the `/v4/ai` and `/v1/models` gateway endpoints, the native OpenAI and Anthropic wire shapes the pinned packages emit, and the streaming, warning, usage, and provider-metadata shapes in focused fixture tests before replacing the current adapters.
+- Keep `max` unavailable and cost best-effort regardless of undocumented or eventually consistent fields.
 
-### 2. Catalog and capability resolver
 
-- Add normalized model and reasoning capability contracts.
-- Add the reviewed built-in catalog and validation script.
-- Implement OpenAI, Anthropic, and Vercel discovery adapters.
-- Add a numbered profile migration mechanism, then add the classified cache, reopen idempotency, expiry, refresh, and deletion behavior.
-- Merge capabilities by explicit field provenance.
 
-### 3. Provider request mappings
+### 1. Domain vocabulary and schema cutover
 
-- Add a pure reasoning-dispatch resolver.
-- Put the resolved dispatch into model-call events and outbox input.
-- Implement OpenAI native effort.
-- Implement Anthropic adaptive effort and catalog-backed thinking budgets.
-- Replace Vercel's Anthropic-compatible instantiation with a dedicated, surface-aware gateway adapter.
-- Share payload builders across streaming and non-streaming requests.
-- Route model-summary compaction through the same dispatch resolver.
+- Add `ReasoningEffort`, validators, alias canonicalization at input boundaries, and an `effectiveReasoningEffort` helper.
+- Add the complete `ModelDispatch`, stable bounded `ModelWarning`, and call/effect relation validators.
+- Extend `ModelConfiguration`, the four model-bearing event schemas, `ModelCallRequested`, `ModelCallCompleted`, `ContextCompactionRequested`, and every embedded model validator (including refinement-review subagent specifications) with the new required configuration and conditionally required dispatch fields.
+- Set `EVENT_SCHEMA_VERSION` to `2` and `REDUCER_VERSION` to `8`; extend the model-call projection and diagnostic views with reasoning provenance.
+- Add incompatible-store detection with explicit reset guidance, then recreate replay, rebuild, branch, sync, export, and projection fixtures at the new schema version.
 
-### 4. Protocol, defaults, and inheritance
 
-- Extend session model selection and product configuration routes.
-- Add the model-catalog route and client methods.
-- Add per-model profile preferences and provider environment variables.
-- Verify root creation, branch changes, direct/batch child inheritance, explicit child overrides under the existing same-provider/model policy, subagent specifications, refinement children, recursive calls, schedules, and resume.
 
-### 5. TUI and CLI
+### 2. Profile migration ledger and model catalog
 
-- Add `/effort`, `/thinking`, the effort selector, refresh, and direct command forms.
-- Enrich the existing model inspector with discovered model capabilities.
-- Add CLI flags and config commands.
-- Present current effort in model, info, header, transcript, raw, and plain-output surfaces according to available width.
+- Introduce the transactional `profile_schema_migrations` ledger, fresh-profile baseline/bootstrap, cache migration, concurrent/reopen coverage, and separate profile architecture inventory.
+- Implement the `ModelCatalog` fetch/normalize/cache service with the descriptor model, staleness, refresh, endpoint-identity keying, and deletion behavior.
+- Wire catalog `context_window`/`max_tokens` through the model-keyed in-memory capacity resolver as the `"model-catalog"` source, with multi-model, before/after admission, and compaction-trigger tests.
+
+
+
+### 3. AI SDK adapter core, transport factories, and product model identities
+
+- Implement the shared `AiSdkModelProvider` core with the shared options builder, authoritative stream consumption, reasoning-part discard, warning capture, gateway-cost-or-zero mapping, and bounded typed error mapping; instantiate it through the `vercel`, `openai`, and `anthropic` factories with derived base URLs, per-transport credentials, execution endpoint identities, and native-ID derivation.
+- Delete the hand-written OpenAI and Anthropic HTTP adapters and the SSE parser; keep the `ModelProvider` contract, Echo, and programmatic registration.
+- Move onboarding, the picker, and manual entry to canonical `creator/model` IDs on every transport.
+
+
+
+### 4. Dispatch resolution, recovery, and inheritance
+
+- Add the pure complete-dispatch resolver; wire it into agent runs, diagnostic turns, and compaction.
+- Reserve the model executor from generic `tools.request`; retain recursive model access through admitted `rlm` and child-session services.
+- Enforce dispatch presence, endpoint identity, and call/effect/compaction relation equality before execution; implement recovery copy semantics and byte-identical overflow-retry reuse.
+- Pin the complete model configuration and reasoning decision once per compaction request so every hierarchy chunk and recovery step uses identical settings.
+- Route all model-bearing commands (root, select, spawn, batch, recursive, subagent specs, refinement children) through shared normalization and tier validation; verify inheritance and idempotent-retry payload agreement.
+
+
+
+### 5. Protocol, TUI, and CLI
+
+- Extend capabilities, model selection, catalog, and product-config routes plus `AgentClient` methods with capability negotiation.
+- Add `/effort`, `/thinking`, the selector, refresh, picker enrichment, and status surfaces.
+- Add `--effort` and the `config set-effort`/`clear-effort` commands with typed JSON output.
+
+
 
 ### 6. Documentation and release evidence
 
-- Update public API, console SDK, protocol, configuration, user guide, security, mutable-table, and verification documents.
-- Update `AGENTS.md` current implementation status only after the user-visible product path is implemented and verified.
-- Run the deterministic full suite and report external provider rows separately as pass, fail, or skip.
+- Update public API, console SDK, protocol, configuration, user-guide, architecture, data-lifecycle, installation, security, mutable-table, and verification documents; document the pre-release reset boundary; update `AGENTS.md` status and event-evolution policy (AI SDK-only execution across the gateway and direct transports, canonical model IDs, reasoning effort, and unsupported pre-cutover state) only after the user-visible path is implemented and verified.
+- Run the full deterministic suite; report external rows separately as pass, fail, or skip.
+
+
 
 ## Test strategy
 
+
+
+### Fixture strategy
+
+Black-box and integration tests exercise every transport against **local fixture servers** reached through the origin-only overrides: a gateway fixture serving the pinned SDK's derived `/v4/ai` completion/streaming API plus the `/v1/models` catalog API behind `AI_GATEWAY_BASE_URL`; an OpenAI fixture serving the native wire API the pinned `@ai-sdk/openai` emits behind `OPENAI_BASE_URL`; and an Anthropic fixture serving the native wire API the pinned `@ai-sdk/anthropic` emits behind `ANTHROPIC_BASE_URL`. Fixtures assert authentication boundaries plus exact received model IDs and reasoning payloads. The implementer derives each fixture by recording the pinned package's requests against a local listener. Unit-level injected SDK/provider tests cover warning normalization and error classification that a wire fixture cannot reliably induce. Re-record fixtures on any SDK package bump.
+
 ### Domain and replay
 
-- old version-1 model configurations project as effective `provider-default`;
-- every canonical effort validates and invalid strings fail;
-- optional call provenance round-trips through storage, snapshots, sync envelopes, export, and rebuild;
-- a prior-reducer snapshot is rejected and rebuilt from retained events;
-- duplicate events are no-ops and conflicting idempotency payloads fail;
-- stable retries of pre-feature root, child, and recursive commands preserve the retained absent-field payload instead of conflicting with explicit `provider-default`;
-- branch forks retain the effort visible at the fork cursor;
-- a same-model effort change retains correct previous and next configurations.
+- Every new-version configuration contains a canonical effort; every canonical effort validates; invalid strings fail.
+- Model dispatch provenance round-trips through storage, snapshots, sync envelopes, export, and rebuild; model-summary compaction requires it and deterministic compaction omits it.
+- Duplicate events are no-ops; conflicting idempotency payloads and mismatched call/effect/compaction dispatch relations fail.
+- Branch forks retain the effort visible at the fork cursor; a same-model effort change retains correct previous/next configurations.
+- Pre-cutover stores fail with reset guidance; the runtime never silently deletes them.
 
-### Catalog and discovery
 
-- recorded, sanitized fixtures cover valid, missing, malformed, oversized, and unknown-field responses for all three providers;
-- OpenAI IDs merge with catalog reasoning metadata without inferring unknown IDs;
-- Anthropic explicit capabilities override catalog fallbacks;
-- missing Anthropic fields remain unknown;
-- Vercel tags and endpoint `supported_parameters` do not invent exact levels or surface compatibility;
-- official catalog entries do not leak onto custom base URLs without operator configuration;
-- cache hit, expiry, ETag, refresh failure, stale fallback, endpoint separation, reopen, and deletion are deterministic;
-- no secret value appears in cache bytes, events, errors, logs, snapshots, or protocol responses.
 
-### Provider adapters
+### Catalog
 
-- exact request bodies are asserted for every supported level and `provider-default`;
-- unsupported levels make zero network requests;
-- streaming and non-streaming bodies agree;
-- OpenAI sends the correct native effort and output-token fields;
-- Anthropic sends adaptive effort or the exact retained token budget;
-- Anthropic `none` sends disabled thinking only for model/effort combinations that support it;
-- Anthropic rejects invalid budget/output and temperature combinations;
-- Vercel sends the normalized `reasoning` object with `exclude: true` only on compatible Chat Completions mappings and uses the documented Anthropic shape where required;
-- a Vercel model with reasoning tags but no proven compatible surface exposes only `provider-default`;
-- reasoning/thinking blocks never enter committed messages or provisional text;
-- provider-reported usage still debits total reasoning consumption once.
+- Sanitized fixtures cover valid, missing, malformed, oversized, unknown-field, and `reasoning_options: null` responses (including a flagship-model null case).
+- Listed levels come from recognized effort entries, with `toggle` adding `none`; `max` and other undocumented values remain diagnostic-only; toggle-only, budget-only, and tag-without-selectable-options yield unverified; tag-absent yields unsupported.
+- Only `type: "language"` descriptors appear in the product picker; other catalog types remain unavailable.
+- Cache hit, expiry, refresh failure with cached fallback, stale labeling, endpoint-identity separation, reopen idempotency, and profile-deletion behavior are deterministic.
+- Two catalog models with different capacities resolve independently in one process, on gateway and direct transports alike; refresh swaps the in-memory snapshot atomically.
+- Custom base-URL catalog data never merges with official-endpoint data.
+- No secret appears in cache bytes, events, errors, logs, snapshots, or protocol responses.
+
+
+
+### Adapter
+
+- Exact wire payloads are asserted on all three transports for every level and `provider-default`, including the exact native model ID each direct fixture receives; streaming and non-streaming options agree.
+- Native-ID derivation covers dotted Anthropic versions, dotless models passing through unchanged, and verbatim OpenAI suffixes; a direct transport rejects a canonical ID whose creator disagrees with its provider before any network request.
+- Each transport sends only its own credential to its own origin; direct-transport calls record `Usage.costUsd` of `0`.
+- Rejected selections (unlisted level on a listed model; any level on an unsupported model) make zero network requests.
+- An unverified selection may reach the provider; provider rejection fails the effect without changing effort, retrying at another level, or rerouting.
+- Reasoning parts never enter committed messages or provisional output; warnings are captured, scrubbed, bounded, retained, and surfaced once by committed event identity.
+- Directly returned cost populates `Usage.costUsd`; absent or malformed cost records `0`; no generation lookup occurs.
+- A stream error after text deltas, malformed terminal data, or cancellation commits no text prefix. True context overflow maps to the typed overflow error; false-positive response text, authentication, rate limit, routing, and generic failures do not.
+- Echo and programmatic providers still satisfy the contract; programmatic providers without reasoning support work with `provider-default` only.
+
+
 
 ### Runtime and recovery
 
-- ordinary agent runs and diagnostic turns retain identical dispatch semantics;
-- a crash after effect request and before execution reuses the exact dispatch;
-- a crash after `ModelCallRequested` but before `EffectRequested` copies the retained dispatch without discovery;
-- a retained pre-feature pending model effect executes with omitted reasoning and no discovery;
-- a new explicit-effort effect without a dispatch makes zero network requests;
-- a crash during a non-idempotent model call preserves existing unknown-outcome behavior;
-- overflow compaction retries copy the complete prior dispatch byte-for-byte;
-- effort changes are refused during active work;
-- parent, direct/batch child, recursive, subagent-spec, refinement-child, schedule, heartbeat, follow-up, and model-summary compaction paths retain the intended configuration;
-- console-worker restart does not affect effort.
+- Agent runs and diagnostic turns produce identical dispatch semantics; compaction pins one complete dispatch per request and all chunks reuse its model, endpoint, and effort across branch-model changes, catalog refresh, and recovery.
+- Crash after `ModelCallRequested`/before effect request copies the retained dispatch without re-resolution; pending first attempts drain from committed input; non-idempotent interruption preserves unknown-outcome behavior; endpoint drift blocks rather than reroutes a pending effect.
+- A model effect without a complete dispatch fails before network access.
+- Generic `tools.request` cannot address the model executor; admitted `rlm` and child paths still work.
+- Overflow retries reuse the complete dispatch byte-for-byte; effort changes are refused during active work; console-worker restarts do not affect effort.
+- Parent, direct/batch child, recursive, subagent-spec, refinement-child, schedule, heartbeat, and follow-up paths retain intended configurations; explicit same-model child effort changes follow the documented no-ceiling policy.
+- Saving or removing any provider credential never removes or rewrites other credential records.
+
+
 
 ### Protocol and product UI
 
-- HTTP and in-process clients expose identical catalog, selection, and error behavior;
-- `/effort` and `/thinking` are exact aliases;
-- selectors show exact, mapped, fixed, unknown, stale, surface-incompatible, and gateway-normalized states;
-- historical mode, active run, modal ownership, resize, compact height, and non-TTY output are covered;
-- manual model entry works when discovery is unavailable;
-- hidden credential entry is never rendered as catalog data;
-- JSON output uses stable typed fields.
+- HTTP and in-process clients expose identical catalog, selection, and error behavior; clients refuse explicit effort against servers lacking the capability flag.
+- `/effort` and `/thinking` are exact aliases; the selector covers listed, unverified, unsupported, and stale states; ambient-preference degradation shows its notice.
+- Historical mode, active-run guards, modal ownership, resize, compact height, and non-TTY output are covered; manual entry works without the catalog; JSON output uses stable typed fields.
+
+
 
 ### Black-box acceptance
 
 The linked-executable matrix must prove:
 
-1. a fresh repository selects a real product provider/model fixture and an explicit effort without internal IDs;
-2. the fixture endpoint receives the exact provider payload;
-3. a completed run retains call-level reasoning provenance;
-4. detach, service recovery, and resume preserve the branch effort;
-5. a child and recursive model inherit the effort;
+1. a fresh repository selects the gateway fixture model and an explicit effort without internal IDs;
+2. the fixture receives the exact SDK payload including the `reasoning` value;
+3. a completed run retains call-level complete model dispatch provenance;
+4. detach, service recovery, and resume preserve branch effort;
+5. child and recursive work inherit the effort;
 6. `/effort` changes an idle branch and a later call uses the new value;
-7. unsupported and unknown levels fail truthfully without a model request;
-8. Vercel capability output distinguishes gateway-normalized and surface-incompatible models;
-9. an old retained database resumes with provider-default behavior.
+7. an unlisted level and an unsupported model fail truthfully with zero model requests;
+8. an unverified model accepts a standard level and retains the recorded coercion warning when the fixture emits one;
+9. a pre-cutover database fails with explicit reset guidance and is never silently deleted;
+10. a direct-transport session (OpenAI or Anthropic fixture) selects an explicit effort without internal IDs, its native fixture receives the exact derived model ID and reasoning payload, and the run retains the same dispatch provenance as the gateway path.
 
-Credential-gated real-provider tests are additional evidence. They must be explicitly enabled and reported as skipped when credentials or a compatible model are unavailable.
+A credential-gated real-gateway smoke row (real `AI_GATEWAY_API_KEY`, real namespaced model, explicit effort) is additional evidence, explicitly opt-in, and reported as skipped when credentials are absent. Real direct-transport smoke rows are equally opt-in behind `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` and reported as skipped when absent. Cost may be a returned nonnegative value or the documented `0` fallback and is not a pass condition.
 
 ## Acceptance criteria
 
-The feature is complete when:
+- A user can inspect and change effort through the documented terminal and CLI paths, with levels sourced from the gateway catalog.
+- All product model execution flows through the shared AI SDK adapter core and its `vercel`, `openai`, and `anthropic` transport factories; the hand-written wire adapters are removed; Echo and programmatic registration still work.
+- Pre-cutover workspace and profile state is unsupported, fails with explicit reset guidance, and is never silently deleted.
+- Direct transports exhibit the same effort vocabulary, capability tiers, dispatch, warning, and recovery behavior as the gateway, differing only in credential, execution endpoint, and native model ID.
+- Every admitted model call retains its exact immutable complete model dispatch; recovery, compaction, and overflow retries never reinterpret its configuration or reasoning.
+- Coercion and unsupported warnings are recorded and visible; Agencity never substitutes a level itself.
+- `Usage.costUsd` preserves directly returned gateway cost and otherwise remains `0` (always `0` on direct transports); exact delayed cost accounting is not claimed. Model-keyed catalog capacity feeds context-window admission with tested behavior.
+- Unlisted and unsupported selections fail truthfully with no model request; unverified selections are labeled.
+- Provider keys and raw catalog responses never enter durable or user-visible state.
+- The installed black-box path and the full deterministic suite pass; public docs and `AGENTS.md` describe AI SDK-only execution, the per-transport network boundaries, and remaining limits.
 
-- a user can inspect and change effort through the documented terminal and CLI paths;
-- supported levels come from attributable model capability data;
-- old sessions preserve provider-default behavior without history rewrites;
-- direct provider adapters send the documented exact request fields;
-- Vercel normalization is labeled and never presented as exact backing-provider behavior;
-- every admitted model call retains its exact immutable reasoning dispatch;
-- recovery and overflow retries do not reinterpret that dispatch;
-- child and recursive inheritance is deterministic;
-- unsupported, unknown, and surface-incompatible states cause no hidden fallback or network call;
-- provider keys and raw discovery responses never enter durable or user-visible state;
-- the installed black-box path and the full deterministic verification suite pass;
-- public documentation and `AGENTS.md` accurately describe shipped behavior and remaining limits.
+
 
 ## Explicit deferrals
 
-- A user-specified integer thinking-token budget.
-- Per-task automatic effort selection.
-- A delegated maximum-effort policy separate from model and budget policy.
+- Additional AI SDK transports (Google, xAI, Amazon Bedrock, and others) and any transport-fallback or routing policy.
+- Gateway BYOK, provider routing controls (`order`/`only`), and gateway automatic caching.
+- A user-specified integer thinking-token budget (`reasoning_options` `budget_tokens` entries are ignored in this release).
+- Environment-variable effort control.
+- Per-task automatic effort selection; a delegated maximum-effort policy.
 - Provider reasoning summaries and hidden-reasoning display.
 - A normalized cross-provider `reasoningTokens` usage field.
-- Automatic catalog updates outside ordinary package releases.
-- Model benchmark recommendations or cost/latency forecasts.
+- Embeddings, image, and other non-language gateway model types in the product picker.
+- Catalog-only reasoning levels outside the documented AI SDK top-level vocabulary, including `max`.
+- Delayed generation lookup, exact cost reconciliation, and strict cost-budget enforcement when the completed response omits cost.
+- Migration or compatibility support for pre-cutover workspace, profile, branch, effect, subagent-specification, or event data.
+- A dedicated reasoning-progress indicator beyond the existing model-working run status.

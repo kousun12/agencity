@@ -90,6 +90,9 @@ export class GoalService {
       if (!gate.name?.trim() || !gate.executor?.trim() || !gate.operation?.trim()) {
         throw new ValidationError("Completion gates require name, executor, and operation");
       }
+      if (gate.executor === "model") {
+        throw new ValidationError("Completion gates cannot invoke the model executor directly; use a typed recursive model or agent task");
+      }
       const gateId = `${goalId}-gate-${index + 1}`;
       return {
         sessionId, branchId, type: "GoalGateAdded" as const, producer,

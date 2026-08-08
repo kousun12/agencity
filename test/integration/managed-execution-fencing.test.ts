@@ -56,7 +56,7 @@ describe("managed canonical and outbox fencing", () => {
     const effectId = "effect-fenced";
     await storage.appendEvents([{
       sessionId, branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "effect:fenced",
-      payload: { effectId, executor: "model", operation: "complete", input: {}, idempotencyKey: "effect:fenced", idempotent: false },
+      payload: { effectId, executor: "shell", operation: "run", input: { command: "printf fenced" }, idempotencyKey: "effect:fenced", idempotent: false },
     }], proof(workspaceB, rootB));
     await expect(storage.claimEffect(effectId, "stale-runner", 1_000, proof(workspaceA, rootA))).rejects.toMatchObject({ code: "EXECUTION_OWNERSHIP_CONFLICT" });
     expect((await storage.claimEffect(effectId, "winner", 1_000, proof(workspaceB, rootB)))?.owner).toBe("winner");

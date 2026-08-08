@@ -7,6 +7,8 @@
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related backlog:** [FU-005 protocol-backed TUI and FU-012 durable agent families](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md)
 
+**Superseded activity detail:** This implemented plan records the pre-formal-tool family projection. [ADR 0010](../docs/decisions/0010-formal-model-tool-contracts.md) removes `waiting`, `waiting_for_user`, `permission_required`, and reply-through-run-input behavior. The formal-tool cutover maps blocked/failed outcomes to `attention`; a later user message starts an ordinary run on the selected branch.
+
 ## Summary
 
 Agencity retains parent and child sessions, exact family relationships, child tasks, mailbox activity, and branch coordinates. The full-screen terminal currently presents that information as passive task rows in the conversation and through the read-only `/agents` and `/tree` inspectors. It does not provide a selected agent, a persistent direct-child summary, or keyboard navigation between a parent and its children.

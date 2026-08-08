@@ -10,5 +10,6 @@ This directory contains Agencity's durable implementation plans. `AGENTS.md` is 
 - [Ergonomic agent-family navigation plan](./2026-08-07-ergonomic-agent-family-navigation-plan.md) — add a persistent child summary and keyboard parent/child navigation to the protocol-backed TUI.
 - [Rich terminal rendering and layout plan](./2026-08-07-rich-terminal-rendering-and-layout-plan.md) — add structured Markdown and cell rendering, syntax color, a corrected bottom dock, and contextual inspector sizing.
 - [Reasoning effort and model capabilities plan](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md) — add durable effort selection, model-specific capability discovery, provider request mappings, and terminal controls.
+- [Formal model tool contracts plan](./2026-08-07-formal-model-tool-contracts-plan.md) — replace assistant-text JSON actions with required `bun_console` and `finish` tools plus formal contracts for other structured model results.
 
 New implementation plans belong here rather than at the repository root. Keep links relative to their destination and update this index when adding, renaming, or retiring a plan.

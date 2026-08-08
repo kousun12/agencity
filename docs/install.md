@@ -79,10 +79,10 @@ Direct commands remain available:
 
 ```text
 /model login openai
-/model openai:gpt-5.6-sol
+/model openai:openai/gpt-5.6-sol
 
 /model login anthropic
-/model anthropic:claude-fable-5
+/model anthropic:anthropic/claude-fable-5
 
 /model login vercel
 /model vercel:openai/gpt-5.6-sol
@@ -90,7 +90,7 @@ Direct commands remain available:
 
 Stored provider keys live in the owner-only profile `auth.json`, separate from profile preferences and canonical workspace history. Environment fallbacks are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY`. A stored key takes precedence.
 
-The model identifier uses `provider:model`; the model portion may contain `/`. `--model PROVIDER:MODEL` selects a model for new work. Non-interactive new work fails with setup guidance until both a usable credential and model are available.
+The model identifier uses `provider:creator/model`; the model portion is the canonical Vercel AI Gateway catalog ID. `--model PROVIDER:CREATOR/MODEL` and optional `--effort LEVEL` select a model configuration for new work. Non-interactive new work fails with setup guidance until both a usable credential and model are available.
 
 There is no product demo mode or credential-free provider fallback. Internal deterministic providers are test-only and cannot be selected through the product CLI or `/model`.
 

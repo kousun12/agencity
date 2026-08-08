@@ -62,9 +62,9 @@ describe("FU-009 installed no-ID release transcript", () => {
     expect(`${missing.stdout}${missing.stderr}`).not.toContain("Echo:");
     await world.command(["service", "shutdown", "--json"]);
 
-    const configured = await world.command(["config", "set-model", "openai:fixture-v1", "--json"], fixture.environment());
+    const configured = await world.command(["config", "set-model", "openai:openai/fixture-v1", "--json"], fixture.environment());
     expect(configured.code).toBe(0);
-    expect(configured.stdout).toContain("openai:fixture-v1");
+    expect(configured.stdout).toContain("openai:openai/fixture-v1");
 
     const completed = await world.command([
       "run", "--json",

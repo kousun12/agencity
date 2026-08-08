@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentState, ModelConfiguration } from "../domain/index.ts";
+import type { AgentEvent, AgentState, ModelConfigurationInput, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
 import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
@@ -29,6 +29,7 @@ export interface ProtocolCapabilities {
   readonly historicalProjection: boolean;
   readonly managedService: boolean;
   readonly productCatalog: boolean;
+  readonly reasoningEffortSelection?: boolean;
   readonly sync: Record<string, unknown>;
   readonly providers: ModelProviderDescriptor[];
 }
@@ -72,6 +73,7 @@ export class AgentClient {
   readonly baseUrl: string;
   readonly bearerToken: string | undefined;
   readonly #pendingRequests = new Set<AbortController>();
+  #capabilitiesSnapshot: Promise<ProtocolCapabilities> | null = null;
   constructor(baseUrlOrTransport: string | ProtocolTransport, bearerToken?: string) {
     this.transport = typeof baseUrlOrTransport === "string"
       ? new HttpProtocolTransport(baseUrlOrTransport, bearerToken)
@@ -83,23 +85,63 @@ export class AgentClient {
     for (const controller of this.#pendingRequests) controller.abort(new DOMException(reason, "AbortError"));
   }
   health(): Promise<{ ok: boolean; authenticated?: boolean; workspaceId?: string; instanceId?: string; appVersion?: string; protocolMin?: number; protocolMax?: number; configHash?: string }> { return this.#json("/health"); }
-  capabilities(): Promise<ProtocolCapabilities> { return this.#json("/capabilities"); }
+  capabilities(): Promise<ProtocolCapabilities> {
+    if (this.#capabilitiesSnapshot === null) {
+      const request = this.#json<ProtocolCapabilities>("/capabilities");
+      this.#capabilitiesSnapshot = request;
+      void request.catch(() => {
+        if (this.#capabilitiesSnapshot === request) this.#capabilitiesSnapshot = null;
+      });
+    }
+    return this.#capabilitiesSnapshot;
+  }
+  async requireCapability(capability: "reasoningEffortSelection"): Promise<void> {
+    if ((await this.capabilities())[capability] !== true) {
+      throw new ProtocolClientError("CAPABILITY_UNAVAILABLE", `Server does not support ${capability}`, 501);
+    }
+  }
+  async #compatibleModel<T>(model: T): Promise<T> {
+    if (!model || typeof model !== "object" || Array.isArray(model)) return model;
+    const record = model as Record<string, unknown>;
+    const effort = record.reasoningEffort;
+    if (effort === undefined) return model;
+    if (effort === "provider-default" || effort === "default") {
+      const legacy = { ...record };
+      delete legacy.reasoningEffort;
+      return legacy as T;
+    }
+    await this.requireCapability("reasoningEffortSelection");
+    return model;
+  }
   serviceStatus(): Promise<unknown> { return this.#json("/service/status"); }
   shutdownService(): Promise<unknown> { return this.#post("/service/shutdown"); }
   serviceAgents(): Promise<any[]> { return this.#json("/service/agents"); }
   productSessions(): Promise<any[]> { return this.#json("/product/sessions"); }
   productSelect(target?: string, branchId?: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/product/select", { ...(target === undefined ? {} : { target }), ...(branchId === undefined ? {} : { branchId }) }); }
   productRename(sessionId: string, branchId: string | undefined, name: string): Promise<unknown> { return this.#post("/product/rename", { sessionId, ...(branchId === undefined ? {} : { branchId }), name }); }
-  productConfig(): Promise<{ defaultModel: string | null; credentialReferences: unknown[]; providers?: ModelProviderDescriptor[] }> { return this.#json("/product/config"); }
+  productConfig(model?: string): Promise<{ defaultModel: string | null; catalogEndpointId: string; catalogOrigin: string; executionOrigins: Record<string, string>; selectedModelEffortPreference: ReasoningEffort | null; credentialReferences: unknown[]; providers?: ModelProviderDescriptor[] }> { return this.#json(`/product/config${model ? `?model=${encodeURIComponent(model)}` : ""}`); }
   productSetModel(model: string | null): Promise<unknown> { return this.#post("/product/config/model", { model }); }
+  async productSetReasoningEffort(model: string, effort: ReasoningEffort | null): Promise<unknown> {
+    await this.requireCapability("reasoningEffortSelection");
+    return this.#post("/product/config/reasoning-effort", { model, effort });
+  }
   productSetProviderKey(provider: string, apiKey: string | null): Promise<unknown> { return this.#post("/product/config/provider-key", { provider, apiKey }); }
   productCredentialReference(provider: string, reference: string, label: string): Promise<unknown> { return this.#post("/product/config/credential-reference", { provider, reference, label }); }
   stopSession(sessionId: string, branchId: string, reason?: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/stop?branch=${branchId}`, reason === undefined ? {} : { reason }); }
   modelProviders(): Promise<ModelProviderDescriptor[]> { return this.#json("/model-providers"); }
-  createSession(workspaceId: string, options: { model?: unknown; budget?: unknown; sessionName?: string; branchName?: string } = {}): Promise<{ sessionId: string; branchId: string }> { return this.#post("/sessions", { workspaceId, ...options }); }
+  async createSession(workspaceId: string, options: { model?: unknown; budget?: unknown; sessionName?: string; branchName?: string } = {}): Promise<{ sessionId: string; branchId: string }> {
+    const model = await this.#compatibleModel(options.model);
+    return this.#post("/sessions", { workspaceId, ...options, ...(model === undefined ? {} : { model }) });
+  }
   snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
   message(sessionId: string, branchId: string, content: string): Promise<AgentEvent> { return this.#post(`/sessions/${sessionId}/messages?branch=${branchId}`, { content }); }
-  selectModel(sessionId: string, branchId: string, model: ModelConfiguration): Promise<unknown> { return this.#post(`/sessions/${sessionId}/model?branch=${branchId}`, { model }); }
+  async selectModel(sessionId: string, branchId: string, model: ModelConfigurationInput): Promise<unknown> {
+    return this.#post(`/sessions/${sessionId}/model?branch=${branchId}`, { model: await this.#compatibleModel(model) });
+  }
+  async modelCatalog(refresh = false): Promise<{ endpointId?: string; origin?: string; status?: "refreshed" | "cached-fallback" | "unavailable"; descriptors: ModelDescriptor[]; error?: string }> {
+    await this.requireCapability("reasoningEffortSelection");
+    return refresh ? this.#post("/model-catalog/refresh") : this.#json("/model-catalog");
+  }
   startRun(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs?branch=${branchId}`, typeof input === "string" ? { task: input } : input); }
   run(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#json(`/sessions/${sessionId}/runs/${runId}?branch=${branchId}`); }
   resumeRun(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/resume?branch=${branchId}`); }
@@ -216,8 +258,19 @@ export class AgentClient {
   inspectUnknownEffect(sessionId: string, branchId: string, effectId: string): Promise<UnknownEffectView> { return this.#json(`/sessions/${sessionId}/effects/${encodeURIComponent(effectId)}/reconciliation?branch=${branchId}`); }
   reconcileUnknownEffect(sessionId: string, branchId: string, effectId: string, input: RecordEffectReconciliationInput): Promise<EffectReconciliationView> { return this.#post(`/sessions/${sessionId}/effects/${encodeURIComponent(effectId)}/reconciliation?branch=${branchId}`, input); }
 
-  spawn(sessionId: string, branchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> { return this.#post(`/sessions/${sessionId}/agents?branch=${branchId}`, typeof input === "string" ? { task: input } : input); }
-  spawnMany(sessionId: string, branchId: string, inputs: readonly (SpawnAgentInput | string)[]): Promise<SubagentHandle[]> { return this.#post(`/sessions/${sessionId}/agents/batch?branch=${branchId}`, { inputs }); }
+  async spawn(sessionId: string, branchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> {
+    if (typeof input === "string") return this.#post(`/sessions/${sessionId}/agents?branch=${branchId}`, { task: input });
+    const model = await this.#compatibleModel(input.model);
+    return this.#post(`/sessions/${sessionId}/agents?branch=${branchId}`, { ...input, ...(model === undefined ? {} : { model }) });
+  }
+  async spawnMany(sessionId: string, branchId: string, inputs: readonly (SpawnAgentInput | string)[]): Promise<SubagentHandle[]> {
+    const compatible = await Promise.all(inputs.map(async input => {
+      if (typeof input === "string") return input;
+      const model = await this.#compatibleModel(input.model);
+      return { ...input, ...(model === undefined ? {} : { model }) };
+    }));
+    return this.#post(`/sessions/${sessionId}/agents/batch?branch=${branchId}`, { inputs: compatible });
+  }
   tasks(sessionId: string, branchId: string): Promise<TaskRecord[]> { return this.#json(`/sessions/${sessionId}/tasks?branch=${branchId}`); }
   cancelTask(sessionId: string, branchId: string, taskId: string, reason?: string): Promise<TaskRecord> { return this.#post(`/sessions/${sessionId}/tasks/${taskId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }
   agents(sessionId: string, branchId: string): Promise<FamilyListResult> { return this.#json(`/sessions/${sessionId}/agents?branch=${branchId}`); }
@@ -229,7 +282,11 @@ export class AgentClient {
 
   importDocument(sessionId: string, branchId: string, input: ImportDocumentInput): Promise<DocumentHandle> { return this.#post(`/sessions/${sessionId}/documents?branch=${branchId}`, input); }
   createInputSet(sessionId: string, branchId: string, input: CreateInputSetInput): Promise<InputSetHandle> { return this.#post(`/sessions/${sessionId}/input-sets?branch=${branchId}`, input); }
-  startModel(sessionId: string, branchId: string, input: StartRecursiveModelInput | string): Promise<RecursiveModelHandle> { return this.#post(`/sessions/${sessionId}/models?branch=${branchId}`, typeof input === "string" ? { prompt: input } : input); }
+  async startModel(sessionId: string, branchId: string, input: StartRecursiveModelInput | string): Promise<RecursiveModelHandle> {
+    if (typeof input === "string") return this.#post(`/sessions/${sessionId}/models?branch=${branchId}`, { prompt: input });
+    const model = await this.#compatibleModel(input.model);
+    return this.#post(`/sessions/${sessionId}/models?branch=${branchId}`, { ...input, ...(model === undefined ? {} : { model }) });
+  }
   model(handleId: string): Promise<RecursiveModelHandle> { return this.#json(`/models/${handleId}`); }
   cancelModel(handleId: string, reason?: string): Promise<RecursiveModelHandle> { return this.#post(`/models/${handleId}/cancel`, reason === undefined ? {} : { reason }); }
 
@@ -289,7 +346,10 @@ export class AgentClient {
   removeSkill(sessionId:string,branchId:string,reference:string):Promise<SkillManagementView>{return this.#post(`/sessions/${sessionId}/skills/${encodeURIComponent(reference)}/remove?branch=${branchId}`,{});}
   invokeSkill(sessionId: string, branchId: string, entryId: string, input: JsonValue, options: InvokeSkillOptions = {}): Promise<SkillInvocationResult> { return this.#post(`/sessions/${sessionId}/skills/${encodeURIComponent(entryId)}/invoke?branch=${branchId}`, { input, options }); }
   testSkill(sessionId: string, branchId: string, entryId: string): Promise<SkillTestReport> { return this.#post(`/sessions/${sessionId}/skills/${encodeURIComponent(entryId)}/test?branch=${branchId}`, {}); }
-  spawnSpec(sessionId: string, branchId: string, entryId: string, input: SpawnSpecInput = {}): Promise<SpecSubagentHandle> { return this.#post(`/sessions/${sessionId}/specs/${entryId}/spawn?branch=${branchId}`, input); }
+  async spawnSpec(sessionId: string, branchId: string, entryId: string, input: SpawnSpecInput = {}): Promise<SpecSubagentHandle> {
+    const model = await this.#compatibleModel(input.model);
+    return this.#post(`/sessions/${sessionId}/specs/${entryId}/spawn?branch=${branchId}`, { ...input, ...(model === undefined ? {} : { model }) });
+  }
 
   syncStatus(): Promise<SyncStatusView> { return this.#json("/sync/status"); }
   syncNow(): Promise<SyncCycleResult> { return this.#post("/sync"); }

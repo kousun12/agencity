@@ -4,12 +4,16 @@ import {
   ValidationError,
   newId,
   projectEvents,
+  resolveModelDispatch,
+  STANDARD_UNVERIFIED_REASONING_LEVELS,
   type AgentState,
   type BudgetLimits,
   type ContextCapacityProvenance,
   type EffectOutcome,
   type EventPayloads,
   type JsonValue,
+  type ModelDispatch,
+  type ModelWarning,
   type Usage,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
@@ -27,19 +31,29 @@ import {
 } from "./context-window.ts";
 import { estimateContextWindow } from "./compaction-core.ts";
 
-interface ModelOutput { text: string; finishReason: string; usage: Usage }
+interface ModelOutput { text: string; finishReason: string; usage: Usage; warnings?: ModelWarning[] }
 
 function parseOutput(value: JsonValue | undefined): ModelOutput {
   if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.text !== "string" ||
       typeof value.finishReason !== "string" || !value.usage || typeof value.usage !== "object" ||
       Array.isArray(value.usage)) throw new ValidationError("Model executor returned an invalid response");
   const usage = value.usage;
-  if (typeof usage.inputTokens !== "number" || typeof usage.outputTokens !== "number" ||
-      typeof usage.costUsd !== "number") throw new ValidationError("Model usage is invalid");
+  if (typeof usage.inputTokens !== "number" || !Number.isFinite(usage.inputTokens) || usage.inputTokens < 0 ||
+      typeof usage.outputTokens !== "number" || !Number.isFinite(usage.outputTokens) || usage.outputTokens < 0 ||
+      typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0) throw new ValidationError("Model usage is invalid");
+  if (Array.isArray(value.warnings) && value.warnings.length > 8) throw new ValidationError("Model warnings exceed their count bound");
+  const warnings = Array.isArray(value.warnings) ? value.warnings.map((warning) => {
+    if (!warning || typeof warning !== "object" || Array.isArray(warning) ||
+        !["coerced", "unsupported", "provider", "truncated"].includes(String(warning.kind)) ||
+        typeof warning.message !== "string" ||
+        new TextEncoder().encode(warning.message).byteLength > 1_024) throw new ValidationError("Model warnings are invalid");
+    return { kind: warning.kind as ModelWarning["kind"], message: warning.message };
+  }) : undefined;
   return {
     text: value.text,
     finishReason: value.finishReason,
     usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd },
+    ...(warnings?.length ? { warnings } : {}),
   };
 }
 
@@ -122,24 +136,25 @@ export class ModelLoop {
 
     let rejectedEstimate = estimateContextWindow(materialized.context).estimatedTokens;
     let priorCallId: string | undefined;
+    const modelDispatch: ModelDispatch = this.modelExecutor?.resolveDispatch(state.model) ?? fallbackDispatch(state);
     for (let attempt = 1; attempt <= 1 + 2; attempt++) {
       const callId = `legacy-turn-${turnId}-call-${attempt}`;
       const effectId = `legacy-turn-${turnId}-effect-${attempt}`;
       const effectKey = `model:${callId}`;
-      await this.storage.appendEvents([{
+      await this.storage.appendEvents([...(attempt === 1 ? [{
         sessionId, branchId, type: "SessionStatusChanged", producer: "supervisor",
         idempotencyKey: `turn-running:${turnId}:${attempt}`, payload: { status: "running" },
-      }, {
+      } as const] : []), {
         sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
         idempotencyKey: `model-call:${callId}`,
         payload: {
-          callId, contextId: materialized.contextId, effectId, provider: state.model.provider, model: state.model.model,
+          callId, contextId: materialized.contextId, effectId, modelDispatch,
           attempt, ...(priorCallId === undefined ? {} : { retryOfCallId: priorCallId }), contextWindow: window.provenance,
         },
       }, {
         sessionId, branchId, type: "EffectRequested", producer: "supervisor",
         idempotencyKey: effectKey,
-        payload: { effectId, executor: "model", operation: "complete", input: { callId, context: materialized.context, configuration: state.model as unknown as JsonValue }, idempotencyKey: effectKey, idempotent: false },
+        payload: { effectId, executor: "model", operation: "complete", input: { callId, context: materialized.context, modelDispatch: modelDispatch as unknown as JsonValue }, idempotencyKey: effectKey, idempotent: false },
       }]);
       const execution = await this.outbox.run(effectId);
       if (execution.outcome === "succeeded") {
@@ -147,9 +162,11 @@ export class ModelLoop {
         await this.#finalizeSucceeded(sessionId, branchId, callId, output, Math.round(performance.now() - started));
         return { outcome: "succeeded", message: output.text };
       }
-      await this.#finalizeTerminated(sessionId, branchId, callId, execution.outcome, execution.error);
       const classification = providerClassification(execution.output, state.model.provider, state.model.model, execution.outcome);
-      if (!this.compactions || classification.code !== ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) {
+      const overflow = this.compactions !== undefined &&
+        classification.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow;
+      await this.#finalizeTerminated(sessionId, branchId, callId, execution.outcome, execution.error, !overflow);
+      if (!overflow) {
         return { outcome: execution.outcome, ...(execution.error === undefined ? {} : { error: execution.error }) };
       }
       const compacted = await this.compactions.compact(sessionId, branchId, {
@@ -157,14 +174,20 @@ export class ModelLoop {
         idempotencyKey: `legacy-turn-overflow:${turnId}:${attempt}`,
         retainRecentMessages: Math.max(1, AUTOMATIC_COMPACTION_RECENT_MESSAGES - attempt), capacity: window.provenance,
       });
-      if (compacted.status !== "completed") return { outcome: execution.outcome, error: compacted.error ?? execution.error ?? "Provider overflow compaction failed" };
+      if (compacted.status !== "completed") {
+        await this.#markIdle(sessionId, branchId, callId, "provider overflow compaction failed");
+        return { outcome: execution.outcome, error: compacted.error ?? execution.error ?? "Provider overflow compaction failed" };
+      }
       const next = await this.contexts.materialize(sessionId, branchId, {
         contextId: `legacy-turn-${turnId}-overflow-context-${attempt}`,
         idempotencyKey: `legacy-turn-overflow-context:${turnId}:${attempt}`,
       });
       const nextEstimate = estimateContextWindow(next.context).estimatedTokens;
       const retry = planContextWindowOverflowRetry({ classification, retriesAlreadyAttempted: attempt - 1, rejectedEstimatedInputTokens: rejectedEstimate, nextEstimatedInputTokens: nextEstimate });
-      if (!retry.retry) return { outcome: execution.outcome, error: execution.error ?? `Provider overflow retry refused: ${retry.reason}` };
+      if (!retry.retry) {
+        await this.#markIdle(sessionId, branchId, callId, `provider overflow retry refused: ${retry.reason}`);
+        return { outcome: execution.outcome, error: execution.error ?? `Provider overflow retry refused: ${retry.reason}` };
+      }
       materialized = next;
       rejectedEstimate = nextEstimate;
       priorCallId = callId;
@@ -254,6 +277,7 @@ export class ModelLoop {
     callId: string,
     outcome: Exclude<EffectOutcome, "succeeded">,
     error?: string,
+    markIdle = true,
   ): Promise<void> {
     await this.storage.appendEvents([{
       sessionId,
@@ -262,13 +286,24 @@ export class ModelLoop {
       producer: "supervisor",
       idempotencyKey: `model-terminal:${callId}`,
       payload: { callId, outcome, ...(error === undefined ? {} : { error }) },
-    }, {
+    }, ...(markIdle ? [{
       sessionId,
       branchId,
       type: "SessionStatusChanged",
       producer: "supervisor",
       idempotencyKey: `turn-idle:${callId}`,
       payload: { status: "idle", reason: `model ${outcome}` },
+    } as const] : [])]);
+  }
+
+  async #markIdle(sessionId: string, branchId: string, callId: string, reason: string): Promise<void> {
+    await this.storage.appendEvents([{
+      sessionId,
+      branchId,
+      type: "SessionStatusChanged",
+      producer: "supervisor",
+      idempotencyKey: `turn-idle:${callId}`,
+      payload: { status: "idle", reason },
     }]);
   }
 
@@ -304,7 +339,7 @@ export class ModelLoop {
       type: "ModelCallCompleted",
       producer: "supervisor",
       idempotencyKey: `model-complete:${callId}`,
-      payload: { callId, responseMessageId: messageId, finishReason: output.finishReason, usage: output.usage },
+      payload: { callId, responseMessageId: messageId, finishReason: output.finishReason, usage: output.usage, ...(output.warnings === undefined ? {} : { warnings: output.warnings }) },
     }, {
       sessionId,
       branchId,
@@ -353,6 +388,18 @@ function providerClassification(
     if (value.provider === provider && value.model === model && value.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) return { provider, model, code: ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow };
   }
   return { provider, model, code: ProviderModelErrorCode.Generic };
+}
+
+function fallbackDispatch(state: AgentState): ModelDispatch {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(JSON.stringify({ provider: state.model.provider, model: state.model.model, fallback: true }));
+  return resolveModelDispatch({
+    configuration: state.model,
+    capability: state.model.reasoningEffort === "provider-default"
+      ? { status: "unsupported", levels: [] }
+      : { status: "unverified", levels: STANDARD_UNVERIFIED_REASONING_LEVELS },
+    catalogDigest: hash.digest("hex"),
+  });
 }
 
 function assertBudgetAvailable(state: AgentState): void {

@@ -6,6 +6,8 @@ import {
   CapabilityUnavailableError,
   NotFoundError,
   projectEvents,
+  resolveModelDispatch,
+  STANDARD_UNVERIFIED_REASONING_LEVELS,
   ValidationError,
   type AgentAction,
   type AgentEvent,
@@ -18,6 +20,8 @@ import {
   type ContextCapacityProvenance,
   type EventPayloads,
   type JsonValue,
+  type ModelDispatch,
+  type ModelWarning,
   type Usage,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
@@ -32,7 +36,7 @@ import {
   type ModelContextWindowConfiguration, type ProviderModelErrorClassification,
 } from "./context-window.ts";
 
-interface ModelOutput { readonly text: string; readonly finishReason: string; readonly usage: Usage }
+interface ModelOutput { readonly text: string; readonly finishReason: string; readonly usage: Usage; readonly warnings?: ModelWarning[] }
 
 export interface StartAgentRunInput {
   readonly task: string;
@@ -525,6 +529,10 @@ export class AgentRunService {
       ? `agent-run-model:${run.id}:${step.ordinal}`
       : `agent-run-model:${run.id}:${step.ordinal}:attempt:${attempt.attempt}`;
     if (!current.modelCalls[attempt.callId]) {
+      const modelDispatch: ModelDispatch = attempt.retryOfCallId === undefined
+        ? this.modelExecutor?.resolveDispatch(state.model) ?? fallbackDispatch(state)
+        : current.modelCalls[attempt.retryOfCallId]?.modelDispatch
+          ?? (() => { throw new ValidationError("Overflow retry is missing its retained prior model dispatch"); })();
       await this.storage.appendEvents([{
         sessionId, branchId, type: "SessionStatusChanged", producer: "supervisor",
         idempotencyKey: `agent-run-session-running:${attempt.callId}`, payload: { status: "running" },
@@ -533,17 +541,18 @@ export class AgentRunService {
         idempotencyKey: `agent-run-model-call:${attempt.callId}`,
         payload: {
           callId: attempt.callId, contextId: attempt.contextId, effectId: attempt.effectId,
-          provider: state.model.provider, model: state.model.model, attempt: attempt.attempt,
+          modelDispatch, attempt: attempt.attempt,
           ...(attempt.retryOfCallId === undefined ? {} : { retryOfCallId: attempt.retryOfCallId }),
           contextWindow: attempt.contextWindow,
         },
       }]);
       current = await this.#state(sessionId, branchId);
     }
+    const retainedDispatch = current.modelCalls[attempt.callId]!.modelDispatch;
     if (!current.effects[attempt.effectId]) {
       const requestedEffectId = await this.outbox.request({
         sessionId, branchId, executor: "model", operation: "complete",
-        input: { callId: attempt.callId, context, configuration: state.model as unknown as JsonValue },
+        input: { callId: attempt.callId, context, modelDispatch: retainedDispatch as unknown as JsonValue },
         idempotencyKey: effectKey, idempotent: false,
       });
       if (requestedEffectId !== attempt.effectId) throw new ValidationError("Agent run model effect identity is not stable");
@@ -574,7 +583,7 @@ export class AgentRunService {
     }
     if (call.status !== "succeeded") {
       const effect = current.effects[attempt.effectId];
-      const classification = providerClassification(effect?.output, state.model.provider, state.model.model, call.status);
+      const classification = providerClassification(effect?.output, call.modelDispatch.configuration.provider, call.modelDispatch.configuration.model, call.status);
       if (this.compactions && classification.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) {
         const compacted = await this.compactions.compact(sessionId, branchId, {
           strategy: "deterministic-extractive-v1", reason: "provider-overflow", requestedBy: "supervisor",
@@ -859,7 +868,7 @@ export class AgentRunService {
     }, {
       sessionId, branchId, type: "ModelCallCompleted", producer: "supervisor",
       idempotencyKey: `model-complete:${callId}`,
-      payload: { callId, finishReason: output.finishReason, usage: output.usage },
+      payload: { callId, finishReason: output.finishReason, usage: output.usage, ...(output.warnings === undefined ? {} : { warnings: output.warnings }) },
     }, {
       sessionId, branchId, type: "BudgetDebited", producer: "supervisor",
       idempotencyKey: `budget:${callId}`,
@@ -1011,7 +1020,20 @@ function parseOutput(value: JsonValue | undefined): ModelOutput {
       typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0) {
     throw new ValidationError("Model usage is invalid");
   }
-  return { text: value.text, finishReason: value.finishReason, usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd } };
+  if (Array.isArray(value.warnings) && value.warnings.length > 8) throw new ValidationError("Model warnings exceed their count bound");
+  const warnings = Array.isArray(value.warnings) ? value.warnings.map((warning) => {
+    if (!warning || typeof warning !== "object" || Array.isArray(warning) ||
+        !["coerced", "unsupported", "provider", "truncated"].includes(String(warning.kind)) ||
+        typeof warning.message !== "string" ||
+        new TextEncoder().encode(warning.message).byteLength > 1_024) throw new ValidationError("Model warnings are invalid");
+    return { kind: warning.kind as ModelWarning["kind"], message: warning.message };
+  }) : undefined;
+  return {
+    text: value.text,
+    finishReason: value.finishReason,
+    usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd },
+    ...(warnings?.length ? { warnings } : {}),
+  };
 }
 
 function providerClassification(
@@ -1026,6 +1048,18 @@ function providerClassification(
     if (value.provider === provider && value.model === model && value.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) return { provider, model, code: ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow };
   }
   return { provider, model, code: ProviderModelErrorCode.Generic };
+}
+
+function fallbackDispatch(state: AgentState): ModelDispatch {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(JSON.stringify({ provider: state.model.provider, model: state.model.model, fallback: true }));
+  return resolveModelDispatch({
+    configuration: state.model,
+    capability: state.model.reasoningEffort === "provider-default"
+      ? { status: "unsupported", levels: [] }
+      : { status: "unverified", levels: STANDARD_UNVERIFIED_REASONING_LEVELS },
+    catalogDigest: hash.digest("hex"),
+  });
 }
 
 function effectElapsedMs(events: readonly AgentEvent[], effectId: string): number {

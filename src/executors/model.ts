@@ -1,12 +1,44 @@
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGateway } from "@ai-sdk/gateway";
+import { createOpenAI } from "@ai-sdk/openai";
+import { generateText, streamText, type LanguageModel, type ModelMessage } from "ai";
 import type { JsonValue } from "../domain/json.ts";
-import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, ValidationError, type AgentAction, type ModelConfiguration, type Usage } from "../domain/index.ts";
+import {
+  AGENT_ACTION_PROTOCOL,
+  AGENT_ACTION_VERSION,
+  STANDARD_UNVERIFIED_REASONING_LEVELS,
+  ValidationError,
+  assertReasoningSelection,
+  normalizeReasoningEffort,
+  resolveModelDispatch,
+  validateModelDispatch,
+  type AgentAction,
+  type ModelConfiguration,
+  type ModelConfigurationInput,
+  type ModelDescriptor,
+  type ModelDispatch,
+  type ModelReasoningCapability,
+  type ModelWarning,
+  type Usage,
+} from "../domain/index.ts";
 import type { EffectExecutor, ExecutionResult } from "./contract.ts";
 import { result } from "./contract.ts";
+import { scrubText } from "../security/index.ts";
 
-export interface ModelResponse { readonly text: string; readonly finishReason: string; readonly usage: Usage; }
+// Agencity retains normalized warnings as attributable model-call provenance.
+// Disable the SDK's process-global stderr duplicate, which is neither durable nor scrubbed.
+(globalThis as { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
+
+export interface ModelResponse {
+  readonly text: string;
+  readonly finishReason: string;
+  readonly usage: Usage;
+  readonly warnings?: readonly ModelWarning[];
+}
 export interface ModelOutputDelta { readonly text: string; }
 export interface ModelProviderCapabilities {
   readonly streaming: boolean;
+  readonly reasoningControl?: "none" | "normalized";
   readonly contextWindowTokens?: number;
   readonly contextCapacitySource?: "provider-metadata" | "model-catalog" | "operator-configuration";
 }
@@ -20,16 +52,15 @@ export interface ModelProviderDescriptor {
 }
 export interface ModelProvider {
   readonly name: string;
-  /** A missing declaration is deliberately treated as non-streaming. */
   readonly capabilities?: ModelProviderCapabilities;
   readonly displayName?: string;
+  /** Present only on product transports whose origin is part of durable dispatch. */
+  readonly executionEndpointId?: string;
+  readonly executionOrigin?: string;
+  readonly productTransport?: boolean;
   availability?(): Pick<ModelProviderDescriptor, "usable" | "credentialSource" | "remediation">;
   normalizeModel?(model: string): string;
   complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse>;
-  /**
-   * Optional incremental completion. Implementations opt in only by declaring
-   * capabilities.streaming=true; the returned response remains authoritative.
-   */
   stream?(
     context: JsonValue,
     configuration: ModelConfiguration,
@@ -38,10 +69,20 @@ export interface ModelProvider {
   ): Promise<ModelResponse>;
 }
 
+export interface ModelCatalogSnapshot {
+  readonly endpointId: string;
+  descriptor(model: string): ModelDescriptor;
+}
+
 export class EchoModelProvider implements ModelProvider {
   readonly name = "echo";
   readonly displayName = "Echo (internal test fixture; non-streaming)";
-  readonly capabilities = { streaming: false, contextWindowTokens: 128_000, contextCapacitySource: "model-catalog" } as const;
+  readonly capabilities = {
+    streaming: false,
+    reasoningControl: "none",
+    contextWindowTokens: 128_000,
+    contextCapacitySource: "model-catalog",
+  } as const;
   availability() { return { usable: true, credentialSource: "programmatic" as const }; }
   async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -68,7 +109,12 @@ export class EchoModelProvider implements ModelProvider {
 export class ScriptedAgentActionProvider implements ModelProvider {
   readonly name: string;
   readonly displayName: string;
-  readonly capabilities = { streaming: false, contextWindowTokens: 128_000, contextCapacitySource: "model-catalog" } as const;
+  readonly capabilities = {
+    streaming: false,
+    reasoningControl: "none",
+    contextWindowTokens: 128_000,
+    contextCapacitySource: "model-catalog",
+  } as const;
   constructor(
     readonly script: Readonly<Record<number, AgentAction | string>> | readonly (AgentAction | string)[],
     name = "structured-action",
@@ -93,155 +139,35 @@ export class ModelProviderContextWindowOverflowError extends Error {
   }
 }
 
-export interface OpenAICompatibleOptions {
-  readonly baseUrl: string;
+type AiSdkTransport = "vercel" | "openai" | "anthropic";
+interface AiSdkModelProviderOptions {
+  readonly transport: AiSdkTransport;
+  readonly origin: string;
   readonly apiKey: () => string | undefined;
-  readonly providerName?: string;
-  readonly displayName?: string;
-  readonly availability?: () => Pick<ModelProviderDescriptor, "usable" | "credentialSource" | "remediation">;
-  /**
-   * Explicitly disable streaming for compatible endpoints that do not support
-   * SSE. Streaming defaults to true; a streaming failure is never retried as a
-   * non-streaming request because that could duplicate a non-idempotent call.
-   */
-  readonly streaming?: boolean;
-  /** Exact operator/provider metadata only; unknown capacity is represented by omission. */
-  readonly contextWindowTokens?: number;
-  readonly contextCapacitySource?: "provider-metadata" | "model-catalog" | "operator-configuration";
-}
-export class OpenAICompatibleProvider implements ModelProvider {
-  readonly name: string;
   readonly displayName: string;
-  readonly capabilities: ModelProviderCapabilities;
-  constructor(readonly options: OpenAICompatibleOptions) {
-    this.name = options.providerName ?? "openai";
-    const streaming = options.streaming ?? true;
-    this.capabilities = {
-      streaming,
-      ...(options.contextWindowTokens === undefined ? {} : { contextWindowTokens: options.contextWindowTokens, contextCapacitySource: options.contextCapacitySource ?? "operator-configuration" }),
-    };
-    this.displayName = options.displayName ?? `${this.name} (OpenAI-compatible; ${streaming ? "streaming" : "non-streaming"})`;
-  }
-  availability() {
-    return this.options.availability?.() ?? {
-      usable: Boolean(this.options.apiKey()),
-      credentialSource: this.options.apiKey() ? "programmatic" as const : "missing" as const,
-    };
-  }
-  async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
-    const key = this.options.apiKey(); if (!key) throw new ValidationError(`Credential unavailable for ${this.name}`);
-    const contextObject = context && typeof context === "object" && !Array.isArray(context) ? context : {};
-    const messages = Array.isArray(contextObject.messages) ? contextObject.messages : [];
-    const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model: configuration.model, messages, temperature: configuration.temperature, max_tokens: configuration.maxOutputTokens }), signal,
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      if ((response.status === 400 || response.status === 413 || response.status === 422) && /context(?:_| )?(?:length|window)|maximum context|too many tokens|token limit/i.test(body)) throw new ModelProviderContextWindowOverflowError(this.name, configuration.model);
-      throw new Error(`Model HTTP ${response.status}: ${body}`);
-    }
-    const body = await response.json() as { choices?: Array<{ message?: { content?: string }; finish_reason?: string }>; usage?: { prompt_tokens?: number; completion_tokens?: number }; cost_usd?: number };
-    const choice = body.choices?.[0];
-    return { text: choice?.message?.content ?? "", finishReason: choice?.finish_reason ?? "stop", usage: { inputTokens: body.usage?.prompt_tokens ?? 0, outputTokens: body.usage?.completion_tokens ?? 0, costUsd: body.cost_usd ?? 0 } };
-  }
-
-  async stream(
-    context: JsonValue,
-    configuration: ModelConfiguration,
-    signal: AbortSignal,
-    onDelta: (delta: ModelOutputDelta) => void,
-  ): Promise<ModelResponse> {
-    const key = this.options.apiKey(); if (!key) throw new ValidationError(`Credential unavailable for ${this.name}`);
-    const contextObject = context && typeof context === "object" && !Array.isArray(context) ? context : {};
-    const messages = Array.isArray(contextObject.messages) ? contextObject.messages : [];
-    const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "text/event-stream",
-        authorization: `Bearer ${key}`,
-      },
-      body: JSON.stringify({
-        model: configuration.model,
-        messages,
-        temperature: configuration.temperature,
-        max_tokens: configuration.maxOutputTokens,
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-      signal,
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      if ((response.status === 400 || response.status === 413 || response.status === 422) && /context(?:_| )?(?:length|window)|maximum context|too many tokens|token limit/i.test(body)) throw new ModelProviderContextWindowOverflowError(this.name, configuration.model);
-      throw new Error(`Model HTTP ${response.status}: ${body}`);
-    }
-    if (!response.body) throw new Error("Model streaming response has no body");
-
-    let text = "";
-    let finishReason = "stop";
-    let usage: Usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
-    let completed = false;
-    await readServerSentEvents(response.body, (data) => {
-      if (data === "[DONE]") { completed = true; return; }
-      let chunk: {
-        choices?: Array<{ delta?: { content?: string | null }; finish_reason?: string | null }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
-        cost_usd?: number;
-      };
-      try { chunk = JSON.parse(data) as typeof chunk; }
-      catch { throw new Error("Model stream returned invalid JSON"); }
-      const choice = chunk.choices?.[0];
-      const delta = choice?.delta?.content;
-      if (typeof delta === "string" && delta.length > 0) {
-        text += delta;
-        onDelta({ text: delta });
-      }
-      if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
-      if (chunk.usage) {
-        usage = {
-          inputTokens: chunk.usage.prompt_tokens ?? usage.inputTokens,
-          outputTokens: chunk.usage.completion_tokens ?? usage.outputTokens,
-          costUsd: chunk.cost_usd ?? usage.costUsd,
-        };
-      } else if (typeof chunk.cost_usd === "number") {
-        usage = { ...usage, costUsd: chunk.cost_usd };
-      }
-    }, signal);
-    if (!completed) throw new Error("Model stream ended before [DONE]");
-    return { text, finishReason, usage };
-  }
-}
-
-export interface AnthropicCompatibleOptions {
-  readonly baseUrl: string;
-  readonly apiKey: () => string | undefined;
-  readonly providerName?: string;
-  readonly displayName?: string;
-  readonly streaming?: boolean;
-  readonly normalizeModel?: (model: string) => string;
   readonly availability?: () => Pick<ModelProviderDescriptor, "usable" | "credentialSource" | "remediation">;
-  readonly contextWindowTokens?: number;
-  readonly contextCapacitySource?: "provider-metadata" | "model-catalog" | "operator-configuration";
+  readonly fetch?: typeof globalThis.fetch;
 }
 
-export class AnthropicCompatibleProvider implements ModelProvider {
-  readonly name: string;
+/**
+ * Shared AI SDK implementation. Transport factories below supply only model
+ * construction, endpoint identity, credentials, and native-ID derivation.
+ */
+class AiSdkModelProvider implements ModelProvider {
+  readonly name: AiSdkTransport;
   readonly displayName: string;
-  readonly capabilities: ModelProviderCapabilities;
+  readonly productTransport = true;
+  readonly capabilities = { streaming: true, reasoningControl: "normalized" } as const;
+  readonly executionEndpointId: string;
+  readonly executionOrigin: string;
+  readonly #baseUrl: string;
 
-  constructor(readonly options: AnthropicCompatibleOptions) {
-    this.name = options.providerName ?? "anthropic";
-    const streaming = options.streaming ?? true;
-    this.capabilities = {
-      streaming,
-      ...(options.contextWindowTokens === undefined ? {} : {
-        contextWindowTokens: options.contextWindowTokens,
-        contextCapacitySource: options.contextCapacitySource ?? "operator-configuration",
-      }),
-    };
-    this.displayName = options.displayName ?? `${this.name} (Anthropic-compatible; ${streaming ? "streaming" : "non-streaming"})`;
+  constructor(readonly options: AiSdkModelProviderOptions) {
+    this.name = options.transport;
+    this.displayName = options.displayName;
+    this.#baseUrl = executionBaseUrl(options.transport, options.origin);
+    this.executionOrigin = this.#baseUrl;
+    this.executionEndpointId = digest(this.#baseUrl);
   }
 
   availability() {
@@ -252,26 +178,25 @@ export class AnthropicCompatibleProvider implements ModelProvider {
   }
 
   normalizeModel(model: string): string {
-    return this.options.normalizeModel?.(model) ?? model;
+    const canonical = model.trim();
+    if (!canonical || /\s/.test(canonical) || !canonical.includes("/")) {
+      throw new ValidationError("Product models must use the canonical creator/model catalog ID");
+    }
+    if (this.name === "openai" && !canonical.startsWith("openai/")) {
+      throw new ValidationError("Direct OpenAI transport requires an openai/... canonical model ID");
+    }
+    if (this.name === "anthropic" && !canonical.startsWith("anthropic/")) {
+      throw new ValidationError("Direct Anthropic transport requires an anthropic/... canonical model ID");
+    }
+    return canonical;
   }
 
   async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
-    const response = await this.#request(context, configuration, signal, false);
-    const body = await response.json() as {
-      content?: Array<{ type?: string; text?: string }>;
-      stop_reason?: string | null;
-      usage?: { input_tokens?: number; output_tokens?: number };
-    };
-    const text = body.content?.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text).join("") ?? "";
-    return {
-      text,
-      finishReason: body.stop_reason ?? "stop",
-      usage: {
-        inputTokens: body.usage?.input_tokens ?? 0,
-        outputTokens: body.usage?.output_tokens ?? 0,
-        costUsd: 0,
-      },
-    };
+    const sdk = await generateText({
+      ...this.#callOptions(context, configuration, signal),
+      model: this.#model(configuration),
+    });
+    return this.#response(sdk.text, sdk.finishReason, sdk.usage, sdk.warnings, sdk.providerMetadata);
   }
 
   async stream(
@@ -280,169 +205,233 @@ export class AnthropicCompatibleProvider implements ModelProvider {
     signal: AbortSignal,
     onDelta: (delta: ModelOutputDelta) => void,
   ): Promise<ModelResponse> {
-    const response = await this.#request(context, configuration, signal, true);
-    if (!response.body) throw new Error("Model streaming response has no body");
-    let text = "";
-    let finishReason = "stop";
-    let usage: Usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
-    let completed = false;
-    await readServerSentEvents(response.body, (data) => {
-      let event: {
-        type?: string;
-        message?: { usage?: { input_tokens?: number; output_tokens?: number } };
-        delta?: { type?: string; text?: string; stop_reason?: string | null };
-        usage?: { input_tokens?: number; output_tokens?: number };
-        error?: { type?: string; message?: string };
-      };
-      try { event = JSON.parse(data) as typeof event; }
-      catch { throw new Error("Model stream returned invalid JSON"); }
-      if (event.type === "error") {
-        const kind = event.error?.type ? ` ${event.error.type}` : "";
-        const message = event.error?.message ? `: ${event.error.message}` : "";
-        throw new Error(`Model stream error${kind}${message}`);
+    const sdk = streamText({
+      ...this.#callOptions(context, configuration, signal),
+      model: this.#model(configuration),
+      onError: () => {},
+    });
+    let streamed = "";
+    for await (const part of sdk.fullStream) {
+      if (part.type === "text-delta") {
+        streamed += part.text;
+        onDelta({ text: part.text });
+      } else if (part.type === "error") {
+        throw part.error;
       }
-      if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
-        text += event.delta.text;
-        onDelta({ text: event.delta.text });
-      }
-      if (event.type === "message_start" && event.message?.usage) {
-        usage = {
-          inputTokens: event.message.usage.input_tokens ?? usage.inputTokens,
-          outputTokens: event.message.usage.output_tokens ?? usage.outputTokens,
-          costUsd: 0,
-        };
-      }
-      if (event.type === "message_delta") {
-        if (event.delta?.stop_reason) finishReason = event.delta.stop_reason;
-        if (event.usage) {
-          usage = {
-            inputTokens: event.usage.input_tokens ?? usage.inputTokens,
-            outputTokens: event.usage.output_tokens ?? usage.outputTokens,
-            costUsd: 0,
-          };
-        }
-      }
-      if (event.type === "message_stop") completed = true;
-    }, signal);
-    if (!completed) throw new Error("Model stream ended before message_stop");
-    return { text, finishReason, usage };
+      // Reasoning and all non-text protocol parts are deliberately discarded.
+    }
+    const [text, finishReason, usage, warnings, metadata] = await Promise.all([
+      sdk.text,
+      sdk.finishReason,
+      sdk.usage,
+      sdk.warnings,
+      sdk.providerMetadata,
+    ]);
+    if (text !== streamed) throw new Error("Model stream terminal text disagrees with emitted text");
+    const terminalReason = normalizeFinishReason(finishReason);
+    if (terminalReason === "other" || terminalReason === "unknown") {
+      throw new Error("Model stream ended without a confirmed terminal provider outcome");
+    }
+    return this.#response(text, terminalReason, usage, warnings, metadata);
   }
 
-  async #request(
-    context: JsonValue,
-    configuration: ModelConfiguration,
-    signal: AbortSignal,
-    stream: boolean,
-  ): Promise<Response> {
+  #callOptions(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal) {
+    return {
+      messages: modelMessages(context),
+      allowSystemInMessages: true,
+      maxRetries: 0,
+      abortSignal: signal,
+      ...(configuration.temperature === undefined ? {} : { temperature: configuration.temperature }),
+      ...(configuration.maxOutputTokens === undefined ? {} : { maxOutputTokens: configuration.maxOutputTokens }),
+      ...(configuration.reasoningEffort === "provider-default" ? {} : { reasoning: configuration.reasoningEffort }),
+    };
+  }
+
+  #model(configuration: ModelConfiguration): LanguageModel {
     const key = this.options.apiKey();
     if (!key) throw new ValidationError(`Credential unavailable for ${this.name}`);
-    const prepared = anthropicContext(context);
-    const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: stream ? "text/event-stream" : "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: configuration.model,
-        messages: prepared.messages,
-        ...(prepared.system ? { system: prepared.system } : {}),
-        max_tokens: configuration.maxOutputTokens ?? 4_096,
-        ...(configuration.temperature === undefined ? {} : { temperature: configuration.temperature }),
-        stream,
-      }),
-      signal,
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      if ((response.status === 400 || response.status === 413 || response.status === 422) &&
-          /context(?:_| )?(?:length|window)|maximum context|too many tokens|token limit/i.test(body)) {
-        throw new ModelProviderContextWindowOverflowError(this.name, configuration.model);
-      }
-      throw new Error(`Model HTTP ${response.status}: ${body}`);
+    const nativeId = nativeModelId(this.name, this.normalizeModel(configuration.model));
+    if (this.name === "vercel") {
+      return createGateway({
+        apiKey: key,
+        baseURL: this.#baseUrl,
+        ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
+      })(configuration.model);
     }
-    return response;
+    if (this.name === "openai") {
+      return createOpenAI({
+        apiKey: key,
+        baseURL: this.#baseUrl,
+        ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
+      }).chat(nativeId);
+    }
+    return createAnthropic({
+      apiKey: key,
+      baseURL: this.#baseUrl,
+      ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
+    })(nativeId);
+  }
+
+  #response(
+    text: string,
+    finishReason: unknown,
+    usage: unknown,
+    warnings: unknown,
+    providerMetadata: unknown,
+  ): ModelResponse {
+    const mappedWarnings = normalizeWarnings(warnings);
+    return {
+      text,
+      finishReason: normalizeFinishReason(finishReason),
+      usage: normalizeUsage(usage, this.name === "vercel" ? gatewayCost(providerMetadata) : 0),
+      ...(mappedWarnings.length ? { warnings: mappedWarnings } : {}),
+    };
   }
 }
 
-function anthropicContext(context: JsonValue): {
-  system: string;
-  messages: Array<{ role: "user" | "assistant"; content: string }>;
-} {
+export interface ProductModelProviderOptions {
+  readonly origin: string;
+  readonly apiKey: () => string | undefined;
+  readonly availability?: () => Pick<ModelProviderDescriptor, "usable" | "credentialSource" | "remediation">;
+  readonly fetch?: typeof globalThis.fetch;
+}
+
+export function createVercelModelProvider(options: ProductModelProviderOptions): ModelProvider {
+  return new AiSdkModelProvider({ ...options, transport: "vercel", displayName: "Vercel AI Gateway" });
+}
+export function createOpenAIModelProvider(options: ProductModelProviderOptions): ModelProvider {
+  return new AiSdkModelProvider({ ...options, transport: "openai", displayName: "OpenAI" });
+}
+export function createAnthropicModelProvider(options: ProductModelProviderOptions): ModelProvider {
+  return new AiSdkModelProvider({ ...options, transport: "anthropic", displayName: "Anthropic" });
+}
+
+export function nativeModelId(transport: AiSdkTransport, canonicalModel: string): string {
+  if (transport === "vercel") return canonicalModel;
+  const slash = canonicalModel.indexOf("/");
+  if (slash <= 0 || slash === canonicalModel.length - 1) throw new ValidationError("Canonical model ID must use creator/model form");
+  const creator = canonicalModel.slice(0, slash);
+  const suffix = canonicalModel.slice(slash + 1);
+  if (creator !== transport) throw new ValidationError(`Direct ${transport} transport cannot execute ${creator} models`);
+  return transport === "anthropic" ? suffix.replaceAll(".", "-") : suffix;
+}
+
+export function normalizeExecutionOrigin(value: string, label: string): string {
+  let url: URL;
+  try { url = new URL(value); }
+  catch { throw new ValidationError(`${label} must be an absolute HTTP(S) origin`); }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password ||
+      url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new ValidationError(`${label} must be an origin without credentials, path, query, or fragment`);
+  }
+  return url.origin;
+}
+
+function executionBaseUrl(transport: AiSdkTransport, value: string): string {
+  if (transport === "vercel") return `${normalizeExecutionOrigin(value, "Vercel AI Gateway origin")}/v4/ai`;
+  return `${normalizeExecutionOrigin(value, `${transport.toUpperCase()}_BASE_URL`)}/v1`;
+}
+
+function modelMessages(context: JsonValue): ModelMessage[] {
   const record = context && typeof context === "object" && !Array.isArray(context) ? context : {};
-  const rawMessages = Array.isArray(record.messages) ? record.messages : [];
-  const system: string[] = [];
-  const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
-  for (const raw of rawMessages) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw) || typeof raw.content !== "string") continue;
-    if (raw.role === "system") {
-      system.push(raw.content);
-      continue;
-    }
-    const role = raw.role === "assistant" ? "assistant" : "user";
-    const previous = messages.at(-1);
-    if (previous?.role === role) previous.content += `\n\n${raw.content}`;
-    else messages.push({ role, content: raw.content });
+  const raw = Array.isArray(record.messages) ? record.messages : [];
+  const messages: ModelMessage[] = [];
+  for (const value of raw) {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.content !== "string") continue;
+    if (value.role === "system") messages.push({ role: "system", content: value.content });
+    else if (value.role === "assistant") messages.push({ role: "assistant", content: value.content });
+    else if (value.role === "tool") messages.push({ role: "user", content: `[tool observation]\n${value.content}` });
+    else messages.push({ role: "user", content: value.content });
   }
-  return { system: system.join("\n\n"), messages };
+  if (!messages.length) messages.push({ role: "user", content: JSON.stringify(context) });
+  return messages;
 }
 
-async function readServerSentEvents(
-  body: ReadableStream<Uint8Array>,
-  onData: (data: string) => void,
-  signal: AbortSignal,
-): Promise<void> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let dataLines: string[] = [];
-  const dispatch = (): void => {
-    if (!dataLines.length) return;
-    const data = dataLines.join("\n");
-    dataLines = [];
-    onData(data);
+function normalizeUsage(value: unknown, costUsd: number): Usage {
+  const usage = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return {
+    inputTokens: finiteTokenCount(usage.inputTokens),
+    outputTokens: finiteTokenCount(usage.outputTokens),
+    costUsd: Number.isFinite(costUsd) && costUsd >= 0 ? costUsd : 0,
   };
-  try {
-    while (true) {
-      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      let newline: number;
-      while ((newline = buffer.indexOf("\n")) >= 0) {
-        let line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
-        if (line.endsWith("\r")) line = line.slice(0, -1);
-        if (line === "") dispatch();
-        else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
-      }
-      if (done) break;
-    }
-    if (buffer) {
-      const line = buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer;
-      if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
-    }
-    dispatch();
-  } finally {
-    reader.releaseLock();
-  }
 }
 
-function parse(input: JsonValue): { context: JsonValue; configuration: ModelConfiguration; callId?: string } {
+function normalizeFinishReason(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value === "undefined" || value === "null") {
+    throw new ValidationError("Model provider returned an invalid finish reason");
+  }
+  return value;
+}
+
+function finiteTokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function gatewayCost(value: unknown): number {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
+  const metadata = value as Record<string, unknown>;
+  const gateway = metadata.gateway && typeof metadata.gateway === "object" && !Array.isArray(metadata.gateway)
+    ? metadata.gateway as Record<string, unknown> : metadata;
+  for (const candidate of [gateway.costUsd, gateway.costUSD, gateway.cost]) {
+    const number = typeof candidate === "string" ? Number(candidate) : candidate;
+    if (typeof number === "number" && Number.isFinite(number) && number >= 0) return number;
+  }
+  return 0;
+}
+
+function normalizeWarnings(value: unknown): ModelWarning[] {
+  if (!Array.isArray(value)) return [];
+  const warnings: ModelWarning[] = [];
+  for (const warning of value.slice(0, 8)) {
+    const record = warning && typeof warning === "object" && !Array.isArray(warning)
+      ? warning as Record<string, unknown> : {};
+    const rawType = typeof record.type === "string" ? record.type : "";
+    const rawMessage = typeof record.message === "string" ? record.message
+      : typeof record.details === "string" ? record.details
+      : rawType || "Provider warning";
+    const lower = `${rawType} ${rawMessage}`.toLowerCase();
+    const kind: ModelWarning["kind"] = /coerc|compatib|adjust/.test(lower) ? "coerced"
+      : /unsupported|ignored/.test(lower) ? "unsupported" : "provider";
+    warnings.push({ kind, message: boundedText(scrubProviderText(rawMessage), 1_024) || "Provider warning" });
+  }
+  if (value.length > 8) {
+    warnings[7] = { kind: "truncated", message: `Additional provider warnings were omitted (${value.length - 7} hidden)` };
+  }
+  return warnings;
+}
+
+function scrubProviderText(value: string): string {
+  return scrubText(value)
+    .replace(/(?:bearer|api[-_ ]?key|authorization|x-api-key)\s*[:=]\s*\S+/gi, "[redacted]")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+}
+
+function boundedText(value: string, maximum: number): string {
+  let bounded = new TextDecoder().decode(new TextEncoder().encode(value).slice(0, maximum));
+  while (new TextEncoder().encode(bounded).byteLength > maximum) bounded = bounded.slice(0, -1);
+  return bounded;
+}
+
+function parse(input: JsonValue): { context: JsonValue; modelDispatch: ModelDispatch; callId?: string; compactionId?: string } {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("Model input must be an object");
-  const context = input.context; const config = input.configuration;
-  if (context === undefined || !config || typeof config !== "object" || Array.isArray(config) || typeof config.provider !== "string" || typeof config.model !== "string") throw new ValidationError("Model input requires context and configuration");
+  const context = input.context;
+  const rawDispatch = input.modelDispatch;
+  if (context === undefined || !rawDispatch || typeof rawDispatch !== "object" || Array.isArray(rawDispatch)) {
+    throw new ValidationError("Model input requires context and a complete model dispatch");
+  }
+  const modelDispatch = rawDispatch as unknown as ModelDispatch;
+  validateModelDispatch(modelDispatch);
   return {
     context,
-    configuration: config as unknown as ModelConfiguration,
+    modelDispatch,
     ...(typeof input.callId === "string" ? { callId: input.callId } : {}),
+    ...(typeof input.compactionId === "string" ? { compactionId: input.compactionId } : {}),
   };
 }
 
 export type ProviderConcurrency = number | Readonly<Record<string, number>>;
 type Waiter = { readonly resolve: (release: () => void) => void; readonly reject: (error: unknown) => void; readonly signal: AbortSignal; readonly abort: () => void };
 
-/** One process-wide limiter shared by every model effect (root, recursive, gate). */
 class ProviderLimiter {
   readonly #active = new Map<string, number>();
   readonly #waiting = new Map<string, Waiter[]>();
@@ -492,15 +481,37 @@ export class ModelExecutor implements EffectExecutor {
   readonly name = "model";
   readonly #providers = new Map<string, ModelProvider>();
   readonly #limiter: ProviderLimiter;
-  constructor(providers: readonly ModelProvider[], concurrency: ProviderConcurrency = 1) {
+  #catalog: ModelCatalogSnapshot | undefined;
+
+  constructor(
+    providers: readonly ModelProvider[],
+    concurrency: ProviderConcurrency = 1,
+    catalog?: ModelCatalogSnapshot,
+  ) {
     for (const provider of providers) {
       if (provider.capabilities?.contextWindowTokens !== undefined && (!Number.isSafeInteger(provider.capabilities.contextWindowTokens) || provider.capabilities.contextWindowTokens < 2)) throw new ValidationError(`Model provider ${provider.name} context window must be an integer of at least 2 tokens`);
       if (provider.capabilities?.streaming === true && typeof provider.stream !== "function") {
         throw new ValidationError(`Model provider ${provider.name} declares streaming without a stream implementation`);
       }
+      if (this.#providers.has(provider.name)) throw new ValidationError(`Duplicate model provider: ${provider.name}`);
       this.#providers.set(provider.name, provider);
     }
     this.#limiter = new ProviderLimiter(concurrency);
+    this.#catalog = catalog;
+  }
+
+  attachCatalog(catalog: ModelCatalogSnapshot): void { this.#catalog = catalog; }
+
+  executionOrigins(): Readonly<Record<string, string>> {
+    return Object.freeze(Object.fromEntries(
+      [...this.#providers.values()]
+        .filter((provider): provider is ModelProvider & { executionOrigin: string } => provider.executionOrigin !== undefined)
+        .map((provider) => [provider.name, provider.executionOrigin]),
+    ));
+  }
+
+  isProductTransport(provider: string): boolean {
+    return this.#providers.get(provider.trim().toLowerCase())?.productTransport === true;
   }
 
   providers(): ModelProviderDescriptor[] {
@@ -511,6 +522,7 @@ export class ModelExecutor implements EffectExecutor {
         displayName: provider.displayName ?? provider.name,
         capabilities: {
           streaming: provider.capabilities?.streaming === true,
+          reasoningControl: provider.capabilities?.reasoningControl ?? "none",
           ...(provider.capabilities?.contextWindowTokens === undefined ? {} : {
             contextWindowTokens: provider.capabilities.contextWindowTokens,
             contextCapacitySource: provider.capabilities.contextCapacitySource ?? "provider-metadata",
@@ -521,13 +533,67 @@ export class ModelExecutor implements EffectExecutor {
     });
   }
 
-  normalizeConfiguration(configuration: ModelConfiguration): ModelConfiguration {
-    const normalized = this.#providers.get(configuration.provider)?.normalizeModel?.(configuration.model) ?? configuration.model;
-    return normalized === configuration.model ? configuration : { ...configuration, model: normalized };
+  normalizeConfiguration(configuration: ModelConfigurationInput): ModelConfiguration {
+    const normalized = this.normalizeConfigurationIdentity(configuration);
+    const provider = this.#providers.get(normalized.provider);
+    assertReasoningSelection(normalized.reasoningEffort, this.#capability(provider, normalized.model));
+    return normalized;
+  }
+
+  normalizeConfigurationIdentity(configuration: ModelConfigurationInput): ModelConfiguration {
+    if (!configuration || typeof configuration.provider !== "string" || !configuration.provider.trim() ||
+        typeof configuration.model !== "string" || !configuration.model.trim()) {
+      throw new ValidationError("Model configuration requires provider and model");
+    }
+    if (configuration.temperature !== undefined && (!Number.isFinite(configuration.temperature) || configuration.temperature < 0 || configuration.temperature > 2)) {
+      throw new ValidationError("Model temperature must be a finite value from 0 to 2");
+    }
+    if (configuration.maxOutputTokens !== undefined && (!Number.isSafeInteger(configuration.maxOutputTokens) || configuration.maxOutputTokens < 1)) {
+      throw new ValidationError("Model maxOutputTokens must be a positive integer");
+    }
+    const providerName = configuration.provider.trim().toLowerCase();
+    const provider = this.#providers.get(providerName);
+    const model = provider?.normalizeModel?.(configuration.model) ?? configuration.model.trim();
+    const normalized: ModelConfiguration = {
+      provider: providerName,
+      model,
+      ...(configuration.temperature === undefined ? {} : { temperature: configuration.temperature }),
+      ...(configuration.maxOutputTokens === undefined ? {} : { maxOutputTokens: configuration.maxOutputTokens }),
+      reasoningEffort: normalizeReasoningEffort(configuration.reasoningEffort),
+    };
+    return Object.freeze(normalized);
+  }
+
+  resolveDispatch(configuration: ModelConfigurationInput): ModelDispatch {
+    const normalized = this.normalizeConfiguration(configuration);
+    const provider = this.#providers.get(normalized.provider);
+    if (!provider) throw new ValidationError(`Unknown model provider: ${normalized.provider}`);
+    const descriptor = provider.productTransport ? this.#catalog?.descriptor(normalized.model) : undefined;
+    const capability = this.#capability(provider, normalized.model);
+    const catalogDigest = descriptor?.catalogDigest ?? digest(JSON.stringify({
+      provider: normalized.provider,
+      model: normalized.model,
+      reasoningControl: provider.capabilities?.reasoningControl ?? "none",
+    }));
+    return resolveModelDispatch({
+      configuration: normalized,
+      capability,
+      catalogDigest,
+      ...(provider.executionEndpointId === undefined ? {} : { executionEndpointId: provider.executionEndpointId }),
+    });
   }
 
   contextCapacity(configuration: ModelConfiguration): Readonly<{ provider: string; model: string; source: "provider-metadata" | "model-catalog" | "operator-configuration" | "unknown"; contextWindowTokens: number | null }> {
     const provider = this.#providers.get(configuration.provider);
+    if (provider?.productTransport) {
+      const descriptor = this.#catalog?.descriptor(configuration.model);
+      return Object.freeze({
+        provider: configuration.provider,
+        model: configuration.model,
+        source: descriptor?.contextWindowTokens == null ? "unknown" : "model-catalog",
+        contextWindowTokens: descriptor?.contextWindowTokens ?? null,
+      });
+    }
     const capacity = provider?.capabilities?.contextWindowTokens;
     return Object.freeze({
       provider: configuration.provider,
@@ -540,16 +606,18 @@ export class ModelExecutor implements EffectExecutor {
   async execute(request: Parameters<EffectExecutor["execute"]>[0], context: Parameters<EffectExecutor["execute"]>[1]): Promise<ExecutionResult> {
     if (request.operation !== "complete") return result("failed", undefined, `Unsupported model operation: ${request.operation}`);
     try {
-      const { context: modelContext, configuration, callId } = parse(request.input);
+      const { context: modelContext, modelDispatch, callId } = parse(request.input);
+      const configuration = modelDispatch.configuration;
       const provider = this.#providers.get(configuration.provider);
       if (!provider) return result("failed", undefined, `Unknown model provider: ${configuration.provider}`);
+      if (provider.executionEndpointId !== modelDispatch.executionEndpointId) {
+        return result("failed", { errorClassification: { provider: configuration.provider, model: configuration.model, code: "endpoint-drift" } }, "Retained model dispatch endpoint differs from the current configured transport origin");
+      }
       const release = await this.#limiter.acquire(configuration.provider, context.signal);
       try {
         const useStreaming = provider.capabilities?.streaming === true;
         const response = useStreaming
           ? await provider.stream!(modelContext, configuration, context.signal, (delta) => {
-              // Bound individual notifications before the outbox applies its
-              // per-effect aggregate bound. The final response is unaffected.
               for (let offset = 0; offset < delta.text.length; offset += 4_096) {
                 context.reportProgress?.({
                   kind: "model-output-delta",
@@ -557,20 +625,109 @@ export class ModelExecutor implements EffectExecutor {
                     text: delta.text.slice(offset, offset + 4_096),
                     provider: configuration.provider,
                     model: configuration.model,
+                    reasoningEffort: configuration.reasoningEffort,
                     ...(callId === undefined ? {} : { callId }),
                   },
                 });
               }
             })
           : await provider.complete(modelContext, configuration, context.signal);
-        return result("succeeded", response as unknown as JsonValue);
+        return result("succeeded", normalizeModelResponse(response) as unknown as JsonValue);
       } finally { release(); }
     } catch (error) {
       if (context.signal.aborted || error instanceof DOMException && error.name === "AbortError") return result("cancelled", undefined, "Model call cancelled");
-      const classification = error instanceof ModelProviderContextWindowOverflowError
-        ? { provider: error.provider, model: error.model, code: "provider-confirmed-context-window-overflow" }
-        : { provider: request.input && typeof request.input === "object" && !Array.isArray(request.input) && request.input.configuration && typeof request.input.configuration === "object" && !Array.isArray(request.input.configuration) && typeof request.input.configuration.provider === "string" ? request.input.configuration.provider : "unknown", model: request.input && typeof request.input === "object" && !Array.isArray(request.input) && request.input.configuration && typeof request.input.configuration === "object" && !Array.isArray(request.input.configuration) && typeof request.input.configuration.model === "string" ? request.input.configuration.model : "unknown", code: "generic" };
-      return result("failed", { errorClassification: classification }, error instanceof Error ? error.message : String(error));
+      const retained = retainedModelIdentity(request.input);
+      const classified = classifyProviderError(error, retained.provider, retained.model);
+      return result("failed", { errorClassification: classified }, providerErrorMessage(classified.code));
     }
   }
+
+  #capability(provider: ModelProvider | undefined, model: string): ModelReasoningCapability {
+    if (provider?.productTransport) return this.#catalog?.descriptor(model).reasoning ?? {
+      status: "unverified",
+      levels: STANDARD_UNVERIFIED_REASONING_LEVELS,
+    };
+    if (provider?.capabilities?.reasoningControl === "normalized") return {
+      status: "unverified",
+      levels: STANDARD_UNVERIFIED_REASONING_LEVELS,
+    };
+    return { status: "unsupported", levels: [] };
+  }
+}
+
+function normalizeModelResponse(value: ModelResponse): ModelResponse {
+  if (!value || typeof value.text !== "string" || typeof value.finishReason !== "string") {
+    throw new ValidationError("Model provider returned an invalid response");
+  }
+  const usage = value.usage;
+  if (!usage || ![usage.inputTokens, usage.outputTokens, usage.costUsd].every(
+    item => typeof item === "number" && Number.isFinite(item) && item >= 0,
+  )) {
+    throw new ValidationError("Model provider returned invalid usage");
+  }
+  const warnings = normalizeRetainedWarnings(value.warnings);
+  return {
+    text: value.text,
+    finishReason: normalizeFinishReason(value.finishReason),
+    usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd },
+    ...(warnings.length ? { warnings } : {}),
+  };
+}
+
+function normalizeRetainedWarnings(value: readonly ModelWarning[] | undefined): ModelWarning[] {
+  if (!Array.isArray(value)) return [];
+  const normalized = value.slice(0, 8).map((warning): ModelWarning => {
+    const kind = warning && ["coerced", "unsupported", "provider", "truncated"].includes(warning.kind)
+      ? warning.kind : "provider";
+    const message = boundedText(scrubProviderText(typeof warning?.message === "string" ? warning.message : "Provider warning"), 1_024);
+    return { kind, message: message || "Provider warning" };
+  });
+  if (value.length > 8) {
+    normalized[7] = { kind: "truncated", message: `Additional provider warnings were omitted (${value.length - 7} hidden)` };
+  }
+  return normalized;
+}
+
+function retainedModelIdentity(input: JsonValue): { provider: string; model: string } {
+  if (input && typeof input === "object" && !Array.isArray(input) &&
+      input.modelDispatch && typeof input.modelDispatch === "object" && !Array.isArray(input.modelDispatch) &&
+      input.modelDispatch.configuration && typeof input.modelDispatch.configuration === "object" && !Array.isArray(input.modelDispatch.configuration)) {
+    const configuration = input.modelDispatch.configuration;
+    return {
+      provider: typeof configuration.provider === "string" ? configuration.provider : "unknown",
+      model: typeof configuration.model === "string" ? configuration.model : "unknown",
+    };
+  }
+  return { provider: "unknown", model: "unknown" };
+}
+
+function classifyProviderError(error: unknown, provider: string, model: string): { provider: string; model: string; code: string } {
+  if (error instanceof ModelProviderContextWindowOverflowError) return { provider: error.provider, model: error.model, code: error.code };
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const status = typeof record.statusCode === "number" ? record.statusCode : typeof record.status === "number" ? record.status : undefined;
+  const text = `${typeof record.name === "string" ? record.name : ""} ${typeof record.message === "string" ? record.message : ""} ${typeof record.code === "string" ? record.code : ""}`;
+  if ([400, 413, 422].includes(status ?? -1) &&
+      /context(?:_| )?(?:length|window)|maximum context|prompt (?:is )?too long|too many input tokens/i.test(text)) {
+    return { provider, model, code: "provider-confirmed-context-window-overflow" };
+  }
+  if (status === 401 || status === 403) return { provider, model, code: "authentication" };
+  if (status === 429) return { provider, model, code: "rate-limit" };
+  if (status === 404 || /no route|routing|model not found/i.test(text)) return { provider, model, code: "routing" };
+  if (/parse|malformed|invalid (?:json|response)|response.*invalid/i.test(text)) return { provider, model, code: "malformed-response" };
+  return { provider, model, code: "transport" };
+}
+
+function providerErrorMessage(code: string): string {
+  if (code === "provider-confirmed-context-window-overflow") return "Model provider confirmed that the context window overflowed";
+  if (code === "authentication") return "Model provider authentication failed";
+  if (code === "rate-limit") return "Model provider rate limit was reached";
+  if (code === "routing") return "Model provider could not route the configured model";
+  if (code === "malformed-response") return "Model provider returned a malformed response";
+  return "Model provider request failed";
+}
+
+function digest(value: string): string {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(value);
+  return hash.digest("hex");
 }

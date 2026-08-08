@@ -1,7 +1,7 @@
 # AGENTS.md
 
 **Role:** Canonical repository guide  
-**Last reviewed:** August 7, 2026
+**Last reviewed:** August 8, 2026
 
 This file is the current source of truth for Agencity's purpose, product intention, design principles, supported behavior, known gaps, architecture, and implementation rules. A new reader should not need another product document to understand what the project is trying to build or what is currently real.
 
@@ -9,7 +9,7 @@ This file is the current source of truth for Agencity's purpose, product intenti
 
 Update this file whenever a change alters the product direction, supported user journey, durable domain model, security boundary, major capability, or known limitation.
 
-Authoritative implementation plans are the [parent TypeScript/Turso rewrite PRD](./plans/2026-08-05-prime-agent-typescript-turso-rewrite-prd.md), the [FU-001–FU-019 follow-up backlog](./plans/2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md), and the [lossless context-reference storage plan](./plans/2026-08-07-lossless-context-references-plan.md), in that order after this guide.
+Authoritative implementation plans are the [parent TypeScript/Turso rewrite PRD](./plans/2026-08-05-prime-agent-typescript-turso-rewrite-prd.md), the [FU-001–FU-019 follow-up backlog](./plans/2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md), and the [formal model-tool contracts plan](./plans/2026-08-07-formal-model-tool-contracts-plan.md), in that order after this guide. The [lossless context-reference storage plan](./plans/2026-08-07-lossless-context-references-plan.md) is deferred until after the formal-tool cutover and requires a new readiness review.
 
 ## What Agencity is
 
@@ -44,7 +44,7 @@ The product should let a user:
 
 - give a task and let a typed, budgeted, recoverable agent loop carry it through TypeScript cells, tools, model calls, and subagents;
 - inspect the conversation together with the cells, bounded observations, effects, child sessions, budgets, goals, gates, and unresolved outcomes that produced it;
-- steer, approve, cancel, detach, resume, branch, export, and delete owned work without bypassing durable runtime semantics;
+- steer, cancel, detach, resume, branch, export, and delete owned work without bypassing durable runtime semantics;
 - use human-readable product flows while retaining internal IDs, SQL, and low-level operations for diagnostics and automation;
 - attach through a terminal client that observes the same public snapshot/event protocol as other clients and does not become the owner of session identity.
 
@@ -65,7 +65,7 @@ Use these principles when requirements leave an implementation choice:
 - **Uncertainty remains visible.** Unknown effects, stale gates, missing artifacts, conflicting claims, and unavailable capabilities stay explicit. The runtime does not invent success or retry unsafe work to keep a run moving.
 - **Subagents are retained relationships.** Root agents, subagents, and recursive model calls share the durable session/task/mailbox model. Delegation produces inspectable ownership and communication, not anonymous returned strings.
 - **Placement is configuration, not identity.** Local and remote adapters preserve identifiers, causality, recovery, and model-facing behavior. Stronger infrastructure may add capabilities; weaker placement must report unavailable behavior instead of silently weakening semantics.
-- **Autonomy is bounded and inspectable.** Goals, completion gates, budgets, timeouts, permissions, cancellation, and user decisions are durable parts of a run. Completion is not merely the model claiming it is done.
+- **Autonomy is bounded and inspectable.** Goals, completion gates, budgets, timeouts, authority boundaries, cancellation, and unresolved outcomes are durable parts of a run. Completion is not merely the model claiming it is done.
 
 ## Product goals
 
@@ -75,7 +75,7 @@ Agencity aims to provide:
 - **Durable execution:** committed work survives worker, supervisor, terminal, and machine-process restarts without relying on an intact heap.
 - **Relational context:** complete history remains queryable while each model call receives a bounded, attributable selection of what matters now.
 - **Retained multi-agent work:** subagents and recursive calls are durable sessions with tasks, budgets, messages, artifacts, cancellation, and follow-up—not disposable strings.
-- **Bounded autonomy:** goals, completion gates, permissions, budgets, timeouts, user decisions, and uncertain effects remain visible and enforceable.
+- **Bounded autonomy:** goals, completion gates, authority boundaries, budgets, timeouts, and uncertain effects remain visible and enforceable.
 - **Governed adaptation:** memories, prompt notes, skills, and subagent specifications can improve through scoped evidence, evaluation, approval where required, and rollback.
 - **Local-first replaceability:** a complete local runtime works without Cloud, while storage, artifacts, retrieval, execution, and clients can move behind capability-aware contracts without changing agent identity.
 - **Inspectable operation:** users and clients can understand what the agent knew, what it did, which evidence supported it, what remains unresolved, and how to resume or reverse work.
@@ -117,15 +117,15 @@ The target task path is:
 1. Resolve the workspace and create or select a durable root session with an explicit usable model.
 2. Commit the user's instruction and applicable goal, limits, policy, and completion requirements.
 3. Materialize bounded context with the exact source-event and harness provenance supplied to the model.
-4. Ask the model for a versioned typed next action: a user-facing result, clarification or permission request, TypeScript cell, durable delegation, or explicit blocked/failed outcome.
+4. Require exactly one formal provider tool call: `bun_console` for a TypeScript cell or `finish` for a successful, blocked, or failed outcome.
 5. Validate the action, authority, scope, budget, and compatibility before execution.
 6. Execute generated work through the disposable TypeScript console and durable outbox-backed APIs.
 7. Commit the action, cell, effects, observations, usage, child work, and resulting state before making a dependent model call.
-8. Continue until completion gates pass, the user must decide, a bound is reached, cancellation reconciles, or a failed/unknown outcome blocks safe progress.
+8. Continue until completion gates pass, a bound is reached, cancellation reconciles, or a blocked, failed, or unknown outcome ends the run. Missing user information uses blocked `finish`; a later user message starts an ordinary new run on the same branch.
 
 Unstructured model prose must never be heuristically executed as code. The model receives TypeScript as its general generated-execution surface; run-control outcomes remain typed supervisor decisions rather than additional privileged tools.
 
-The TUI and other clients observe this lifecycle through snapshot-plus-cursor event semantics. They may steer, approve, cancel, detach, and resume, but client attachment is not durable session identity and process exit is not proof that external work stopped.
+The TUI and other clients observe this lifecycle through snapshot-plus-cursor event semantics. They may steer, cancel, detach, and resume, but client attachment is not durable session identity and process exit is not proof that external work stopped.
 
 ## Current implementation status
 
@@ -142,16 +142,16 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 
 ### Incomplete product surfaces
 
-- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. First interactive startup without a usable provider asks the user to choose OpenAI, Anthropic, or Vercel AI Gateway, accepts the key through hidden input, and asks for the model ID before creating a session. The TUI `/model` inspector is a keyboard-driven provider/model picker; it stores owner-only provider keys outside canonical/profile preference databases and selects durable `provider:model` configurations, including gateway IDs containing `/`. Environment keys remain supported fallbacks. The package remains private and has no claimed registry or standalone release channel.
+- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. First interactive startup without a usable provider asks the user to choose OpenAI, Anthropic, or Vercel AI Gateway, accepts the key through hidden input, and asks for the canonical `creator/model` ID before creating a session. Gateway, direct OpenAI, and direct Anthropic execution share one Vercel AI SDK core with thin transport factories. The public Gateway catalog is the source for model capacity, pricing, and reasoning metadata and is retained in a bounded endpoint-keyed profile cache. The TUI `/model` inspector is a keyboard-driven provider/model picker; `/effort` selects durable provider-default, none, minimal, low, medium, high, or xhigh reasoning at an idle model boundary. Owner-only provider keys remain outside canonical/profile preference databases. Environment keys remain supported fallbacks. The package remains private and has no claimed registry or standalone release channel.
 - The product has no demo mode. Echo remains an internal deterministic test provider and is filtered from product selection, help, status, and onboarding. Ordinary non-interactive work without a usable provider fails with setup guidance.
-- The ordinary task route drives the strict `agencity.agent-action` version-1 autonomous loop. Only validated TypeScript actions execute generated work; final, clarification, permission, blocked, and failed are typed run control. Raw action JSON remains internal attributable history. A rejected action is retained and, when run bounds permit, delivered exactly once to one correction step; rejected code never executes, and a second consecutive rejection terminates the run.
+- The ordinary task route currently drives the strict textual `agencity.agent-action` version-1 autonomous loop. This is a pre-release implementation gap: the formal model-tool contract plan replaces it with exactly `bun_console` and `finish`, removes clarification/permission and waiting-for-user state, and uses blocked `finish` for missing information. Until that cutover is implemented, raw action JSON and the older input states are transitional implementation details, not product direction or compatibility commitments.
 - Console cells support notebook observation, bounded `inspect`, artifact spill, `state.list`, and retained `cells.list/get`; lexical bindings remain deliberately non-durable.
 - The console exposes first-class durable `rlm.start/startMany/get/result/cancel` handles plus `sdk.agents` roster, spawn, bounded direct messaging, receipts, acknowledgement, cancellation, and same-session retained follow-up.
 - `/refine`, the public protocol client, and `sdk.harness.review/reviews` run a strict trajectory-to-candidate review through an ordinary durable recursive model child. Frozen bounded sources, decisions, proposal identity, and recovery status remain attributable. Automatic refinement is profile-opt-in, local-only, and scans typed repeated effect failures, distinct-pin gate failures, and explicit `UserCorrection` events only at committed AgentRun boundaries; repeated success, stale-memory, and unproductive-delegation detectors are not implemented.
 - The interactive TUI is a full-screen OpenTUI client of the managed workspace service. It reconciles stable committed Markdown message blocks and syntax-aware fenced code, interleaves each compact run status after its initiating user task, and exposes retained TypeScript actions as expandable exact source, logs, bounded results, and errors. A prompted multiline composer preserves pasted line breaks, uses `Shift-Enter` for new lines, submits with Enter, and grows within the responsive normal/compact/minimum height modes. A width-prioritized split footer preserves trusted-local authority and current actions without reserving idle inspector width. Contextual command, model, credential, provisional-output, notice, and family inspectors appear beside the conversation on wide terminals and replace it on narrow terminals. Snapshots, cursor-resumable committed SSE events, and cursorless progress remain distinct; a compact direct-child summary, responsive family browser, ancestry breadcrumb, and draft-safe Down/Enter/Right/Left navigation open exact retained parent and child branches without changing execution or workspace resume selection. Family activity is route-derived, admitted children without active runs are idle, current projections are reused across refreshes, and periodic refresh stops when the browser is closed and no child is actively working. Raw diagnostics remain available only through `Shift-R` or `/raw`, and non-TTY execution retains a readable plain transcript fallback.
 - Streaming-capable providers emit bounded cursorless progress before an atomic committed response; non-streaming providers truthfully report committed-only behavior. Real-provider streaming remains credential-gated.
 - Unknown effects are retained and visible through startup/status plus `unknown` and evidence-only `reconcile` product flows. Reconciliation deliberately does not rewrite the unknown outcome or authorize automatic retry.
-- The on-demand managed workspace service owns detached runs, schedules, and recovery behind the same authenticated loopback protocol, with process fencing and tested client detach/reattach. A quiescent service exits after 60 seconds; active runs, effects, wakes, schedules, heartbeats, resident workers, and attached clients keep it alive and are reported by `service status`, while a durable run waiting only for user input does not. Graceful shutdown stops admission, drains admitted protocol handlers and resident workers, and preserves sessions. The service is not an OS-login service and has no cross-device execution-owner failover.
+- The on-demand managed workspace service owns detached runs, schedules, and recovery behind the same authenticated loopback protocol, with process fencing and tested client detach/reattach. A quiescent service exits after 60 seconds; active runs, effects, wakes, schedules, heartbeats, resident workers, and attached clients keep it alive and are reported by `service status`, while a terminal blocked branch does not. The transitional pre-release pending-input state also does not keep the service alive while it remains implemented. Graceful shutdown stops admission, drains admitted protocol handlers and resident workers, and preserves sessions. The service is not an OS-login service and has no cross-device execution-owner failover.
 - FU-009 release acceptance now invokes only an isolated `bun link` executable from fresh external repositories. Its guarded black-box matrix covers truthful missing-provider behavior, explicit fixture-model selection, coding cells/tools, durable recursive/family follow-up, failed-gate repair, detach/client loss/service recovery, named head branch/resume/history/tree, distinct JSON run exits, post-commit crash recovery and unknown/no-retry reconciliation, plus refinement, installed skills, streaming, compaction, and schedules. The full-screen renderer has deterministic OpenTUI frame/input/resize coverage for Markdown, retained cells, bottom following, responsive layout, notices, inspectors, and family navigation. A linked-executable pseudo-terminal journey expands a retained TypeScript cell, submits another composer command, opens an exact child route, returns to the parent, detaches, and resumes the remembered root without internal IDs; the release matrix remains non-interactive. The real-provider, official Turso, and Cloud rows remain explicitly opt-in and may be skipped.
 
 ### Deliberately unavailable or deferred
@@ -293,15 +293,9 @@ Physical owned-scope deletion is a separate, guarded data-control operation. Do 
 
 ### Event evolution is versioned
 
-Released event meanings are immutable. The current runtime accepts event schema version 1 only and does not yet have a general event-version registry or upcaster pipeline. Before introducing a new version:
+Released event meanings are immutable. Before the first release, an architecture cutover may replace the accepted workspace schema and require local state reset instead of implementing compatibility. The current runtime accepts event schema version 2 only; the formal model-tool cutover will accept version 3 only and reject version-1/version-2 workspaces with reset guidance. There is no general event-version registry or upcaster pipeline.
 
-- implement explicit version acceptance and deterministic projection/upcasting;
-- preserve and replay retained version-1 fixtures;
-- add validation and protocol compatibility tests;
-- update the event documentation;
-- keep mixed-history projection behavior explicit.
-
-Compatible optional version-1 data may be added only when old retained records, reducers, validators, storage, and clients continue to behave deterministically.
+After release, changing event meaning requires explicit version acceptance, deterministic projection/upcasting, retained-history fixtures, protocol compatibility tests, and updated event documentation. Pre-release cutovers must still fail closed before projection and must never silently reinterpret an older workspace.
 
 Never rewrite retained history as a migration shortcut.
 
