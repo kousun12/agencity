@@ -24,6 +24,7 @@ import {
   formatTerminalBreadcrumb,
   formatTerminalFamilySummary,
   type TerminalFamilyChildView,
+  type TerminalFamilyRefreshState,
   type TerminalPresentation,
   type TerminalScreenView,
 } from "./view-model.ts";
@@ -100,6 +101,10 @@ function familyActivityMarker(activity: TerminalFamilyChildView["activity"]): st
   return "○";
 }
 
+export function familyRefreshSuffix(refresh: TerminalFamilyRefreshState): string {
+  return refresh === "stale" || refresh === "unavailable" ? ` · ${refresh}` : "";
+}
+
 function renderFamilyBrowser(
   view: TerminalScreenView,
   selectedKey: string | null,
@@ -117,7 +122,7 @@ function renderFamilyBrowser(
     "AGENT FAMILY",
     "",
     `Current: ${view.sessionName}`,
-    view.familyRefresh === "current" ? "Direct children" : `Direct children · ${view.familyRefresh}`,
+    `Direct children${familyRefreshSuffix(view.familyRefresh)}`,
   ];
   for (const child of view.familyChildren) {
     const selected = child.key === selectedKey;
@@ -1321,7 +1326,7 @@ export class OpenTuiApp {
         : this.#familyFocus === "browser" && selectedFamily
           ? terminalToneColor(terminalFamilyTone(selectedFamily.activity))
           : TERMINAL_THEME.muted;
-    const familyRefresh = this.#view.familyRefresh === "current" ? "" : ` · ${this.#view.familyRefresh}`;
+    const familyRefresh = familyRefreshSuffix(this.#view.familyRefresh);
     this.#familySummary.visible = layout.showFamilySummary && this.#view.familySummary !== null;
     this.#familySummary.content = this.#view.familySummary
       ? `${this.#familyFocus === "summary" ? ">" : " "} ${formatTerminalFamilySummary(

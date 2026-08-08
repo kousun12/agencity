@@ -7,663 +7,358 @@
 
 ## Summary
 
-Agencity retains root sessions, nested child sessions, branches, task edges, lifecycle state, and exact parent coordinates. The shipped terminal family navigator exposes direct children and lets an empty child composer move directly to its parent conversation with Left. The product also has a flat `/sessions` inspector, but it has no first-class screen that presents all retained workspace agents and lets a user move through arbitrary ancestry.
+Agencity already supports ergonomic navigation inside one retained agent family:
 
-This plan adds a full-screen **Agents view** modeled on the useful navigation structure in Prime Agent while preserving Agencity's durable route and execution semantics:
+- Right or Enter opens the current route's direct-child browser.
+- Up and Down select a child.
+- Right or Enter opens the selected child conversation.
+- Left from an empty child composer opens its exact parent conversation.
+- Repeating Left climbs the retained ancestry one conversation at a time.
 
-1. Left from any live conversation with an empty composer opens the Agents view.
-2. A nested conversation opens its exact parent scope with the current route selected.
-3. A root conversation opens the global workspace scope.
-4. Up and Down select retained routes.
-5. Enter or Right opens the selected route.
-6. Left in the Agents view moves one scope toward the workspace root.
-7. Repeated Left reaches the global workspace view from any supported nesting depth.
-8. The global view includes working, idle, attention, failed, stopped, archived, and otherwise ended retained routes.
+The remaining gap is above the root. Left has no action on a top-level root conversation, and the terminal has no full-screen selector for previous root sessions.
 
-“Left always works” means the navigation is available at every retained ancestry depth. It does not override a non-empty editor, search text, secret entry, modal control, or historical inspection.
+This plan adds one new navigation boundary:
 
-### Relationship to Prime Agent
+```text
+workspace Agents view ← root conversation ← child ← grandchild
+```
 
-Prime Agent's current interaction keeps an ephemeral stack of Agents-view scopes. Left from an empty chat returns to that existing Agents view, and Left inside a scoped Agents view pops one stored scope frame. This plan adopts the visible parent-scope and global-catalog interaction, but it intentionally does not copy that state model.
-
-Agencity derives each scope from durable exact parent routes. The same Left path therefore works after a client restart and when a conversation was opened by a command rather than through the Agents view. Prior browser scope and selection may improve the return experience, but they are never required to recover ancestry.
-
-## Verified current behavior
-
-The current implementation provides:
-
-- a direct-child summary between the composer and footer;
-- Down to focus that summary;
-- Enter or Right to open a direct-child browser;
-- Up and Down to select a direct child;
-- Enter or Right to open the selected child's conversation;
-- Left from an empty child composer to open the exact parent conversation;
-- retained ancestry in the conversation breadcrumb;
-- a flat `/sessions` inspector that includes every retained workspace branch;
-- `/sessions select` for changing the remembered resumable product route.
-
-The current behavior does not provide:
-
-- a global Agents screen;
-- a selectable workspace-wide hierarchy;
-- a way to inspect unrelated retained roots without a command;
-- a way to open the committed conversation and history of failed or archived routes through the flat selector;
-- a parent-scope screen between a nested conversation and its parent conversation;
-- a search surface for retained agents;
-- one repeated Left interaction that moves from a nested route through every parent scope to the workspace catalog.
-
-The implemented family-navigation plan explicitly excluded unrelated roots and replacement of `/sessions`. This plan adds that missing product layer without broadening model-facing family authorization.
+Existing parent and child navigation remains unchanged. Left opens the workspace Agents view only when the current conversation is a top-level root. `/agents` provides a direct shortcut to the same screen from any live conversation.
 
 ## Goals
 
-- Make all retained workspace agents discoverable from the ordinary terminal interface.
-- Let a user move from any live conversation to its parent scope with Left.
-- Let repeated Left traverse arbitrary retained ancestry and reach the global workspace view.
-- Keep working, idle, stopped, failed, archived, ended, and unavailable work visible.
-- Open exact session and branch routes without names, recency, or incidental ordering determining identity.
-- Preserve drafts, search input, modal key ownership, and historical inspection.
-- Keep browsing observational: it must not start, stop, resume, retry, cancel, or re-own work.
-- Keep workspace browsing separate from the model-facing nuclear-family API.
-- Preserve the current remembered workspace route unless the user invokes an explicit product-selection action.
-- Support large retained workspaces without replaying every branch on every refresh.
-- Cover the installed full-screen product path without exposing internal IDs.
+- Make every retained top-level workspace session visible in one terminal screen.
+- Include running, idle, stopped, failed, and archived root work.
+- Preserve the existing Left-to-parent and Right-to-children behavior at every nested level.
+- Let a user climb from any child to the root and press Left once more to reach the workspace screen.
+- Open an exact resumable root route without internal IDs.
+- Use the existing product session catalog and selection semantics.
+- Preserve drafts, modal controls, historical inspection, and durable runtime ownership.
+- Keep the change confined to product catalog presentation and terminal navigation.
 
 ## Non-goals
 
-- Changing child admission, task ownership, mailbox authorization, budgets, or cancellation semantics.
-- Giving generated TypeScript or models workspace-wide session visibility.
-- Replacing exact session and branch identity with display names.
-- Making failed or archived routes resumable merely because they are inspectable.
-- Treating a terminal attachment as durable session ownership.
-- Persisting search text, selected rows, expansion, scope, or scroll position as canonical events.
-- Adding mouse navigation.
-- Adding a new canonical event or mutable source of agent identity.
-- Deleting, archiving, renaming, stopping, or resuming sessions from the first version of the Agents view.
-- Silently truncating retained work when the workspace exceeds one response page.
+- Replacing the existing direct-child browser.
+- Adding a workspace-wide descendant graph.
+- Showing child sessions in the workspace screen.
+- Changing family authorization, task ownership, mailbox behavior, budgets, or cancellation.
+- Opening failed or archived sessions that the product catalog classifies as non-resumable.
+- Adding new canonical events, tables, migrations, or storage contracts.
+- Adding live workspace event aggregation.
+- Adding session deletion, rename, stop, resume, or creation controls to the first version.
+- Changing the model-facing `sdk.agents` API.
 
 ## Terms
 
-- **Route:** One exact `(sessionId, branchId)` pair.
-- **Agent route:** A route that belongs to a root or child session.
-- **Branch route:** A later branch of an existing session, linked to its exact source branch.
-- **Route graph:** The workspace-wide read projection containing root routes, branch lineage, child task edges, and unavailable retained references.
-- **Conversation route:** The route whose transcript the terminal currently observes.
-- **Return route:** The conversation route that remains unchanged while the Agents view is open.
-- **Scope route:** The route whose subtree is shown in a scoped Agents view.
-- **Parent scope:** The subtree rooted at the current route's exact parent route.
-- **Workspace scope:** The top-level view containing every retained root route in the workspace.
-- **Open:** Observe a retained route. Open does not resume or otherwise execute it.
-- **Inspect-only route:** A resolvable failed or archived route whose history may be opened but whose composer cannot start new work.
-- **Unavailable route:** A retained reference whose required session or branch state cannot be resolved.
+- **Root conversation:** A route whose session has no retained parent session.
+- **Nested conversation:** A child session route with an exact retained parent route.
+- **Workspace Agents view:** A full-screen selector containing retained root-session branches in the current workspace.
+- **Resumable row:** A root route whose session status is not `failed` or `archived`.
+- **Non-resumable row:** A visible failed or archived root route that cannot be opened from the selector.
 
-## Product interaction
+## Interaction
 
-### Conversation to Agents view
+### Conversation navigation
 
-When a live conversation is focused and its composer is empty:
+The existing rules remain:
 
-- Left opens the Agents view.
-- If the current route has a retained parent route, the view opens at that parent scope and selects the current route.
-- If the current route is a root, the view opens at workspace scope and selects that root.
-- The conversation remains the return route until the user opens another route.
+- Empty nested composer + Left opens the exact parent conversation.
+- Repeating Left climbs one exact retained parent route at a time.
+- Down focuses the direct-child summary.
+- Right or Enter opens the current direct-child browser.
+- Right or Enter in that browser opens the selected child.
 
-This replaces the shipped behavior in which Left jumps directly from a child conversation to the parent conversation. The parent remains one Enter or Right action away, but the user first sees the parent, siblings, descendants, and current selection in context.
+The new rule is:
 
-When the composer contains text, Left keeps ordinary cursor-editing behavior. The terminal never discards, submits, stashes, or hides a draft to enter the Agents view.
+- Empty top-level root composer + Left opens the workspace Agents view.
 
-### Agents view layout
+The terminal determines root status from the current retained family projection. It does not infer root status from a missing UI row, display name, branch name, or recent-session preference.
 
-The Agents view is a first-class full-screen product mode, not a contextual side inspector. It contains:
+### Workspace Agents view
+
+The workspace Agents view is a full-screen product surface modeled on Prime Agent's top-level Agents screen. It replaces the conversation body while open and retains:
 
 - an `Agents` header;
-- workspace and current-scope labels;
+- the workspace label;
 - a search field;
-- a virtualized hierarchical route list;
-- visible route activity and lifecycle labels;
-- a persistent trusted-local footer;
-- key hints that reflect the selected row and current scope.
+- grouped retained root rows;
+- the trusted-local footer;
+- current key hints.
 
-At workspace scope, root families are ordered in aggregate sections:
+Rows use the existing `ProductBranchSummary` identity and fields:
 
-1. **Attention**
-2. **Working**
-3. **Idle**
-4. **Ended**
+- session and branch names;
+- exact session and branch IDs internally;
+- model;
+- session status;
+- task summary;
+- unresolved-work count;
+- active-goal count;
+- created and updated timestamps.
 
-Each root family remains a hierarchical subtree inside its section. Descendants are not moved into separate sections, because separating them from their parents would hide the retained relationship. Every descendant row carries its own activity and lifecycle label.
+Child sessions are excluded with `root === true` filtering. Every branch of a root session remains eligible. When one root session has multiple branches, rows show `session name / branch name`; a single-branch session may omit the redundant branch suffix.
 
-Aggregate family activity uses the first matching rule:
+### Sections
 
-1. `attention` when any retained route is attention or unavailable;
-2. `working` when no route needs attention and any route is working;
-3. `idle` when no route needs attention or is working and at least one route remains interactive;
-4. `ended` otherwise.
+Rows are grouped by exact retained session status:
 
-Aggregate state is recomputed from the complete route graph at each catalog revision. It is not copied into a route summary whose own event stream cannot observe descendant changes.
+1. **Running**
+2. **Idle**
+3. **Stopped**
+4. **Failed**
+5. **Archived**
 
-The screen must not use `inactive` as an unexplained synonym for several different durable states. Failed, archived, stopped, cancelled, unknown, and unavailable remain distinguishable.
+Failed and archived rows remain visible. They are marked non-resumable and cannot be opened. The screen does not relabel several durable states as generic `inactive`.
 
-### Key behavior
+Rows sort within each section by:
 
-Key ownership follows this precedence:
+1. most recent `updatedAt`;
+2. normalized session name;
+3. normalized branch name;
+4. session ID and branch ID as hidden stable tie-breakers.
 
-1. Secret entry, model and effort selection, command search, notices requiring acknowledgement, and other modal surfaces retain their existing keys.
-2. A non-empty conversation composer retains ordinary editing behavior.
-3. A historical conversation rejects Left and `/agents` navigation with `Return to live with /live before opening Agents`.
-4. An Agents-view search query retains text-editing behavior.
-5. Agents navigation handles the remaining keys.
+### Keys
 
-The Agents view uses:
+The workspace Agents view uses:
 
-- Up and Down: move selection without wrapping.
-- Page Up and Page Down: move by one visible page.
-- Enter or Right: open the selected exact route.
-- Left with an empty search field: move one scope toward workspace scope.
-- Left at workspace scope: remain at workspace scope.
-- Escape with search text: clear the search.
-- Escape with an empty search field: close the Agents view and return to the unchanged return route.
-- Printable input: enter or update search; it never becomes a task prompt.
+- Up and Down to move selection without wrapping.
+- Page Up and Page Down to move by one visible page.
+- Enter or Right to open the selected resumable route.
+- Enter or Right on a failed or archived row to show a clear non-resumable notice.
+- Left at workspace scope to remain on the workspace screen.
+- Escape with search text to clear the search.
+- Escape with an empty search field to return to the conversation that opened the screen.
+- Printable input to update search.
 
-Opening a route closes the Agents view and returns focus to the conversation composer. Pressing Left again reopens the prior parent scope with that route selected.
+Search matches session name, branch name, task summary, model, and exact visible status. Search text is never submitted as a task.
 
-### Repeated ancestry traversal
+### Draft and modal safety
 
-For a retained route:
+Key ownership follows this order:
 
-```text
-root / main
-└── reviewer / main
-    └── verifier / main
-        └── reproduction / main
-```
+1. Secret entry, model and effort selection, command search, and other active modal surfaces retain their keys.
+2. A non-empty conversation composer retains ordinary cursor behavior.
+3. Historical inspection rejects root Left and `/agents` with `Return to live with /live before opening Agents`.
+4. The workspace Agents view owns search and list-navigation keys.
+5. Root Left navigation handles the remaining empty-composer case.
 
-Left from `reproduction` opens the `verifier` scope with `reproduction` selected. Another Left opens the `reviewer` scope. Another Left opens the `root` scope. Another Left opens workspace scope. Left at workspace scope is a no-op. Escape returns to the unchanged conversation route.
+No navigation action discards, submits, stashes, or rewrites a draft.
 
-Traversal follows retained exact route edges. It never chooses a route because it has a similar name or was used recently.
+### Opening a root route
 
-### Opening working and ended routes
+Opening a resumable row is an explicit top-level product selection:
 
-Every row has one interaction state:
+1. Call the existing `productSelect(sessionId, branchId)`.
+2. Reuse the existing serialized, snapshot-first route transition.
+3. Close the workspace Agents view.
+4. Focus the selected root conversation.
+5. Preserve one snapshot-plus-cursor branch watch.
 
-- **interactive:** idle, running, or stopped routes that support the existing conversation behavior;
-- **inspect-only:** failed or archived routes whose committed transcript and cells remain readable;
-- **unavailable:** missing or unreadable retained references.
+Unlike temporary parent/child browsing, selecting a root from the workspace screen updates the workspace's remembered resume route. A later no-argument `agencity` invocation resumes that selected root.
 
-Enter or Right opens interactive and inspect-only routes. Inspect-only conversations visibly disable task submission and explain the retained lifecycle state. Unavailable rows remain visible but cannot open.
+Opening the screen by itself changes no preference, event, execution owner, task, run, or effect.
 
-A completed or cancelled child task does not automatically make its session inspect-only. Retained child follow-up remains available when the session lifecycle supports it.
+## Commands
 
-Inspect-only behavior is controller-enforced rather than a visual convention:
+- `/agents` opens the workspace Agents view from any live conversation.
+- `/tree` continues to show the current route's retained parent, siblings, direct children, tasks, and mailbox.
+- `/sessions` continues to show the flat diagnostic branch catalog.
+- `/sessions select NAME|ID` remains the command form of explicit root or branch selection.
 
-- read-only inspection commands, `/agents`, `/tree`, `/sessions`, `/history`, `/live`, help, and raw diagnostics remain available;
-- independent workspace actions such as `/new` and an explicit `/sessions select` remain available because they do not mutate the inspect-only route;
-- free-text submission and every current-route mutation are rejected, including cells or model runs, `/branch`, `/resume`, model or effort changes, task cancellation, goals, heartbeats, schedules, refinement, compaction, skill invocation, and other effectful route commands;
-- command metadata classifies every command as read-only, navigation, independent workspace control, or current-route mutation; an unclassified command fails closed in inspect-only mode.
+Changing `/agents` from a nuclear-family inspector to the workspace screen is intentional. `/tree` preserves access to the former diagnostic content.
 
-The runtime and domain services remain the authority for lifecycle transitions. The terminal policy is a product guard, not a security boundary or permission to weaken server validation.
+## Data and protocol
 
-### Search
-
-Search matches:
-
-- session name;
-- branch name;
-- retained task summary;
-- model label;
-- visible lifecycle and activity labels.
-
-Search results retain enough ancestors to show each match's path. Matching descendants remain under their exact root family. Internal IDs are not part of ordinary search display, but remain available in raw diagnostics.
-
-Search, selection, expansion, scope, and scroll position are disposable client state.
-
-### Existing direct-child summary
-
-The compact direct-child summary remains in the conversation view.
-
-- Down focuses the summary.
-- Enter or Right opens the Agents view scoped to the current route, with its direct children visible.
-- Up and Down select routes in the Agents view.
-- Enter or Right opens the selected route.
-- Left moves to the current route's parent scope.
-
-The old direct-child browser implementation is retired after the new Agents view covers its behavior. `/tree` remains a structured diagnostic inspector for the current nuclear family.
-
-### Commands
-
-- `/agents` opens the workspace Agents view.
-- `/tree` continues to inspect the current route's parent, siblings, direct children, tasks, and mailbox.
-- `/sessions` continues to show the flat retained branch catalog for diagnostics.
-- `/sessions select NAME|ID` remains the explicit action that changes the workspace's remembered resume selection.
-
-Opening a route in the Agents view does not call `productSelect`. Detaching while observing an unrelated route therefore does not silently change the next no-argument `agencity` selection.
-
-## Route graph semantics
-
-### Exact hierarchy
-
-Every visible row represents an exact route or an unavailable retained route reference.
-
-- A root session's initial branch is a workspace root route.
-- A child session's initial branch is attached to the exact parent session and branch recorded by its task edge.
-- A later branch is attached to its exact `BranchCreated.parentBranchId` route in the same session.
-- A child admitted from a non-initial parent branch appears under that exact branch.
-- An unavailable child task target appears beneath the route that admitted it.
-
-The graph must not infer parentage from session names, timestamps, branch labels, task text, or current product selection.
-
-### Branch presentation
-
-Rows display `session name / branch name`. A branch edge and child-agent edge use distinct text markers so users can tell whether they are entering alternate history or delegated work.
-
-The route graph may contain several branches of one session. Each branch remains independently selectable and keeps its own status, cursor, messages, cells, effects, and descendants.
-
-### Activity and lifecycle
-
-The Agents view presents activity separately from session lifecycle.
-
-Activity is one of:
-
-- `working`;
-- `idle`;
-- `attention`;
-- `ended`;
-- `unavailable`.
-
-Lifecycle remains the exact session status:
-
-- `running`;
-- `idle`;
-- `stopped`;
-- `failed`;
-- `archived`.
-
-Bounded reasons preserve blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state distinctions without copying raw provider output or error text into a workspace roster.
-
-Unknown and unavailable never render as idle or successful.
-
-## Product protocol
-
-### Workspace agent catalog
-
-Add a managed product endpoint separate from `AgentService.listFamily`:
-
-```http
-GET /product/agents?revision=REVISION&cursor=CURSOR&limit=200
-```
-
-The endpoint returns a typed `WorkspaceAgentCatalogPage`:
+The first version uses the existing managed product contract:
 
 ```ts
-interface WorkspaceAgentCatalogPage {
-  workspaceId: string;
-  revision: string;
-  totalRoutes: number;
-  items: WorkspaceAgentRoute[];
-  nextCursor: string | null;
-  unchanged: boolean;
-}
+AgentClient.productSessions(): Promise<ProductBranchSummary[]>
 ```
 
-Each `WorkspaceAgentRoute` includes:
+`ProductCatalog.list()` already returns every retained branch in the workspace, including:
 
-- `sessionId`;
-- `branchId`;
-- `routeKey`;
-- `routeKind: "root" | "child" | "branch" | "unavailable"`;
-- `parentRouteKey`;
-- `rootSessionId`;
-- `sessionDepth`;
-- `taskId`;
-- session and branch display names;
-- task summary and task status;
-- model configuration;
-- session lifecycle;
-- activity and bounded reason;
-- cancellation-request state;
-- active-goal and unresolved-work counts;
-- created and updated timestamps;
-- interaction state: `interactive`, `inspect-only`, or `unavailable`.
+- display names;
+- model;
+- exact lifecycle status;
+- task summary;
+- unresolved-work and active-goal counts;
+- timestamps;
+- `root` and `initialBranch` classification.
 
-The product capability document adds `workspaceAgentCatalog`. Clients that connect to an older or reduced placement report the view as unavailable instead of falling back to a misleading flat or partial tree.
+No new product endpoint or family API is required.
 
-`sessionDepth` is the durable child-session depth enforced by `AgentService` and defaults to a maximum of eight. Branch ancestry is a separate route relation and does not increment session depth. The client derives display indentation iteratively from `parentRouteKey`; display depth is not canonical and is bounded by the number of routes in the validated graph.
+The terminal fetches the catalog:
 
-### Pagination and revision
+- when the workspace Agents view opens;
+- when the user explicitly refreshes it;
+- after a successful top-level selection before the next open.
 
-The endpoint never silently truncates the workspace:
+The first version does not poll while the screen is open. It displays the catalog's fetch time and provides `R` to refresh. This avoids repeatedly replaying every retained branch through the current `ProductCatalog.list()` implementation. Live revision-based refresh is deferred until the catalog has a measured incremental projection.
 
-- pages use a deterministic opaque cursor;
-- every page belongs to one immutable catalog revision;
-- the client continues until `nextCursor` is null;
-- the TUI shows explicit loading progress while later pages arrive;
-- if a revision expires during paging, the client discards the partial graph and restarts from the new revision;
-- a completed client may send its last revision and receive `unchanged: true` without retransferring rows.
+A failed refresh keeps the prior complete rows visible with a stale marker. It does not clear the list or invent a new status.
 
-The managed service may retain recent immutable catalog revisions in a bounded in-memory cache. That cache is disposable and reconstructible.
+## Terminal state
 
-### Authorization boundary
-
-`GET /product/agents` is an owner-facing managed product surface for the current workspace. It does not alter:
-
-- `GET /sessions/:session/agents`;
-- `sdk.agents.list()`;
-- mailbox target authorization;
-- model context scope;
-- console SQL policy;
-- child task ownership.
-
-The model-facing family API remains nuclear-family-only. The TUI must not recursively call it to construct a workspace catalog.
-
-## Catalog construction and performance
-
-### Storage read projection
-
-Add a storage read that enumerates workspace-owned route tips and retained edges in one bounded query. It may join existing `sessions`, `branches`, and task projections, but it does not create a new canonical event or mutable identity table.
-
-The read returns enough data to:
-
-- identify every workspace route;
-- identify exact child and branch parents;
-- detect missing retained targets;
-- determine each route's latest canonical cursor;
-- load only changed route snapshots.
-
-If the storage contract gains a bulk workspace-route method, local and HTTP-backed placements receive the same typed capability and conformance coverage. Unsupported remote placement must report the capability as unavailable.
-
-### Incremental catalog cache
-
-The managed product service owns a disposable cache:
-
-1. Read ordered route identities, edges, dependency fingerprints, and tip cursors.
-2. Derive a revision from that ordered material.
-3. Reuse route summaries only when their complete dependency fingerprints agree.
-4. Rebuild changed summaries through cached deterministic projections.
-5. Recompute root-family aggregate activity from the complete graph.
-6. Sort and page the immutable graph.
-
-A route-summary dependency fingerprint includes:
-
-- the route's own latest canonical cursor;
-- the latest session-name event across every branch of that session;
-- the inbound parent-task version that supplies child task status, cancellation, and activity;
-- the branch or child edge identity and source cursor;
-- any other route whose canonical projection supplies a displayed field.
-
-Synchronization, branch creation, task admission, parent-task changes, session naming on another branch, branch naming, status changes, goals, run outcomes, and unknown effects must invalidate every dependent summary. Tests prove cross-route invalidation rather than assuming an own-route tip is sufficient.
-
-A cache miss or process restart rebuilds from canonical events and projections. Cache loss never loses agent identity or changes hierarchy.
-
-Ordinary cold construction uses one bulk storage read for workspace routes, edges, tips, dependency versions, and valid current snapshots. It must not make one protocol or placement round trip per route. Missing or stale snapshots use a topological workspace rebuild that shares projected parent state at branch fork points and does not independently replay the same inherited history for every descendant branch. Rebuilt snapshots remain disposable and are persisted through the existing snapshot contract.
-
-The benchmark records physical rows read and events reduced. A cold rebuild may be more expensive than an unchanged refresh, but its work must be bounded by the workspace's unique retained routes and events rather than route count multiplied by inherited history.
-
-### Refresh
-
-The TUI refreshes the catalog:
-
-- when the Agents view opens;
-- after a successful route transition before the next Agents view opens;
-- while the Agents view remains open;
-- once after reconnect.
-
-Refreshes are revision-based, coalesced, and generation-checked. Only one refresh may be in flight. A failed refresh preserves the last complete graph, marks it stale, and never invents an idle or ended state.
-
-No workspace-catalog polling continues after the Agents view closes.
-
-### Scale verification
-
-Benchmarks cover:
-
-- 100 routes with 5,000 events per route;
-- 1,000 mixed root, child, and branch routes;
-- a child-session chain at the configured `AgentService.maxDepth` and a separate 100-branch lineage;
-- cold catalog construction;
-- unchanged warm refresh;
-- one-route invalidation;
-- complete paged transfer and rendering.
-
-The acceptance threshold records latency and query work rather than embedding an unsupported production-scale claim. An unchanged warm refresh must not replay all branch histories.
-
-## Terminal state model
-
-Add disposable `TerminalAgentsNavigation` state:
+Add disposable workspace-screen state:
 
 ```ts
-interface TerminalAgentsNavigation {
+interface TerminalWorkspaceAgentsState {
   open: boolean;
   returnRoute: { sessionId: string; branchId: string };
-  scopeRouteKey: string | null;
-  selectedRouteKey: string | null;
+  rows: readonly ProductBranchSummary[];
+  selectedKey: string | null;
   query: string;
-  revision: string | null;
-  refresh: "current" | "loading" | "stale" | "unavailable";
-  loadedRoutes: number;
-  totalRoutes: number | null;
+  refresh: "loading" | "current" | "stale" | "unavailable";
+  fetchedAt: string | null;
   generation: number;
 }
 ```
 
-The controller derives visible rows and ancestor paths from the complete route graph. Route transitions reuse the existing snapshot-first, serialized, generation-checked switch primitive.
+The selected key combines exact session and branch IDs. Refresh preserves selection when the route remains present and otherwise selects the nearest visible resumable row, then the nearest visible row.
 
-Opening a selected route:
-
-1. verifies the selected row is resolvable;
-2. fetches and validates the exact target snapshot;
-3. aborts and awaits the old branch watch;
-4. clears route-local provisional output and interrupt state;
-5. installs the exact target route and snapshot;
-6. starts one target snapshot-plus-cursor watch;
-7. closes the Agents view;
-8. restores conversation focus.
-
-The transition does not append an event or call product selection.
+This state is client-local. A client restart reconstructs the catalog from the product service.
 
 ## Responsive rendering
 
 ### Normal and wide terminals
 
-- The Agents view replaces the conversation body.
-- The search field and selected route remain visible.
-- Rows show session, branch, activity, lifecycle, model, task summary, and unresolved-work count when width permits.
-- Indentation and text markers show derived display depth and edge kind.
+- The workspace screen replaces the conversation body.
+- Rows show name, branch, status, model, task summary, unresolved work, and relative update time.
+- Search and the selected row remain visible.
 
 ### Narrow terminals
 
-- The full-screen hierarchy remains available.
-- Rows prioritize name, branch, status, and derived display depth.
-- Model, timestamps, and task detail collapse before navigation controls.
-- The selected row and its complete ancestry appear in a compact detail line.
+- Rows prioritize session name, branch name, and status.
+- Model, task detail, counts, and timestamps collapse in that order.
+- The selected row remains distinguishable without color.
 
 ### Very short terminals
 
-- Preserve header, search, one selected row, and trusted-local footer.
+- Preserve the header, search field, one selected row, and trusted-local footer.
 - Page movement remains available.
 - Do not render a zero-height list or overlapping controls.
 
-### Accessibility
+## Architecture and security invariants
 
-- Color is supplementary.
-- Every state has a text label and marker.
-- Selection is visible without color.
-- Long paths preserve root and selected labels while collapsing middle ancestry.
-- Enter, Return, linefeed, keypad Enter, and common CSI arrow sequences share behavior.
-
-## Security and architecture invariants
-
-- The TUI remains a public protocol client and never opens the workspace database.
-- Workspace browsing does not broaden model or console authorization.
-- Route opening executes no effect and bypasses no outbox boundary.
-- Navigation does not mutate canonical history.
-- Missing or corrupt route state remains unavailable.
-- Raw credentials, known secret values, provider output, and unbounded errors do not enter catalog labels.
-- Internal IDs remain hidden in ordinary rendering and available through scrubbed diagnostics.
+- The TUI uses only `AgentClient.productSessions()` and `productSelect()`.
+- The TUI does not open the database or call `Supervisor` directly.
+- The workspace screen does not broaden model-facing family access.
+- Root selection follows exact session and branch IDs.
+- Opening the screen executes no effect and appends no canonical event.
+- Failed and archived routes remain visible rather than being presented as absent.
+- Unsupported or missing catalog capability fails visibly.
+- Raw credentials and known secret values do not enter rows, search text, notices, or tests.
 - Trusted-local authority remains visible in every layout.
-- A client crash loses only disposable browser state.
 
 ## Delivery sequence
 
-### 1. Typed route graph
+### 1. Pure workspace view model
 
-- Define workspace catalog and route types.
-- Add exact child and branch edge derivation.
-- Add lifecycle, activity, interaction-state, and bounded-reason derivation.
-- Add deterministic graph validation and ordering.
-- Preserve unavailable retained edges.
+- Filter `ProductBranchSummary` rows to roots.
+- Group and sort exact statuses.
+- Add search, fallback labels, resumable state, and stable selection keys.
+- Add responsive row formatting.
 
-### 2. Efficient catalog read
+### 2. Terminal controller
 
-- Add the workspace route-tip storage read.
-- Refactor product catalog projection to reuse snapshots and unchanged summaries.
-- Add immutable revision and pagination support.
-- Add cold, warm, changed-route, and scale benchmarks.
+- Add workspace Agents state and one-shot refresh.
+- Add root-only Left entry.
+- Preserve nested Left-to-parent behavior unchanged.
+- Add `/agents` entry and `/tree` diagnostic separation.
+- Open selected roots through `productSelect` and the existing route transition.
 
-### 3. Product protocol
+### 3. OpenTUI screen
 
-- Add the managed product endpoint and capability.
-- Add typed client methods.
-- Add revision-expiry and unavailable-capability errors.
-- Keep family and console SDK contracts unchanged.
+- Add the full-screen list, search, selection, refresh, notices, and footer hints.
+- Add normal, compact, narrow, and minimum-height layouts.
+- Preserve existing family summary and direct-child browser behavior.
 
-### 4. Terminal controller
+### 4. Verification and documentation
 
-- Add Agents-view state, graph loading, search, scope, selection, and refresh.
-- Add Left entry from root and nested conversations.
-- Replace direct parent-conversation Left with parent-scope entry.
-- Reuse race-safe route switching without product selection.
-- Preserve prior scope and selection when a route is opened and revisited.
-
-### 5. OpenTUI screen
-
-- Build the full-screen Agents view and virtualized route rows.
-- Add search and responsive key hints.
-- Connect the direct-child summary to the new scoped view.
-- Change `/agents` to open the workspace screen and retain `/tree` diagnostics.
-- Add inspect-only conversation treatment.
-
-### 6. Product verification and documentation
-
-- Add projection, protocol, controller, rendering, performance, and installed-product tests.
-- Update the user guide, protocol and API references, verification claims, and command help.
+- Add pure, controller, OpenTUI, and installed-product tests.
+- Update user, command, protocol, and verification documentation.
 - Update `AGENTS.md` only after implementation and verification are complete.
 
 ## Expected implementation areas
 
-- `src/product/catalog.ts` — workspace route graph, revision, paging, and summary caching.
-- `src/product/service.ts` — managed workspace catalog hook.
-- `src/storage/contract.ts` — efficient workspace route-tip read contract.
-- `src/storage/libsql.ts` — local route and edge query.
-- `src/placement/` — capability and conformance updates if the storage read crosses placement.
-- `src/protocol/server.ts` — product Agents endpoint.
-- `src/protocol/client.ts` — typed catalog client.
-- `src/tui/view-model.ts` — graph rows, paths, search, activity, and responsive view data.
-- `src/tui/index.ts` — Agents-view state, refresh, scope traversal, and route transitions.
-- `src/tui/opentui.ts` — full-screen screen, search, virtualized list, and key handling.
-- `src/tui/detail-model.ts` — retain `/tree` and `/sessions` diagnostics.
-- `test/unit/` — graph, catalog, controller, rendering, input, and responsive behavior.
-- `test/integration/` — protocol, exact route graph, storage, refresh, and performance.
-- `test/e2e/opentui-pty.test.ts` — installed multi-level navigation and retained-route inspection.
-- `README.md`, `docs/user-guide.md`, `docs/protocol.md`, `docs/api.md`, `docs/verification.md`, and `AGENTS.md` — shipped behavior and evidence.
+- `src/tui/view-model.ts` — root filtering, grouping, search, sorting, and row formatting.
+- `src/tui/index.ts` — workspace catalog loading, state, root selection, and command routing.
+- `src/tui/opentui.ts` — full-screen screen, keys, search, refresh, and responsive rendering.
+- `src/tui/detail-model.ts` — retain `/tree` diagnostics and remove the old `/agents` alias.
+- `src/product/catalog.ts` — no semantic change expected; optimize only if measurement shows the one-shot read is unacceptable.
+- `test/unit/tui-workspace-agents-view-model.test.ts` — pure presentation behavior.
+- `test/unit/terminal-ui.test.ts` — root detection, catalog refresh, and exact selection.
+- `test/unit/opentui.test.ts` — key ownership and responsive frames.
+- `test/e2e/opentui-pty.test.ts` — installed ancestry-to-workspace navigation.
+- `README.md`, `docs/user-guide.md`, `docs/api.md`, `docs/protocol.md`, `docs/verification.md`, and `AGENTS.md` — shipped behavior and evidence.
 
 ## Test plan
 
-### Route graph
+### View model
 
-- One root produces one workspace root route.
-- Multiple roots remain separate.
-- Child routes attach to exact parent branches.
-- Children admitted from non-initial branches attach correctly.
-- Branches attach to exact source branches.
-- Child traversal remains deterministic through the configured session-depth limit, including the default maximum of eight.
-- Branch traversal remains deterministic through long branch lineages without treating branch depth as session depth.
-- Duplicate names never merge routes.
-- Missing child sessions or branches remain visible and unavailable.
-- Cyclic, cross-workspace, or malformed edges fail closed.
-- Physical owned-scope deletion removes only data that no longer exists by contract; retained unavailable references remain explicit.
-
-### Activity and lifecycle
-
-- Running work appears working.
-- Resumable stopped work remains visibly stopped and idle.
-- Failed work appears attention and inspect-only.
-- Archived work appears ended and inspect-only.
-- Cancelled child tasks remain visible.
-- Unknown effects remain attention.
-- Missing state remains unavailable.
-- A completed child task with a follow-up-capable session remains interactive.
-
-### Catalog and protocol
-
-- Only routes owned by the selected workspace are returned.
-- Pages are stable within one revision.
-- All pages reconstruct the same deterministic graph.
-- Revision expiry forces a clean restart.
-- Unchanged refresh transfers no route rows.
-- One changed route does not replay unrelated branch histories.
-- A session rename on one branch invalidates every branch summary for that session.
-- A parent-task change invalidates the related child row even when the child's own tip is unchanged.
-- Descendant activity changes recompute the root family's aggregate section.
-- Direct family and console SDK calls remain nuclear-family-only.
-- Unsupported placement returns a typed capability error.
+- Child-session rows are excluded.
+- Every branch of a root session remains visible.
+- Running, idle, stopped, failed, and archived sections are exact.
+- Failed and archived rows are visibly non-resumable.
+- Duplicate names remain distinct through stable route keys.
+- Search matches visible fields and never exposes IDs.
+- Sorting is deterministic.
+- Empty workspaces render a useful empty state.
 
 ### Controller
 
-- Root Left opens workspace scope with the root selected.
-- Nested Left opens the exact parent scope with the current route selected.
-- Repeated Left reaches every ancestor and then workspace scope.
-- Left at workspace scope is a no-op.
-- Escape returns to the unchanged conversation.
-- Opening another root does not call `productSelect`.
-- Opening a failed or archived route enters inspect-only conversation mode.
-- Inspect-only mode rejects every classified current-route mutation and fails closed for an unclassified command.
-- Unavailable routes cannot open.
-- Rapid open, Left, and refresh input cannot let stale state win.
-- Every completed transition owns exactly one branch watch.
-- Navigation clears route-local provisional state without cancelling work.
+- Left from an empty nested composer opens the exact parent conversation, unchanged from current behavior.
+- Repeated nested Left reaches the root conversation.
+- Left from an empty root composer opens the workspace Agents view.
+- Left with a draft retains cursor behavior.
+- `/agents` opens the workspace screen from a live nested or root conversation.
+- Historical mode requires `/live`.
+- Opening the screen does not call `productSelect`.
+- Opening a resumable row calls `productSelect` once with exact IDs.
+- Failed and archived rows cannot open.
+- A failed refresh preserves stale rows.
+- Rapid open, close, refresh, and selection cannot let an old response replace current state.
+- Each successful root selection leaves exactly one branch watch.
 
 ### OpenTUI
 
-- Non-empty drafts retain all cursor behavior.
-- Search text retains editing behavior.
-- Escape clears search before closing the screen.
-- Up and Down do not wrap.
-- Page movement keeps the selection visible.
-- Right and all Enter variants open exactly one route.
-- Existing modal and secret-input keys take precedence.
-- Wide, narrow, compact, and minimum-height frames remain usable.
-- Search results retain matching ancestry.
-- Working, attention, idle, ended, inspect-only, and unavailable rows remain understandable without color.
-- Refresh preserves the selected route when it still exists.
+- Up, Down, Page Up, and Page Down keep selection visible.
+- Enter and Right open one resumable row.
+- Enter and Right show a notice for non-resumable rows.
+- Escape clears search before closing.
+- Left at workspace scope is a no-op.
+- Existing family-summary and child-browser keys remain unchanged.
+- Modal and secret-input keys retain precedence.
+- Normal, narrow, compact, and minimum-height frames remain usable.
+- Stale and unavailable catalog states remain explicit.
 
 ### Installed product
 
 A linked `agencity` executable in a fresh external repository must:
 
-1. create at least two root sessions;
-2. create a retained child chain at least three levels deep;
-3. retain an idle route and an ended or failed route;
-4. press Left from the deepest conversation and open its parent scope;
-5. repeat Left until the global workspace view appears;
-6. find and open the idle and ended or failed routes without internal IDs;
-7. return to the original nested route;
-8. prove browsing did not start, stop, retry, cancel, or duplicate work;
-9. detach and prove the remembered product route did not change;
-10. keep provider credentials absent from pseudo-terminal output.
-
-The black-box test must use only the installed product and public protocol-backed TUI.
+1. create two retained root sessions;
+2. create a root, child, and grandchild family;
+3. open the grandchild;
+4. press Left to return to the child;
+5. press Left to return to the root;
+6. press Left to open the workspace Agents view;
+7. show both retained roots without internal IDs;
+8. select the other root with Down and Right or Enter;
+9. detach and confirm the selected root is the remembered resume route;
+10. prove navigation did not duplicate, cancel, stop, or retry family work.
 
 ## Completion criteria
 
 The feature is complete when:
 
-1. Left from any live empty conversation opens the correct Agents scope.
-2. Repeated Left reaches every retained ancestor and workspace scope.
-3. The workspace view includes every retained route, including idle, stopped, failed, archived, ended, and unavailable records.
-4. Enter or Right opens an exact interactive or inspect-only route.
-5. Drafts, search, modals, and historical inspection retain their authority.
-6. Browsing never changes product resume selection or execution ownership.
-7. Workspace catalog reads are revisioned, paged, and efficient on unchanged refresh.
-8. The model-facing family boundary remains unchanged.
-9. Wide, narrow, and very short terminals expose the same navigation semantics.
-10. Unit, integration, performance, OpenTUI frame/input, and installed pseudo-terminal tests cover the complete path.
-11. `bun run typecheck`, `bun run check:architecture`, relevant focused suites, and `bun run verify` pass.
-12. Public documentation and `AGENTS.md` describe the shipped behavior and remaining limits accurately.
+1. Existing nested Left-to-parent and Right-to-child behavior is unchanged.
+2. Left from a top-level root opens the workspace Agents view.
+3. `/agents` opens the same screen from any live conversation.
+4. Every retained root branch appears with its exact status, including failed and archived rows.
+5. Only resumable rows can be opened.
+6. Opening a root intentionally updates the remembered product selection.
+7. Drafts, modals, and historical inspection retain their existing authority.
+8. The implementation requires no new canonical event, table, migration, storage contract, or model-facing capability.
+9. Unit, OpenTUI, controller, and installed pseudo-terminal tests cover the complete path.
+10. `bun run typecheck`, `bun run check:architecture`, relevant focused tests, and `bun run verify` pass.
+11. Public documentation and `AGENTS.md` describe the shipped behavior and limitations accurately.

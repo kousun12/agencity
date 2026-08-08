@@ -21,6 +21,7 @@ import {
 import {
   OpenTuiApp,
   alternateScrollDelta,
+  familyRefreshSuffix,
   formatManagedDetach,
   toggleAllRunDetails,
   type OpenTuiController,
@@ -35,6 +36,13 @@ const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
 
 describe("OpenTUI interactive terminal", () => {
+  test("keeps routine family refreshes invisible while retaining degraded states", () => {
+    expect(familyRefreshSuffix("current")).toBe("");
+    expect(familyRefreshSuffix("refreshing")).toBe("");
+    expect(familyRefreshSuffix("stale")).toBe(" · stale");
+    expect(familyRefreshSuffix("unavailable")).toBe(" · unavailable");
+  });
+
   test("maps alternate-scroll wheel input without consuming physical Kitty arrow keys", () => {
     expect(alternateScrollDelta("\u001bOA")).toBe(-3);
     expect(alternateScrollDelta("\u001bOB")).toBe(3);
