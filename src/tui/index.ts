@@ -9,9 +9,12 @@ import type { FamilyAgentRecord, RecoverySummaryView } from "../runtime/index.ts
 import { scrubText } from "../security/index.ts";
 import type { ModelConfiguration } from "../domain/index.ts";
 import {
+  selectTerminalWorkspaceAgentKey,
+  terminalWorkspaceAgentKey,
   type TerminalConnectionState,
   type TerminalFamilyNavigation,
   type TerminalPresentation,
+  type TerminalWorkspaceAgentsState,
 } from "./view-model.ts";
 import {
   buildTerminalDetail,
@@ -79,7 +82,8 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/mailbox", aliases: [], category: "status", usage: "/mailbox", summary: "Show retained family messages and receipts." },
   { name: "/tasks", aliases: [], category: "status", usage: "/tasks", summary: "Show retained child tasks." },
   { name: "/cancel-task", aliases: [], category: "status", usage: "/cancel-task TASK_ID [REASON]", summary: "Request durable child-task cancellation." },
-  { name: "/agents", aliases: ["/tree"], category: "status", usage: "/agents", summary: "Show the retained family, tasks, and mailbox." },
+  { name: "/agents", aliases: [], category: "product", usage: "/agents", summary: "Open retained root work in this workspace." },
+  { name: "/tree", aliases: [], category: "status", usage: "/tree", summary: "Show the current retained family, tasks, and mailbox." },
   { name: "/goal", aliases: ["/goals"], category: "autonomy", usage: "/goal [create DESCRIPTION|pause|resume|clear|complete]", summary: "Inspect or manage the current goal." },
   { name: "/heartbeat", aliases: ["/heartbeats"], category: "autonomy", usage: "/heartbeat [create MS [PROMPT]|pause N|resume N|clear N]", summary: "Inspect or manage heartbeats." },
   { name: "/schedule", aliases: ["/schedules"], category: "autonomy", usage: "/schedule [once ISO PROMPT|every MS PROMPT|pause N|resume N|clear N]", summary: "Inspect or manage schedules." },
@@ -269,7 +273,18 @@ export class TerminalUI {
     parent: null,
     children: [],
     ancestry: [],
+    root: null,
     refresh: "unavailable",
+    generation: 0,
+  };
+  #workspaceAgents: TerminalWorkspaceAgentsState = {
+    open: false,
+    returnRoute: { sessionId: "", branchId: "" },
+    rows: [],
+    selectedKey: null,
+    query: "",
+    refresh: "unavailable",
+    fetchedAt: null,
     generation: 0,
   };
   #familyRefreshPromise: Promise<void> | null = null;
@@ -335,8 +350,19 @@ export class TerminalUI {
       parent: null,
       children: [],
       ancestry: [snapshot.state.sessionName ?? "Unnamed session"],
+      root: null,
       refresh: "refreshing",
       generation: ++this.#familyGeneration,
+    };
+    this.#workspaceAgents = {
+      open: false,
+      returnRoute: { sessionId, branchId },
+      rows: [],
+      selectedKey: null,
+      query: "",
+      refresh: this.#productCatalog ? "loading" : "unavailable",
+      fetchedAt: null,
+      generation: this.#workspaceAgents.generation + 1,
     };
     await this.#refreshFamily(true);
     const recovery = await this.client.recoverySummary(sessionId, branchId);
@@ -366,6 +392,11 @@ export class TerminalUI {
     }
     this.#watchController?.abort();
     this.#familyBrowserOpen = false;
+    this.#workspaceAgents = {
+      ...this.#workspaceAgents,
+      open: false,
+      generation: this.#workspaceAgents.generation + 1,
+    };
     this.#clearFamilyRefreshTimer();
     this.#familyGeneration++;
     this.#removeSigintHandler();
@@ -399,6 +430,7 @@ export class TerminalUI {
       connection: this.#connection,
       provisionalRunIds: [...this.#agentWorkingRunIds],
       family: this.#family,
+      workspaceAgents: this.#workspaceAgents,
     };
   }
 
@@ -422,6 +454,112 @@ export class TerminalUI {
     this.#familyBrowserOpen = open;
     if (open) void this.#refreshFamily();
     this.#scheduleFamilyRefresh();
+  }
+
+  async openWorkspaceAgents(): Promise<void> {
+    this.#assertWorkspaceAgentsAvailable();
+    const returnRoute = { sessionId: this.#sessionId, branchId: this.#branchId };
+    const preferredKey = terminalWorkspaceAgentKey(returnRoute);
+    this.#workspaceAgents = {
+      ...this.#workspaceAgents,
+      open: true,
+      returnRoute,
+      query: "",
+      selectedKey: selectTerminalWorkspaceAgentKey(this.#workspaceAgents.rows, "", preferredKey),
+    };
+    this.#publish();
+    await this.refreshWorkspaceAgents();
+  }
+
+  closeWorkspaceAgents(): void {
+    if (!this.#workspaceAgents.open) return;
+    this.#workspaceAgents = {
+      ...this.#workspaceAgents,
+      open: false,
+      query: "",
+      generation: this.#workspaceAgents.generation + 1,
+    };
+    this.#publish();
+  }
+
+  setWorkspaceAgentsQuery(query: string): void {
+    if (!this.#workspaceAgents.open || query === this.#workspaceAgents.query) return;
+    this.#workspaceAgents = {
+      ...this.#workspaceAgents,
+      query,
+      selectedKey: selectTerminalWorkspaceAgentKey(
+        this.#workspaceAgents.rows,
+        query,
+        this.#workspaceAgents.selectedKey,
+      ),
+    };
+    this.#publish();
+  }
+
+  selectWorkspaceAgent(selectedKey: string | null): void {
+    if (!this.#workspaceAgents.open || selectedKey === this.#workspaceAgents.selectedKey) return;
+    const nextKey = selectTerminalWorkspaceAgentKey(
+      this.#workspaceAgents.rows,
+      this.#workspaceAgents.query,
+      selectedKey,
+    );
+    this.#workspaceAgents = { ...this.#workspaceAgents, selectedKey: nextKey };
+    this.#publish();
+  }
+
+  async refreshWorkspaceAgents(): Promise<void> {
+    this.#assertWorkspaceAgentsAvailable();
+    const generation = this.#workspaceAgents.generation + 1;
+    this.#workspaceAgents = { ...this.#workspaceAgents, refresh: "loading", generation };
+    this.#publish();
+    try {
+      const rows = await this.client.productSessions();
+      if (generation !== this.#workspaceAgents.generation || this.#detached || this.#closing) return;
+      const selectedKey = selectTerminalWorkspaceAgentKey(
+        rows,
+        this.#workspaceAgents.query,
+        this.#workspaceAgents.selectedKey,
+      );
+      this.#workspaceAgents = {
+        ...this.#workspaceAgents,
+        rows,
+        selectedKey,
+        refresh: "current",
+        fetchedAt: new Date().toISOString(),
+        generation,
+      };
+    } catch {
+      if (generation !== this.#workspaceAgents.generation || this.#detached || this.#closing) return;
+      this.#workspaceAgents = {
+        ...this.#workspaceAgents,
+        refresh: this.#workspaceAgents.rows.length ? "stale" : "unavailable",
+        generation,
+      };
+    }
+    this.#publish();
+  }
+
+  async openWorkspaceAgent(sessionId: string, branchId: string): Promise<void> {
+    this.#assertWorkspaceAgentsAvailable();
+    if (!this.#workspaceAgents.open) throw new Error("The workspace Agents view is not open");
+    const selected = this.#workspaceAgents.rows.find(row =>
+      row.root && row.sessionId === sessionId && row.branchId === branchId);
+    if (!selected) throw new Error("The selected root route is no longer available");
+    if (selected.status === "failed" || selected.status === "archived") {
+      throw new Error(`${selected.sessionName} is ${selected.status} and cannot be opened`);
+    }
+    await this.client.productSelect(sessionId, branchId);
+    await this.#queueRouteTransition(sessionId, branchId);
+    this.#workspaceAgents = {
+      ...this.#workspaceAgents,
+      open: false,
+      returnRoute: { sessionId, branchId },
+      query: "",
+      selectedKey: terminalWorkspaceAgentKey({ sessionId, branchId }),
+      generation: this.#workspaceAgents.generation + 1,
+    };
+    this.#publish();
+    await this.refreshWorkspaceAgents();
   }
 
   subscribePresentation(listener: TerminalPresentationListener): () => void {
@@ -504,7 +642,8 @@ export class TerminalUI {
     if (line === "/budget") { this.#detail("/budget", this.#requireState().budget); return "continue"; }
     if (line === "/cells") { this.#detail("/cells", Object.values(this.#requireState().cells)); return "continue"; }
     if (line.startsWith("/cell ")) { this.#detail("/cell", await this.client.cell(this.#sessionId,this.#branchId,line.slice(6))); return "continue"; }
-    if (line === "/agents" || line === "/tree") { this.#detail(line, {family:await this.client.agents(this.#sessionId,this.#branchId),tasks:await this.client.tasks(this.#sessionId,this.#branchId),mailbox:await this.client.mailbox(this.#sessionId,this.#branchId,{limit:50})}); return "continue"; }
+    if (line === "/agents") { await this.openWorkspaceAgents(); return "continue"; }
+    if (line === "/tree") { this.#detail(line, {family:await this.client.agents(this.#sessionId,this.#branchId),tasks:await this.client.tasks(this.#sessionId,this.#branchId),mailbox:await this.client.mailbox(this.#sessionId,this.#branchId,{limit:50})}); return "continue"; }
     if (line === "/mailbox") { this.#detail("/mailbox", await this.client.mailbox(this.#sessionId,this.#branchId,{limit:50}));return "continue"; }
     if (line === "/tasks") { this.#detail("/tasks", await this.client.tasks(this.#sessionId,this.#branchId));return "continue"; }
     if (line.startsWith("/cancel-task ")) { const [taskId,...reason]=line.slice(13).trim().split(/\s+/);if(!taskId)throw new Error("/cancel-task requires TASK_ID [REASON]");this.#detail("/cancel-task", await this.client.cancelTask(this.#sessionId,this.#branchId,taskId,reason.join(" ")||undefined));return "continue"; }
@@ -724,6 +863,13 @@ export class TerminalUI {
     if (this.#pendingCredentialProvider !== null) throw new Error("Finish or cancel provider login before opening another agent");
   }
 
+  #assertWorkspaceAgentsAvailable(): void {
+    if (this.#detached || this.#closing) throw new Error("The terminal is detached");
+    if (this.#historicalCursor !== null) throw new Error("Return to live with /live before opening Agents");
+    if (this.#pendingCredentialProvider !== null) throw new Error("Finish or cancel provider login before opening Agents");
+    if (!this.#productCatalog) throw new Error("The workspace Agents catalog is unavailable");
+  }
+
   #queueRouteTransition(sessionId: string, branchId: string): Promise<void> {
     const operation = this.#navigationTail.then(() => this.#transitionRoute(sessionId, branchId));
     this.#navigationTail = operation.catch(() => {});
@@ -762,6 +908,7 @@ export class TerminalUI {
       parent: null,
       children: [],
       ancestry: [snapshot.state.sessionName ?? "Unnamed session"],
+      root: null,
       refresh: "refreshing",
       generation: this.#familyGeneration,
     };
@@ -823,6 +970,7 @@ export class TerminalUI {
         parent,
         children,
         ancestry,
+        root: parent === null,
         refresh: "current",
         generation,
       };

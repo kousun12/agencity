@@ -1,5 +1,6 @@
 import type { AgentRunState, AgentState, CellLogStream, JsonValue, MessageState } from "../domain/index.ts";
 import type { ProtocolCapabilities } from "../protocol/index.ts";
+import type { ProductBranchSummary } from "../product/index.ts";
 import type {
   FamilyAgentActivity,
   FamilyAgentActivityReason,
@@ -12,6 +13,7 @@ const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancel
 
 export type TerminalConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
 export type TerminalFamilyRefreshState = "current" | "refreshing" | "stale" | "unavailable";
+export type TerminalWorkspaceAgentsRefreshState = "loading" | "current" | "stale" | "unavailable";
 
 export interface TerminalRoute {
   readonly sessionId: string;
@@ -23,7 +25,19 @@ export interface TerminalFamilyNavigation {
   readonly parent: FamilyAgentRecord | null;
   readonly children: readonly FamilyAgentRecord[];
   readonly ancestry: readonly string[];
+  readonly root: boolean | null;
   readonly refresh: TerminalFamilyRefreshState;
+  readonly generation: number;
+}
+
+export interface TerminalWorkspaceAgentsState {
+  readonly open: boolean;
+  readonly returnRoute: TerminalRoute;
+  readonly rows: readonly ProductBranchSummary[];
+  readonly selectedKey: string | null;
+  readonly query: string;
+  readonly refresh: TerminalWorkspaceAgentsRefreshState;
+  readonly fetchedAt: string | null;
   readonly generation: number;
 }
 
@@ -34,6 +48,7 @@ export interface TerminalPresentation {
   readonly connection: TerminalConnectionState;
   readonly provisionalRunIds: readonly string[];
   readonly family: TerminalFamilyNavigation;
+  readonly workspaceAgents: TerminalWorkspaceAgentsState;
 }
 
 export interface TerminalConversationItem {
@@ -101,6 +116,40 @@ export interface TerminalFamilySummaryView {
   readonly label: string;
 }
 
+export type TerminalWorkspaceAgentStatus = ProductBranchSummary["status"];
+
+export interface TerminalWorkspaceAgentRow extends TerminalRoute {
+  readonly key: string;
+  readonly sessionName: string;
+  readonly branchName: string;
+  readonly displayName: string;
+  readonly model: string;
+  readonly status: TerminalWorkspaceAgentStatus;
+  readonly task: string;
+  readonly unresolvedWork: number;
+  readonly activeGoals: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly resumable: boolean;
+}
+
+export interface TerminalWorkspaceAgentSection {
+  readonly status: TerminalWorkspaceAgentStatus;
+  readonly title: string;
+  readonly rows: readonly TerminalWorkspaceAgentRow[];
+}
+
+export interface TerminalWorkspaceAgentsView {
+  readonly open: boolean;
+  readonly returnRoute: TerminalRoute;
+  readonly rows: readonly TerminalWorkspaceAgentRow[];
+  readonly sections: readonly TerminalWorkspaceAgentSection[];
+  readonly selectedKey: string | null;
+  readonly query: string;
+  readonly refresh: TerminalWorkspaceAgentsRefreshState;
+  readonly fetchedAt: string | null;
+}
+
 export interface TerminalScreenView {
   readonly workspaceId: string;
   readonly sessionName: string;
@@ -115,7 +164,9 @@ export interface TerminalScreenView {
   readonly familyChildren: readonly TerminalFamilyChildView[];
   readonly familyParent: FamilyAgentRecord | null;
   readonly familySummary: TerminalFamilySummaryView | null;
+  readonly familyRoot: boolean | null;
   readonly familyRefresh: TerminalFamilyRefreshState;
+  readonly workspaceAgents: TerminalWorkspaceAgentsView;
   readonly runState: string;
   readonly composerPlaceholder: string;
   readonly attentionCount: number;
@@ -210,6 +261,175 @@ function truncate(value: string, max: number): string {
   if (max < 1) return "";
   if (value.length <= max) return value;
   return max === 1 ? "…" : `${value.slice(0, max - 1)}…`;
+}
+
+const WORKSPACE_AGENT_STATUS_ORDER: readonly TerminalWorkspaceAgentStatus[] = [
+  "running",
+  "idle",
+  "stopped",
+  "failed",
+  "archived",
+];
+
+const WORKSPACE_AGENT_STATUS_TITLES: Readonly<Record<TerminalWorkspaceAgentStatus, string>> = {
+  running: "Running",
+  idle: "Idle",
+  stopped: "Stopped",
+  failed: "Failed",
+  archived: "Archived",
+};
+
+function normalizedWorkspaceLabel(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+}
+
+function workspaceAgentName(value: string, fallback: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized || fallback;
+}
+
+export function terminalWorkspaceAgentKey(route: TerminalRoute): string {
+  return `${route.sessionId}\u0000${route.branchId}`;
+}
+
+export function buildTerminalWorkspaceAgentRows(
+  summaries: readonly ProductBranchSummary[],
+  query = "",
+): TerminalWorkspaceAgentRow[] {
+  const roots = summaries.filter(summary => summary.root);
+  const branchesPerSession = new Map<string, number>();
+  for (const summary of roots) {
+    branchesPerSession.set(summary.sessionId, (branchesPerSession.get(summary.sessionId) ?? 0) + 1);
+  }
+  const normalizedQuery = normalizedWorkspaceLabel(query);
+  return roots
+    .map((summary): TerminalWorkspaceAgentRow => {
+      const sessionName = workspaceAgentName(summary.sessionName, "Unnamed agent");
+      const branchName = workspaceAgentName(summary.branchName, "unnamed branch");
+      return {
+        key: terminalWorkspaceAgentKey(summary),
+        sessionId: summary.sessionId,
+        branchId: summary.branchId,
+        sessionName,
+        branchName,
+        displayName: (branchesPerSession.get(summary.sessionId) ?? 0) > 1
+          ? `${sessionName} / ${branchName}`
+          : sessionName,
+        model: `${summary.model.provider}:${summary.model.model}`,
+        status: summary.status,
+        task: summary.taskSummary?.replace(/\s+/g, " ").trim() || "No retained task summary",
+        unresolvedWork: summary.unresolvedWork,
+        activeGoals: summary.activeGoals,
+        createdAt: summary.createdAt,
+        updatedAt: summary.updatedAt,
+        resumable: summary.status !== "failed" && summary.status !== "archived",
+      };
+    })
+    .filter(row => !normalizedQuery || [
+      row.sessionName,
+      row.branchName,
+      row.task,
+      row.model,
+      row.status,
+    ].some(value => normalizedWorkspaceLabel(value).includes(normalizedQuery)))
+    .sort((left, right) =>
+      WORKSPACE_AGENT_STATUS_ORDER.indexOf(left.status) - WORKSPACE_AGENT_STATUS_ORDER.indexOf(right.status)
+      || right.updatedAt.localeCompare(left.updatedAt)
+      || normalizedWorkspaceLabel(left.sessionName).localeCompare(normalizedWorkspaceLabel(right.sessionName))
+      || normalizedWorkspaceLabel(left.branchName).localeCompare(normalizedWorkspaceLabel(right.branchName))
+      || left.sessionId.localeCompare(right.sessionId)
+      || left.branchId.localeCompare(right.branchId));
+}
+
+export function selectTerminalWorkspaceAgentKey(
+  summaries: readonly ProductBranchSummary[],
+  query: string,
+  selectedKey: string | null,
+): string | null {
+  const visible = buildTerminalWorkspaceAgentRows(summaries, query);
+  if (selectedKey && visible.some(row => row.key === selectedKey)) return selectedKey;
+  if (!visible.length) return null;
+  const preferred = visible.filter(row => row.resumable);
+  const candidates = preferred.length ? preferred : visible;
+  if (!selectedKey) return candidates[0]!.key;
+  const all = buildTerminalWorkspaceAgentRows(summaries);
+  const selectedIndex = all.findIndex(row => row.key === selectedKey);
+  if (selectedIndex < 0) return candidates[0]!.key;
+  return [...candidates]
+    .sort((left, right) =>
+      Math.abs(all.findIndex(row => row.key === left.key) - selectedIndex)
+      - Math.abs(all.findIndex(row => row.key === right.key) - selectedIndex)
+      || all.findIndex(row => row.key === left.key) - all.findIndex(row => row.key === right.key))[0]!.key;
+}
+
+export function buildTerminalWorkspaceAgentsView(
+  state: TerminalWorkspaceAgentsState,
+): TerminalWorkspaceAgentsView {
+  const rows = buildTerminalWorkspaceAgentRows(state.rows, state.query);
+  const selectedKey = selectTerminalWorkspaceAgentKey(state.rows, state.query, state.selectedKey);
+  return {
+    open: state.open,
+    returnRoute: state.returnRoute,
+    rows,
+    sections: WORKSPACE_AGENT_STATUS_ORDER.flatMap(status => {
+      const statusRows = rows.filter(row => row.status === status);
+      return statusRows.length
+        ? [{ status, title: WORKSPACE_AGENT_STATUS_TITLES[status], rows: statusRows }]
+        : [];
+    }),
+    selectedKey,
+    query: state.query,
+    refresh: state.refresh,
+    fetchedAt: state.fetchedAt,
+  };
+}
+
+export function formatTerminalWorkspaceAgentsRelativeTime(
+  timestamp: string,
+  now = Date.now(),
+): string {
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) return "updated time unknown";
+  const seconds = Math.max(0, Math.floor((now - parsed) / 1_000));
+  if (seconds < 60) return "updated just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `updated ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `updated ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `updated ${days}d ago`;
+}
+
+export interface TerminalWorkspaceAgentRowLines {
+  readonly primary: string;
+  readonly secondary: string | null;
+}
+
+export function formatTerminalWorkspaceAgentRow(
+  row: TerminalWorkspaceAgentRow,
+  maxWidth: number,
+  selected: boolean,
+  now = Date.now(),
+): TerminalWorkspaceAgentRowLines {
+  const width = Math.max(1, maxWidth);
+  const prefix = selected ? "› " : "  ";
+  const status = ` · ${row.status}`;
+  const primary = `${prefix}${truncate(row.displayName, Math.max(1, width - prefix.length - status.length))}${status}`;
+  const relative = formatTerminalWorkspaceAgentsRelativeTime(row.updatedAt, now);
+  const counts = `${row.unresolvedWork} unresolved · ${row.activeGoals} goals`;
+  const details = width >= 96
+    ? `${row.task} · ${row.model} · ${counts} · ${relative}`
+    : width >= 76
+      ? `${row.task} · ${counts} · ${relative}`
+      : width >= 60
+        ? `${counts} · ${relative}`
+        : width >= 48
+          ? relative
+          : null;
+  return {
+    primary: truncate(primary, width),
+    secondary: details === null ? null : `  ${truncate(details, Math.max(1, width - 2))}`,
+  };
 }
 
 export function formatTerminalFamilySummary(summary: TerminalFamilySummaryView, maxWidth: number): string {
@@ -370,7 +590,9 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
     familyChildren,
     familyParent: presentation.family.parent,
     familySummary: buildTerminalFamilySummary(familyChildren),
+    familyRoot: presentation.family.root,
     familyRefresh: presentation.family.refresh,
+    workspaceAgents: buildTerminalWorkspaceAgentsView(presentation.workspaceAgents),
     runState: activeRun?.statusLabel ?? [...runs].at(-1)?.statusLabel ?? "idle",
     composerPlaceholder: activeRun
       ? "Run in progress — /stop to cancel"
