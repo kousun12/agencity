@@ -1034,7 +1034,8 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 
 - Add a new ADR that supersedes ADR 0005's textual JSON transport, clarification/permission lifecycle, and success-only final-message linkage while preserving strict typed admission and the single-TypeScript execution surface.
 - Mark ADR 0005 as superseded and retain it as historical context.
-- Update `AGENTS.md`, `README.md`, `docs/architecture.md`, `docs/api.md`, `docs/protocol.md`, `docs/events.md`, `docs/recovery.md`, `docs/security.md`, `docs/capabilities.md`, `docs/console-sdk.md`, `docs/user-guide.md`, `docs/verification.md`, and `docs/decisions/README.md`.
+- Update `AGENTS.md`, `README.md`, `docs/architecture.md`, `docs/api.md`, `docs/protocol.md`, `docs/events.md`, `docs/recovery.md`, `docs/security.md`, `docs/capabilities.md`, `docs/console-sdk.md`, `docs/user-guide.md`, `docs/verification.md`, `docs/operator-guide.md`, `docs/configuration.md`, `docs/data-lifecycle.md`, `docs/mutable-tables.md`, and `docs/decisions/0001-durable-local-runtime-foundations.md`.
+- Verify that `docs/decisions/README.md` retains ADR 0010 and ADR 0005's supersession relationship; do not rewrite superseded ADR 0005's historical decision text.
 - State clearly that the provider `bun_console` tool and its injected SDK are different layers.
 - Remove public wording that describes raw action JSON as the current product protocol after rollout.
 

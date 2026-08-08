@@ -102,6 +102,17 @@ First interactive startup asks for a provider key through hidden input and then 
 
 `agencity config set-model PROVIDER:MODEL` changes the default for new work. `agencity config clear-model` clears that preference. A branch already created with another model retains its committed model.
 
+### Formal agent-tool capability
+
+Autonomous work requires the selected model and transport to support Agencity's formal `bun_console` and `finish` response contract. Model setup and the model picker report one of four states:
+
+- **strict agent tools** — the provider constrains the schema and requires a tool call; Agencity also validates the result;
+- **validated agent tools** — the provider supplies the formal call channel and Agencity enforces schema and call cardinality;
+- **agent tools unavailable** — new autonomous work is rejected before its task message or run is committed; and
+- **unknown model support** — the exact model is unverified, but it may be attempted when the transport has proven bounded formal-tool streaming support.
+
+An unknown model that the provider rejects fails visibly as an unsupported response contract. Agencity does not change reasoning effort, switch transports, downgrade schema enforcement, or fall back to assistant JSON text. A resumed branch retains its committed model; select another model for new work rather than silently changing the existing branch.
+
 ### Reasoning effort
 
 Reasoning effort is part of the durable branch model configuration. Supported values are `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; `default` and `off` are input aliases for `provider-default` and `none`.

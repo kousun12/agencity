@@ -65,7 +65,7 @@ agencity service status
 agencity service status --json
 ```
 
-The status reports lifecycle, recovery, attached clients, idle deadline, retained roots, and reasons the service remains resident. Active runs, pending effects, queued wakes, schedules, heartbeats, resident workers, and clients can keep it alive. A terminal blocked branch does not. The transitional pre-release pending-input state also does not keep the service resident while it remains implemented.
+The status reports lifecycle, recovery, attached clients, idle deadline, retained roots, and reasons the service remains resident. Active runs, pending effects, queued wakes, schedules, heartbeats, resident workers, and clients can keep it alive. A terminal blocked branch does not.
 
 The service normally exits 60 seconds after becoming quiescent. It is not registered as an OS boot or login service.
 
@@ -166,7 +166,7 @@ See [Recovery](./recovery.md) for the complete state machine.
 
 ## Completion gates and blocked runs
 
-A model's final text is provisional until required completion gates pass. Failed or stale evidence returns to the run as a bounded repair observation. An unknown gate effect remains visible and blocks completion.
+A model's successful `finish` submission is provisional until required completion gates pass. Failed or stale evidence returns to the run as a bounded repair observation. An unknown gate effect remains visible and blocks completion.
 
 For one non-interactive shell gate:
 
@@ -175,7 +175,7 @@ agencity run --completion-gate "bun test" \
   "repair the test failure and verify the result"
 ```
 
-Under the accepted formal-tool architecture, missing information ends the current run as blocked and does not keep the service resident. Attach to inspect the blocked message, then submit the missing information as an ordinary new instruction on the same branch. The current pre-release checkout may still expose its older waiting-input state until that cutover is implemented; it carries no compatibility commitment.
+Missing information ends the current run through blocked `finish` and does not keep the service resident. Attach to inspect the blocked assistant message, then submit the missing information as an ordinary new instruction on the same branch.
 
 ## Optional Turso synchronization
 
@@ -292,7 +292,7 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
 
-The reasoning-effort/model-capability revision is an explicit pre-release cutover: version-1 workspace events and legacy profile databases are rejected instead of migrated. Back up or move aside the affected workspace `.agencity` and selected profile directory before first startup. The rejection does not delete retained data; see [Data lifecycle](./data-lifecycle.md).
+The formal model-tool revision is an explicit pre-release workspace cutover: only event schema version 3 is accepted. Version-1 and version-2 workspace histories are rejected before projection or recovery instead of being decoded or migrated. Back up or move aside the affected workspace `.agencity` directory before first startup. The rejection does not delete retained data; see [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

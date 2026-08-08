@@ -29,7 +29,7 @@ Do not change the first three columns or class tokens without updating the archi
 | `heartbeats` | `rebuildable-projection` | `mutable` | Due-time/tick/status/owner projection of heartbeat events. Scheduler ownership is not durable identity. |
 | `schedules` | `rebuildable-projection` | `mutable` | Current one-time/interval schedule definition, owner, tick, and lifecycle projection rebuilt from schedule events. |
 | `wake_queue` | `rebuildable-projection` | `mutable` | Durable queued/claimed/delivered/unknown wake projection; stable AgentRun identity and canonical wake events own recovery semantics. |
-| `recursive_model_handles` | `rebuildable-projection` | `mutable` | Current recursive-call lookup/status projection; task, child session, model, and terminal transitions are events. |
+| `recursive_model_handles` | `rebuildable-projection` | `mutable` | Current recursive-call lookup/status projection, including retained response admission and structured-result recovery fields; task, child session, model, response contract, and terminal transitions remain canonical events. |
 | `harness_entries` | `rebuildable-projection` | `mutable` | Current harness entry/latest/active-version routing derived from canonical harness events. |
 | `harness_versions` | `rebuildable-projection` | `mutable` | Query projection of immutable version identity/content and canonical status transitions; rebuilt from harness events. |
 | `refinement_reviews` | `rebuildable-projection` | `mutable` | Current trajectory-review request, durable recursive-child link, exact frozen snapshot/source hash/IDs, automatic-trigger frontier, and terminal status derived from canonical review events. |
@@ -117,7 +117,7 @@ The table is not canonical agent history and is not rebuilt from events. It inte
 
 ### Recursive session projections
 
-`tasks`, mailbox/terminal delivery rows, document/chunk/input-set rows, goals/gates with their completion workspace pins, heartbeats, and recursive model handles are updated in the same transaction as their canonical event. Recursive-handle input/provenance/hash and outcome/result/artifact columns are rebuildable query state; the corresponding `RecursiveModel*` events remain authoritative. `rebuildOperationalProjections()` deletes these mutable rows and replays only their source events; it never re-executes a model, gate, tool, heartbeat callback, or subagent. Document content is duplicated in a query-friendly table, but the `DocumentChunkAdded` event remains authoritative.
+`tasks`, mailbox/terminal delivery rows, document/chunk/input-set rows, goals/gates with their completion workspace pins, heartbeats, and recursive model handles are updated in the same transaction as their canonical event. Recursive-handle input/provenance/hash, response admission, and outcome/structured-result/artifact columns are rebuildable query state; the corresponding `RecursiveModel*` events remain authoritative. Recovery before the first model request reads the exact retained response contract and capability seed instead of resolving current capability again. `rebuildOperationalProjections()` deletes these mutable rows and replays only their source events; it never re-executes a model, gate, tool, heartbeat callback, or subagent. Document content is duplicated in a query-friendly table, but the `DocumentChunkAdded` event remains authoritative.
 
 ### Harness and retrieval projections
 
