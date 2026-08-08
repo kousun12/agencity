@@ -22,7 +22,7 @@ The city adapts through retained evidence. Agents may propose new roles, charter
 
 Retirement removes an agent from future routing, follow-up, schedules, and the default active hierarchy. It preserves the agent's charter history, origin, work, relationships, effects, and reasons for retirement. Retired agents remain available through explicit historical inspection but are not silently reactivated. A renewed function is represented by a new successor agent with an explicit lineage link.
 
-The city has its own workspace-scoped canonical control stream. City state does not live on an operator conversation branch or in a mutable directory table. The control stream owns the operator pointer, active management hierarchy, charter activation, session-wide lifecycle, assignment admission, organization revisions, and governance decisions. Agent conversations remain session/branch streams. All streams share the workspace's ordered canonical event universe.
+The city has its own workspace-scoped canonical control stream. City state does not live on an operator conversation branch or in a mutable directory table. The control stream owns the operator pointer, active management hierarchy, charter and grant activation, session-wide lifecycle, service routes, assignment admission, organization revisions, and governance decisions. Agent conversations remain session/branch streams. All streams share the workspace's ordered canonical event universe.
 
 The end state is not one model with every historical record in its prompt. It is one durable workspace institution containing many separately identified actors, plus a stable operator and directory through which the institution can be queried and changed.
 
@@ -117,7 +117,7 @@ Current prompt notes are optional harness context. They are not required identit
 ## Goals
 
 - Give every root, delegated, and recursive agent a required durable charter before it can run.
-- Supply the exact active agent charter as system-prompt content on every model call.
+- Supply the exact active agent charter as system-prompt content on every agent model call.
 - Keep the global immutable runtime policy separate from agent-specific purpose.
 - Preserve exact charter-version and effective-prompt provenance for every run and model effect.
 - Let a managing parent revise a direct child's charter for future runs without rewriting past work.
@@ -202,6 +202,8 @@ The city operator can inspect all agent charters and directory metadata. This do
 
 - **City:** One workspace-scoped durable agent organization.
 - **City control stream:** The workspace-scoped canonical aggregate that owns city revisions, the operator pointer, charters, management, lifecycle, assignments, and organization decisions independently of conversation branches.
+- **City head revision:** The portable identity of the latest accepted city-stream event, including proposals, locks, and in-progress transitions.
+- **Stable organization revision:** The city head revision at which the current operator, charter, grant, management, lifecycle, and service-route pointers last committed as a valid organization state.
 - **City operator:** The single distinguished agent that receives ordinary inbound work and coordinates the city.
 - **Agent:** A durable `Session` identity. The plan does not introduce a second competing agent identity above sessions.
 - **Route:** One exact `(sessionId, branchId)` execution history.
@@ -214,7 +216,7 @@ The city operator can inspect all agent charters and directory metadata. This do
 - **Directory:** A rebuildable workspace projection of agents, active charters, hierarchy, lifecycle, routing metadata, evidence summaries, and retained routes.
 - **Assignment:** A durable task relationship that sends new work to an existing agent and retains sponsor, target route, budget, completion, cancellation, usage, result, and lifecycle.
 - **Standing agent:** An active agent eligible for repeated directory routing and assignments.
-- **Task agent:** An assignment-scoped agent created for one bounded task and automatically retired unless a governed promotion makes it standing.
+- **Task agent:** An assignment-scoped agent created for one bounded task and retired after its disposition decision. A recurring function becomes a new standing successor rather than changing the task agent's identity.
 - **Rotation:** Eligibility for ordinary routing, schedules, follow-up, and new autonomous work.
 - **Organization proposal:** A durable request to create, revise, pause, resume, reparent, split, supersede, or retire agents.
 - **Successor:** A new agent that continues some or all of a retired or superseded function without reusing the old identity.
@@ -229,16 +231,16 @@ The following rules govern every later section:
 3. Every run pins one charter version and exact effective system-prompt content before model-effect admission.
 4. Candidate evaluation may pin an explicitly allocated candidate charter. Unallocated work continues to use the active charter.
 5. Dynamic tasks, assignments, messages, memories, and observations do not mutate agent identity.
-6. Every new agent is either `standing` or `task`. A task agent retires after its bounded assignment unless promoted through governance.
+6. Every new agent is either `standing` or `task`. A task agent accepts only its creation assignment, then retires after a bounded disposition period.
 7. Every charter revision creates a proposal. Validation and approval are mandatory; evaluation depth depends on the change's impact.
 8. A managing parent decides ordinary direct-child charter changes within inherited ceilings. A child cannot activate its own revision.
 9. Management hierarchy does not change immutable creation family, mailbox reach, cancellation trees, root identity, or historical budget attribution.
 10. Cross-family work uses a typed assignment. It does not broaden general messaging.
 11. The city control stream is the only authority for current operator, charter, management, lifecycle, assignment, and organization revisions.
-12. City mutations use compare-and-swap against one completed city revision. Partial transitions never appear as a completed revision.
+12. Every city command compares `cityHeadRevision`; organization activation also compares `stableOrganizationRevision`. Partial transitions advance the head and may hold admission locks without changing stable organization pointers.
 13. Only the city governance owner may activate city mutations. Cross-owner execution is unavailable; synced conflicting activations produce explicit conflict.
 14. Charter authority declarations are behavioral policy. Enforceable model, budget, SDK, credential, and effect grants use separate runtime controls. Trusted-local OS authority is not sandboxed.
-15. Session-wide lifecycle is checked at every run, assignment, follow-up, schedule, wake, spawn, and effect-admission boundary, including recovery.
+15. Session-wide lifecycle is checked at every run, assignment, assignment-steering, schedule, wake, spawn, and effect-admission boundary, including recovery.
 16. Retirement blocks future execution but permits narrowly classified recovery, effect reconciliation, sync, export, deletion planning, and historical annotation.
 17. Retired agents remain explicitly enumerable by the operator and owner, although normal routing and active views exclude them.
 18. Internal canonical transitions are completed, blocked, failed, conflicted, or partially applied and recoverable. `unknown` remains reserved for external effects whose outcome cannot be proven.
@@ -250,7 +252,7 @@ The following rules govern every later section:
 This preserves the existing durable actor model:
 
 - one session owns model configuration, budget, goals, conversation, branches, child work, and lifecycle;
-- follow-up addresses the same agent rather than instantiating a separate role object;
+- assignments address the same standing agent rather than instantiating a new role object for every task;
 - branches remain alternate histories of that agent;
 - effects, context, tasks, and mail retain current ownership semantics.
 
@@ -301,7 +303,7 @@ Replacing the operator is a user-authorized atomic city transition:
 5. reparent the predecessor beneath the successor as paused, or retire it under the same approved transition;
 6. resume organization mutations under the new operator.
 
-There is never more than one active operator at one city revision. The outgoing operator cannot approve its own successor.
+There is never more than one active operator at one stable organization revision. The outgoing operator cannot approve its own successor.
 
 ## Agent charter model
 
@@ -420,7 +422,7 @@ A parent declares the new agent kind at creation:
 - **standing:** a durable function eligible for repeated routing and assignments;
 - **task:** an assignment-scoped specialist created for one bounded unit of work.
 
-Task agents receive complete charters because every model actor needs explicit purpose. They are excluded from normal standing-function routing and automatically enter retirement after their creation assignment becomes terminal and retained effects are reconciled. A parent may promote a useful task agent to standing before retirement through an organization proposal, repeated evidence where required, and an updated charter.
+Task agents receive complete charters because every model actor needs explicit purpose. They are excluded from normal standing-function routing. After the creation assignment becomes terminal, they enter `disposition_pending`; the manager may use their evidence to propose a new standing successor, but the task-agent identity itself retires.
 
 This distinction preserves complete prompt provenance for recursive and one-off children without filling the active city hierarchy with every historical helper.
 
@@ -443,34 +445,78 @@ The child subsequently owns its charter history. Replacing the reusable specific
 
 ### Purpose
 
-An assignment sends a new bounded task to an existing standing agent. It is the city-wide equivalent of durable delegated work without changing the target's creation parent or granting arbitrary cross-family messaging.
+An assignment sends a new bounded task to an agent. It is the city-wide equivalent of durable delegated work without changing the target's creation parent or granting arbitrary cross-family messaging.
 
 Each assignment records:
 
 - assignment ID and idempotency key;
 - sponsor principal and sponsoring manager;
-- target session and exact target route;
+- target session and exact service route;
 - task, inputs, allowed artifact references, and completion criteria;
 - goal and completion gates;
 - reserved token, cost, turn, and wall-time budget;
-- target charter version resolved at run admission;
+- assignment admission mode;
+- target charter and grant versions resolved at claim;
 - lifecycle, cancellation intent, usage, result, artifacts, and terminal delivery;
-- city revision, authority, and routing-decision provenance.
+- city head and stable organization revisions, authority, and routing-decision provenance.
 
 ### Assignment lifecycle
 
 ```text
 proposed
   -> admitted
+  -> queued
+  -> claimed
   -> running
-  -> completed | failed | cancelled | budget_exceeded | blocked
+  -> waiting_for_sponsor -> queued
+  -> attention -> queued | failed | cancelled
+  -> completed | failed | cancelled | budget_exceeded
 ```
 
-External effects used by the assignment may still end `unknown`. The assignment remains blocked or terminal with explicit unresolved effects; assignment state does not convert those effects into an invented result.
+`waiting_for_sponsor` retains a blocked model result that needs clarification or steering; it is not a new task and does not auto-retire a task agent. `attention` retains an unresolved external effect, stale target, or other condition that requires reconciliation. Assignment state never converts an external unknown effect into an invented result.
+
+A queued assignment can be cancelled before any run. Terminal states are immutable; a distinct later unit of work creates another assignment.
+
+### Admission modes
+
+The runtime validates one explicit mode:
+
+- **ordinary:** target is an active standing agent on its current service route;
+- **creation:** target session, service route, charter, grants, lifecycle, management edge, and initial assignment commit atomically for a new task or approved standing agent;
+- **candidate-charter:** target is an active standing agent, and one valid candidate allocation authorizes a bounded trial charter for this assignment.
+
+New-function evaluation uses one or more task agents, each with its own creation assignment, rather than a separate candidate-agent lifecycle. Evidence across those bounded agents may justify creation of a new standing successor with explicit `derivedFrom` links. An explicitly user-directed or manager-authorized standing creation can activate directly after its creation proposal is approved.
+
+### Service route and queue
+
+Every runnable agent has one city-designated service route. The initial branch is the default service route at creation. Changing it is a city proposal and does not reinterpret earlier assignments.
+
+Assignments to one agent are serialized on the service route:
+
+- one assignment may be claimed or running at a time;
+- additional assignments queue by declared priority and then canonical city sequence;
+- claim atomically pins current city head, stable organization revision, service route, charter, grant, budget, and run identity after checking all active locks;
+- a stale route, charter incompatibility, pause, revocation, or ownership change blocks claim before context delivery;
+- the same assignment can return from `waiting_for_sponsor` or reconciled `attention` to the queue;
+- simultaneous work requires delegation to child agents or a separately chartered standing agent, not two interleaved runs on one agent branch.
+
+This preserves one coherent long-lived conversation for the agent while keeping assignment observations attributable. Branches remain available for historical inspection and counterfactual work but are not routable unless the city explicitly designates one as the service route.
 
 ### Budget and completion
 
-The assignment sponsor reserves a bounded budget before admission. Target execution debits both the target session projection and the exact assignment attribution ledger. Duplicate terminal attribution is a no-op.
+The assignment sponsor owns the economic reservation and charge.
+
+- A manager-sponsored assignment reserves from that manager's delegated assignment budget.
+- A user-sponsored assignment reserves from the city user-work budget.
+- The assignment ledger receives direct provider/tool usage and is the sole economic charge record.
+- Session, manager, creation-family, and city totals are attribution projections over that charge, not additional debits.
+- The initial child task and creation assignment share one reservation and one usage source.
+- Child agents or assignments created while assignment `A` is running carry `fundingAssignmentId: A`.
+- Delegated child reservation must fit both `A`'s remaining delegation allowance and the applicable manager/city ceiling.
+- Child usage is one economic charge against `A`'s reservation with hierarchical attribution; it is not charged again to a general delegated budget.
+- Unused reservation returns to the sponsor at terminal status.
+- Unknown provider usage consumes the unresolved reservation conservatively.
+- Duplicate terminal or ancestor attribution is a no-op.
 
 Completion gates run against attributable workspace state. Terminal result delivery is a typed assignment notice to the sponsor. It does not rely on general cross-family mailbox permission.
 
@@ -479,7 +525,7 @@ Completion gates run against attributable workspace state. Terminal result deliv
 Assignment admission validates:
 
 - the sponsor may assign work to the target;
-- the target is standing, active, and runnable;
+- the admission mode permits the target kind and lifecycle;
 - the target route and charter are current;
 - model, runtime grants, and budgets are compatible;
 - inputs and artifacts are explicitly allowed;
@@ -487,9 +533,11 @@ Assignment admission validates:
 
 Assignment communication is limited to task steering, receipts, result delivery, cancellation, and authorized artifacts for that assignment. Existing family mailboxes and cancellation trees retain their current creation-family semantics.
 
+Every new unit of work uses an assignment, including work from a creation-family parent. `followUp` is either steering or clarification on one nonterminal assignment, or a client convenience that creates a new assignment after normal validation. It never starts an unrelated run by appending a message alone. Task agents accept only their creation assignment and its nonterminal steering; they never receive unrelated assignments or schedules.
+
 ### Recovery
 
-Assignment admission, run identity, budget reservation, and target context delivery commit before execution. Recovery resumes the same assignment and run without duplicate model calls or usage attribution. Cross-owner or unavailable targets fail before admission.
+Assignment admission and budget reservation commit before execution. Assignment claim atomically records the run identity, charter and grant pins, and target-context delivery before the run advances. Recovery resumes the same queued, claimed, waiting, attention, or running assignment without duplicate model calls or usage attribution. Cross-owner or unavailable targets fail before admission.
 
 ## Provider context composition
 
@@ -524,7 +572,7 @@ The invocation-specific layer is not always the ordinary `bun_console`/`finish` 
 
 Every step and model effect in that run uses the same charter and grant versions, subject to explicit revocation barriers. A parent revision or grant expansion activated while a run is in progress applies only to later runs. Changing a charter does not mutate the model identity halfway through a task.
 
-A follow-up, schedule wake, or new task starts a new run and resolves the active charter at admission. A schedule does not permanently preserve a stale charter unless it explicitly declares and validates a version pin.
+Steering on a nonterminal assignment may start its next run after claim and resolves the assignment's valid charter/grant policy. A new task or schedule tick creates a new assignment; it cannot start a run through an unscoped follow-up message. A schedule does not permanently preserve a stale charter unless it explicitly declares and validates a version pin.
 
 A candidate allocation may explicitly pin a candidate charter version for one bounded trial run. The run records allocation ID, candidate version, active control version, exposure ordinal, and decision authority. Runs without a valid candidate allocation continue to pin the active charter.
 
@@ -534,10 +582,11 @@ Retained `MessageAppended` rows with role `system` remain historical conversatio
 
 ### Inspection and provenance
 
-For every model call, diagnostics can show:
+For every agent model call, diagnostics can show:
 
 - active agent identity;
 - exact charter version and digest;
+- exact runtime-grant version and revocation checks;
 - exact effective system-prompt content and digest;
 - charter creator and proposal;
 - management parent at run admission;
@@ -581,6 +630,12 @@ Before creating a child, the parent defines:
 
 The initial task remains separate and can be narrower than the standing mission.
 
+### Creation governance
+
+A parent may create a task agent directly inside its child-count, assignment-budget, model, and runtime-grant ceilings. The creation assignment is the bounded evaluation and execution scope.
+
+Standing-agent and successor creation require an organization proposal. Recurring-demand evidence and candidate task-agent outcomes support autonomous approval. Explicit user direction may authorize standing creation without repeated historical demand, but all charter, grant, budget, hierarchy, capability, and secret checks still apply.
+
 ### Atomic admission
 
 Novel child admission atomically commits:
@@ -588,14 +643,16 @@ Novel child admission atomically commits:
 - parent task;
 - child `SessionCreated`;
 - city-stream charter-version and activation events;
+- city-stream grant-version and activation events;
 - city-stream agent kind, lifecycle, and initial managing-parent edge;
-- initial assignment request and admission;
-- initial task message;
+- city-stream service-route designation;
+- initial assignment request, admission, and queueing;
 - subagent admission;
-- optional specification invocation;
-- runnable `AgentRunRequested` with exact charter pin.
+- optional specification invocation.
 
-The storage transaction spans the agent session stream and city control stream under the city governance fence and the new target root's admission fence. A crash cannot leave a runnable child without a charter or a chartered child without its retained creation relationship. Idempotency-key reuse must agree on every durable field, including agent kind, complete charter, management edge, and prompt digest.
+The storage transaction spans the agent session stream and city control stream under the city governance fence and the new target root's admission fence. It stops at a durable queued assignment. The ordinary assignment scheduler then claims it through the same `AssignmentClaimed` → `AssignmentContextDelivered` → `AgentRunRequested` path used for existing agents. An idle target may be claimed immediately in a second idempotent transaction, but no special creation path bypasses queue, grant, context, or run pinning.
+
+A crash cannot leave a runnable child without a charter or a chartered child without its retained creation relationship and queued work. Idempotency-key reuse must agree on every durable field, including agent kind, complete charter and grants, management edge, service route, assignment, and prompt digest.
 
 ## Charter revision authority
 
@@ -617,8 +674,8 @@ This authority is durable and available throughout the relationship, including a
 
 Every revision has a proposal and validation record. Evaluation requirements depend on impact:
 
-- **editorial correction:** no authority, routing, responsibility, evaluator, or behavior change; the manager may activate after validation and retained reason;
-- **behavioral revision:** changes mission wording, standing context, responsibilities, routing, delegation, or evaluation; requires bounded candidate exposure and observations;
+- **metadata-only correction:** changes display or directory metadata while preserving byte-identical `exactSystemPrompt`, grants, routing, responsibilities, and evaluators; the manager may activate after validation and retained reason;
+- **behavioral revision:** changes any provider-facing prompt text, mission, standing context, responsibilities, routing, delegation, or evaluation; requires bounded candidate exposure and observations;
 - **grant revision:** changes enforceable model, budget, SDK, credential-reference, data, or effect grants; requires grant-policy validation and the higher authority that owns the applicable ceiling;
 - **constitutional revision:** changes immutable base policy, trusted-local boundary, user authority, or operator constitution; unavailable to agents and ordinary managers.
 
@@ -673,7 +730,7 @@ Each immutable `AgentGrantVersion` contains:
 
 The city control stream owns grant-version creation, activation, revocation, rejection, and rollback events. Rebuildable projections expose one active grant version for every runnable agent. Grant versions use compare-and-swap and cannot exceed the complete active management chain.
 
-Assignment claim and `AgentRunRequested` pin both charter and grant versions. Every effect request records the pinned grant version and city revision used for admission.
+Assignment claim and `AgentRunRequested` pin both charter and grant versions. Every effect request records the pinned grant version, city head, and stable organization revision used for admission.
 
 Grant changes follow these rules:
 
@@ -681,6 +738,9 @@ Grant changes follow these rules:
 - ordinary narrowing applies to later runs and blocks incompatible queued assignments;
 - security, credential, or publication revocation creates an immediate revocation barrier;
 - an active run rechecks revocation barriers before its next cell, tool, model, file, shell, or other effect admission;
+- the outbox rechecks the barrier atomically when claiming a pending effect and immediately before committing `EffectAttemptStarted`;
+- a revoked effect with no committed attempt receives a canonical cancelled outcome and is never dispatched externally;
+- revocation and outbox attempt-start use compatible fencing so neither can pass on a stale city head;
 - already-started external effects retain their real terminal or unknown outcome;
 - no revocation rewrites prior effect authority or provider input;
 - descendant grants that exceed a new parent or city ceiling are narrowed through approved versions or the affected agents are paused.
@@ -701,7 +761,7 @@ Creation ancestry answers “How did this agent come to exist?” Management hie
 ### Active hierarchy invariants
 
 - exactly one operator is the root;
-- every other active, paused, or retiring agent has exactly one managing parent;
+- every other active, paused, disposition-pending, or retiring agent has exactly one managing parent;
 - management edges remain inside one workspace;
 - the active management graph is acyclic;
 - retired agents cannot manage active agents;
@@ -736,6 +796,10 @@ Multi-agent changes use this approval rule:
 
 | Change | Required decision authority |
 | --- | --- |
+| Task-agent creation inside current limits | Creating parent |
+| Standing-agent creation | Manager with delegated standing-create authority and recurring-demand evidence, or explicit user direction |
+| Standing successor based on task-agent evidence | Authority required for standing creation plus the source task agents' manager |
+| Other successor creation | Authority required for standing creation plus the source function's retirement/split authority |
 | Direct-child charter revision inside current grants | Current managing parent |
 | Direct-child grant expansion inside manager ceiling | Authority that owns the expanded grant ceiling |
 | Reparenting | Old manager and new manager consent; nearest common manager decides |
@@ -746,6 +810,8 @@ Multi-agent changes use this approval rule:
 | Operator succession or retirement | User |
 
 The affected agent may attach an objection or alternative proposal, but it does not veto an ordinary in-scope management decision. If the required managers disagree or the nearest common manager is unavailable, the proposal becomes blocked and escalates to the operator or user according to the hierarchy.
+
+Task-agent creation is the bounded direct-delegation path and does not require evidence of recurring demand. Standing and successor creation require an organization proposal. Explicit user direction supplies decision authority and may replace recurring-demand evidence, but it does not bypass charter, grant, budget, hierarchy, or secret validation.
 
 ### Functional split
 
@@ -779,20 +845,21 @@ Lineage supports navigation and context retrieval. It does not grant authority o
 
 Agent lifecycle is separate from task status and current session activity.
 
-| State | New routed work | Explicit follow-up | Schedules | Default directory | Historical inspection |
+| State | New assignment | Assignment steering | Schedules | Default directory | Historical inspection |
 | --- | --- | --- | --- | --- | --- |
 | `active` | allowed | allowed | allowed | visible | visible |
 | `paused` | rejected | rejected | suspended | visible with reason | visible |
+| `disposition_pending` | rejected | rejected | disabled | visible with decision due | visible |
 | `retiring` | rejected | rejected | disabled | visible as attention | visible |
 | `retired` | rejected | rejected | disabled | hidden by default | explicit archive only |
 
 `paused` is reversible. `retired` is terminal for that agent identity. Restoring a retired function creates a successor agent rather than resuming the retired session.
 
-Existing session statuses continue to describe execution state. A session may be idle while its agent lifecycle is active, or stopped while the retained agent remains eligible for a later follow-up. Agent retirement is not represented by overloading task completion or session failure.
+Existing session statuses continue to describe execution state. A session may be idle or stopped while its agent lifecycle remains active and eligible for a later assignment. Agent retirement is not represented by overloading task completion or session failure.
 
-The city lifecycle projection is checked transactionally at every execution boundary: assignment admission, run request, follow-up, schedule creation and tick, wake claim and delivery, child spawn, model/effect admission, and recovery. A branch-local event or stale snapshot cannot bypass pause or retirement.
+The city lifecycle projection is checked transactionally at every execution boundary: assignment admission, run request, assignment steering, schedule creation and tick, wake claim and delivery, child spawn, model/effect admission, and recovery. A branch-local event or stale snapshot cannot bypass pause or retirement.
 
-Task agents automatically request retirement after their creation assignment becomes terminal unless an approved promotion to standing has committed first.
+When a task agent's creation assignment becomes terminal, one stable organization revision moves it to `disposition_pending` with a bounded policy deadline. The manager may propose a new standing successor that cites the task agent's evidence, or retire the task agent immediately. If no decision commits by the deadline, a durable city wake requests retirement. `waiting_for_sponsor` and `attention` assignments are nonterminal and do not start disposition. External effects may be terminal or unknown; either remains visible and does not erase the decision window.
 
 ### Retirement request
 
@@ -806,7 +873,9 @@ A parent can request retirement of a direct child. The request includes:
 - direct-child disposition;
 - successor links;
 - artifact and handoff requirements;
-- whether user approval is required.
+- city-policy-derived approval class.
+
+Protected functions are defined by city policy: the operator, required top-level functions, and agents explicitly marked protected by the user. A request cannot choose its own approval requirement.
 
 ### Child disposition
 
@@ -820,7 +889,7 @@ The runtime validates the resulting management tree before beginning retirement.
 
 ### Draining and uncertainty
 
-Entering `retiring` immediately blocks new admission, follow-up, routing, schedule ticks, and wakes.
+Entering `retiring` is an atomically completed stable organization revision. It immediately blocks new assignment, steering, routing, schedule ticks, and wakes before drain work begins. Retirement completion is a later city transition.
 
 Active work follows the declared drain or cancellation policy. Cancellation intent is not proof that an external effect stopped. Unknown effects remain attached to the retired history and visible as unresolved evidence. Retirement may complete once no runtime-owned work can continue, even if an external effect remains unknown; completion does not convert that effect to success, failure, or cancellation.
 
@@ -829,7 +898,8 @@ Active work follows the declared drain or cancellation policy. Cancellation inte
 Retirement completes when:
 
 - no new work can be admitted;
-- active local execution is terminal or explicitly unknown;
+- active local execution is terminal;
+- every external effect is terminal or explicitly unknown;
 - schedules and wakes are disabled;
 - child disposition is complete;
 - required handoff artifacts exist;
@@ -854,7 +924,7 @@ Explicit historical views support:
 - retirement proposal, evidence, and decision;
 - unresolved effects or missing artifacts.
 
-Retired agents remain inspect-only. Opening history cannot start a run, send follow-up, create a schedule, invoke a skill, or mutate the retired route.
+Retired agents remain inspect-only. Opening history cannot start a run, create or steer an assignment, create a schedule, invoke a skill, or mutate the retired route.
 
 Inspect-only does not prohibit supervisor- or owner-classified evidence operations. Effect reconciliation, late external outcome evidence, recovery closure, sync conflict resolution, export receipts, deletion planning, and historical annotations may append through narrow typed commands without reactivating the agent or admitting work.
 
@@ -870,6 +940,8 @@ The directory is a rebuildable, revisioned, paged workspace projection. Each age
 - exact managing parent and creation parent;
 - direct reports and bounded descendant counts;
 - model and budget policy;
+- active runtime-grant version and bounded grant summary;
+- exact service route and assignment queue state;
 - routing labels and invocation criteria;
 - current assignments, active runs, and unresolved-work counts;
 - bounded outcome and evaluation summaries;
@@ -894,13 +966,13 @@ interface AgentPromptMapItem {
   exactSystemPrompt: string;
   promptDigest: string;
   managingParentSessionId: string | null;
-  createdBySessionId: string | null;
-  lifecycle: "active" | "paused" | "retiring" | "retired";
+  createdBy: CityPrincipalReference;
+  lifecycle: "active" | "paused" | "disposition_pending" | "retiring" | "retired";
   origin: AgentOriginSummary;
 }
 ```
 
-The operator and owner may explicitly enumerate active, paused, retiring, and retired agents and retrieve every current or historical charter version through bounded paging and exact lookups. Ordinary list pages default to active organization state, and the complete map is never inserted into each operator model call. The operator receives a small directory summary and typed query methods.
+The operator and owner may explicitly enumerate active, paused, disposition-pending, retiring, and retired agents and retrieve every current or historical charter version through bounded paging and exact lookups. Ordinary list pages default to active organization state, and the complete map is never inserted into each operator model call. The operator receives a small directory summary and typed query methods.
 
 ### Routing
 
@@ -972,7 +1044,7 @@ Organization governance keeps five concepts separate:
 
 Textual model claims are not objective evidence. Minimum evidence depends on operation:
 
-- editorial charter corrections require an attributable reason and exact diff;
+- metadata-only charter corrections require an attributable reason, exact diff, and proof that `exactSystemPrompt` is byte-identical;
 - behavioral charter revisions require at least one bounded candidate comparison;
 - standing-agent creation requires demonstrated recurring demand or explicit user direction;
 - reparenting requires current bottleneck or authority evidence plus both manager consents;
@@ -1018,7 +1090,7 @@ draft
   -> promoted | revision_required | rejected
 ```
 
-At any nonterminal stage a proposal may become `withdrawn`, `expired`, `superseded`, `blocked`, or `conflicted`. A promoted reversible change may later enter a separate rollback request and end `rolled_back`.
+`withdrawn`, `expired`, `superseded`, `promoted`, and `rejected` are terminal. `blocked` and `conflicted` are resumable after required evidence, approval, or compare-and-swap rebase. `revision_required` closes the current proposal version and creates a linked replacement proposal with a new immutable edit set. A promoted reversible change may later enter a separate rollback request and end `rolled_back`.
 
 Validation proves shape, references, authority, current-version compare-and-swap, hierarchy acyclicity, budget bounds, runtime-grant bounds, evidence visibility, lifecycle compatibility, and required approvers.
 
@@ -1030,7 +1102,7 @@ Candidate allocation has a separate lifecycle:
 allocated -> exposed -> observed -> closed
 ```
 
-A charter candidate allocation pins the candidate charter and active control version for one exact run. A provisional standing agent remains `candidate` and unavailable to general routing; only allocated assignments may target it. Editorial changes can proceed directly from validation to `decision_pending`.
+A charter candidate allocation pins the candidate charter and active control version for one exact standing-agent assignment. New-function evaluation allocates separate task-agent creation assignments under the proposed role and aggregates their evidence before creating a standing successor. The agent lifecycle does not add a separate `candidate` state. Metadata-only changes can proceed directly from validation to `decision_pending`.
 
 Promotion creates one city transition:
 
@@ -1038,7 +1110,11 @@ Promotion creates one city transition:
 pending -> applying -> completed | blocked | failed | conflicted
 ```
 
-The last completed city revision remains the active read model until the transition commits. Internal event appends are never marked `unknown`; only external effects used during evaluation or draining may have unknown outcomes.
+The stable organization pointers remain active until promotion commits, but the transition request advances `cityHeadRevision` and carries affected-agent admission locks. Every admission path consults both stable pointers and active locks. Irreversible guard changes such as `active -> retiring` commit as their own stable organization revision before drain work begins.
+
+A portable city head revision is `{ cityId, ordinal, eventId, digest, governanceOwnerDeviceId }`. The governance owner allocates the ordinal; sync preserves the identity and causality. `stableOrganizationRevision` references one such head revision. A local database cursor is never either revision.
+
+Internal event appends are never marked `unknown`; only external effects used during evaluation or draining may have unknown outcomes. A failed transition either releases unapplied locks through a terminal event or remains visibly blocked when irreversible control actions require completion.
 
 ### Evaluation
 
@@ -1075,7 +1151,7 @@ Reversible changes include:
 - management-edge activation;
 - routing preference changes.
 
-Rollback restores the exact prior pointer through a new event.
+Rollback restores the exact prior pointer through a new event. It has its own request and decision lifecycle; it does not reopen or mutate the terminal promoted proposal.
 
 Retirement and physical deletion are not rolled back. A retired function returns only through a new successor identity. This keeps the meaning of “retired and unavailable for continuation” stable.
 
@@ -1107,7 +1183,7 @@ Assignment sponsorship, result receipt, and cancellation are separate typed righ
 
 The charter belongs to the session identity, not to one conversational branch. Charter activation and agent lifecycle live in the city control stream and reference the session ID.
 
-All branches resolve the same completed city revision and active charter for new work. Run admission transactionally compares that city revision, lifecycle revision, and charter revision before appending the run pin. A historical run on any branch retains its own pinned charter version. Forking a conversation branch does not fork the agent's identity or silently create a different charter lineage.
+All branches resolve the same stable organization revision and active charter for new work. Run admission transactionally compares city head, stable organization, lifecycle, charter, and grant revisions and verifies active locks before appending the run pin. A historical run on any branch retains its own pinned charter version. Forking a conversation branch does not fork the agent's identity or silently create a different charter lineage.
 
 Session snapshots may cache city references but never own them. Context materialization, subscriptions, recovery, sync, and old branch routes explicitly resolve the city projection rather than relying on conversational ancestor visibility.
 
@@ -1138,16 +1214,26 @@ The implementation adds versioned event types shaped around durable meaning:
 - `AgentCharterActivated`;
 - `AgentCharterRejected`;
 - `AgentCharterRolledBack`;
+- `AgentGrantVersionCreated`;
+- `AgentGrantActivated`;
+- `AgentGrantRevoked`;
+- `AgentGrantRolledBack`;
 - `AgentManagementChanged`;
 - `AgentLifecycleChangeRequested`;
 - `AgentLifecycleChanged`;
 - `AgentSuccessorLinked`;
 - `AssignmentRequested`;
 - `AssignmentAdmitted`;
+- `AssignmentQueued`;
+- `AssignmentClaimed`;
 - `AssignmentStatusChanged`;
+- `AssignmentSteeringSent`;
+- `AssignmentContextDelivered`;
 - `AssignmentUsageAttributed`;
 - `AssignmentTerminalNoticeSent`;
 - `AssignmentTerminalNoticeDelivered`;
+- `AgentOrganizationProposalSubmitted`;
+- `OrganizationProposalRegistered`;
 - `OrganizationReviewRequested`;
 - `OrganizationProposalCreated`;
 - `OrganizationProposalValidated`;
@@ -1171,20 +1257,38 @@ type EventStreamAddress =
 
 The existing `events` table remains the single ordered canonical history, but city events have no conversational branch ancestry. This requires a pre-release event-schema cutover rather than disguising city state as an operator session or mutable projection. Older schemas fail closed under the repository's existing reset guidance.
 
-One city governance fence serializes city-stream commits and increments a monotonic completed city revision. The city stream owns current operator, charter activation, management edges, lifecycle, assignment admission, and organization decisions. Payloads retain target session IDs, acting principals, expected revisions, authorization basis, evidence, and exact immutable content.
+One city governance fence serializes city-stream commits and increments monotonic `cityHeadRevision`. Organization activation also advances `stableOrganizationRevision`; proposals, locks, observations, and transition progress advance only the head. The city stream owns current operator, charter and grant activation, management edges, lifecycle, service routes, assignment admission and queueing, and organization decisions. Payloads retain target session IDs, acting principals, expected revisions, authorization basis, evidence, and exact immutable content.
 
 Agent execution events retain session/branch addressing and root execution fences. Commands that atomically create an agent or admit an assignment acquire the city governance fence and target root fence in a fixed order. If the target root is owned by another device, the command is unavailable before canonical admission.
 
 A city transition can stage a multi-step operation such as retirement:
 
-1. commit transition intent and a new `retiring` city revision;
+1. commit `active -> retiring` as a completed guard revision;
 2. perform idempotent assignment, schedule, wake, and run-control steps;
 3. retain external-effect outcomes through the ordinary outbox;
 4. commit completed, blocked, failed, or conflicted terminal city status.
 
-Readers expose the last completed revision plus any pending transition. Internal event writes and deterministic control steps are never `unknown`. An external effect may remain unknown and block or qualify the transition without changing that effect's meaning.
+Readers expose completed stable pointers, active admission locks, and any pending transition. Internal event writes and deterministic control steps are never `unknown`. An external effect may remain unknown and block or qualify the transition without changing that effect's meaning.
 
-City synchronization preserves the city stream and its causal revision. Only the governance owner can produce an activation envelope. Competing or non-owner activation claims enter explicit conflict/quarantine handling and do not advance the completed city pointer.
+City synchronization preserves the city stream and its causal revisions. Only the governance owner can produce an activation envelope. Competing or non-owner activation claims enter explicit conflict/quarantine handling and do not advance `stableOrganizationRevision`.
+
+### Event-stream ownership and bridges
+
+| Meaning | Canonical stream |
+| --- | --- |
+| Operator, city policy, charter, grant, management, lifecycle, service route, assignment queue, organization decision | City |
+| Conversation, context, run, cell, effect, working value, artifact registration, family mailbox | Agent route |
+| Bottom-up organization proposal submission | Proposer agent route |
+| Registered proposal and later governance lifecycle | City, referencing the submission event |
+| Assignment input or steering delivered to target context | Target agent service route, referencing city assignment events |
+| Assignment result delivered to an agent sponsor | Sponsor agent route, referencing the city terminal notice |
+| Assignment result delivered to the user/operator product | City terminal notice and product projection |
+
+A bottom-up proposal first appends `AgentOrganizationProposalSubmitted` to the proposer route. The governance owner validates visibility and appends `OrganizationProposalRegistered` to the city stream. Registration never changes the submitted text or evidence IDs.
+
+Assignment admission is city-stream authority. Claim acquires city and target-root fences in fixed order, then atomically appends `AssignmentClaimed` in the city stream with `AssignmentContextDelivered` and `AgentRunRequested` in the target service route. Steering follows the same city-intent/target-delivery bridge. Terminal target events are observed idempotently, then the city stream records assignment status and terminal notice. Delivery to an agent sponsor appends one provenance-linked context event on the sponsor route.
+
+These bridges are typed and assignment-scoped. They do not create general cross-family mailbox reach. A crash between target terminal work and city notice delivery is recoverable from retained event IDs and stable idempotency keys.
 
 ### Rebuildable projections
 
@@ -1193,8 +1297,11 @@ New projections include:
 - `city_state`;
 - `agent_charter_entries`;
 - `agent_charter_versions`;
+- `agent_grant_entries`;
+- `agent_grant_versions`;
 - `agent_management_edges`;
 - `agent_lifecycle`;
+- `agent_service_routes`;
 - `agent_successor_links`;
 - `assignments`;
 - `assignment_usage`;
@@ -1212,9 +1319,11 @@ All tables are classified in `docs/mutable-tables.md`. Current pointers and inde
 Stable command retries agree on:
 
 - target agent;
-- expected city revision and event stream;
+- expected city head, stable organization revision, and event stream;
 - expected prior versions;
 - complete charter content and prompt digest;
+- complete grant content and activation identity;
+- assignment mode, service route, reservation, and target policy;
 - acting authority;
 - proposal and evidence;
 - hierarchy and lifecycle transitions;
@@ -1235,6 +1344,8 @@ GET  /product/city/agents
 GET  /product/city/agents/:session
 GET  /product/city/agents/:session/charters
 GET  /product/city/agents/:session/charters/:version
+GET  /product/city/agents/:session/grants
+GET  /product/city/agents/:session/grants/:version
 GET  /product/city/assignments
 GET  /product/city/assignments/:assignment
 GET  /product/city/proposals
@@ -1242,6 +1353,7 @@ POST /product/city/agents
 POST /product/city/assignments
 POST /product/city/assignments/:assignment/cancel
 POST /product/city/agents/:session/charters
+POST /product/city/agents/:session/grants
 POST /product/city/agents/:session/pause
 POST /product/city/agents/:session/resume
 POST /product/city/agents/:session/retire
@@ -1271,6 +1383,7 @@ Generated TypeScript receives capability-scoped operations:
 sdk.city.status()
 sdk.city.agents.list(options?)
 sdk.city.agents.get(target, options?)
+sdk.city.agents.grants(target)
 sdk.city.assignments.list(options?)
 sdk.city.assignments.get(assignmentId)
 sdk.city.assignments.create(input)
@@ -1382,9 +1495,10 @@ The runtime remains trusted-local.
 Normal retention includes:
 
 - every charter version, exact prompt text, and prompt digest;
+- every runtime-grant version, activation, revocation, and run/effect pin;
 - immutable content for every base-policy, invocation-contract, and execution-guide component needed to reconstruct effective system prompts;
 - creation and management lineage;
-- city control events and completed revisions;
+- city control events, `cityHeadRevision`, and `stableOrganizationRevision`;
 - assignments, usage attribution, results, and terminal notices;
 - organization proposals, evaluations, approvals, and decisions;
 - pause, retirement, and successor events;
@@ -1457,33 +1571,39 @@ No migration rewrites retained event rows or silently interprets an initial task
 
 - Add city and agent stream addressing to the canonical event header.
 - Reject older workspaces before decode, projection, sync, or recovery.
-- Add city revision, governance owner, fencing, sync, export, and deletion semantics.
+- Add city head, stable organization revision, governance owner, fencing, sync, export, and deletion semantics.
 - Add transactional city-plus-agent append support with fixed fence ordering.
 - Add replay, rebuild, duplicate, conflict, and schema-rejection tests.
 
 ### Phase 2 — Charter domain and storage
 
 - Add charter types, validators, events, reducer behavior, and projections on the city stream.
+- Add runtime-grant versions, activation, revocation barriers, and projections.
 - Add table classification and architecture checks.
 - Add exact charter lookup by session and version.
 - Add exact immutable prompt-component storage and resolution.
 - Add replay, rebuild, duplicate, conflict, and integrity tests.
 
-### Phase 3 — Required charter admission and run pinning
+### Phase 3 — Assignment foundation and required agent admission
 
+- Add durable assignment admission, funding, budget, goals, cancellation, usage, results, terminal delivery, and recovery.
+- Add service routes, serialized queues, claim fencing, assignment-context bridges, and sponsor delivery.
 - Require charters on root and child creation.
 - Require standing or task agent kind.
 - Update specification and recursive-child admission.
-- Atomically create child, charter, management edge, task, and runnable run across city and agent streams.
+- Atomically create child, charter, grants, management edge, service route, task, and queued assignment across city and agent streams.
+- Route repeated city work through assignments without broadening family mailboxes.
+- Prove that no creation path appends `AgentRunRequested` before assignment claim.
+
+### Phase 4 — Assignment claim, run pinning, and parent revision authority
+
+- Claim queued assignments with exact city-head, stable-organization, charter, grant, context, and run identity.
 - Pin charter and effective-prompt identity at `AgentRunRequested`.
+- Pin runtime-grant identity and enforce revocation barriers at effect boundaries.
+- Recheck immediate revocation at outbox claim and attempt start.
 - Compose exact invocation-specific provider system content on every step.
 - Add context inspection and effect provenance.
 - Block runnable legacy sessions that lack an active charter.
-
-### Phase 4 — Assignments and parent revision authority
-
-- Add durable assignment admission, budget, goals, cancellation, usage, results, terminal delivery, and recovery.
-- Route repeated city work through assignments without broadening family mailboxes.
 - Add direct-child charter read, propose, activate, and rollback commands.
 - Enforce constitutional, city, manager, and current-grant ceilings.
 - Add child self-proposals and parent decisions.
@@ -1502,7 +1622,8 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Add pause, resume, retiring, and retired states.
 - Add transactional lifecycle checks to every admission and recovery boundary.
 - Add child disposition, schedule/wake blocking, cancellation, and external-unknown-effect handling.
-- Add automatic task-agent retirement and standing promotion.
+- Add automatic task-agent disposition and successor creation.
+- Add disposition deadlines and city wakes without racing waiting assignments.
 - Add successor links and archive filtering.
 - Make retired routes execution-disabled while preserving reconciliation and administrative evidence.
 
@@ -1537,7 +1658,7 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Root creation without a charter is rejected before session or run admission.
 - Every child surface rejects promptless admission.
 - Every child declares standing or task agent kind.
-- A task agent auto-retires after terminal assignment unless promoted.
+- A task agent enters disposition-pending after terminal assignment and then retires.
 - Specification spawn records exact specification and charter versions.
 - Recursive children receive explicit charters.
 - Charter renderer output and digest are deterministic.
@@ -1546,12 +1667,13 @@ No migration rewrites retained event rows or silently interprets an initial task
 
 ### Model context
 
-- Every provider call contains base policy, exact pinned charter, invocation-specific response policy, and execution guidance in fixed order.
+- Every agent provider call contains base policy, exact pinned charter, invocation-specific response policy, and execution guidance in fixed order.
 - The effective prompt digest matches the exact provider-facing system text.
+- Run and effect records pin one immutable runtime-grant version.
 - Exact historical system-role messages are quoted data, not provider system instructions.
 - Prompt notes and dynamic messages cannot replace the charter.
 - A charter revision during a run does not change later steps of that run.
-- A new follow-up run uses the newly active charter.
+- A newly claimed assignment run uses the newly active charter.
 - An allocated candidate run uses the candidate charter and records its active control version.
 - Compaction preserves exact charter references.
 - Recovery after context, model request, or effect commit does not rematerialize with a different charter.
@@ -1563,6 +1685,9 @@ No migration rewrites retained event rows or silently interprets an initial task
 - A child can propose but not activate its own charter revision.
 - A parent cannot exceed constitutional, city, or manager-delegated ceilings.
 - Enforceable grant expansion requires the authority that owns the applicable ceiling.
+- Grant expansion does not change an active run.
+- Immediate revocation blocks the next effect admission without rewriting an already-started effect.
+- Immediate revocation cancels a pending effect before outbox attempt start and never dispatches it.
 - The operator cannot widen its own charter or replace itself.
 - User approval is required for protected organization changes.
 - Forged actor, evidence, approval, or current-version fields fail closed.
@@ -1581,17 +1706,25 @@ No migration rewrites retained event rows or silently interprets an initial task
 ### Assignments
 
 - Routing to an existing agent creates one durable assignment.
-- Assignment admission reserves sponsor budget and pins exact target route and charter.
+- Assignment admission reserves sponsor budget and targets the exact service route.
+- Claim pins exact city, charter, grant, assignment, and run identity.
+- Busy agents queue assignments deterministically and run at most one assignment on the service route.
+- Waiting-for-sponsor steering resumes the same assignment; new work creates another assignment.
 - Completion gates, cancellation, usage attribution, result, artifacts, and terminal delivery survive restart.
 - Cross-family assignment communication cannot be used for general messaging.
 - A target owned by another device is unavailable before admission.
 - Duplicate assignment admission or terminal recovery does not duplicate work or usage.
+- Sponsor charge, session attribution, ancestor attribution, unused release, and conservative unknown usage never double debit.
+- Child work funded by an active assignment cannot reserve beyond that assignment's remaining delegation allowance.
+- Agent-route proposal submission and assignment delivery bridge to the city stream with exact provenance.
+- Creation commits queued work and reaches `AgentRunRequested` only through the ordinary claim path.
 
 ### Lifecycle
 
-- Paused agents reject routing, follow-up, wakes, schedules, and new runs.
+- Paused agents reject routing, assignment creation or steering, wakes, schedules, and new runs.
 - Resuming a paused agent preserves identity and uses the current charter.
 - Retiring immediately blocks new work.
+- `active -> retiring` commits before any drain action.
 - Child disposition is required before parent retirement.
 - Cancellation intent and unknown effects remain visible through retirement.
 - Retired agents are absent from ordinary routing and default directory pages.
@@ -1599,6 +1732,7 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Retired routes reject execution and user route mutation.
 - Reconciliation, recovery closure, sync resolution, export, deletion planning, and historical annotation remain available without reactivation.
 - A renewed function requires a successor agent rather than reactivation.
+- Task-agent terminal work enters disposition-pending before successor creation or automatic retirement.
 
 ### Adaptation and governance
 
@@ -1614,7 +1748,7 @@ No migration rewrites retained event rows or silently interprets an initial task
 
 ### Directory and routing
 
-- The operator can explicitly page every active, paused, retiring, and retired agent and retrieve current or historical charter text.
+- The operator can explicitly page every active, paused, disposition-pending, retiring, and retired agent and retrieve current or historical charter text.
 - Non-operator agents receive only authorized detail.
 - Full prompt text is absent from ordinary list pages.
 - Routing records considered candidates, exact charter versions, and reason.
@@ -1629,6 +1763,8 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Every branch resolves session-wide identity from the city control stream rather than branch ancestry.
 - Organization simulation on a branch has no active effect.
 - Crash after proposal, activation intent, partial target transition, or terminal decision recovers idempotently.
+- Active transition locks block affected admission even while stable organization pointers remain unchanged.
+- City head and stable organization revisions survive sync without using local cursors.
 - Offline conflicting charter or hierarchy changes remain explicit.
 - A non-governance-owner device cannot activate organization mutations.
 - Cross-owner assignment and reorganization are unavailable.
@@ -1669,6 +1805,8 @@ The implementation defines and tests bounds for:
 
 - active agents per city;
 - management depth and direct reports;
+- queued assignments per agent and city;
+- assignment steering and result payloads;
 - charter encoded bytes and collection counts;
 - directory page size;
 - full-prompt detail requests;
@@ -1721,7 +1859,7 @@ Offline writers cannot safely share one organization pointer. Only the city gove
 The adaptive agent city is complete when:
 
 1. Every runnable agent has exactly one active immutable charter version.
-2. Every model call uses and records one exact pinned charter and effective system prompt.
+2. Every agent model call uses and records one exact pinned charter and effective system prompt.
 3. No child-admission path accepts only a task string.
 4. Parents can revise direct children's future charters without changing active or historical runs.
 5. One explicit operator is the stable workspace entrypoint and can query every agent charter.
@@ -1729,7 +1867,7 @@ The adaptive agent city is complete when:
 7. The active management hierarchy is distinct from immutable creation ancestry and remains exact, bounded, and acyclic.
 8. Repeated work reaches existing agents through durable assignments rather than unscoped follow-up.
 9. Standing and task agents have distinct rotation and retirement behavior.
-10. The city control stream owns one completed revision independently of conversation branches.
+10. The city control stream owns portable head and stable organization revisions independently of conversation branches.
 11. The city can create, revise, pause, resume, reparent, split, merge, supersede, and retire functions through durable governed proposals.
 12. Retired agents receive no future work, disappear from normal routing and organization views, and remain inspectable through explicit history.
 13. Organizational changes preserve evidence, evaluation, authority, conflicts, and rollback or irreversibility.
