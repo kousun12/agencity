@@ -182,7 +182,7 @@ The initial terminal product is complete only when all of these are reproducible
 - Worker, supervisor, and client interruption at durable boundaries reconstructs the same committed state without duplicate cells, effects, model calls, or children.
 - Cancellation requests, budget exhaustion, failed gates, unknown effects, and unavailable capabilities are distinct visible states with safe resume or reconciliation behavior.
 - The TUI consumes the public client contract, can detach and catch up from a cursor, and never owns durable session identity.
-- Black-box tests cover installation, empty-state start, task execution, verification, parent-to-child-to-parent navigation, quit, resume, branch, and history without calling supervisor internals or parsing IDs.
+- Black-box tests cover installation, empty-state start, task execution, verification, root-to-child-to-grandchild ancestry navigation, workspace-root selection, quit, remembered resume, branch, and history without calling supervisor internals or parsing IDs.
 
 ## Runtime and development requirements
 

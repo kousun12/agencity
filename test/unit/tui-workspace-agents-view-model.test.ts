@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ProductBranchSummary } from "../../src/product/index.ts";
+import { registerBrokeredSecret } from "../../src/security/index.ts";
 import {
   buildTerminalWorkspaceAgentRows,
   buildTerminalWorkspaceAgentsView,
@@ -97,6 +98,32 @@ describe("workspace Agents view model", () => {
     }
     expect(buildTerminalWorkspaceAgentRows(rows, "secret-session-id")).toHaveLength(0);
     expect(buildTerminalWorkspaceAgentRows(rows, "secret-branch-id")).toHaveLength(0);
+  });
+
+  test("scrubs brokered secrets from rendered and searchable catalog fields", () => {
+    const secret = "workspace-catalog-secret-7e31";
+    const release = registerBrokeredSecret(secret);
+    try {
+      const summaries = [
+        summary("session", "branch", {
+          sessionName: `Agent ${secret}`,
+          branchName: `branch-${secret}`,
+          taskSummary: `Inspect ${secret}`,
+          model: { provider: "openai", model: secret, reasoningEffort: "provider-default" },
+        }),
+      ];
+      const rows = buildTerminalWorkspaceAgentRows(summaries);
+      expect(JSON.stringify(rows)).not.toContain(secret);
+      expect(rows[0]).toMatchObject({
+        sessionName: "Agent [REDACTED]",
+        branchName: "branch-[REDACTED]",
+        task: "Inspect [REDACTED]",
+        model: "openai:[REDACTED]",
+      });
+      expect(buildTerminalWorkspaceAgentRows(summaries, secret)).toHaveLength(0);
+    } finally {
+      release();
+    }
   });
 
   test("sorts deterministically and keeps duplicate names distinct through route keys", () => {

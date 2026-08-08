@@ -81,7 +81,7 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 
 The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Echo can appear in low-level descriptors because it is installed for deterministic tests, but product onboarding, selection, help, and status must exclude it.
 
-`GET /product/sessions` is a read-only catalog operation and does not change the remembered workspace route. Clients use `root === true` to select top-level work while retaining every branch of each root session. `failed` and `archived` rows remain in the response even though the terminal product does not open them. An exact `POST /product/select` changes the remembered route used by later no-argument product resume.
+`GET /product/sessions` is a read-only catalog operation and does not change the remembered workspace route. Clients use `root === true` to select top-level work while retaining every branch of each root session. `failed` and `archived` rows remain in the response, but `POST /product/select` rejects them as non-resumable. An exact successful selection changes the remembered route used by later no-argument product resume.
 
 Selected capability query values must be nonblank UTF-8 strings. Provider is limited to 256 bytes and model to 512 bytes. The response state is exactly `provider-strict`, `runtime-validated`, `unknown`, or `unavailable`. Credential usability is reported separately from formal-contract capability, and this route never calls a provider. The shipped transports prove the formal primitives, while exact public-catalog model support normally remains `unknown` because the catalog has no authoritative formal-tool fields.
 

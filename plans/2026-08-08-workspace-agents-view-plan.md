@@ -381,14 +381,13 @@ Implementation completed on August 8, 2026.
 ### Implementation deviations
 
 - `src/product/catalog.ts` required no change because the existing catalog already supplied the required fields and root classification.
-- `src/tui/detail-model.ts` required no change because `/tree` continues to use the existing family diagnostic renderer.
 - The linked pseudo-terminal journey opens the workspace screen with `/agents` after climbing grandchild-to-child-to-root with Left. Deterministic OpenTUI input coverage separately proves that Left from an empty root composer opens the same screen and that Left with a draft retains editor behavior. This split avoids making the installed journey depend on terminal-specific root-Left timing while retaining behavioral coverage of both entry paths.
 
 ### Verification evidence
 
-- Focused view-model, terminal-controller, and OpenTUI tests: 35 passed, 0 failed.
+- Focused view-model, terminal-controller, and OpenTUI tests: 36 passed, 0 failed.
 - Linked installed-product pseudo-terminal journey: 1 passed, 0 failed.
 - `bun run typecheck`: passed.
 - `bun run check:architecture`: passed.
-- `bun run verify`: passed. The deterministic core reported 844 passed, 2 skipped, and 0 failed. Installed-product acceptance reported 14 passed, 1 skipped, and 0 failed.
+- `bun run verify`: passed. The deterministic core reported 845 passed, 2 skipped, and 0 failed. Installed-product acceptance reported 14 passed, 1 skipped, and 0 failed.
 - The skipped rows were external or dependency-gated checks: official Turso Sync server conformance, real Turso Cloud smoke, and the real-provider installed-product smoke. They are not claimed as verified.

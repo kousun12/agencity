@@ -37,6 +37,15 @@ test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI
   const installation = join(directory, "bun-install");
   await mkdir(workspace);
   await mkdir(home);
+  const initialized = Bun.spawn(["git", "init", "--quiet"], {
+    cwd: workspace,
+    env: process.env,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const [initCode, initError] = await Promise.all([initialized.exited, new Response(initialized.stderr).text()]);
+  expect(initCode, initError).toBe(0);
   const linked = Bun.spawn([process.execPath, "link", "--cwd", root], {
     cwd: root,
     env: { ...process.env, HOME: home, BUN_INSTALL: installation },

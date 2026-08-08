@@ -8,6 +8,7 @@ import type {
   ModelContractDiagnosticOutcome,
 } from "../runtime/index.ts";
 import { deriveModelContractCallDiagnostic } from "../runtime/index.ts";
+import { scrubText } from "../security/index.ts";
 
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]);
 
@@ -284,7 +285,7 @@ function normalizedWorkspaceLabel(value: string): string {
 }
 
 function workspaceAgentName(value: string, fallback: string): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
+  const normalized = scrubText(value).replace(/\s+/g, " ").trim();
   return normalized || fallback;
 }
 
@@ -315,9 +316,9 @@ export function buildTerminalWorkspaceAgentRows(
         displayName: (branchesPerSession.get(summary.sessionId) ?? 0) > 1
           ? `${sessionName} / ${branchName}`
           : sessionName,
-        model: `${summary.model.provider}:${summary.model.model}`,
+        model: scrubText(`${summary.model.provider}:${summary.model.model}`),
         status: summary.status,
-        task: summary.taskSummary?.replace(/\s+/g, " ").trim() || "No retained task summary",
+        task: workspaceAgentName(summary.taskSummary ?? "", "No retained task summary"),
         unresolvedWork: summary.unresolvedWork,
         activeGoals: summary.activeGoals,
         createdAt: summary.createdAt,
