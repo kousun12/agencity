@@ -136,6 +136,13 @@
 - Passed `bun run typecheck`, `bun run check:architecture`, and `bun run verify` with 842 passes, 3 documented external skips, and 0 failures. The deterministic acceptance matrix passed; the real-provider, official Turso Sync server, and Turso Cloud rows remained skipped and unverified.
 - Implementation commit: `9fc25e8`.
 
+#### August 8, 2026 — Final whole-feature pass
+
+- Re-ran `bun run verify` on the completed branch: typecheck and architecture checks passed; the deterministic core suite reported 828 passes and 2 external skips; installed acceptance reported 14 passes and 1 real-provider skip. The aggregate result was 842 passes, 3 skips, and 0 failures.
+- Re-ran `bun run test:acceptance:matrix`. The isolated linked-executable deterministic row passed. The real-provider, official Turso Sync server, and Turso Cloud rows were skipped because their opt-in credentials or binary were absent and remain unverified.
+- An independent final review inspected the complete `origin/main...HEAD` change against this plan, the parent architecture, and repository rules. It found no defect to patch in provider cardinality, canonical bounds, durable linkage, schema rejection, AgentRun finish and gate recovery, structured refinement and sync provenance, authority boundaries, observability, documentation, or removal of text-JSON fallbacks.
+- The final review retained two documented non-blocking observations: the linked known-unsupported-model row remains deferred for the reason recorded in Phase 7, and the real-provider and external Turso integrations require separate opt-in verification. The worktree remained clean after review.
+
 ## Summary
 
 Before this implementation, Agencity's ordinary autonomous loop asked a model to serialize one `agencity.agent-action` JSON object into assistant text. The runtime concatenated the returned text, called `JSON.parse`, validated the resulting object, and only then executed an admitted TypeScript action. That path preserved a strict execution boundary but used free-form assistant text as transport for a protocol that model providers already support through formal tool calling.
