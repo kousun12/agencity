@@ -64,7 +64,9 @@ Agencity:
 - opens a full-screen terminal client on interactive terminals and a readable transcript for non-interactive use; and
 - starts an authenticated local-machine-only workspace service on demand so detached work can continue independently of the client.
 
-The current pre-release checkout still uses textual typed actions and may expose older pending-input states while the formal-tool cutover is implemented. Those surfaces are transitional and carry no compatibility commitment. In the accepted architecture, missing information ends the run through blocked `finish`; a later user message starts an ordinary new run on the same branch.
+`bun_console` and `finish` are declaration-only provider response tools. They have no execute callbacks and do not run at the provider. Only an accepted `bun_console` call can lead to execution, after validation and durable action commit. The `tools`, `sql`, `state`, `rlm`, `sdk`, memory, agent, skill, and artifact surfaces exist inside that later disposable cell; they are not provider tools. Every autonomous model step must return exactly one formal call. Supplemental narration is diagnostic only, and Agencity has no text-JSON or fenced-code fallback.
+
+A successful `finish` message is published only after required completion gates pass. Blocked and failed finishes atomically retain their exact assistant message and terminal status. Missing information ends the current run as blocked; a later user message starts an ordinary new run on the same branch.
 
 When the current agent has retained direct children, the full-screen client keeps a compact family summary above the footer. With an empty composer, press Down to focus it, Enter or Right to open the child browser, and Up or Down to select a child. Enter or Right opens that child's conversation; Left from an empty child composer returns to the exact retained parent branch. Opening another family member is observational: it does not cancel, resume, retry, or change the workspace's remembered root selection.
 

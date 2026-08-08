@@ -132,11 +132,20 @@ Goals own typed completion gates which execute through the existing request-befo
 
 ## Autonomous typed runs
 
-`AgentRunService` is the ordinary product path. The current pre-release code still uses textual action JSON and pending-input states. Those surfaces are transitional and carry no compatibility commitment.
+`AgentRunService` is the ordinary product path. Every autonomous model request commits a required-tool-set dispatch containing exactly two declaration-only provider tools:
 
-The accepted architecture in [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) requires exactly one provider-native `bun_console` or `finish` call on every autonomous step. `bun_console` is the one executable action; every file, shell, SQL, model/subagent, skill, memory, state, and artifact mechanism stays inside the console SDK. `finish` ends model-directed work as successful, blocked, or failed. Missing information is a blocked terminal response, and a later user message starts an ordinary new run on the same branch. Clarification, permission, request-input, and waiting-for-user actions are not part of the target domain.
+- `bun_console` proposes one multiline TypeScript cell;
+- `finish` proposes an exact user-facing message and successful, blocked, or failed run-control outcome.
 
-Run, step, context, call, effect, action, and cell IDs are stable across recovery. Committed cell/effect observations enter exactly one dependent step with their event IDs. A pending unclaimed model effect drains once; a retained succeeded outcome finalizes without a second provider call; a lost started non-idempotent effect becomes unknown. Started cells are abandoned rather than replayed. Budget admission uses the existing `>=` limits, and a generated finish may be accepted at the exact turn boundary while a new effectful cell is not. The formal-tool cutover rejects older workspace schemas with reset guidance rather than preserving them. Provider tool submissions remain internal attributable history; only an accepted `finish` publishes its exact assistant message.
+These declarations have no execute callback, provider-hosted execution, tool-result continuation, or provider-managed loop. Agencity accepts exactly one completed permitted call. Supplemental text is bounded diagnostic evidence only; it is never parsed for JSON or TypeScript. Zero, multiple, malformed, truncated, oversized, unknown, refused, or incomplete calls execute nothing and become typed contract violations.
+
+Only `bun_console` can lead to execution. Agencity validates and durably commits its canonical `agencity.agent-action` before starting the disposable worker. Files, shell, read-only SQL, models, subagents, skills, memory, state, artifacts, goals, and refinement are injected SDK APIs inside that later cell, not provider tools.
+
+A successful `finish` remains provisional until required completion gates pass. Failed gates create bounded repair evidence without publishing the proposed success message; an unknown required gate ends unknown without publishing it. Blocked and failed finishes atomically retain their exact submitted assistant message with the effective terminal status. A failed finish after unresolved required-gate failure becomes goal-derived blocked. Missing information uses blocked `finish`; later user text starts a normal new run on the same branch. There is no second pending-input lifecycle.
+
+Run, step, context, call, effect, action, and cell IDs are stable across recovery. Committed cell/effect observations enter exactly one dependent step with their event IDs. A pending unclaimed model effect drains once; a retained succeeded outcome finalizes without a second provider call; a lost started non-idempotent effect becomes unknown. Started cells are abandoned rather than replayed. Budget admission uses the existing `>=` limits, and a generated finish may be accepted at the exact turn boundary while a new effectful cell is not.
+
+The canonical writer accepts event schema 3, reducer 11, `agencity.model-dispatch.v2`, and `agencity.model-effect-output.v2`. Version-1/version-2 workspaces reject with reset guidance before migration, decoding, projection, synchronization, or recovery. The effect output retains one full accepted formal input. Completion and action events carry result digests, input digests, provider call identity, and model-call references; rejected raw arguments are not retained.
 
 ## Artifact storage
 
@@ -225,6 +234,8 @@ FTS5 is only a candidate generator. The runtime then authoritatively applies ses
 The base runtime policy is a frozen runtime constant with ID/version/digest and is serialized separately from `context.harness`. Harness edits have no base-policy kind, reserved policy names are rejected, and generated skill permissions cannot expand permission/safety policy.
 
 Refinement uses proposal validation and activation CAS, including a repeated local/workspace ownership check and transaction-visible duplicate-name guard. A revise/reject decision rejects every candidate version so create names and active baselines are never stranded. Objective observations bind evidence to the exact allocated session/branch/task and to the predeclared metric/test command when structurally available. User/global rollback has its own owner/admin approval event and projection; promotion approval is deliberately insufficient.
+
+Trajectory review uses the sealed internal `agencity.refinement-review.v1` response contract with exactly one required `agencity_submit_refinement_review` tool. The supervisor selects this contract for a durable recursive child and retains its exact `responseAdmission`; public recursive calls remain text operations. Successful review children create no assistant result message. Their normalized typed result is bound to the exact child model completion and accepted transport digests, and recovery reconstructs it from the retained admission and authoritative effect. No assistant prose parser participates.
 
 Generated skills are the additional hard gate: a candidate version is created for attribution, then Bun compilation and every declared runtime case execute in a separate process through the ordinary durable outbox. Only a passing report permits bounded candidate activation. The configured permission-name allowlist is checked at validation, activation, testing, and invocation. Invocation repeats compilation for the exact pinned immutable source and records both effect and skill-version linkage. This is trusted-local process isolation, not a new sandbox.
 

@@ -92,6 +92,8 @@ The Echo provider exists inside the low-level runtime as a deterministic test fi
 
 `ModelExecutor.providers()` and `Supervisor.modelProviders` return secret-free descriptors with names, display labels, capabilities, usability, credential source, and remediation. `ModelExecutor.contextCapacity()` reports exact provider/operator metadata or an explicit unknown value; it does not guess model capacity.
 
+Structured requests use response-aware `agencity.model-dispatch.v2` and return `agencity.model-effect-output.v2`. The built-in product transports declare formal tools without execute callbacks and perform no provider-side execution or tool-result continuation. A custom provider's complete structured output is credential-checked across all fields and fails closed before return or persistence.
+
 ## Sessions, branches, and autonomous runs
 
 - `createSession` appends `SessionCreated`; optional caller IDs and names support deterministic provisioning.
@@ -106,14 +108,13 @@ Product tasks use the strict autonomous-run service:
 - `runs.start` admits a task and advances it through typed model actions, cells, observations, budget accounting, goals, and a terminal boundary.
 - `runs.get` reads the retained run.
 - `runs.advance` resumes a retained run without inventing action identity.
-- `runs.respond` is a transitional pre-release method for the current clarification/permission implementation.
 - `runs.cancel` commits cancellation intent before aborting admitted work.
 
 An exact `requestKey` retry returns the same run; reuse with changed durable meaning conflicts. `unknown`, `cancelled`, `budget_exceeded`, `blocked`, and `failed` are distinct outcomes.
 
-The accepted architecture replaces textual action JSON with exactly two formal provider tools: `bun_console` and `finish`. Only `bun_console` executes generated work. Shell, file, SQL, model, subagent, memory, skill, and artifact operations are typed APIs inside the cell. `finish` ends the run as successful, blocked, or failed; missing information uses blocked `finish` and a later ordinary run. The supervisor never heuristically executes prose. See [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) and [Generated TypeScript console SDK](./console-sdk.md).
+Autonomous calls declare exactly two fixed provider tools: `bun_console` and `finish`. They are response declarations, not executable provider callbacks. Only a validated and durably committed `bun_console` submission can execute generated work. Shell, file, SQL, model, subagent, memory, skill, state, and artifact operations are injected APIs inside that later disposable cell. `finish` ends the run as successful, blocked, or failed. Supplemental narration is diagnostic-only, and the supervisor never searches prose for JSON or code. See [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) and [Generated TypeScript console SDK](./console-sdk.md).
 
-The current pre-release implementation still exposes textual version-1 actions and `runs.respond`. The formal-tool cutover removes clarification, permission, request-input, and waiting-for-user types and methods without a compatibility layer.
+A successful finish publishes its exact message only after required gates pass. Failed or unknown required gates do not publish the proposed success. Blocked and failed finishes commit their exact messages atomically with effective terminal status. Missing information uses a blocked finish; later user text starts a normal new run.
 
 `modelLoop.turn` and `modelLoop.run` remain low-level diagnostic paths. They are not substitutes for `runs` in a product task integration.
 
@@ -148,7 +149,7 @@ const terminal = await supervisor.models.result(call.handleId, {
 });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. The current pre-release projection includes waiting/input/permission reasons; the formal-tool cutover removes them. The target values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
+`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 
 Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
 
@@ -209,7 +210,7 @@ The database-driven coordinators create durable wakes. Missed intervals coalesce
 
 `memory.create/search/list` operate on scoped, attributable records. Search returns both ranked records and provenance for candidates, policy rejections, and selections. FTS5 is a candidate generator; scope, status, tags, conflicts, exposure, and limits remain authoritative service decisions.
 
-`refiner.request` freezes a bounded trajectory and runs an ordinary durable recursive child that must produce a strict refinement decision. Valid output enters proposal validation and bounded candidate exposure. Promotion, broad scope, approval, and rollback are governed separately; model prose is not evidence.
+`refiner.request` freezes a bounded trajectory and runs a durable recursive child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Public recursive calls remain text operations, and no assistant JSON parser or prose fallback exists. Valid output enters proposal validation and bounded candidate exposure. Promotion, broad scope, approval, and rollback are governed separately; model prose is not evidence.
 
 `harness` exposes proposal, validation, activation, allocation, observation, decision, approval, history, and rollback operations. `skills` compiles, tests, and invokes immutable skill versions through the outbox. `specs.spawn` admits a version-pinned subagent through the normal task/session model. Skill permissions are an exact runtime allowlist and are not an OS sandbox.
 

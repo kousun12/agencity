@@ -55,7 +55,7 @@ Deployments that require filesystem, network, process, resource, or tenant isola
 - Generated programs use one general TypeScript surface while canonical writes remain validated and attributable.
 - Trusted-local operation is usable without claiming hostile-code isolation.
 
-Later ADRs preserve these foundations while adding relational memory and refinement, immutable envelope synchronization, proposed event-version evolution, typed autonomous actions, durable agent relationships, managed detached execution, profile and credential separation, guarded physical deletion, and formal provider-tool response contracts. ADR 0010 supersedes ADR 0005's textual action transport while preserving this ADR's durable outbox, attributable state, and single generated TypeScript execution surface.
+Later ADRs preserve these foundations while adding relational memory and refinement, immutable envelope synchronization, event-version evolution, typed autonomous actions, durable agent relationships, managed detached execution, profile and credential separation, guarded physical deletion, and formal provider-tool response contracts. ADR 0010 supersedes ADR 0005's textual action transport while preserving this ADR's durable outbox, attributable state, and single generated TypeScript execution surface. Under ADR 0010, declaration-only provider tools select either a proposed console cell or a typed terminal outcome; only a validated, durably committed console action reaches the disposable worker and its injected SDK.
 
 ## Rejected alternatives and limitations
 

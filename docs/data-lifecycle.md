@@ -30,6 +30,8 @@ Its append-only event history is the canonical record of sessions, branches, tas
 
 The same database contains rebuildable projections and operational rows such as snapshots, routing indexes, the effect outbox, process leases, and synchronization status. Those rows accelerate or coordinate the runtime; they do not replace canonical events.
 
+Structured model effects retain one complete accepted formal input. Model completion, action, diagnostics, and progress records use bounded digests, identities, counts, and summaries rather than copying accepted input or retaining rejected argument bodies. Treat the workspace database as sensitive trajectory data even when artifacts are stored elsewhere.
+
 Opening a database applies the repository's numbered migrations. Retained event meanings are not rewritten during ordinary projection rebuild.
 
 ### Artifact store
@@ -190,10 +192,11 @@ A filesystem or administration failure produces a partial result. Workspace owne
 
 ## Upgrades and migrations
 
-- The formal model-tool release is a pre-release workspace cutover. It accepts event schema version 3 only.
+- The current workspace format accepts event schema version 3, reducer version 11, model dispatch version 2, and model effect output version 2.
 - Version-1 and version-2 workspaces are rejected with reset guidance and are not decoded, upcast, synchronized, projected, or recovered. Profile model-catalog caches may be discarded and rebuilt.
 - Opening incompatible state fails before applying product migrations to its retained rows and reports reset guidance. The runtime does not delete the old database.
 - Before using this revision, back up or move aside each affected workspace's `.agencity` directory. Starting again creates a fresh version-3 workspace. The separate profile directory (normally `~/.agencity`) does not need to be reset unless startup reports a profile-specific incompatibility; resetting a workspace does not remove profile state, and resetting a profile does not remove workspace state.
+- Migration 015 adds `response_admission_json` to the mutable `recursive_model_handles` projection. It preserves the exact contract/capability seed needed to recover structured recursive work and is rebuilt from `RecursiveModelStarted`; canonical event history remains authoritative.
 - Back up databases, sidecars, artifacts, profile data, and replicas before changing to a source revision with new migrations.
 - Run only one runtime version against a given writable workspace at a time.
 - Do not downgrade a migrated database unless that repository revision explicitly supports it.

@@ -22,6 +22,14 @@ Do not expose `ProtocolServer` directly to an untrusted network. The product-man
 
 ## Defense in depth that is implemented
 
+### Formal model responses
+
+`bun_console`, `finish`, and the sealed refinement-review tool are declaration-only response contracts, not sandboxes or provider-hosted executors. Formal input deltas are provisional, private, and non-executable. Agencity executes only a validated `bun_console` action after its canonical commit; the later disposable cell retains the same trusted-local OS authority described above.
+
+Supplemental narration is diagnostic-only. There is no text-JSON or TypeScript fallback. Rejected raw argument bodies are not written to events, logs, artifacts, cursorless progress, or model-contract diagnostics. Those surfaces retain only bounded codes, digests, names, byte counts, and scrubbed summaries.
+
+The built-in product transports validate and scrub normalized output before persistence. A custom provider's complete structured result is scanned across submission input, termination reasons, warnings, supplemental text, violation evidence, and every other retained field for registered brokered secrets or credential-shaped material. A match fails closed before the value is returned or persisted and does not echo the observed credential.
+
 ### Generated SQL
 
 The injected `sql` template binds interpolations and accepts only a narrow single-statement read grammar. DDL/DML/transactions, dangerous file/extension functions, mutation-capable pragmas, private operational tables, and SQLite schema/engine tables are rejected. Results are capped at 1,000 rows, statements at 64 KiB, and execution at 2 seconds. A dedicated analytical LibSQL client additionally enables `PRAGMA query_only=ON` and is closed after each query. This protects the intended SDK path from accidental canonical mutation or unbounded reads; it does not turn arbitrary generated TypeScript with OS authority into untrusted code.
@@ -34,6 +42,7 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 - The shell executor receives an environment with credential-shaped names removed.
 - OpenAI, Anthropic, and Vercel AI Gateway providers resolve stored or environment keys in the supervisor.
 - Provider execution uses the Vercel AI SDK inside the supervisor; provider keys are not passed to the TypeScript console worker.
+- Provider tool declarations do not receive credentials and have no execute callback. Provider keys remain supervisor-side for the model request.
 - The public Gateway model-catalog request sends no provider credential. Custom provider origins receive execution prompts and authentication and must be treated as trusted network destinations.
 - TUI-stored model keys live in a profile-owned `auth.json` written with mode `0600`, separate from canonical events and profile preferences.
 - Inputs containing an actual known environment or stored model secret value are rejected before durable append.

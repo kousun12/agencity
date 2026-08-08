@@ -44,6 +44,7 @@ This index is the public documentation entrypoint. Start with the user guide for
 ## Decisions
 
 - [Decision index](./decisions/README.md) — consequential architecture decisions and their status.
+- [Formal model tool contracts](./decisions/0010-formal-model-tool-contracts.md) — fixed provider tools, console/API boundary, terminal semantics, and schema-3 compatibility rule; supersedes historical [ADR 0005](./decisions/0005-typed-autonomous-actions.md).
 
 ## Verification
 

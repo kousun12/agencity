@@ -138,6 +138,8 @@ A resumed branch retains its committed model. If that provider is unavailable, r
 
 There is no product demo provider or automatic fake fallback. Internal deterministic providers are test-only.
 
+Agent-tool status is `provider-strict`, `runtime-validated`, `unknown`, or `unavailable`. Missing credentials are reported separately. Capability inspection does not call the provider. The shipped transports prove the formal primitives, but ordinary catalog models usually remain `unknown` because the public catalog has no authoritative exact-model support fields. A known unsupported model rejects before run or runnable-child admission; Agencity does not switch model, transport, schema enforcement, or response mode.
+
 ## Recovery and unknown effects
 
 Startup recovery:
@@ -145,7 +147,8 @@ Startup recovery:
 - requeues lost work only when the effect is declared idempotent;
 - records lost non-idempotent ownership as `unknown`;
 - abandons interrupted cells instead of replaying their code;
-- finalizes already-committed model outcomes without another provider call;
+- finalizes already-committed model outcomes and applies retained formal actions without another provider call;
+- recovers structured refinement from retained recursive `responseAdmission` and exact child-completion evidence;
 - restores branch status, cancellation, goals, schedules, child work, and typed runs from retained boundaries; and
 - never re-executes effects during projection rebuild.
 
@@ -292,7 +295,7 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
 
-The formal model-tool revision is an explicit pre-release workspace cutover: only event schema version 3 is accepted. Version-1 and version-2 workspace histories are rejected before projection or recovery instead of being decoded or migrated. Back up or move aside the affected workspace `.agencity` directory before first startup. The rejection does not delete retained data; see [Data lifecycle](./data-lifecycle.md).
+The current workspace format accepts only event schema version 3. Version-1 and version-2 workspace histories are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. The rejection does not delete retained data; see [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

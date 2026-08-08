@@ -6,7 +6,7 @@
 - **Extends:** [ADR 0001](./0001-durable-local-runtime-foundations.md)
 - **Implementation plan:** [Lossless context-reference storage plan](../../plans/2026-08-07-lossless-context-references-plan.md)
 
-This proposal is deferred until the formal model-tool cutover establishes the implementation baseline. [ADR 0010](./0010-formal-model-tool-contracts.md) establishes a single current workspace schema with reset guidance for older state until the first release. The context exactness and canonical-reference goals remain proposed; mixed pre-release event versions are not part of this decision.
+This proposal is deferred and requires a new readiness review before implementation. [ADR 0010](./0010-formal-model-tool-contracts.md) establishes a single current workspace schema with reset guidance for older state until the first release. The context exactness and canonical-reference goals remain proposed; mixed pre-release event versions are not part of this decision.
 
 ## Context
 

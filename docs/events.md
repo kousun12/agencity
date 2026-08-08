@@ -1,6 +1,6 @@
-# Event schemas (version 2)
+# Event schemas (version 3)
 
-`events` is the canonical append-only history. The current implementation validates version 2 at the storage boundary and rejects any other schema version. The accepted formal-tool architecture will cut over to version 3 only, reject version-1/version-2 workspaces with reset guidance, and remove textual action and pending-input events without an upcaster. These are pre-release reset boundaries; no released history is being migrated. After release, payload evolution requires a new schema version and an explicit tested projection/upcast path.
+`events` is the canonical append-only history. The runtime accepts schema version 3 only. Version-1 and version-2 workspaces reject with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. After release, payload evolution requires a new schema version and an explicit tested projection path.
 
 ## Header
 
@@ -12,15 +12,15 @@ Every stored event has:
 | `id` | non-empty string | Globally unique event identity (normally ULID). Consumers deduplicate on this field. |
 | `sessionId` | non-empty string | Owning session. |
 | `branchId` | non-empty string | Branch where the event was appended. Lineage reads may also include ancestor-branch events. |
-| `causationId` | string or `null` | Direct causal event when supplied. Version 2 does not require it on every append. |
+| `causationId` | string or `null` | Direct causal event when supplied. |
 | `correlationId` | string or `null` | Cross-event operation correlation when supplied. |
 | `type` | `EventType` | Payload discriminator listed below. |
-| `schemaVersion` | positive integer | Payload/header version; currently exactly `2`. |
+| `schemaVersion` | positive integer | Payload/header version; exactly `3`. |
 | `committedAt` | string (normally ISO datetime) | Commit timestamp supplied or generated at the storage boundary. |
 | `producer` | non-empty string | Usually `supervisor`, `console`, `model`, `executor`, `client`, or `recovery`. |
 | `idempotencyKey` | string or `null` | Unique within `(sessionId, type)` when present. Same payload/branch deduplicates; changed meaning conflicts. |
 | `payload` | JSON value | Typed by `type` and validated before append. |
-| `originDeviceId` | non-empty string | Stable profile device that first committed the event; retained rows created before origin metadata was required expose a local fallback during compatibility projection and export. |
+| `originDeviceId` | non-empty string | Stable profile device that first committed the event. |
 | `originSequence` | positive safe integer | Monotonic sequence allocated by that origin device, independent of the local database cursor. |
 | `streamParentId` | string or `null` | Previous event in the writer's source branch. Sync uses it for causal order and offline divergence detection. |
 
@@ -54,7 +54,7 @@ A model configuration has required non-empty `provider`, canonical `creator/mode
 
 Optional fields are marked `?`. All IDs/names required by schema are non-empty strings unless a stricter note is shown.
 
-| Event type | Version 2 payload | Projection/semantic effect |
+| Event type | Version 3 payload | Projection/semantic effect |
 |---|---|---|
 | `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, sessionName?, initialBranchName?, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Initializes a root or normal child session, including optional human display labels. Child creation requires the complete parent/root/depth/task tuple; retained rows without ancestry fields project self as root and depth zero. |
 | `BranchCreated` | `{ branchId, parentBranchId, forkCursor: decimal string, name?: string }` | Selects the new active branch projection. Storage records ancestry through the exact parent cursor. |
@@ -62,7 +62,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `BranchNamed` | `{ name }` | Changes the current branch label; the rebuildable branch routing projection mirrors it. |
 | `SessionStatusChanged` | `{ status: SessionStatus, reason?: string }` | Sets projected lifecycle status. |
 | `SessionModelChanged` | `{ previousModel, model, selectedBy: "user" }` | Replaces the selected model for the current branch only when `previousModel` still matches and no model work is active. It is explicit user configuration, not workspace-material evidence. |
-| `MessageAppended` | `{ messageId, role: "system" | "user" | "assistant" | "tool", content: string, modelCallId?: string }` | Appends one conversation message. |
+| `MessageAppended` | `{ messageId, role: "system" | "user" | "assistant" | "tool", content: string, modelCallId?: string, mailbox?: { mailboxMessageId, fromSessionId, relationship, taskId?, artifactIds?, receiptEventId } }` | Appends one conversation message. Optional mailbox provenance links a family-delivered message to its exact sender and receipt. |
 | `CellProposed` | `{ cellId, code: string, dependencies: string[] }` | Creates a proposed cell with attempt count zero. |
 | `CellStarted` | `{ cellId, attempt: positive integer }` | Moves a proposed/running cell to running. |
 | `CellCommitted` | `{ cellId, result: JsonValue, logs: string[], durationMs: nonnegative number, exports: string[] }` | Moves a running cell to committed. Working/artifact events are committed in the same append batch. |
@@ -72,16 +72,16 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `ArtifactRegistered` | `{ artifactId, digest, mediaType, size, sourceEventId?: string }` | Registers integrity metadata; bytes remain in the artifact store. |
 | `EffectRequested` | `{ effectId, executor, operation, input: JsonValue, idempotencyKey, idempotent: boolean }` | Canonical intent and source of a pending outbox projection. Commits before execution. |
 | `EffectAttemptStarted` | `{ effectId, attempt: positive integer }` | Records an execution attempt and projects running status. |
-| `EffectOutcomeRecorded` | `{ effectId, attempt: positive integer, outcome: EffectOutcome, output?: JsonValue, error?: string, observedAt: ISO datetime }` | Canonical terminal observation. Unknown remains visibly distinct. |
+| `EffectOutcomeRecorded` | `{ effectId, attempt: positive integer, outcome: EffectOutcome, output?: JsonValue, error?: string, modelFailure?: { code: ModelEffectFailureCode }, observedAt: ISO datetime }` | Canonical terminal observation. Unknown remains visibly distinct. A failed model effect retains the same closed failure code as `ModelCallTerminated.failureCode`. |
 | `EffectReconciliationRecorded` | `{ reconciliationId, effectId, assessment: "succeeded" | "failed" | "no_effect" | "still_unknown", summary, evidence?: JsonValue, recordedBy, recordedAt }` | Append-only operator evidence for an already-unknown effect. It never changes effect/outbox status and never retries work. |
 | `ContextCompactionRequested` | `{ compactionId, strategy, reason, requestedBy, instructions?, throughCursor, sourceEventIds, sourceDigest, frozenSources, capacity?, modelDispatch?, ancestorContextId?, rematerializedFromContextId? }` | Freezes the exact ordered narrative source envelopes, cursors, payloads, digest, and model dispatch before any model-summary effect. Requests never delete or rewrite their sources. |
 | `ContextCompactionFailed` | `{ compactionId, requestEventId, strategy, outcome, error, effectId? }` | Makes failed, unknown, protected-only, and non-shrinking compaction terminal states explicit. Unknown model effects are not retried. |
 | `ContextMaterialized` | `{ contextId, records, contentHash, context, harnessProvenance?, derivation? }` | Records exact model context and provenance; an optional typed compaction derivation names strategy, request, leaf/source digests, generation, capacity, effects, and usage. Also inserts immutable `context_records`. |
-| `ModelCallRequested` | `{ callId, contextId, effectId, modelDispatch, attempt?, retryOfCallId?, contextWindow? }` | Links a logical model call or attributed overflow retry to exact context, immutable configuration/capability/endpoint dispatch, capacity provenance, and durable effect. The matching model `EffectRequested` input must contain the same dispatch. |
-| `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends authoritative projected output text. The current runtime commits one sequence-0 chunk in the terminal success batch; live provider deltas are deliberately not this event. |
-| `ModelCallCompleted` | `{ callId, responseMessageId?, finishReason: string, usage: Usage, warnings?: ModelWarning[] }` | Marks model call succeeded and records usage plus bounded normalized AI SDK warnings. `responseMessageId` is present for ordinary diagnostic text turns and absent when the output is an internal agent-action encoding. |
-| `ModelCallTerminated` | `{ callId, outcome: "failed" | "cancelled" | "unknown", error?: string }` | Visible non-success terminal state; no fabricated response. |
-| `BudgetDebited` | `{ callId, tokens, costUsd, turns, wallTimeMs }` (all nonnegative) | Adds usage to projected counters. |
+| `ModelCallRequested` | `{ callId, contextId, effectId, modelDispatch, estimatedInputTokens, attempt?, retryOfCallId?, contextWindow? }` | Links a logical model call or attributed overflow retry to exact context, immutable `agencity.model-dispatch.v2` configuration/capability/endpoint dispatch, input estimate, capacity provenance, and durable effect. The matching model `EffectRequested` input must contain the same dispatch. |
+| `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends authoritative projected output for a text-result call. Text paths commit one sequence-0 chunk in the terminal success batch; live provider deltas and formal arguments are deliberately not this event. |
+| `ModelCallCompleted` | `{ callId, responseMessageId?, result, resultDigest, termination, usage, warnings, usageSource }` | Marks model success and binds the response summary to the authoritative `agencity.model-effect-output.v2`. Text results may link an assistant message; formal submissions and violations retain only digest-linked summaries. |
+| `ModelCallTerminated` | `{ callId, outcome: "failed" | "cancelled" | "unknown", error?, failureCode? }` | Visible non-success terminal state with a closed model-failure classification; no fabricated response. |
+| `BudgetDebited` | `{ callId, tokens, costUsd, turns, wallTimeMs, usageSource }` (all nonnegative) | Adds provider-reported or conservative guard-estimate usage to projected counters. |
 | `BudgetExceeded` | `{ dimension: "tokens" | "cost" | "turns" | "wallTime", limit: nonnegative, spent: nonnegative }` | Sets exceeded and idle; future turns reject. Boundary comparison is `>=`. |
 | `RecoveryPerformed` | `{ abandonedCellIds: string[], unknownEffectIds: string[], retriedEffectIds: string[] }` | Audit evidence for a branch recovery pass; otherwise projection-neutral. |
 | `TaskCreated` / `SubagentAdmitted` | Durable parent/task/child/model/budget intent, followed by matching admitted child IDs/time. | Creates a pending task then admits the already-created normal child session. |
@@ -97,18 +97,19 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `HeartbeatCreated` / `HeartbeatTicked` / `HeartbeatStatusChanged` | Interval/due time/goal/prompt/owner, monotonic coalesced tick timing, and active/paused/cancelled state. | Ticks atomically enqueue a durable wake; they do not call the diagnostic text loop. User-owned records cannot be changed by generated code. |
 | `ScheduleCreated` / `ScheduleTicked` / `ScheduleStatusChanged` | One-time/interval prompt, explicit goal mode, due time, coalesced tick, owner, and lifecycle. | One-time schedules complete after one queued tick; recurring missed intervals coalesce into one wake. |
 | `WakeQueued` / `WakeClaimed` / `WakeDelivered` / `WakeDeliveryUnknown` | Stable source/tick/wake identity, prompt/goal provenance, claim, AgentRun ID, and explicit uncertain delivery. | Delivery is claim-before-run through `AgentRunService`; stable IDs reconcile crashes without a second execution loop or blind prompt replay. |
-| `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs, bounded materialized input plus identity provenance/hash, lifecycle status, distinct terminal outcome, and bounded result/artifact reference. | Projects immediately returned recursive model handles backed by normal child sessions; fresh workers resolve the same ID and recovery never turns unknown or budget exhaustion into ordinary failure/success. |
+| `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs, exact `responseAdmission`, bounded materialized input plus identity provenance/hash, lifecycle status, distinct terminal outcome, and bounded result/artifact reference. | Public recursive calls retain text admission. Sealed structured children retain their exact contract/capability seed and may complete with a typed message-free result bound to the child model completion. |
 | `AgentRunRequested` | `{ runId, task, requestKey, goalId? }` | Commits stable autonomous-run intent. One branch has at most one nonterminal run and an exact request-key retry cannot change durable meaning. |
 | `AgentRunStepStarted` | `{ runId, stepId, ordinal, contextId, callId, effectId, actionId, observationEventIds }` | Starts the next deterministic step and freezes the exact not-previously-delivered execution/input observation IDs for its dependent context. |
 | `AgentRunModelAttemptStarted` | `{ runId, stepId, ordinal, attempt, contextId, callId, effectId, reason, estimatedInputTokens, contextWindow, retryOfCallId? }` | Attributes the exact initial or provider-overflow model attempt. Only typed provider-confirmed overflow may create a later attempt over a strictly smaller candidate. |
-| `AgentRunActionCommitted` / `AgentRunActionRejected` | Run/step/action/call identity plus raw authoritative response and either strict v1 parsed action or rejection reason. | Retains internal attributable model-action history. Raw action JSON never becomes an ordinary assistant message or executable code unless strict parsing admits the `typescript` variant. When run bounds permit, the first consecutive rejection is delivered exactly once to one correction step; another rejection terminates the run. |
-| `AgentRunUserInputRequested` / `AgentRunUserInputReceived` | Stable request/action IDs, clarification/permission kind and question, optional permission, then response and explicit approval decision. | Transitional version-2 behavior removed by the version-3 formal-tool cutover. |
+| `AgentRunActionCommitted` | `{ runId, stepId, ordinal, actionId, source: { kind: "tool-submission", modelCallId, providerToolCallId, resultDigest }, action }` | Retains one validated canonical `agencity.agent-action` derived from the accepted `bun_console` or `finish` formal call. The full accepted input remains only in the model effect output. |
+| `AgentRunActionRejected` | `{ runId, stepId, ordinal, actionId, source: { kind: "contract-violation", modelCallId, providerToolCallId?, resultDigest }, error }` | Retains a bounded typed violation without copying rejected raw arguments. One bounded correction step may follow; another consecutive rejection terminates the run. |
+| `AgentRunGoalCheckRecorded` | `{ runId, actionId, goalId, requestId, status: "passed" | "failed" | "unknown", summary, gateEvaluationEventIds }` | Binds one successful `finish` attempt to exact required-gate evidence. Failed/unknown checks do not publish the proposed success message. |
 | `AgentRunCancellationRequested` | `{ runId, reason? }` | Records cancellation intent before effect abort/terminal cancellation; the first retained reason wins. |
-| `AgentRunStatusChanged` | `{ runId, status, reason?, finalMessageId? }` | Version 2 projects waiting or distinct terminal states and links only succeeded messages. Version 3 removes waiting and permits an accepted `finish` to link succeeded, blocked, or failed assistant messages; runtime-originated terminal outcomes do not fabricate messages. |
+| `AgentRunStatusChanged` | `{ runId, status, reason?, finalMessageId? }` | Projects succeeded, blocked, failed, cancelled, budget-exceeded, or unknown. Accepted successful, blocked, and failed finishes link exact assistant messages; runtime-originated outcomes do not fabricate one. |
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
 
-Mailbox intent, artifact, follow-up, and receipt-link fields are optional in version 2. Replay treats paired events without those fields as already context-delivered, with no intent/artifact/follow-up metadata, and rebuild initializes their query rows accordingly. New messages always carry an intent and require an explicit context-delivery event before acknowledgement.
+Mailbox intent, artifact, follow-up, and receipt-link fields are optional by schema. New messages carry an intent and require an explicit context-delivery event before acknowledgement.
 
 ## Lifecycle groupings
 
@@ -146,11 +147,11 @@ A send and its recipient delivery commit in one batch. Acknowledgement appends o
 
 ### Model turn
 
-A normal turn appends status-running, `ContextMaterialized`, `ModelCallRequested`, and the model `EffectRequested` before provider execution. A streaming-capable provider may then publish bounded process-local `model-output-delta` progress, but that text is non-canonical and cannot enter messages, context, or dependent work. Success atomically appends the full authoritative output chunk, assistant message, model completion, budget debit, optional budget-exceeded, and status-idle. Non-success appends `ModelCallTerminated` and status-idle without any partial assistant output. Startup can finalize a call whose effect terminal event committed before the supervisor's model terminal batch.
+A normal text turn appends status-running, `ContextMaterialized`, `ModelCallRequested`, and the model `EffectRequested` before provider execution. A streaming-capable text operation may publish bounded process-local `model-output-delta` progress, but that text is non-canonical and cannot enter messages, context, or dependent work. Success atomically appends the full authoritative output chunk, assistant message, digest-linked model completion, budget debit, optional budget-exceeded, and status-idle.
+
+A structured call instead commits its required-tool-set dispatch before provider execution. Its declaration-only tools have no execute callback or provider continuation. Provisional argument deltas remain private and can produce only bounded phase/sealed-name/byte-count progress. Success retains one complete accepted input in `agencity.model-effect-output.v2`; completion and action events reference its digests. Contract violations retain bounded evidence without raw rejected arguments.
 
 ### Autonomous agent run
-
-The following diagram documents the current version-2 implementation. Version 3 removes `WaitingForUser`; `finish` transitions directly to succeeded, blocked, or failed, and a later user message starts a separate ordinary run.
 
 ```mermaid
 stateDiagram-v2
@@ -159,21 +160,18 @@ stateDiagram-v2
     StepStarted --> ModelCall
     ModelCall --> ActionValidation
 
-    ActionValidation --> Failed: action rejected
-    ActionValidation --> Cell: typescript
+    ActionValidation --> Failed: correction exhausted
+    ActionValidation --> Cell: bun_console
     Cell --> StepStarted: committed terminal observation
 
-    ActionValidation --> WaitingForUser: clarification or permission
-    WaitingForUser --> StepStarted: user input received
-
-    ActionValidation --> GoalCheck: final with attached goal
-    ActionValidation --> Succeeded: final without attached goal
+    ActionValidation --> GoalCheck: successful finish with goal
+    ActionValidation --> Succeeded: successful finish without goal
     GoalCheck --> StepStarted: required gate failed; repair observation
     GoalCheck --> Succeeded: required gates passed
     GoalCheck --> Unknown: gate outcome unknown
 
-    ActionValidation --> Blocked: blocked
-    ActionValidation --> Failed: failed
+    ActionValidation --> Blocked: blocked finish
+    ActionValidation --> Failed: failed finish
     Requested --> Cancelled: cancellation requested
     StepStarted --> BudgetExceeded: budget boundary
     ModelCall --> Unknown: effect outcome unknown
@@ -186,7 +184,7 @@ stateDiagram-v2
     Unknown --> [*]
 ```
 
-Every current version-2 step context records its source events and an exact-once `run.observations` list. The provider's authoritative JSON response is retained internally rather than becoming conversation. This textual transport and its clarification/permission waiting states are removed by version 3. Formal tool submissions remain internal; an accepted `finish` appends the exact assistant message for succeeded, blocked, or failed status. Recovery owns agent-run calls separately from diagnostic text-turn finalization, so a crash after the model effect commits cannot publish protocol data or call the provider again.
+Every step context records its source events and an exact-once `run.observations` list. Formal submissions remain internal. A successful `finish` publishes its exact assistant message only after required gates pass; failed or unknown gate evidence does not publish it. Blocked and failed finishes atomically append their exact messages with terminal status. A failed finish after unresolved gate failure becomes goal-derived blocked. Later user text starts a new ordinary run. Recovery owns agent-run calls separately from diagnostic text-turn finalization, so a crash after the model effect commits cannot publish provisional data or call the provider again.
 
 ### Goal gate and heartbeat
 
@@ -200,7 +198,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. Synchronized envelopes use a separate ingestion path that quarantines invalid remote rows rather than weakening local validation.
-- Snapshots include `reducerVersion: 8`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 11`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 
@@ -208,12 +206,12 @@ Events are made visible to subscribers only after database commit. Durable commi
 
 ## Current evolution limitations
 
-The current runtime validates one uniform `EVENT_SCHEMA_VERSION = 2`. The formal-tool implementation replaces it with version 3 and rejects version-1/version-2 workspaces before projection. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
+The runtime validates one uniform `EVENT_SCHEMA_VERSION = 3`. Version-1/version-2 workspaces reject before product migration, decoding, projection, synchronization, and recovery. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
 
 
 ## Harness, evaluation, and exact-version events
 
-Embedded harness and refinement content retains its own version-1 formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-2 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
+Embedded harness and refinement content retains its own versioned formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-3 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
 
 | Event | Durable meaning |
 |---|---|
@@ -244,7 +242,7 @@ Embedded harness and refinement content retains its own version-1 formats and st
 
 ## Synchronization conflict resolution
 
-| Event type | Version 2 payload | Projection/semantic effect |
+| Event type | Version 3 payload | Projection/semantic effect |
 |---|---|---|
 | `SyncConflictResolved` | `{ conflictId, action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge", resolvedBy, chosenEventId?, note?, resolvedAt }` | Records explicit authority over a surfaced reconciliation. It updates the local reconciliation projection and replicates as ordinary canonical history; it never rewrites either claim or branch. |
 

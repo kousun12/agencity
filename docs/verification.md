@@ -41,7 +41,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 
 These are static constraints. They do not replace replay, recovery, protocol, security, or product behavior tests.
 
-`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Together, their current coverage includes canonical event replay and rebuild, disposable console behavior, outbox recovery, typed autonomous actions, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
+`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Together, their current coverage includes schema-3 event replay and rebuild, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
 
 Those tests use local fixtures, temporary databases, deterministic providers, and in-process or loopback test services where appropriate. A pass supports the behaviors exercised by those tests. It does not establish hostile-code isolation, exactly-once external effects, automatic cross-device failover, or correctness at every possible machine-instruction crash boundary.
 
@@ -55,12 +55,14 @@ bun run test:acceptance
 
 Each case creates an isolated Bun install root, temporary home directory, and fresh external repository. It runs `bun link` and invokes only the resulting `agencity` executable from outside the source checkout. A source guard rejects acceptance tests that import runtime internals, open LibSQL directly, use private runtime clients, or supply opaque session, branch, or history coordinates.
 
-The suite uses a local OpenAI API fixture reached through the Vercel AI SDK transport and implements the strict version-1 action protocol and streaming transport. It covers:
+The suite uses a local OpenAI API fixture reached through the Vercel AI SDK transport and implements the formal `bun_console`/`finish` response contract and streaming transport. It covers:
 
 - truthful missing-provider behavior and explicit provider/model selection;
 - canonical catalog model IDs and durable reasoning-effort selection;
 - autonomous TypeScript cells and typed file or shell effects;
+- exact root and child provider tool sets, single-call cardinality, narration-plus-call acceptance, and no text-JSON fallback;
 - durable recursive calls, child agents, messages, and retained follow-up;
+- sealed structured refinement submission with a message-free typed child result;
 - failed completion-gate repair;
 - detach, client loss, managed-service recovery, resume, named branching, tree, status, and history;
 - distinct non-interactive run outcomes and interruption behavior;
@@ -70,13 +72,25 @@ The suite uses a local OpenAI API fixture reached through the Vercel AI SDK tran
 
 This acceptance suite is intentionally non-interactive. The `test:core` groups separately cover deterministic full-screen renderer frames, stable reconciled Markdown and code identities, user-task/run interleaving, durable cell joining and bounded output, line-preserving composer paste, `Shift-Enter` multiline input, follow-until-scrolled timeline behavior, idle and active inspectors, width-prioritized footer content, normal/compact/minimum height modes, draft-safe family focus, parent/child input, refresh races, and exact route switching. `bun run test:e2e` adds a linked-executable pseudo-terminal journey that expands a retained TypeScript cell, submits another composer command, creates and opens a named retained child through Down/Right, returns with Left, verifies the cell and child were not duplicated or cancelled, and resumes the remembered root without exposing credentials.
 
-The agent-run integration suite verifies that malformed action text never executes, its exact rejection is delivered once to one correction step, a second consecutive rejection terminates the run, and recovery after a committed rejection does not duplicate the model call or observation.
+The agent-run integration suite verifies zero, duplicate, malformed, truncated, oversized, and unknown formal calls execute nothing; a text-JSON response does not become an action; a typed rejection is delivered once to one correction step; a second consecutive rejection terminates the run; and recovery after committed response or action boundaries does not duplicate the model call, cell, message, or observation.
 
-The integration suite also verifies the AI SDK OpenAI, Anthropic, and Gateway transport factories; normalized reasoning mapping; authoritative streaming; bounded warnings and errors; model-catalog normalization, endpoint-keyed cache isolation, stale fallback, and malformed-record rejection; dispatch equality; and pre-cutover data rejection without deletion.
+The integration suite also verifies declaration-only AI SDK tools for OpenAI, Anthropic, and Gateway; direct-transport parallel-call suppression; normalized reasoning mapping; structured and text streaming; bounded warnings and errors; model-catalog normalization, endpoint-keyed cache isolation, stale fallback, and malformed-record rejection; dispatch equality; custom-provider credential failure across complete structured output; schema-1/schema-2 rejection without deletion; and structured result recovery across rebuild, reopen, and divergent synchronization.
 
 It records a focused family-projection benchmark with 25 relatives and branch histories expanded to 5,000 canonical event records at the storage boundary. It proves that a cold read projects each route once and that a warm refresh reuses current snapshots without replaying the 130,000 retained events. Controller tests separately prove that periodic refresh requests are coalesced, never overlap, do not accumulate a timer backlog, and stop when the browser is closed and no child is actively working.
 
 The package is private. This verifies the documented source and `bun link` workflow; it is not evidence of a package-registry or standalone-binary release.
+
+### Recorded baseline
+
+The last recorded repository evidence for the runtime baseline at commit `2d2536f` on August 8, 2026 is:
+
+- `bun run test:core`: 828 passes and 2 documented external skips;
+- `bun run test:e2e`: 3 passes;
+- `bun run test:acceptance`: 14 passes and 1 credential-gated real-provider skip;
+- deterministic release matrix: passed;
+- real-provider, official Turso Sync server, and Turso Cloud rows: skipped and unverified.
+
+The linked acceptance suite does not include a known-unsupported-model row. That condition cannot currently be represented truthfully through a shipped product transport or the public Gateway catalog: shipped transports prove the required primitives, while exact catalog model support remains `unknown`. Protocol tests use a genuine text-only provider to prove pre-admission rejection with no message, run, effect, child, or provider call. Linked tests separately prove missing-provider behavior and absence of text fallback.
 
 ## Focused local commands
 

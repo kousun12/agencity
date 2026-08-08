@@ -4,6 +4,12 @@ Agencity's generated execution surface is a TypeScript cell. A cell is transpile
 
 This reference describes the model-facing cell environment and its private supervisor/worker boundary. External applications should use the [TypeScript integration API](./api.md) or [public client protocol](./protocol.md), not the worker RPC.
 
+## Provider boundary versus cell environment
+
+An autonomous model request exposes exactly two declaration-only provider tools: `bun_console` and `finish`. Those tools have no execute callbacks and do not expose the SDK to the provider. An accepted `bun_console` call proposes source text; Agencity validates and durably commits the canonical action before creating the disposable cell described below.
+
+The injected names in this document—`tools`, `sql`, `state`, `cells`, `artifacts`, `rlm`, `sdk`, memory, agents, skills, goals, and related facades—exist only inside that later cell. They are not provider tools. Provider narration cannot invoke them, and Agencity has no assistant-text JSON or fenced-code fallback.
+
 ## Execution model
 
 A cell can use top-level `await` and is evaluated like an async notebook cell:
@@ -287,6 +293,8 @@ Methods:
 - `history(entryId)` returns authorized version history.
 
 The model view includes active entries authorized for the local/workspace/user/global scope plus candidate versions from the branch's exact exposed allocation. Unexposed candidates are omitted from these facades.
+
+`review()` uses a supervisor-selected sealed recursive response contract with exactly one fully typed `agencity_submit_refinement_review` provider tool. The structured child result is retained without an assistant result message and is bound to the exact child model completion. This internal path does not change the public `rlm` methods below, which remain text-result calls.
 
 Generated code cannot validate, activate, allocate, record evaluator observations, approve promotion, decide promotion, approve rollback, or perform rollback. Those operations remain evaluator/user-owned through the supervisor or public client.
 

@@ -106,10 +106,12 @@ First interactive startup asks for a provider key through hidden input and then 
 
 Autonomous work requires the selected model and transport to support Agencity's formal `bun_console` and `finish` response contract. Model setup and the model picker report one of four states:
 
-- **strict agent tools** — the provider constrains the schema and requires a tool call; Agencity also validates the result;
-- **validated agent tools** — the provider supplies the formal call channel and Agencity enforces schema and call cardinality;
-- **agent tools unavailable** — new autonomous work is rejected before its task message or run is committed; and
-- **unknown model support** — the exact model is unverified, but it may be attempted when the transport has proven bounded formal-tool streaming support.
+- `provider-strict` — authoritative provider capability constrains the schema and required call; Agencity also validates the result;
+- `runtime-validated` — the transport supplies the formal call channel and Agencity enforces schema and cardinality;
+- `unknown` — exact-model support is unverified, but the model may be attempted when the transport proves bounded formal-tool streaming; and
+- `unavailable` — new autonomous work is rejected before its task message or run is committed.
+
+Credential usability is separate from capability state. Capability inspection uses retained transport/catalog facts and does not call the provider. The shipped product transports prove formal primitives; the public Gateway catalog normally leaves exact-model support `unknown` because it has no authoritative fields for these facts. Do not interpret a shipped transport as proof of provider-strict support for every model.
 
 An unknown model that the provider rejects fails visibly as an unsupported response contract. Agencity does not change reasoning effort, switch transports, downgrade schema enforcement, or fall back to assistant JSON text. A resumed branch retains its committed model; select another model for new work rather than silently changing the existing branch.
 

@@ -63,7 +63,7 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 | Method and path | Result |
 |---|---|
 | `GET /health` | Managed authenticated identity/version/config/readiness, or basic embedded health. |
-| `GET /capabilities` | Protocol version, trusted-local mode, snapshot/resume, progress, historical projection, managed-service/catalog availability, reasoning-effort support, sync capabilities, and raw provider descriptors. |
+| `GET /capabilities` | Protocol/runtime capabilities, raw provider descriptors, and the fixed agent-tool contract. With no query it reports all transports; with both `provider` and `model` it also returns selected-model admission. Supplying only one selector is invalid. |
 | `GET /model-catalog` | Normalized Gateway language-model descriptors, catalog endpoint identity, origin, freshness, capacity, pricing, and reasoning capability. It refreshes an absent or stale cache and reports cached fallback or unavailability explicitly. |
 | `POST /model-catalog/refresh` | Bounded public Gateway catalog refresh, with an explicit cached-fallback or unavailable result. |
 | `GET /model-providers` | Secret-free raw supervisor provider descriptors. Product UIs must apply product policy; Echo is an internal test fixture, not a product-selectable provider. |
@@ -81,6 +81,8 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 
 The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Echo can appear in low-level descriptors because it is installed for deterministic tests, but product onboarding, selection, help, and status must exclude it.
 
+Selected capability query values must be nonblank UTF-8 strings. Provider is limited to 256 bytes and model to 512 bytes. The response state is exactly `provider-strict`, `runtime-validated`, `unknown`, or `unavailable`. Credential usability is reported separately from formal-contract capability, and this route never calls a provider. The shipped transports prove the formal primitives, while exact public-catalog model support normally remains `unknown` because the catalog has no authoritative formal-tool fields.
+
 ### Sessions, branches, runs, cells, and recovery
 
 | Method and path | Input and result |
@@ -88,13 +90,13 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 | `POST /sessions` | `{ workspaceId?, model?, budget?, sessionName?, branchName? }` → `{ sessionId, branchId }`; product model configuration includes `reasoningEffort`. |
 | `POST /sessions/:session/model?branch=:branch` | `{ model: { provider, model, reasoningEffort? } }` → explicit idle-branch model or effort change. |
 | `GET /sessions/:session/snapshot?branch=:branch` | `{ cursor, state }`. |
+| `GET /sessions/:session/model-contract-diagnostics?branch=:branch` | Projection-derived fixed-cardinality formal submission and violation diagnostics for the branch. |
 | `GET /sessions/:session/history?branch=:branch` | Ordered branch-lineage `AgentEvent[]`. |
 | `GET /sessions/:session/stream?branch=:branch&after=:cursor` | Committed-event SSE plus cursorless progress. |
 | `POST /sessions/:session/messages?branch=:branch` | `{ content }` → committed user message event. |
 | `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalMode?, goalId? }` → run result or managed acceptance. |
 | `GET /sessions/:session/runs/:run?branch=:branch` | Current retained `AgentRunResult`. |
 | `POST /sessions/:session/runs/:run/resume?branch=:branch` | Advance the retained run. |
-| `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | Transitional pre-release route for the current clarification/permission implementation; removed by the formal-tool cutover. |
 | `POST /sessions/:session/runs/:run/cancel?branch=:branch` | `{ reason? }` → cancellation-reconciled result. |
 | `POST /sessions/:session/stop?branch=:branch` | Managed-only `{ reason? }` → cancel the active run, if any. |
 | `POST /sessions/:session/turns?branch=:branch` | Advanced diagnostic one-turn model result. |
@@ -108,7 +110,9 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 | `GET /sessions/:session/effects/:effect/reconciliation?branch=:branch` | One unknown effect and assessment history. |
 | `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | Append `{ reconciliationId?, assessment, summary, evidence?, recordedBy }`; durable effect status remains unknown. |
 
-Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start`. The current pre-release server may also stop at its older user-waiting boundary; [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) removes that boundary and the input route. Missing information becomes a blocked `finish`, and a later user message starts an ordinary new run.
+Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start`. Missing information becomes a blocked `finish`; a later user message starts an ordinary new run. There is no separate run-input route or retained input-request state.
+
+Model-contract diagnostics always return three submission counters—`bun_console`, `finish`, and sealed refinement review—nine violation counters, an unclassified-submission count, and at most 32 recent bounded outcomes plus an omitted count. They derive from canonical projections and retained structured recursive results. They add no mutable table and never expose rejected argument bodies.
 
 `reasoningEffort` is `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Clients that send an effort configuration first require `reasoningEffortSelection` from `/capabilities`; an older server fails with `CAPABILITY_UNAVAILABLE` rather than ignoring the field. Existing clients remain compatible because omitted effort normalizes to `provider-default`.
 
@@ -149,7 +153,7 @@ Reconciliation is evidence-only. It never rewrites an unknown effect, reports a 
 | `GET /sessions/:session/schedules/wakes?branch=:branch&status=...` | Durable wake records. |
 | `POST /schedules/:id/tick\|pause\|resume\|clear` | Schedule lifecycle operation. |
 
-The family roster is an additive deterministic read projection. Each item contains the exact `sessionId` and `branchId`, display name, relationship, depth, session status, related task identity and status, task summary, model configuration, cancellation-request flag, activity, and bounded activity reason. The current pre-release projection can report `waiting`, `waiting_for_user`, and `permission_required`; the formal-tool cutover removes those values. The target activities are `working`, `idle`, `attention`, `ended`, or `unavailable`, with reasons `blocked`, `failed`, `budget_exceeded`, `unknown`, `cancellation_pending`, `cancelled`, `archived`, `missing_state`, or `null`.
+The family roster is an additive deterministic read projection. Each item contains the exact `sessionId` and `branchId`, display name, relationship, depth, session status, related task identity and status, task summary, model configuration, cancellation-request flag, activity, and bounded activity reason. Activities are `working`, `idle`, `attention`, `ended`, or `unavailable`, with reasons `blocked`, `failed`, `budget_exceeded`, `unknown`, `cancellation_pending`, `cancelled`, `archived`, `missing_state`, or `null`.
 
 `working` requires a running task, queued/running agent run, or running session. An admitted child with no active run is `idle`. A parent row retains the task edge that relates it to the current child, but its activity is derived from the parent route rather than from that child task.
 
@@ -240,7 +244,7 @@ The client exposes typed methods for all route groups:
 - discovery and service: `health`, `capabilities`, `serviceStatus`, `shutdownService`, `serviceAgents`;
 - product catalog/configuration: `productSessions`, `productSelect`, `productRename`, `productConfig`, `productSetModel`, `productSetProviderKey`, `productCredentialReference`, `modelProviders`;
 - session lifecycle: `createSession`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
-- autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`; the current pre-release client also exposes transitional `respondToRun`, which the formal-tool cutover removes;
+- autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`, `agentToolCapability`, and `modelContractDiagnostics`;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
 - agents and recursive work: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mailbox methods, follow-up/cancel methods, documents, input sets, recursive model methods;
@@ -351,7 +355,7 @@ event: progress
 data: <EffectProgressNotification JSON>
 ```
 
-Progress has no cursor, is not replayed, and may be bounded or dropped. For autonomous runs, model deltas encode raw typed-action JSON and must not be rendered as assistant conversation. Only a validated final action becomes an assistant message.
+Progress has no cursor, is not replayed, and may be bounded or dropped. Structured model progress exposes only a bounded phase, a sealed tool name, or a byte count. Provider/model/call identities and provisional arguments remain private and non-executable. Text operations may still stream bounded provisional text. Only a validated terminal text result or accepted `finish` message can enter assistant conversation.
 
 The endpoint does not emit the initial snapshot, heartbeat frames, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
 

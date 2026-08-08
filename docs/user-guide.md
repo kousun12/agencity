@@ -67,16 +67,16 @@ Agencity has no product demo mode or credential-free fallback. Internal determin
 
 ## Tasks and runs
 
-A task is the instruction you give Agencity. A run is one durable attempt to carry that task forward. The current pre-release checkout uses strict textual actions and may expose clarification/permission input states. Those surfaces are transitional and carry no compatibility commitment.
-
-The accepted formal-tool architecture replaces them with two model choices:
+A task is the instruction you give Agencity. A run is one durable attempt to carry that task forward. Every autonomous model step must make exactly one formal choice:
 
 - `bun_console`, which submits a TypeScript cell using the console SDK for files, shell commands, SQL, models, subagents, memory, skills, or artifacts;
 - `finish`, which returns a successful answer or an explicit blocked or failed result.
 
-Every autonomous response must contain exactly one valid call from that set. If validation rejects a response, Agencity retains it without executing its code and gives the model one bounded correction step with the exact error. A second consecutive rejection ends the run. Normal budget and step limits also apply to the correction.
+These are declaration-only provider tools. They do not execute at the provider and have no execute callbacks. Only a validated, durably committed `bun_console` action can start a disposable TypeScript cell. The APIs available inside that cell are a separate layer, not additional provider tools.
 
-There is no clarification, permission, request-input, or waiting-for-user run state after this cutover. If information is missing, `finish` returns a blocked response containing the question. Your later message starts an ordinary new run on the same branch.
+Every autonomous response must contain exactly one valid call from the fixed set. Provider narration is diagnostic-only. Agencity does not search it for JSON or code and has no text-JSON or TypeScript fallback. If validation rejects a response, no submitted code executes; the model receives one bounded correction step with the exact error. A second consecutive rejection ends the run. Normal budget and step limits also apply to the correction.
+
+If information is missing, `finish` returns a blocked response containing the question. Your later message starts an ordinary new run on the same branch; there is no separate input-response lifecycle.
 
 Agencity records a requested external effect before executing it. A dependent model step starts only after the result is committed. A final answer may also be checked by a completion gate:
 
@@ -86,6 +86,8 @@ agencity run --completion-gate "bun test" \
 ```
 
 The completion command runs through the same durable effect path as other shell work.
+
+A successful finish is provisional until every required gate passes. Failed gates return repair evidence to the agent without publishing its proposed success message. An unknown required gate ends the run as unknown without publishing that message. Blocked and failed finishes commit their exact submitted messages atomically with terminal status. A failed finish after unresolved required-gate failure is reported as goal-derived blocked.
 
 ## Sessions and branches
 
@@ -127,7 +129,7 @@ Useful inspectors include `/history`, `/budget`, `/tree`, `/agents`, `/tasks`, `
 
 ### Navigate retained child agents
 
-When the current agent has direct children, a one-line summary stays visible between the composer and footer. It counts working, idle, attention, and ended children. Waiting and unavailable children are included in the attention count so uncertain work is not presented as idle.
+When the current agent has direct children, a one-line summary stays visible between the composer and footer. It counts working, idle, attention, and ended children. Unavailable children are included in the attention count so uncertain work is not presented as idle.
 
 An admitted child that has no active run is idle, not working. The client refreshes continuously while the family browser is open or a child is actively working; dormant child admissions do not keep a background polling loop active.
 
@@ -141,7 +143,7 @@ Family navigation applies only while the composer is empty:
 
 Up, Left, or Escape returns from the focused summary to the composer. Left or Escape closes the browser. Printable input from the focused summary returns to the composer and keeps the typed character. A non-empty draft retains normal editing and submission behavior.
 
-The header breadcrumb shows retained ancestry separately from the branch. The child browser labels each row as `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable`, with a bounded reason where attention is required. Unavailable routes remain visible but cannot be opened.
+The header breadcrumb shows retained ancestry separately from the branch. The child browser labels each row as `working`, `idle`, `attention`, `ended`, or `unavailable`, with a bounded reason where attention is required. Unavailable routes remain visible but cannot be opened.
 
 Opening a family member only changes what this client observes. It does not stop, resume, cancel, retry, or re-own work, and it does not change the workspace's remembered resume selection. Family opening is disabled during `/history` inspection; use `/live` first.
 
