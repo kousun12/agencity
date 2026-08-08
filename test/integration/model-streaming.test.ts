@@ -12,7 +12,7 @@ import {
   type ModelConfiguration,
   type ModelOutputDelta,
   type ModelProvider,
-  type ModelResponse,
+  type TextModelResponse,
 } from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
@@ -27,7 +27,7 @@ class ControlledStreamingProvider implements ModelProvider {
     this.displayName = `${name} (streaming test)`;
   }
 
-  async complete(): Promise<ModelResponse> {
+  async complete(): Promise<TextModelResponse> {
     throw new Error("complete must not be used for a streaming provider");
   }
 
@@ -36,7 +36,7 @@ class ControlledStreamingProvider implements ModelProvider {
     _configuration: ModelConfiguration,
     signal: AbortSignal,
     onDelta: (delta: ModelOutputDelta) => void,
-  ): Promise<ModelResponse> {
+  ): Promise<TextModelResponse> {
     this.calls++;
     onDelta({ text: "partial-alpha " });
     this.firstDelta.resolve();
@@ -56,7 +56,7 @@ class ControlledStreamingProvider implements ModelProvider {
 
 class NonStreamingProvider implements ModelProvider {
   readonly name = "non-streaming";
-  async complete(): Promise<ModelResponse> {
+  async complete(): Promise<TextModelResponse> {
     return { text: "one committed response", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 2, costUsd: 0 } };
   }
 }
@@ -64,13 +64,13 @@ class NonStreamingProvider implements ModelProvider {
 class BurstStreamingProvider implements ModelProvider {
   readonly name = "burst-streaming";
   readonly capabilities = { streaming: true } as const;
-  async complete(): Promise<ModelResponse> { throw new Error("complete must not be used"); }
+  async complete(): Promise<TextModelResponse> { throw new Error("complete must not be used"); }
   async stream(
     _context: JsonValue,
     _configuration: ModelConfiguration,
     _signal: AbortSignal,
     onDelta: (delta: ModelOutputDelta) => void,
-  ): Promise<ModelResponse> {
+  ): Promise<TextModelResponse> {
     for (let index = 0; index < 2_100; index++) onDelta({ text: "x" });
     return { text: "x".repeat(2_100), finishReason: "stop", usage: { inputTokens: 1, outputTokens: 2_100, costUsd: 0 } };
   }
@@ -83,13 +83,13 @@ class CrossDeltaSecretProvider implements ModelProvider {
   readonly release = Promise.withResolvers<void>();
 
   constructor(readonly secret: string) {}
-  async complete(): Promise<ModelResponse> { throw new Error("complete must not be used"); }
+  async complete(): Promise<TextModelResponse> { throw new Error("complete must not be used"); }
   async stream(
     _context: JsonValue,
     _configuration: ModelConfiguration,
     _signal: AbortSignal,
     onDelta: (delta: ModelOutputDelta) => void,
-  ): Promise<ModelResponse> {
+  ): Promise<TextModelResponse> {
     const split = Math.floor(this.secret.length / 2);
     const text = `visible-before:${this.secret}:visible-after`;
     onDelta({ text: `visible-before:${this.secret.slice(0, split)}` });

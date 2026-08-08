@@ -1,24 +1,22 @@
 import {
   TEXT_MODEL_RESPONSE_CONTRACT,
-  responseAwareDispatchFromV1,
+  modelDispatchWithResponseAdmission,
   resolveBuiltInModelResponseContract,
   type BuiltInStructuredContractId,
   type ModelConfigurationInput,
-  type ModelDispatchV2,
+  type ModelDispatch,
   type ResolvedModelExecutionDescriptor,
 } from "../domain/index.ts";
 import type { ModelExecutor } from "../executors/index.ts";
 
 export interface ModelEffectAdmission {
-  readonly modelDispatch: ModelDispatchV2;
+  readonly modelDispatch: ModelDispatch;
   readonly execution: ResolvedModelExecutionDescriptor;
 }
 
 /**
- * Supervisor-owned response-contract admission. Phase 2 constructs and
- * validates the complete version-2 dispatch here; the workspace-schema-3
- * writer cutover in Phase 4 will commit this value atomically with calls and
- * effects.
+ * Supervisor-owned response-contract admission for every canonical model
+ * dispatch.
  */
 export class ModelEffectAdmissionService {
   constructor(readonly modelExecutor: ModelExecutor) {}
@@ -30,7 +28,7 @@ export class ModelEffectAdmissionService {
       configuration,
     );
     const responseCapability = Object.freeze({ kind: "text" as const });
-    const modelDispatch = responseAwareDispatchFromV1(
+    const modelDispatch = modelDispatchWithResponseAdmission(
       this.modelExecutor.resolveDispatch(configuration),
       {
         responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
@@ -59,7 +57,7 @@ export class ModelEffectAdmissionService {
       kind: "required-tool-set" as const,
       capability,
     });
-    const modelDispatch = responseAwareDispatchFromV1(
+    const modelDispatch = modelDispatchWithResponseAdmission(
       this.modelExecutor.resolveDispatch(configuration),
       {
         responseContract,

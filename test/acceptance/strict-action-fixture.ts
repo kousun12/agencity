@@ -90,7 +90,7 @@ export class StrictActionFixture {
     if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const authorization = request.headers.get("authorization");
     if (authorization !== "Bearer acceptance-fixture-key") return new Response("unauthorized", { status: 401 });
-    const body = await request.json() as { model?: unknown; stream?: unknown; messages?: Array<{ role?: unknown; content?: unknown }> };
+    const body = await request.json() as { model?: unknown; stream?: unknown; messages?: Array<{ role?: unknown; content?: unknown }>; tools?: unknown };
     if (typeof body.model !== "string" || !Array.isArray(body.messages)) return new Response("invalid request", { status: 400 });
     const lastUser = [...body.messages].reverse().find(item => item.role === "user");
     const lastUserText = messageText(lastUser?.content);
@@ -116,15 +116,22 @@ export class StrictActionFixture {
         : `fixture recursive response: ${lastUserText.slice(-200)}`;
     const reply = typeof selected === "function" ? selected(probe) : selected ?? fallback;
     const text = typeof reply === "string" ? reply : JSON.stringify(reply);
+    const toolCall = Array.isArray(body.tools) && typeof reply !== "string" ? formalToolCall(reply) : null;
     if (body.stream !== true) return Response.json({
       id: "fixture-completion",
       object: "chat.completion",
       created: 1,
       model: body.model,
-      choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      choices: [{
+        index: 0,
+        message: toolCall
+          ? { role: "assistant", content: null, tool_calls: [{ index: 0, id: `fixture-tool-${durable?.stepOrdinal ?? 1}`, type: "function", function: toolCall }] }
+          : { role: "assistant", content: text },
+        finish_reason: toolCall ? "tool_calls" : "stop",
+      }],
       usage: { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4), total_tokens: 7 + Math.ceil(text.length / 4) },
     });
-    const chunks = split(text, 3);
+    const chunks = split(toolCall?.arguments ?? text, 3);
     return new Response(new ReadableStream<Uint8Array>({
       start(controller) {
         const encoder = new TextEncoder();
@@ -136,8 +143,13 @@ export class StrictActionFixture {
           choices,
           ...(usage === undefined ? {} : { usage }),
         });
-        for (const chunk of chunks) controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta: { content: chunk }, finish_reason: null }]))}\n\n`));
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta: {}, finish_reason: "stop" }]))}\n\n`));
+        for (const [index, chunk] of chunks.entries()) {
+          const delta = toolCall
+            ? { tool_calls: [{ index: 0, ...(index === 0 ? { id: `fixture-tool-${durable?.stepOrdinal ?? 1}`, type: "function" } : {}), function: { ...(index === 0 ? { name: toolCall.name } : {}), arguments: chunk } }] }
+            : { content: chunk };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta, finish_reason: null }]))}\n\n`));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta: {}, finish_reason: toolCall ? "tool_calls" : "stop" }]))}\n\n`));
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([], { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4), total_tokens: 7 + Math.ceil(text.length / 4) }))}\n\n`));
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
@@ -175,6 +187,23 @@ function split(text: string, parts: number): string[] {
   const result: string[] = [];
   for (let index = 0; index < text.length; index += size) result.push(text.slice(index, index + size));
   return result.length ? result : [""];
+}
+
+function formalToolCall(reply: Record<string, unknown>): { name: "bun_console" | "finish"; arguments: string } | null {
+  if (reply.protocol !== "agencity.agent-action" || reply.version !== 1) return null;
+  if (reply.type === "typescript" && typeof reply.code === "string") {
+    return { name: "bun_console", arguments: JSON.stringify({ source: reply.code }) };
+  }
+  if (reply.type === "final" && typeof reply.content === "string") {
+    return { name: "finish", arguments: JSON.stringify({ outcome: { message: reply.content } }) };
+  }
+  if (reply.type === "blocked" && typeof reply.reason === "string") {
+    return { name: "finish", arguments: JSON.stringify({ outcome: { status: "blocked", message: reply.reason } }) };
+  }
+  if (reply.type === "failed" && typeof reply.error === "string") {
+    return { name: "finish", arguments: JSON.stringify({ outcome: { status: "failed", message: reply.error } }) };
+  }
+  return null;
 }
 
 export function action(type: "final" | "failed" | "blocked" | "typescript", value: string): Record<string, unknown> {

@@ -456,10 +456,9 @@ export interface GuardAbortedModelResponse {
   readonly transport: ModelResponseTransport;
 }
 
-export type NormalizedModelResponse =
+export type ModelResponse =
   | CompleteModelResponse
   | GuardAbortedModelResponse;
-export type ModelResponseV2 = NormalizedModelResponse;
 
 export interface ModelResponseTransport {
   readonly provider: string;
@@ -555,7 +554,7 @@ export interface ModelContractViolationEvidence {
 export interface ModelContractViolation {
   readonly code: ModelContractViolationCode;
   readonly message: string;
-  readonly termination: NormalizedModelResponse["termination"];
+  readonly termination: ModelResponse["termination"];
   readonly evidence: ModelContractViolationEvidence;
   readonly evidenceDigest: Sha256Digest;
 }
@@ -607,7 +606,7 @@ export type ModelEffectResult =
 
 export interface ModelEffectOutputV2 {
   readonly kind: "agencity.model-effect-output.v2";
-  readonly response: NormalizedModelResponse;
+  readonly response: ModelResponse;
   readonly result: ModelEffectResult;
   readonly resultDigest: Sha256Digest;
 }
@@ -631,7 +630,7 @@ export function modelEffectResultDigest(
   return canonicalJsonDigest(result);
 }
 
-export function validateModelResponse(value: unknown): NormalizedModelResponse {
+export function validateModelResponse(value: unknown): ModelResponse {
   assertJsonValue(value);
   const record = asRecord(value, "Model response");
   assertExactKeys(
@@ -1013,7 +1012,7 @@ export function validateModelEffectOutputV2(
 }
 
 export function createModelEffectOutputV2(input: {
-  readonly response: NormalizedModelResponse;
+  readonly response: ModelResponse;
   readonly result: ModelEffectResult;
   readonly responseContract: ModelResponseContract;
   readonly responseCapability: ModelResponseCapability;
@@ -1106,7 +1105,7 @@ function validateModelResponseBlock(value: unknown): void {
 
 function validateAnyTermination(
   value: unknown,
-): NormalizedModelResponse["termination"] {
+): ModelResponse["termination"] {
   const record = asRecord(value, "Model response termination");
   return record.kind === "adapter-guard"
     ? validateGuardTermination(record)
@@ -1379,7 +1378,7 @@ function validateToolCallSummary(value: unknown): void {
 }
 
 function assertStructuredSupplementalTextBound(
-  response: NormalizedModelResponse,
+  response: ModelResponse,
 ): void {
   const bytes = utf8Bytes(
     response.blocks
@@ -1437,7 +1436,7 @@ function validateSubmissionSupplementalText(
 
 function validateViolationEvidenceRelation(
   evidence: ModelContractViolationEvidence,
-  response: NormalizedModelResponse,
+  response: ModelResponse,
 ): void {
   const calls = response.blocks.filter(
     (

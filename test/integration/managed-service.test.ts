@@ -395,13 +395,13 @@ describe("managed workspace service", () => {
     } finally { raw.close(); }
   });
 
-  test("a durable run waiting for user input does not keep the service process resident", async () => {
+  test("a terminal blocked run does not keep the service process resident", async () => {
     const config = { ...(await configuration("agencity-managed-waiting-input-")), idleShutdownMs: 100 };
     const provider = new ScriptedAgentActionProvider([{
       protocol: "agencity.agent-action",
       version: 1,
-      type: "clarification",
-      question: "Which retained choice?",
+      type: "blocked",
+      reason: "A required external choice is missing.",
     }], "waiting-input-provider");
     const preparer = await Supervisor.open({
       databaseUrl: `file:${config.databasePath}`,
@@ -416,15 +416,15 @@ describe("managed workspace service", () => {
         workspaceId: config.workspace.workspaceId,
         model: { provider: provider.name, model: "scripted-v1" },
       });
-      expect(await preparer.runs.start(session.sessionId, session.branchId, "Ask and wait"))
-        .toMatchObject({ status: "waiting_for_user" });
+      expect(await preparer.runs.start(session.sessionId, session.branchId, "Ask and stop"))
+        .toMatchObject({ status: "blocked" });
     } finally {
       await preparer.close();
     }
 
     const service = await opened(config);
     const manifestPath = serviceStatePaths(config.workspace.root).manifestPath;
-    await waitFor(async () => !(await Bun.file(manifestPath).exists()), "idle shutdown while waiting for durable input", 5_000);
+    await waitFor(async () => !(await Bun.file(manifestPath).exists()), "idle shutdown after blocked run", 5_000);
     expect(service.ready).toBe(false);
   });
 

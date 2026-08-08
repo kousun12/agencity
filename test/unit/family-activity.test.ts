@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   deriveFamilyAgentActivity,
+  EVENT_SCHEMA_VERSION,
   reduceAgentState,
   type AgentEvent,
   type AgentRunState,
@@ -18,7 +19,7 @@ function state(overrides: Partial<AgentState> = {}): AgentState {
     causationId: null,
     correlationId: null,
     type: "SessionCreated",
-    schemaVersion: 2,
+    schemaVersion: EVENT_SCHEMA_VERSION,
     producer: "supervisor",
     idempotencyKey: "created",
     committedAt: "2026-08-07T00:00:00.000Z",

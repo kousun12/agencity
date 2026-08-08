@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
-import { Supervisor, projectEvents } from "../../src/index.ts";
+import { Supervisor, TEXT_MODEL_RESPONSE_CONTRACT, projectEvents, type RecursiveResponseAdmission } from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -19,7 +19,7 @@ describe("Slice 2 projection rebuilds and reducer-versioned snapshots", () => {
       const child = await supervisor.agents.spawn(root.sessionId, root.branchId, "project me");
       const mail = await supervisor.agents.sendMessage(root.sessionId, root.branchId, { toSessionId: child.sessionId, content: "snapshot mailbox" });
       const live = await supervisor.projections.getSnapshot(root.sessionId, root.branchId);
-      expect(live.state.reducerVersion).toBe(8);
+      expect(live.state.reducerVersion).toBe(9);
 
       const staleState = { ...live.state, reducerVersion: 1 } as unknown as Record<string, unknown>;
       delete staleState.tasks;
@@ -33,13 +33,13 @@ describe("Slice 2 projection rebuilds and reducer-versioned snapshots", () => {
       client.close();
 
       const upgraded = await supervisor.projections.getSnapshot(root.sessionId, root.branchId);
-      expect(upgraded.state.reducerVersion).toBe(8);
+      expect(upgraded.state.reducerVersion).toBe(9);
       expect(upgraded.state.tasks[child.taskId]?.task).toBe("project me");
       expect(upgraded.state.mailbox[mail.mailboxMessageId]?.content).toBe("snapshot mailbox");
       expect(upgraded.state.documents).toEqual({});
       const verifyClient = createClient({ url: temp.databaseUrl });
       const row = await verifyClient.execute({ sql: "SELECT reducer_version FROM snapshots WHERE session_id=? AND branch_id=?", args: [root.sessionId, root.branchId] });
-      expect(Number(row.rows[0]?.reducer_version)).toBe(8);
+      expect(Number(row.rows[0]?.reducer_version)).toBe(9);
       verifyClient.close();
     } finally { await supervisor.close(); }
   });
@@ -113,5 +113,42 @@ describe("Slice 2 projection rebuilds and reducer-versioned snapshots", () => {
       const events = await resumed.storage.loadEvents(root.sessionId, { branchId: root.branchId });
       expect(events.filter((event) => event.type === "TaskTerminalNoticeDelivered")).toHaveLength(1);
     } finally { await resumed.close(); }
+  });
+
+  test("recursive response admission survives migration, rebuild, and reopen exactly", async () => {
+    const temp = await makeTempRuntime("agencity-recursive-response-admission-"); temps.push(temp);
+    const bootstrap = await open(temp);
+    await bootstrap.close();
+    const preMigration = createClient({ url: temp.databaseUrl });
+    await preMigration.execute("ALTER TABLE recursive_model_handles DROP COLUMN response_admission_json");
+    await preMigration.execute("DELETE FROM schema_migrations WHERE version=15");
+    preMigration.close();
+
+    let supervisor = await open(temp);
+    const root = await supervisor.createSession({ workspaceId: "recursive-admission" });
+    const handle = await supervisor.models.start(root.sessionId, root.branchId, {
+      task: "retain text admission",
+      idempotencyKey: "response-admission",
+      run: false,
+    });
+    const expected: RecursiveResponseAdmission = {
+      responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+      responseCapability: { kind: "text" },
+    };
+    expect(handle.responseAdmission).toEqual(expected);
+    expect((await supervisor.storage.getRecursiveModel?.(handle.handleId))?.responseAdmission).toEqual(expected);
+    await supervisor.storage.rebuildOperationalProjections?.();
+    expect((await supervisor.storage.getRecursiveModel?.(handle.handleId))?.responseAdmission).toEqual(expected);
+    expect((await supervisor.projections.rebuild(root.sessionId, root.branchId)).recursiveModels[handle.handleId]?.responseAdmission).toEqual(expected);
+    await supervisor.close();
+
+    supervisor = await open(temp, true);
+    try {
+      expect((await supervisor.models.get(handle.handleId)).responseAdmission).toEqual(expected);
+      const client = createClient({ url: temp.databaseUrl });
+      const columns = await client.execute("PRAGMA table_info(recursive_model_handles)");
+      expect(columns.rows.some(row => String(row.name) === "response_admission_json")).toBe(true);
+      client.close();
+    } finally { await supervisor.close(); }
   });
 });

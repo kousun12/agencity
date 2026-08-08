@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, AgentClient, ProtocolServer, ScriptedAgentActionProvider, Supervisor,
-  projectEvents, type AgentAction, type JsonValue, type ModelConfiguration, type ModelProvider, type ModelResponse,
+  projectEvents, type AgentAction, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse,
 } from "../../src/index.ts";
+import { formalOutputFromAgentAction } from "../../src/executors/model-response.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -11,19 +12,26 @@ const action = <T extends Omit<AgentAction, "protocol" | "version">>(value: T): 
 async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 3_000): Promise<T> { const end = Date.now() + timeoutMs; while (Date.now() < end) { const value = await read(); if (value !== undefined) return value; await Bun.sleep(10); } throw new Error("timed out"); }
 
 class SequentialActionProvider implements ModelProvider {
-  readonly name = "family-actions"; readonly displayName = "Sequential family action fixture"; readonly capabilities = { streaming: false } as const;
+  readonly name = "family-actions"; readonly displayName = "Sequential family action fixture";
+  readonly capabilities = { streaming: false, requiredToolSet: { status: "provider-strict", requiredChoice: "provider-enforced", parallelCalls: "provider-disabled", streaming: true, adapter: "agencity.family-sequential.formal.v1" } } as const;
   #index = 0;
   constructor(readonly script: readonly AgentAction[]) {}
-  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     const selected = this.script[this.#index++] ?? action({ type: "failed", error: "No sequential family action" });
     const text = JSON.stringify(selected);
     return { text, finishReason: "stop", usage: { inputTokens: 1, outputTokens: Math.ceil(text.length / 4), costUsd: 0 } };
   }
+  async streamResponse(_context: JsonValue, dispatch: ModelDispatch, signal: AbortSignal): Promise<ModelEffectOutputV2> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const selected = this.script[this.#index++] ?? action({ type: "failed", error: "No sequential family action" });
+    return formalOutputFromAgentAction({ action: selected, dispatch, providerToolCallId: `family-${this.#index}`, provider: this.name, adapter: this.capabilities.requiredToolSet.adapter, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } });
+  }
 }
 
 class GatedActionProvider implements ModelProvider {
-  readonly name = "gated-family-actions"; readonly displayName = "Gated family action fixture"; readonly capabilities = { streaming: false } as const;
+  readonly name = "gated-family-actions"; readonly displayName = "Gated family action fixture";
+  readonly capabilities = { streaming: false, requiredToolSet: { status: "provider-strict", requiredChoice: "provider-enforced", parallelCalls: "provider-disabled", streaming: true, adapter: "agencity.family-gated.formal.v1" } } as const;
   readonly contexts: JsonValue[] = [];
   readonly started: Promise<void>; #markStarted!: () => void;
   #release!: () => void; #gate = new Promise<void>((resolve) => { this.#release = resolve; });
@@ -31,7 +39,16 @@ class GatedActionProvider implements ModelProvider {
     this.started = new Promise<void>((resolve) => { this.#markStarted = resolve; });
   }
   release(): void { this.#release(); }
-  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
+    const selected = await this.#select(context, signal);
+    const text = JSON.stringify(selected);
+    return { text, finishReason: "stop", usage: { inputTokens: 1, outputTokens: Math.ceil(text.length / 4), costUsd: 0 } };
+  }
+  async streamResponse(context: JsonValue, dispatch: ModelDispatch, signal: AbortSignal): Promise<ModelEffectOutputV2> {
+    const selected = await this.#select(context, signal);
+    return formalOutputFromAgentAction({ action: selected, dispatch, providerToolCallId: `gated-${this.contexts.length}`, provider: this.name, adapter: this.capabilities.requiredToolSet.adapter, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } });
+  }
+  async #select(context: JsonValue, signal: AbortSignal): Promise<AgentAction> {
     const ordinal = this.contexts.push(context);
     if (ordinal === 1) {
       this.#markStarted();
@@ -42,9 +59,7 @@ class GatedActionProvider implements ModelProvider {
         void this.#gate.then(() => { signal.removeEventListener("abort", abort); resolve(); });
       });
     }
-    const selected = ordinal === 1 ? this.afterGate : this.next;
-    const text = JSON.stringify(selected);
-    return { text, finishReason: "stop", usage: { inputTokens: 1, outputTokens: Math.ceil(text.length / 4), costUsd: 0 } };
+    return ordinal === 1 ? this.afterGate : this.next;
   }
 }
 

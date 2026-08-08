@@ -1,6 +1,7 @@
 import {
   NotFoundError,
   RESERVED_MODEL_DISPATCH_INPUT_FIELDS,
+  TEXT_MODEL_RESPONSE_CONTRACT,
   ValidationError,
   assertNoReservedModelDispatchInputFields,
   assertJsonValue,
@@ -14,6 +15,7 @@ import {
   type ModelConfigurationInput,
   type NewAgentEvent,
   type RecursiveModelOutcome,
+  type RecursiveResponseAdmission,
 } from "../domain/index.ts";
 import type { ArtifactStore } from "../artifacts/index.ts";
 import { containsBrokeredSecret, scrubJson, scrubText } from "../security/index.ts";
@@ -89,6 +91,10 @@ interface MaterializedInput {
 }
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+const PUBLIC_RECURSIVE_RESPONSE_ADMISSION: RecursiveResponseAdmission = Object.freeze({
+  responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+  responseCapability: Object.freeze({ kind: "text" as const }),
+});
 
 export class RecursiveModelService {
   readonly #recursive;
@@ -184,6 +190,7 @@ export class RecursiveModelService {
             childSessionId: child.sessionId,
             childBranchId: child.branchId,
             model,
+            responseAdmission: PUBLIC_RECURSIVE_RESPONSE_ADMISSION,
             ...(plan.normalized.inputSetId === undefined ? {} : { inputSetId: plan.normalized.inputSetId }),
             ...(plan.materialized.value === undefined ? {} : { input: plan.materialized.value }),
             ...(plan.materialized.provenance === undefined ? {} : { inputProvenance: plan.materialized.provenance }),
@@ -219,7 +226,8 @@ export class RecursiveModelService {
           handle.inputHash !== plan.materialized.hash ||
           !Bun.deepEquals(handle.input, plan.materialized.value) ||
           !Bun.deepEquals(handle.inputProvenance, plan.materialized.provenance) ||
-          !Bun.deepEquals(handle.model, expectedModel)) {
+          !Bun.deepEquals(handle.model, expectedModel) ||
+          !Bun.deepEquals(handle.responseAdmission, PUBLIC_RECURSIVE_RESPONSE_ADMISSION)) {
         throw new ValidationError("Recursive model idempotency key was reused with a different request");
       }
       committed.push(handle);

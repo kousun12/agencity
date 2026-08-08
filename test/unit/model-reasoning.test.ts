@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ValidationError,
+  TEXT_MODEL_RESPONSE_CONTRACT,
   assertReasoningSelection,
   normalizeReasoningEffort,
   resolveModelDispatch,
@@ -54,6 +55,8 @@ describe("model reasoning configuration", () => {
       capability: descriptor.reasoning,
       catalogDigest: descriptor.catalogDigest,
       executionEndpointId: descriptor.catalogEndpointId,
+      responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+      responseCapability: { kind: "text" },
     });
     expect(dispatch).toEqual({
       configuration,
@@ -68,7 +71,9 @@ describe("model reasoning configuration", () => {
         resolverId: "agencity.reasoning-dispatch.v1",
       },
       executionEndpointId: descriptor.catalogEndpointId,
-      dispatchVersion: "agencity.model-dispatch.v1",
+      responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+      responseCapability: { kind: "text" },
+      dispatchVersion: "agencity.model-dispatch.v2",
     });
     expect(Object.isFrozen(dispatch)).toBe(true);
     expect(Object.isFrozen(dispatch.configuration)).toBe(true);
@@ -80,6 +85,8 @@ describe("model reasoning configuration", () => {
       configuration: { ...configuration, reasoningEffort: "provider-default" },
       capability: descriptor.reasoning,
       catalogDigest: descriptor.catalogDigest,
+      responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+      responseCapability: { kind: "text" },
     });
     expect(dispatch.reasoning.requestedEffort).toBe("provider-default");
     expect(dispatch.reasoning.mode).toBe("omitted");

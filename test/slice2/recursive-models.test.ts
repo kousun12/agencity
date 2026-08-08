@@ -97,7 +97,7 @@ describe("Slice 2 recursive model concurrency, cancellation, and recovery", () =
       idempotencyKey: "test-context:lost-context", payload: { contextId: "lost-context", records: [], contentHash: "0".repeat(64), context: {} },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ModelCallRequested", producer: "supervisor",
-      idempotencyKey: `test-call:${callId}`, payload: { callId, contextId: "lost-context", effectId, modelDispatch },
+      idempotencyKey: `test-call:${callId}`, payload: { callId, contextId: "lost-context", effectId, modelDispatch, estimatedInputTokens: 0 },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor",
       idempotencyKey: `test-effect:${effectId}`, payload: {

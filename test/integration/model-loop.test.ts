@@ -4,13 +4,16 @@ import {
   ModelLoop,
   OutboxRunner,
   Supervisor,
+  TEXT_MODEL_RESPONSE_CONTRACT,
   ValidationError,
+  canonicalJsonDigest,
+  createModelEffectOutputV2,
   projectEvents,
   resolveModelDispatch,
   type JsonValue,
   type ModelConfiguration,
   type ModelProvider,
-  type ModelResponse,
+  type TextModelResponse,
 } from "../../src/index.ts";
 import {
   makeTempRuntime,
@@ -26,14 +29,14 @@ class ScriptedProvider implements ModelProvider {
   calls = 0;
   constructor(
     readonly name: string,
-    readonly response: ModelResponse | ((call: number) => ModelResponse),
+    readonly response: TextModelResponse | ((call: number) => TextModelResponse),
     readonly failure?: Error,
   ) {}
   async complete(
     context: JsonValue,
     configuration: ModelConfiguration,
     signal: AbortSignal,
-  ): Promise<ModelResponse> {
+  ): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     this.calls++;
     this.contexts.push(JSON.parse(JSON.stringify(context)) as JsonValue);
@@ -258,6 +261,22 @@ describe("context provenance and model loop", () => {
       configuration: { provider: "not-installed", model: "durable-only", reasoningEffort: "provider-default" },
       capability: { status: "unverified", levels: ["none", "minimal", "low", "medium", "high", "xhigh"] },
       catalogDigest: "0".repeat(64),
+      responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+      responseCapability: { kind: "text" },
+    });
+    const retainedOutput = createModelEffectOutputV2({
+      response: {
+        kind: "complete",
+        blocks: [{ type: "text", text: "recovered response" }],
+        termination: { kind: "text-stop", rawReason: "stop" },
+        usage: { inputTokens: 4, outputTokens: 2, costUsd: 0.02 },
+        warnings: [],
+        transport: { provider: "not-installed", adapter: "agencity.model-provider.text.v1" },
+      },
+      result: { kind: "text", text: "recovered response", textDigest: canonicalJsonDigest("recovered response") },
+      responseContract: modelDispatch.responseContract,
+      responseCapability: modelDispatch.responseCapability,
+      configuredProvider: "not-installed",
     });
     await storage.appendEvents([{
       sessionId, branchId, type: "ContextMaterialized", producer: "supervisor",
@@ -267,7 +286,7 @@ describe("context provenance and model loop", () => {
     }, {
       sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
       idempotencyKey: "model-call:recovery", payload: {
-        callId: "call-recovery", contextId: "context-recovery", effectId: "effect-recovery", modelDispatch,
+        callId: "call-recovery", contextId: "context-recovery", effectId: "effect-recovery", modelDispatch, estimatedInputTokens: 0,
       },
     }, {
       sessionId, branchId, type: "EffectRequested", producer: "supervisor",
@@ -285,10 +304,7 @@ describe("context provenance and model loop", () => {
       idempotencyKey: "effect-outcome:effect-recovery:1",
       payload: {
         effectId: "effect-recovery", attempt: 1, outcome: "succeeded",
-        output: {
-          text: "recovered response", finishReason: "stop",
-          usage: { inputTokens: 4, outputTokens: 2, costUsd: 0.02 },
-        },
+        output: retainedOutput as unknown as JsonValue,
         observedAt: "2026-01-01T00:01:00.000Z",
       },
     }]);
@@ -315,6 +331,8 @@ describe("context provenance and model loop", () => {
       configuration: state.model,
       capability: { status: "unsupported", levels: [] },
       catalogDigest: "0".repeat(64),
+      responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+      responseCapability: { kind: "text" },
     });
     await storage.appendEvents([{
       sessionId,
@@ -329,7 +347,7 @@ describe("context provenance and model loop", () => {
       type: "ModelCallRequested",
       producer: "supervisor",
       idempotencyKey: "model-call:first-shared-effect",
-      payload: { callId: "call-first", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch },
+      payload: { callId: "call-first", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, estimatedInputTokens: 0 },
     }]);
     await expect(storage.appendEvents([{
       sessionId,
@@ -337,7 +355,7 @@ describe("context provenance and model loop", () => {
       type: "ModelCallRequested",
       producer: "supervisor",
       idempotencyKey: "model-call:second-shared-effect",
-      payload: { callId: "call-second", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch },
+      payload: { callId: "call-second", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, estimatedInputTokens: 0 },
     }])).rejects.toThrow("only one model call");
     storage.close();
   });

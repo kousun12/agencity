@@ -1,6 +1,17 @@
-import type { JsonValue, ModelConfiguration, ModelProvider, ModelResponse } from "../../src/index.ts";
+import type { JsonValue, ModelConfiguration, ModelDispatch, ModelEffectOutputV2, ModelProvider, TextModelResponse } from "../../src/index.ts";
+import { formalMissingToolOutput } from "../../src/executors/model-response.ts";
 
 export class RecordingProvider implements ModelProvider {
+  readonly capabilities = {
+    streaming: false,
+    requiredToolSet: {
+      status: "runtime-validated",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "runtime-rejected",
+      streaming: true,
+      adapter: "agencity.slice2-recording.formal.v1",
+    },
+  } as const;
   readonly contexts: JsonValue[] = [];
   readonly configurations: ModelConfiguration[] = [];
   calls = 0;
@@ -9,7 +20,7 @@ export class RecordingProvider implements ModelProvider {
 
   constructor(readonly name: string, readonly onCall?: (context: JsonValue, call: number) => void | Promise<void>) {}
 
-  async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     this.calls++;
     this.active++;
@@ -27,6 +38,16 @@ export class RecordingProvider implements ModelProvider {
     } finally {
       this.active--;
     }
+  }
+  async streamResponse(context: JsonValue, dispatch: ModelDispatch, signal: AbortSignal): Promise<ModelEffectOutputV2> {
+    const observed = await this.complete(context, dispatch.configuration, signal);
+    return formalMissingToolOutput({
+      dispatch,
+      provider: this.name,
+      adapter: this.capabilities.requiredToolSet.adapter,
+      text: observed.text,
+      usage: observed.usage,
+    });
   }
 }
 
@@ -46,7 +67,7 @@ export class BlockingProvider implements ModelProvider {
     this.#waiters.clear();
   }
 
-  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.calls++;
     this.active++;
     this.peakActive = Math.max(this.peakActive, this.active);

@@ -4,7 +4,7 @@ import {
   type JsonValue,
   type ModelConfiguration,
   type ModelProvider,
-  type ModelResponse,
+  type TextModelResponse,
 } from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
@@ -15,7 +15,7 @@ class PromptProvider implements ModelProvider {
   calls = 0;
   readonly contexts: JsonValue[] = [];
   constructor(readonly name: string, readonly large = false) {}
-  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     this.calls++;
     this.contexts.push(context);
@@ -29,7 +29,7 @@ class PromptProvider implements ModelProvider {
 class TimedProvider implements ModelProvider {
   calls = 0;
   constructor(readonly name: string) {}
-  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.calls++;
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(resolve, 1_000);

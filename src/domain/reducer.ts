@@ -1,11 +1,17 @@
-import type { AgentEvent, EventPayloads, TaskStatus } from "./events.ts";
+import { EVENT_SCHEMA_VERSION, type AgentEvent, type EventPayloads, type ModelCallResult, type TaskStatus } from "./events.ts";
 import type {
   AgentRunInputRequestState, AgentRunState, AgentRunStepState, AgentState, CellState, DocumentChunkState, EffectState, GoalGateState,
   MailboxMessageState, ModelCallState, RecursiveModelState, TaskState, TerminalNoticeState,
 } from "./state.ts";
 import { REDUCER_VERSION } from "./state.ts";
 import { InvalidTransitionError, ValidationError } from "./errors.ts";
-import { parseAgentAction, type AgentAction } from "./agent-action.ts";
+import type { AgentAction } from "./agent-action.ts";
+import { agentActionFromToolSubmission } from "./agent-tool-contract.ts";
+import {
+  validateModelEffectOutputV2,
+  type ModelEffectOutputV2,
+} from "./model-response.ts";
+import { validateModelDispatch, type ModelDispatch } from "./model.ts";
 
 function withBase(state: AgentState, event: AgentEvent): AgentState {
   return { ...state, cursor: event.cursor, appliedEventIds: [...state.appliedEventIds, event.id] };
@@ -18,6 +24,11 @@ function taskCanTransition(from: TaskStatus, to: TaskStatus): boolean {
 }
 
 export function reduceAgentState(state: AgentState | undefined, event: AgentEvent): AgentState {
+  if (event.schemaVersion !== EVENT_SCHEMA_VERSION) {
+    throw new ValidationError(
+      `Unsupported event schema version ${event.schemaVersion}. Reset local Agencity state before using schema version ${EVENT_SCHEMA_VERSION}; legacy history was not projected.`,
+    );
+  }
   if (state?.appliedEventIds.includes(event.id)) return state;
   if (!state) {
     if (event.type !== "SessionCreated") throw new ValidationError("First projected event must be SessionCreated");
@@ -69,7 +80,42 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       return { ...next, effects: { ...state.effects, [p.effectId]: effect } };
     }
     case "EffectAttemptStarted": { const p = event.payload as EventPayloads["EffectAttemptStarted"]; const old = state.effects[p.effectId]; if (!old || !["requested", "started"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("effect", old?.status ?? "missing", "started"); return { ...next, effects: { ...state.effects, [p.effectId]: { ...old, status: "started", attempts: p.attempt, eventId: event.id } } }; }
-    case "EffectOutcomeRecorded": { const p = event.payload as EventPayloads["EffectOutcomeRecorded"]; const old = state.effects[p.effectId]; if (!old || !["requested", "started"].includes(old.status) || p.attempt < Math.max(1, old.attempts)) throw new InvalidTransitionError("effect", old?.status ?? "missing", p.outcome); const updated: EffectState = { ...old, status: p.outcome, attempts: Math.max(old.attempts, p.attempt), eventId: event.id, ...(p.output === undefined ? {} : { output: p.output }), ...(p.error === undefined ? {} : { error: p.error }) }; return { ...next, effects: { ...state.effects, [p.effectId]: updated } }; }
+    case "EffectOutcomeRecorded": {
+      const p = event.payload as EventPayloads["EffectOutcomeRecorded"];
+      const old = state.effects[p.effectId];
+      if (!old || !["requested", "started"].includes(old.status) || p.attempt < Math.max(1, old.attempts)) {
+        throw new InvalidTransitionError("effect", old?.status ?? "missing", p.outcome);
+      }
+      if (old.executor === "model") {
+        if (p.outcome === "succeeded") {
+          if (p.output === undefined || p.modelFailure !== undefined) {
+            throw new ValidationError("Succeeded model effects require one normalized output and no modelFailure");
+          }
+          const dispatch = modelDispatchFromEffectInput(old.input);
+          validateModelEffectOutputV2(p.output, {
+            responseContract: dispatch.responseContract,
+            responseCapability: dispatch.responseCapability,
+            configuredProvider: dispatch.configuration.provider,
+          });
+        } else if (p.outcome === "failed") {
+          if (p.modelFailure === undefined) throw new ValidationError("Failed model effects require a typed modelFailure");
+        } else if (p.modelFailure !== undefined) {
+          throw new ValidationError("Cancelled and unknown model effects must omit modelFailure");
+        }
+      } else if (p.modelFailure !== undefined) {
+        throw new ValidationError("Non-model effects cannot retain modelFailure");
+      }
+      const updated: EffectState = {
+        ...old,
+        status: p.outcome,
+        attempts: Math.max(old.attempts, p.attempt),
+        eventId: event.id,
+        ...(p.output === undefined ? {} : { output: p.output }),
+        ...(p.error === undefined ? {} : { error: p.error }),
+        ...(p.modelFailure === undefined ? {} : { modelFailure: p.modelFailure.code }),
+      };
+      return { ...next, effects: { ...state.effects, [p.effectId]: updated } };
+    }
     case "EffectReconciliationRecorded": {
       const p = event.payload as EventPayloads["EffectReconciliationRecorded"];
       const effect = state.effects[p.effectId];
@@ -136,27 +182,113 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         throw new ValidationError("A model effect can belong to only one model call");
       }
       if (!Bun.deepEquals(p.modelDispatch.configuration, state.model)) throw new ValidationError("Model call dispatch configuration must match the committed branch configuration");
+      const ownedStep = Object.values(state.agentRuns)
+        .flatMap((run) => run.steps)
+        .find((candidate) => candidate.callId === p.callId || candidate.modelAttempts.some((attempt) => attempt.callId === p.callId));
+      if (ownedStep) {
+        const ownedAttempt = ownedStep.modelAttempts.at(-1);
+        if (!ownedAttempt || ownedAttempt.callId !== p.callId || ownedAttempt.effectId !== p.effectId ||
+            ownedAttempt.contextId !== p.contextId || ownedAttempt.estimatedInputTokens !== p.estimatedInputTokens ||
+            ownedAttempt.attempt !== (p.attempt ?? 1) || ownedAttempt.retryOfCallId !== p.retryOfCallId ||
+            !Bun.deepEquals(ownedAttempt.contextWindow, p.contextWindow)) {
+          throw new ValidationError("Agent-run model call must be atomically bound to its retained attempt");
+        }
+      }
       if (p.retryOfCallId !== undefined) {
         const prior = state.modelCalls[p.retryOfCallId];
         if (!prior || !Bun.deepEquals(prior.modelDispatch, p.modelDispatch)) throw new ValidationError("Model overflow retries must reuse the complete prior dispatch");
       }
-      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
+      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, estimatedInputTokens: p.estimatedInputTokens, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
       return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } };
     }
-    case "ModelOutputChunk": { const p = event.payload as EventPayloads["ModelOutputChunk"]; const old = state.modelCalls[p.callId]; if (!old || old.status !== "requested" || p.sequence !== old.chunks.length) throw new InvalidTransitionError("modelCall", old?.status ?? "missing", "streaming"); return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, chunks: [...old.chunks, p.text], eventId: event.id } } }; }
+    case "ModelOutputChunk": {
+      const p = event.payload as EventPayloads["ModelOutputChunk"];
+      const old = state.modelCalls[p.callId];
+      if (!old || old.status !== "requested" || old.modelDispatch.responseContract.kind !== "text" || p.sequence !== old.chunks.length) {
+        throw new InvalidTransitionError("modelCall", old?.status ?? "missing", "streaming");
+      }
+      return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, chunks: [...old.chunks, p.text], eventId: event.id } } };
+    }
     case "ModelCallCompleted": {
       const p = event.payload as EventPayloads["ModelCallCompleted"]; const old = state.modelCalls[p.callId];
-      const agentRunOwned = Object.values(state.agentRuns).some((run) => run.steps.some((step) => step.callId === p.callId || step.modelAttempts.some((attempt) => attempt.callId === p.callId)));
       const response = p.responseMessageId === undefined ? undefined : state.messages.find((message) => message.id === p.responseMessageId);
-      if (!old || old.status !== "requested" ||
-          (agentRunOwned && p.responseMessageId !== undefined) ||
-          (!agentRunOwned && (!response || response.role !== "assistant" || response.modelCallId !== p.callId))) {
+      const effect = old ? state.effects[old.effectId] : undefined;
+      if (!old || old.status !== "requested" || effect?.status !== "succeeded" || effect.output === undefined) {
         throw new InvalidTransitionError("modelCall", old?.status ?? "missing", "succeeded");
       }
-      return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, status: "succeeded", ...(p.responseMessageId === undefined ? {} : { responseMessageId: p.responseMessageId }), finishReason: p.finishReason, usage: p.usage, ...(p.warnings === undefined ? {} : { warnings: p.warnings.map((warning) => ({ ...warning })) }), eventId: event.id } } };
+      const output = validateModelEffectOutputV2(effect.output, {
+        responseContract: old.modelDispatch.responseContract,
+        responseCapability: old.modelDispatch.responseCapability,
+        configuredProvider: old.modelDispatch.configuration.provider,
+      });
+      const expected = compactModelCallResult(output);
+      const text = output.result.kind === "text" ? output.result.text : undefined;
+      const textShapeValid = output.result.kind === "text"
+        ? p.responseMessageId !== undefined && response?.role === "assistant" && response.modelCallId === p.callId &&
+          response.content === text && old.chunks.join("") === text
+        : p.responseMessageId === undefined && old.chunks.length === 0;
+      const responseUsage = output.response.usage;
+      const usageSource = output.response.kind === "guard-aborted"
+        ? "conservative-guard-estimate"
+        : "provider-reported";
+      if (!textShapeValid || !Bun.deepEquals(p.result, expected) || p.resultDigest !== output.resultDigest ||
+          !Bun.deepEquals(p.termination, output.response.termination) ||
+          !Bun.deepEquals(p.usage, responseUsage) ||
+          !Bun.deepEquals(p.warnings, output.response.warnings) ||
+          p.usageSource !== usageSource) {
+        throw new ValidationError("Model completion does not match its authoritative retained effect output");
+      }
+      return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: {
+        ...old, status: "succeeded",
+        ...(p.responseMessageId === undefined ? {} : { responseMessageId: p.responseMessageId }),
+        result: p.result, resultDigest: p.resultDigest, termination: p.termination,
+        usage: p.usage, usageSource: p.usageSource,
+        warnings: p.warnings.map((warning) => ({ ...warning })), eventId: event.id,
+      } } };
     }
-    case "ModelCallTerminated": { const p = event.payload as EventPayloads["ModelCallTerminated"]; const old = state.modelCalls[p.callId]; if (!old || old.status !== "requested") throw new InvalidTransitionError("modelCall", old?.status ?? "missing", p.outcome); return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, status: p.outcome, ...(p.error === undefined ? {} : { error: p.error }), eventId: event.id } } }; }
-    case "BudgetDebited": { const p = event.payload as EventPayloads["BudgetDebited"]; return { ...next, budget: { ...state.budget, tokens: state.budget.tokens + p.tokens, costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns, wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs } }; }
+    case "ModelCallTerminated": {
+      const p = event.payload as EventPayloads["ModelCallTerminated"];
+      const old = state.modelCalls[p.callId];
+      const effect = old ? state.effects[old.effectId] : undefined;
+      if (!old || old.status !== "requested" || !effect || effect.status !== p.outcome ||
+          (p.outcome === "failed" && p.failureCode !== effect.modelFailure) ||
+          (p.outcome !== "failed" && p.failureCode !== undefined)) {
+        throw new InvalidTransitionError("modelCall", old?.status ?? "missing", p.outcome);
+      }
+      return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: { ...old, status: p.outcome, ...(p.error === undefined ? {} : { error: p.error }), ...(p.failureCode === undefined ? {} : { failureCode: p.failureCode }), eventId: event.id } } };
+    }
+    case "BudgetDebited": {
+      const p = event.payload as EventPayloads["BudgetDebited"];
+      const call = state.modelCalls[p.callId];
+      if (call) {
+        if (call.status !== "succeeded" || call.usageSource !== p.usageSource || call.budgetDebited !== undefined) {
+          throw new ValidationError("Model-call budget debit must match its completed usage attribution");
+        }
+        const expectedTokens = call.usageSource === "provider-reported"
+          ? (call.usage?.inputTokens ?? 0) + (call.usage?.outputTokens ?? 0)
+          : call.estimatedInputTokens + (call.contextWindow?.outputReserveTokens ?? call.modelDispatch.configuration.maxOutputTokens ?? 0);
+        const expectedCost = call.usageSource === "provider-reported" ? call.usage?.costUsd ?? 0 : 0;
+        if (p.tokens !== expectedTokens || p.costUsd !== expectedCost || p.turns !== 1) {
+          throw new ValidationError("Model-call budget debit disagrees with retained usage provenance");
+        }
+      }
+      return {
+        ...next,
+        ...(call === undefined ? {} : {
+          modelCalls: {
+            ...state.modelCalls,
+            [p.callId]: {
+              ...call,
+              budgetDebited: {
+                tokens: p.tokens, costUsd: p.costUsd, turns: p.turns,
+                wallTimeMs: p.wallTimeMs, usageSource: p.usageSource, eventId: event.id,
+              },
+            },
+          },
+        }),
+        budget: { ...state.budget, tokens: state.budget.tokens + p.tokens, costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns, wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs },
+      };
+    }
     case "BudgetExceeded": return { ...next, budget: { ...state.budget, exceeded: true }, status: "idle" };
     case "RecoveryPerformed": return next;
     case "SyncConflictResolved": return next;
@@ -335,7 +467,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     }
     case "RecursiveModelStarted": {
       const p = event.payload as EventPayloads["RecursiveModelStarted"]; if (state.recursiveModels[p.handleId]) throw new InvalidTransitionError("recursiveModel", "existing", "pending");
-      const handle: RecursiveModelState = { id: p.handleId, taskId: p.taskId, parentSessionId: p.parentSessionId, parentBranchId: p.parentBranchId, childSessionId: p.childSessionId, childBranchId: p.childBranchId, model: p.model, inputSetId: p.inputSetId ?? null, ...(p.input === undefined ? {} : { input: p.input }), ...(p.inputProvenance === undefined ? {} : { inputProvenance: p.inputProvenance }), ...(p.inputHash === undefined ? {} : { inputHash: p.inputHash }), status: "pending", eventId: event.id };
+      const handle: RecursiveModelState = { id: p.handleId, taskId: p.taskId, parentSessionId: p.parentSessionId, parentBranchId: p.parentBranchId, childSessionId: p.childSessionId, childBranchId: p.childBranchId, model: p.model, responseAdmission: p.responseAdmission, inputSetId: p.inputSetId ?? null, ...(p.input === undefined ? {} : { input: p.input }), ...(p.inputProvenance === undefined ? {} : { inputProvenance: p.inputProvenance }), ...(p.inputHash === undefined ? {} : { inputHash: p.inputHash }), status: "pending", eventId: event.id };
       return { ...next, recursiveModels: { ...state.recursiveModels, [p.handleId]: handle } };
     }
     case "RecursiveModelStatusChanged": {
@@ -382,25 +514,42 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
     }
     case "AgentRunActionCommitted": {
-      const p = event.payload as EventPayloads["AgentRunActionCommitted"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1); const call = state.modelCalls[p.callId];
-      let rawMatches = false;
-      try { rawMatches = sameAgentAction(parseAgentAction(p.raw), p.action); }
-      catch { rawMatches = false; }
-      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId || (step.modelAttempts.at(-1)?.callId ?? step.callId) !== p.callId || call?.status !== "succeeded" || call.chunks.join("") !== p.raw || step.action !== undefined || step.rejection !== undefined || !rawMatches) {
+      const p = event.payload as EventPayloads["AgentRunActionCommitted"];
+      const run = state.agentRuns[p.runId];
+      const step = run?.steps.at(-1);
+      const call = state.modelCalls[p.source.modelCallId];
+      const output = call ? completedModelOutput(state, call) : undefined;
+      const submission = output?.result.kind === "tool-submission" ? output.result.submission : undefined;
+      const expectedAction = submission
+        ? agentActionFromToolSubmission({ name: submission.name, input: submission.input } as unknown as Parameters<typeof agentActionFromToolSubmission>[0])
+        : undefined;
+      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId ||
+          (step.modelAttempts.at(-1)?.callId ?? step.callId) !== p.source.modelCallId ||
+          call?.status !== "succeeded" || step.action !== undefined || step.rejection !== undefined ||
+          !submission || output!.resultDigest !== p.source.resultDigest ||
+          submission.providerToolCallId !== p.source.providerToolCallId ||
+          !expectedAction || !sameAgentAction(expectedAction, p.action)) {
         throw new InvalidTransitionError("agentRunAction", step?.action ? "committed" : run?.status ?? "missing-run", "committed");
       }
-      const updated = { ...step, action: p.action, rawAction: p.raw, eventId: event.id };
+      const updated = { ...step, action: p.action, actionSource: p.source, eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
     }
     case "AgentRunActionRejected": {
-      const p = event.payload as EventPayloads["AgentRunActionRejected"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1); const call = state.modelCalls[p.callId];
-      let rawIsInvalid = false;
-      try { parseAgentAction(p.raw); }
-      catch { rawIsInvalid = true; }
-      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId || (step.modelAttempts.at(-1)?.callId ?? step.callId) !== p.callId || call?.status !== "succeeded" || call.chunks.join("") !== p.raw || step.action !== undefined || step.rejection !== undefined || !rawIsInvalid) {
+      const p = event.payload as EventPayloads["AgentRunActionRejected"];
+      const run = state.agentRuns[p.runId];
+      const step = run?.steps.at(-1);
+      const call = state.modelCalls[p.source.modelCallId];
+      const output = call ? completedModelOutput(state, call) : undefined;
+      const violation = output?.result.kind === "contract-violation" ? output.result.violation : undefined;
+      const diagnosticCallId = violation?.evidence.toolCalls.find((item) => item.callId !== undefined)?.callId;
+      if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || step.actionId !== p.actionId ||
+          (step.modelAttempts.at(-1)?.callId ?? step.callId) !== p.source.modelCallId ||
+          call?.status !== "succeeded" || step.action !== undefined || step.rejection !== undefined ||
+          !violation || output!.resultDigest !== p.source.resultDigest || p.error !== violation.message ||
+          p.source.providerToolCallId !== diagnosticCallId) {
         throw new InvalidTransitionError("agentRunAction", step?.rejection ? "rejected" : run?.status ?? "missing-run", "rejected");
       }
-      const updated = { ...step, rejection: p.error, rawAction: p.raw, eventId: event.id };
+      const updated = { ...step, rejection: p.error, actionSource: p.source, eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
     }
     case "AgentRunGoalCheckRecorded": {
@@ -532,6 +681,50 @@ function validateModelEffectRelation(
       !compaction.modelDispatch || !Bun.deepEquals(compaction.modelDispatch, dispatch)) {
     throw new ValidationError("Model effect does not agree with its pinned compaction dispatch");
   }
+}
+
+function modelDispatchFromEffectInput(input: import("./json.ts").JsonValue): ModelDispatch {
+  if (!input || typeof input !== "object" || Array.isArray(input) ||
+      !input.modelDispatch || typeof input.modelDispatch !== "object" || Array.isArray(input.modelDispatch)) {
+    throw new ValidationError("Model effect is missing its retained dispatch");
+  }
+  const dispatch = input.modelDispatch as unknown as ModelDispatch;
+  validateModelDispatch(dispatch);
+  return dispatch;
+}
+
+function completedModelOutput(state: AgentState, call: ModelCallState): ModelEffectOutputV2 {
+  const effect = state.effects[call.effectId];
+  if (!effect || effect.status !== "succeeded" || effect.output === undefined) {
+    throw new ValidationError("Completed model call is missing its authoritative effect output");
+  }
+  return validateModelEffectOutputV2(effect.output, {
+    responseContract: call.modelDispatch.responseContract,
+    responseCapability: call.modelDispatch.responseCapability,
+    configuredProvider: call.modelDispatch.configuration.provider,
+  });
+}
+
+function compactModelCallResult(output: ModelEffectOutputV2): ModelCallResult {
+  if (output.result.kind === "text") {
+    return { kind: "text", textDigest: output.result.textDigest };
+  }
+  if (output.result.kind === "tool-submission") {
+    return {
+      kind: "tool-submission",
+      providerToolCallId: output.result.submission.providerToolCallId,
+      name: output.result.submission.name,
+      inputDigest: output.result.submission.inputDigest,
+    };
+  }
+  const providerToolCallId = output.result.violation.evidence.toolCalls
+    .find((item) => item.callId !== undefined)?.callId;
+  return {
+    kind: "contract-violation",
+    code: output.result.violation.code,
+    evidenceDigest: output.result.violation.evidenceDigest,
+    ...(providerToolCallId === undefined ? {} : { providerToolCallId }),
+  };
 }
 
 function sameAgentAction(left: AgentAction, right: AgentAction): boolean {

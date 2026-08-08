@@ -16,7 +16,6 @@ import {
   normalizeReasoningEffort,
   resolveModelDispatch,
   validateModelDispatch,
-  validateModelDispatchV2,
   validateModelEffectOutputV2,
   type AgentAction,
   type CompleteModelResponse,
@@ -24,7 +23,6 @@ import {
   type ModelConfigurationInput,
   type ModelDescriptor,
   type ModelDispatch,
-  type ModelDispatchV2,
   type ModelEffectOutputV2,
   type ProviderNeutralModelOutputDelta as ResponseContractOutputDelta,
   type ModelReasoningCapability,
@@ -49,13 +47,12 @@ import {
 // Disable the SDK's process-global stderr duplicate, which is neither durable nor scrubbed.
 (globalThis as { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
 
-export interface ModelResponse {
+export interface TextModelResponse {
   readonly text: string;
   readonly finishReason: string;
   readonly usage: Usage;
   readonly warnings?: readonly ModelWarning[];
 }
-export type TextModelResponse = ModelResponse;
 export interface ModelOutputDelta { readonly text: string; }
 export interface ModelProviderRequiredToolSetCapabilities {
   readonly status:
@@ -106,18 +103,15 @@ export interface ModelProvider {
     signal: AbortSignal,
     onDelta: (delta: ModelOutputDelta) => void,
   ): Promise<TextModelResponse>;
-  /**
-   * Provider-neutral response-contract primitives. Phase 3 supplies these for
-   * the shared AI SDK adapter; custom providers may implement them directly.
-   */
+  /** Provider-neutral response-contract primitives implemented by product and custom adapters. */
   completeResponse?(
     context: JsonValue,
-    dispatch: ModelDispatchV2,
+    dispatch: ModelDispatch,
     signal: AbortSignal,
   ): Promise<ModelEffectOutputV2>;
   streamResponse?(
     context: JsonValue,
-    dispatch: ModelDispatchV2,
+    dispatch: ModelDispatch,
     signal: AbortSignal,
     onDelta: (delta: ResponseContractOutputDelta) => void,
   ): Promise<ModelEffectOutputV2>;
@@ -166,7 +160,7 @@ export class EchoModelProvider implements ModelProvider {
   }
   async streamResponse(
     context: JsonValue,
-    dispatch: ModelDispatchV2,
+    dispatch: ModelDispatch,
     signal: AbortSignal,
   ): Promise<ModelEffectOutputV2> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -227,19 +221,19 @@ export class ScriptedAgentActionProvider implements ModelProvider {
   }
   async streamResponse(
     context: JsonValue,
-    dispatch: ModelDispatchV2,
+    dispatch: ModelDispatch,
     signal: AbortSignal,
   ): Promise<ModelEffectOutputV2> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    // Fixture subclasses historically observe, delay, or abort through
+    // `complete`. Preserve that deterministic hook while the authoritative
+    // returned value remains the formal normalized submission below.
+    const observed = await this.complete(context, dispatch.configuration, signal);
     const ordinal = context && typeof context === "object" && !Array.isArray(context) && context.run &&
       typeof context.run === "object" && !Array.isArray(context.run) && typeof context.run.stepOrdinal === "number"
       ? context.run.stepOrdinal : 1;
     const selected = Array.isArray(this.script) ? this.script[ordinal - 1] : this.script[ordinal];
-    const usage = {
-      inputTokens: Math.ceil(JSON.stringify(context).length / 4),
-      outputTokens: Math.ceil(JSON.stringify(selected ?? "").length / 4),
-      costUsd: 0,
-    };
+    const usage = observed.usage;
     if (!selected || typeof selected === "string") {
       return formalMissingToolOutput({
         dispatch,
@@ -384,7 +378,7 @@ class AiSdkModelProvider implements ModelProvider {
 
   async streamResponse(
     context: JsonValue,
-    dispatch: ModelDispatchV2,
+    dispatch: ModelDispatch,
     signal: AbortSignal,
     onDelta: (delta: ResponseContractOutputDelta) => void,
   ): Promise<ModelEffectOutputV2> {
@@ -802,6 +796,8 @@ export class ModelExecutor implements EffectExecutor {
       configuration: normalized,
       capability,
       catalogDigest: descriptor.catalogDigest,
+      responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+      responseCapability: { kind: "text" },
       ...(provider.executionEndpointId === undefined ? {} : { executionEndpointId: provider.executionEndpointId }),
     });
   }
@@ -854,16 +850,16 @@ export class ModelExecutor implements EffectExecutor {
   }
 
   /**
-   * Provider-neutral execution used after a response-aware dispatch has been
-   * durably admitted. The live v1 event writer does not call this method.
+   * Provider-neutral execution used after the canonical response-aware
+   * dispatch has been durably admitted.
    */
   async executeResponseAware(
     context: JsonValue,
-    dispatch: ModelDispatchV2,
+    dispatch: ModelDispatch,
     signal: AbortSignal,
     onDelta?: (delta: ResponseContractOutputDelta) => void,
   ): Promise<ModelEffectOutputV2> {
-    validateModelDispatchV2(dispatch);
+    validateModelDispatch(dispatch);
     const provider = this.#providers.get(dispatch.configuration.provider);
     if (!provider) {
       throw new ValidationError(
@@ -914,13 +910,14 @@ export class ModelExecutor implements EffectExecutor {
             signal,
           );
       const normalized = normalizeModelResponse(textResponse);
+      const safeText = scrubProviderText(normalized.text);
       const rawReason = boundedText(
         scrubProviderText(normalized.finishReason),
         256,
       );
       const response: CompleteModelResponse = {
         kind: "complete",
-        blocks: [{ type: "text", text: normalized.text }],
+        blocks: [{ type: "text", text: safeText }],
         termination: {
           kind: normalizedTextTermination(normalized.finishReason),
           // An empty scrubbed reason must stay absent: retained "other"
@@ -941,8 +938,8 @@ export class ModelExecutor implements EffectExecutor {
         response,
         result: {
           kind: "text",
-          text: normalized.text,
-          textDigest: canonicalTextDigest(normalized.text),
+          text: safeText,
+          textDigest: canonicalTextDigest(safeText),
         },
         responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
         responseCapability: { kind: "text" },
@@ -974,41 +971,56 @@ export class ModelExecutor implements EffectExecutor {
   }
 
   async execute(request: Parameters<EffectExecutor["execute"]>[0], context: Parameters<EffectExecutor["execute"]>[1]): Promise<ExecutionResult> {
-    if (request.operation !== "complete") return result("failed", undefined, `Unsupported model operation: ${request.operation}`);
+    if (request.operation !== "complete") return result("failed", undefined, `Unsupported model operation: ${request.operation}`, "provider-request-failed");
     try {
       const { context: modelContext, modelDispatch, callId } = parse(request.input);
-      const configuration = modelDispatch.configuration;
-      const provider = this.#providers.get(configuration.provider);
-      if (!provider) return result("failed", undefined, `Unknown model provider: ${configuration.provider}`);
-      if (provider.executionEndpointId !== modelDispatch.executionEndpointId) {
-        return result("failed", { errorClassification: { provider: configuration.provider, model: configuration.model, code: "endpoint-drift" } }, "Retained model dispatch endpoint differs from the current configured transport origin");
-      }
-      const release = await this.#limiter.acquire(configuration.provider, context.signal);
-      try {
-        const useStreaming = provider.capabilities?.streaming === true;
-        const response = useStreaming
-          ? await provider.stream!(modelContext, configuration, context.signal, (delta) => {
-              for (let offset = 0; offset < delta.text.length; offset += 4_096) {
-                context.reportProgress?.({
-                  kind: "model-output-delta",
-                  value: {
-                    text: delta.text.slice(offset, offset + 4_096),
-                    provider: configuration.provider,
-                    model: configuration.model,
-                    reasoningEffort: configuration.reasoningEffort,
-                    ...(callId === undefined ? {} : { callId }),
-                  },
-                });
-              }
-            })
-          : await provider.complete(modelContext, configuration, context.signal);
-        return result("succeeded", normalizeModelResponse(response) as unknown as JsonValue);
-      } finally { release(); }
+      const output = await this.executeResponseAware(
+        modelContext,
+        modelDispatch,
+        context.signal,
+        (delta) => {
+          if (delta.kind === "text") {
+            for (let offset = 0; offset < delta.text.length; offset += 4_096) {
+              context.reportProgress?.({
+                kind: "model-output-delta",
+                value: {
+                  text: delta.text.slice(offset, offset + 4_096),
+                  provider: modelDispatch.configuration.provider,
+                  model: modelDispatch.configuration.model,
+                  reasoningEffort: modelDispatch.configuration.reasoningEffort,
+                  ...(callId === undefined ? {} : { callId }),
+                },
+              });
+            }
+            return;
+          }
+          context.reportProgress?.({
+            kind: "model-tool-progress",
+            value: {
+              phase: delta.kind,
+              callId: delta.callId,
+              ...(delta.kind === "tool-call-start" ? { name: delta.name } : { bytes: delta.bytes }),
+              provider: modelDispatch.configuration.provider,
+              model: modelDispatch.configuration.model,
+            },
+          });
+        },
+      );
+      return result("succeeded", output as unknown as JsonValue);
     } catch (error) {
       if (context.signal.aborted || error instanceof DOMException && error.name === "AbortError") return result("cancelled", undefined, "Model call cancelled");
       const retained = retainedModelIdentity(request.input);
+      if (error instanceof ModelProviderResponseFailureError) {
+        return result("failed", undefined, error.message, error.code);
+      }
+      if (error instanceof ModelProviderContextWindowOverflowError) {
+        return result("failed", undefined, error.message, "provider-context-window-overflow");
+      }
       const classified = classifyProviderError(error, retained.provider, retained.model);
-      return result("failed", { errorClassification: classified }, providerErrorMessage(classified.code));
+      const failureCode = classified.code === "provider-confirmed-context-window-overflow"
+        ? "provider-context-window-overflow"
+        : "provider-request-failed";
+      return result("failed", undefined, providerErrorMessage(classified.code), failureCode);
     }
   }
 

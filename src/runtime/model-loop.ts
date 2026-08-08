@@ -2,10 +2,12 @@ import {
   CapabilityUnavailableError,
   NotFoundError,
   ValidationError,
+  TEXT_MODEL_RESPONSE_CONTRACT,
   newId,
   projectEvents,
   resolveModelDispatch,
   STANDARD_UNVERIFIED_REASONING_LEVELS,
+  validateModelEffectOutputV2,
   type AgentState,
   type BudgetLimits,
   type ContextCapacityProvenance,
@@ -13,8 +15,8 @@ import {
   type EventPayloads,
   type JsonValue,
   type ModelDispatch,
-  type ModelWarning,
-  type Usage,
+  type ModelEffectFailureCode,
+  type ModelEffectOutputV2,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import { ContextMaterializer } from "./context.ts";
@@ -30,32 +32,8 @@ import {
   type ProviderModelErrorClassification,
 } from "./context-window.ts";
 import { estimateContextWindow } from "./compaction-core.ts";
+import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 
-interface ModelOutput { text: string; finishReason: string; usage: Usage; warnings?: ModelWarning[] }
-
-function parseOutput(value: JsonValue | undefined): ModelOutput {
-  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.text !== "string" ||
-      typeof value.finishReason !== "string" || !value.usage || typeof value.usage !== "object" ||
-      Array.isArray(value.usage)) throw new ValidationError("Model executor returned an invalid response");
-  const usage = value.usage;
-  if (typeof usage.inputTokens !== "number" || !Number.isFinite(usage.inputTokens) || usage.inputTokens < 0 ||
-      typeof usage.outputTokens !== "number" || !Number.isFinite(usage.outputTokens) || usage.outputTokens < 0 ||
-      typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0) throw new ValidationError("Model usage is invalid");
-  if (Array.isArray(value.warnings) && value.warnings.length > 8) throw new ValidationError("Model warnings exceed their count bound");
-  const warnings = Array.isArray(value.warnings) ? value.warnings.map((warning) => {
-    if (!warning || typeof warning !== "object" || Array.isArray(warning) ||
-        !["coerced", "unsupported", "provider", "truncated"].includes(String(warning.kind)) ||
-        typeof warning.message !== "string" ||
-        new TextEncoder().encode(warning.message).byteLength > 1_024) throw new ValidationError("Model warnings are invalid");
-    return { kind: warning.kind as ModelWarning["kind"], message: warning.message };
-  }) : undefined;
-  return {
-    text: value.text,
-    finishReason: value.finishReason,
-    usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd },
-    ...(warnings?.length ? { warnings } : {}),
-  };
-}
 
 class TurnQueue {
   readonly #tails = new Map<string, Promise<void>>();
@@ -136,7 +114,9 @@ export class ModelLoop {
 
     let rejectedEstimate = estimateContextWindow(materialized.context).estimatedTokens;
     let priorCallId: string | undefined;
-    const modelDispatch: ModelDispatch = this.modelExecutor?.resolveDispatch(state.model) ?? fallbackDispatch(state);
+    const modelDispatch: ModelDispatch = this.modelExecutor
+      ? new ModelEffectAdmissionService(this.modelExecutor).requestText(state.model).modelDispatch
+      : fallbackDispatch(state);
     for (let attempt = 1; attempt <= 1 + 2; attempt++) {
       const callId = `legacy-turn-${turnId}-call-${attempt}`;
       const effectId = `legacy-turn-${turnId}-effect-${attempt}`;
@@ -148,7 +128,7 @@ export class ModelLoop {
         sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
         idempotencyKey: `model-call:${callId}`,
         payload: {
-          callId, contextId: materialized.contextId, effectId, modelDispatch,
+          callId, contextId: materialized.contextId, effectId, modelDispatch, estimatedInputTokens: rejectedEstimate,
           attempt, ...(priorCallId === undefined ? {} : { retryOfCallId: priorCallId }), contextWindow: window.provenance,
         },
       }, {
@@ -158,14 +138,16 @@ export class ModelLoop {
       }]);
       const execution = await this.outbox.run(effectId);
       if (execution.outcome === "succeeded") {
-        const output = parseOutput(execution.output);
+        const output = modelOutput(execution.output, modelDispatch);
         await this.#finalizeSucceeded(sessionId, branchId, callId, output, Math.round(performance.now() - started));
-        return { outcome: "succeeded", message: output.text };
+        return output.result.kind === "text"
+          ? { outcome: "succeeded", message: output.result.text }
+          : { outcome: "succeeded" };
       }
-      const classification = providerClassification(execution.output, state.model.provider, state.model.model, execution.outcome);
+      const classification = providerClassification(execution.modelFailure, state.model.provider, state.model.model, execution.outcome);
       const overflow = this.compactions !== undefined &&
         classification.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow;
-      await this.#finalizeTerminated(sessionId, branchId, callId, execution.outcome, execution.error, !overflow);
+      await this.#finalizeTerminated(sessionId, branchId, callId, execution.outcome, execution.error, execution.modelFailure, !overflow);
       if (!overflow) {
         return { outcome: execution.outcome, ...(execution.error === undefined ? {} : { error: execution.error }) };
       }
@@ -221,9 +203,9 @@ export class ModelLoop {
           const started = events.find((event) => event.type === "EffectAttemptStarted" && (event.payload as EventPayloads["EffectAttemptStarted"]).effectId === effect.id);
           const outcome = [...events].reverse().find((event) => event.type === "EffectOutcomeRecorded" && (event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId === effect.id);
           const elapsed = started && outcome ? Math.max(0, Date.parse(outcome.committedAt) - Date.parse(started.committedAt)) : 0;
-          await this.#finalizeSucceeded(branch.sessionId, branch.branchId, call.id, parseOutput(effect.output), elapsed);
+          await this.#finalizeSucceeded(branch.sessionId, branch.branchId, call.id, modelOutput(effect.output, call.modelDispatch), elapsed);
         } else {
-          await this.#finalizeTerminated(branch.sessionId, branch.branchId, call.id, effect.status, effect.error);
+          await this.#finalizeTerminated(branch.sessionId, branch.branchId, call.id, effect.status, effect.error, effect.modelFailure);
         }
         recovered++;
       }
@@ -277,6 +259,7 @@ export class ModelLoop {
     callId: string,
     outcome: Exclude<EffectOutcome, "succeeded">,
     error?: string,
+    failureCode?: ModelEffectFailureCode,
     markIdle = true,
   ): Promise<void> {
     await this.storage.appendEvents([{
@@ -285,7 +268,7 @@ export class ModelLoop {
       type: "ModelCallTerminated",
       producer: "supervisor",
       idempotencyKey: `model-terminal:${callId}`,
-      payload: { callId, outcome, ...(error === undefined ? {} : { error }) },
+      payload: { callId, outcome, ...(error === undefined ? {} : { error }), ...(failureCode === undefined ? {} : { failureCode }) },
     }, ...(markIdle ? [{
       sessionId,
       branchId,
@@ -311,46 +294,61 @@ export class ModelLoop {
     sessionId: string,
     branchId: string,
     callId: string,
-    output: ModelOutput,
+    output: ModelEffectOutputV2,
     wallTimeMs: number,
   ): Promise<void> {
     const state = projectEvents(await this.storage.loadEvents(sessionId, { branchId }));
     const existing = state.modelCalls[callId];
     if (existing?.status === "succeeded") return;
     const messageId = newId();
-    const tokens = output.usage.inputTokens + output.usage.outputTokens;
+    const call = state.modelCalls[callId];
+    if (!call) throw new ValidationError(`Model call is unavailable: ${callId}`);
+    const usageSource = output.response.kind === "guard-aborted" ? "conservative-guard-estimate" as const : "provider-reported" as const;
+    const usage = output.response.usage;
+    const tokens = usageSource === "provider-reported"
+      ? usage!.inputTokens + usage!.outputTokens
+      : call.estimatedInputTokens + (call.contextWindow?.outputReserveTokens ?? call.modelDispatch.configuration.maxOutputTokens ?? 0);
+    const costUsd = usage?.costUsd ?? 0;
+    if (output.result.kind !== "text") throw new ValidationError("Text model loop received a structured response result");
+    const text = output.result.text;
+    const textDigest = output.result.textDigest;
     const completionEvents: any[] = [{
       sessionId,
       branchId,
       type: "ModelOutputChunk",
       producer: "model",
       idempotencyKey: `model-chunk:${callId}:0`,
-      payload: { callId, sequence: 0, text: output.text },
+      payload: { callId, sequence: 0, text },
     }, {
       sessionId,
       branchId,
       type: "MessageAppended",
       producer: "model",
       idempotencyKey: `model-message:${callId}`,
-      payload: { messageId, role: "assistant", content: output.text, modelCallId: callId },
+      payload: { messageId, role: "assistant", content: text, modelCallId: callId },
     }, {
       sessionId,
       branchId,
       type: "ModelCallCompleted",
       producer: "supervisor",
       idempotencyKey: `model-complete:${callId}`,
-      payload: { callId, responseMessageId: messageId, finishReason: output.finishReason, usage: output.usage, ...(output.warnings === undefined ? {} : { warnings: output.warnings }) },
+      payload: {
+        callId, responseMessageId: messageId,
+        result: { kind: "text", textDigest },
+        resultDigest: output.resultDigest, termination: output.response.termination,
+        usage, warnings: [...output.response.warnings], usageSource,
+      },
     }, {
       sessionId,
       branchId,
       type: "BudgetDebited",
       producer: "supervisor",
       idempotencyKey: `budget:${callId}`,
-      payload: { callId, tokens, costUsd: output.usage.costUsd, turns: 1, wallTimeMs },
+      payload: { callId, tokens, costUsd, turns: 1, wallTimeMs, usageSource },
     }];
     const exceeded = budgetReached(state.budget.limits, {
       tokens: state.budget.tokens + tokens,
-      costUsd: state.budget.costUsd + output.usage.costUsd,
+      costUsd: state.budget.costUsd + costUsd,
       turns: state.budget.turns + 1,
       wallTimeMs: state.budget.wallTimeMs + wallTimeMs,
     });
@@ -377,16 +375,13 @@ export class ModelLoop {
 }
 
 function providerClassification(
-  output: JsonValue | undefined,
+  failureCode: ModelEffectFailureCode | undefined,
   provider: string,
   model: string,
   outcome: Exclude<EffectOutcome, "succeeded">,
 ): ProviderModelErrorClassification {
   if (outcome === "unknown") return { provider, model, code: ProviderModelErrorCode.Unknown };
-  if (output && typeof output === "object" && !Array.isArray(output) && output.errorClassification && typeof output.errorClassification === "object" && !Array.isArray(output.errorClassification)) {
-    const value = output.errorClassification;
-    if (value.provider === provider && value.model === model && value.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) return { provider, model, code: ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow };
-  }
+  if (failureCode === "provider-context-window-overflow") return { provider, model, code: ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow };
   return { provider, model, code: ProviderModelErrorCode.Generic };
 }
 
@@ -399,6 +394,16 @@ function fallbackDispatch(state: AgentState): ModelDispatch {
       ? { status: "unsupported", levels: [] }
       : { status: "unverified", levels: STANDARD_UNVERIFIED_REASONING_LEVELS },
     catalogDigest: hash.digest("hex"),
+    responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+    responseCapability: { kind: "text" },
+  });
+}
+
+function modelOutput(value: JsonValue | undefined, dispatch: ModelDispatch): ModelEffectOutputV2 {
+  return validateModelEffectOutputV2(value, {
+    responseContract: dispatch.responseContract,
+    responseCapability: dispatch.responseCapability,
+    configuredProvider: dispatch.configuration.provider,
   });
 }
 

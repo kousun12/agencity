@@ -3,13 +3,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   AGENT_ACTION_PROTOCOL,
   AGENT_ACTION_VERSION,
+  ScriptedAgentActionProvider,
   Supervisor,
   projectEvents,
   type AgentAction,
   type JsonValue,
   type ModelConfiguration,
   type ModelProvider,
-  type ModelResponse,
+  type TextModelResponse,
 } from "../../src/index.ts";
 import {
   makeTempRuntime,
@@ -23,21 +24,24 @@ const typedAction = <T extends Omit<AgentAction, "protocol" | "version">>(value:
   ...value,
 } as unknown as AgentAction);
 
-class CodingProvider implements ModelProvider {
-  readonly name = "coding-planner";
+class CodingProvider extends ScriptedAgentActionProvider {
   readonly contexts: JsonValue[] = [];
   calls = 0;
-  constructor(readonly script: readonly AgentAction[]) {}
-  async complete(
+  constructor(script: readonly AgentAction[]) { super(script, "coding-planner"); }
+  override async complete(
     context: JsonValue,
     configuration: ModelConfiguration,
     signal: AbortSignal,
-  ): Promise<ModelResponse> {
+  ): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     expect(configuration.model).toBe("deterministic-plan-v1");
     expect(JSON.stringify(context)).toContain("slugify");
     this.contexts.push(context);
-    const selected = this.script[this.calls++];
+    this.calls++;
+    const ordinal = context && typeof context === "object" && !Array.isArray(context) &&
+      context.run && typeof context.run === "object" && !Array.isArray(context.run) &&
+      typeof context.run.stepOrdinal === "number" ? context.run.stepOrdinal : 1;
+    const selected = (this.script as readonly AgentAction[])[ordinal - 1];
     if (!selected) throw new Error("coding fixture exhausted");
     const text = JSON.stringify(selected);
     return {

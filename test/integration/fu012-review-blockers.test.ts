@@ -3,36 +3,35 @@ import {
   AGENT_ACTION_PROTOCOL,
   AGENT_ACTION_VERSION,
   AgentService,
+  ScriptedAgentActionProvider,
   Supervisor,
   projectEvents,
   type AgentAction,
   type JsonValue,
   type ModelConfiguration,
   type ModelProvider,
-  type ModelResponse,
+  type TextModelResponse,
 } from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
 
-class CountingFinalProvider implements ModelProvider {
-  readonly name = "fu012-crash-provider";
-  readonly displayName = "FU-012 crash recovery fixture";
-  readonly capabilities = { streaming: false } as const;
+class CountingFinalProvider extends ScriptedAgentActionProvider {
   calls = 0;
-
-  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
-    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-    this.calls++;
-    const action: AgentAction = {
+  constructor() {
+    super([{
       protocol: AGENT_ACTION_PROTOCOL,
       version: AGENT_ACTION_VERSION,
       type: "final",
       content: "recovered child reply",
-    };
-    const text = JSON.stringify(action);
-    return { text, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } };
+    }], "fu012-crash-provider");
+  }
+
+  override async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    this.calls++;
+    return super.complete(context, configuration, signal);
   }
 }
 

@@ -1,12 +1,23 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
-import { AgentClient, LibSqlStorage, ProtocolServer, Supervisor, TerminalUI, projectEvents, type JsonValue, type ModelConfiguration, type ModelProvider, type ModelResponse } from "../../src/index.ts";
+import { AgentClient, LibSqlStorage, ProtocolServer, Supervisor, TerminalUI, projectEvents, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse } from "../../src/index.ts";
+import { formalOutputFromAgentAction } from "../../src/executors/model-response.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
 
 class ReviewProvider implements ModelProvider {
+  readonly capabilities = {
+    streaming: false,
+    requiredToolSet: {
+      status: "provider-strict",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "provider-disabled",
+      streaming: true,
+      adapter: "agencity.refiner-test.formal.v1",
+    },
+  } as const;
   calls = 0;
   runCalls = 0;
   evidenceEventId = "";
@@ -14,7 +25,7 @@ class ReviewProvider implements ModelProvider {
   targetEntryId = "";
   targetVersionId = "";
   constructor(readonly name: string, readonly decision: "no_change" | "propose" | "replace" | "malformed" | "overscope" | "no_evidence" = "no_change") {}
-  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     const reviewId = JSON.stringify(context).match(/refinement-review-[a-f0-9]{32}/)?.[0];
     if (!reviewId) {
@@ -37,6 +48,18 @@ class ReviewProvider implements ModelProvider {
     });
     }
     return { text, finishReason: "stop", usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 } };
+  }
+  async streamResponse(context: JsonValue, dispatch: ModelDispatch, signal: AbortSignal): Promise<ModelEffectOutputV2> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    this.runCalls++;
+    return formalOutputFromAgentAction({
+      action: { protocol: "agencity.agent-action", version: 1, type: "final", content: "done" },
+      dispatch,
+      providerToolCallId: `refiner-run-${this.runCalls}`,
+      provider: this.name,
+      adapter: this.capabilities.requiredToolSet.adapter,
+      usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 },
+    });
   }
 }
 

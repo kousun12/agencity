@@ -232,7 +232,7 @@ describe("AI SDK product model providers", () => {
     }, { signal: new AbortController().signal });
     expect(execution).toMatchObject({
       outcome: "failed",
-      output: { errorClassification: { code: "transport" } },
+      modelFailure: "provider-request-failed",
     });
   });
 

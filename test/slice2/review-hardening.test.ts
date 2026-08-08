@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { LibSqlStorage, Supervisor, type JsonValue, type ModelConfiguration, type ModelProvider, type ModelResponse } from "../../src/index.ts";
+import { LibSqlStorage, Supervisor, type JsonValue, type ModelConfiguration, type ModelProvider, type TextModelResponse } from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -17,7 +17,7 @@ async function waitFor<T>(load: () => Promise<T>, predicate: (value: T) => boole
 class UsageProvider implements ModelProvider {
   calls = 0;
   constructor(readonly name: string, readonly tokens = 2) {}
-  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     this.calls++;
     return { text: "used", finishReason: "stop", usage: { inputTokens: this.tokens - 1, outputTokens: 1, costUsd: 0.25 } };
@@ -29,7 +29,7 @@ class TwoSlotProvider implements ModelProvider {
   readonly waiters = new Set<() => void>();
   constructor(readonly name: string) {}
   unblock(): void { this.blocked = false; for (const resolve of this.waiters) resolve(); this.waiters.clear(); }
-  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.calls++; this.active++; this.peak = Math.max(this.peak, this.active);
     try {
       if (this.blocked) await new Promise<void>((resolve, reject) => {
@@ -143,7 +143,7 @@ describe("Slice 2 independent-review hardening", () => {
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: "unknown-budget-context", payload: { contextId: "unknown-budget-context", records: [], contentHash: "0".repeat(64), context: {} },
     }, {
-      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: "unknown-budget-call", payload: { callId, contextId: "unknown-budget-context", effectId, modelDispatch },
+      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: "unknown-budget-call", payload: { callId, contextId: "unknown-budget-context", effectId, modelDispatch, estimatedInputTokens: 0 },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "unknown-budget-effect", payload: { effectId, executor: "model", operation: "complete", input: { context: {}, callId, modelDispatch } as any, idempotencyKey: "unknown-budget-effect", idempotent: false },
     }, {

@@ -16,8 +16,8 @@ import {
   createVercelModelProvider,
   registerBrokeredSecret,
   resolveBuiltInModelResponseContract,
-  responseAwareDispatchFromV1,
-  type ModelDispatchV2,
+  modelDispatchWithResponseAdmission,
+  type ModelDispatch,
   type ModelProvider,
 } from "../../src/index.ts";
 import {
@@ -892,7 +892,7 @@ function admittedDispatch(
   provider: string,
   model: string,
   reasoningEffort: typeof efforts[number] = "provider-default",
-): ModelDispatchV2 {
+): ModelDispatch {
   return new ModelEffectAdmissionService(executor)
     .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, {
       provider,
@@ -905,7 +905,7 @@ function strictDispatch(
   executor: ModelExecutor,
   provider: string,
   model: string,
-): ModelDispatchV2 {
+): ModelDispatch {
   const base = executor.resolveDispatch({
     provider,
     model,
@@ -915,7 +915,7 @@ function strictDispatch(
     AGENT_TOOL_CONTRACT_ID,
     "provider-strict",
   );
-  return responseAwareDispatchFromV1(base, {
+  return modelDispatchWithResponseAdmission(base, {
     responseContract: contract,
     responseCapability: {
       kind: "required-tool-set",
@@ -956,7 +956,7 @@ async function consume(
   });
 }
 
-function fixtureDispatch(): ModelDispatchV2 {
+function fixtureDispatch(): ModelDispatch {
   const provider: ModelProvider = {
     name: "fixture",
     executionEndpointId: "endpoint",

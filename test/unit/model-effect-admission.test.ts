@@ -8,7 +8,7 @@ import {
   canonicalJsonDigest,
   createModelEffectOutputV2,
   type ModelDescriptor,
-  type ModelDispatchV2,
+  type ModelDispatch,
   type ModelProvider,
   type ModelProviderRequiredToolSetCapabilities,
 } from "../../src/index.ts";

@@ -81,20 +81,7 @@ export interface ReasoningDispatch {
   readonly resolverId: "agencity.reasoning-dispatch.v1";
 }
 
-export interface ModelDispatchV1 {
-  readonly configuration: ModelConfiguration;
-  readonly reasoning: ReasoningDispatch;
-  readonly executionEndpointId?: string;
-  readonly dispatchVersion: "agencity.model-dispatch.v1";
-}
-
-/**
- * The live version-2 event writer retains ModelDispatchV1 until the atomic
- * workspace-schema cutover. New response-aware admission uses ModelDispatchV2.
- */
-export type ModelDispatch = ModelDispatchV1;
-
-export interface ModelDispatchV2 {
+export interface ModelDispatch {
   readonly configuration: ModelConfiguration;
   readonly reasoning: ReasoningDispatch;
   readonly responseContract: ModelResponseContract;
@@ -158,10 +145,12 @@ export function resolveModelDispatch(input: {
   readonly configuration: ModelConfiguration;
   readonly capability: ModelReasoningCapability;
   readonly catalogDigest: string;
+  readonly responseContract: ModelResponseContract;
+  readonly responseCapability: ModelResponseCapability;
   readonly executionEndpointId?: string;
 }): ModelDispatch {
   assertReasoningSelection(input.configuration.reasoningEffort, input.capability);
-  return Object.freeze({
+  const resolved: ModelDispatch = deepFreeze({
     configuration: Object.freeze({ ...input.configuration }),
     reasoning: Object.freeze({
       requestedEffort: input.configuration.reasoningEffort,
@@ -176,29 +165,20 @@ export function resolveModelDispatch(input: {
     ...(input.executionEndpointId === undefined
       ? {}
       : { executionEndpointId: input.executionEndpointId }),
-    dispatchVersion: "agencity.model-dispatch.v1",
+    responseContract: validateModelResponseContract(input.responseContract),
+    responseCapability: deepFreeze(
+      JSON.parse(JSON.stringify(input.responseCapability)) as ModelResponseCapability,
+    ),
+    dispatchVersion: "agencity.model-dispatch.v2",
   });
+  validateModelDispatch(resolved);
+  return resolved;
 }
 
-export function resolveModelDispatchV2(input: {
-  readonly configuration: ModelConfiguration;
-  readonly capability: ModelReasoningCapability;
-  readonly catalogDigest: string;
-  readonly responseContract: ModelResponseContract;
-  readonly responseCapability: ModelResponseCapability;
-  readonly executionEndpointId?: string;
-}): ModelDispatchV2 {
-  const base = resolveModelDispatch(input);
-  return responseAwareDispatchFromV1(base, {
-    responseContract: input.responseContract,
-    responseCapability: input.responseCapability,
-  });
-}
-
-export function responseAwareDispatchFromV1(
-  dispatch: ModelDispatchV1,
+export function modelDispatchWithResponseAdmission(
+  dispatch: ModelDispatch,
   responseAdmission: RecursiveResponseAdmission,
-): ModelDispatchV2 {
+): ModelDispatch {
   validateModelDispatch(dispatch);
   const responseContract = validateModelResponseContract(
     responseAdmission.responseContract,
@@ -211,7 +191,7 @@ export function responseAwareDispatchFromV1(
     JSON.parse(JSON.stringify(responseAdmission.responseCapability)) as
       ModelResponseCapability,
   );
-  const resolved: ModelDispatchV2 = deepFreeze({
+  const resolved: ModelDispatch = deepFreeze({
     configuration: dispatch.configuration,
     reasoning: dispatch.reasoning,
     responseContract,
@@ -221,26 +201,11 @@ export function responseAwareDispatchFromV1(
       : { executionEndpointId: dispatch.executionEndpointId }),
     dispatchVersion: "agencity.model-dispatch.v2",
   });
-  validateModelDispatchV2(resolved);
+  validateModelDispatch(resolved);
   return resolved;
 }
 
 export function validateModelDispatch(dispatch: ModelDispatch): void {
-  if (dispatch.dispatchVersion !== "agencity.model-dispatch.v1") {
-    throw new ValidationError("Unsupported model dispatch version");
-  }
-  const effort = normalizeReasoningEffort(dispatch.configuration.reasoningEffort);
-  if (effort !== dispatch.reasoning.requestedEffort) {
-    throw new ValidationError("Model dispatch reasoning effort disagrees with its configuration");
-  }
-  if (dispatch.reasoning.resolverId !== "agencity.reasoning-dispatch.v1" ||
-      dispatch.reasoning.mode !== (effort === "provider-default" ? "omitted" : "requested")) {
-    throw new ValidationError("Model dispatch reasoning mode is invalid");
-  }
-  assertReasoningSelection(effort, dispatch.reasoning.capability);
-}
-
-export function validateModelDispatchV2(dispatch: ModelDispatchV2): void {
   assertJsonValue(dispatch);
   const record = dispatch as unknown as Record<string, JsonValue>;
   const required = new Set([
@@ -274,15 +239,15 @@ export function validateModelDispatchV2(dispatch: ModelDispatchV2): void {
       "Response-aware model dispatch execution endpoint identity is invalid",
     );
   }
-  const legacy: ModelDispatchV1 = {
-    configuration: dispatch.configuration,
-    reasoning: dispatch.reasoning,
-    ...(dispatch.executionEndpointId === undefined
-      ? {}
-      : { executionEndpointId: dispatch.executionEndpointId }),
-    dispatchVersion: "agencity.model-dispatch.v1",
-  };
-  validateModelDispatch(legacy);
+  const effort = normalizeReasoningEffort(dispatch.configuration.reasoningEffort);
+  if (effort !== dispatch.reasoning.requestedEffort) {
+    throw new ValidationError("Model dispatch reasoning effort disagrees with its configuration");
+  }
+  if (dispatch.reasoning.resolverId !== "agencity.reasoning-dispatch.v1" ||
+      dispatch.reasoning.mode !== (effort === "provider-default" ? "omitted" : "requested")) {
+    throw new ValidationError("Model dispatch reasoning mode is invalid");
+  }
+  assertReasoningSelection(effort, dispatch.reasoning.capability);
   const contract = validateModelResponseContract(dispatch.responseContract);
   validateModelResponseContractCapability(
     contract,
@@ -300,13 +265,6 @@ export function validateModelDispatchV2(dispatch: ModelDispatchV2): void {
 }
 
 export function modelDispatchEquals(left: ModelDispatch, right: ModelDispatch): boolean {
-  return Bun.deepEquals(left, right);
-}
-
-export function modelDispatchV2Equals(
-  left: ModelDispatchV2,
-  right: ModelDispatchV2,
-): boolean {
   return Bun.deepEquals(left, right);
 }
 

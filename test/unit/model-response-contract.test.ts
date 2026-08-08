@@ -16,9 +16,9 @@ import {
   canonicalJsonDigest,
   createModelEffectOutputV2,
   resolveBuiltInModelResponseContract,
-  resolveModelDispatchV2,
+  resolveModelDispatch,
   validateModelContractViolation,
-  validateModelDispatchV2,
+  validateModelDispatch,
   validateModelEffectOutputV2,
   validateModelEffectFailureCode,
   validateModelResponse,
@@ -689,7 +689,7 @@ describe("provider-neutral model response contracts", () => {
   });
 
   test("builds one response-aware dispatch and rejects relation tampering", () => {
-    const dispatch = resolveModelDispatchV2({
+    const dispatch = resolveModelDispatch({
       configuration: {
         provider: "vercel",
         model: "openai/gpt-test",
@@ -717,38 +717,38 @@ describe("provider-neutral model response contracts", () => {
       },
     });
     expect(Object.isFrozen(dispatch)).toBe(true);
-    expect(() => validateModelDispatchV2(dispatch)).not.toThrow();
+    expect(() => validateModelDispatch(dispatch)).not.toThrow();
 
     const strict = structuredClone(dispatch) as any;
     strict.responseContract = resolveBuiltInModelResponseContract(
       AGENT_TOOL_CONTRACT_ID,
       "provider-strict",
     );
-    expect(() => validateModelDispatchV2(strict))
+    expect(() => validateModelDispatch(strict))
       .toThrow("lacks matching capability");
 
     const extra = { ...dispatch, tools: [] } as any;
-    expect(() => validateModelDispatchV2(extra))
+    expect(() => validateModelDispatch(extra))
       .toThrow("missing or unknown fields");
 
     const configurationExtra = structuredClone(dispatch) as any;
     configurationExtra.configuration.responseContract = {};
-    expect(() => validateModelDispatchV2(configurationExtra))
+    expect(() => validateModelDispatch(configurationExtra))
       .toThrow("configuration has missing or unknown fields");
 
     const reasoningExtra = structuredClone(dispatch) as any;
     reasoningExtra.reasoning.capability.source = "caller";
-    expect(() => validateModelDispatchV2(reasoningExtra))
+    expect(() => validateModelDispatch(reasoningExtra))
       .toThrow("capability has missing or unknown fields");
 
     const mismatched = structuredClone(dispatch) as any;
     mismatched.reasoning.requestedEffort = "low";
-    expect(() => validateModelDispatchV2(mismatched))
+    expect(() => validateModelDispatch(mismatched))
       .toThrow("disagrees with its configuration");
 
     const catalog = structuredClone(dispatch) as any;
     catalog.responseCapability.capability.catalogDigest = "c".repeat(64);
-    expect(() => validateModelDispatchV2(catalog))
+    expect(() => validateModelDispatch(catalog))
       .toThrow("disagree on catalog provenance");
   });
 });

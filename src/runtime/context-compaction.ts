@@ -16,11 +16,15 @@ import {
   type FrozenContextCompactionSource,
   type JsonValue,
   type ModelDispatch,
+  type ModelEffectOutputV2,
   type Usage,
+  validateModelEffectOutputV2,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
+import type { ModelExecutor } from "../executors/index.ts";
 import { containsBrokeredSecret } from "../security/index.ts";
 import { stableEffectId, type OutboxRunner } from "./outbox.ts";
+import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import {
   assertCompactionProgress,
   buildDeterministicExtractiveSummary,
@@ -81,7 +85,6 @@ export interface ContextInspection {
   readonly compactions: readonly ContextCompactionView[];
 }
 
-interface ModelOutput { readonly text: string; readonly finishReason: string; readonly usage: Usage }
 interface ExecuteRequest {
   readonly request: ContextCompactionState;
   readonly requestEvent: AgentEvent<"ContextCompactionRequested">;
@@ -98,10 +101,7 @@ export class CompactionService {
   constructor(
     readonly storage: AgentStorage,
     readonly outbox: OutboxRunner,
-    readonly capacities?: {
-      contextCapacity(configuration: AgentState["model"]): Readonly<{ provider: string; model: string; source: ContextCapacityProvenance["source"]; contextWindowTokens: number | null }>;
-      resolveDispatch(configuration: AgentState["model"]): ModelDispatch;
-    },
+    readonly capacities?: ModelExecutor,
   ) {}
 
   async inspect(sessionId: string, branchId: string): Promise<ContextInspection> {
@@ -174,7 +174,9 @@ export class CompactionService {
     const exact = createExactSourceManifest(selected, { sessionId, branchId, throughCursor, allowLineageBranches: true });
     const frozenSources = selected.map(toDomainSource);
     const modelDispatch = strategy === MODEL_SUMMARY_STRATEGY
-      ? this.capacities?.resolveDispatch(state.model)
+      ? this.capacities === undefined
+        ? undefined
+        : new ModelEffectAdmissionService(this.capacities).requestText(state.model).modelDispatch
       : undefined;
     if (strategy === MODEL_SUMMARY_STRATEGY && modelDispatch === undefined) {
       throw new CapabilityUnavailableError("model-summary compaction dispatch", "model executor is unavailable");
@@ -320,26 +322,29 @@ export class CompactionService {
           const terminal = execution.outcome === "unknown" ? "unknown" : "failed";
           return { outcome: "terminal", view: await this.#fail(requestEvent, terminal, execution.error ?? `Compaction model effect ${execution.outcome}`, effectId) };
         }
-        let output: ModelOutput;
-        try { output = parseModelOutput(execution.output); }
+        let output: ModelEffectOutputV2;
+        try { output = parseModelOutput(execution.output, request.modelDispatch!); }
         catch (error) { return { outcome: "terminal", view: await this.#fail(requestEvent, "failed", error instanceof Error ? error.message : String(error), effectId) }; }
-        const text = boundedUtf8(output.text.trim(), MAX_MODEL_SUMMARY_BYTES);
+        if (output.result.kind !== "text" || output.response.kind !== "complete") {
+          return { outcome: "terminal", view: await this.#fail(requestEvent, "failed", "Compaction text contract returned a non-text result", effectId) };
+        }
+        const text = boundedUtf8(output.result.text.trim(), MAX_MODEL_SUMMARY_BYTES);
         if (!text) return { outcome: "terminal", view: await this.#fail(requestEvent, "failed", "Compaction model returned an empty summary", effectId) };
         const elapsed = effectElapsedMs(await this.#events(requestEvent.sessionId, requestEvent.branchId), effectId);
         const callId = `context-compaction:${request.compactionId}:${level}:${index}`;
-        const tokens = output.usage.inputTokens + output.usage.outputTokens;
+        const tokens = output.response.usage.inputTokens + output.response.usage.outputTokens;
         const budgetEvents: any[] = [{
           sessionId: requestEvent.sessionId, branchId: requestEvent.branchId, type: "BudgetDebited", producer: "supervisor",
           idempotencyKey: `context-compaction-budget:${request.compactionId}:${level}:${index}`,
-          payload: { callId, tokens, costUsd: output.usage.costUsd, turns: 1, wallTimeMs: elapsed },
+          payload: { callId, tokens, costUsd: output.response.usage.costUsd, turns: 1, wallTimeMs: elapsed, usageSource: "provider-reported" },
         }];
-        const exceeded = budgetExceeded(current, { tokens, costUsd: output.usage.costUsd, turns: 1, wallTimeMs: elapsed });
+        const exceeded = budgetExceeded(current, { tokens, costUsd: output.response.usage.costUsd, turns: 1, wallTimeMs: elapsed });
         if (exceeded) budgetEvents.push({
           sessionId: requestEvent.sessionId, branchId: requestEvent.branchId, type: "BudgetExceeded", producer: "supervisor",
           idempotencyKey: `context-compaction-budget-exceeded:${request.compactionId}:${level}:${index}`, payload: exceeded,
         });
         await this.storage.appendEvents(budgetEvents);
-        usage = { inputTokens: usage.inputTokens + output.usage.inputTokens, outputTokens: usage.outputTokens + output.usage.outputTokens, costUsd: usage.costUsd + output.usage.costUsd };
+        usage = { inputTokens: usage.inputTokens + output.response.usage.inputTokens, outputTokens: usage.outputTokens + output.response.usage.outputTokens, costUsd: usage.costUsd + output.response.usage.costUsd };
         next.push({ label: `hierarchical level ${level + 1} chunk ${index + 1}`, text });
       }
       nodes = next;
@@ -475,11 +480,12 @@ function summaryPrompt(
     ],
   });
 }
-function parseModelOutput(value: JsonValue | undefined): ModelOutput {
-  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.text !== "string" || typeof value.finishReason !== "string" || !value.usage || typeof value.usage !== "object" || Array.isArray(value.usage)) throw new ValidationError("Compaction model returned an invalid response");
-  const usage = value.usage;
-  if (typeof usage.inputTokens !== "number" || !Number.isFinite(usage.inputTokens) || usage.inputTokens < 0 || typeof usage.outputTokens !== "number" || !Number.isFinite(usage.outputTokens) || usage.outputTokens < 0 || typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0) throw new ValidationError("Compaction model usage is invalid");
-  return { text: value.text, finishReason: value.finishReason, usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd } };
+function parseModelOutput(value: JsonValue | undefined, dispatch: ModelDispatch): ModelEffectOutputV2 {
+  return validateModelEffectOutputV2(value, {
+    responseContract: dispatch.responseContract,
+    responseCapability: dispatch.responseCapability,
+    configuredProvider: dispatch.configuration.provider,
+  });
 }
 function budgetExceeded(state: AgentState, delta: { tokens: number; costUsd: number; turns: number; wallTimeMs: number }): EventPayloads["BudgetExceeded"] | null {
   const limits = state.budget.limits;

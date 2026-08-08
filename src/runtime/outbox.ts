@@ -295,12 +295,13 @@ export class OutboxRunner {
     try {
       execution = executor
         ? await executor.execute({ ...record, attempt }, { signal: controller.signal, reportProgress })
-        : result("failed", undefined, `Executor unavailable: ${record.executor}`);
+        : result("failed", undefined, `Executor unavailable: ${record.executor}`, record.executor === "model" ? "provider-request-failed" : undefined);
     } catch (error) {
       execution = result(
         controller.signal.aborted ? "cancelled" : "failed",
         undefined,
         error instanceof Error ? error.message : String(error),
+        !controller.signal.aborted && record.executor === "model" ? "transport-failed" : undefined,
       );
     } finally {
       // A suffix matching the beginning of a known secret is withheld until a
@@ -310,10 +311,22 @@ export class OutboxRunner {
       progressOpen = false;
       this.#controllers.delete(record.effectId);
     }
+    if (record.executor === "model" && execution.outcome === "failed" && execution.modelFailure === undefined) {
+      execution = result("failed", execution.output, execution.error ?? "Model execution failed without a typed failure", "provider-request-failed");
+    }
+    if (record.executor === "model" && execution.outcome !== "failed" && execution.modelFailure !== undefined) {
+      execution = result("failed", undefined, "Model executor returned failure provenance for a non-failed outcome", "provider-request-failed");
+    }
+    if (record.executor === "model" && execution.output !== undefined && containsBrokeredSecret(execution.output)) {
+      execution = result("failed", undefined, "Model output contained brokered credential material", "stream-failed");
+    }
     const safeExecution = result(
       execution.outcome,
-      execution.output === undefined ? undefined : scrubJson(execution.output),
+      execution.output === undefined
+        ? undefined
+        : record.executor === "model" ? execution.output : scrubJson(execution.output),
       execution.error === undefined ? undefined : scrubText(execution.error),
+      execution.modelFailure,
     );
     await this.storage.appendEvents([{
       sessionId: record.sessionId,
@@ -327,6 +340,7 @@ export class OutboxRunner {
         outcome: safeExecution.outcome,
         ...(safeExecution.output === undefined ? {} : { output: safeExecution.output }),
         ...(safeExecution.error === undefined ? {} : { error: safeExecution.error }),
+        ...(safeExecution.modelFailure === undefined ? {} : { modelFailure: { code: safeExecution.modelFailure } }),
         observedAt: new Date().toISOString(),
       },
     }]);
@@ -340,8 +354,8 @@ export class OutboxRunner {
         (event.payload as { effectId: string }).effectId === record.effectId,
     );
     if (!outcome) return result(record.status as EffectOutcome, undefined, "Terminal outbox row has no outcome event");
-    const payload = outcome.payload as { outcome: EffectOutcome; output?: JsonValue; error?: string };
-    return result(payload.outcome, payload.output, payload.error);
+    const payload = outcome.payload as { outcome: EffectOutcome; output?: JsonValue; error?: string; modelFailure?: { code: NonNullable<ExecutionResult["modelFailure"]> } };
+    return result(payload.outcome, payload.output, payload.error, payload.modelFailure?.code);
   }
 
   /**

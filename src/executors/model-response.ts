@@ -27,7 +27,7 @@ import {
   type ModelAdapterGuardCode,
   type ModelContractViolation,
   type ModelContractViolationCode,
-  type ModelDispatchV2,
+  type ModelDispatch,
   type ModelEffectFailureCode,
   type ModelEffectOutputV2,
   type ModelResponseBlock,
@@ -35,7 +35,7 @@ import {
   type ModelToolCallSummary,
   type ModelToolSubmission,
   type ModelWarning,
-  type NormalizedModelResponse,
+  type ModelResponse,
   type ProviderNeutralModelOutputDelta,
   type RequiredToolSetModelResponseContract,
   type Usage,
@@ -167,7 +167,7 @@ export function requiredToolGenerationOptions(
 
 export async function consumeRequiredToolStream(input: {
   readonly stream: RequiredToolStreamResult;
-  readonly dispatch: ModelDispatchV2;
+  readonly dispatch: ModelDispatch;
   readonly guard: ModelResponseGuard;
   readonly onDelta: (delta: ProviderNeutralModelOutputDelta) => void;
   readonly gatewayCost: (metadata: unknown) => number;
@@ -219,7 +219,7 @@ export async function consumeRequiredToolStream(input: {
 
 export function formalOutputFromAgentAction(input: {
   readonly action: AgentAction;
-  readonly dispatch: ModelDispatchV2;
+  readonly dispatch: ModelDispatch;
   readonly providerToolCallId: string;
   readonly provider: string;
   readonly adapter: string;
@@ -250,7 +250,7 @@ export function formalOutputFromAgentAction(input: {
 }
 
 export function formalMissingToolOutput(input: {
-  readonly dispatch: ModelDispatchV2;
+  readonly dispatch: ModelDispatch;
   readonly provider: string;
   readonly adapter: string;
   readonly text?: string;
@@ -371,10 +371,10 @@ class FormalStreamState {
 
   guardOutput(
     code: ModelAdapterGuardCode,
-    dispatch: ModelDispatchV2,
+    dispatch: ModelDispatch,
   ): ModelEffectOutputV2 {
     const blocks = this.#evidenceBlocks(code);
-    const response: NormalizedModelResponse = {
+    const response: ModelResponse = {
       kind: "guard-aborted",
       blocks,
       termination: { kind: "adapter-guard", code },
@@ -395,7 +395,7 @@ class FormalStreamState {
   }
 
   completeOutput(
-    dispatch: ModelDispatchV2,
+    dispatch: ModelDispatch,
     gatewayCost: (metadata: unknown) => number,
   ): ModelEffectOutputV2 {
     if (this.#abortPart || !this.#terminal || !this.#finished) {
@@ -836,7 +836,7 @@ function validateToolInputValue(
 }
 
 function acceptedSubmissionOutput(input: {
-  readonly dispatch: ModelDispatchV2;
+  readonly dispatch: ModelDispatch;
   readonly contract: RequiredToolSetModelResponseContract;
   readonly provider: string;
   readonly adapter: string;
@@ -916,8 +916,8 @@ function acceptedSubmissionOutput(input: {
 }
 
 function violationOutput(
-  dispatch: ModelDispatchV2,
-  response: NormalizedModelResponse,
+  dispatch: ModelDispatch,
+  response: ModelResponse,
   code: ModelContractViolationCode,
   message: string,
   observed: {
@@ -1149,7 +1149,7 @@ function classifyStreamFailure(
 }
 
 function unsupportedContractFailure(
-  dispatch: ModelDispatchV2,
+  dispatch: ModelDispatch,
 ): ModelProviderResponseFailureError {
   return new ModelProviderResponseFailureError(
     "unsupported-response-contract",
@@ -1192,7 +1192,7 @@ function isContextOverflow(error: unknown): boolean {
 }
 
 function requiredContract(
-  dispatch: ModelDispatchV2,
+  dispatch: ModelDispatch,
 ): RequiredToolSetModelResponseContract {
   if (dispatch.responseContract.kind !== "required-tool-set") {
     throw new Error("Formal response execution requires a required-tool-set contract");
@@ -1200,7 +1200,7 @@ function requiredContract(
   return dispatch.responseContract;
 }
 
-function requiredCapability(dispatch: ModelDispatchV2) {
+function requiredCapability(dispatch: ModelDispatch) {
   if (dispatch.responseCapability.kind !== "required-tool-set") {
     throw new Error("Formal response execution requires required-tool-set capability");
   }

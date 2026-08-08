@@ -2,9 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   AGENT_ACTION_PROTOCOL,
   AGENT_ACTION_VERSION,
+  AGENT_TOOL_CONTRACT_ID,
+  MAX_AGENT_TOOL_INPUT_BYTES,
   AgentClient,
   ProtocolServer,
   ScriptedAgentActionProvider,
+  ModelEffectAdmissionService,
   Supervisor,
   newId,
   projectEvents,
@@ -12,9 +15,11 @@ import {
   type AgentAction,
   type JsonValue,
   type ModelConfiguration,
-  type ModelProvider,
-  type ModelResponse,
+  type ModelDispatch,
+  type ModelEffectOutputV2,
+  type TextModelResponse,
 } from "../../src/index.ts";
+import { consumeRequiredToolStream, ModelProviderResponseFailureError, ModelResponseGuard } from "../../src/executors/model-response.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -29,7 +34,7 @@ const action = <T extends Omit<AgentAction, "protocol" | "version">>(value: T): 
 class RecordingActions extends ScriptedAgentActionProvider {
   readonly contexts: JsonValue[] = [];
   calls = 0;
-  override async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  override async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.contexts.push(context);
     this.calls++;
     return super.complete(context, configuration, signal);
@@ -43,28 +48,84 @@ class SlowActions extends ScriptedAgentActionProvider {
     super(script, "slow-actions");
     this.delayMs = delayMs;
   }
-  override async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  override async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.calls++;
     await Bun.sleep(this.delayMs);
     return super.complete(context, configuration, signal);
   }
 }
 
-class HoldingActions implements ModelProvider {
-  readonly name = "holding-actions";
-  readonly displayName = "holding-actions (cancellation fixture)";
+class HoldingActions extends ScriptedAgentActionProvider {
   calls = 0;
   readonly entered: Promise<void>;
   #markEntered!: () => void;
-  constructor() { this.entered = new Promise(resolve => { this.#markEntered = resolve; }); }
-  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  constructor() {
+    super([action({ type: "final", content: "Must be cancelled." })], "holding-actions");
+    this.entered = new Promise(resolve => { this.#markEntered = resolve; });
+  }
+  override async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.calls++;
     this.#markEntered();
-    return new Promise<ModelResponse>((_resolve, reject) => {
+    return new Promise<TextModelResponse>((_resolve, reject) => {
       const abort = () => reject(new DOMException("Aborted", "AbortError"));
       if (signal.aborted) abort();
       else signal.addEventListener("abort", abort, { once: true });
     });
+  }
+}
+
+class GuardAbortActions {
+  readonly name: string = "guard-abort-actions";
+  readonly capabilities = {
+    streaming: false,
+    contextWindowTokens: 128_000,
+    contextCapacitySource: "provider-metadata",
+    requiredToolSet: {
+      status: "runtime-validated",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "runtime-rejected",
+      streaming: true,
+      adapter: "agencity.guard-abort.fixture.v1",
+    },
+  } as const;
+  calls = 0;
+  async complete(): Promise<TextModelResponse> {
+    throw new Error("text completion is not used");
+  }
+  async streamResponse(
+    _context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+    onDelta: (delta: any) => void,
+  ): Promise<ModelEffectOutputV2> {
+    this.calls++;
+    const guard = new ModelResponseGuard(signal);
+    return consumeRequiredToolStream({
+      dispatch,
+      guard,
+      onDelta,
+      gatewayCost: () => 0,
+      stream: {
+        fullStream: (async function* () {
+          yield { type: "tool-input-start", id: "guard-call", toolName: "bun_console" };
+          yield { type: "tool-input-delta", id: "guard-call", delta: "x".repeat(MAX_AGENT_TOOL_INPUT_BYTES + 1) };
+        })(),
+      },
+    });
+  }
+}
+
+class FailingFormalActions extends GuardAbortActions {
+  override readonly name: string = "failing-formal-actions";
+  override calls = 0;
+  override async streamResponse(): Promise<ModelEffectOutputV2> {
+    this.calls++;
+    throw new ModelProviderResponseFailureError(
+      "stream-failed",
+      this.name,
+      "failure-v1",
+      "Fixture stream failed",
+    );
   }
 }
 
@@ -80,6 +141,14 @@ async function fixture(script: readonly (AgentAction | string)[], budget: Record
     workspaceId: "agent-run", model: { provider: provider.name, model: "scripted-v1" }, budget,
   });
   return { temp, provider, supervisor, ...session };
+}
+
+function fixtureContextWindow(provider: string, model: string) {
+  return {
+    provider, model, source: "model-catalog" as const,
+    contextWindowTokens: 128_000, outputReserveTokens: 4_096,
+    estimatorId: "utf8-bytes-per-token-v1", triggerRatio: 0.8, targetRatio: 0.6,
+  };
 }
 
 function providerObservations(context: JsonValue): Array<{ eventId: string; type: string; payload: JsonValue }> {
@@ -164,13 +233,20 @@ describe("autonomous durable agent runs", () => {
         { role: "assistant", content: "Created answer.txt and verified its contents." },
       ]);
       expect(Object.values(state.modelCalls).every(call => call.responseMessageId === undefined)).toBe(true);
+      const responseContract = Object.values(state.modelCalls)[0]!.modelDispatch.responseContract;
+      expect(responseContract.kind).toBe("required-tool-set");
+      expect((value.provider.contexts[0] as any).responseContract).toMatchObject({
+        contractId: AGENT_TOOL_CONTRACT_ID,
+        contractDigest: responseContract.kind === "required-tool-set" ? responseContract.contractDigest : "unreachable",
+        selection: "exactly-one-of",
+      });
       const history = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
       const contexts = history.filter(event => event.type === "ContextMaterialized");
       expect((contexts[1]!.payload as any).records.some((record: any) => record.eventId === cells[0]!.eventId)).toBe(true);
-      const rawActions = history.filter(event => event.type === "AgentRunActionCommitted").map(event => (event.payload as any).raw);
-      expect(rawActions).toHaveLength(2);
-      expect(rawActions.every(raw => typeof raw === "string" && raw.includes('"protocol":"agencity.agent-action"'))).toBe(true);
-      expect(state.messages.some(message => rawActions.includes(message.content))).toBe(false);
+      const actionEvents = history.filter(event => event.type === "AgentRunActionCommitted");
+      expect(actionEvents).toHaveLength(2);
+      expect(actionEvents.every(event => (event.payload as any).source.kind === "tool-submission")).toBe(true);
+      expect(actionEvents.every(event => !Object.hasOwn(event.payload, "raw"))).toBe(true);
     } finally { await value.supervisor.close(); }
   });
 
@@ -186,19 +262,149 @@ describe("autonomous durable agent runs", () => {
       expect(await Bun.file(`${value.temp.workspaceRoot}/owned`).exists()).toBe(false);
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
       expect(Object.values(state.cells)).toEqual([]);
-      expect(state.agentRuns[result.runId]?.steps[0]?.rejection).toContain("exactly one JSON object");
+      expect(state.agentRuns[result.runId]?.steps[0]?.rejection).toContain("without calling a required tool");
       const correctionObservations = providerObservations(value.provider.contexts[1]!)
         .filter(item => item.type === "AgentRunActionRejected");
       expect(correctionObservations).toHaveLength(1);
       expect((value.provider.contexts[1] as any).run.instruction)
-        .toContain("return exactly one corrected action JSON object");
+        .toContain("call exactly one provided tool");
       expect(correctionObservations[0]?.payload).toMatchObject({
         runId: result.runId,
-        error: expect.stringContaining("exactly one JSON object"),
+        error: expect.stringContaining("without calling a required tool"),
       });
       expect(value.provider.contexts.flatMap(providerObservations)
         .filter(item => item.eventId === correctionObservations[0]!.eventId)).toHaveLength(1);
     } finally { await value.supervisor.close(); }
+  });
+
+  test("binds committed action provenance to the retained submission and rejects tampering", async () => {
+    const value = await fixture([action({ type: "final", content: "Bound action." })]);
+    const append = value.supervisor.storage.appendEvents.bind(value.supervisor.storage);
+    let captured: any;
+    (value.supervisor.storage as any).appendEvents = async (events: any[], ...rest: any[]) => {
+      const actionEvent = events.find(event => event.type === "AgentRunActionCommitted");
+      if (actionEvent && !captured) {
+        captured = actionEvent;
+        throw new Error("capture action boundary");
+      }
+      return (append as any)(events, ...rest);
+    };
+    try {
+      await expect(value.supervisor.runs.start(value.sessionId, value.branchId, "Bind the retained action"))
+        .rejects.toThrow("capture action boundary");
+      (value.supervisor.storage as any).appendEvents = append;
+      expect(captured).toBeDefined();
+      const variants = [
+        { ...captured.payload, source: { ...captured.payload.source, resultDigest: `sha256:${"0".repeat(64)}` } },
+        { ...captured.payload, source: { ...captured.payload.source, providerToolCallId: "tampered-provider-call" } },
+        { ...captured.payload, action: action({ type: "final", content: "Tampered action." }) },
+      ];
+      for (const [index, payload] of variants.entries()) {
+        await expect(append([{ ...captured, idempotencyKey: `tampered-action:${index}`, payload }]))
+          .rejects.toThrow();
+      }
+      await append([captured]);
+      await append([captured]);
+      const retained = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
+      const budget = retained.find(event => event.type === "BudgetDebited")!;
+      await expect(append([{ ...budget, id: undefined, idempotencyKey: "duplicate-budget-with-new-intent" } as any]))
+        .rejects.toThrow();
+      const state = projectEvents(retained);
+      const run = Object.values(state.agentRuns)[0]!;
+      expect(run.steps).toHaveLength(1);
+      expect(run.steps[0]?.actionSource).toEqual(captured.payload.source);
+      const completed = await value.supervisor.runs.advance(value.sessionId, value.branchId, run.id);
+      expect(completed).toMatchObject({ status: "succeeded", final: "Bound action." });
+      expect(value.provider.calls).toBe(1);
+    } finally {
+      (value.supervisor.storage as any).appendEvents = append;
+      await value.supervisor.close();
+    }
+  });
+
+  test("binds rejection provenance to the retained violation and rejects tampering", async () => {
+    const value = await fixture(["JSON-looking text is not a formal call"]);
+    const append = value.supervisor.storage.appendEvents.bind(value.supervisor.storage);
+    let captured: any;
+    (value.supervisor.storage as any).appendEvents = async (events: any[], ...rest: any[]) => {
+      const rejection = events.find(event => event.type === "AgentRunActionRejected");
+      if (rejection && !captured) {
+        captured = rejection;
+        throw new Error("capture rejection boundary");
+      }
+      return (append as any)(events, ...rest);
+    };
+    try {
+      await expect(value.supervisor.runs.start(value.sessionId, value.branchId, "Reject text transport"))
+        .rejects.toThrow("capture rejection boundary");
+      (value.supervisor.storage as any).appendEvents = append;
+      const variants = [
+        { ...captured.payload, error: "tampered violation" },
+        { ...captured.payload, source: { ...captured.payload.source, resultDigest: `sha256:${"f".repeat(64)}` } },
+        { ...captured.payload, source: { ...captured.payload.source, providerToolCallId: "fabricated-call" } },
+      ];
+      for (const [index, payload] of variants.entries()) {
+        await expect(append([{ ...captured, idempotencyKey: `tampered-rejection:${index}`, payload }]))
+          .rejects.toThrow();
+      }
+      await append([captured]);
+      const history = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
+      expect(history.filter(event => event.type === "AgentRunActionRejected")).toHaveLength(1);
+      const state = projectEvents(history);
+      expect(Object.values(state.agentRuns)[0]?.steps[0]?.actionSource).toEqual(captured.payload.source);
+    } finally {
+      (value.supervisor.storage as any).appendEvents = append;
+      await value.supervisor.close();
+    }
+  });
+
+  test("binds model completion and budget debit to the retained effect output and rejects tampering", async () => {
+    const value = await fixture([action({ type: "final", content: "Bound completion." })]);
+    const append = value.supervisor.storage.appendEvents.bind(value.supervisor.storage);
+    let captured: any[] | undefined;
+    (value.supervisor.storage as any).appendEvents = async (events: any[], ...rest: any[]) => {
+      if (!captured && events.some(event => event.type === "ModelCallCompleted")) {
+        captured = events;
+        throw new Error("capture completion boundary");
+      }
+      return (append as any)(events, ...rest);
+    };
+    try {
+      await expect(value.supervisor.runs.start(value.sessionId, value.branchId, "Bind the retained completion"))
+        .rejects.toThrow("capture completion boundary");
+      (value.supervisor.storage as any).appendEvents = append;
+      const completion = captured!.find(event => event.type === "ModelCallCompleted")!;
+      const budget = captured!.find(event => event.type === "BudgetDebited")!;
+      const completionVariants = [
+        { ...completion.payload, termination: { kind: "text-stop" } },
+        { ...completion.payload, warnings: [{ kind: "provider", message: "fabricated warning" }] },
+        { ...completion.payload, usage: { ...completion.payload.usage, inputTokens: completion.payload.usage.inputTokens + 1 } },
+        { ...completion.payload, usageSource: "conservative-guard-estimate" },
+      ];
+      for (const [index, payload] of completionVariants.entries()) {
+        await expect(append([{ ...completion, idempotencyKey: `tampered-completion:${index}`, payload }]))
+          .rejects.toThrow("does not match its authoritative retained effect output");
+      }
+      await append([completion]);
+      const budgetVariants = [
+        { ...budget.payload, tokens: budget.payload.tokens + 1 },
+        { ...budget.payload, costUsd: budget.payload.costUsd + 0.5 },
+        { ...budget.payload, turns: 2 },
+        { ...budget.payload, usageSource: "conservative-guard-estimate" },
+      ];
+      for (const [index, payload] of budgetVariants.entries()) {
+        await expect(append([{ ...budget, idempotencyKey: `tampered-budget:${index}`, payload }]))
+          .rejects.toThrow();
+      }
+      await append([budget]);
+      const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
+      const call = Object.values(state.modelCalls)[0]!;
+      expect(call).toMatchObject({ status: "succeeded", usageSource: "provider-reported" });
+      expect(call.budgetDebited).toMatchObject({ tokens: budget.payload.tokens, turns: 1, usageSource: "provider-reported" });
+    } finally {
+      (value.supervisor.storage as any).appendEvents = append;
+      await value.supervisor.close();
+    }
   });
 
   test("fails after the bounded action-correction attempt is also malformed", async () => {
@@ -213,8 +419,8 @@ describe("autonomous durable agent runs", () => {
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
       expect(Object.values(state.cells)).toEqual([]);
       expect(state.agentRuns[result.runId]?.steps.map(step => step.rejection)).toEqual([
-        expect.stringContaining("exactly one JSON object"),
-        expect.stringContaining("exactly one JSON object"),
+        expect.stringContaining("without calling a required tool"),
+        expect.stringContaining("without calling a required tool"),
       ]);
     } finally { await value.supervisor.close(); }
   });
@@ -229,8 +435,40 @@ describe("autonomous durable agent runs", () => {
       expect(result).toMatchObject({ status: "budget_exceeded", steps: 1 });
       expect(value.provider.calls).toBe(1);
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
-      expect(state.agentRuns[result.runId]?.steps[0]?.rejection).toContain("exactly one JSON object");
+      expect(state.agentRuns[result.runId]?.steps[0]?.rejection).toContain("without calling a required tool");
     } finally { await value.supervisor.close(); }
+  });
+
+  test("charges guard-aborted responses from retained estimates without inventing provider usage", async () => {
+    const temp = await makeTempRuntime("agencity-agent-guard-budget-"); temps.push(temp);
+    const provider = new GuardAbortActions();
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    try {
+      const session = await supervisor.createSession({
+        workspaceId: "guard-budget",
+        model: { provider: provider.name, model: "guard-v1", maxOutputTokens: 64 },
+        budget: { turnLimit: 1 },
+      });
+      const result = await supervisor.runs.start(session.sessionId, session.branchId, "Trigger the formal guard");
+      expect(result).toMatchObject({ status: "budget_exceeded", steps: 1 });
+      expect(provider.calls).toBe(1);
+      const state = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
+      const call = Object.values(state.modelCalls)[0]!;
+      expect(call).toMatchObject({
+        status: "succeeded",
+        usage: null,
+        usageSource: "conservative-guard-estimate",
+        result: { kind: "contract-violation", code: "oversized-tool-input" },
+      });
+      expect(state.budget.tokens).toBe(call.estimatedInputTokens + 64);
+      expect(state.budget.costUsd).toBe(0);
+    } finally { await supervisor.close(); }
   });
 
   test("resumes the bounded correction after a crash committed the rejection", async () => {
@@ -315,34 +553,20 @@ describe("autonomous durable agent runs", () => {
     } finally { await value.supervisor.close(); }
   });
 
-  test("pauses for clarification and permission, then continues from exact durable responses", async () => {
+  test("keeps clarification and permission actions unreachable under the formal tool contract", async () => {
     const value = await fixture([
       action({ type: "clarification", question: "Which filename should I create?" }),
       action({ type: "permission", permission: "write workspace file", question: "May I create chosen.txt?" }),
-      action({ type: "typescript", code: `return await tools.writeFile("chosen.txt", "approved");` }),
-      action({ type: "final", content: "Created chosen.txt after approval." }),
     ]);
     try {
-      const waiting = await value.supervisor.runs.start(value.sessionId, value.branchId, "Create the requested file");
-      expect(waiting).toMatchObject({ status: "waiting_for_user", pendingInput: { kind: "clarification" } });
-      const permission = await value.supervisor.runs.respond(value.sessionId, value.branchId, waiting.runId, waiting.pendingInput!.id, "chosen.txt");
-      expect(permission).toMatchObject({ status: "waiting_for_user", pendingInput: { kind: "permission" } });
-      await expect(value.supervisor.runs.respond(value.sessionId, value.branchId, waiting.runId, permission.pendingInput!.id, { response: "yes" }))
-        .rejects.toThrow("approved=true or approved=false");
-      const completed = await value.supervisor.runs.respond(value.sessionId, value.branchId, waiting.runId, permission.pendingInput!.id, { response: "yes", approved: true });
-      expect(completed).toMatchObject({ status: "succeeded", steps: 4 });
-      expect(await value.supervisor.runs.respond(value.sessionId, value.branchId, waiting.runId, permission.pendingInput!.id, { response: "yes", approved: true })).toEqual(completed);
-      await expect(value.supervisor.runs.respond(value.sessionId, value.branchId, waiting.runId, permission.pendingInput!.id, { response: "no", approved: false }))
-        .rejects.toThrow("already answered differently");
-      expect(value.provider.calls).toBe(4);
-      expect(await Bun.file(`${value.temp.workspaceRoot}/chosen.txt`).text()).toBe("approved");
-      const received = value.provider.contexts.flatMap(providerObservations).filter(item => item.type === "AgentRunUserInputReceived");
-      expect(received).toHaveLength(2);
-      expect(new Set(received.map(item => item.eventId)).size).toBe(2);
-      expect(received.map(item => item.payload)).toEqual([
-        expect.objectContaining({ response: "chosen.txt" }),
-        expect.objectContaining({ response: "yes", approved: true }),
-      ]);
+      const result = await value.supervisor.runs.start(value.sessionId, value.branchId, "Create the requested file");
+      expect(result).toMatchObject({ status: "failed", steps: 2 });
+      expect(result.pendingInput).toBeUndefined();
+      const run = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId })).agentRuns[result.runId]!;
+      expect(Object.values(run.inputRequests)).toEqual([]);
+      expect(run.steps.every(step => step.action === undefined && step.rejection !== undefined)).toBe(true);
+      await expect(value.supervisor.runs.respond(value.sessionId, value.branchId, result.runId, "unreachable", "answer"))
+        .rejects.toThrow();
     } finally { await value.supervisor.close(); }
   });
 
@@ -520,32 +744,22 @@ describe("autonomous durable agent runs", () => {
     } finally { restore(); await supervisor.close(); }
   });
 
-  test("recovers a committed clarification action by its deterministic input request without another provider call", async () => {
+  test("never commits a clarification action or pending input under schema three", async () => {
     const temp = await makeTempRuntime("agencity-agent-input-action-recovery-"); temps.push(temp);
     const provider = new RecordingActions([
       action({ type: "clarification", question: "Which retained choice?" }),
     ], "input-action-recover-actions");
     let supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
     const session = await supervisor.createSession({ workspaceId: "input-action-recovery", model: { provider: provider.name, model: "v1" } });
-    const restore = crashAfterNextActionCommit(supervisor);
-    let runId = "";
     try {
-      await expect(supervisor.runs.start(session.sessionId, session.branchId, "Ask the retained question"))
-        .rejects.toThrow("simulated crash after AgentRunActionCommitted");
-      restore();
-      const crashed = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
-      runId = Object.values(crashed.agentRuns)[0]!.id;
-      expect(Object.values(crashed.agentRuns[runId]!.inputRequests)).toHaveLength(0);
-      expect(provider.calls).toBe(1);
-      await supervisor.close();
-
-      supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: true });
-      expect(await supervisor.runs.get(session.sessionId, session.branchId, runId))
-        .toMatchObject({ status: "waiting_for_user", steps: 1, pendingInput: { kind: "clarification", question: "Which retained choice?" } });
-      expect(provider.calls).toBe(1);
-      const recovered = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId })).agentRuns[runId]!;
-      expect(Object.values(recovered.inputRequests)).toHaveLength(1);
-    } finally { restore(); await supervisor.close(); }
+      const result = await supervisor.runs.start(session.sessionId, session.branchId, "Ask the retained question");
+      expect(result).toMatchObject({ status: "failed", steps: 2 });
+      const history = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      const run = projectEvents(history).agentRuns[result.runId]!;
+      expect(Object.values(run.inputRequests)).toHaveLength(0);
+      expect(history.filter(event => event.type === "AgentRunActionCommitted")).toHaveLength(0);
+      expect(history.filter(event => event.type === "AgentRunActionRejected")).toHaveLength(2);
+    } finally { await supervisor.close(); }
   });
 
   test("marks a stable cell interrupted after action commit as unknown and never replays it or calls the provider", async () => {
@@ -598,7 +812,8 @@ describe("autonomous durable agent runs", () => {
     const session = await supervisor.createSession({ workspaceId: "recovery", model: { provider: provider.name, model: "v1" } });
     const runId = newId(); const stepId = `agent-run-${runId}-step-1`; const contextId = `${stepId}-context`; const callId = `${stepId}-call`; const actionId = `${stepId}-action`;
     const effectKey = `agent-run-model:${runId}:1`; const effectId = stableEffectId(session.sessionId, effectKey);
-    const modelDispatch = supervisor.modelExecutor.resolveDispatch({ provider: provider.name, model: "v1", reasoningEffort: "provider-default" });
+    const modelDispatch = new ModelEffectAdmissionService(supervisor.modelExecutor)
+      .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, { provider: provider.name, model: "v1", reasoningEffort: "provider-default" }).modelDispatch;
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
       payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Recover this run" },
@@ -612,8 +827,11 @@ describe("autonomous durable agent runs", () => {
       sessionId: session.sessionId, branchId: session.branchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: `agent-run-context:${runId}:1`,
       payload: { contextId, records: [], contentHash: "a".repeat(64), context: { run: { stepOrdinal: 1 }, messages: [] } },
     }, {
+      sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor", idempotencyKey: `agent-run-model-attempt:${runId}:1:1`,
+      payload: { runId, stepId, ordinal: 1, attempt: 1, contextId, callId, effectId, reason: "initial", estimatedInputTokens: 0, contextWindow: fixtureContextWindow(provider.name, "v1") },
+    }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
-      payload: { callId, contextId, effectId, modelDispatch },
+      payload: { callId, contextId, effectId, modelDispatch, estimatedInputTokens: 0, attempt: 1, contextWindow: fixtureContextWindow(provider.name, "v1") },
     }]);
     await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context: { run: { stepOrdinal: 1 }, messages: [] }, modelDispatch } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
     expect((await supervisor.outbox.run(effectId)).outcome).toBe("succeeded");
@@ -626,7 +844,7 @@ describe("autonomous durable agent runs", () => {
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallCompleted", producer: "supervisor",
       idempotencyKey: `forbidden-agent-run-complete:${callId}`,
-      payload: { callId, responseMessageId: `forbidden-${callId}`, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } },
+      payload: { callId, responseMessageId: `forbidden-${callId}`, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } } as any,
     }])).rejects.toThrow();
     expect(projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId })).messages.map(message => message.content))
       .toEqual(["Recover this run"]);
@@ -650,6 +868,69 @@ describe("autonomous durable agent runs", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("recovers the exact typed model failure without repeating the provider call", async () => {
+    const temp = await makeTempRuntime("agencity-agent-failure-recovery-"); temps.push(temp);
+    const provider = new FailingFormalActions();
+    let supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "failure-recovery",
+      model: { provider: provider.name, model: "failure-v1" },
+    });
+    const interceptedStorage = supervisor.storage;
+    const append = interceptedStorage.appendEvents.bind(interceptedStorage);
+    let intercepted = false;
+    (interceptedStorage as any).appendEvents = async (events: any[], ...rest: any[]) => {
+      if (!intercepted && events.some(event => event.type === "ModelCallTerminated")) {
+        intercepted = true;
+        throw new Error("crash before typed model termination");
+      }
+      return (append as any)(events, ...rest);
+    };
+    try {
+      await expect(supervisor.runs.start(session.sessionId, session.branchId, "Fail once"))
+        .rejects.toThrow("crash before typed model termination");
+      (interceptedStorage as any).appendEvents = append;
+      const retainedEvents = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
+      const outcomeEvent = retainedEvents.find(event => event.type === "EffectOutcomeRecorded")!;
+      expect((outcomeEvent.payload as any).modelFailure).toEqual({ code: "stream-failed" });
+      await expect(append([{
+        sessionId: session.sessionId, branchId: session.branchId, type: "EffectOutcomeRecorded", producer: "executor",
+        idempotencyKey: "bare-model-failure-shape",
+        payload: { ...(outcomeEvent.payload as any), effectId: "shape-probe", modelFailure: "stream-failed" },
+      }])).rejects.toThrow("Invalid EffectOutcomeRecorded payload");
+      await expect(append([{
+        sessionId: session.sessionId, branchId: session.branchId, type: "EffectOutcomeRecorded", producer: "executor",
+        idempotencyKey: "succeeded-model-failure-shape",
+        payload: { ...(outcomeEvent.payload as any), effectId: "shape-probe", outcome: "succeeded", modelFailure: { code: "stream-failed" } },
+      }])).rejects.toThrow("Only failed model effects may retain modelFailure");
+      const before = projectEvents(retainedEvents);
+      expect(Object.values(before.effects)[0]).toMatchObject({ status: "failed", modelFailure: "stream-failed" });
+      expect(Object.values(before.modelCalls)[0]).toMatchObject({ status: "requested" });
+      await supervisor.close();
+
+      supervisor = await Supervisor.open({
+        databaseUrl: temp.databaseUrl,
+        artifactDirectory: temp.artifactDirectory,
+        workspaceRoot: temp.workspaceRoot,
+        modelProviders: [provider],
+        recover: true,
+      });
+      const after = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
+      expect(Object.values(after.modelCalls)[0]).toMatchObject({ status: "failed", failureCode: "stream-failed" });
+      expect(Object.values(after.agentRuns)[0]).toMatchObject({ status: "failed" });
+      expect(provider.calls).toBe(1);
+    } finally {
+      (interceptedStorage as any).appendEvents = append;
+      await supervisor.close();
+    }
+  });
+
   test("recovery drains an unclaimed stable model request exactly once", async () => {
     const temp = await makeTempRuntime("agencity-agent-pending-recovery-"); temps.push(temp);
     const provider = new RecordingActions([action({ type: "final", content: "Pending recovered once." })], "pending-recover-actions");
@@ -657,7 +938,8 @@ describe("autonomous durable agent runs", () => {
     const session = await supervisor.createSession({ workspaceId: "pending-recovery", model: { provider: provider.name, model: "v1" } });
     const runId = newId(); const stepId = `agent-run-${runId}-step-1`; const contextId = `${stepId}-context`; const callId = `${stepId}-call`; const actionId = `${stepId}-action`;
     const effectKey = `agent-run-model:${runId}:1`; const effectId = stableEffectId(session.sessionId, effectKey);
-    const modelDispatch = supervisor.modelExecutor.resolveDispatch({ provider: provider.name, model: "v1", reasoningEffort: "provider-default" });
+    const modelDispatch = new ModelEffectAdmissionService(supervisor.modelExecutor)
+      .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, { provider: provider.name, model: "v1", reasoningEffort: "provider-default" }).modelDispatch;
     const context = { run: { stepOrdinal: 1 }, messages: [] };
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
@@ -672,8 +954,11 @@ describe("autonomous durable agent runs", () => {
       sessionId: session.sessionId, branchId: session.branchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: `agent-run-context:${runId}:1`,
       payload: { contextId, records: [], contentHash: "b".repeat(64), context },
     }, {
+      sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor", idempotencyKey: `agent-run-model-attempt:${runId}:1:1`,
+      payload: { runId, stepId, ordinal: 1, attempt: 1, contextId, callId, effectId, reason: "initial", estimatedInputTokens: 0, contextWindow: fixtureContextWindow(provider.name, "v1") },
+    }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
-      payload: { callId, contextId, effectId, modelDispatch },
+      payload: { callId, contextId, effectId, modelDispatch, estimatedInputTokens: 0, attempt: 1, contextWindow: fixtureContextWindow(provider.name, "v1") },
     }]);
     await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context, modelDispatch } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
     expect(provider.calls).toBe(0);
@@ -713,18 +998,16 @@ describe("autonomous durable agent runs", () => {
     } finally { await supervisor.close(); }
   });
 
-  test("exposes start, inspect, clarification response, and legacy diagnostic turns through the protocol client", async () => {
+  test("exposes formal runs while the transitional response route remains unreachable", async () => {
     const value = await fixture([
-      action({ type: "clarification", question: "Say continue" }),
-      action({ type: "final", content: "Protocol continued." }),
+      action({ type: "blocked", reason: "A required external decision is missing." }),
     ]);
     const protocol = new ProtocolServer(value.supervisor); const server = protocol.listen(0);
     const client = new AgentClient(`http://${server.hostname}:${server.port}`);
     try {
-      const waiting = await client.startRun(value.sessionId, value.branchId, "Protocol task");
-      expect(await client.run(value.sessionId, value.branchId, waiting.runId)).toMatchObject({ status: "waiting_for_user" });
-      const completed = await client.respondToRun(value.sessionId, value.branchId, waiting.runId, waiting.pendingInput!.id, "continue");
-      expect(completed).toMatchObject({ status: "succeeded", final: "Protocol continued." });
+      const blocked = await client.startRun(value.sessionId, value.branchId, "Protocol task");
+      expect(await client.run(value.sessionId, value.branchId, blocked.runId)).toMatchObject({ status: "blocked" });
+      await expect(client.respondToRun(value.sessionId, value.branchId, blocked.runId, "unreachable", "continue")).rejects.toThrow();
       // This remains callable as a separate diagnostic surface.
       const legacy = await client.turn(value.sessionId, value.branchId) as { outcome: string };
       expect(legacy.outcome).toBe("succeeded");

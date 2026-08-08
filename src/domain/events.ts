@@ -1,12 +1,27 @@
 import { ulid } from "ulid";
 import { z } from "zod";
-import type { JsonValue } from "./json.ts";
+import type { JsonValue, Sha256Digest } from "./json.ts";
 import { assertJsonValue } from "./json.ts";
 import { ValidationError } from "./errors.ts";
 import { agentActionSchema, type AgentAction } from "./agent-action.ts";
-import type { ModelConfiguration, ModelDispatch, ModelWarning } from "./model.ts";
+import {
+  validateModelDispatch,
+  type ModelConfiguration,
+  type ModelDispatch,
+  type ModelWarning,
+  type RecursiveResponseAdmission,
+} from "./model.ts";
+import {
+  MODEL_EFFECT_FAILURE_CODES,
+  validateModelResponseContract,
+  validateModelResponseContractCapability,
+  type ModelAdapterGuardCode,
+  type ModelContractViolationCode,
+  type ModelEffectFailureCode,
+  type ModelTerminationKind,
+} from "./model-response.ts";
 
-export const EVENT_SCHEMA_VERSION = 2 as const;
+export const EVENT_SCHEMA_VERSION = 3 as const;
 export const eventTypes = [
   "SessionCreated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
@@ -60,6 +75,17 @@ export type ContextCapacitySource = "provider-metadata" | "model-catalog" | "ope
 
 export interface BudgetLimits { readonly tokenLimit?: number; readonly costLimitUsd?: number; readonly turnLimit?: number; readonly wallTimeLimitMs?: number; }
 export interface Usage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; }
+export type ModelUsageSource = "provider-reported" | "conservative-guard-estimate";
+export type ModelCallTermination =
+  | { readonly kind: ModelTerminationKind; readonly rawReason?: string }
+  | { readonly kind: "adapter-guard"; readonly code: ModelAdapterGuardCode };
+export type ModelCallResult =
+  | { readonly kind: "text"; readonly textDigest: Sha256Digest }
+  | { readonly kind: "tool-submission"; readonly providerToolCallId: string; readonly name: string; readonly inputDigest: Sha256Digest }
+  | { readonly kind: "contract-violation"; readonly code: ModelContractViolationCode; readonly evidenceDigest: Sha256Digest; readonly providerToolCallId?: string };
+export type AgentRunActionSource =
+  | { readonly kind: "tool-submission"; readonly modelCallId: string; readonly providerToolCallId: string; readonly resultDigest: Sha256Digest }
+  | { readonly kind: "contract-violation"; readonly modelCallId: string; readonly providerToolCallId?: string; readonly resultDigest: Sha256Digest };
 export interface ArtifactReference { readonly artifactId: string; readonly digest: string; readonly mediaType: string; readonly size: number; }
 export type WorkingValue = { readonly kind: "json"; readonly value: JsonValue } | { readonly kind: "artifact"; readonly artifactId: string };
 export interface ContextRecordReference { readonly eventId: string; readonly type: EventType; readonly schemaVersion: number; readonly reason?: string; }
@@ -100,7 +126,7 @@ export interface EventPayloads {
   ArtifactRegistered: ArtifactReference & { sourceEventId?: string };
   EffectRequested: { effectId: string; executor: string; operation: string; input: JsonValue; idempotencyKey: string; idempotent: boolean };
   EffectAttemptStarted: { effectId: string; attempt: number };
-  EffectOutcomeRecorded: { effectId: string; attempt: number; outcome: EffectOutcome; output?: JsonValue; error?: string; observedAt: string };
+  EffectOutcomeRecorded: { effectId: string; attempt: number; outcome: EffectOutcome; output?: JsonValue; error?: string; modelFailure?: { code: ModelEffectFailureCode }; observedAt: string };
   EffectReconciliationRecorded: { reconciliationId: string; effectId: string; assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; summary: string; evidence?: JsonValue; recordedBy: string; recordedAt: string };
   ContextCompactionRequested: {
     compactionId: string; strategy: ContextCompactionStrategy; reason: ContextCompactionReason;
@@ -114,11 +140,11 @@ export interface EventPayloads {
     outcome: "failed" | "unknown" | "protected-only" | "no-progress"; error: string; effectId?: string;
   };
   ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue; derivation?: ContextCompactionDerivation };
-  ModelCallRequested: { callId: string; contextId: string; effectId: string; modelDispatch: ModelDispatch; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
+  ModelCallRequested: { callId: string; contextId: string; effectId: string; modelDispatch: ModelDispatch; estimatedInputTokens: number; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
   ModelOutputChunk: { callId: string; sequence: number; text: string };
-  ModelCallCompleted: { callId: string; responseMessageId?: string; finishReason: string; usage: Usage; warnings?: ModelWarning[] };
-  ModelCallTerminated: { callId: string; outcome: Exclude<EffectOutcome, "succeeded">; error?: string };
-  BudgetDebited: { callId: string; tokens: number; costUsd: number; turns: number; wallTimeMs: number };
+  ModelCallCompleted: { callId: string; responseMessageId?: string; result: ModelCallResult; resultDigest: Sha256Digest; termination: ModelCallTermination; usage: Usage | null; warnings: ModelWarning[]; usageSource: ModelUsageSource };
+  ModelCallTerminated: { callId: string; outcome: Exclude<EffectOutcome, "succeeded">; error?: string; failureCode?: ModelEffectFailureCode };
+  BudgetDebited: { callId: string; tokens: number; costUsd: number; turns: number; wallTimeMs: number; usageSource: ModelUsageSource };
   BudgetExceeded: { dimension: "tokens" | "cost" | "turns" | "wallTime"; limit: number; spent: number };
   RecoveryPerformed: { abandonedCellIds: string[]; unknownEffectIds: string[]; retriedEffectIds: string[] };
   TaskCreated: { taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; task: string; completionCriteria?: string; model: ModelConfiguration; budget: BudgetLimits };
@@ -152,7 +178,7 @@ export interface EventPayloads {
   WakeClaimed: { wakeId: string; claimId: string; claimedAt: string };
   WakeDelivered: { wakeId: string; claimId: string; runId: string; deliveredAt: string };
   WakeDeliveryUnknown: { wakeId: string; claimId: string; reason: string; observedAt: string };
-  RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; inputSetId?: string; input?: JsonValue; inputProvenance?: JsonValue; inputHash?: string };
+  RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; responseAdmission: RecursiveResponseAdmission; inputSetId?: string; input?: JsonValue; inputProvenance?: JsonValue; inputHash?: string };
   RecursiveModelStatusChanged: { handleId: string; status: Exclude<RecursiveModelStatus, "pending">; outcome?: RecursiveModelOutcome; resultMessageId?: string; result?: JsonValue; resultArtifactId?: string; error?: string };
   HarnessVersionCreated: { entryId: string; versionId: string; version: number; kind: "memory" | "prompt_note" | "skill" | "subagent_spec"; scope: "local" | "workspace" | "user" | "global"; scopeKey: string; name: string; content: JsonValue; tags: string[]; confidence: number; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; evidenceEventIds: string[]; conflictEntryIds: string[]; supersedesVersionId?: string; proposalId?: string; createdBy: string; lastConfirmedAt: string };
   HarnessVersionStatusChanged: { entryId: string; versionId: string; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; reason: string; proposalId?: string };
@@ -180,8 +206,8 @@ export interface EventPayloads {
   AgentRunRequested: { runId: string; task: string; requestKey: string; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
   AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; retryOfCallId?: string };
-  AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; callId: string; raw: string; action: AgentAction };
-  AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; callId: string; raw: string; error: string };
+  AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; action: AgentAction };
+  AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "contract-violation" }>; error: string };
   AgentRunGoalCheckRecorded: { runId: string; actionId: string; goalId: string; requestId: string; status: "passed" | "failed" | "unknown"; summary: string; gateEvaluationEventIds: string[] };
   AgentRunUserInputRequested: { runId: string; requestId: string; actionId: string; kind: AgentRunInputKind; question: string; permission?: string };
   AgentRunUserInputReceived: { runId: string; requestId: string; response: string; approved?: boolean };
@@ -221,39 +247,14 @@ const jsonValueSchema = z.custom<JsonValue>((value) => { try { assertJsonValue(v
 const budgetSchema = z.object({ tokenLimit: nonnegative.optional(), costLimitUsd: nonnegative.optional(), turnLimit: nonnegative.optional(), wallTimeLimitMs: nonnegative.optional() });
 const reasoningEffortSchema = z.enum(["provider-default", "none", "minimal", "low", "medium", "high", "xhigh"]);
 const modelSchema = z.object({ provider: id, model: id, temperature: z.number().finite().optional(), maxOutputTokens: nonnegative.optional(), reasoningEffort: reasoningEffortSchema }).strict();
-const reasoningLevelSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
-const modelReasoningCapabilitySchema = z.object({
-  status: z.enum(["listed", "unverified", "unsupported"]),
-  levels: z.array(reasoningLevelSchema).max(6),
-  catalogDigest: digest,
-}).strict();
-const modelDispatchSchema = z.object({
-  configuration: modelSchema,
-  reasoning: z.object({
-    requestedEffort: reasoningEffortSchema,
-    mode: z.enum(["omitted", "requested"]),
-    capability: modelReasoningCapabilitySchema,
-    resolverId: z.literal("agencity.reasoning-dispatch.v1"),
-  }).strict(),
-  executionEndpointId: digest.optional(),
-  dispatchVersion: z.literal("agencity.model-dispatch.v1"),
-}).strict().superRefine((value, context) => {
-  if (value.configuration.reasoningEffort !== value.reasoning.requestedEffort) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "dispatch effort must match configuration" });
+const modelDispatchSchema = z.custom<ModelDispatch>((value) => {
+  try {
+    validateModelDispatch(value as ModelDispatch);
+    return true;
+  } catch {
+    return false;
   }
-  const expectedMode = value.configuration.reasoningEffort === "provider-default" ? "omitted" : "requested";
-  if (value.reasoning.mode !== expectedMode) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "dispatch mode must match requested effort" });
-  }
-  if (value.reasoning.capability.status === "unsupported" && value.configuration.reasoningEffort !== "provider-default") {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "unsupported models permit only provider-default" });
-  }
-  if (value.reasoning.capability.status === "listed" &&
-      value.configuration.reasoningEffort !== "provider-default" &&
-      !value.reasoning.capability.levels.includes(value.configuration.reasoningEffort)) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "requested effort is not listed for this model" });
-  }
-});
+}, "Expected one canonical response-aware model dispatch");
 const boundedWarningMessage = z.string().min(1).refine(
   (value) => new TextEncoder().encode(value).byteLength <= 1_024,
   "warning message exceeds 1024 UTF-8 bytes",
@@ -263,6 +264,20 @@ const modelWarningSchema = z.object({
   message: boundedWarningMessage,
 }).strict();
 const usageSchema = z.object({ inputTokens: nonnegative, outputTokens: nonnegative, costUsd: nonnegative });
+const modelFailureCodeSchema = z.enum(MODEL_EFFECT_FAILURE_CODES as [ModelEffectFailureCode, ...ModelEffectFailureCode[]]);
+const usageSourceSchema = z.enum(["provider-reported", "conservative-guard-estimate"]);
+const terminationSchema = z.union([
+  z.object({ kind: z.enum(["text-stop", "tool-calls", "output-limit", "content-filter", "refusal", "other"]), rawReason: z.string().optional() }).strict(),
+  z.object({ kind: z.literal("adapter-guard"), code: z.enum(["multiple-tool-calls", "unexpected-tool", "oversized-tool-input", "oversized-provider-response"]) }).strict(),
+]);
+const modelCallResultSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("text"), textDigest: fingerprint }).strict(),
+  z.object({ kind: z.literal("tool-submission"), providerToolCallId: id, name: id, inputDigest: fingerprint }).strict(),
+  z.object({ kind: z.literal("contract-violation"), code: z.enum(["required-tool-missing", "multiple-tool-calls", "unexpected-tool", "invalid-tool-input", "truncated-tool-input", "oversized-tool-input", "oversized-provider-response", "incomplete-provider-response", "provider-refusal"]), evidenceDigest: fingerprint, providerToolCallId: id.optional() }).strict(),
+]);
+const actionSourceSubmissionSchema = z.object({ kind: z.literal("tool-submission"), modelCallId: id, providerToolCallId: id, resultDigest: fingerprint }).strict();
+const actionSourceViolationSchema = z.object({ kind: z.literal("contract-violation"), modelCallId: id, providerToolCallId: id.optional(), resultDigest: fingerprint }).strict();
+const responseAdmissionSchema = z.object({ responseContract: jsonValueSchema, responseCapability: jsonValueSchema }).strict();
 const artifactSchema = z.object({ artifactId: id, digest, mediaType: id, size: nonnegative });
 const workingValueSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("json"), value: jsonValueSchema }), z.object({ kind: z.literal("artifact"), artifactId: id })]);
 const taskTerminalSchema = z.object({ noticeId: id, taskId: id, parentSessionId: id, childSessionId: id, status: z.enum(["completed", "failed", "cancelled"]), result: jsonValueSchema.optional(), artifactIds: z.array(id).optional(), error: z.string().optional(), reason: z.string().optional() });
@@ -304,7 +319,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   ArtifactRegistered: artifactSchema.extend({ sourceEventId: id.optional() }),
   EffectRequested: z.object({ effectId: id, executor: id, operation: id, input: jsonValueSchema, idempotencyKey: id, idempotent: z.boolean() }),
   EffectAttemptStarted: z.object({ effectId: id, attempt: positiveInteger }),
-  EffectOutcomeRecorded: z.object({ effectId: id, attempt: positiveInteger, outcome: z.enum(["succeeded", "failed", "cancelled", "unknown"]), output: jsonValueSchema.optional(), error: z.string().optional(), observedAt: dateTime }),
+  EffectOutcomeRecorded: z.object({ effectId: id, attempt: positiveInteger, outcome: z.enum(["succeeded", "failed", "cancelled", "unknown"]), output: jsonValueSchema.optional(), error: z.string().optional(), modelFailure: z.object({ code: modelFailureCodeSchema }).strict().optional(), observedAt: dateTime }).strict(),
   EffectReconciliationRecorded: z.object({ reconciliationId: id, effectId: id, assessment: z.enum(["succeeded", "failed", "no_effect", "still_unknown"]), summary: z.string().min(1).max(16384), evidence: jsonValueSchema.optional(), recordedBy: id, recordedAt: dateTime }).strict(),
   ContextCompactionRequested: z.object({
     compactionId: id, strategy: compactionStrategySchema, reason: compactionReasonSchema,
@@ -326,11 +341,13 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     outcome: z.enum(["failed", "unknown", "protected-only", "no-progress"]), error: z.string().min(1), effectId: id.optional(),
   }).strict(),
   ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional(), derivation: compactionDerivationSchema.optional() }),
-  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, modelDispatch: modelDispatchSchema, attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }).strict(),
+  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, modelDispatch: modelDispatchSchema, estimatedInputTokens: z.number().int().nonnegative(), attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }).strict(),
   ModelOutputChunk: z.object({ callId: id, sequence: z.number().int().nonnegative(), text: z.string() }),
-  ModelCallCompleted: z.object({ callId: id, responseMessageId: id.optional(), finishReason: z.string(), usage: usageSchema, warnings: z.array(modelWarningSchema).max(8).optional() }).strict(),
-  ModelCallTerminated: z.object({ callId: id, outcome: z.enum(["failed", "cancelled", "unknown"]), error: z.string().optional() }),
-  BudgetDebited: z.object({ callId: id, tokens: nonnegative, costUsd: nonnegative, turns: nonnegative, wallTimeMs: nonnegative }),
+  ModelCallCompleted: z.object({ callId: id, responseMessageId: id.optional(), result: modelCallResultSchema, resultDigest: fingerprint, termination: terminationSchema, usage: usageSchema.nullable(), warnings: z.array(modelWarningSchema).max(8), usageSource: usageSourceSchema }).strict(),
+  ModelCallTerminated: z.object({ callId: id, outcome: z.enum(["failed", "cancelled", "unknown"]), error: z.string().optional(), failureCode: modelFailureCodeSchema.optional() }).strict().superRefine((value, context) => {
+    if ((value.outcome === "failed") !== (value.failureCode !== undefined)) context.addIssue({ code: z.ZodIssueCode.custom, message: "failed model termination requires exactly one failureCode" });
+  }),
+  BudgetDebited: z.object({ callId: id, tokens: nonnegative, costUsd: nonnegative, turns: nonnegative, wallTimeMs: nonnegative, usageSource: usageSourceSchema }).strict(),
   BudgetExceeded: z.object({ dimension: z.enum(["tokens", "cost", "turns", "wallTime"]), limit: nonnegative, spent: nonnegative }),
   RecoveryPerformed: z.object({ abandonedCellIds: z.array(id), unknownEffectIds: z.array(id), retriedEffectIds: z.array(id) }),
   TaskCreated: z.object({ taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, task: z.string().min(1), completionCriteria: z.string().optional(), model: modelSchema, budget: budgetSchema }),
@@ -364,7 +381,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   WakeClaimed: z.object({ wakeId: id, claimId: id, claimedAt: dateTime }).strict(),
   WakeDelivered: z.object({ wakeId: id, claimId: id, runId: id, deliveredAt: dateTime }).strict(),
   WakeDeliveryUnknown: z.object({ wakeId: id, claimId: id, reason: z.string().min(1), observedAt: dateTime }).strict(),
-  RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, inputSetId: id.optional(), input: jsonValueSchema.optional(), inputProvenance: jsonValueSchema.optional(), inputHash: digest.optional() }),
+  RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, responseAdmission: responseAdmissionSchema, inputSetId: id.optional(), input: jsonValueSchema.optional(), inputProvenance: jsonValueSchema.optional(), inputHash: digest.optional() }).strict(),
   RecursiveModelStatusChanged: z.object({ handleId: id, status: z.enum(["running", "completed", "failed", "cancelled"]), outcome: z.enum(["succeeded", "failed", "cancelled", "budget-exceeded", "unknown"]).optional(), resultMessageId: id.optional(), result: jsonValueSchema.optional(), resultArtifactId: id.optional(), error: z.string().optional() }),
   HarnessVersionCreated: z.object({ entryId: id, versionId: id, version: positiveInteger, kind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]), scope: z.enum(["local", "workspace", "user", "global"]), scopeKey: id, name: z.string().min(1), content: jsonValueSchema, tags: z.array(z.string()), confidence: z.number().finite().min(0).max(1), status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), evidenceEventIds: z.array(id), conflictEntryIds: z.array(id), supersedesVersionId: id.optional(), proposalId: id.optional(), createdBy: id, lastConfirmedAt: dateTime }),
   HarnessVersionStatusChanged: z.object({ entryId: id, versionId: id, status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), reason: z.string().min(1), proposalId: id.optional() }),
@@ -392,8 +409,8 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
   AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
   AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, retryOfCallId: id.optional() }).strict(),
-  AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, callId: id, raw: z.string(), action: agentActionSchema }).strict(),
-  AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, callId: id, raw: z.string(), error: z.string().min(1) }).strict(),
+  AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceSubmissionSchema, action: agentActionSchema }).strict(),
+  AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceViolationSchema, error: z.string().min(1) }).strict(),
   AgentRunGoalCheckRecorded: z.object({ runId: id, actionId: id, goalId: id, requestId: id, status: z.enum(["passed", "failed", "unknown"]), summary: z.string().min(1).max(65536), gateEvaluationEventIds: z.array(id) }).strict(),
   AgentRunUserInputRequested: z.object({ runId: id, requestId: id, actionId: id, kind: z.enum(["clarification", "permission"]), question: z.string().min(1), permission: z.string().min(1).optional() }).strict(),
   AgentRunUserInputReceived: z.object({ runId: id, requestId: id, response: z.string(), approved: z.boolean().optional() }).strict(),
@@ -404,11 +421,26 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
 export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): void {
   const parsed = headerSchema.safeParse(event);
   if (!parsed.success) throw new ValidationError("Invalid event header", { issues: parsed.error.issues });
-  if ((event.schemaVersion ?? EVENT_SCHEMA_VERSION) !== EVENT_SCHEMA_VERSION) throw new ValidationError(`Unsupported ${event.type} schema version: ${event.schemaVersion}`);
+  if ((event.schemaVersion ?? EVENT_SCHEMA_VERSION) !== EVENT_SCHEMA_VERSION) {
+    throw new ValidationError(
+      `Unsupported ${event.type} event schema version ${event.schemaVersion}. Reset local Agencity state before using schema version ${EVENT_SCHEMA_VERSION}; no legacy event is projected or executed.`,
+    );
+  }
   assertJsonValue(event.payload);
   const payload = payloadSchemas[event.type].safeParse(event.payload);
   if (!payload.success) throw new ValidationError(`Invalid ${event.type} payload`, { issues: payload.error.issues });
   if (event.type === "ContextCompactionRequested") validateCompactionRequestIntegrity(event.payload as unknown as EventPayloads["ContextCompactionRequested"]);
+  if (event.type === "RecursiveModelStarted") {
+    const admission = (event.payload as unknown as EventPayloads["RecursiveModelStarted"]).responseAdmission;
+    const contract = validateModelResponseContract(admission.responseContract);
+    validateModelResponseContractCapability(contract, admission.responseCapability);
+  }
+  if (event.type === "EffectOutcomeRecorded") {
+    const effect = event.payload as unknown as EventPayloads["EffectOutcomeRecorded"];
+    if (effect.modelFailure !== undefined && effect.outcome !== "failed") {
+      throw new ValidationError("Only failed model effects may retain modelFailure");
+    }
+  }
 }
 
 function validateCompactionRequestIntegrity(payload: EventPayloads["ContextCompactionRequested"]): void {

@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LibSqlStorage } from "../../src/storage/index.ts";
+import { projectEvents, type AgentEvent } from "../../src/domain/index.ts";
 
 let directory: string | undefined;
 
@@ -13,19 +14,19 @@ afterEach(async () => {
 });
 
 describe("reasoning/model-capability schema cutover", () => {
-  test("rejects version-1 workspace events before applying migrations or deleting data", async () => {
+  test.each([1, 2])("rejects version-%d workspace events before applying migrations or deleting data", async (schemaVersion) => {
     directory = await mkdtemp(join(tmpdir(), "ag-schema-cutover-"));
     const url = `file:${directory}/agent.db`;
     const raw = createClient({ url });
     await raw.execute("CREATE TABLE events(schema_version INTEGER NOT NULL, retained_text TEXT NOT NULL)");
     await raw.execute({
       sql: "INSERT INTO events(schema_version,retained_text) VALUES(?,?)",
-      args: [1, "retain me"],
+      args: [schemaVersion, "retain me"],
     });
     raw.close();
 
     const storage = new LibSqlStorage({ url });
-    await expect(storage.migrate()).rejects.toThrow("pre-cutover event schema version(s) 1");
+    await expect(storage.migrate()).rejects.toThrow(`pre-cutover event schema version(s) ${schemaVersion}`);
     storage.close();
 
     const retained = createClient({ url });
@@ -36,8 +37,34 @@ describe("reasoning/model-capability schema cutover", () => {
     expect(data.rows.map(row => ({
       schemaVersion: Number(row.schema_version),
       retainedText: String(row.retained_text),
-    }))).toEqual([{ schemaVersion: 1, retainedText: "retain me" }]);
+    }))).toEqual([{ schemaVersion, retainedText: "retain me" }]);
     expect(tables.rows.map(row => String(row.name))).toEqual(["events"]);
     retained.close();
+  });
+
+  test.each([1, 2])("rejects version-%d events before payload projection", (schemaVersion) => {
+    const event = {
+      cursor: "1",
+      id: `legacy-${schemaVersion}`,
+      sessionId: "legacy-session",
+      branchId: "legacy-branch",
+      causationId: null,
+      correlationId: null,
+      type: "SessionCreated",
+      schemaVersion,
+      committedAt: "2026-08-08T00:00:00.000Z",
+      producer: "supervisor",
+      idempotencyKey: null,
+      payload: {
+        workspaceId: "legacy-workspace",
+        initialBranchId: "legacy-branch",
+        model: { provider: "echo", model: "echo", reasoningEffort: "provider-default" },
+        budget: {},
+      },
+      originDeviceId: "legacy-device",
+      originSequence: 1,
+      streamParentId: null,
+    } as AgentEvent;
+    expect(() => projectEvents([event])).toThrow(/Reset local Agencity state/);
   });
 });

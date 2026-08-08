@@ -12,7 +12,7 @@ import {
   type AgentAction,
   type JsonValue,
   type ModelConfiguration,
-  type ModelResponse,
+  type TextModelResponse,
 } from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
@@ -23,7 +23,7 @@ const action = <T extends Omit<AgentAction, "protocol" | "version">>(value: T): 
 class RecordingActions extends ScriptedAgentActionProvider {
   readonly contexts: JsonValue[] = [];
   calls = 0;
-  override async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<ModelResponse> {
+  override async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.contexts.push(context); this.calls++;
     return super.complete(context, configuration, signal);
   }

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeTempRuntime, openTempStorage, removeTempRuntime, seedSession } from "../helpers.ts";
 import { ContextMaterializer, CompactionService, OutboxRunner, ProjectionService, Supervisor, stableEffectId } from "../../src/runtime/index.ts";
-import { EchoModelProvider, ModelExecutor, ModelProviderContextWindowOverflowError, type ModelProvider } from "../../src/executors/index.ts";
-import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, projectEvents, resolveModelDispatch, type AgentEvent, type JsonValue } from "../../src/domain/index.ts";
+import { EchoModelProvider, ModelExecutor, ModelProviderContextWindowOverflowError, ScriptedAgentActionProvider, type ModelProvider } from "../../src/executors/index.ts";
+import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, TEXT_MODEL_RESPONSE_CONTRACT, projectEvents, resolveModelDispatch, type AgentEvent, type JsonValue } from "../../src/domain/index.ts";
 import { AgentClient, ProtocolServer } from "../../src/protocol/index.ts";
 import { createExactSourceManifest, planCompactionSources } from "../../src/runtime/compaction-core.ts";
 
@@ -37,6 +37,8 @@ async function appendPendingModelRequest(storage: any, sessionId: string, branch
     configuration,
     capability: { status: "unsupported", levels: [] },
     catalogDigest: "0".repeat(64),
+    responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
+    responseCapability: { kind: "text" },
   });
   const [request] = await storage.appendEvents([{
     sessionId, branchId, type: "ContextCompactionRequested", producer: "supervisor",
@@ -131,13 +133,15 @@ describe("FU-019 durable context compaction", () => {
   });
 
   test("automatically compacts a long AgentRun at the provider threshold while preserving active durable state", async () => {
-    const provider: ModelProvider = {
-      name: "small-window", capabilities: { streaming: false, contextWindowTokens: 18_000, contextCapacitySource: "provider-metadata" },
-      async complete() {
-        const text = JSON.stringify({ protocol: AGENT_ACTION_PROTOCOL, version: AGENT_ACTION_VERSION, type: "final", content: "continued after compaction" });
-        return { text, finishReason: "stop", usage: { inputTokens: 500, outputTokens: 20, costUsd: 0 } };
-      },
-    };
+    const provider = new ScriptedAgentActionProvider([{
+      protocol: AGENT_ACTION_PROTOCOL,
+      version: AGENT_ACTION_VERSION,
+      type: "final",
+      content: "continued after compaction",
+    }], "small-window");
+    Object.defineProperty(provider, "capabilities", {
+      value: { ...provider.capabilities, contextWindowTokens: 18_000, contextCapacitySource: "provider-metadata" },
+    });
     const temp = await makeTempRuntime("agencity-auto-compaction-"); temps.push(temp);
     const supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
     const root = await supervisor.createSession({ workspaceId: "auto-compaction", model: { provider: provider.name, model: "small" } });
@@ -157,28 +161,32 @@ describe("FU-019 durable context compaction", () => {
   });
 
   test("retries only a typed provider overflow with a strictly smaller candidate and a new attributed run attempt", async () => {
-    let calls = 0;
-    const provider: ModelProvider = {
-      name: "overflow-once", capabilities: { streaming: false },
-      async complete(_context, configuration) {
-        calls++;
-        if (calls === 1) throw new ModelProviderContextWindowOverflowError("overflow-once", configuration.model);
-        const text = JSON.stringify({ protocol: AGENT_ACTION_PROTOCOL, version: AGENT_ACTION_VERSION, type: "final", content: "retried safely" });
-        return { text, finishReason: "stop", usage: { inputTokens: 100, outputTokens: 10, costUsd: 0 } };
-      },
-    };
+    class OverflowOnceProvider extends ScriptedAgentActionProvider {
+      calls = 0;
+      constructor() {
+        super([{ protocol: AGENT_ACTION_PROTOCOL, version: AGENT_ACTION_VERSION, type: "final", content: "retried safely" }], "overflow-once");
+      }
+      override async complete(context: JsonValue, configuration: any, signal: AbortSignal) {
+        this.calls++;
+        if (this.calls === 1) throw new ModelProviderContextWindowOverflowError("overflow-once", configuration.model);
+        return super.complete(context, configuration, signal);
+      }
+    }
+    const provider = new OverflowOnceProvider();
     const temp = await makeTempRuntime("agencity-overflow-compaction-"); temps.push(temp);
     const supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false });
     const root = await supervisor.createSession({ workspaceId: "overflow-compaction", model: { provider: provider.name, model: "overflow" } });
     await messages(supervisor.storage, root.sessionId, root.branchId, 30);
     const result = await supervisor.runs.start(root.sessionId, root.branchId, { task: "retry overflow", goalMode: "none" });
     expect(result.status).toBe("succeeded");
-    expect(calls).toBe(2);
+    expect(provider.calls).toBe(2);
     const state = (await supervisor.projections.getSnapshot(root.sessionId, root.branchId)).state;
     const run = state.agentRuns[result.runId]!;
     expect(run.steps[0]?.modelAttempts).toHaveLength(2);
     expect(run.steps[0]?.modelAttempts[1]).toMatchObject({ attempt: 2, reason: "provider-overflow", retryOfCallId: run.steps[0]?.modelAttempts[0]?.callId });
     expect(run.steps[0]!.modelAttempts[1]!.estimatedInputTokens).toBeLessThan(run.steps[0]!.modelAttempts[0]!.estimatedInputTokens);
+    const [firstAttempt, secondAttempt] = run.steps[0]!.modelAttempts;
+    expect(state.modelCalls[secondAttempt!.callId]?.modelDispatch).toEqual(state.modelCalls[firstAttempt!.callId]?.modelDispatch);
     expect(Object.values(state.compactions).some((item) => item.reason === "provider-overflow" && item.status === "completed")).toBe(true);
     await supervisor.close();
   });
