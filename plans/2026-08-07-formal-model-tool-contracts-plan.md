@@ -1,6 +1,6 @@
 # Formal model tool contracts plan
 
-**Status:** In implementation  
+**Status:** Complete  
 **Date:** August 7, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Prerequisite:** [Reasoning effort and model capabilities](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md) must be complete and merged before this plan begins
@@ -18,7 +18,7 @@
 | 5. AgentRun integration | Done |
 | 6. Specialized structured outputs | Done |
 | 7. Product and observability surfaces | Done |
-| 8. ADRs and documentation | Not started |
+| 8. ADRs and documentation | Done |
 
 ### Implementation log
 
@@ -126,34 +126,44 @@
 - Real-provider, official Turso Sync server, and Turso Cloud rows remain unverified.
 - Implementation commit: `aa14d76`.
 
+#### August 8, 2026 — Phase 8
+
+- Expanded ADR 0010 as the durable formal-model-tool decision and kept its supersession of historical ADR 0005 explicit without rewriting ADR 0005's body. Updated ADR 0001's extension summary and removed the completed-cutover precondition from deferred ADR 0004 while preserving its requirement for a new readiness review.
+- Reconciled the repository guide, root README, documentation index, architecture, API, protocol, event, recovery, security, capability, console SDK, user, operator, configuration, data-lifecycle, mutable-table, and verification references with the shipped schema-3 runtime.
+- Public documentation now distinguishes declaration-only provider tools from the SDK injected inside an admitted console cell, explains exactly-one formal submission with no provider-managed tool loop or text fallback, and records exact finish/gate, structured refinement, capability, diagnostics, progress-privacy, credential, recovery, reset, and export semantics.
+- Review corrected omitted `EffectOutcomeRecorded.modelFailure`, `MessageAppended.mailbox`, and `RecursiveModelStarted.inputSetId` fields in the event reference, aligned a capability status token with the document's vocabulary, and fixed the exact `ModelCallRequested` dispatch-commit boundary in recovery guidance.
+- Independent verification checked every Phase 8 document against code and tests, confirmed ADR relations and historical preservation, found no current textual-action, schema-2, pending-input, or refinement-JSON claims outside intentional historical and planning context, and found no broken local Markdown links.
+- Passed `bun run typecheck`, `bun run check:architecture`, and `bun run verify` with 842 passes, 3 documented external skips, and 0 failures. The deterministic acceptance matrix passed; the real-provider, official Turso Sync server, and Turso Cloud rows remained skipped and unverified.
+- Implementation commit: `9fc25e8`.
+
 ## Summary
 
-Agencity's ordinary autonomous loop currently asks a model to serialize one `agencity.agent-action` JSON object into assistant text. The runtime concatenates the returned text, calls `JSON.parse`, validates the resulting object, and only then executes an admitted TypeScript action. This preserves a strict execution boundary, but it uses free-form assistant text as a transport for a protocol that model providers already support as formal tool calling.
+Before this implementation, Agencity's ordinary autonomous loop asked a model to serialize one `agencity.agent-action` JSON object into assistant text. The runtime concatenated the returned text, called `JSON.parse`, validated the resulting object, and only then executed an admitted TypeScript action. That path preserved a strict execution boundary but used free-form assistant text as transport for a protocol that model providers already support through formal tool calling.
 
-This plan replaces that transport with a small fixed provider-native tool set on every autonomous `AgentRun` model call:
+Agencity now supplies a small fixed provider-native tool set on every autonomous `AgentRun` model call:
 
 ```text
 bun_console
 finish
 ```
 
-The model must call exactly one of these tools on every step. `bun_console` proposes one multiline Bun notebook cell and exposes the existing SDK for shell, files, SQL, models, subagents, memory, skills, artifacts, and other programmatic work. `finish` ends model-directed work. Omitting its status means success; `blocked` and `failed` retain distinct terminal outcomes. If missing user information prevents progress, a blocked `finish` asks the necessary question in its final message.
+The model must call exactly one of these tools on every step. `bun_console` proposes one multiline Bun notebook cell; after validation and durable commit, that disposable cell exposes the SDK for shell, files, SQL, models, subagents, memory, skills, artifacts, and other programmatic work. `finish` ends model-directed work. Omitting its status means success; `blocked` and `failed` retain distinct terminal outcomes. If missing user information prevents progress, a blocked `finish` asks the necessary question in its final message.
 
 The provider's formal tool-call channel and selected tool name, not assistant prose, identify the action. Agencity still validates and durably commits the submission before executing or applying anything. Assistant text is never searched for JSON, JavaScript, or an implied action.
 
-The same provider-neutral response-contract mechanism also replaces the remaining structured model response that is parsed from text: trajectory refinement decisions. Text remains a valid model result for operations whose result is actually text, such as diagnostic turns and model-summary compaction. The rule is:
+The same provider-neutral response-contract mechanism governs trajectory refinement decisions, the other structured model result. Text remains a valid model result for operations whose result is actually text, such as diagnostic turns and model-summary compaction. The rule is:
 
 > If Agencity consumes a model result as structured data, the request declares a bounded formal provider tool set and the response must contain exactly one permitted tool call. Agencity never asks for structured JSON in assistant text.
 
 There is no prompt-JSON fallback. A provider or model that cannot use the required formal tool contract is unavailable for that structured operation.
 
-This plan begins from the completed reasoning-effort and model-capabilities architecture. The implementation baseline therefore already has one shared Vercel AI SDK adapter core, `vercel`, `openai`, and `anthropic` transport factories, canonical gateway-catalog model IDs, the cached gateway model catalog, normalized top-level reasoning dispatch, and an immutable version-1 `ModelDispatch` copied into model-call and outbox records. Formal tool contracts extend those mechanisms. They do not add provider-native HTTP adapters, a second model catalog, a dedicated gateway wire surface, or another model-effect admission path.
+This implementation began from the completed reasoning-effort and model-capabilities architecture. That baseline provided one shared Vercel AI SDK adapter core, `vercel`, `openai`, and `anthropic` transport factories, canonical gateway-catalog model IDs, the cached Gateway model catalog, normalized top-level reasoning dispatch, and an immutable version-1 `ModelDispatch`. The formal-tool cutover extended those mechanisms and replaced the dispatch shape with version 2. It did not add provider-native HTTP adapters, a second model catalog, a dedicated Gateway wire surface, or another model-effect admission path.
 
 ## Motivation
 
-### The current transport is not the intended programming model
+### The former transport was not the intended programming model
 
-Agencity's product architecture defines one general generated-execution surface: the Bun TypeScript console. The current implementation preserves that surface at execution time, but the provider-facing request does not expose a formal console/action tool. `AgentRunService` instead:
+Agencity's product architecture defines one general generated-execution surface: the Bun TypeScript console. Before this implementation, the runtime preserved that surface at execution time, but the provider-facing request did not expose a formal console/action tool. `AgentRunService` instead:
 
 1. inserts `AGENT_ACTION_POLICY` and `AGENT_ACTION_JSON_SCHEMA` into the system prompt;
 2. asks the model to return one JSON object with no surrounding prose;
@@ -161,14 +171,14 @@ Agencity's product architecture defines one general generated-execution surface:
 4. parses the concatenated text with `parseAgentAction`;
 5. commits `AgentRunActionCommitted` or `AgentRunActionRejected`.
 
-The shared `AiSdkModelProvider` sends messages, sampling configuration, and the retained reasoning decision through `generateText` or `streamText`. Its shared options builder does not yet compile a response contract into AI SDK `tools`, `toolChoice`, per-tool `strict`, or parallel-call controls, and its result normalization still assumes text. The `vercel`, `openai`, and `anthropic` factories differ only in credential, endpoint, model construction, and native-ID derivation; this plan must preserve that boundary.
+The shared `AiSdkModelProvider` sent messages, sampling configuration, and the retained reasoning decision through `generateText` or `streamText`. Its options builder did not compile a response contract into AI SDK `tools`, `toolChoice`, per-tool `strict`, or parallel-call controls, and its result normalization assumed text. The `vercel`, `openai`, and `anthropic` factories differed only in credential, endpoint, model construction, and native-ID derivation; this implementation preserved that boundary.
 
-The `tools`, `sdk`, `sql`, `state`, `artifacts`, `rlm`, and related names described in the model prompt are Bun console bindings. They are not model-provider tools. The two layers are therefore:
+The `tools`, `sdk`, `sql`, `state`, `artifacts`, `rlm`, and related names described in the model prompt were and remain Bun console bindings. They are not model-provider tools. The former provider path and the execution layer were:
 
 - a free-form textual JSON action envelope at the provider boundary; and
 - the typed TypeScript SDK after the envelope is accepted.
 
-This plan makes the first layer formal while preserving the second.
+This implementation made the first layer formal while preserving the second.
 
 ### Observed failure pattern
 
