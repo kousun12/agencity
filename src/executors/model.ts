@@ -36,6 +36,14 @@ import {
 import type { EffectExecutor, ExecutionResult } from "./contract.ts";
 import { result } from "./contract.ts";
 import { scrubText } from "../security/index.ts";
+import {
+  ModelProviderResponseFailureError,
+  ModelResponseGuard,
+  consumeRequiredToolStream,
+  formalMissingToolOutput,
+  formalOutputFromAgentAction,
+  requiredToolGenerationOptions,
+} from "./model-response.ts";
 
 // Agencity retains normalized warnings as attributable model-call provenance.
 // Disable the SDK's process-global stderr duplicate, which is neither durable nor scrubbed.
@@ -126,6 +134,13 @@ export class EchoModelProvider implements ModelProvider {
   readonly capabilities = {
     streaming: false,
     reasoningControl: "none",
+    requiredToolSet: {
+      status: "provider-strict",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "provider-disabled",
+      streaming: true,
+      adapter: "agencity.echo.formal.v1",
+    },
     contextWindowTokens: 128_000,
     contextCapacitySource: "model-catalog",
   } as const;
@@ -149,6 +164,34 @@ export class EchoModelProvider implements ModelProvider {
       : text || "Echo model completed.";
     return { text: output, finishReason: "stop", usage: { inputTokens: Math.ceil(JSON.stringify(context).length / 4), outputTokens: Math.ceil(output.length / 4), costUsd: 0 } };
   }
+  async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatchV2,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const runContext = context && typeof context === "object" && !Array.isArray(context) &&
+      context.run && typeof context.run === "object" && !Array.isArray(context.run) ? context.run : undefined;
+    const runTask = typeof runContext?.task === "string" ? runContext.task : undefined;
+    const action: AgentAction = {
+      protocol: AGENT_ACTION_PROTOCOL,
+      version: AGENT_ACTION_VERSION,
+      type: "final",
+      content: runTask ? `Echo: ${runTask}` : "Echo model completed.",
+    };
+    return formalOutputFromAgentAction({
+      action,
+      dispatch,
+      providerToolCallId: "echo-finish",
+      provider: this.name,
+      adapter: this.capabilities.requiredToolSet.adapter,
+      usage: {
+        inputTokens: Math.ceil(JSON.stringify(context).length / 4),
+        outputTokens: Math.ceil(JSON.stringify(action).length / 4),
+        costUsd: 0,
+      },
+    });
+  }
 }
 
 /** Deterministic structured-action fixture keyed by the durable run step ordinal in context. */
@@ -158,6 +201,13 @@ export class ScriptedAgentActionProvider implements ModelProvider {
   readonly capabilities = {
     streaming: false,
     reasoningControl: "none",
+    requiredToolSet: {
+      status: "provider-strict",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "provider-disabled",
+      streaming: true,
+      adapter: "agencity.scripted-agent-action.formal.v1",
+    },
     contextWindowTokens: 128_000,
     contextCapacitySource: "model-catalog",
   } as const;
@@ -174,6 +224,39 @@ export class ScriptedAgentActionProvider implements ModelProvider {
     const fallback: AgentAction = { protocol: AGENT_ACTION_PROTOCOL, version: AGENT_ACTION_VERSION, type: "failed", error: `No scripted agent action for durable step ${ordinal}` };
     const text = typeof selected === "string" ? selected : JSON.stringify(selected ?? fallback);
     return { text, finishReason: "stop", usage: { inputTokens: Math.ceil(JSON.stringify(context).length / 4), outputTokens: Math.ceil(text.length / 4), costUsd: 0 } };
+  }
+  async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatchV2,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const ordinal = context && typeof context === "object" && !Array.isArray(context) && context.run &&
+      typeof context.run === "object" && !Array.isArray(context.run) && typeof context.run.stepOrdinal === "number"
+      ? context.run.stepOrdinal : 1;
+    const selected = Array.isArray(this.script) ? this.script[ordinal - 1] : this.script[ordinal];
+    const usage = {
+      inputTokens: Math.ceil(JSON.stringify(context).length / 4),
+      outputTokens: Math.ceil(JSON.stringify(selected ?? "").length / 4),
+      costUsd: 0,
+    };
+    if (!selected || typeof selected === "string") {
+      return formalMissingToolOutput({
+        dispatch,
+        provider: this.name,
+        adapter: this.capabilities.requiredToolSet.adapter,
+        ...(typeof selected === "string" ? { text: selected } : {}),
+        usage,
+      });
+    }
+    return formalOutputFromAgentAction({
+      action: selected,
+      dispatch,
+      providerToolCallId: `scripted-${ordinal}`,
+      provider: this.name,
+      adapter: this.capabilities.requiredToolSet.adapter,
+      usage,
+    });
   }
 }
 
@@ -299,6 +382,58 @@ class AiSdkModelProvider implements ModelProvider {
     return this.#response(text, terminalReason, usage, warnings, metadata);
   }
 
+  async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatchV2,
+    signal: AbortSignal,
+    onDelta: (delta: ResponseContractOutputDelta) => void,
+  ): Promise<ModelEffectOutputV2> {
+    if (dispatch.responseContract.kind !== "required-tool-set") {
+      throw new ValidationError(
+        "Structured AI SDK execution requires a required-tool-set response contract",
+      );
+    }
+    const guard = new ModelResponseGuard(signal);
+    try {
+      const sdk = streamText({
+        ...this.#callOptions(context, dispatch.configuration, guard.signal),
+        ...requiredToolGenerationOptions(dispatch.responseContract),
+        ...this.#formalProviderOptions(),
+        model: this.#model(dispatch.configuration),
+        onError: () => {},
+      });
+      return await consumeRequiredToolStream({
+        stream: sdk,
+        dispatch,
+        guard,
+        onDelta,
+        gatewayCost: (metadata) =>
+          this.name === "vercel" ? gatewayCost(metadata) : 0,
+      });
+    } catch (error) {
+      guard.close();
+      if (
+        error instanceof ModelProviderResponseFailureError ||
+        error instanceof ModelProviderContextWindowOverflowError ||
+        error instanceof DOMException && error.name === "AbortError"
+      ) {
+        throw error;
+      }
+      const classified = classifyProviderError(
+        error,
+        dispatch.configuration.provider,
+        dispatch.configuration.model,
+      );
+      if (classified.code === "provider-confirmed-context-window-overflow") {
+        throw new ModelProviderContextWindowOverflowError(
+          dispatch.configuration.provider,
+          dispatch.configuration.model,
+        );
+      }
+      throw error;
+    }
+  }
+
   #callOptions(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal) {
     return {
       messages: modelMessages(context),
@@ -309,6 +444,24 @@ class AiSdkModelProvider implements ModelProvider {
       ...(configuration.maxOutputTokens === undefined ? {} : { maxOutputTokens: configuration.maxOutputTokens }),
       ...(configuration.reasoningEffort === "provider-default" ? {} : { reasoning: configuration.reasoningEffort }),
     };
+  }
+
+  #formalProviderOptions() {
+    if (this.name === "openai") {
+      return {
+        providerOptions: {
+          openai: { parallelToolCalls: false },
+        },
+      };
+    }
+    if (this.name === "anthropic") {
+      return {
+        providerOptions: {
+          anthropic: { disableParallelToolUse: true },
+        },
+      };
+    }
+    return {};
   }
 
   #model(configuration: ModelConfiguration): LanguageModel {
