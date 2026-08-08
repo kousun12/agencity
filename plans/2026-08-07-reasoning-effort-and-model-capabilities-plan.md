@@ -10,13 +10,13 @@
 
 Agencity lets a user select a provider and model, but `ModelConfiguration` has no reasoning setting and the provider adapters never send reasoning parameters. A user cannot choose how much reasoning a supported model performs.
 
-This plan delivers reasoning-effort selection by consolidating model execution onto one path:
+This plan delivers reasoning-effort selection by consolidating model execution onto one implementation:
 
-1. **All product model execution goes through the Vercel AI Gateway, called through the Vercel AI SDK.** The three hand-written HTTP adapters (OpenAI-compatible, Anthropic-compatible, and the gateway instantiated through the Anthropic adapter) are replaced by one AI SDK-backed provider behind the existing `ModelProvider` contract.
-2. **The gateway's public model catalog is the single source of model and capability metadata** — model IDs, display names, context windows, output limits, pricing, and per-model reasoning levels. Agencity maintains no hand-written model catalog, no per-provider level maps, and no per-provider discovery adapters.
+1. **All product model execution goes through the Vercel AI SDK.** One shared adapter core behind the existing `ModelProvider` contract replaces the three hand-written HTTP adapters (OpenAI-compatible, Anthropic-compatible, and the gateway instantiated through the Anthropic adapter). Three thin transport factories instantiate the core: the Vercel AI Gateway (`@ai-sdk/gateway`, the recommended default), direct OpenAI (`@ai-sdk/openai`), and direct Anthropic (`@ai-sdk/anthropic`).
+2. **The gateway's public model catalog is the single source of model and capability metadata for every transport** — model IDs, display names, context windows, output limits, pricing, and per-model reasoning levels. Agencity maintains no hand-written model catalog, no per-provider level maps, and no per-provider discovery adapters.
 3. **A durable** `reasoningEffort` **setting** on `ModelConfiguration`, selected through `/effort` (alias `/thinking`), `--effort`, and the public protocol, inherited by child and recursive sessions, and recorded with the complete model configuration in an immutable per-call dispatch before any outbox-backed model effect.
 
-Direct OpenAI and Anthropic API access is removed from the product and listed as an explicit deferral. The gateway's namespaced model identifiers align with the native provider identifiers (verified below), so direct access can later reuse the same catalog identities. Retained gateway configurations already using namespaced IDs continue unchanged; bare or otherwise non-canonical retained gateway IDs require explicit compatibility handling.
+Direct OpenAI and Anthropic access is included rather than deferred because the AI SDK makes each additional transport thin: the call interface, normalized reasoning parameter, warning semantics, catalog identities, dispatch, and recovery machinery are shared, so a direct transport adds only a credential path, a deterministic native-ID derivation, and recorded wire fixtures. Canonical model identity is the gateway's namespaced `creator/model` form for every provider (verified below). Retained configurations already using canonical namespaced IDs continue unchanged; bare or otherwise non-canonical retained IDs require explicit catalog-assisted migration.
 
 The default effort is `provider-default`: Agencity omits all reasoning controls and the provider behaves exactly as it does today. Retained sessions and new sessions without an explicit setting keep current behavior.
 
@@ -24,31 +24,40 @@ The default effort is `provider-default`: Agencity omits all reasoning controls 
 
 
 
-### Why gateway-only through the AI SDK
+### Why the AI SDK is the single model interface
 
-The initial design for this feature (previous revision of this document) kept three direct provider adapters and added per-provider reasoning dispatch: OpenAI `reasoning_effort`, Anthropic `thinking`/`output_config.effort` with reviewed token-budget maps, and a dedicated surface-aware gateway adapter. That design required a reviewed built-in capability catalog, a catalog validation script, a multi-source capability resolver with field-level provenance merging, and per-provider API-surface compatibility analysis. Those were the most fragile, highest-maintenance parts of the plan.
+An earlier design for this feature kept three hand-written direct provider adapters and added per-provider reasoning dispatch: OpenAI `reasoning_effort`, Anthropic `thinking`/`output_config.effort` with reviewed token-budget maps, and a dedicated surface-aware gateway adapter. That design required a reviewed built-in capability catalog, a catalog validation script, a multi-source capability resolver with field-level provenance merging, and per-provider API-surface compatibility analysis. Those were the most fragile, highest-maintenance parts of the plan.
 
-The AI SDK (version 7 and later) provides a normalized top-level `reasoning` parameter — `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` — and owns the translation to each provider's native reasoning API. The gateway's public model catalog provides model-specific reasoning capability metadata. Together they eliminate the hand-maintained catalog and all per-provider dispatch code.
+The AI SDK (version 7 and later) provides a normalized top-level `reasoning` parameter — `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` — and owns the translation to each provider's native reasoning API, through the gateway and through the direct provider packages alike. The gateway's public model catalog provides model-specific reasoning capability metadata. Together they eliminate the hand-maintained catalog and all hand-written wire code.
 
-Restricting the product to the gateway is acceptable because:
+The gateway is the recommended default transport because it adds capabilities the direct paths lack: one key for every listed model, optional response cost metadata (making `Usage.costUsd` meaningful), and optional caching. Model calls always require network access; local-first in `AGENTS.md` governs canonical state, storage, and artifacts, all of which remain local. The `ModelProvider` executor contract remains the seam for internal test providers, programmatic providers, and any future transports.
 
-- The current product operator uses only a gateway key and holds no direct OpenAI or Anthropic credentials.
-- Model calls always require network access; local-first in `AGENTS.md` governs canonical state, storage, and artifacts, all of which remain local. Consolidating on one model-network dependency is a product decision, not an architecture violation.
-- The gateway adds capabilities the direct paths lack: one unified catalog, normalized reasoning controls, optional response cost metadata, and optional caching.
-- The `ModelProvider` executor contract is retained as the seam. Adding a direct provider later is a contained adapter addition, not a rewrite, because the AI SDK exposes the same call interface for direct providers and the model identifiers align (see verified facts).
+### Why direct transports are included and cheap
+
+Under the AI SDK, a transport is a factory rather than an adapter. Direct OpenAI and Anthropic execution is in scope because every substantial surface is shared and written once:
+
+- **Same call interface.** `generateText`/`streamText`, message shapes, streaming parts, warnings, and usage are identical across `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic`. The shared adapter core — options building, stream consumption, reasoning-part discard, warning normalization, error classification — has one implementation.
+- **Same reasoning semantics.** The top-level `reasoning` parameter is documented for the direct provider packages with the same coercion-and-warning behavior used through the gateway, so the effort vocabulary, capability tiers, dispatch shape, and provenance are transport-independent.
+- **Same model identities.** Canonical `creator/model` IDs drive every transport. The canonical-to-native derivation is deterministic: OpenAI native IDs are the suffix verbatim; Anthropic native IDs replace dots with dashes in the version segment. Only the reverse direction (bare retained IDs back to canonical) needs catalog assistance, which is why retained bare IDs migrate explicitly rather than by string inference.
+- **Same metadata.** The public gateway catalog describes the models themselves, not the transport, so its descriptors, reasoning tiers, capacity, and pricing apply to direct transports without a second catalog or per-provider discovery adapters.
+
+What a direct transport adds: a credential path that already exists in the credential store and environment fallbacks (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), a native-ID derivation, a trusted-local base-URL override used chiefly by test fixtures, and recorded wire fixtures for the pinned provider package. What it does not add: reasoning maps, capability sources, dispatch modes, recovery rules, or event schema changes.
+
+Direct transports return no response cost metadata; their calls record the documented `Usage.costUsd` fallback of `0`, and cost remains best-effort telemetry.
 
 
 
 ### Rejected alternatives
 
-- **Keep direct OpenAI/Anthropic adapters with per-provider reasoning dispatch.** Highest maintenance cost; requires a reviewed catalog and budget maps that the gateway catalog now provides; supports credential configurations no current user has.
+- **Keep hand-written direct OpenAI/Anthropic adapters with per-provider reasoning dispatch.** Highest maintenance cost; requires a reviewed catalog and budget maps that the gateway catalog now provides.
+- **A gateway-only product with direct access deferred.** An intermediate revision of this plan took this shape. Rejected because operating on provider keys without a Vercel account is a supported mode, and the shared-core design reduces direct support to thin factories over the same identities, catalog, and dispatch semantics; the deferral saved almost nothing.
 - **Gateway BYOK (bring your own key) as the bridge for users holding only provider keys.** Verified facts: every gateway request still requires Vercel authentication (API key or OIDC), so BYOK does not serve a user without a Vercel key; BYOK requires a paid Vercel team; a failed BYOK request silently retries on Vercel system credentials billed to gateway credits, which is a hidden fallback that conflicts with Agencity's no-hidden-fallback invariant; BYOK spend bypasses gateway budgets. BYOK is a non-goal.
 - **Gateway REST endpoints without the AI SDK.** Keeps hand-written request/streaming/SSE code that the SDK already owns, for no capability gain.
 - **Strict reject-before-commit capability validation (previous revision).** With one normalized vocabulary and SDK-documented coercion behavior, strictness is retained where the catalog has exact data and relaxed to labeled, warning-recording behavior where it does not. This removes the failure mode where a stale or incomplete catalog makes a working model unusable.
 
 ### Sequencing with formal model tool contracts
 
-This plan is implemented first and preserves the current provider-neutral text response contract. The later formal-tool-contract work will extend the model dispatch and response types for required provider tool calls. It must reuse the AI SDK gateway adapter and the durable dispatch boundary introduced here rather than reintroducing hand-written OpenAI or Anthropic transports. Formal tool calling is not an implementation dependency for reasoning-effort selection.
+This plan is implemented first and preserves the current provider-neutral text response contract. The later formal-tool-contract work will extend the model dispatch and response types for required provider tool calls. It must reuse the shared AI SDK adapter core and the durable dispatch boundary introduced here rather than reintroducing hand-written OpenAI or Anthropic transports. Formal tool calling is not an implementation dependency for reasoning-effort selection.
 
 
 
@@ -84,27 +93,31 @@ The `anthropic/claude-opus-5` row is load-bearing: **flagship models can have mi
 - OpenAI suffixes in the catalog are byte-identical to OpenAI's native API model IDs (`gpt-5.2`, `o3-mini`, `gpt-5.1-codex`).
 - Anthropic suffixes use dotted aliases (`claude-opus-4.5`) where Anthropic's native API uses dashed aliases (`claude-opus-4-5`); the transform is deterministic (`.` ↔ `-` in the version segment).
 
-This is why gateway-namespaced IDs are safe as Agencity's canonical durable model identity: a future direct-provider transport can derive native IDs from the same stored value.
+This is why gateway-namespaced IDs are safe as Agencity's canonical durable model identity on every transport: the direct transports derive native IDs from the same stored value. The canonical-to-native direction is deterministic, and version segments without dots (for example `claude-3-haiku`) pass through unchanged. The native-to-canonical direction is not string-inferable for Anthropic, so retained bare IDs canonicalize through catalog matching rather than inference.
 
 ### AI SDK reasoning normalization
 
 - The AI SDK (v7+) `generateText`/`streamText` accept a top-level `reasoning` value: `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. `provider-default` is the behavior when the option is omitted.
 - Effort-based providers receive the level directly. When a model supports fewer levels, **the SDK coerces the value to the nearest supported level and emits a warning**. Budget-based providers receive a token budget derived as a documented percentage of maximum output tokens. Providers without reasoning support ignore the option and emit an `unsupported` warning.
 - Reasoning-related settings in `providerOptions` take full precedence over the top-level `reasoning` value.
+- The top-level `reasoning` parameter is documented for the direct provider packages, including `@ai-sdk/openai` and `@ai-sdk/anthropic`, with the same coercion and warning semantics as gateway execution.
 - The catalog lists `max` as an effort value for some models (for example `openai/gpt-5.6-sol`), but `max` is not in the SDK's documented top-level vocabulary. This release does not send undocumented provider-option escapes: `max` is retained in catalog diagnostics but is not selectable.
 
 ### Current SDK and gateway endpoints
 
 - The latest stable package versions verified on August 7, 2026 are `ai@7.0.58` and `@ai-sdk/gateway@4.0.46`. Implementation rechecks the registry, installs the latest stable compatible versions, and pins the resolved versions exactly.
+- The direct provider packages `@ai-sdk/openai` and `@ai-sdk/anthropic` expose the same model interface consumed by `generateText`/`streamText`, with per-provider `apiKey` and `baseURL` options. Implementation resolves and pins their latest stable compatible versions alongside `ai` and `@ai-sdk/gateway`.
 - The AI SDK `createGateway` model API uses a base URL prefix whose official default is `https://ai-gateway.vercel.sh/v4/ai`.
 - Public model discovery uses `https://ai-gateway.vercel.sh/v1/models`.
 - `AI_GATEWAY_BASE_URL` remains an origin override, not an AI SDK model-API prefix. Agencity derives the model API and catalog URLs from that normalized origin.
+- `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are origin-only trusted-local execution overrides for the direct transports with the same normalization rules; they never affect the catalog origin.
 
 ### Usage and cost reporting
 
 - AI SDK results provide token usage and may provide gateway cost metadata with the completed response.
 - Exact generation cost is also available through generation lookup, but that data is asynchronously ingested and may be unavailable immediately after completion.
 - This plan does not add generation polling or later cost reconciliation. `Usage.costUsd` uses a finite nonnegative cost returned directly with the completed SDK result when available and otherwise remains `0`. Cost is best-effort telemetry, not a reliable admission or enforcement boundary.
+- Direct OpenAI and Anthropic transports return no gateway cost metadata; their calls always record the `0` fallback.
 
 
 
@@ -142,12 +155,13 @@ As of this writing:
 - Persist the selected effort as part of durable branch model configuration; preserve it across process, worker, terminal, and managed-service restarts.
 - Apply the same setting to streaming and non-streaming calls.
 - Place the exact resolved complete model dispatch in the outbox input so recovery cannot reinterpret configuration or reasoning.
-- Replace the three hand-written provider adapters with one AI SDK gateway adapter behind the unchanged `ModelProvider` contract.
-- Make the gateway catalog the single model/capability/pricing/capacity metadata source, cached for offline listing.
+- Replace the three hand-written provider adapters with one shared AI SDK adapter core and three thin transport factories (gateway, direct OpenAI, direct Anthropic) behind the unchanged `ModelProvider` contract.
+- Make the gateway catalog the single model/capability/pricing/capacity metadata source for every transport, cached for offline listing.
+- Give direct OpenAI and Anthropic execution the same canonical model identities, capability tiers, dispatch, provenance, and recovery semantics as the gateway, differing only in credential, execution endpoint identity, and native-ID derivation.
 - Record provider coercion and unsupported-setting warnings as bounded, attributable call provenance rather than silently accepting or silently dropping a setting.
 - Preserve directly returned gateway cost metadata when available and retain the current `0` fallback when it is not.
 - Preserve manual model entry and truthful failure when the catalog is unavailable.
-- Keep the gateway credential supervisor-side and out of events, profile metadata, caches, logs, and protocol output.
+- Keep every provider credential supervisor-side, confined to its own transport, and out of events, profile metadata, caches, logs, and protocol output.
 - Preserve exact parent configuration when child and recursive work use inherited models.
 - Cover the installed product path with black-box tests.
 
@@ -155,14 +169,13 @@ As of this writing:
 
 ## Non-goals
 
-- Direct OpenAI or Anthropic API access (explicit deferral; see below).
 - Gateway BYOK in any form.
 - Displaying hidden chain-of-thought or storing provider reasoning traces.
 - A user-specified integer thinking-token budget.
 - Automatically choosing an effort from task complexity.
 - Allowing a model to mutate its own root-session effort during active work.
 - Retrying a failed or unknown model effect with a different effort, model, or provider.
-- Multi-provider onboarding, provider fallback, or gateway `order`/`only` routing controls in the first product interface.
+- Automatic transport selection, fallback between transports, or gateway `order`/`only` routing controls; a session's provider is an explicit durable choice.
 - Treating scope filtering, the gateway, or the console worker as a hostile-code security boundary.
 - Normalizing reasoning-token accounting beyond what the gateway reports.
 - Polling generation metadata, reconciling delayed cost, or making cost limits strict when a response does not contain cost.
@@ -173,14 +186,15 @@ As of this writing:
 ## Terms
 
 - **Gateway:** the Vercel AI Gateway protocol, hosted by default at `ai-gateway.vercel.sh` and replaceable only through the explicit trusted-local origin override.
-- **AI SDK:** the latest stable compatible Vercel AI SDK (`ai` package, version 7 line) plus `@ai-sdk/gateway`, resolved at implementation time and pinned exactly.
-- **Canonical model ID:** the gateway's namespaced `creator/model` identifier stored in `ModelConfiguration.model` with `provider: "vercel"`. The durable provider name stays `"vercel"`; retained branches already using canonical namespaced IDs do not need migration.
+- **AI SDK:** the latest stable compatible Vercel AI SDK (`ai` package, version 7 line) plus `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic`, resolved at implementation time and pinned exactly.
+- **Transport:** the durable `ModelConfiguration.provider` value a session executes through — `vercel` (gateway), `openai` (direct), or `anthropic` (direct) — all implemented by the shared AI SDK adapter core.
+- **Canonical model ID:** the gateway catalog's namespaced `creator/model` identifier stored in `ModelConfiguration.model` on every product transport. Retained branches already using canonical namespaced IDs do not need migration.
 - **Requested effort:** the user-facing level retained in `ModelConfiguration.reasoningEffort`.
 - **Provider default:** an explicit choice to omit Agencity's reasoning control and let the gateway, provider, and model choose their default behavior.
 - **Listed capability:** the catalog's `reasoning_options` enumerates an exact selectable SDK effort set for the model after documented toggle normalization.
 - **Unverified capability:** the model carries the catalog `reasoning` tag (or is absent from the catalog entirely) but has no exact level enumeration; standard levels are offered with an unverified label and SDK/gateway coercion semantics.
 - **Reasoning dispatch:** the immutable record of the resolved effort decision committed before a model effect.
-- **Model dispatch:** the immutable complete model configuration, reasoning dispatch, and gateway endpoint identity used by one call or pinned compaction.
+- **Model dispatch:** the immutable complete model configuration, reasoning dispatch, and execution endpoint identity used by one call or pinned compaction.
 - **Catalog cache:** a non-canonical, replaceable profile record of normalized catalog entries used for offline listing and bounded discovery traffic.
 
 
@@ -216,13 +230,13 @@ Selection behavior depends on what the catalog knows about the model:
 
 1. **Listed** (`reasoning_options` enumerates an effort set): the selector offers recognized documented SDK levels from the effort set plus `none` when the same entry advertises a reasoning toggle, then adds `provider-default`. An explicit level outside the normalized listed set fails at selection time with the listed alternatives named. No model call is made.
 2. **Unverified** (catalog `reasoning` tag present but `reasoning_options` is `null`, or the model is absent from the catalog, as with manual entry): the selector offers the standard SDK levels (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`) labeled **unverified**. The SDK or gateway may coerce the level; any coercion or unsupported warning is recorded as call provenance and surfaced once in the run status. Agencity itself never substitutes a different level.
-3. **Unsupported** (catalog entry exists and has no `reasoning` tag): only `provider-default` is selectable. An explicit level fails at selection time with a clear message, because the gateway would silently ignore the parameter and the stored setting would be a lie. A catalog refresh is offered in the same message since tags can be stale.
+3. **Unsupported** (catalog entry exists and has no `reasoning` tag): only `provider-default` is selectable. An explicit level fails at selection time with a clear message, because the SDK would silently ignore the parameter on every transport and the stored setting would be a lie. A catalog refresh is offered in the same message since tags can be stale.
 
 This is deliberately less strict than reject-everything-unproven and more honest than accept-everything-silently: exact data gates exactly, missing data degrades to labeled normalized behavior, and explicit contradiction with catalog data fails truthfully.
 
 ### Effort is model-specific
 
-Workspace default efforts are keyed by the normalized gateway endpoint identity and canonical model ID, not stored as one global effort. Changing models or gateway origins does not carry an old effort implicitly.
+Workspace default efforts are keyed by the normalized catalog endpoint identity and canonical model ID, not stored as one global effort. Preferences are transport-independent: the effort stored for `openai/gpt-5.2` applies whether the model runs through the gateway or the direct OpenAI transport, because the capability data is the same catalog entry. Changing models or catalog origins does not carry an old effort implicitly.
 
 Selection order for a new root session:
 
@@ -254,8 +268,8 @@ Existing branches ignore changes to defaults. Changing a branch's effort require
 
 ```ts
 interface ModelConfiguration {
-  readonly provider: string;          // "vercel" for all product models
-  readonly model: string;             // canonical creator/model gateway ID
+  readonly provider: string;          // transport: "vercel", "openai", or "anthropic"
+  readonly model: string;             // canonical creator/model catalog ID on every transport
   readonly temperature?: number;
   readonly maxOutputTokens?: number;
   readonly reasoningEffort?: ReasoningEffort;
@@ -264,7 +278,7 @@ interface ModelConfiguration {
 
 The field is optional so retained version-1 events preserve their exact shape. New product selections retain the canonical value explicitly, including `provider-default`.
 
-`normalizeModelConfiguration` must: normalize provider and model identity as today; canonicalize effort aliases at input boundaries; reject unknown effort strings; validate numeric settings; and leave capability checks to the catalog-backed resolver. The same command-level validation must be injected into `AgentService` and applied to direct/batch spawn, recursive starts, subagent specifications, and refinement-review child creation before any model-bearing event is appended.
+`normalizeModelConfiguration` must: normalize provider and model identity as today; canonicalize effort aliases at input boundaries; reject unknown effort strings; reject a direct-transport configuration whose model creator prefix disagrees with its provider (`provider: "openai"` requires an `openai/…` model and `provider: "anthropic"` an `anthropic/…` model, while the gateway accepts any creator); validate numeric settings; and leave capability checks to the catalog-backed resolver. The same command-level validation must be injected into `AgentService` and applied to direct/batch spawn, recursive starts, subagent specifications, and refinement-review child creation before any model-bearing event is appended.
 
 ### Model descriptor
 
@@ -282,12 +296,12 @@ interface ModelDescriptor {
     readonly levels: readonly Exclude<ReasoningEffort, "provider-default">[]; // exact when listed, standard set when unverified, empty when unsupported
   };
   readonly catalogDigest: string;               // sha256 of the normalized entry; stable across identical fetches
-  readonly catalogEndpointId: string;           // digest of the normalized gateway origin
+  readonly catalogEndpointId: string;           // digest of the normalized catalog origin
   readonly stale: boolean;                      // cache entry past its freshness window
 }
 ```
 
-There is no multi-source provenance merging: the gateway catalog is the only source, so per-field evidence reduces to the endpoint identity, entry digest, and presentation-time staleness. Models absent from the catalog (manual entry) get a synthesized descriptor with `status: "unverified"` and `catalogDigest` of the synthesized entry.
+There is no multi-source provenance merging: the gateway catalog is the only source, so per-field evidence reduces to the endpoint identity, entry digest, and presentation-time staleness. Descriptors are transport-independent: the same entry informs selection and dispatch on the gateway and on the direct transports. Models absent from the catalog (manual entry) get a synthesized descriptor with `status: "unverified"` and `catalogDigest` of the synthesized entry.
 
 ### Immutable model dispatch
 
@@ -308,7 +322,7 @@ interface ReasoningDispatch {
 interface ModelDispatch {
   readonly configuration: ModelConfiguration;
   readonly reasoning: ReasoningDispatch;
-  readonly gatewayEndpointId?: string;          // required when provider is "vercel"
+  readonly executionEndpointId?: string;        // required for product transports; digest of the normalized execution origin
   readonly dispatchVersion: "agencity.model-dispatch.v1";
 }
 ```
@@ -317,9 +331,9 @@ Rules:
 
 - The dispatch contains **no timestamps, staleness flags, or other volatile fields**. Catalog fetch times and cache staleness remain presentation metadata, so byte-identical dispatch comparison is stable across recovery and retries.
 - The complete dispatch is included as an optional `modelDispatch` field in `ModelCallRequested` and in `EffectRequested.input`. The executor reads configuration and reasoning only from that dispatch, passes `reasoning: requestedEffort` to the AI SDK when `mode` is `"requested"`, and omits the option when `"omitted"`.
-- The model-call admission command validates the relation between `ModelCallRequested` and its eventual `EffectRequested`: `callId`, `effectId`, complete configuration, gateway endpoint identity, and reasoning dispatch must agree byte-for-byte. Compaction effects must agree with the pinned dispatch on `ContextCompactionRequested`. A malformed or mismatched relation fails before network access.
+- The model-call admission command validates the relation between `ModelCallRequested` and its eventual `EffectRequested`: `callId`, `effectId`, complete configuration, execution endpoint identity, and reasoning dispatch must agree byte-for-byte. Compaction effects must agree with the pinned dispatch on `ContextCompactionRequested`. A malformed or mismatched relation fails before network access.
 - The dispatch is part of idempotency agreement: reusing a model-call, compaction, or effect idempotency key with a different dispatch is a conflict.
-- Before a pending gateway effect executes, the executor compares the retained `gatewayEndpointId` with the current normalized gateway origin. Configuration drift produces a typed unavailable outcome instead of sending a request to a different endpoint.
+- Before a pending product-model effect executes, the executor compares the retained `executionEndpointId` with the current normalized execution origin for the configured transport (the gateway origin for `vercel`; the official or overridden provider origin for a direct transport). Configuration drift produces a typed unavailable outcome instead of sending a request to a different endpoint.
 - A new model effect without a dispatch is malformed. A retained pre-feature effect input with its legacy standalone configuration and no dispatch executes as omitted/provider-default without discovery or event rewriting.
 
 
@@ -355,6 +369,8 @@ Add a `ModelCatalog` service under the model execution boundary:
 
 Custom `AI_GATEWAY_BASE_URL` values are trusted-local endpoints. Catalog data fetched from an override is keyed to that exact normalized endpoint identity and is not merged with official-endpoint data.
 
+Catalog metadata is transport-independent, and catalog fetches never send any provider credential. Direct transports execute against their official origins by default; `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are origin-only trusted-local execution overrides with the same normalization rules, used chiefly by test fixtures. Execution overrides never change the catalog origin, which is controlled only by `AI_GATEWAY_BASE_URL`.
+
 ### Profile cache and migration ledger
 
 Add a profile-local `model_catalog_cache` operational table keyed by the normalized endpoint identity digest, storing bounded normalized descriptors, revision metadata, fetch time, expiry, and schema version.
@@ -367,37 +383,41 @@ The cache: contains no credentials or raw responses; is not canonical; is safe t
 
 ### Context-window capacity integration
 
-The catalog's `context_window` and `max_tokens` feed a model-keyed capacity resolver, replacing today's one-static-window-per-provider lookup for gateway models. `ModelCatalog` hydrates a bounded in-memory descriptor snapshot from the profile cache before execution recovery; refresh atomically swaps that snapshot. `ModelExecutor.contextCapacity(configuration)` remains synchronous but delegates gateway configurations to the model-keyed snapshot and returns `"unknown"` when that exact endpoint/model has no descriptor. It never mutates one provider-wide capacity from the last model fetched.
+The catalog's `context_window` and `max_tokens` feed a model-keyed capacity resolver, replacing today's one-static-window-per-provider lookup for all product transports. `ModelCatalog` hydrates a bounded in-memory descriptor snapshot from the profile cache before execution recovery; refresh atomically swaps that snapshot. `ModelExecutor.contextCapacity(configuration)` remains synchronous but delegates product model configurations on any transport to the model-keyed snapshot and returns `"unknown"` when that exact catalog endpoint/model has no descriptor. It never mutates one provider-wide capacity from the last model fetched.
 
-This is a **deliberate behavior change**: context-window admission and compaction triggers begin operating on real per-model capacity values for gateway models. Add tests with two gateway models with different windows in one process, admission and automatic compaction before and after capacity becomes known, and a retained session that gains capacity data after upgrade. Capacity provenance flows through the existing `ContextCapacityProvenance` mechanism unchanged.
+This is a **deliberate behavior change**: context-window admission and compaction triggers begin operating on real per-model capacity values for catalog-listed models on every transport. Add tests with two catalog models with different windows in one process (covering both a gateway and a direct-transport session), admission and automatic compaction before and after capacity becomes known, and a retained session that gains capacity data after upgrade. Capacity provenance flows through the existing `ContextCapacityProvenance` mechanism unchanged.
 
 ## Execution
 
 
 
-### The gateway provider adapter
+### The shared AI SDK adapter core and transport factories
 
-Replace `OpenAICompatibleProvider`, `AnthropicCompatibleProvider`, and the Anthropic-instantiated `vercel` provider with one `VercelGatewayProvider` implementing the existing `ModelProvider` contract via the AI SDK:
+Replace `OpenAICompatibleProvider`, `AnthropicCompatibleProvider`, and the Anthropic-instantiated `vercel` provider with one shared `AiSdkModelProvider` core implementing the existing `ModelProvider` contract, instantiated by three thin transport factories:
 
-- Create the provider with the pinned SDK's documented `createGateway` API, the derived `${gatewayOrigin}/v4/ai` model API base URL, and the supervisor-resolved credential. Do not pass the origin-only override directly as the SDK model API prefix.
+- **`vercel`** — the pinned SDK's documented `createGateway` API with the derived `${gatewayOrigin}/v4/ai` model API base URL (never the origin-only override directly) and the gateway credential; passes canonical `creator/model` IDs through unchanged and accepts any creator.
+- **`openai`** — `createOpenAI` with the OpenAI credential and the official or overridden origin; requires an `openai/…` canonical ID and derives the native ID by stripping the creator prefix.
+- **`anthropic`** — `createAnthropic` with the Anthropic credential and the official or overridden origin; requires an `anthropic/…` canonical ID and derives the native ID by stripping the creator prefix and replacing dots with dashes in the version segment.
+
+A factory contributes instantiation only: model construction, credential resolution, execution endpoint identity, and native-ID derivation. Every request behavior lives once in the shared core:
 - `complete` uses `generateText`; `stream` uses `streamText`. One shared pure options builder serves both, so model, temperature, maximum output, and reasoning options cannot diverge.
 - Streaming consumes the SDK's authoritative full stream. Only text deltas reach the existing provisional `onDelta` callback; reasoning and protocol parts do not. The adapter awaits final text, finish reason, usage, warnings, and gateway metadata. Any stream error, cancellation, malformed terminal data, or incomplete termination fails the effect, and no provisional prefix becomes durable.
 - The dispatch's `requestedEffort` maps to the SDK's top-level `reasoning` option (`mode: "omitted"` omits it). No reasoning-related `providerOptions` are set, and catalog-only `max` is unavailable.
 - **Reasoning content is never persisted.** Reasoning parts in SDK responses and streams are discarded; only final text enters `ModelResponse.text`, committed messages, and cursorless progress. This feature controls effort, not chain-of-thought storage.
 - **Warnings are provenance.** SDK warnings are converted at the adapter boundary into a stable internal `ModelWarning` shape with kind (`coerced`, `unsupported`, `provider`, or `truncated`) and bounded scrubbed message. Retain at most eight warnings of at most 1,024 UTF-8 bytes each. They remain in the effect outcome and are copied to optional `ModelCallCompleted.warnings` for ordinary calls, visible in `/raw`, and surfaced once by committed event identity. They never mutate branch configuration.
-- **Usage and cost:** token usage maps from the completed SDK result. A directly returned finite nonnegative gateway cost populates `Usage.costUsd`; missing or malformed cost becomes `0`. The adapter does not call generation lookup. Provider-reported reasoning tokens are debited once inside total output usage, as today.
+- **Usage and cost:** token usage maps from the completed SDK result. A directly returned finite nonnegative gateway cost populates `Usage.costUsd`; missing or malformed cost becomes `0`, and direct transports always record `0`. The adapter does not call generation lookup. Provider-reported reasoning tokens are debited once inside total output usage, as today.
 - **Errors are bounded and classified.** Convert SDK failures into a closed internal classification without retaining raw response bodies, headers, prompts, or provider payloads. Only a positively identified context-limit error becomes `ModelProviderContextWindowOverflowError`; authentication, rate limit, routing, malformed-response, and generic transport failures never trigger overflow retry.
-- The gateway credential resolves through the existing supervisor-side credential store / `AI_GATEWAY_API_KEY` environment fallback and is passed to the SDK per call; it never enters events, cache rows, logs, or errors.
-- Resolve the latest stable compatible `ai` and `@ai-sdk/gateway` packages at implementation start and pin their exact versions in `package.json` and the lockfile. Record the versions in fixture provenance. AI SDK types must not leak through the `ModelProvider` contract or into domain/storage code.
+- Each transport's credential resolves through the existing supervisor-side credential store and environment fallbacks (`AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) and is passed to the SDK per call. A credential is used only by its own transport and never enters events, cache rows, logs, or errors.
+- Resolve the latest stable compatible `ai`, `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic` packages at implementation start and pin their exact versions in `package.json` and the lockfile. Record the versions in fixture provenance. AI SDK types must not leak through the `ModelProvider` contract or into domain/storage code.
 
-Echo remains unchanged behind the same contract. Extend provider capabilities with an explicit internal reasoning-control declaration (`"none"` or `"normalized"`). Programmatic provider registration remains supported for tests and trusted integrations; absent capability means `"none"` and permits only `provider-default`. The gateway adapter declares `"normalized"`. Catalog fallback never grants reasoning control to an unrelated custom provider.
+Echo remains unchanged behind the same contract. Extend provider capabilities with an explicit internal reasoning-control declaration (`"none"` or `"normalized"`). Programmatic provider registration remains supported for tests and trusted integrations; absent capability means `"none"` and permits only `provider-default`. All three product transports declare `"normalized"`. Catalog fallback never grants reasoning control to an unrelated custom provider.
 
-### Retiring direct providers
+### Providers, onboarding, and retained-branch canonicalization
 
-- Remove the OpenAI and Anthropic product providers, their onboarding paths, and their credential prompts. Product provider selection offers only Vercel AI Gateway. Separate the active product-provider list (`vercel`) from the credential file's recognized historical provider keys.
-- Stored OpenAI/Anthropic credentials in the owner-only store are ignored and are never selected or exposed. Credential-file reads and subsequent Vercel set/remove writes preserve retired and unknown provider records byte-for-byte at their logical field values rather than rewriting them away. Provider retirement performs no credential deletion; only a future explicit credential-deletion operation may remove them. `docs/configuration.md` documents this.
-- **Retained branches on retired providers** (`provider` of `openai` or `anthropic`): interactive resume offers an explicit model migration to the equivalent gateway model (suggested by catalog match on the model name; the ID transforms are deterministic for OpenAI and dot/dash for Anthropic), committed as an ordinary `SessionModelChanged`. Non-interactive work on such a branch fails truthfully with that guidance. This mirrors the established retained-Echo-branch migration pattern. History is never rewritten.
-- Retained `vercel` branches with canonical `creator/model` IDs continue working with no migration: the durable provider name and model ID remain unchanged while only the wire implementation changes. A retained bare or otherwise non-canonical gateway ID does not receive a guessed namespace. Interactive resume offers catalog-assisted explicit migration or manual canonical entry; non-interactive work fails with guidance. Add fixtures for both canonical and bare pre-feature gateway configurations.
+- Product provider selection offers `vercel` (recommended and listed first), `openai`, and `anthropic`. The existing three-provider onboarding, hidden credential entry, and environment fallbacks are retained. What changes: the hand-written wire adapters behind these providers are deleted; model selection and manual entry use canonical `creator/model` IDs on every transport; and the picker filters the catalog to the transport's creator namespace for direct providers while the gateway shows all listed models.
+- The credential store's recognized provider keys are unchanged. Credential-file reads and writes preserve unknown or historical records byte-for-byte at their logical field values; this plan deletes no credential. `docs/configuration.md` documents the credential and override environment variables per transport.
+- **Retained branches with canonical namespaced IDs** on any product transport continue working with no migration: durable provider and model values are unchanged while only the wire implementation changes.
+- **Retained branches with bare or otherwise non-canonical model IDs** — every pre-feature `openai` and `anthropic` branch (they stored native IDs) and older bare `vercel` IDs — never receive a guessed namespace, because the native-to-canonical direction is not string-inferable for Anthropic. Interactive resume offers catalog-assisted explicit migration or manual canonical entry, committed as an ordinary `SessionModelChanged`; the suggested target keeps the same provider when its credential is usable and otherwise suggests the gateway. Non-interactive work on such a branch fails truthfully with that guidance. This mirrors the established retained-Echo-branch migration pattern; history is never rewritten. Add fixtures for canonical and bare pre-feature configurations on all three providers.
 
 
 
@@ -416,7 +436,7 @@ Recovery does not: query the catalog to reinterpret a committed effect; apply a 
 - Context-window overflow retries reuse the exact prior complete dispatch byte-for-byte under a new call/effect identity; only context and context-window provenance change. Compaction cannot change model settings.
 - Console-worker restarts do not affect effort; the setting lives in durable state only.
 
-If the gateway rejects a retained request (for example, capabilities changed after selection), that is a normal failed model effect with model/effort context. Agencity does not change the branch configuration or retry at another level.
+If the gateway or a direct provider rejects a retained request (for example, capabilities changed after selection), that is a normal failed model effect with model/effort context. Agencity does not change the branch configuration, retry at another level, or reroute to another transport.
 
 ## Selection, protocol, and SDK
 
@@ -433,7 +453,7 @@ Additive changes; `agencity.protocol` stays version 1 with capability negotiatio
 - `GET /capabilities` advertises `reasoningEffortSelection: true`;
 - `POST /sessions/:session/model?branch=…` accepts `reasoningEffort` in the configuration;
 - `GET /model-catalog` returns bounded normalized descriptors plus cache staleness; `POST /model-catalog/refresh` refreshes and returns the cached fallback with a typed refresh status on remote failure;
-- `GET /product/config` includes the current gateway endpoint identity and per-endpoint/per-model workspace effort preferences; `POST /product/config/reasoning-effort` sets or clears `{ model, effort }` for the server's current endpoint identity.
+- `GET /product/config` includes the current catalog endpoint identity, the per-transport execution origins, and per-catalog-endpoint/per-model workspace effort preferences; `POST /product/config/reasoning-effort` sets or clears `{ model, effort }` for the server's current catalog endpoint identity.
 
 A client must not send explicit effort to a server whose capabilities omit `reasoningEffortSelection`; it fails with a typed unavailable error instead of letting an older server silently strip the field. Add a shared `AgentClient.requireCapability("reasoningEffortSelection")` guard backed by the validated attach-time capability snapshot and use it in every effort-bearing model/configuration method. TUI and CLI commands call those guarded methods rather than posting raw configurations. Managed and in-process transports return identical types and errors; clients never parse raw catalog responses.
 
@@ -481,12 +501,12 @@ Catalog unavailability does not make a retained session disappear or block execu
 
 ## Security and data classification
 
-- The gateway API key remains in the owner-only credential store or environment; it is passed to the AI SDK per call supervisor-side and never enters events, cache rows, sync envelopes, logs, protocol output, or error messages.
-- With the default origin, **all product model traffic — prompts, context, and generated text — transits Vercel's AI Gateway.** State this plainly in `docs/security.md`. Note the gateway's prompt-training opt-out setting as operator guidance.
+- Provider API keys (gateway, OpenAI, Anthropic) remain in the owner-only credential store or environment; each is passed to the AI SDK per call supervisor-side, is used only by its own transport, and never enters events, cache rows, sync envelopes, logs, protocol output, or error messages.
+- Network paths are per transport: with the `vercel` transport, **all model traffic for that session — prompts, context, and generated text — transits Vercel's AI Gateway**; with a direct transport it goes to that provider's API. State this plainly in `docs/security.md`. Note the gateway's prompt-training opt-out setting as operator guidance.
 - Catalog responses are bounded, schema-validated, secret-free, and excluded from errors and canonical history.
 - `model_catalog_cache` is a mutable operational profile cache; its migration and classification are architecture-checked.
 - Selected effort is canonical (it changes model behavior). The complete model dispatch is canonical provenance. Recorded warnings are bounded effect-outcome data.
-- A custom `AI_GATEWAY_BASE_URL` replaces Vercel as the trusted-local network destination. Its derived `/v4/ai` model API receives the gateway credential and all model traffic. Its public catalog request omits credentials unless a future authenticated-catalog contract is explicitly implemented.
+- Custom `AI_GATEWAY_BASE_URL`, `OPENAI_BASE_URL`, and `ANTHROPIC_BASE_URL` values replace the corresponding official origin as the trusted-local network destination for that transport and receive that transport's credential and model traffic. The public catalog request omits credentials unless a future authenticated-catalog contract is explicitly implemented.
 
 Update `docs/mutable-tables.md` for the cache classification and `docs/security.md` for the transit and credential statements.
 
@@ -494,8 +514,8 @@ Update `docs/mutable-tables.md` for the cache classification and `docs/security.
 
 ### 0. Pin the SDK and wire contract
 
-- Recheck the package registry and official AI SDK 7 gateway documentation; install the latest stable compatible `ai` and `@ai-sdk/gateway` versions and pin them exactly.
-- Record the resolved package versions and capture the documented `createGateway`, `/v4/ai`, `/v1/models`, streaming, warning, usage, and provider-metadata shapes in focused fixture tests before replacing the current adapters.
+- Recheck the package registry and official AI SDK 7 documentation; install the latest stable compatible `ai`, `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic` versions and pin them exactly.
+- Record the resolved package versions and capture the documented `createGateway`/`createOpenAI`/`createAnthropic` APIs, the `/v4/ai` and `/v1/models` gateway endpoints, the native OpenAI and Anthropic wire shapes the pinned packages emit, and the streaming, warning, usage, and provider-metadata shapes in focused fixture tests before replacing the current adapters.
 - Keep `max` unavailable and cost best-effort regardless of undocumented or eventually consistent fields.
 
 
@@ -518,11 +538,11 @@ Update `docs/mutable-tables.md` for the cache classification and `docs/security.
 
 
 
-### 3. AI SDK gateway adapter and provider retirement
+### 3. AI SDK adapter core, transport factories, and branch canonicalization
 
-- Implement `VercelGatewayProvider` with the derived SDK model API base URL, shared options builder, authoritative stream consumption, reasoning-part discard, warning capture, direct-cost-or-zero mapping, and bounded typed error mapping.
-- Delete the OpenAI and Anthropic HTTP adapters and the SSE parser; keep the `ModelProvider` contract, Echo, and programmatic registration.
-- Retire direct providers from onboarding, credential prompts, and product selection while preserving ignored credential-file records; implement retained-branch migration for `openai`/`anthropic` and non-canonical `vercel` branches; test canonical pre-feature gateway continuity.
+- Implement the shared `AiSdkModelProvider` core with the shared options builder, authoritative stream consumption, reasoning-part discard, warning capture, gateway-cost-or-zero mapping, and bounded typed error mapping; instantiate it through the `vercel`, `openai`, and `anthropic` factories with derived base URLs, per-transport credentials, execution endpoint identities, and native-ID derivation.
+- Delete the hand-written OpenAI and Anthropic HTTP adapters and the SSE parser; keep the `ModelProvider` contract, Echo, and programmatic registration.
+- Move onboarding, the picker, and manual entry to canonical `creator/model` IDs on every transport; implement catalog-assisted canonicalization migration for bare-ID branches on all three providers; test canonical pre-feature continuity.
 
 
 
@@ -546,7 +566,7 @@ Update `docs/mutable-tables.md` for the cache classification and `docs/security.
 
 ### 6. Documentation and release evidence
 
-- Update public API, console SDK, protocol, configuration, user-guide, architecture, data-lifecycle, security, mutable-table, and verification documents; update `AGENTS.md` status (gateway-only execution, retired direct providers, reasoning effort) only after the user-visible path is implemented and verified.
+- Update public API, console SDK, protocol, configuration, user-guide, architecture, data-lifecycle, security, mutable-table, and verification documents; update `AGENTS.md` status (AI SDK-only execution across the gateway and direct transports, canonical model IDs, reasoning effort) only after the user-visible path is implemented and verified.
 - Run the full deterministic suite; report external rows separately as pass, fail, or skip.
 
 
@@ -557,7 +577,7 @@ Update `docs/mutable-tables.md` for the cache classification and `docs/security.
 
 ### Fixture strategy
 
-Black-box and integration tests exercise the new adapter against a **local gateway fixture server** reached through an origin-only `AI_GATEWAY_BASE_URL`. The fixture serves the pinned SDK's derived `/v4/ai` completion/streaming API and `/v1/models` catalog API, and asserts authentication boundaries plus exact received reasoning payloads. The implementer derives the fixture by recording the pinned SDK's requests against a local listener. Unit-level injected SDK/provider tests cover warning normalization and error classification that a wire fixture cannot reliably induce. Re-record fixtures on any SDK version bump.
+Black-box and integration tests exercise every transport against **local fixture servers** reached through the origin-only overrides: a gateway fixture serving the pinned SDK's derived `/v4/ai` completion/streaming API plus the `/v1/models` catalog API behind `AI_GATEWAY_BASE_URL`; an OpenAI fixture serving the native wire API the pinned `@ai-sdk/openai` emits behind `OPENAI_BASE_URL`; and an Anthropic fixture serving the native wire API the pinned `@ai-sdk/anthropic` emits behind `ANTHROPIC_BASE_URL`. Fixtures assert authentication boundaries plus exact received model IDs and reasoning payloads. The implementer derives each fixture by recording the pinned package's requests against a local listener. Unit-level injected SDK/provider tests cover warning normalization and error classification that a wire fixture cannot reliably induce. Re-record fixtures on any SDK package bump.
 
 ### Domain and replay
 
@@ -574,7 +594,7 @@ Black-box and integration tests exercise the new adapter against a **local gatew
 - Sanitized fixtures cover valid, missing, malformed, oversized, unknown-field, and `reasoning_options: null` responses (including a flagship-model null case).
 - Listed levels come from recognized effort entries, with `toggle` adding `none`; `max` and other undocumented values remain diagnostic-only; toggle-only, budget-only, and tag-without-selectable-options yield unverified; tag-absent yields unsupported.
 - Cache hit, expiry, refresh failure with cached fallback, stale labeling, endpoint-identity separation, reopen idempotency, and profile-deletion behavior are deterministic.
-- Two gateway models with different capacities resolve independently in one process; refresh swaps the in-memory snapshot atomically.
+- Two catalog models with different capacities resolve independently in one process, on gateway and direct transports alike; refresh swaps the in-memory snapshot atomically.
 - Custom base-URL catalog data never merges with official-endpoint data.
 - No secret appears in cache bytes, events, errors, logs, snapshots, or protocol responses.
 
@@ -582,7 +602,9 @@ Black-box and integration tests exercise the new adapter against a **local gatew
 
 ### Adapter
 
-- Exact SDK-bound payloads are asserted for every level and `provider-default`; streaming and non-streaming options agree.
+- Exact wire payloads are asserted on all three transports for every level and `provider-default`, including the exact native model ID each direct fixture receives; streaming and non-streaming options agree.
+- Native-ID derivation covers dotted Anthropic versions, dotless models passing through unchanged, and verbatim OpenAI suffixes; a direct transport rejects a canonical ID whose creator disagrees with its provider before any network request.
+- Each transport sends only its own credential to its own origin; direct-transport calls record `Usage.costUsd` of `0`.
 - Rejected selections (unlisted level on a listed model; any level on an unsupported model) make zero network requests.
 - Reasoning parts never enter committed messages or provisional output; warnings are captured, scrubbed, bounded, retained, and surfaced once by committed event identity.
 - Directly returned cost populates `Usage.costUsd`; absent or malformed cost records `0`; no generation lookup occurs.
@@ -599,8 +621,8 @@ Black-box and integration tests exercise the new adapter against a **local gatew
 - Generic `tools.request` cannot address the model executor; admitted `rlm` and child paths still work.
 - Overflow retries reuse the complete dispatch byte-for-byte; effort changes are refused during active work; console-worker restarts do not affect effort.
 - Parent, direct/batch child, recursive, subagent-spec, refinement-child, schedule, heartbeat, and follow-up paths retain intended configurations; explicit same-model child effort changes follow the documented no-ceiling policy.
-- Retired-provider and non-canonical gateway branches migrate only through explicit `SessionModelChanged`; non-interactive use fails truthfully; canonical pre-feature gateway branches execute unchanged.
-- Saving or removing the Vercel credential never removes ignored retired credential records.
+- Bare-ID branches on all three providers migrate only through explicit `SessionModelChanged`; non-interactive use fails truthfully; canonical pre-feature branches execute unchanged.
+- Saving or removing any provider credential never removes or rewrites other credential records.
 
 
 
@@ -624,27 +646,29 @@ The linked-executable matrix must prove:
 6. `/effort` changes an idle branch and a later call uses the new value;
 7. an unlisted level and an unsupported model fail truthfully with zero model requests;
 8. an unverified model accepts a standard level and retains the recorded coercion warning when the fixture emits one;
-9. an old retained database resumes with provider-default behavior, and a retained direct-provider branch requires the explicit migration.
+9. an old retained database resumes with provider-default behavior, and retained bare-ID branches require the explicit canonicalization migration;
+10. a direct-transport session (OpenAI or Anthropic fixture) selects an explicit effort without internal IDs, its native fixture receives the exact derived model ID and reasoning payload, and the run retains the same dispatch provenance as the gateway path.
 
-A credential-gated real-gateway smoke row (real `AI_GATEWAY_API_KEY`, real namespaced model, explicit effort) is additional evidence, explicitly opt-in, and reported as skipped when credentials are absent. Cost may be a returned nonnegative value or the documented `0` fallback and is not a pass condition.
+A credential-gated real-gateway smoke row (real `AI_GATEWAY_API_KEY`, real namespaced model, explicit effort) is additional evidence, explicitly opt-in, and reported as skipped when credentials are absent. Real direct-transport smoke rows are equally opt-in behind `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` and reported as skipped when absent. Cost may be a returned nonnegative value or the documented `0` fallback and is not a pass condition.
 
 ## Acceptance criteria
 
 - A user can inspect and change effort through the documented terminal and CLI paths, with levels sourced from the gateway catalog.
-- All product model execution flows through the AI SDK gateway adapter; the direct OpenAI/Anthropic adapters and onboarding paths are removed; Echo and programmatic registration still work.
-- Old sessions preserve provider-default behavior without history rewrites; canonical retained gateway branches work unchanged; retired-provider and non-canonical gateway branches migrate only explicitly.
+- All product model execution flows through the shared AI SDK adapter core and its `vercel`, `openai`, and `anthropic` transport factories; the hand-written wire adapters are removed; Echo and programmatic registration still work.
+- Old sessions preserve provider-default behavior without history rewrites; canonical retained branches on every transport work unchanged; bare-ID branches migrate only explicitly.
+- Direct transports exhibit the same effort vocabulary, capability tiers, dispatch, warning, and recovery behavior as the gateway, differing only in credential, execution endpoint, and native model ID.
 - Every admitted model call retains its exact immutable complete model dispatch; recovery, compaction, and overflow retries never reinterpret its configuration or reasoning.
 - Coercion and unsupported warnings are recorded and visible; Agencity never substitutes a level itself.
-- `Usage.costUsd` preserves directly returned gateway cost and otherwise remains `0`; exact delayed cost accounting is not claimed. Model-keyed catalog capacity feeds context-window admission with tested behavior.
+- `Usage.costUsd` preserves directly returned gateway cost and otherwise remains `0` (always `0` on direct transports); exact delayed cost accounting is not claimed. Model-keyed catalog capacity feeds context-window admission with tested behavior.
 - Unlisted and unsupported selections fail truthfully with no model request; unverified selections are labeled.
-- The gateway key and raw catalog responses never enter durable or user-visible state.
-- The installed black-box path and the full deterministic suite pass; public docs and `AGENTS.md` describe gateway-only execution, the Vercel transit boundary, and remaining limits.
+- Provider keys and raw catalog responses never enter durable or user-visible state.
+- The installed black-box path and the full deterministic suite pass; public docs and `AGENTS.md` describe AI SDK-only execution, the per-transport network boundaries, and remaining limits.
 
 
 
 ## Explicit deferrals
 
-- **Direct OpenAI and Anthropic access** via `@ai-sdk/openai`/`@ai-sdk/anthropic`, keyed off the same canonical model IDs (OpenAI suffixes are native IDs; Anthropic needs the deterministic dot/dash transform). Requires per-provider credentials, onboarding, fixtures, and a capability story for models the catalog does not cover.
+- Additional AI SDK transports (Google, xAI, Amazon Bedrock, and others) and any transport-fallback or routing policy.
 - Gateway BYOK, provider routing controls (`order`/`only`), and gateway automatic caching.
 - A user-specified integer thinking-token budget (`reasoning_options` `budget_tokens` entries are ignored in this release).
 - Environment-variable effort control.
