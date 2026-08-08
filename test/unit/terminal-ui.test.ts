@@ -479,6 +479,8 @@ describe("FU-005 protocol-backed terminal UI", () => {
     let activeWatches = 0;
     let maximumActiveWatches = 0;
     let selectionError: Error | null = null;
+    let transitionError: Error | null = null;
+    let familyError = false;
     const client = new Proxy(base, {
       get(target, property) {
         if (property === "capabilities") return async () => ({
@@ -493,6 +495,18 @@ describe("FU-005 protocol-backed terminal UI", () => {
           if (selectionError) throw selectionError;
           selections.push([sessionId, branchId]);
           return { sessionId: sessionId!, branchId: branchId! };
+        };
+        if (property === "snapshot") return async (sessionId: string, branchId: string) => {
+          if (transitionError && sessionId === second.sessionId && branchId === second.branchId) {
+            throw transitionError;
+          }
+          return base.snapshot(sessionId, branchId);
+        };
+        if (property === "agents") return async (sessionId: string, branchId: string) => {
+          if (familyError && sessionId === second.sessionId && branchId === second.branchId) {
+            throw new ProtocolClientError("UNAVAILABLE", "Family projection unavailable", 503);
+          }
+          return base.agents(sessionId, branchId);
         };
         if (property === "watchBranch") return async (...args: Parameters<AgentClient["watchBranch"]>) => {
           activeWatches++;
@@ -523,22 +537,38 @@ describe("FU-005 protocol-backed terminal UI", () => {
       await expect(ui.openWorkspaceAgent("archived-session", "archived-branch")).rejects.toThrow(/archived and cannot be opened/);
       expect(selections).toEqual([]);
 
-      selectionError = new Error(`Session or branch not found: ${second.sessionId}/${second.branchId}`);
-      const staleSelection = await ui.openWorkspaceAgent(second.sessionId, second.branchId).catch(error => error);
-      expect(staleSelection).toBeInstanceOf(Error);
-      expect((staleSelection as Error).message).toBe("Could not select Second root. Refresh Agents and try again.");
-      expect((staleSelection as Error).message).not.toContain(second.sessionId);
-      expect((staleSelection as Error).message).not.toContain(second.branchId);
+      transitionError = new Error(`Session or branch not found: ${second.sessionId}/${second.branchId}`);
+      const failedTransition = await ui.openWorkspaceAgent(second.sessionId, second.branchId).catch(error => error);
+      expect(failedTransition).toBeInstanceOf(Error);
+      expect((failedTransition as Error).message).toBe("Could not open Second root. Refresh Agents and try again.");
+      expect((failedTransition as Error).message).not.toContain(second.sessionId);
+      expect((failedTransition as Error).message).not.toContain(second.branchId);
+      expect(selections).toEqual([]);
+      expect(ui.presentation.state.sessionId).toBe(first.sessionId);
       expect(ui.presentation.workspaceAgents.open).toBe(true);
-      selectionError = null;
+      transitionError = null;
+      familyError = true;
 
       await ui.openWorkspaceAgent(second.sessionId, second.branchId);
       expect(selections).toEqual([[second.sessionId, second.branchId]]);
       expect(ui.presentation.state.sessionId).toBe(second.sessionId);
       expect(ui.presentation.workspaceAgents.open).toBe(false);
+      expect(ui.presentation.family).toMatchObject({ root: true, refresh: "unavailable" });
       expect(catalogCalls).toBe(2);
       expect(maximumActiveWatches).toBe(1);
       expect(activeWatches).toBe(1);
+
+      await ui.openWorkspaceAgents();
+      selectionError = new Error(`Session or branch not found: ${first.sessionId}/${first.branchId}`);
+      const failedSelection = await ui.openWorkspaceAgent(first.sessionId, first.branchId).catch(error => error);
+      expect(failedSelection).toBeInstanceOf(Error);
+      expect((failedSelection as Error).message)
+        .toBe("First root is open, but could not be selected for resume. Reopen Agents and try again.");
+      expect((failedSelection as Error).message).not.toContain(first.sessionId);
+      expect((failedSelection as Error).message).not.toContain(first.branchId);
+      expect(selections).toEqual([[second.sessionId, second.branchId]]);
+      expect(ui.presentation.state.sessionId).toBe(first.sessionId);
+      expect(ui.presentation.workspaceAgents.open).toBe(false);
     } finally {
       await ui.detach(false);
       await supervisor.close();

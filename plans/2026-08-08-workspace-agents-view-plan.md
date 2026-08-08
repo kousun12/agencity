@@ -375,7 +375,7 @@ Implementation completed on August 8, 2026.
 - The terminal controller owns disposable workspace Agents state, race-safe one-shot catalog refresh, stale-row preservation, historical-mode rejection, `/agents` and `/tree` command separation, and exact root selection through `productSelect`.
 - Empty-composer Left opens the workspace Agents view only when the retained family projection classifies the current route as a root. Nested Left navigation remains parent-directed.
 - The OpenTUI screen replaces the conversation while open, preserves the trusted-local footer and search composer, renders the human workspace label, exact status sections, and retained-root counts, keeps variable-height selection visible, prevents hidden modal state, and keeps failed and archived rows visible but non-resumable.
-- Successful root opening reuses the serialized snapshot-first route transition, leaves one branch watch, refreshes the catalog, and updates the remembered no-ID resume route.
+- Successful root opening reuses the serialized snapshot-first route transition, leaves one branch watch, and updates the remembered no-ID resume route only after the target conversation is open.
 - Catalog text and stale selection failures are scrubbed at the terminal boundary so workspace and route IDs remain internal.
 - Public README, user, TypeScript API, protocol, verification, and canonical repository documentation describe the shipped behavior.
 

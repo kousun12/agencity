@@ -352,7 +352,7 @@ export class TerminalUI {
       parent: null,
       children: [],
       ancestry: [snapshot.state.sessionName ?? "Unnamed session"],
-      root: null,
+      root: snapshot.state.parentSessionId === null,
       refresh: "refreshing",
       generation: ++this.#familyGeneration,
     };
@@ -556,14 +556,9 @@ export class TerminalUI {
       throw new Error(`${selectedName} is ${selected.status} and cannot be opened`);
     }
     try {
-      await this.client.productSelect(sessionId, branchId);
-    } catch {
-      throw new Error(`Could not select ${selectedName}. Refresh Agents and try again.`);
-    }
-    try {
       await this.#queueRouteTransition(sessionId, branchId);
     } catch {
-      throw new Error(`${selectedName} is selected for resume but could not be displayed. Refresh Agents and try again.`);
+      throw new Error(`Could not open ${selectedName}. Refresh Agents and try again.`);
     }
     this.#workspaceAgents = {
       ...this.#workspaceAgents,
@@ -574,6 +569,11 @@ export class TerminalUI {
       generation: this.#workspaceAgents.generation + 1,
     };
     this.#publish();
+    try {
+      await this.client.productSelect(sessionId, branchId);
+    } catch {
+      throw new Error(`${selectedName} is open, but could not be selected for resume. Reopen Agents and try again.`);
+    }
     await this.refreshWorkspaceAgents();
   }
 
@@ -923,7 +923,7 @@ export class TerminalUI {
       parent: null,
       children: [],
       ancestry: [snapshot.state.sessionName ?? "Unnamed session"],
-      root: null,
+      root: snapshot.state.parentSessionId === null,
       refresh: "refreshing",
       generation: this.#familyGeneration,
     };
