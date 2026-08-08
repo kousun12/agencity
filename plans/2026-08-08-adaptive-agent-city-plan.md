@@ -207,7 +207,7 @@ The city operator can inspect all agent charters and directory metadata. This do
 - **Route:** One exact `(sessionId, branchId)` execution history.
 - **Charter:** The durable definition of an agent's purpose and operating boundaries.
 - **Charter version:** One immutable charter revision with exact system-prompt text and provenance.
-- **Effective system prompt:** The exact provider-facing system content composed from immutable base policy, one charter version, and the fixed run-control contract.
+- **Effective system prompt:** The exact provider-facing system content composed from immutable base policy, one charter version, the invocation-specific response/run-control contract, and its execution guidance.
 - **Creation parent:** The session and branch that admitted the agent. This relationship is immutable provenance.
 - **Managing parent:** The agent currently authorized to manage the child. This relationship is versioned and can change.
 - **Active hierarchy:** The current managing-parent tree rooted at the city operator.
@@ -254,7 +254,7 @@ This preserves the existing durable actor model:
 - branches remain alternate histories of that agent;
 - effects, context, tasks, and mail retain current ownership semantics.
 
-Each session receives exactly one charter entry with one active version. A session cannot have two active charters. Reusable subagent specifications remain templates that can produce new agent charters; they are not the resulting agent's identity.
+Each runnable session receives exactly one charter entry with one active version. A runnable session cannot have two active charters. A retired or imported historical agent retains its last effective or historical-unknown charter record without an active runnable pointer. Reusable subagent specifications remain templates that can produce new agent charters; they are not the resulting agent's identity.
 
 A future cross-workspace marketplace or profile-level institutional agent may require identity above a workspace session. That is outside this plan because it introduces different ownership, sync, credential, deletion, and governance boundaries.
 
@@ -295,10 +295,10 @@ The operator charter includes:
 Replacing the operator is a user-authorized atomic city transition:
 
 1. create or select the successor agent and charter;
-2. validate that the successor can satisfy the operator contract;
+2. validate that the successor can satisfy the operator contract and that promoting it cannot create a management cycle;
 3. pause ordinary organization mutations;
-4. transfer the operator pointer and active top-level management edges;
-5. retain the predecessor as an ordinary paused or retired agent;
+4. remove the successor's prior management edge and transfer the operator pointer and active top-level management edges;
+5. reparent the predecessor beneath the successor as paused, or retire it under the same approved transition;
 6. resume organization mutations under the new operator.
 
 There is never more than one active operator at one city revision. The outgoing operator cannot approve its own successor.
@@ -514,6 +514,7 @@ The invocation-specific layer is not always the ordinary `bun_console`/`finish` 
 
 - `charterVersionId`;
 - `charterPromptDigest`;
+- `grantVersionId`;
 - exact immutable references to every effective system-prompt component;
 - exact composed effective system-prompt content or a verified content-addressed definition;
 - effective system-prompt digest;
@@ -521,7 +522,7 @@ The invocation-specific layer is not always the ordinary `bun_console`/`finish` 
 - invocation response-contract version;
 - execution-guide version.
 
-Every step and model effect in that run uses the same charter version. A parent revision activated while a run is in progress applies only to later runs. Changing a charter does not mutate the model identity halfway through a task.
+Every step and model effect in that run uses the same charter and grant versions, subject to explicit revocation barriers. A parent revision or grant expansion activated while a run is in progress applies only to later runs. Changing a charter does not mutate the model identity halfway through a task.
 
 A follow-up, schedule wake, or new task starts a new run and resolves the active charter at admission. A schedule does not permanently preserve a stale charter unless it explicitly declares and validates a version pin.
 
@@ -654,6 +655,37 @@ Authority has four distinct layers:
 A charter describes expected behavior inside those grants. Runtime services enforce model, budget, SDK, credential-reference, data, and effect grants. Because trusted-local Bun and shell execution retain ambient OS authority, a charter cannot truthfully claim filesystem or network sandboxing that the runtime does not implement.
 
 A child revision may narrow current grants. Expansion above current grants requires the authority that owns the next ceiling and cannot exceed the manager's delegated ceiling. Reparenting validates the complete descendant closure; agents whose grants do not fit the new chain must be narrowed through approved revisions or paused before the new edge activates.
+
+## Runtime grant model
+
+Charter language and enforceable runtime grants are separate versioned records.
+
+Each immutable `AgentGrantVersion` contains:
+
+- allowed model/provider and reasoning configurations;
+- per-assignment and aggregate budget ceilings;
+- SDK capabilities;
+- opaque credential references and allowed uses;
+- data and artifact scopes;
+- effect categories and approval requirements;
+- delegation ceilings;
+- source policy, acting principal, evidence, and superseded version.
+
+The city control stream owns grant-version creation, activation, revocation, rejection, and rollback events. Rebuildable projections expose one active grant version for every runnable agent. Grant versions use compare-and-swap and cannot exceed the complete active management chain.
+
+Assignment claim and `AgentRunRequested` pin both charter and grant versions. Every effect request records the pinned grant version and city revision used for admission.
+
+Grant changes follow these rules:
+
+- expansion applies only to later assignment claims and runs;
+- ordinary narrowing applies to later runs and blocks incompatible queued assignments;
+- security, credential, or publication revocation creates an immediate revocation barrier;
+- an active run rechecks revocation barriers before its next cell, tool, model, file, shell, or other effect admission;
+- already-started external effects retain their real terminal or unknown outcome;
+- no revocation rewrites prior effect authority or provider input;
+- descendant grants that exceed a new parent or city ceiling are narrowed through approved versions or the affected agents are paused.
+
+A charter proposal that changes only behavioral text cannot alter grants. A grant proposal may be linked to a charter proposal, but each has its own immutable version, authority validation, activation, run pin, and rollback.
 
 ## Organizational hierarchy
 

@@ -3,11 +3,17 @@ import {
   CliRenderEvents,
   type CliRenderer,
   createCliRenderer,
+  bg,
+  bold,
+  dim,
+  fg,
   ScrollBoxRenderable,
+  StyledText,
   TextRenderable,
   TextareaRenderable,
   type KeyEvent,
   type PasteEvent,
+  type TextChunk,
   decodePasteBytes,
 } from "@opentui/core";
 import { stdin, stdout } from "node:process";
@@ -105,37 +111,139 @@ export function familyRefreshSuffix(refresh: TerminalFamilyRefreshState): string
   return refresh === "stale" || refresh === "unavailable" ? ` · ${refresh}` : "";
 }
 
+export interface FamilyBrowserLine {
+  readonly text: string;
+  readonly tone: "title" | "context" | "selected" | "selected-detail" | "option" | "warning" | "help";
+  readonly activity?: TerminalFamilyChildView["activity"];
+}
+
+function truncateFamilyText(value: string, maximum: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (maximum <= 0) return "";
+  if (normalized.length <= maximum) return normalized;
+  return maximum === 1 ? "…" : `${normalized.slice(0, maximum - 1)}…`;
+}
+
+export function familyBrowserLines(
+  view: TerminalScreenView,
+  selectedKey: string | null,
+  compact = false,
+  showModel = false,
+  width = 48,
+): FamilyBrowserLine[] {
+  const maximum = Math.max(12, width);
+  const selected = view.familyChildren.find(child => child.key === selectedKey) ?? view.familyChildren[0];
+  const title = compact ? `AGENT FAMILY · ${view.sessionName}` : "AGENT FAMILY";
+  if (compact) {
+    return [
+      { text: truncateFamilyText(title, maximum), tone: "title" },
+      selected
+        ? {
+            text: truncateFamilyText(`› ${familyActivityMarker(selected.activity)} ${selected.displayName} · ${selected.activityLabel}`, maximum),
+            tone: "selected",
+            activity: selected.activity,
+          }
+        : { text: "No retained direct children.", tone: "context" },
+    ];
+  }
+
+  const count = view.familyChildren.length;
+  const lines: FamilyBrowserLine[] = [
+    { text: title, tone: "title" },
+    {
+      text: truncateFamilyText(
+        `${view.sessionName} · ${count} direct ${count === 1 ? "child" : "children"}${familyRefreshSuffix(view.familyRefresh)}`,
+        maximum,
+      ),
+      tone: "context",
+    },
+    { text: "", tone: "context" },
+  ];
+
+  for (const child of view.familyChildren) {
+    const isSelected = child.key === selected?.key;
+    const label = `${familyActivityMarker(child.activity)} ${child.displayName} · ${child.activityLabel}`;
+    if (isSelected) {
+      lines.push({
+        text: truncateFamilyText(`› ${label}`, maximum),
+        tone: "selected",
+        activity: child.activity,
+      });
+      lines.push({
+        text: truncateFamilyText(`  ${child.task}`, maximum),
+        tone: "selected-detail",
+      });
+      if (showModel && child.model) {
+        lines.push({
+          text: truncateFamilyText(`  model · ${child.model}`, maximum),
+          tone: "selected-detail",
+        });
+      }
+      if (child.cancellationRequested) {
+        lines.push({ text: "  cancellation requested", tone: "warning" });
+      }
+      if (child.activityReasonLabel) {
+        lines.push({
+          text: truncateFamilyText(`  ${child.activityReasonLabel}`, maximum),
+          tone: "warning",
+        });
+      }
+      continue;
+    }
+    lines.push({
+      text: truncateFamilyText(`  ${label} — ${child.task}`, maximum),
+      tone: "option",
+      activity: child.activity,
+    });
+  }
+
+  if (!view.familyChildren.length) lines.push({ text: "No retained direct children.", tone: "context" });
+  lines.push(
+    { text: "", tone: "context" },
+    { text: truncateFamilyText("↑/↓ select · Enter/→ open · ←/Esc close", maximum), tone: "help" },
+  );
+  return lines;
+}
+
+function styledFamilyBrowser(lines: readonly FamilyBrowserLine[], width: number): StyledText {
+  const chunks: TextChunk[] = [];
+  lines.forEach((line, index) => {
+    const selected = line.tone === "selected" || line.tone === "selected-detail" || line.tone === "warning";
+    const text = selected ? line.text.padEnd(Math.max(1, width)) : line.text;
+    switch (line.tone) {
+      case "title":
+        chunks.push(bold(fg(TERMINAL_THEME.accent)(text)));
+        break;
+      case "selected":
+        chunks.push(bold(bg(TERMINAL_THEME.selectionBackground)(fg(TERMINAL_THEME.text)(text))));
+        break;
+      case "selected-detail":
+        chunks.push(bg(TERMINAL_THEME.selectionBackground)(fg(TERMINAL_THEME.muted)(text)));
+        break;
+      case "warning":
+        chunks.push(bg(TERMINAL_THEME.selectionBackground)(fg(TERMINAL_THEME.danger)(text)));
+        break;
+      case "option":
+        chunks.push(dim(fg(terminalToneColor(terminalFamilyTone(line.activity ?? "idle")))(text)));
+        break;
+      case "context":
+      case "help":
+        chunks.push(dim(fg(TERMINAL_THEME.muted)(text)));
+        break;
+    }
+    if (index < lines.length - 1) chunks.push(fg(TERMINAL_THEME.muted)("\n"));
+  });
+  return new StyledText(chunks);
+}
+
 function renderFamilyBrowser(
   view: TerminalScreenView,
   selectedKey: string | null,
   compact = false,
   showModel = false,
+  width = 48,
 ): string {
-  if (compact) {
-    const selected = view.familyChildren.find(child => child.key === selectedKey) ?? view.familyChildren[0];
-    return [
-      `AGENT FAMILY · ${view.sessionName}`,
-      selected ? `> ${familyActivityMarker(selected.activity)} ${selected.displayName} — ${selected.activityLabel}` : "No retained direct children.",
-    ].join("\n");
-  }
-  const lines = [
-    "AGENT FAMILY",
-    "",
-    `Current: ${view.sessionName}`,
-    `Direct children${familyRefreshSuffix(view.familyRefresh)}`,
-  ];
-  for (const child of view.familyChildren) {
-    const selected = child.key === selectedKey;
-    lines.push(
-      `${selected ? ">" : " "} ${familyActivityMarker(child.activity)} ${child.displayName} — ${child.activityLabel}${showModel && child.model ? ` · ${child.model}` : ""}`,
-      `    ${child.task}`,
-    );
-    if (child.cancellationRequested) lines.push("    cancellation requested");
-    if (child.activityReasonLabel) lines.push(`    ${child.activityReasonLabel}`);
-  }
-  if (!view.familyChildren.length) lines.push("", "No retained direct children.");
-  lines.push("", "↑/↓ select · Enter/→ open · ←/Esc close · PgUp/PgDn scroll");
-  return lines.join("\n");
+  return familyBrowserLines(view, selectedKey, compact, showModel, width).map(line => line.text).join("\n");
 }
 
 function paletteText(query: string): string {
@@ -1273,7 +1381,13 @@ export class OpenTuiApp {
     this.#details.border = wide && layout.mode !== "minimum" ? ["left"] : false;
     this.#details.visible = activeInspector;
     this.#timeline.visible = !activeInspector || (wide && layout.mode !== "minimum");
-    this.#details.width = wide ? Math.min(64, Math.max(40, Math.round(width * 0.4))) : "100%";
+    const detailsWidth = wide ? Math.min(64, Math.max(40, Math.round(width * 0.4))) : width;
+    const detailsContentWidth = Math.max(
+      12,
+      detailsWidth - layout.inspectorPadding * 2 - (wide && layout.mode !== "minimum" ? 1 : 0),
+    );
+    const familyBrowserActive = this.#familyFocus === "browser";
+    this.#details.width = wide ? detailsWidth : "100%";
     const provisional = [...this.#provisionalOutput.values()].join("");
     const baseDetails = this.controller.pendingSecretInput
       ? [
@@ -1289,8 +1403,8 @@ export class OpenTuiApp {
       ? paletteText(this.#paletteQuery)
       : provisional
         ? `PROVISIONAL OUTPUT\n${provisional}`
-        : this.#familyFocus === "browser"
-          ? renderFamilyBrowser(this.#view, this.#familySelectedKey, compact, width >= 96)
+        : familyBrowserActive
+          ? renderFamilyBrowser(this.#view, this.#familySelectedKey, compact, width >= 96, detailsContentWidth)
         : this.#detail
           ? this.#detail.kind === "model" && !this.#rawDetail
             ? renderModelInspector(this.#detail, this.#modelProviderIndex, this.#modelEntryProvider, this.#modelCatalogIndex, this.#composerValue())
@@ -1316,7 +1430,14 @@ export class OpenTuiApp {
       : primaryHeader;
     this.#header.fg = this.#view.connection === "connected" ? TERMINAL_THEME.text : TERMINAL_THEME.warning;
     this.#transcript.reconcile(this.#view, this.#expandedRunIds);
-    this.#detailsText.content = details;
+    const styledFamily = familyBrowserActive && !notice && layout.mode !== "minimum"
+      ? styledFamilyBrowser(
+          familyBrowserLines(this.#view, this.#familySelectedKey, compact, width >= 96, detailsContentWidth),
+          detailsContentWidth,
+        )
+      : null;
+    this.#detailsText.wrapMode = styledFamily ? "none" : "word";
+    this.#detailsText.content = styledFamily ?? details;
     const selectedFamily = this.#view.familyChildren.find(child => child.key === this.#familySelectedKey);
     const noticeTone = this.#notice?.tone ?? "normal";
     this.#detailsText.fg = this.#notice

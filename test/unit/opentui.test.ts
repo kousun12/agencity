@@ -21,6 +21,7 @@ import {
 import {
   OpenTuiApp,
   alternateScrollDelta,
+  familyBrowserLines,
   familyRefreshSuffix,
   formatManagedDetach,
   toggleAllRunDetails,
@@ -36,6 +37,41 @@ const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
 
 describe("OpenTUI interactive terminal", () => {
+  test("renders the family browser as bounded, visually distinct option rows", () => {
+    const view = {
+      sessionName: "Root agent",
+      familyRefresh: "current",
+      familyChildren: [
+        {
+          key: "selected",
+          displayName: "Selected reviewer",
+          task: "Review a deliberately long implementation description without wrapping across the panel.",
+          activity: "working",
+          activityLabel: "working",
+          model: "vercel:openai/gpt-5.6-sol",
+          cancellationRequested: false,
+          activityReasonLabel: null,
+        },
+        {
+          key: "other",
+          displayName: "Other reviewer",
+          task: "Check another deliberately long task that must remain on one line.",
+          activity: "idle",
+          activityLabel: "idle",
+          model: "vercel:openai/gpt-5.6-sol",
+          cancellationRequested: false,
+          activityReasonLabel: null,
+        },
+      ],
+    } as unknown as TerminalScreenView;
+    const lines = familyBrowserLines(view, "selected", false, true, 36);
+
+    expect(lines.find(line => line.tone === "selected")?.text).toBe("› ● Selected reviewer · working");
+    expect(lines.some(line => line.tone === "selected-detail" && line.text.endsWith("…"))).toBe(true);
+    expect(lines.find(line => line.tone === "option")?.text.endsWith("…")).toBe(true);
+    expect(lines.every(line => line.text.length <= 36)).toBe(true);
+  });
+
   test("keeps routine family refreshes invisible while retaining degraded states", () => {
     expect(familyRefreshSuffix("current")).toBe("");
     expect(familyRefreshSuffix("refreshing")).toBe("");
@@ -725,7 +761,7 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressKey("u", { ctrl: true });
       setup.mockInput.pressKey("\u001b[B");
       setup.mockInput.pressEnter();
-      frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("> ○ Reviewer — idle"));
+      frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("› ○ Reviewer · idle"));
       expect(frame).toContain("Review the implementation");
       expect(frame).toContain("echo:echo-1");
 

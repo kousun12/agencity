@@ -126,6 +126,7 @@ The workspace Agents view uses:
 - Enter or Right to open the selected resumable route.
 - Enter or Right on a failed or archived row to show a clear non-resumable notice.
 - Left at workspace scope to remain on the workspace screen.
+- Ctrl-R to refresh the catalog without changing search text.
 - Escape with search text to clear the search.
 - Escape with an empty search field to return to the conversation that opened the screen.
 - Printable input to update search.
@@ -169,13 +170,13 @@ Changing `/agents` from a nuclear-family inspector to the workspace screen is in
 
 ## Data and protocol
 
-The first version uses the existing managed product contract:
+The first version uses the existing managed product route. Its current client method is untyped:
 
 ```ts
-AgentClient.productSessions(): Promise<ProductBranchSummary[]>
+AgentClient.productSessions(): Promise<any[]>
 ```
 
-`ProductCatalog.list()` already returns every retained branch in the workspace, including:
+The implementation changes that client signature to `Promise<ProductBranchSummary[]>` without changing the wire route or payload. `ProductCatalog.list()` already returns every retained branch in the workspace, including:
 
 - display names;
 - model;
@@ -193,7 +194,7 @@ The terminal fetches the catalog:
 - when the user explicitly refreshes it;
 - after a successful top-level selection before the next open.
 
-The first version does not poll while the screen is open. It displays the catalog's fetch time and provides `R` to refresh. This avoids repeatedly replaying every retained branch through the current `ProductCatalog.list()` implementation. Live revision-based refresh is deferred until the catalog has a measured incremental projection.
+The first version does not poll while the screen is open. It displays the catalog's fetch time and provides Ctrl-R to refresh. This avoids repeatedly replaying every retained branch through the current `ProductCatalog.list()` implementation. Live revision-based refresh is deferred until the catalog has a measured incremental projection.
 
 A failed refresh keeps the prior complete rows visible with a stale marker. It does not clear the list or invent a new status.
 
@@ -284,7 +285,7 @@ This state is client-local. A client restart reconstructs the catalog from the p
 - `src/tui/view-model.ts` — root filtering, grouping, search, sorting, and row formatting.
 - `src/tui/index.ts` — workspace catalog loading, state, root selection, and command routing.
 - `src/tui/opentui.ts` — full-screen screen, keys, search, refresh, and responsive rendering.
-- `src/tui/detail-model.ts` — retain `/tree` diagnostics and remove the old `/agents` alias.
+- `src/tui/detail-model.ts` — retain the existing family diagnostic renderer for `/tree`.
 - `src/product/catalog.ts` — no semantic change expected; optimize only if measurement shows the one-shot read is unacceptable.
 - `test/unit/tui-workspace-agents-view-model.test.ts` — pure presentation behavior.
 - `test/unit/terminal-ui.test.ts` — root detection, catalog refresh, and exact selection.

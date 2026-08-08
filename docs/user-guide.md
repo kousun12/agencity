@@ -146,7 +146,7 @@ Family navigation applies only while the composer is empty:
 
 Up, Left, or Escape returns from the focused summary to the composer. Left or Escape closes the browser. Printable input from the focused summary returns to the composer and keeps the typed character. A non-empty draft retains normal editing and submission behavior.
 
-The header breadcrumb shows retained ancestry separately from the branch. The child browser labels each row as `working`, `idle`, `attention`, `ended`, or `unavailable`, with a bounded reason where attention is required. Unavailable routes remain visible but cannot be opened.
+The header breadcrumb shows retained ancestry separately from the branch. The child browser highlights the selected child, dims other options, and keeps names, status, tasks, and model metadata to bounded single-line rows with ellipses. It labels activity as `working`, `idle`, `attention`, `ended`, or `unavailable`, with a bounded reason where attention is required. Unavailable routes remain visible but cannot be opened.
 
 Opening a family member only changes what this client observes. It does not stop, resume, cancel, retry, or re-own work, and it does not change the workspace's remembered resume selection. Family opening is disabled during `/history` inspection; use `/live` first.
 
