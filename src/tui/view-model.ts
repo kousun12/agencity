@@ -413,7 +413,7 @@ export function formatTerminalWorkspaceAgentRow(
 ): TerminalWorkspaceAgentRowLines {
   const width = Math.max(1, maxWidth);
   const prefix = selected ? "› " : "  ";
-  const status = ` · ${row.status}`;
+  const status = ` · ${row.status}${row.resumable ? "" : " · cannot open"}`;
   const primary = `${prefix}${truncate(row.displayName, Math.max(1, width - prefix.length - status.length))}${status}`;
   const relative = formatTerminalWorkspaceAgentsRelativeTime(row.updatedAt, now);
   const counts = `${row.unresolvedWork} unresolved · ${row.activeGoals} goals`;

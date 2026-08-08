@@ -29,10 +29,12 @@ import {
   buildTerminalScreen,
   formatTerminalBreadcrumb,
   formatTerminalFamilySummary,
+  formatTerminalWorkspaceAgentRow,
   type TerminalFamilyChildView,
   type TerminalFamilyRefreshState,
   type TerminalPresentation,
   type TerminalScreenView,
+  type TerminalWorkspaceAgentRow,
 } from "./view-model.ts";
 import { TerminalTranscript } from "./transcript.ts";
 import {
@@ -246,6 +248,95 @@ function renderFamilyBrowser(
   return familyBrowserLines(view, selectedKey, compact, showModel, width).map(line => line.text).join("\n");
 }
 
+export interface WorkspaceAgentsLine {
+  readonly text: string;
+  readonly tone: "context" | "section" | "selected" | "selected-detail" | "option" | "warning" | "help";
+}
+
+export function workspaceAgentsLines(
+  view: TerminalScreenView["workspaceAgents"],
+  width: number,
+  now = Date.now(),
+): WorkspaceAgentsLine[] {
+  const maximum = Math.max(1, width);
+  const freshness = view.refresh === "loading"
+    ? "Loading retained roots…"
+    : view.refresh === "unavailable"
+      ? "Catalog unavailable · Ctrl-R to retry"
+      : view.refresh === "stale"
+        ? "Catalog stale · Ctrl-R to retry"
+        : view.fetchedAt
+          ? `Catalog current · ${new Date(view.fetchedAt).toLocaleTimeString()}`
+          : "Catalog current";
+  const lines: WorkspaceAgentsLine[] = [
+    { text: truncateFamilyText(freshness, maximum), tone: view.refresh === "stale" || view.refresh === "unavailable" ? "warning" : "context" },
+    { text: "", tone: "context" },
+  ];
+  if (!view.rows.length) {
+    lines.push({
+      text: truncateFamilyText(
+        view.query ? `No retained root work matches “${view.query}”.` : "No retained root work is available.",
+        maximum,
+      ),
+      tone: "context",
+    });
+  }
+  for (const section of view.sections) {
+    lines.push({ text: truncateFamilyText(section.title.toUpperCase(), maximum), tone: "section" });
+    for (const row of section.rows) {
+      const formatted = formatTerminalWorkspaceAgentRow(row, maximum, row.key === view.selectedKey, now);
+      const selected = row.key === view.selectedKey;
+      lines.push({
+        text: formatted.primary,
+        tone: selected ? "selected" : row.resumable ? "option" : "warning",
+      });
+      if (formatted.secondary) {
+        lines.push({
+          text: formatted.secondary,
+          tone: selected ? "selected-detail" : row.resumable ? "context" : "warning",
+        });
+      }
+    }
+    lines.push({ text: "", tone: "context" });
+  }
+  lines.push({
+    text: truncateFamilyText("↑/↓ select · PgUp/PgDn page · Enter/→ open · Ctrl-R refresh · Esc back", maximum),
+    tone: "help",
+  });
+  return lines;
+}
+
+function styledWorkspaceAgents(lines: readonly WorkspaceAgentsLine[], width: number): StyledText {
+  const chunks: TextChunk[] = [];
+  lines.forEach((line, index) => {
+    const selected = line.tone === "selected" || line.tone === "selected-detail";
+    const text = selected ? line.text.padEnd(Math.max(1, width)) : line.text;
+    switch (line.tone) {
+      case "section":
+        chunks.push(bold(fg(TERMINAL_THEME.accent)(text)));
+        break;
+      case "selected":
+        chunks.push(bold(bg(TERMINAL_THEME.selectionBackground)(fg(TERMINAL_THEME.text)(text))));
+        break;
+      case "selected-detail":
+        chunks.push(bg(TERMINAL_THEME.selectionBackground)(fg(TERMINAL_THEME.muted)(text)));
+        break;
+      case "warning":
+        chunks.push(fg(TERMINAL_THEME.warning)(text));
+        break;
+      case "option":
+        chunks.push(fg(TERMINAL_THEME.text)(text));
+        break;
+      case "context":
+      case "help":
+        chunks.push(dim(fg(TERMINAL_THEME.muted)(text)));
+        break;
+    }
+    if (index < lines.length - 1) chunks.push(fg(TERMINAL_THEME.muted)("\n"));
+  });
+  return new StyledText(chunks);
+}
+
 function paletteText(query: string): string {
   const normalized = query.toLowerCase();
   const matches = TERMINAL_COMMAND_REGISTRY.filter(command => {
@@ -374,6 +465,12 @@ export interface OpenTuiController {
   openFamilyChild?(sessionId: string, branchId: string): Promise<void>;
   openFamilyParent?(): Promise<void>;
   setFamilyBrowserOpen?(open: boolean): void;
+  openWorkspaceAgents?(): Promise<void>;
+  closeWorkspaceAgents?(): void;
+  refreshWorkspaceAgents?(): Promise<void>;
+  setWorkspaceAgentsQuery?(query: string): void;
+  selectWorkspaceAgent?(selectedKey: string | null): void;
+  openWorkspaceAgent?(sessionId: string, branchId: string): Promise<void>;
   abortPendingOperations?(): void;
 }
 
@@ -536,10 +633,34 @@ export class OpenTuiApp {
       backgroundColor: TERMINAL_THEME.raised,
       focusedBackgroundColor: TERMINAL_THEME.raised,
       placeholderColor: TERMINAL_THEME.muted,
-      onSubmit: () => { void this.#submit(); },
-      onContentChange: () => { if (!this.#closed) this.#render(); },
+      onSubmit: () => {
+        if (!this.#view.workspaceAgents.open) void this.#submit();
+      },
+      onContentChange: () => {
+        if (this.#closed) return;
+        if (this.#view.workspaceAgents.open) {
+          this.controller.setWorkspaceAgentsQuery?.(this.#composerValue());
+        }
+        this.#render();
+      },
       onKeyDown: key => {
-        if (!this.controller.pendingSecretInput && (key.name === "escape" || key.name === "esc" || key.sequence === "\u001b")) {
+        const escape = key.name === "escape" || key.name === "esc" || key.sequence === "\u001b";
+        if (!this.controller.pendingSecretInput && this.#view.workspaceAgents.open && escape) {
+          key.preventDefault();
+          key.stopPropagation();
+          if (this.#view.workspaceAgents.query) {
+            this.#setComposerValue("");
+            this.controller.setWorkspaceAgentsQuery?.("");
+          } else {
+            this.controller.closeWorkspaceAgents?.();
+          }
+          return;
+        }
+        if (
+          !this.controller.pendingSecretInput
+          && !this.#view.workspaceAgents.open
+          && escape
+        ) {
           key.preventDefault();
           key.stopPropagation();
           this.#dismissInspector();
@@ -603,8 +724,24 @@ export class OpenTuiApp {
 
     this.#unsubscribe = controller.subscribePresentation(presentation => {
       const previousIndex = this.#view.familyChildren.findIndex(child => child.key === this.#familySelectedKey);
+      const workspaceWasOpen = this.#view.workspaceAgents.open;
       this.#view = buildTerminalScreen(presentation);
-      if (this.#familyFocus === "browser") {
+      if (this.#view.workspaceAgents.open) {
+        if (this.#familyFocus === "browser") this.controller.setFamilyBrowserOpen?.(false);
+        this.#familyFocus = "composer";
+        this.#detail = null;
+        this.#rawDetail = false;
+        this.#paletteQuery = "";
+        this.#paletteDraft = null;
+        if (this.#composerValue() !== this.#view.workspaceAgents.query) {
+          this.#setComposerValue(this.#view.workspaceAgents.query);
+        }
+        if (!workspaceWasOpen) this.#resetDetailScroll = true;
+        this.#composer.focus();
+      } else if (workspaceWasOpen) {
+        this.#setComposerValue("");
+        this.#composer.focus();
+      } else if (this.#familyFocus === "browser") {
         const retained = this.#view.familyChildren.some(child => child.key === this.#familySelectedKey);
         if (!retained) {
           const nextIndex = Math.min(Math.max(0, previousIndex), Math.max(0, this.#view.familyChildren.length - 1));
@@ -636,6 +773,7 @@ export class OpenTuiApp {
 
   handleTerminalLinefeedInput(sequence: string): boolean {
     if (sequence !== "\n" || this.controller.pendingSecretInput) return false;
+    if (this.#view.workspaceAgents.open) return true;
     this.#composer.newLine();
     this.#render();
     return true;
@@ -788,6 +926,52 @@ export class OpenTuiApp {
       }
       return;
     }
+    const enter = key.name === "return" || key.name === "linefeed" || key.name === "kpenter";
+    if (this.#view.workspaceAgents.open) {
+      if (key.ctrl && key.name === "r") {
+        key.preventDefault();
+        key.stopPropagation();
+        void this.#refreshWorkspaceAgents();
+        return;
+      }
+      if (!key.ctrl && !key.meta) {
+        if (key.name === "up" || key.name === "down") {
+          key.preventDefault();
+          key.stopPropagation();
+          this.#moveWorkspaceAgentSelection(key.name === "up" ? -1 : 1);
+          return;
+        }
+        if (key.name === "pageup" || key.name === "pagedown") {
+          key.preventDefault();
+          key.stopPropagation();
+          const page = Math.max(1, this.renderer.terminalHeight - 8);
+          this.#moveWorkspaceAgentSelection(key.name === "pageup" ? -page : page);
+          return;
+        }
+        if (enter || key.name === "right") {
+          key.preventDefault();
+          key.stopPropagation();
+          void this.#openSelectedWorkspaceAgent();
+          return;
+        }
+        if (escape) {
+          key.preventDefault();
+          key.stopPropagation();
+          if (this.#view.workspaceAgents.query) {
+            this.#setComposerValue("");
+            this.controller.setWorkspaceAgentsQuery?.("");
+          } else {
+            this.controller.closeWorkspaceAgents?.();
+          }
+          return;
+        }
+        if (key.name === "left") {
+          key.preventDefault();
+          key.stopPropagation();
+          return;
+        }
+      }
+    }
     const modelDetail = this.#activeModelDetail();
     if (modelDetail && !this.#paletteQuery && this.#provisionalOutput.size === 0 && !this.#rawDetail) {
       if (this.#modelEntryProvider) {
@@ -875,7 +1059,6 @@ export class OpenTuiApp {
         return;
       }
     }
-    const enter = key.name === "return" || key.name === "linefeed" || key.name === "kpenter";
     if (this.#familyFocus === "browser" && !key.ctrl && !key.meta) {
       if (key.name === "up" || key.name === "down") {
         key.preventDefault();
@@ -947,6 +1130,12 @@ export class OpenTuiApp {
         key.preventDefault();
         key.stopPropagation();
         void this.#openFamilyParent();
+        return;
+      }
+      if (key.name === "left" && this.#view.familyRoot === true) {
+        key.preventDefault();
+        key.stopPropagation();
+        void this.#openWorkspaceAgents();
         return;
       }
     }
@@ -1124,6 +1313,7 @@ export class OpenTuiApp {
       || this.#provisionalOutput.size
       || this.#detail
       || this.#modelEntryProvider
+      || this.#view.workspaceAgents.open
       || this.#busy,
     );
   }
@@ -1215,6 +1405,62 @@ export class OpenTuiApp {
     return this.#runFamilyTransition(() => this.controller.openFamilyParent!());
   }
 
+  #openWorkspaceAgents(): Promise<void> {
+    if (this.#view.historicalCursor !== null) {
+      this.#showNotice("Return to live with /live before opening Agents.", "warning");
+      return Promise.resolve();
+    }
+    if (!this.controller.openWorkspaceAgents) {
+      this.#showNotice("The workspace Agents view is unavailable in this terminal.", "warning");
+      return Promise.resolve();
+    }
+    return this.#runFamilyTransition(() => this.controller.openWorkspaceAgents!());
+  }
+
+  #refreshWorkspaceAgents(): Promise<void> {
+    if (!this.controller.refreshWorkspaceAgents) {
+      this.#showNotice("The workspace Agents catalog cannot be refreshed in this terminal.", "warning");
+      return Promise.resolve();
+    }
+    return this.#runFamilyTransition(() => this.controller.refreshWorkspaceAgents!());
+  }
+
+  #moveWorkspaceAgentSelection(delta: number): void {
+    const rows = this.#view.workspaceAgents.rows;
+    if (!rows.length) return;
+    const current = rows.findIndex(row => row.key === this.#view.workspaceAgents.selectedKey);
+    const index = Math.min(rows.length - 1, Math.max(0, (current < 0 ? 0 : current) + delta));
+    const selected = rows[index]!;
+    this.controller.selectWorkspaceAgent?.(selected.key);
+    const contentWidth = Math.max(1, this.renderer.terminalWidth - 2);
+    const rowHeight = (row: TerminalWorkspaceAgentRow): number =>
+      formatTerminalWorkspaceAgentRow(row, contentWidth, row.key === selected.key).secondary ? 2 : 1;
+    const precedingSections = new Set(rows.slice(0, index).map(row => row.status)).size;
+    const rowTop = 2 + precedingSections + rows.slice(0, index).reduce((lines, row) => lines + rowHeight(row), 0);
+    const viewportLines = Math.max(1, this.renderer.terminalHeight - 7);
+    const scrollTop = Math.max(0, rowTop - Math.floor((viewportLines - rowHeight(selected)) / 2));
+    this.#details.stickyScroll = false;
+    this.#details.scrollTo({ x: 0, y: scrollTop });
+    this.#render();
+  }
+
+  #openSelectedWorkspaceAgent(): Promise<void> {
+    const selected = this.#view.workspaceAgents.rows.find(row =>
+      row.key === this.#view.workspaceAgents.selectedKey);
+    if (!selected) return Promise.resolve();
+    if (!selected.resumable) {
+      this.#showNotice(`${selected.displayName} is ${selected.status} and cannot be opened.`, "warning");
+      this.#composer.focus();
+      return Promise.resolve();
+    }
+    if (!this.controller.openWorkspaceAgent) {
+      this.#showNotice("Workspace root navigation is unavailable in this terminal.", "warning");
+      return Promise.resolve();
+    }
+    return this.#runFamilyTransition(() =>
+      this.controller.openWorkspaceAgent!(selected.sessionId, selected.branchId));
+  }
+
   #runFamilyTransition(navigate: () => Promise<void>): Promise<void> {
     if (this.#busy) return Promise.resolve();
     const operation = this.#performFamilyTransition(navigate);
@@ -1249,7 +1495,8 @@ export class OpenTuiApp {
       || this.#provisionalOutput.size
       || this.#detail
       || this.#notice
-      || this.#familyFocus === "browser",
+      || this.#familyFocus === "browser"
+      || this.#view.workspaceAgents.open,
     );
   }
 
@@ -1317,21 +1564,26 @@ export class OpenTuiApp {
   }
 
   #familyHint(compact: boolean): string {
+    if (this.#view.workspaceAgents.open) return "";
     if (this.#familyFocus === "browser") {
       return compact ? "↑/↓ · Enter/→ open · ←/Esc close" : "↑/↓ select · Enter/→ open · ←/Esc close";
     }
     if (this.#familyFocus === "summary") return "Enter/→ agents · ↑/←/Esc composer";
-    if (this.#view.historicalCursor !== null && (this.#view.familySummary || this.#view.familyParent)) {
+    if (this.#view.historicalCursor !== null && (this.#view.familySummary || this.#view.familyParent || this.#view.familyRoot === true)) {
       return "/live before agent navigation";
     }
     return [
       this.#view.familyParent?.activity !== "unavailable" && this.#view.familyParent ? "← parent" : "",
+      this.#view.familyRoot === true ? "← agents" : "",
       this.#view.familySummary ? "↓ agents" : "",
     ].filter(Boolean).join(" · ");
   }
 
   #activeInspectorAction(): string {
     if (this.controller.pendingSecretInput) return "Enter save · Esc cancel";
+    if (this.#view.workspaceAgents.open) {
+      return "↑/↓ select · Enter/→ open · Ctrl-R refresh · Esc back";
+    }
     if (this.#modelEntryProvider) return "Enter save · Esc back";
     if (this.#activeModelDetail()) return "↑/↓ provider · Enter choose · Esc close";
     if (this.#paletteQuery) return "Esc close";
@@ -1343,6 +1595,13 @@ export class OpenTuiApp {
 
   #minimumInspectorText(details: string): string {
     if (this.controller.pendingSecretInput) return "PROVIDER LOGIN · Enter save · Esc cancel";
+    if (this.#view.workspaceAgents.open) {
+      const selected = this.#view.workspaceAgents.rows.find(row =>
+        row.key === this.#view.workspaceAgents.selectedKey);
+      return selected
+        ? `AGENTS · ${selected.displayName} · ${selected.status} · ${selected.resumable ? "Enter/→ open" : "cannot open"} · Esc back`
+        : `AGENTS · ${this.#view.workspaceAgents.refresh} · Esc back`;
+    }
     if (this.#paletteQuery) return "COMMANDS · type to filter · Esc close";
     if (this.#provisionalOutput.size > 0) return "PROVISIONAL OUTPUT · PgUp/PgDn scroll";
     if (this.#familyFocus === "browser") {
@@ -1367,6 +1626,7 @@ export class OpenTuiApp {
     const wide = width >= 96;
     const layout = selectTerminalHeightLayout(height);
     const compact = layout.mode !== "normal";
+    const workspaceAgentsActive = this.#view.workspaceAgents.open;
     const activeInspector = this.#activeInspector();
     const composerContentRows = terminalComposerContentRows(this.#composerValue(), layout.mode);
     this.#header.height = layout.headerRows;
@@ -1378,16 +1638,20 @@ export class OpenTuiApp {
     this.#composerContent.height = composerContentRows;
     this.#composer.height = composerContentRows;
     this.#details.padding = layout.inspectorPadding;
-    this.#details.border = wide && layout.mode !== "minimum" ? ["left"] : false;
+    this.#details.border = !workspaceAgentsActive && wide && layout.mode !== "minimum" ? ["left"] : false;
     this.#details.visible = activeInspector;
-    this.#timeline.visible = !activeInspector || (wide && layout.mode !== "minimum");
-    const detailsWidth = wide ? Math.min(64, Math.max(40, Math.round(width * 0.4))) : width;
+    this.#timeline.visible = !workspaceAgentsActive && (!activeInspector || (wide && layout.mode !== "minimum"));
+    const detailsWidth = workspaceAgentsActive
+      ? width
+      : wide
+        ? Math.min(64, Math.max(40, Math.round(width * 0.4)))
+        : width;
     const detailsContentWidth = Math.max(
       12,
       detailsWidth - layout.inspectorPadding * 2 - (wide && layout.mode !== "minimum" ? 1 : 0),
     );
     const familyBrowserActive = this.#familyFocus === "browser";
-    this.#details.width = wide ? detailsWidth : "100%";
+    this.#details.width = workspaceAgentsActive || !wide ? "100%" : detailsWidth;
     const provisional = [...this.#provisionalOutput.values()].join("");
     const baseDetails = this.controller.pendingSecretInput
       ? [
@@ -1399,6 +1663,8 @@ export class OpenTuiApp {
           "",
           "Enter saves · Esc cancels",
         ].join("\n")
+      : workspaceAgentsActive
+        ? workspaceAgentsLines(this.#view.workspaceAgents, detailsContentWidth).map(line => line.text).join("\n")
       : this.#paletteQuery
       ? paletteText(this.#paletteQuery)
       : provisional
@@ -1423,11 +1689,15 @@ export class OpenTuiApp {
       this.#view.branchName,
       Math.max(8, width - history.length - 2),
     );
-    const primaryHeader = `${breadcrumb}${history}`;
-    const secondaryHeader = `${this.#view.model} · ${this.#view.runState} · ${this.#view.connection}`;
+    const primaryHeader = workspaceAgentsActive ? "Agents" : `${breadcrumb}${history}`;
+    const secondaryHeader = workspaceAgentsActive
+      ? `${this.#view.workspaceId} · ${this.#view.workspaceAgents.refresh}`
+      : `${this.#view.model} · ${this.#view.runState} · ${this.#view.connection}`;
     this.#header.content = layout.mode === "normal"
       ? `${primaryHeader}\n${secondaryHeader}`
-      : primaryHeader;
+      : workspaceAgentsActive
+        ? `Agents · ${this.#view.workspaceId}`
+        : primaryHeader;
     this.#header.fg = this.#view.connection === "connected" ? TERMINAL_THEME.text : TERMINAL_THEME.warning;
     this.#transcript.reconcile(this.#view, this.#expandedRunIds);
     const styledFamily = familyBrowserActive && !notice && layout.mode !== "minimum"
@@ -1436,19 +1706,27 @@ export class OpenTuiApp {
           detailsContentWidth,
         )
       : null;
-    this.#detailsText.wrapMode = styledFamily ? "none" : "word";
-    this.#detailsText.content = styledFamily ?? details;
+    const styledWorkspace = workspaceAgentsActive && !notice && layout.mode !== "minimum"
+      ? styledWorkspaceAgents(
+          workspaceAgentsLines(this.#view.workspaceAgents, detailsContentWidth),
+          detailsContentWidth,
+        )
+      : null;
+    this.#detailsText.wrapMode = styledWorkspace || styledFamily ? "none" : "word";
+    this.#detailsText.content = styledWorkspace ?? styledFamily ?? details;
     const selectedFamily = this.#view.familyChildren.find(child => child.key === this.#familySelectedKey);
     const noticeTone = this.#notice?.tone ?? "normal";
     this.#detailsText.fg = this.#notice
       ? terminalToneColor(noticeTone)
       : provisional
         ? TERMINAL_THEME.provisional
+        : workspaceAgentsActive
+          ? TERMINAL_THEME.muted
         : this.#familyFocus === "browser" && selectedFamily
           ? terminalToneColor(terminalFamilyTone(selectedFamily.activity))
           : TERMINAL_THEME.muted;
     const familyRefresh = familyRefreshSuffix(this.#view.familyRefresh);
-    this.#familySummary.visible = layout.showFamilySummary && this.#view.familySummary !== null;
+    this.#familySummary.visible = !workspaceAgentsActive && layout.showFamilySummary && this.#view.familySummary !== null;
     this.#familySummary.content = this.#view.familySummary
       ? `${this.#familyFocus === "summary" ? ">" : " "} ${formatTerminalFamilySummary(
           this.#view.familySummary,
@@ -1486,7 +1764,10 @@ export class OpenTuiApp {
         ? "API key (input hidden)…"
         : this.#modelEntryProvider
           ? `Model ID for ${this.#modelEntryProvider}…`
+          : workspaceAgentsActive
+            ? "Search retained root work…"
           : this.#view.composerPlaceholder;
+    this.#composerPrompt.content = workspaceAgentsActive ? "⌕ " : "› ";
     const familyHint = this.#familyHint(compact);
     const footer = layoutTerminalFooter({
       width: Math.max(1, width - 2),
@@ -1506,7 +1787,9 @@ export class OpenTuiApp {
       : TERMINAL_THEME.muted;
     this.#footerRight.content = footer.right;
     this.#footerRight.width = footer.right.length;
-    this.renderer.setTerminalTitle(`Agencity — ${this.#view.sessionName}`);
+    this.renderer.setTerminalTitle(workspaceAgentsActive
+      ? `Agencity — Agents — ${this.#view.workspaceId}`
+      : `Agencity — ${this.#view.sessionName}`);
     this.renderer.requestRender();
   }
 }
