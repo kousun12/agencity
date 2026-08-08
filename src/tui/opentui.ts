@@ -55,6 +55,12 @@ export interface OpenTerminalUIOptions {
   readonly output?: NodeJS.WriteStream;
 }
 
+const ENABLE_ALTERNATE_SCROLL = "\u001b[?1007h";
+const DISABLE_ALTERNATE_SCROLL = "\u001b[?1007l";
+const ENABLE_APPLICATION_CURSOR_KEYS = "\u001b[?1h";
+const DISABLE_APPLICATION_CURSOR_KEYS = "\u001b[?1l";
+const ALTERNATE_SCROLL_LINES = 3;
+
 export interface ManagedServiceKeepAliveReasonView {
   readonly kind: string;
   readonly count: number;
@@ -137,7 +143,7 @@ function paletteText(query: string): string {
     "COMMANDS",
     ...matches.map(command => `${command.usage}\n  ${command.summary}`),
     "",
-    "Ctrl-P commands · Ctrl-O latest activity · Ctrl-A all activity · PgUp/PgDn scroll · Ctrl-C stop/detach · Ctrl-D detach · Esc close",
+    "Ctrl-P commands · Ctrl-O latest activity · Ctrl-L all activity · PgUp/PgDn scroll · Ctrl-C stop/detach · Ctrl-D detach · Esc close",
   ].join("\n");
 }
 
@@ -272,6 +278,12 @@ export function toggleAllRunDetails(
     else expandedRunIds.add(runId);
   }
   return true;
+}
+
+export function alternateScrollDelta(sequence: string): number | null {
+  if (sequence === "\u001bOA") return -ALTERNATE_SCROLL_LINES;
+  if (sequence === "\u001bOB") return ALTERNATE_SCROLL_LINES;
+  return null;
 }
 
 export class OpenTuiApp {
@@ -500,6 +512,20 @@ export class OpenTuiApp {
 
   async run(): Promise<void> {
     await this.#done;
+  }
+
+  handleAlternateScrollInput(sequence: string): boolean {
+    const delta = alternateScrollDelta(sequence);
+    if (delta === null) return false;
+    if (delta !== 0) this.#scrollActiveView(delta);
+    return true;
+  }
+
+  handleTerminalLinefeedInput(sequence: string): boolean {
+    if (sequence !== "\n" || this.controller.pendingSecretInput) return false;
+    this.#composer.newLine();
+    this.#render();
+    return true;
   }
 
   showOutput(value: string): void {
@@ -819,7 +845,7 @@ export class OpenTuiApp {
       this.#render();
       return;
     }
-    if (enter && key.shift && !key.meta && !key.ctrl) {
+    if (enter && !key.meta && !key.ctrl && (key.shift || key.name === "linefeed")) {
       key.preventDefault();
       key.stopPropagation();
       this.#composer.newLine();
@@ -844,7 +870,7 @@ export class OpenTuiApp {
       this.requestExit();
       return;
     }
-    if (key.ctrl && key.name === "a" && this.#composerValue().length === 0) {
+    if (key.ctrl && key.name === "l") {
       if (toggleAllRunDetails(this.#view.runs, this.#expandedRunIds)) {
         key.preventDefault();
         key.stopPropagation();
@@ -874,16 +900,12 @@ export class OpenTuiApp {
     }
     if (key.name === "pageup") {
       key.preventDefault();
-      this.#details.stickyScroll = false;
-      const delta = -Math.max(3, this.renderer.terminalHeight - 8);
-      this.#activeInspector() ? this.#details.scrollBy({ x: 0, y: delta }) : this.#timeline.scrollBy({ x: 0, y: delta });
+      this.#scrollActiveView(-Math.max(3, this.renderer.terminalHeight - 8));
       return;
     }
     if (key.name === "pagedown") {
       key.preventDefault();
-      this.#details.stickyScroll = false;
-      const delta = Math.max(3, this.renderer.terminalHeight - 8);
-      this.#activeInspector() ? this.#details.scrollBy({ x: 0, y: delta }) : this.#timeline.scrollBy({ x: 0, y: delta });
+      this.#scrollActiveView(Math.max(3, this.renderer.terminalHeight - 8));
       return;
     }
     if (escape) {
@@ -899,6 +921,12 @@ export class OpenTuiApp {
       this.#render();
     }, 0);
   };
+
+  #scrollActiveView(delta: number): void {
+    this.#details.stickyScroll = false;
+    const target = this.#activeInspector() ? this.#details : this.#timeline;
+    target.scrollBy({ x: 0, y: delta });
+  }
 
   #submit(): Promise<void> {
     const value = this.#composerValue().trim();
@@ -1369,6 +1397,7 @@ export class OpenTerminalUI {
   async run(sessionId: string, branchId: string): Promise<void> {
     let app: OpenTuiApp | null = null;
     let renderer: CliRenderer | null = null;
+    let alternateScrollEnabled = false;
     let attached = false;
     let receivedSignal: NodeJS.Signals | null = null;
     const pendingOutput: string[] = [];
@@ -1402,6 +1431,16 @@ export class OpenTerminalUI {
     const onSigint = requestSignalExit("SIGINT");
     const onSigterm = requestSignalExit("SIGTERM");
     const onSighup = requestSignalExit("SIGHUP");
+    const handleAlternateScrollInput = (sequence: string): boolean =>
+      alternateScrollEnabled && (app?.handleAlternateScrollInput(sequence) ?? false);
+    const handleTerminalLinefeedInput = (sequence: string): boolean =>
+      app?.handleTerminalLinefeedInput(sequence) ?? false;
+    const enableAlternateScroll = (): void => {
+      const capabilities = renderer?.capabilities as { kitty_keyboard?: boolean } | null | undefined;
+      if (alternateScrollEnabled || capabilities?.kitty_keyboard !== true) return;
+      this.#output.write(`${ENABLE_APPLICATION_CURSOR_KEYS}${ENABLE_ALTERNATE_SCROLL}`);
+      alternateScrollEnabled = true;
+    };
     try {
       await controller.attach(sessionId, branchId, false);
       attached = true;
@@ -1414,12 +1453,15 @@ export class OpenTerminalUI {
         exitOnCtrlC: false,
         exitSignals: [],
         screenMode: "alternate-screen",
-        useMouse: true,
+        useMouse: false,
         useKittyKeyboard: { disambiguate: true },
+        prependInputHandlers: [handleTerminalLinefeedInput, handleAlternateScrollInput],
         autoFocus: false,
         clearOnShutdown: true,
         consoleMode: "disabled",
       });
+      renderer.on("capabilities", enableAlternateScroll);
+      enableAlternateScroll();
       app = new OpenTuiApp(renderer, controller);
       for (const value of pendingOutput) app.showOutput(value);
       for (const detail of pendingDetails) app.showDetail(detail);
@@ -1432,6 +1474,8 @@ export class OpenTerminalUI {
       process.off("SIGTERM", onSigterm);
       process.off("SIGHUP", onSighup);
       app?.destroy();
+      renderer?.off("capabilities", enableAlternateScroll);
+      if (alternateScrollEnabled) this.#output.write(`${DISABLE_ALTERNATE_SCROLL}${DISABLE_APPLICATION_CURSOR_KEYS}`);
       if (attached) await controller.detach(false);
       renderer?.destroy();
     }

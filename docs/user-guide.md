@@ -109,7 +109,9 @@ Agencity remembers the recent branch for each workspace. If more than one choice
 
 ## Terminal interface basics
 
-The full-screen terminal interface renders committed user and assistant messages as structured Markdown. Supported fenced languages and retained TypeScript cells use syntax-aware rendering; unsupported fenced languages remain readable as plain code. Each run appears directly after the user task that started it and before the resulting assistant message. During an active run, prior steps collapse to syntax-colored one-line summaries as each new step starts; only the latest step shows details. Completed activity collapses to one status row. Expanding it with `Ctrl-O` shows retained step details in a slightly indented, rounded panel, including exact TypeScript source, dim stream-colored logs and returned stdout/stderr, and errors. Structured result JSON remains available through cell diagnostics rather than the conversation transcript.
+The full-screen terminal interface renders committed user and assistant messages as structured Markdown. Supported fenced languages and retained TypeScript cells use syntax-aware rendering; unsupported fenced languages remain readable as plain code. Each run appears directly after the user task that started it and before the resulting assistant message. During an active run, prior steps collapse to syntax-colored one-line summaries as each new step starts; only the latest committed action shows details. A pending model response is represented by the active run header rather than a separate waiting row. Completed activity collapses to one status row. Expanding it with `Ctrl-O` shows retained step details in a slightly indented, rounded panel, including exact TypeScript source, dim stream-colored logs and returned stdout/stderr, and errors. Structured result JSON remains available through cell diagnostics rather than the conversation transcript.
+
+Agencity does not enable click or drag mouse reporting. Drag normally to select rendered text, then use the terminal's native copy command such as Command-C on macOS. Compatible terminals use alternate-scroll mode to translate trackpad or wheel gestures into conversation scrolling without taking over text selection.
 
 The bottom composer is a raised multiline surface with a visible `›` prompt. Pasting preserves line breaks, `Shift-Enter` inserts a new line, and Enter submits the complete draft. The composer grows to show up to five lines in normal-height terminals and keeps longer drafts scrollable. A family summary, when present, remains between the composer and footer. The footer keeps the trusted-local boundary and current action visible, then adds connection, attention, recovery, budget, family, and command hints as width permits.
 
@@ -120,7 +122,7 @@ Normal, compact, and minimum height modes reduce chrome in a fixed order. The ma
 - Type plain text to start a task or provide more information after a blocked result.
 - `Ctrl-P` opens command search.
 - `Ctrl-O` expands or collapses the latest run activity.
-- `Ctrl-A` expands or collapses all completed run activity while the composer is empty.
+- `Ctrl-L` expands or collapses all completed run activity without changing the composer draft.
 - Page Up/Down scrolls the active view.
 - Escape closes the current inspector.
 - `Shift-R` or `/raw` opens scrubbed raw diagnostics.

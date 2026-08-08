@@ -47,7 +47,7 @@ test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI
   const [linkCode, linkError] = await Promise.all([linked.exited, new Response(linked.stderr).text()]);
   expect(linkCode, linkError).toBe(0);
   const executable = join(installation, "bin", "agencity");
-  const task = "OpenTUI pseudo-terminal round trip";
+  const task = "OpenTUI pseudo-terminal\nround trip";
   const childTask = "PTY retained child";
   provider.script(task, [
     action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer", run: false }); return "spawned";`),
@@ -105,6 +105,11 @@ model_prompt = pump(5, "Model ID for OpenAI:")
 if model_prompt:
     os.write(fd, b"openai/fixture-v1\r")
 ready = pump(10, "Ask Agencity")
+kitty_query = b"\x1b[?u" in output
+if kitty_query:
+    os.write(fd, b"\x1b[?0u")
+alternate_scroll = kitty_query and pump(5, "\x1b[?1007h")
+application_cursor = b"\x1b[?1h" in output
 if ready:
     os.write(fd, task.encode() + b"\r")
 task_complete = False
@@ -193,6 +198,8 @@ print(json.dumps({
     "credentialPrompt": credential_prompt,
     "modelPrompt": model_prompt,
     "ready": ready,
+    "alternateScroll": alternate_scroll,
+    "applicationCursor": application_cursor,
     "taskComplete": task_complete,
     "cellRendered": cell_rendered,
     "postCellInspector": post_cell_inspector,
@@ -206,6 +213,14 @@ print(json.dumps({
     "resumeExitCode": resume_exit_code,
     "idleDetach": b"workspace service will stop automatically" in output,
     "secretHidden": b"acceptance-fixture-key" not in output,
+    "nativeSelectionAvailable": not any(sequence in output for sequence in (
+        b"\x1b[?1000h",
+        b"\x1b[?1002h",
+        b"\x1b[?1003h",
+        b"\x1b[?1005h",
+        b"\x1b[?1006h",
+        b"\x1b[?1015h",
+    )),
     "outputTail": output.decode("utf-8", "replace")[-1200:],
 }))
 `;
@@ -236,6 +251,8 @@ print(json.dumps({
       credentialPrompt: true,
       modelPrompt: true,
       ready: true,
+      alternateScroll: true,
+      applicationCursor: true,
       taskComplete: true,
       cellRendered: true,
       postCellInspector: true,
@@ -249,6 +266,7 @@ print(json.dumps({
       resumeExitCode: 0,
       idleDetach: true,
       secretHidden: true,
+      nativeSelectionAvailable: true,
     });
 
     let history: any = null;

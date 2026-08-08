@@ -176,7 +176,7 @@ function runHint(block: Pick<RunBlock, "run" | "expanded" | "latestExpandable" |
   if (block.latestExpandable) {
     return block.expanded ? "(Ctrl-O to collapse latest)" : "(Ctrl-O to expand latest)";
   }
-  return block.allCompletedExpanded ? "(Ctrl-A to collapse all)" : "(Ctrl-A to expand all)";
+  return block.allCompletedExpanded ? "(Ctrl-L to collapse all)" : "(Ctrl-L to expand all)";
 }
 
 function cellSummary(): string {
@@ -423,15 +423,22 @@ export class TerminalTranscript {
         }
         reason.content = current.reason ?? "";
         stepsHost.visible = block.expanded;
-        if (block.expanded) this.#reconcileSteps(block, current.steps.slice(-8), current.active);
+        if (block.expanded) {
+          this.#reconcileSteps(block, current.steps.slice(-8), current.active, current.actionPending);
+        }
       },
     };
     return block;
   }
 
-  #reconcileSteps(block: RunBlock, steps: readonly TerminalStepView[], latestOnly: boolean): void {
+  #reconcileSteps(
+    block: RunBlock,
+    steps: readonly TerminalStepView[],
+    latestOnly: boolean,
+    actionPending: boolean,
+  ): void {
     const desired: StepBlock[] = [];
-    const detailedStepId = steps.at(-1)?.id;
+    const detailedStepId = actionPending ? undefined : steps.at(-1)?.id;
     for (const step of steps) {
       const key = `step:${step.id}`;
       let stepBlock = block.stepBlocks.get(key);

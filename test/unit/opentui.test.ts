@@ -20,6 +20,7 @@ import {
 } from "../../src/index.ts";
 import {
   OpenTuiApp,
+  alternateScrollDelta,
   formatManagedDetach,
   toggleAllRunDetails,
   type OpenTuiController,
@@ -34,6 +35,17 @@ const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
 
 describe("OpenTUI interactive terminal", () => {
+  test("maps alternate-scroll wheel input without consuming physical Kitty arrow keys", () => {
+    expect(alternateScrollDelta("\u001bOA")).toBe(-3);
+    expect(alternateScrollDelta("\u001bOB")).toBe(3);
+    expect(alternateScrollDelta("\u001b[A")).toBeNull();
+    expect(alternateScrollDelta("\u001b[B")).toBeNull();
+    expect(alternateScrollDelta("\u001b[C")).toBeNull();
+    expect(alternateScrollDelta("\u001b[D")).toBeNull();
+    expect(alternateScrollDelta("\u001b[1;1A")).toBeNull();
+    expect(alternateScrollDelta("\u001b[57352u")).toBeNull();
+  });
+
   test("renders a stable workspace, preserves input during protocol updates, responds to resize, and detaches", async () => {
     const temp = await makeTempRuntime("agencity-opentui-"); temps.push(temp);
     const supervisor = await Supervisor.open({
@@ -192,7 +204,10 @@ describe("OpenTUI interactive terminal", () => {
         agentRuns: { [waitingRun.id]: waitingRun },
       },
     });
-    expect(waitingForModel.runs[0]?.steps[0]?.label).toBe("Waiting for model response…");
+    expect(waitingForModel.runs[0]).toMatchObject({
+      actionPending: true,
+      steps: [],
+    });
     const absentActiveCell = buildTerminalScreen({
       ...controller.presentation,
       state: { ...controller.presentation.state, agentRuns: { [typescriptRun.id]: typescriptRun }, cells: {} },
@@ -272,6 +287,16 @@ describe("OpenTUI interactive terminal", () => {
       expect(executedLines).toEqual(["pasted first line\npasted second line\npasted third line"]);
       composer.clear();
 
+      await setup.mockInput.typeText("linefeed first line");
+      expect(app.handleTerminalLinefeedInput("\n")).toBe(true);
+      await setup.mockInput.typeText("linefeed second line");
+      frame = await setup.waitForFrame(value =>
+        value.includes("linefeed first line") && value.includes("linefeed second line"),
+      );
+      expect(composer.plainText).toBe("linefeed first line\nlinefeed second line");
+      expect(executedLines).toEqual(["pasted first line\npasted second line\npasted third line"]);
+      composer.clear();
+
       await setup.mockInput.typeText("draft response");
       frame = await setup.waitForFrame(value => value.includes("draft response"));
       expect(frame).toContain("draft response");
@@ -297,6 +322,15 @@ describe("OpenTUI interactive terminal", () => {
       }
       frame = await setup.waitForFrame(value => value.includes("Long timeline update 28") && value.includes("draft response"));
       expect(frame).toContain("Long timeline update 28");
+      expect(app.handleAlternateScrollInput("\u001bOA")).toBe(true);
+      expect(app.handleAlternateScrollInput("\u001b[A")).toBe(false);
+      await Bun.sleep(20);
+      await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", "Update while alternate-scroll is away");
+      await Bun.sleep(20);
+      frame = (await setup.captureCharFrame()).toString();
+      expect(frame).not.toContain("Update while alternate-scroll is away");
+      expect(app.handleAlternateScrollInput("\u001bOB")).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("Update while alternate-scroll is away"));
       setup.mockInput.pressKey("\u001b[5~");
       await Bun.sleep(20);
       await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", "Update while timeline is scrolled away");
@@ -773,6 +807,7 @@ describe("OpenTUI interactive terminal", () => {
         status: "succeeded",
         statusLabel: "succeeded",
         active: false,
+        actionPending: false,
         provisional: false,
         cancellationRequested: false,
         reason: null,
@@ -901,26 +936,17 @@ describe("OpenTUI interactive terminal", () => {
           status: "running",
           statusLabel: "running",
           active: true,
-          steps: [
-            view.runs[0]!.steps[0]!,
-            {
-              id: "step-2",
-              ordinal: 2,
-              label: "Waiting for model response…",
-              detail: null,
-              attempts: 1,
-              formalOutcome: null,
-              cell: null,
-            },
-          ],
+          actionPending: true,
+          steps: [view.runs[0]!.steps[0]!],
         }],
       };
       transcript.reconcile(activeView, new Set());
       await setup.waitForFrame(value =>
-        value.includes("Waiting for model response")
+        value.includes("running")
         && value.includes("const value = 42;")
         && !value.includes("return { value };"),
       );
+      expect((await setup.captureCharFrame()).toString()).not.toContain("Waiting for model response");
       expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
         .toBe(false);
 
@@ -942,12 +968,12 @@ describe("OpenTUI interactive terminal", () => {
       };
       transcript.reconcile({ ...view, runs: [previousRun, view.runs[0]!] }, new Set());
       await setup.waitForFrame(value =>
-        value.includes("Ctrl-A to expand all") && value.includes("Ctrl-O to expand latest"));
+        value.includes("Ctrl-L to expand all") && value.includes("Ctrl-O to expand latest"));
       const previousSummary = setup.renderer.root.findDescendantById(
         "agencity-transcript-run-summary-run-0",
       ) as TextRenderable;
       const previousHint = previousSummary.textNode.children.find(child =>
-        typeof child !== "string" && child.children.join("").includes("Ctrl-A to expand all"));
+        typeof child !== "string" && child.children.join("").includes("Ctrl-L to expand all"));
       expect(typeof previousHint === "string" ? 0 : (previousHint?.attributes ?? 0) & TextAttributes.DIM)
         .toBe(TextAttributes.DIM);
 

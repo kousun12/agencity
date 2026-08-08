@@ -72,6 +72,7 @@ export interface TerminalRunView {
   readonly status: AgentRunState["status"];
   readonly statusLabel: string;
   readonly active: boolean;
+  readonly actionPending: boolean;
   readonly provisional: boolean;
   readonly cancellationRequested: boolean;
   readonly reason: string | null;
@@ -254,13 +255,14 @@ function visibleConversation(messages: readonly MessageState[]): TerminalConvers
     .slice(-24);
 }
 
-function stepView(state: AgentState, run: AgentRunState, ordinal: number): TerminalStepView {
+function stepView(state: AgentState, run: AgentRunState, ordinal: number): TerminalStepView | null {
   const step = run.steps[ordinal]!;
   const action = step.action;
+  if (!action && !step.rejection) return null;
   const formalOutcome = step.actionSource
     ? deriveModelContractCallDiagnostic(state, step.actionSource.modelCallId)
     : null;
-  let label = "Waiting for model response…";
+  let label = "";
   let detail: string | null = null;
   let cell: TerminalCellView | null = null;
   if (action?.type === "typescript") {
@@ -313,6 +315,7 @@ function stepView(state: AgentState, run: AgentRunState, ordinal: number): Termi
 }
 
 function runView(state: AgentState, run: AgentRunState, provisionalRunIds: ReadonlySet<string>): TerminalRunView {
+  const latestStep = run.steps.at(-1);
   return {
     id: run.id,
     task: run.task,
@@ -321,10 +324,14 @@ function runView(state: AgentState, run: AgentRunState, provisionalRunIds: Reado
     status: run.status,
     statusLabel: run.status.replaceAll("_", " "),
     active: !isTerminalRunStatus(run.status),
+    actionPending: Boolean(latestStep && !latestStep.action && !latestStep.rejection),
     provisional: provisionalRunIds.has(run.id),
     cancellationRequested: run.cancellationRequested,
     reason: run.reason ?? run.cancellationReason ?? null,
-    steps: run.steps.map((_, index) => stepView(state, run, index)),
+    steps: run.steps.flatMap((_, index) => {
+      const step = stepView(state, run, index);
+      return step ? [step] : [];
+    }),
   };
 }
 

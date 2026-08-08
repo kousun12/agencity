@@ -1,0 +1,1404 @@
+# Adaptive agent city and organizational refactoring plan
+
+**Status:** Proposed  
+**Date:** August 8, 2026  
+**Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
+**Related plans:** [Workspace Agents view](./2026-08-08-workspace-agents-view-plan.md), [Ergonomic agent-family navigation](./2026-08-07-ergonomic-agent-family-navigation-plan.md), and [Lossless context-reference storage](./2026-08-07-lossless-context-references-plan.md)  
+**Related decisions:** [Durable agent relationships](../docs/decisions/0006-durable-agent-relationships.md)
+
+## Summary
+
+Agencity evolves from durable agent families into a workspace-scoped **agent city**: a long-lived organization of durable agents whose roles, purposes, relationships, work, and changes remain attributable over time.
+
+Every agent has a required, immutable, versioned **charter**. The charter defines the agent's role, mission, standing context, responsibilities, operating principles, success criteria, delegation rules, escalation rules, and authority envelope. The charter contains the exact agent-specific system-prompt text supplied to the model whenever that agent runs. A task, conversation, retrieved memory, or compacted summary can add dynamic context, but none substitutes for the charter.
+
+Every child is created with a charter. Promptless child admission is invalid. A managing parent can revise a direct child's charter for future work, pause the child, or retire it within the authority inherited from the parent. Revisions never rewrite earlier work: each run pins one exact charter version, and every model call in that run uses it.
+
+Each workspace has one distinguished **city operator**. The operator is the ordinary inbound route for the city. It can inspect the active organizational hierarchy and every agent charter, search the directory, route work to an existing agent, create a new functional agent, and propose changes to the organization. It does not receive every agent's complete history in its model context and does not gain unrestricted authority merely because it can inspect the directory.
+
+The city adapts through retained evidence. Agents may propose new roles, charter revisions, management changes, splits, successors, pauses, or retirement. Organizational changes follow a governed proposal, validation, bounded evaluation, decision, and rollback process. The city does not treat a model's confidence, one successful task, or one failure as sufficient proof.
+
+Retirement removes an agent from future routing, follow-up, schedules, and the default active hierarchy. It preserves the agent's charter history, origin, work, relationships, effects, and reasons for retirement. Retired agents remain available through explicit historical inspection but are not silently reactivated. A renewed function is represented by a new successor agent with an explicit lineage link.
+
+The end state is not one model with every historical record in its prompt. It is one durable workspace institution containing many separately identified actors, plus a stable operator and directory through which the institution can be queried and changed.
+
+## End-state shape
+
+```text
+user
+  |
+  v
+city operator
+  |-- queries active directory and exact charters
+  |-- routes work to an existing agent
+  |-- asks a manager to revise or reorganize a function
+  `-- creates a new top-level function when no current agent fits
+
+active management hierarchy
+  |
+  |-- engineering
+  |     |-- implementation
+  |     `-- verification
+  |
+  |-- research
+  |     `-- evidence review
+  |
+  `-- operations
+
+historical city record
+  |-- immutable charter versions
+  |-- creation and management lineage
+  |-- tasks, branches, effects, artifacts, and evaluations
+  |-- paused, retired, and superseded agents
+  `-- organizational proposals and decisions
+```
+
+Agents are dormant when they have no admitted work. Long-lived identity means that an agent is reconstructable, addressable, inspectable, and eligible for future work; it does not require a continuously running process or language heap.
+
+## Product vision
+
+The ordinary product experience addresses the city rather than asking the user to manage chat sessions.
+
+```sh
+agencity "find and fix the flaky test"
+```
+
+The workspace resolves to its city operator. The operator interprets the request against the active directory:
+
+1. route to an existing agent whose charter and evidence fit the request;
+2. assemble work through an existing management hierarchy;
+3. revise a direct function whose charter no longer matches its responsibilities;
+4. create a new agent when no current role is suitable;
+5. ask the user when the change requires broader authority or an irreversible organizational decision.
+
+Returning with `agencity` enters the same city operator unless the user explicitly opens another retained route. A user can navigate directly to an individual agent, but direct navigation does not change the city operator or the default inbound route.
+
+The city grows from observed need. A new workspace may begin with only the operator. Repeated work can justify specialization. Persistent failures, bottlenecks, or redundant roles can justify charter revision, a split, a successor, or retirement. The resulting organization is retained as history rather than reconstructed from the latest prompt or an undocumented convention.
+
+## Verified current foundation
+
+The current runtime already provides foundations that this plan extends:
+
+- a `Session` is a durable actor with a model, budget, conversation, goals, branches, tasks, and event stream;
+- child admission atomically retains parent and child identity, task intent, model, budget, initial prompt, and admission;
+- parent, child, and sibling communication uses retained family mailboxes;
+- child follow-up can reuse the same durable session after terminal task work;
+- canonical history is append-only and projections are rebuildable;
+- model calls receive attributable materialized context;
+- prompt notes, skills, memories, and reusable subagent specifications are immutable, versioned harness entries;
+- refinement supports evidence, proposals, candidate exposure, observations, promotion, rejection, and rollback;
+- session status includes idle, running, stopped, failed, and archived;
+- the proposed Workspace Agents view defines an owner-facing exact route hierarchy without broadening model-facing family authority.
+
+The current runtime does not provide:
+
+- a required per-agent system prompt;
+- a durable charter attached to every session;
+- exact charter-version pinning on every autonomous run;
+- parent authority to revise a child's future system prompt;
+- a distinguished workspace operator;
+- a city-wide agent and charter directory;
+- a separate active management hierarchy;
+- explicit pause, retirement, successor, split, merge, or reorganization semantics;
+- evidence-driven organization proposals;
+- automatic routing based on charter fit and retained performance.
+
+Current reusable subagent specifications are templates, not agent identity. A specification's role and prompt are concatenated into the spawned child's initial task message. Ordinary child admission does not require a specification, and the child does not receive that content as a durable agent-specific system prompt.
+
+Current prompt notes are optional harness context. They are not required identity, may be selected by scope, and are not compiled into the provider system message as an exact per-agent charter. They remain useful for adaptable tactics but do not replace this plan's charter model.
+
+## Goals
+
+- Give every root, delegated, and recursive agent a required durable charter before it can run.
+- Supply the exact active agent charter as system-prompt content on every model call.
+- Keep the global immutable runtime policy separate from agent-specific purpose.
+- Preserve exact charter-version and effective-prompt provenance for every run and model effect.
+- Let a managing parent revise a direct child's charter for future runs without rewriting past work.
+- Let children propose changes to their own charter or organization without self-promoting them.
+- Provide one distinguished city operator as the workspace's stable inbound route.
+- Give the operator a bounded, queryable directory of every workspace agent and charter.
+- Keep model-facing directory access distinct from conversation-history and effect authority.
+- Separate immutable creation ancestry from a versioned active management hierarchy.
+- Support evidence-governed creation, revision, reparenting, splitting, succession, pausing, and retirement.
+- Remove retired agents from normal routing and default active views while retaining inspectable history.
+- Preserve local-first operation, explicit uncertainty, outbox effects, branch history, sync conflicts, and user authority.
+- Make organizational evolution attributable, testable, reversible where possible, and explicit where irreversible.
+
+## Non-goals
+
+- Sending the complete city history, all charters, or every agent's context to every model call.
+- Treating the whole workspace graph as one merged agent identity.
+- Keeping every agent process, model connection, or console heap continuously alive.
+- Giving the operator unrestricted file, credential, effect, budget, or deletion authority.
+- Letting a parent remove immutable base policy or grant authority it does not possess.
+- Letting an agent activate its own broader authority or approve its own retirement evidence.
+- Rewriting historical prompts, contexts, branches, tasks, or effects after a charter revision.
+- Inferring management authority from names, task text, timestamps, or graph proximity.
+- Making arbitrary cross-agent messaging an authorization mechanism.
+- Automatically merging divergent branches or organizational changes from offline writers.
+- Claiming hosted multi-tenancy, hostile-code isolation, distributed scheduling, or execution-owner failover.
+- Physically deleting retired agents as part of ordinary lifecycle management.
+- Replacing reusable subagent specifications, memories, prompt notes, skills, or task goals with one oversized charter.
+- Building an unbounded autonomous bureaucracy. Agent counts, depth, budgets, proposal rates, and evaluation exposure remain bounded.
+
+## Design principles
+
+### Identity is durable; execution is episodic
+
+An agent remains a durable session identity. Runs, provider calls, console workers, schedules, and terminal attachments are temporary activity associated with that identity.
+
+### Purpose is explicit
+
+No agent is admitted with only a task string. The runtime can answer:
+
+- Why does this agent exist?
+- What is its standing mission?
+- What work should and should not reach it?
+- Who created it?
+- Who currently manages it?
+- Which charter version governed a particular action?
+- Which evidence justified a revision or retirement?
+
+### Static purpose and dynamic work are separate
+
+The charter contains durable identity and standing context. The current task, recent observations, messages, retrieved memories, working values, and artifacts remain dynamic execution context.
+
+### Organizational power follows an explicit tree
+
+Every active agent except the operator has one active managing parent. That tree determines ordinary charter and lifecycle authority. Additional collaboration, citation, successor, and task edges do not grant management power.
+
+### Creation history never changes
+
+The session's original parent session, parent branch, root session, depth, and task remain immutable provenance. Reparenting changes the active management edge, not who created the agent.
+
+### Revisions append
+
+Charters, management edges, lifecycle decisions, and organizational proposals are immutable versions or events. Current pointers are projections. Earlier model calls continue to resolve the exact version they used.
+
+### Adaptation requires evidence
+
+Observed outcomes may trigger a proposal. They do not directly mutate the organization. Promotion requires predeclared evaluation, attributable observations, scope-appropriate authority, and conflict checks.
+
+### Retirement is not deletion
+
+Retirement ends future participation. History remains. Physical erasure continues to use the separate guarded owned-scope deletion system.
+
+### Visibility is not authority
+
+The city operator can inspect all agent charters and directory metadata. This does not automatically grant access to all messages, artifacts, secrets, working values, or effects.
+
+## Terms
+
+- **City:** One workspace-scoped durable agent organization.
+- **City operator:** The single distinguished agent that receives ordinary inbound work and coordinates the city.
+- **Agent:** A durable `Session` identity. The plan does not introduce a second competing agent identity above sessions.
+- **Route:** One exact `(sessionId, branchId)` execution history.
+- **Identity branch:** The agent's initial branch, used as the canonical target for session-wide charter and lifecycle events.
+- **Charter:** The durable definition of an agent's purpose and operating boundaries.
+- **Charter version:** One immutable charter revision with exact system-prompt text and provenance.
+- **Effective system prompt:** The exact provider-facing system content composed from immutable base policy, one charter version, and the fixed run-control contract.
+- **Creation parent:** The session and branch that admitted the agent. This relationship is immutable provenance.
+- **Managing parent:** The agent currently authorized to manage the child. This relationship is versioned and can change.
+- **Active hierarchy:** The current managing-parent tree rooted at the city operator.
+- **Directory:** A rebuildable workspace projection of agents, active charters, hierarchy, lifecycle, routing metadata, evidence summaries, and retained routes.
+- **Rotation:** Eligibility for ordinary routing, schedules, follow-up, and new autonomous work.
+- **Organization proposal:** A durable request to create, revise, pause, resume, reparent, split, supersede, or retire agents.
+- **Successor:** A new agent that continues some or all of a retired or superseded function without reusing the old identity.
+- **Retired archive:** Historical agents omitted from normal active views and routing but available through explicit inspection.
+
+## Core identity decision
+
+`Session` remains the executable agent identity.
+
+This preserves the existing durable actor model:
+
+- one session owns model configuration, budget, goals, conversation, branches, child work, and lifecycle;
+- follow-up addresses the same agent rather than instantiating a separate role object;
+- branches remain alternate histories of that agent;
+- effects, context, tasks, and mail retain current ownership semantics.
+
+Each session receives exactly one charter entry with one active version. A session cannot have two active charters. Reusable subagent specifications remain templates that can produce new agent charters; they are not the resulting agent's identity.
+
+A future cross-workspace marketplace or profile-level institutional agent may require identity above a workspace session. That is outside this plan because it introduces different ownership, sync, credential, deletion, and governance boundaries.
+
+## City initialization and operator
+
+### One operator
+
+Every initialized city has exactly one active operator session and one designated operator route.
+
+The operator:
+
+- is the ordinary no-ID product entrypoint;
+- owns a charter like every other agent;
+- appears at the root of the active management hierarchy;
+- can inspect the complete workspace agent and charter directory through bounded queries;
+- can delegate ordinary work within city policy;
+- can create top-level managed functions within budget and authority;
+- can propose or activate permitted organizational changes;
+- cannot broaden immutable runtime or user authority;
+- cannot approve its own authority expansion, replacement, or retirement.
+
+### Operator charter
+
+The initial operator charter is created from a sealed product template plus explicit user configuration. Model output cannot silently define the operator's initial authority.
+
+The operator charter includes:
+
+- mission to receive, understand, route, coordinate, and synthesize workspace work;
+- obligation to prefer existing capable agents before creating redundant agents;
+- obligation to query bounded directory evidence rather than infer expertise from names;
+- permission to create and manage agents only inside the workspace's declared limits;
+- escalation rules for user approval;
+- prohibition on treating visibility as execution authority;
+- evaluation criteria for routing quality, duplication, unresolved work, cost, and user correction.
+
+### Operator succession
+
+Replacing the operator is a user-authorized atomic city transition:
+
+1. create or select the successor agent and charter;
+2. validate that the successor can satisfy the operator contract;
+3. pause ordinary organization mutations;
+4. transfer the operator pointer and active top-level management edges;
+5. retain the predecessor as an ordinary paused or retired agent;
+6. resume organization mutations under the new operator.
+
+There is never more than one active operator at one city revision. The outgoing operator cannot approve its own successor.
+
+## Agent charter model
+
+### Required fields
+
+Each immutable `AgentCharterVersion` contains:
+
+```ts
+interface AgentCharterVersion {
+  charterVersionId: string;
+  agentSessionId: string;
+  revision: number;
+  status: "candidate" | "active" | "retired" | "rejected" | "rolled_back";
+
+  name: string;
+  role: string;
+  mission: string;
+  responsibilities: string[];
+  nonResponsibilities: string[];
+  standingContext: string[];
+  operatingPrinciples: string[];
+  successCriteria: AgentCharterCriterion[];
+  delegationPolicy: AgentDelegationPolicy;
+  escalationPolicy: AgentEscalationPolicy;
+  authorityEnvelope: AgentAuthorityEnvelope;
+  routingMetadata: AgentRoutingMetadata;
+
+  exactSystemPrompt: string;
+  promptContractId: "agencity.agent-charter.v1";
+  promptDigest: string;
+
+  createdBySessionId: string | null;
+  createdByBranchId: string | null;
+  sourceSpecEntryId: string | null;
+  sourceSpecVersionId: string | null;
+  proposalId: string | null;
+  evidenceEventIds: string[];
+  supersedesCharterVersionId: string | null;
+  createdAt: string;
+}
+```
+
+The exact field limits and nested schemas are domain constants. Every string and collection is bounded before canonical admission. Known secret values, credential-shaped values, and brokered credential references that would reveal secret material are rejected.
+
+### Exact prompt materialization
+
+The runtime validates the structured charter and materializes `exactSystemPrompt` at version creation. Historical prompt text does not depend on a later renderer implementation.
+
+The prompt uses stable labeled sections:
+
+```text
+AGENT IDENTITY
+Name: ...
+Role: ...
+Mission: ...
+
+RESPONSIBILITIES
+...
+
+OUT OF SCOPE
+...
+
+STANDING CONTEXT
+...
+
+OPERATING PRINCIPLES
+...
+
+SUCCESS AND EVALUATION
+...
+
+DELEGATION AND ESCALATION
+...
+
+AUTHORITY BOUNDARY
+...
+```
+
+Structured fields support directory queries, validation, diffs, and evaluation. The exact rendered text is the provider-facing identity contract.
+
+### Standing context
+
+`standingContext` contains bounded facts that should accompany every run because they are part of the agent's durable function. It is not a copy of the full workspace, conversation, or memory store.
+
+Examples include:
+
+- the subsystem or domain the agent owns;
+- durable architectural constraints specific to the role;
+- the expected audience or artifact type;
+- stable dependencies and handoff boundaries;
+- important historical decisions that define the function.
+
+Task-specific data, changing repository state, recent failures, and large evidence belong in dynamic context or referenced artifacts. A standing fact that becomes stale requires a charter revision with evidence.
+
+### Charter and task separation
+
+A charter answers, “Who is this agent and how does it operate?”
+
+A task answers, “What work should this agent do now?”
+
+The same agent can receive many tasks under one charter. A new task does not revise the charter. A charter revision does not retroactively alter earlier tasks.
+
+### Charter and subagent specification separation
+
+A `subagent_spec` remains a reusable template. It may supply default charter fields, model policy, budget policy, completion criteria, and routing metadata.
+
+Spawning from a specification:
+
+1. resolves and pins one active specification version;
+2. materializes a complete candidate charter;
+3. applies explicit parent-provided narrowing or specialization;
+4. validates that no field widens the parent's authority;
+5. atomically creates the child session, charter version, task, initial message, and admission;
+6. records both specification and charter provenance.
+
+The child subsequently owns its charter history. Replacing the reusable specification does not silently rewrite already-created agents.
+
+## Provider context composition
+
+### Fixed ordering
+
+Every autonomous model request receives one deterministic effective system prompt in this order:
+
+1. immutable Agencity base policy;
+2. exact pinned agent-charter system prompt;
+3. immutable formal-tool and run-control policy;
+4. immutable SDK execution guidance required by the selected runtime contract.
+
+Dynamic task and run input follow as user/tool context. Retained conversation messages, selected memories, skills, mailbox messages, artifacts, and observations retain their current roles and provenance.
+
+Provider adapters must not reorder, omit, summarize, or reinterpret the charter layer. If a transport requires one system message, the runtime concatenates the four layers with stable delimiters. If it supports several system blocks, the provider-neutral materialization still records one canonical ordered effective prompt and digest.
+
+### Run pinning
+
+`AgentRunRequested` pins:
+
+- `charterVersionId`;
+- `charterPromptDigest`;
+- effective system-prompt digest;
+- base-policy version;
+- run-control contract version;
+- SDK-guide version.
+
+Every step and model effect in that run uses the same charter version. A parent revision activated while a run is in progress applies only to later runs. Changing a charter does not mutate the model identity halfway through a task.
+
+A follow-up, schedule wake, or new task starts a new run and resolves the active charter at admission. A schedule does not permanently preserve a stale charter unless it explicitly declares and validates a version pin.
+
+### Historical system-role messages
+
+Retained `MessageAppended` rows with role `system` remain historical conversation records. They do not replace, override, or precede the base policy and pinned charter. New runtime policy should prefer typed wake, schedule, task, and control records over arbitrary system-role messages.
+
+### Inspection and provenance
+
+For every model call, diagnostics can show:
+
+- active agent identity;
+- exact charter version and digest;
+- exact effective system-prompt digest;
+- charter creator and proposal;
+- management parent at run admission;
+- dynamic context sources;
+- model, tool contract, and provider dispatch.
+
+Compaction may summarize conversation narrative. It never removes, summarizes, or replaces the pinned charter reference needed to reproduce a model call.
+
+## Agent creation
+
+### No promptless admission
+
+Every child-creation surface requires a complete charter or a version-pinned template that deterministically produces one:
+
+- `sdk.agents.spawn`;
+- `sdk.agents.spawnMany`;
+- `sdk.specs.spawn`;
+- `rlm.start`;
+- `rlm.startMany`;
+- refinement children;
+- scheduler-created agents;
+- product and protocol child admission.
+
+A bare task string is no longer a valid child-admission request. Compatibility helpers may construct an explicit charter draft in client code, but the canonical command always contains a validated charter.
+
+### Required parent decisions
+
+Before creating a child, the parent defines:
+
+- role and mission;
+- standing context;
+- responsibilities and exclusions;
+- completion and quality expectations;
+- authority and data scope;
+- model and budget envelope;
+- delegation and escalation policy;
+- routing labels and invocation criteria;
+- whether the child is a standing function or task-limited specialist.
+
+The initial task remains separate and can be narrower than the standing mission.
+
+### Atomic admission
+
+Novel child admission atomically commits:
+
+- parent task;
+- child `SessionCreated`;
+- initial `AgentCharterVersionCreated`;
+- initial `AgentCharterActivated`;
+- initial managing-parent edge;
+- initial task message;
+- subagent admission;
+- optional specification invocation;
+- runnable `AgentRunRequested` with exact charter pin.
+
+A crash cannot leave a runnable child without a charter or a chartered child without its retained creation relationship. Idempotency-key reuse must agree on every durable field, including the complete charter and prompt digest.
+
+## Charter revision authority
+
+### Direct-parent rule
+
+The active managing parent can create and activate a new charter version for a direct child.
+
+This authority is durable and available throughout the relationship, including after the child's initial task completes. It is subject to these constraints:
+
+- the revision cannot widen authority, model policy, permissions, or budget beyond the parent;
+- the revision cannot alter immutable base policy or safety constraints;
+- the revision cannot change creation ancestry;
+- the revision cannot rewrite an active run's pinned charter;
+- the revision uses compare-and-swap against the child's current charter version;
+- the revision records reason, author, evidence, and exact old/new versions;
+- conflicting concurrent revisions remain explicit and do not use last-write-wins.
+
+“A parent can always revise its child” means the parent retains management authority over future work while the management edge is active. It does not mean that the parent can falsify historical prompts, interrupt a provider call without cancellation, or bypass higher-level policy.
+
+### Child self-revision
+
+An agent may propose a revision to its own charter. It cannot activate that revision. The managing parent evaluates and decides it. The operator or user decides when no valid manager exists.
+
+### Descendant and sibling rules
+
+- A manager directly changes only direct children.
+- A manager can ask a child manager to revise a deeper descendant.
+- The operator may propose a change anywhere in the city.
+- The operator may directly activate a descendant change only when its charter and city policy grant that intervention authority.
+- Siblings cannot revise one another.
+- Management authority does not follow mailbox, artifact, branch, or task edges.
+
+### User authority
+
+The workspace owner can inspect and revise any charter. User changes still append new versions, preserve provenance, and obey immutable safety and secret-handling rules.
+
+Operator charter expansion, operator succession, permission-boundary expansion, cross-workspace scope, and irreversible retirement of protected functions require explicit user approval.
+
+## Organizational hierarchy
+
+### Two relationship layers
+
+The city preserves two distinct structures:
+
+1. **Creation ancestry** — immutable session/task provenance from `SessionCreated` and `TaskCreated`.
+2. **Management hierarchy** — versioned current authority and routing structure.
+
+Creation ancestry answers “How did this agent come to exist?” Management hierarchy answers “Who manages this function now?”
+
+### Active hierarchy invariants
+
+- exactly one operator is the root;
+- every other active or paused agent has exactly one managing parent;
+- management edges remain inside one workspace;
+- the active management graph is acyclic;
+- retired agents cannot manage active agents;
+- management depth and direct-report counts are bounded;
+- a management change cannot silently expand authority;
+- missing or conflicting edges produce an unavailable or attention state, never an inferred parent.
+
+### Reparenting
+
+Reparenting changes only the active management edge.
+
+The command records:
+
+- agent;
+- previous and new managing parent;
+- expected city and charter revisions;
+- reason and evidence;
+- authority transfer;
+- treatment of current child agents;
+- effective time;
+- proposal and decision provenance.
+
+Open runs continue under their pinned charter and admission authority. New work uses the new management relation. Pending parent-to-child management commands either complete before the edge change or fail with a stale-revision error.
+
+### Functional split
+
+A split creates two or more new agents with narrower charters and explicit `derivedFrom` links. Work is allocated to the candidates under bounded exposure. The source agent remains active or paused until evaluation decides whether to:
+
+- keep the source and new specialists;
+- revise responsibilities;
+- route new work only to successors;
+- retire the source.
+
+The city never divides one session's history into several rewritten identities.
+
+### Functional merge
+
+A merge creates one successor agent whose charter explicitly cites the contributing agents. The contributing agents remain retained and are paused or retired after handoff. Their histories are not copied into or attributed to the successor.
+
+### Successor lineage
+
+Successor links are typed and directional:
+
+- `replaces`;
+- `splits_from`;
+- `merges_from`;
+- `inherits_function_from`.
+
+Lineage supports navigation and context retrieval. It does not grant authority or make histories interchangeable.
+
+## Lifecycle and retirement
+
+### Agent lifecycle
+
+Agent lifecycle is separate from task status and current session activity.
+
+| State | New routed work | Explicit follow-up | Schedules | Default directory | Historical inspection |
+| --- | --- | --- | --- | --- | --- |
+| `active` | allowed | allowed | allowed | visible | visible |
+| `paused` | rejected | rejected | suspended | visible with reason | visible |
+| `retiring` | rejected | rejected | disabled | visible as attention | visible |
+| `retired` | rejected | rejected | disabled | hidden by default | explicit archive only |
+
+`paused` is reversible. `retired` is terminal for that agent identity. Restoring a retired function creates a successor agent rather than resuming the retired session.
+
+Existing session statuses continue to describe execution state. A session may be idle while its agent lifecycle is active, or stopped while the retained agent remains eligible for a later follow-up. Agent retirement is not represented by overloading task completion or session failure.
+
+### Retirement request
+
+A parent can request retirement of a direct child. The request includes:
+
+- reason;
+- evidence;
+- expected charter and management revisions;
+- active-run policy: drain or request cancellation;
+- schedule and wake disposition;
+- direct-child disposition;
+- successor links;
+- artifact and handoff requirements;
+- whether user approval is required.
+
+### Child disposition
+
+Retirement cannot silently orphan active children. The retirement proposal must choose one action for every direct child:
+
+- reparent to an authorized manager;
+- include in a reviewed retirement cascade;
+- pause and block the retirement until a later decision.
+
+The runtime validates the resulting management tree before beginning retirement.
+
+### Draining and uncertainty
+
+Entering `retiring` immediately blocks new admission, follow-up, routing, schedule ticks, and wakes.
+
+Active work follows the declared drain or cancellation policy. Cancellation intent is not proof that an external effect stopped. Unknown effects remain attached to the retired history and visible as unresolved evidence. Retirement may complete once no runtime-owned work can continue, even if an external effect remains unknown; completion does not convert that effect to success, failure, or cancellation.
+
+### Retirement completion
+
+Retirement completes when:
+
+- no new work can be admitted;
+- active local execution is terminal or explicitly unknown;
+- schedules and wakes are disabled;
+- child disposition is complete;
+- required handoff artifacts exist;
+- successor and routing updates are committed;
+- required approval is retained.
+
+The final event records exact evidence, unresolved outcomes, successor links, and decision authority.
+
+### Visibility
+
+Normal directory and routing queries exclude retired agents.
+
+Explicit historical views support:
+
+- `includeRetired: true`;
+- retired-agent search;
+- charter history and diffs;
+- origin, management, and successor lineage;
+- retained routes and work;
+- retirement proposal, evidence, and decision;
+- unresolved effects or missing artifacts.
+
+Retired agents remain inspect-only. Opening history cannot start a run, send follow-up, create a schedule, invoke a skill, or mutate the retired route.
+
+## City directory
+
+### Directory contents
+
+The directory is a rebuildable, revisioned, paged workspace projection. Each agent summary includes:
+
+- session identity and display name;
+- lifecycle and activity;
+- active charter identity, role, mission summary, and prompt digest;
+- exact managing parent and creation parent;
+- direct reports and bounded descendant counts;
+- model and budget policy;
+- routing labels and invocation criteria;
+- current assignments, active runs, and unresolved-work counts;
+- bounded outcome and evaluation summaries;
+- creation, revision, pause, and retirement timestamps;
+- successor and predecessor links;
+- exact route links;
+- availability or missing-state reason.
+
+Full prompt text and charter history are retrieved by an exact agent-detail request rather than embedded in every directory page.
+
+### System-prompt map
+
+The directory exposes an owner-facing and operator-readable map:
+
+```ts
+interface AgentPromptMapItem {
+  agentSessionId: string;
+  charterVersionId: string;
+  name: string;
+  role: string;
+  mission: string;
+  exactSystemPrompt: string;
+  promptDigest: string;
+  managingParentSessionId: string | null;
+  createdBySessionId: string | null;
+  lifecycle: "active" | "paused" | "retiring" | "retired";
+  origin: AgentOriginSummary;
+}
+```
+
+The operator may retrieve all active charters through bounded paging and exact lookups. The complete map is not inserted into each operator model call. The operator receives a small directory summary and typed query methods.
+
+### Routing
+
+The operator routes work using:
+
+- charter role, mission, responsibilities, and exclusions;
+- routing labels and invocation criteria;
+- current lifecycle and availability;
+- model and budget compatibility;
+- evidence from prior attributable outcomes;
+- management and delegation limits;
+- task-required capabilities;
+- conflicts, uncertainty, and user constraints.
+
+Routing is a retained decision. The operator records considered candidates, selected agent or creation decision, bounded reasons, and applicable charter versions. Names and recency alone are not sufficient routing evidence.
+
+### Visibility boundaries
+
+The operator can see every agent charter because city coordination requires a common purpose map.
+
+That visibility does not automatically expose:
+
+- complete conversation history;
+- private task inputs;
+- working values;
+- unrestricted artifact content;
+- provider credentials;
+- raw effect payloads;
+- permissions outside the operator's envelope.
+
+Other agents can inspect:
+
+- their own charter and history;
+- direct children's active charters and management metadata;
+- bounded directory summaries explicitly allowed by policy;
+- charter details attached to an authorized handoff.
+
+## Bottom-up adaptation
+
+### Evidence sources
+
+The city can produce organization-review triggers from typed durable evidence:
+
+- repeated successful routing to the same ad hoc specialist;
+- repeated effect or gate failures tied to a role boundary;
+- repeated user corrections;
+- stale standing context;
+- duplicate agents performing substantially overlapping work;
+- repeated handoff failures or mailbox loops;
+- persistent queueing or overloaded managers;
+- underused standing agents;
+- recurring work with no suitable charter;
+- budget, latency, or quality regressions;
+- successful or unsuccessful delegation patterns;
+- completion-gate outcomes;
+- explicit parent, child, operator, or user requests.
+
+Textual model claims are not objective evidence. A trigger identifies a question; it does not decide the change.
+
+### Proposal kinds
+
+Organization proposals support:
+
+- `create-agent`;
+- `revise-charter`;
+- `pause-agent`;
+- `resume-agent`;
+- `reparent-agent`;
+- `split-function`;
+- `merge-functions`;
+- `create-successor`;
+- `retire-agent`;
+- `replace-operator`.
+
+Every proposal includes:
+
+- target agents and expected current revisions;
+- proposed immutable edits;
+- trigger and evidence event IDs;
+- predicted effect;
+- affected tasks, budgets, scopes, and permissions;
+- predeclared evaluation;
+- exposure bounds;
+- required approvals;
+- rollback or irreversibility statement;
+- conflict and child-disposition analysis.
+
+### Proposal lifecycle
+
+```text
+proposed
+  -> validated
+  -> candidate
+  -> observed
+  -> promoted | revision_required | rejected
+  -> rolled_back, when the promoted change is reversible
+```
+
+Validation proves shape, references, authority, current-version compare-and-swap, hierarchy acyclicity, budget bounds, permission bounds, evidence visibility, and lifecycle compatibility.
+
+Candidate exposure uses exact agents, tasks, runs, and charter versions. Observations cite attributable outcomes. A candidate cannot record its own objective success without independently retained evidence.
+
+### Evaluation
+
+Evaluation matches the change:
+
+- charter revisions compare task quality, gate outcomes, corrections, cost, and escalation behavior;
+- new agents must show demand and useful specialization across distinct assignments;
+- routing changes measure selection quality and avoidable transfers;
+- splits measure bottleneck reduction without unacceptable duplication;
+- merges measure reduced coordination cost without lost capability;
+- retirement requires evidence that work is covered, no required function is silently abandoned, and handoff is complete.
+
+Broader or more destructive changes require stronger evidence and authority. Retirement is terminal, so the safe evaluation path is usually candidate routing followed by pause, observation, and only then retirement.
+
+### Promotion and rollback
+
+Promotion changes active pointers and lifecycle. It does not rewrite retained versions or outcomes.
+
+Reversible changes include:
+
+- charter activation;
+- pause and resume;
+- management-edge activation;
+- routing preference changes.
+
+Rollback restores the exact prior pointer through a new event.
+
+Retirement and physical deletion are not rolled back. A retired function returns only through a new successor identity. This keeps the meaning of “retired and unavailable for continuation” stable.
+
+## Authority model
+
+| Actor | Read | Propose | Activate |
+| --- | --- | --- | --- |
+| User | all city records | any change | any policy-valid change |
+| City operator | all charters and directory metadata | any workspace organization change | changes inside delegated operator authority |
+| Managing parent | own and direct-child charters | direct-child and own changes | direct-child changes inside inherited authority |
+| Agent | own charter, authorized directory, direct children | own charter, direct-child, and local organization changes | direct-child changes inside inherited authority |
+| Sibling or unrelated agent | bounded authorized summaries | handoff or collaboration request | none |
+
+No actor can:
+
+- broaden its own immutable authority;
+- disable the base policy;
+- grant permissions, model access, or budget beyond its own envelope;
+- approve evidence it fabricated;
+- mutate prior charter text;
+- reactivate a retired identity;
+- physically erase another agent through lifecycle commands.
+
+## Branch semantics
+
+### Session-wide charter
+
+The charter belongs to the session identity, not to one conversational branch. Charter and lifecycle events target the session's identity branch and feed a session-wide projection.
+
+All branches resolve the same currently active charter for new work. A historical run on any branch retains its own pinned charter version. Forking a branch does not fork the agent's identity or silently create a different charter lineage.
+
+### Governance and branch divergence
+
+Organization mutations use exact expected city, management-edge, lifecycle, and charter revisions. Competing mutations conflict rather than use last-write-wins.
+
+Offline sync may preserve competing proposals or branches, but only the current execution owner may activate a city mutation. A non-owner device can author a proposal; it cannot claim organization execution ownership or silently replace the active charter.
+
+### Counterfactual organization work
+
+A branch may analyze or simulate an organization proposal. Simulation does not change active city state. Promotion references the exact proposal and evidence but appends a new authoritative activation event after current-state validation.
+
+## Canonical events and projections
+
+### Proposed canonical events
+
+The implementation adds versioned event types shaped around durable meaning:
+
+- `CityInitialized`;
+- `CityOperatorChanged`;
+- `AgentCharterVersionCreated`;
+- `AgentCharterActivated`;
+- `AgentCharterRolledBack`;
+- `AgentManagementChanged`;
+- `AgentLifecycleChangeRequested`;
+- `AgentLifecycleChanged`;
+- `AgentSuccessorLinked`;
+- `OrganizationReviewRequested`;
+- `OrganizationProposalCreated`;
+- `OrganizationProposalValidated`;
+- `OrganizationCandidateActivated`;
+- `OrganizationObservationRecorded`;
+- `OrganizationProposalDecided`;
+- `OrganizationRollbackApproved`;
+- `OrganizationRolledBack`.
+
+Exact event shapes require a domain review before implementation. New event meaning remains immutable after adoption. Existing retained events are never rewritten to manufacture charters or organization history.
+
+### Write ownership
+
+Session-wide charter and lifecycle events append to the affected session's identity branch. The payload records the acting user or manager and exact authorization basis.
+
+Cross-agent commands validate the management projection and acquire the required target execution fence before append. A multi-agent reorganization first commits durable intent, then applies each target transition idempotently, and finally commits terminal success, failure, or partial/unknown status. It does not rely on one unbounded cross-root transaction.
+
+### Rebuildable projections
+
+New projections include:
+
+- `city_state`;
+- `agent_charter_entries`;
+- `agent_charter_versions`;
+- `agent_management_edges`;
+- `agent_lifecycle`;
+- `agent_successor_links`;
+- `organization_reviews`;
+- `organization_proposals`;
+- `organization_candidate_allocations`;
+- `organization_observations`;
+- `organization_decisions`.
+
+All tables are classified in `docs/mutable-tables.md`. Current pointers and indexes are rebuildable from canonical events. Prompt text and charter versions remain in canonical payloads, not only mutable tables.
+
+### Idempotency
+
+Stable command retries agree on:
+
+- target agent;
+- expected prior versions;
+- complete charter content and prompt digest;
+- acting authority;
+- proposal and evidence;
+- hierarchy and lifecycle transitions;
+- child disposition;
+- successor links.
+
+Changed meaning under the same key is a conflict.
+
+## Protocol and SDK
+
+### Product protocol
+
+The owner-facing product contract adds capability-negotiated endpoints equivalent to:
+
+```http
+GET  /product/city
+GET  /product/city/agents
+GET  /product/city/agents/:session
+GET  /product/city/agents/:session/charters
+GET  /product/city/agents/:session/charters/:version
+GET  /product/city/proposals
+POST /product/city/agents
+POST /product/city/agents/:session/charters
+POST /product/city/agents/:session/pause
+POST /product/city/agents/:session/resume
+POST /product/city/agents/:session/retire
+POST /product/city/proposals
+POST /product/city/proposals/:proposal/validate
+POST /product/city/proposals/:proposal/activate
+POST /product/city/proposals/:proposal/observe
+POST /product/city/proposals/:proposal/decide
+POST /product/city/proposals/:proposal/rollback
+```
+
+The exact paths may be consolidated, but the typed contract preserves:
+
+- exact IDs and revisions;
+- paging and immutable directory revisions;
+- active versus retired inclusion;
+- owner/operator authority;
+- no mutation from read/navigation calls;
+- typed unavailable and conflict outcomes;
+- bounded prompt and evidence payloads.
+
+### Console SDK
+
+Generated TypeScript receives capability-scoped operations:
+
+```ts
+sdk.city.status()
+sdk.city.agents.list(options?)
+sdk.city.agents.get(target, options?)
+sdk.city.proposals.list(options?)
+sdk.city.proposals.get(proposalId)
+sdk.city.proposals.create(input)
+
+sdk.agents.spawn({ charter, task, ... })
+sdk.agents.reviseChild(target, proposal)
+sdk.agents.pauseChild(target, proposal)
+sdk.agents.resumeChild(target, proposal)
+sdk.agents.retireChild(target, proposal)
+```
+
+The executing session and branch always supply actor identity. Generated code cannot spoof a parent, operator, user approval, evidence source, or current revision.
+
+The operator receives workspace-wide charter-directory reads. Other agents receive own/direct-child detail and bounded city summaries according to policy. No console method exposes raw credentials or converts directory reach into unrestricted SQL mutation.
+
+### Recursive calls
+
+`rlm.start` and `rlm.startMany` require an explicit role/mission/system-prompt charter input or a sealed version-pinned recursive-agent template. The runtime may offer concise helpers, but the retained child always has a complete charter and exact prompt digest.
+
+## Terminal product
+
+### City entrypoint
+
+The default workspace route is the city operator. The product status clearly distinguishes:
+
+- city operator;
+- currently observed agent route;
+- remembered direct route selection;
+- active organization revision;
+- pending organization proposals.
+
+Directly opening another agent does not replace the operator.
+
+### Agents view
+
+The Workspace Agents view becomes the visual foundation for the city directory.
+
+The default screen shows the active management hierarchy:
+
+- operator at the root;
+- active and paused agents;
+- role, mission summary, activity, lifecycle, manager, and unresolved work;
+- exact route links;
+- proposal and attention indicators.
+
+Retired agents are excluded from the default hierarchy. An explicit archive filter shows retired agents and successor lineage.
+
+### Agent detail
+
+An agent detail screen shows:
+
+- active charter;
+- exact system prompt;
+- charter-version history and diffs;
+- creation origin and source specification;
+- current manager and immutable creation parent;
+- direct reports;
+- routing metadata;
+- evaluations and observed outcomes;
+- current routes and tasks;
+- pause, retirement, and successor history;
+- unresolved effects and missing dependencies.
+
+Navigation is observational. Editing a charter, changing management, pausing, or retiring requires an explicit action, review, and confirmation appropriate to authority.
+
+### Operator organization view
+
+The operator view includes:
+
+- active function map;
+- unowned recurring work;
+- redundant or overlapping charters;
+- overloaded and underused agents;
+- pending child proposals;
+- candidate evaluations;
+- required user decisions;
+- retirement drains and unresolved outcomes.
+
+These summaries are derived and attributable. They do not silently become canonical truth.
+
+## Security and trust boundary
+
+The runtime remains trusted-local.
+
+- Model-generated code and shell execution retain the OS authority of the runtime process.
+- Directory and charter scope are behavioral controls, not hostile-code confidentiality boundaries.
+- City-wide prompt visibility does not make a model safe to receive secrets.
+- Charter creation and revision use known-value rejection, credential stripping, bounded diagnostics, and exact provenance.
+- The operator cannot read credential values.
+- A parent cannot use charter revision to widen filesystem, network, provider, budget, or publication authority.
+- Hostile multi-agent or multi-tenant operation requires authenticated principals, isolated storage, capability grants, external sandboxing, resource limits, and a separate deployment plan.
+
+## Retention, export, and deletion
+
+### Retention
+
+Normal retention includes:
+
+- every charter version and exact prompt digest;
+- creation and management lineage;
+- organization proposals, evaluations, approvals, and decisions;
+- pause, retirement, and successor events;
+- exact run-to-charter pins;
+- retained session, branch, task, mailbox, effect, and artifact provenance.
+
+### Export
+
+Workspace export includes city state, charter history, organization history, projections or rebuild inputs, and referenced artifacts. An export that omits active charter definitions or run pins is incomplete.
+
+### Deletion
+
+Retirement is the normal way to remove an agent from future use.
+
+Independent physical deletion of one city agent is initially unavailable when retained charters, management edges, proposals, successor links, tasks, mailboxes, artifacts, replicas, or evaluations would dangle. The data-control planner reports these dependencies rather than silently cascading.
+
+Whole-workspace deletion retains existing confirmation, ownership, quiescence, remote-administration, artifact, receipt, and retry requirements.
+
+## Migration and compatibility
+
+### Fresh workspaces
+
+A fresh workspace initializes:
+
+1. city record;
+2. operator session and route;
+3. sealed initial operator charter;
+4. active operator lifecycle;
+5. empty active management hierarchy;
+6. remembered operator entrypoint.
+
+No autonomous model run begins before the operator charter commits.
+
+### Existing workspaces
+
+Existing sessions are retained. The migration does not infer a definitive mission from old task text.
+
+Bootstrap produces one of these explicit states:
+
+- **confirmed charter:** user or authorized parent reviews and activates a proposed charter;
+- **historical unknown charter:** an ended or archived session receives a non-runnable record stating that its original standing purpose is unavailable;
+- **charter required:** a potentially runnable session remains inspectable but cannot begin new model work until a charter is activated.
+
+The bootstrap assistant may draft charters from session name, initial task, specification invocation, messages, and retained outcomes. Drafts are proposals, not historical facts.
+
+The user selects an existing root as operator or creates a new operator. Existing unrelated roots can join the active management hierarchy without changing immutable creation ancestry.
+
+### Event schema
+
+The design prefers additive schema-version-3 event types and new rebuildable projections when retained schema-3 histories continue to validate and replay deterministically. If implementation requires changing an existing released event's meaning or payload, it must use the repository's explicit pre-release cutover process and fail closed for older workspaces.
+
+No migration rewrites retained event rows or silently interprets an initial task as a historical system prompt.
+
+## Delivery sequence
+
+### Phase 0 — Domain review and prompt contract
+
+- Freeze charter terminology and field boundaries.
+- Define the immutable `agencity.agent-charter.v1` rendering contract.
+- Define domain bounds, digest rules, secret rejection, and exact prompt ordering.
+- Decide the additive-event versus pre-release-schema-cutover path from retained fixtures.
+- Define city, operator, management, lifecycle, and proposal events.
+- Add an ADR for durable agent charters and organizational authority.
+
+### Phase 1 — Charter domain and storage
+
+- Add charter types, validators, events, reducer behavior, and projections.
+- Add table classification and architecture checks.
+- Add exact charter lookup by session and version.
+- Add replay, rebuild, duplicate, conflict, and migration tests.
+- Keep existing execution behavior unchanged until run pinning is complete.
+
+### Phase 2 — Required charter admission and run pinning
+
+- Require charters on root and child creation.
+- Update specification and recursive-child admission.
+- Atomically create child, charter, task, and runnable run.
+- Pin charter and effective-prompt identity at `AgentRunRequested`.
+- Compose the fixed provider system prompt on every step.
+- Add context inspection and effect provenance.
+- Block runnable legacy sessions that lack an active charter.
+
+### Phase 3 — Parent revision authority
+
+- Add direct-child charter read, propose, activate, and rollback commands.
+- Enforce inherited model, budget, permission, and scope limits.
+- Add child self-proposals and parent decisions.
+- Make active-run and next-run behavior explicit.
+- Add concurrent compare-and-swap and cross-device conflict tests.
+
+### Phase 4 — City initialization, operator, and directory
+
+- Add one operator pointer and succession rules.
+- Route ordinary no-ID entry through the operator.
+- Extend the workspace route graph into a revisioned agent/charter directory.
+- Add bounded operator directory queries and retained routing decisions.
+- Preserve model-facing family and history boundaries.
+
+### Phase 5 — Management hierarchy and lifecycle
+
+- Add active managing-parent edges distinct from creation ancestry.
+- Add pause, resume, retiring, and retired states.
+- Add child disposition, schedule/wake blocking, cancellation, and unknown-effect handling.
+- Add successor links and archive filtering.
+- Make retired routes inspect-only at protocol and controller boundaries.
+
+### Phase 6 — Evidence-governed organizational refactoring
+
+- Add organization reviews and typed proposals.
+- Reuse refinement validation, candidate allocation, observation, decision, approval, and rollback principles.
+- Add create, revise, reparent, split, merge, successor, pause, and retirement operations.
+- Add repeated-success, stale-context, role-overlap, unproductive-delegation, and routing-gap detectors.
+- Keep automatic triggers profile-opt-in and bounded.
+
+### Phase 7 — Product surfaces
+
+- Extend the Agents view with active hierarchy, charter detail, prompt history, proposals, and retired archive.
+- Add owner-facing edit, review, and confirmation flows.
+- Add operator function-map and attention views.
+- Update public protocol, TypeScript API, console SDK, CLI help, status, user guide, operator guide, recovery, security, events, capabilities, mutable tables, data lifecycle, and verification docs.
+
+### Phase 8 — Hardening and acceptance
+
+- Add restart and crash-boundary coverage for every transition.
+- Add sync divergence and non-owner refusal coverage.
+- Add large-directory paging, prompt-map, and warm-refresh benchmarks.
+- Add export and deletion-plan coverage.
+- Add installed-product journeys from one operator to organic specialization, revision, handoff, retirement, and historical inspection.
+- Run typecheck, architecture checks, deterministic verification, acceptance, and separately report external skips.
+
+## Test plan
+
+### Charter identity
+
+- Root creation without a charter is rejected before session or run admission.
+- Every child surface rejects promptless admission.
+- Specification spawn records exact specification and charter versions.
+- Recursive children receive explicit charters.
+- Charter renderer output and digest are deterministic.
+- Secret-bearing charter content is rejected without echoing the value.
+- Idempotency-key reuse with changed charter meaning conflicts.
+
+### Model context
+
+- Every provider call contains base policy, exact pinned charter, formal-tool policy, and SDK guidance in fixed order.
+- The effective prompt digest matches the exact provider-facing system text.
+- Prompt notes and dynamic messages cannot replace the charter.
+- A charter revision during a run does not change later steps of that run.
+- A new follow-up run uses the newly active charter.
+- Compaction preserves exact charter references.
+- Recovery after context, model request, or effect commit does not rematerialize with a different charter.
+
+### Authority
+
+- A parent can revise a direct child after the initial task is terminal.
+- A parent cannot revise a sibling, unrelated agent, or former child after reparenting.
+- A child can propose but not activate its own charter revision.
+- A parent cannot widen child authority, model policy, or budget.
+- The operator cannot widen its own charter or replace itself.
+- User approval is required for protected organization changes.
+- Forged actor, evidence, approval, or current-version fields fail closed.
+
+### Hierarchy
+
+- Creation parent remains unchanged after reparenting.
+- Active management hierarchy has one operator root.
+- Cycles, cross-workspace edges, missing agents, retired managers, and excess depth fail.
+- Reparenting preserves open-run charter and uses the new manager for later work.
+- Split and merge operations create new identities and retained lineage.
+- Concurrent hierarchy mutations conflict rather than choose by timestamp.
+
+### Lifecycle
+
+- Paused agents reject routing, follow-up, wakes, schedules, and new runs.
+- Resuming a paused agent preserves identity and uses the current charter.
+- Retiring immediately blocks new work.
+- Child disposition is required before parent retirement.
+- Cancellation intent and unknown effects remain visible through retirement.
+- Retired agents are absent from ordinary routing and default directory pages.
+- Explicit archive inspection resolves charter, history, evidence, and successors.
+- Retired routes reject all execution and mutation operations.
+- A renewed function requires a successor agent rather than reactivation.
+
+### Adaptation and governance
+
+- Typed repeated evidence can trigger one deduplicated organization review.
+- A model assertion without evidence cannot promote a change.
+- Candidate exposure is bounded and tied to exact runs and charter versions.
+- Distinct-task evaluation is required where declared.
+- A candidate cannot fabricate its own objective observation.
+- Promotion changes only current pointers.
+- Rollback restores exact prior pointers without rewriting events.
+- Retirement requires the configured higher-authority decision.
+- Automatic triggers cannot widen their own scope or rate.
+
+### Directory and routing
+
+- The operator can page every active agent and retrieve exact charter text.
+- Non-operator agents receive only authorized detail.
+- Full prompt text is absent from ordinary list pages.
+- Routing records considered candidates, exact charter versions, and reason.
+- Retired and unavailable agents are never selected as active targets.
+- Missing charter or directory state remains explicit.
+- Large unchanged directories refresh without replaying every route history.
+
+### Branch, recovery, and sync
+
+- Branch forks do not duplicate agent identity or fork charter history.
+- Historical runs resolve their original charter after later revisions.
+- Organization simulation on a branch has no active effect.
+- Crash after proposal, activation intent, partial target transition, or terminal decision recovers idempotently.
+- Offline conflicting charter or hierarchy changes remain explicit.
+- A non-owner device cannot activate organization mutations or execute work.
+- Sync never silently selects one conflicting charter.
+
+### Data lifecycle
+
+- Export contains every charter version, prompt digest, run pin, proposal, decision, and lineage edge.
+- Missing charter content or corrupt prompt digest blocks execution.
+- Narrow deletion reports management, proposal, successor, route, replica, and artifact dependencies.
+- Retirement does not delete canonical events or artifacts.
+- Whole-workspace deletion retains existing guarded semantics.
+
+### Installed product
+
+A linked `agencity` executable in a fresh repository must:
+
+1. initialize a city and operator with an explicit usable model;
+2. accept a task through the operator;
+3. create a child only after committing a complete charter;
+4. show the child and exact system prompt in the Agents view;
+5. complete work and retain the child for follow-up;
+6. revise the child's charter from its parent;
+7. prove an existing run retains the old charter and the next run uses the new version;
+8. produce and evaluate a bottom-up specialization proposal;
+9. create a successor or split function with retained lineage;
+10. retire an agent and remove it from ordinary routing;
+11. inspect the retired agent through the archive;
+12. detach, restart the service, and reproduce the same city hierarchy and charter map without duplicate work.
+
+The black-box path uses only the documented executable and public protocol-backed terminal product.
+
+## Performance and bounds
+
+The implementation defines and tests bounds for:
+
+- active agents per city;
+- management depth and direct reports;
+- charter encoded bytes and collection counts;
+- directory page size;
+- full-prompt detail requests;
+- organization proposal rate;
+- concurrent candidate exposure;
+- automatic review triggers;
+- retained evidence references;
+- routing candidates considered per decision.
+
+Directory summaries do not embed full prompts. Exact prompt text is loaded only for selected agents. Warm directory refresh reuses unchanged projections and does not materialize every conversation.
+
+The lossless context-reference plan should deduplicate repeated charter and base-policy content in retained model contexts without changing exact provider input or provenance.
+
+## Risks and safeguards
+
+### Prompt accumulation
+
+Large charters can consume context and become stale. Structured bounds, exact diffs, standing-context review, and separation from dynamic memory prevent the charter from becoming an unbounded knowledge dump.
+
+### Organizational churn
+
+An agent could repeatedly create roles or rewrite charters based on weak evidence. Admission limits, proposal deduplication, candidate exposure, distinct-task evaluation, cooldowns, and parent/operator authority bound churn.
+
+### Metric gaming
+
+Agents may optimize declared metrics rather than useful outcomes. Evaluations use multiple signals, user corrections, completion gates, cost, unresolved effects, and independent evidence. No single model-authored score is sufficient.
+
+### Authority laundering
+
+A broad child charter could become a way to gain permissions indirectly. Every charter and management transition proves that authority is a subset of the acting parent and applicable city policy.
+
+### Hidden retired risk
+
+Removing retired agents from default views can hide unresolved effects or missing functions. The operator receives aggregate retired-attention counts, retirement requires handoff checks, and unresolved unknown outcomes remain visible.
+
+### Identity confusion
+
+Creation ancestry, management hierarchy, routes, specifications, charters, and successors are distinct typed relationships. UI and protocol names preserve these differences.
+
+### Global-context illusion
+
+The operator's directory access can be mistaken for omniscience. Directory reads are bounded, exact prompts require lookup, and task histories remain separately selected and authorized.
+
+### Cross-device conflict
+
+Offline writers cannot safely share one organization pointer. Only the execution owner activates changes; competing proposals and sync divergence remain explicit.
+
+## Completion criteria
+
+The adaptive agent city is complete when:
+
+1. Every runnable agent has exactly one active immutable charter version.
+2. Every model call uses and records one exact pinned charter and effective system prompt.
+3. No child-admission path accepts only a task string.
+4. Parents can revise direct children's future charters without changing active or historical runs.
+5. One explicit operator is the stable workspace entrypoint and can query every agent charter.
+6. Operator visibility does not broaden message, secret, artifact, effect, or permission authority.
+7. The active management hierarchy is distinct from immutable creation ancestry and remains exact, bounded, and acyclic.
+8. The city can create, revise, pause, resume, reparent, split, merge, supersede, and retire functions through durable governed proposals.
+9. Retired agents receive no future work, disappear from normal routing and views, and remain inspectable through explicit history.
+10. Organizational changes preserve evidence, evaluation, authority, conflicts, and rollback or irreversibility.
+11. Restart, crash, branch, sync, export, and deletion behavior preserve the same city and charter provenance.
+12. The installed terminal journey demonstrates organic specialization, charter revision, succession, retirement, archive inspection, detach, and resume without internal IDs.
+13. Public documentation and `AGENTS.md` describe shipped behavior and remaining limits accurately.
+14. Typecheck, architecture checks, deterministic tests, and acceptance pass; credential- or service-gated external checks are reported separately as pass, fail, or skip.
+
+## Deferred extensions
+
+- Cross-workspace or profile-level agents.
+- Hosted multi-tenant cities.
+- Authenticated third-party agent participation.
+- Distributed organization ownership and failover.
+- A marketplace of independently governed agent charters.
+- Embedding-based semantic directory search.
+- Automatic physical garbage collection of retired histories.
+- General consensus or voting among agents.
+- Autonomous operator replacement without explicit user authority.
