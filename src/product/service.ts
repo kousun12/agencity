@@ -32,6 +32,7 @@ export const MANAGED_SERVICE_CONFIG_ENV = "AGENCITY_SERVICE_CONFIG";
 export const DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 60_000;
 const MIN_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 100;
 const MAX_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 24 * 60 * 60 * 1_000;
+const MAX_SERVICE_CHILD_STARTUP_ERROR_BYTES = 16 * 1_024;
 
 export interface ManagedServiceConfiguration {
   readonly workspace: ResolvedWorkspace;
@@ -715,6 +716,15 @@ async function terminateSpawnedServiceChild(child: ReturnType<typeof spawn>): Pr
   }
 }
 
+function serviceChildStartupError(stderr: Buffer, exitCode: number | null, signalCode: NodeJS.Signals | null): Error {
+  const retained = scrubText(stderr.toString("utf8")).trim()
+    .replace(/^Agencity error \[[A-Z0-9_]+\]:\s*/, "");
+  if (retained) return new Error(retained);
+  if (exitCode !== null) return new Error(`Managed workspace service child exited with code ${exitCode}`);
+  if (signalCode !== null) return new Error(`Managed workspace service child exited from signal ${signalCode}`);
+  return new Error("Managed workspace service child exited before publishing health");
+}
+
 /** Discovers a compatible service or securely elects one detached child on demand. */
 export async function connectManagedService(config: ManagedServiceConfiguration, options: { readonly spawn?: boolean; readonly timeoutMs?: number } = {}): Promise<ManagedServiceConnection> {
   let current = await assessment(config);
@@ -729,19 +739,34 @@ export async function connectManagedService(config: ManagedServiceConfiguration,
   const specification = buildServiceChildSpawnSpecification({ workspaceRoot: config.workspace.root });
   const child = spawn(specification.executable, [...specification.argv], {
     ...specification.options,
+    stdio: ["ignore", "ignore", "pipe"],
     env: { ...process.env, [MANAGED_SERVICE_CONFIG_ENV]: encodeManagedServiceConfiguration(config) },
   });
   let spawnError: unknown;
+  let childStderr = Buffer.alloc(0);
   child.once("error", error => { spawnError = error; });
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    if (childStderr.byteLength >= MAX_SERVICE_CHILD_STARTUP_ERROR_BYTES) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const remaining = MAX_SERVICE_CHILD_STARTUP_ERROR_BYTES - childStderr.byteLength;
+    childStderr = Buffer.concat([childStderr, bytes.subarray(0, remaining)]);
+  });
+  const childClosed = new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
   child.unref();
   const deadline = Date.now() + (options.timeoutMs ?? 10_000);
   let lastError: unknown;
   while (Date.now() < deadline) {
     await Bun.sleep(25);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      await Promise.race([childClosed, Bun.sleep(100)]);
+      lastError = spawnError ?? serviceChildStartupError(childStderr, child.exitCode, child.signalCode);
+      break;
+    }
     try {
       current = await assessment(config);
       if (current.kind === "found" && current.decision.kind === "authoritative") {
         if (child.pid !== current.manifest.pidHint && child.exitCode === null && child.signalCode === null) await terminateSpawnedServiceChild(child);
+        child.stderr?.destroy();
         return { client: new AgentClient(current.manifest.url, current.manifest.bearerToken), manifest: current.manifest, started: true };
       }
       if (current.kind === "found" && current.decision.kind === "conflict") lastError = authorityDecisionError(current.decision);
@@ -749,6 +774,7 @@ export async function connectManagedService(config: ManagedServiceConfiguration,
     } catch (error) { lastError = error; }
   }
   await terminateSpawnedServiceChild(child);
+  child.stderr?.destroy();
   throw new ValidationError(`Managed workspace service did not become healthy${lastError instanceof Error ? `: ${scrubText(lastError.message)}` : ""}`);
 }
 

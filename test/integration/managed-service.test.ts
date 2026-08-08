@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { createClient } from "@libsql/client";
 import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { LibSqlStorage } from "../../src/storage/index.ts";
@@ -348,6 +349,20 @@ describe("managed workspace service", () => {
     const owned = serviceChildren().filter(child => !before.has(child.pid) && child.command.includes(base.workspace.root));
     expect(owned).toEqual([]);
     expect(await Bun.file(serviceStatePaths(base.workspace.root).manifestPath).exists()).toBe(false);
+  });
+
+  test("service child startup reports the profile cutover error", async () => {
+    const config = await configuration("agencity-managed-profile-cutover-");
+    const profile = createClient({ url: `file:${config.profileDatabasePath}` });
+    try {
+      await profile.execute("CREATE TABLE legacy_profile_state(value TEXT)");
+    } finally {
+      profile.close();
+    }
+    await expect(connectManagedService(config, { timeoutMs: 2_000 })).rejects.toThrow(
+      "This profile database predates the reasoning/model-capability schema cutover",
+    );
+    expect(await Bun.file(serviceStatePaths(config.workspace.root).manifestPath).exists()).toBe(false);
   });
 
   for (const signal of ["SIGTERM", "SIGINT"] as const) {
