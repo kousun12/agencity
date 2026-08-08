@@ -250,7 +250,7 @@ const AGENT_TOOL_SET = [
 ] as const;
 ```
 
-Each name, description, schema, schema digest, tool-set order, action protocol, and version is immutable contract meaning. The shared adapter compiles the retained ordered definitions into AI SDK `tool(...)` values with no `execute` callback: provider submission ends the model effect, and Agencity applies the accepted action only after durable commit. It passes `strict: true` only when the retained contract says `provider-strict`; otherwise strictness is omitted and the same Agencity schema and domain validation remain authoritative.
+Each name, description, schema, schema digest, tool-set order, action protocol, and version is immutable contract meaning. The shared adapter compiles the retained ordered definitions into AI SDK `tool(...)` values with no `execute` callback: provider submission ends the model effect, and Agencity applies the accepted action only after durable commit. Retained JSON Schema is wrapped with the AI SDK's `jsonSchema(...)` helper and a runtime validator rather than passed as a plain object. The adapter passes `strict: true` only when the retained contract says `provider-strict`; otherwise strictness is omitted and the same Agencity schema and domain validation remain authoritative. Product selection admits only models classified as compatible with the selected strict contract. As a generic execution-time fallback, an SDK warning or provider rejection that says strict tool enforcement was ignored or unsupported fails the effect as `unsupported-response-contract`; Agencity never downgrades the committed contract or retries in text mode.
 
 ### Canonical conversion and bounds
 
@@ -310,7 +310,7 @@ Required-tool-set calls always use `streamText` internally, even when the caller
 - an outbox or caller abort follows the existing cancelled-effect path;
 - an adapter guard abort records the already-proven contract violation, such as `oversized-tool-input`, `multiple-tool-calls`, or `oversized-provider-response`, and never becomes cancellation.
 
-The adapter counts observed AI SDK `tool-input-delta` bytes, aborts immediately after the first observed limit breach, stops retaining application-level argument content, and keeps only scrubbed bounded summaries. This bounds Agencity-owned accumulation; it does not claim that the AI SDK, provider package, network stack, or provider performed no buffering before Agencity observed a chunk. The shared validator separately enforces the existing 256 KiB bound on the converted canonical action. Formal input limits reserve enough envelope overhead that every accepted tool input can still produce a canonical action within that bound.
+The adapter counts observed AI SDK `tool-input-delta` bytes, aborts immediately after the first observed limit breach, stops retaining application-level argument content, and keeps only scrubbed bounded summaries. This bounds Agencity-owned accumulation; it does not claim that the AI SDK, provider package, network stack, or provider performed no buffering before Agencity observed a chunk. A guard abort produces the explicit partial `guard-aborted` response variant defined below rather than pretending that the provider supplied terminal metadata or usage. The shared validator separately enforces the existing 256 KiB bound on the converted canonical action. Formal input limits reserve enough envelope overhead that every accepted tool input can still produce a canonical action within that bound.
 
 ## Provider-neutral model contract
 
@@ -412,7 +412,10 @@ Model-summary compaction has no `ModelCallRequested` event, but it pins a comple
 Providers normalize their native response into content blocks:
 
 ```ts
-interface ModelResponse {
+type ModelResponse = CompleteModelResponse | GuardAbortedModelResponse;
+
+interface CompleteModelResponse {
+  readonly kind: "complete";
   readonly blocks: readonly ModelResponseBlock[];
   readonly termination: {
     readonly kind:
@@ -422,9 +425,28 @@ interface ModelResponse {
       | "content-filter"
       | "refusal"
       | "other";
-    readonly rawReason: string;
+    readonly rawReason?: string;
   };
   readonly usage: Usage;
+  readonly warnings: readonly ModelWarning[];
+  readonly transport: {
+    readonly provider: string;
+    readonly adapter: string;
+  };
+}
+
+interface GuardAbortedModelResponse {
+  readonly kind: "guard-aborted";
+  readonly blocks: readonly ModelResponseBlock[];
+  readonly termination: {
+    readonly kind: "adapter-guard";
+    readonly code:
+      | "multiple-tool-calls"
+      | "unexpected-tool"
+      | "oversized-tool-input"
+      | "oversized-provider-response";
+  };
+  readonly usage: null;
   readonly warnings: readonly ModelWarning[];
   readonly transport: {
     readonly provider: string;
@@ -438,23 +460,29 @@ type ModelResponseBlock =
       readonly type: "tool-call";
       readonly callId: string;
       readonly name: string;
-      readonly input: JsonValue;
+      readonly inputDigest: `sha256:${string}`;
+      readonly inputBytes: number;
     }
   | {
       readonly type: "invalid-tool-call";
       readonly callId?: string;
       readonly name?: string;
+      readonly inputDigest?: `sha256:${string}`;
+      readonly inputBytes: number;
       readonly code:
         | "malformed-arguments"
         | "truncated-arguments"
         | "oversized-arguments";
-      readonly boundedArguments?: string;
     };
 ```
 
-The shared adapter consumes only documented AI SDK results and `fullStream` parts. The pinned provider packages own native HTTP payloads, SSE framing, provider argument decoding, and finish-reason mapping. Agencity consumes AI SDK `text`, `tool-input-start`, `tool-input-delta`, `tool-call`, `finish`, `error`, and `abort` information; it never searches text for an action and never parses OpenAI or Anthropic wire envelopes itself.
+The adapter uses a transient parsed call while it validates the selected tool input and constructs the result. The durable `tool-call` response block is evidence only and never contains the accepted input. A successful `ModelToolSubmission` below is the one durable copy of that validated input. Invalid or rejected calls retain only bounded metadata, digests, byte counts, and typed errors; no raw or bounded argument body is retained.
+
+The shared adapter consumes only documented AI SDK results and stream parts. The pinned provider packages own native HTTP payloads, SSE framing, provider argument decoding, and finish-reason mapping. Agencity consumes AI SDK text start/delta/end, tool-input start/delta/end, `tool-call`, `finish`, `error`, and `abort` information; it never searches text for an action and never parses OpenAI or Anthropic wire envelopes itself.
 
 The shared adapter normalizes the AI SDK's completed finish reason to `termination.kind`. A required-tool-set response is never accepted unless the completed SDK result reports tool-call termination and exactly one validated `tool-call` part. Output limits, content filters, refusals, SDK errors, aborts, interrupted streams, missing terminal completion, and other stop reasons follow the closed terminal classification below; none can commit an action accidentally.
+
+Incomplete-stream detection uses one conservative fallback: a stream whose normalized finish reason is `other` and whose raw finish reason is absent records failed effect code `incomplete-provider-response`, even if the AI SDK exposes partial output or a synthetic finish event. This may reject an unusual legitimate `other` completion; the closed failure is preferable to accepting a partial structured result. Required-tool-set success still requires normalized `tool-calls` termination.
 
 Formal responses use explicit total bounds:
 
@@ -469,9 +497,9 @@ const MAX_MODEL_FORMAL_RESPONSE_BYTES =
   MAX_AGENT_ACTION_BYTES + MAX_MODEL_CONTRACT_EVIDENCE_BYTES;
 ```
 
-The adapter enforces these limits while consuming `streamText.fullStream`. Once a second call, unknown tool name, argument overflow, metadata overflow, or block overflow proves a violation, its private guard controller aborts the SDK request, stops accumulating argument bodies, and retains only scrubbed bounded summaries. The guard cause survives SDK `abort` and `AbortError` surfaces, so a proven violation cannot be reclassified as user cancellation. Tool names must match retained bounded names; call IDs and raw stop reasons are scrubbed and truncated; supplemental text retains bounded content or a digest plus byte count. The complete normalized submission, metadata, and formal event encoding must fit `MAX_MODEL_FORMAL_RESPONSE_BYTES`. These transport limits do not replace the separate 256 KiB canonical action limit.
+The adapter enforces these limits while consuming `streamText.stream`. Once a second call, unknown tool name, argument overflow, metadata overflow, or block overflow proves a violation, its private guard controller aborts the SDK request, stops accumulating argument bodies, and retains only scrubbed bounded summaries. The guard cause survives SDK `abort` and `AbortError` surfaces, so a proven violation cannot be reclassified as user cancellation. Tool names must match retained bounded names; call IDs and raw stop reasons are scrubbed and truncated; supplemental text retains bounded content or a digest plus byte count. Accepted tool input is retained exactly once in `ModelToolSubmission`; the durable response block carries only its digest and byte count. The complete normalized submission, metadata, and formal event encoding must fit `MAX_MODEL_FORMAL_RESPONSE_BYTES`. These transport limits do not replace the separate 256 KiB canonical action limit.
 
-The model executor validates the normalized blocks against the retained response contract:
+The model executor validates the transient completed call and resulting durable submission against the retained response contract:
 
 - exactly one valid tool call must be present;
 - its name must match one retained tool definition;
@@ -514,6 +542,7 @@ interface ModelContractViolation {
       readonly callId?: string;
       readonly name?: string;
       readonly inputDigest?: `sha256:${string}`;
+      readonly inputBytes: number;
       readonly invalidCode?: InvalidToolCallCode;
     }[];
     readonly omittedBlockCount: number;
@@ -542,10 +571,11 @@ type ModelEffectFailureCode =
 
 Terminal classification is deterministic:
 
-- a known unsupported response contract fails admission with a typed unavailable error before `ModelCallRequested`;
-- an SDK/API rejection specifically identifying unsupported submitted tools records failed effect code `unsupported-response-contract`;
+- a known unsupported agent response contract fails before `AgentRunRequested` and before the initiating task `MessageAppended`; no run, step, context, model call, or effect is committed;
+- known unsupported internal structured work, including refinement review, fails before `RecursiveModelStarted`;
+- an SDK/API rejection or warning specifically identifying unsupported submitted tools or ignored strict enforcement records failed effect code `unsupported-response-contract`;
 - a positively classified provider context-window overflow records `provider-context-window-overflow` and enters the predecessor's bounded compaction/overflow-retry path with the complete dispatch preserved;
-- any other SDK/API request rejection records `provider-request-failed`; a transport failure records `transport-failed`; a stream `error` records `stream-failed`; and a stream ending without terminal completion and without a retained adapter guard cause records `incomplete-provider-response`;
+- any other SDK/API request rejection records `provider-request-failed`; a transport failure records `transport-failed`; a stream `error` records `stream-failed`; and a stream ending without terminal completion, or conservatively ending with normalized `other` and no raw finish reason, records `incomplete-provider-response`;
 - those failures are copied from `EffectOutcomeRecorded.modelFailure` to `ModelCallTerminated.failureCode` and never become action rejections;
 - explicit outbox cancellation follows the existing cancelled-effect path; an adapter guard cause takes precedence over SDK abort or incomplete-stream classification, retains its originating contract violation in a successful bounded model-effect output, and never records cancellation;
 - process loss after a non-idempotent model effect starts and before a durable outcome remains `unknown`;
@@ -556,6 +586,15 @@ For an `AgentRun`, a normalized `ModelContractViolation` records `AgentRunAction
 
 A second consecutive rejection retains the current failed-run behavior. A provider HTTP/API failure remains a failed model effect rather than an action rejection. A lost started model effect remains `unknown`.
 
+Guard-aborted responses have no provider usage. Their budget policy is deliberately simple and conservative:
+
+- debit one turn and the measured wall time;
+- debit tokens equal to the retained attempt's estimated input tokens plus its retained output-reserve tokens;
+- retain `usageSource: "conservative-guard-estimate"` on the budget debit and `usage: null` on the guard-aborted response;
+- retain `costUsd: 0` under the predecessor's existing best-effort cost semantics.
+
+Normal complete responses retain `usageSource: "provider-reported"` and debit provider-reported usage as before. A conservative guard estimate may exhaust the budget and prevent the one correction call.
+
 ## Shared AI SDK execution
 
 ### One compiled request path
@@ -563,7 +602,7 @@ A second consecutive rejection retains the current failed-run behavior. A provid
 The existing `AiSdkModelProvider` shared options builder gains one response-contract branch. Given the committed dispatch, it:
 
 1. preserves the predecessor's model, temperature, maximum output, top-level reasoning, endpoint, and credential behavior;
-2. compiles each retained tool definition to an AI SDK `tool(...)` value with its description and JSON `inputSchema`, no `execute` callback, and `strict: true` only for a retained `provider-strict` contract;
+2. compiles each retained tool definition to an AI SDK `tool(...)` value with its description, `jsonSchema(retainedSchema, { validate: runtimeValidator })`, no `execute` callback, and `strict: true` only for a retained `provider-strict` contract;
 3. sets top-level `toolChoice: "required"` for a required-tool-set contract;
 4. applies only documented non-reasoning provider options needed to suppress parallel calls when the canonical model creator has such a control;
 5. consumes exactly one AI SDK generation step and never uses `ToolLoopAgent`, `stopWhen`, a tool-result continuation, or provider-hosted execution.
@@ -646,7 +685,7 @@ requiredAgentToolSet: {
 }
 ```
 
-Known unsupported models cannot start new autonomous work. Unknown catalog or manually entered models may be attempted only when the selected transport implements proven formal AI SDK tool streaming with bounded input deltas; a provider rejection is retained as a failed effect and does not trigger a text fallback.
+Known unsupported models cannot start new autonomous work. `AgentRunService.admit` performs this check before it commits the user's task message or `AgentRunRequested`, and returns the typed unavailable error without creating durable work. Internal structured operations perform the same check before child or effect admission. Unknown catalog or manually entered models may be attempted only when the selected transport implements proven formal AI SDK tool streaming with bounded input deltas; a provider rejection is retained as a failed effect and does not trigger a text fallback.
 
 The product model picker and setup flow distinguish:
 
@@ -737,7 +776,7 @@ interface ModelEffectOutputV2 {
 }
 ```
 
-The executor produces this value only after bounded normalization, schema validation, secret rejection/scrubbing, and terminal classification. Recovery after `EffectOutcomeRecorded(succeeded)` derives `ModelOutputChunk`, `ModelCallCompleted`, and any action event only from this retained output. It never reconstructs a submission from provider text, current source constants, or an uncommitted stream.
+The executor produces this value only after bounded normalization, schema validation, secret rejection/scrubbing, and terminal classification. `response.kind: "guard-aborted"` is valid only with `result.kind: "contract-violation"` and `response.usage: null`. `response.kind: "complete"` carries normal provider usage. `ModelCallCompleted` and `BudgetDebited` retain the corresponding `usageSource`; a conservative guard estimate uses the retained attempt input estimate and output reserve defined above. Recovery after `EffectOutcomeRecorded(succeeded)` derives `ModelOutputChunk`, `ModelCallCompleted`, budget debit, and any action event only from this retained output. It never reconstructs a submission from provider text, current source constants, or an uncommitted stream.
 
 ### Model completion provenance
 
@@ -779,18 +818,21 @@ Replace the text-action event shapes with required formal sources:
 type AgentRunActionSource =
   | {
       kind: "tool-submission";
-      callId: string;
+      modelCallId: string;
+      providerToolCallId: string;
       resultDigest: `sha256:${string}`;
     }
   | {
       kind: "contract-violation";
-      callId: string;
+      modelCallId: string;
+      providerToolCallId?: string;
       resultDigest: `sha256:${string}`;
     };
 ```
 
 - committed actions require `source.kind: "tool-submission"`;
 - rejections, including no call, multiple calls, refusal, or incomplete termination, require `source.kind: "contract-violation"`;
+- every source identifies the durable Agencity model call through `modelCallId` and its normalized result through `resultDigest`; `providerToolCallId` is required only for an accepted single submission and is optional diagnostic provenance for a violation;
 - reducers validate each source against the matching `ModelCallCompleted.result` and committed response contract rather than `call.chunks.join("")`;
 - action events retain only the call/result digest and the action-specific conversion needed by the run projection; they do not duplicate the complete tool input into `raw`, `formalSource`, and `AgentAction`;
 - rejection `error` is the stable bounded message derived from the typed violation and is checked against it;
@@ -905,7 +947,7 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 
 - Run the deterministic predecessor tests and record the pinned `ai`, `@ai-sdk/gateway`, `@ai-sdk/openai`, and `@ai-sdk/anthropic` versions.
 - Freeze fixtures for the predecessor dispatch shape, all three transport factories, top-level reasoning, warnings, usage/cost, endpoint identity, streaming, and context-overflow classification.
-- Re-verify the pinned AI SDK's `tool`, `toolChoice`, per-tool strictness, `fullStream` tool-input events, OpenAI `parallelToolCalls`, Anthropic `disableParallelToolUse`, gateway provider-option forwarding, and finish-reason contracts.
+- Re-verify the pinned AI SDK's `tool`, `jsonSchema`, `toolChoice`, per-tool strictness, `stream` tool-input events, OpenAI `parallelToolCalls`, Anthropic `disableParallelToolUse`, gateway provider-option forwarding, and finish-reason contracts.
 - Re-verify the gateway catalog fields used to classify model-level formal-tool support. Record ambiguous or absent metadata as `unknown`, not unsupported.
 
 ### 1. Domain tool contract
@@ -920,14 +962,14 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 
 ### 2. Provider-neutral response contracts
 
-- Add `ModelResponseContract`, normalized response blocks, tool submissions, and contract violations.
+- Add `ModelResponseContract`, complete and guard-aborted response variants, evidence-only normalized response blocks, single-copy tool submissions, and contract violations.
 - Replace the predecessor dispatch with the single response-contract-aware `ModelDispatch`.
 - Add total block, call-summary, call-ID, termination-reason, supplemental-text, evidence, and formal-response bounds with streaming enforcement.
 - Add the append-only sealed built-in structured-contract registry and exact historical-definition validation; do not expose arbitrary contract definitions through public SDK or protocol inputs.
 - Add `ModelEffectAdmissionService` over the predecessor's dispatch resolver as the sole owner of text versus sealed structured model-effect admission.
 - Keep generic console model effects reserved; route admitted recursive text calls through text admission and reject reserved dispatch fields.
 - Put the exact dispatch into model-call, compaction, and effect records.
-- Define and validate the exact bounded `ModelEffectOutputV2` stored by a successful model effect.
+- Define and validate the exact bounded `ModelEffectOutputV2` stored by a successful model effect, including the guard-aborted/contract-violation pairing and conservative usage attribution.
 - Generalize `ModelProvider.complete/stream` and `ModelExecutor` beyond text-only output.
 - Make text and required-tool-set paths explicit.
 - Add transport-independent catalog tool facts, a transport-keyed resolved execution descriptor, response-contract capability reporting, proven structured-stream admission, and typed unavailable errors.
@@ -935,9 +977,11 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 
 ### 3. Shared AI SDK integration
 
-- Extend the existing shared AI SDK options builder to compile committed tools, `toolChoice: "required"`, committed strictness, and proven creator-specific parallel-call suppression without setting reasoning-related provider options.
-- Run every required-tool-set call through `streamText`, consume bounded `fullStream` parts, and never expose partial arguments.
+- Extend the existing shared AI SDK options builder to compile committed tools through `jsonSchema(..., { validate })`, `toolChoice: "required"`, committed strictness, and proven creator-specific parallel-call suppression without setting reasoning-related provider options.
+- Run every required-tool-set call through `streamText`, consume bounded `stream` parts, apply the conservative `other`-without-raw-reason incomplete fallback, and never expose partial arguments.
 - Compose an adapter-owned guard controller with outbox cancellation; preserve the first abort source so guard violations cannot become cancellations.
+- Store accepted tool input exactly once in `ModelToolSubmission`; durable response evidence retains only call ID, name, digest, and byte count.
+- Treat an SDK warning or rejection that says strict enforcement was ignored or unsupported as failed `unsupported-response-contract`.
 - Preserve the existing `vercel`, `openai`, and `anthropic` factories; add no provider-native adapter or gateway-surface selector.
 - Normalize text, valid tool calls, invalid calls, finish reasons, warnings, usage, gateway cost, and bounded errors from AI SDK results.
 - Add pinned-package wire conformance fixtures for gateway, direct OpenAI, and direct Anthropic, including reasoning-plus-tools combinations and canonical/native model IDs. Gateway remains runtime-cardinality-validated unless a service fixture proves creator-specific parallel suppression.
@@ -946,7 +990,7 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 ### 4. Durable model and action events
 
 - Raise the workspace event schema to version 3 and reject version-1/version-2 workspaces with reset guidance.
-- Replace `ModelCallRequested.modelDispatch`, `ModelCallCompleted`, `ModelCallTerminated`, `EffectOutcomeRecorded`, `RecursiveModelStarted`, `ContextCompactionRequested.modelDispatch`, recursive/model-call state, and action events with the formal contract/submission/violation shapes.
+- Replace `ModelCallRequested.modelDispatch`, `ModelCallCompleted`, `ModelCallTerminated`, `EffectOutcomeRecorded`, `BudgetDebited`, `RecursiveModelStarted`, `ContextCompactionRequested.modelDispatch`, recursive/model-call state, and action events with the formal contract/submission/violation and usage-attribution shapes.
 - Update reducers, event validation, storage rows, snapshots, sync envelopes, export, historical projection, workspace-material classification, and protocol types.
 - Enforce contract-specific completion shapes, result-digest linkage, and the closed effect-versus-contract-violation outcome mapping.
 - Increment `REDUCER_VERSION`.
@@ -955,6 +999,7 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 
 ### 5. AgentRun integration
 
+- Reject a known unsupported required-tool-set contract before committing the initiating task message or `AgentRunRequested`.
 - Build every run model effect with the `bun_console` and `finish` tool set.
 - Remove raw action schema text from `agentProviderContext`.
 - Require exactly one call from the set, convert it to a canonical action, and commit before action application.
@@ -1005,26 +1050,30 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 - A normal successful `finish` omits status, while blocked and failed require their explicit enum value.
 - Empty, oversized, unknown, mismatched, and malicious inputs fail before execution.
 - Every textual or structured call uses the one dispatch shape with an explicit contract.
+- Action-source fixtures require `modelCallId` and `resultDigest`, require `providerToolCallId` for accepted submissions, and permit it to be absent for no-call and multi-call violations.
 - Version-1 and version-2 workspace events fail with reset guidance before projection.
 
 ### Shared AI SDK adapter
 
 - The shared options builder supplies both retained tools, top-level `toolChoice: "required"`, the retained per-tool strictness, and no `execute` callbacks on every product transport.
+- Every retained JSON Schema is compiled through `jsonSchema(..., { validate })`; plain JSON objects and schema wrappers without runtime validation are rejected by fixtures.
 - OpenAI-created requests set documented parallel-call suppression; Anthropic-created requests set documented parallel-call suppression; gateway requests preserve slash-containing model IDs and use runtime cardinality rejection unless service conformance proves suppression.
 - Exact pinned-package wire fixtures prove native strictness, required choice, direct-transport parallel suppression, model-ID derivation, and reasoning without production code constructing those payloads.
 - Required-tool-set calls use `streamText` internally on every transport; text contracts preserve the predecessor's streaming and non-streaming behavior.
 - The adapter accepts completed inputs only from AI SDK `tool-call` parts and never parses provider-native tool envelopes.
 - Each of `bun_console` and `finish` is accepted when selected alone.
 - A required-tool-set response is accepted only when the AI SDK reports completed tool-call termination.
+- Normalized `other` termination without a raw finish reason records `incomplete-provider-response`, including when partial output or a synthetic SDK finish is present.
 - A syntactically complete call paired with output-limit, content-filter, refusal, interrupted, missing-terminal, or other incompatible termination executes nothing.
 - Text containing valid-looking action JSON with no tool call is rejected.
 - One valid tool call plus narration accepts the tool call and treats narration as diagnostic only.
 - Zero, duplicate, parallel, wrong-name, malformed, oversized, and truncated calls execute nothing.
 - Provider refusals and unsupported tool contracts remain distinct.
-- Strict-schema unsupported behavior never retries in text mode.
+- A strict-schema unsupported/ignored warning or rejection fails as `unsupported-response-contract` and never downgrades or retries in text mode.
 - Formal arguments and supplemental text containing a known secret are scrubbed or rejected without the value entering events, progress, logs, snapshots, or errors.
 - `provider-strict` and `runtime-validated` requests differ exactly in provider enforcement fields while retaining identical domain validation.
 - Block-count, call-ID, termination-reason, supplemental-text, violation-evidence, total-response, tool-input-delta, and canonical-action limits have exact-boundary and one-byte-over tests; oversized streamed input triggers the adapter guard at the first observed breach and remains a contract violation.
+- Accepted tool input appears exactly once in `ModelEffectOutputV2`; response evidence contains only its digest and byte count, and invalid-call evidence contains no raw or bounded argument body.
 - Every selectable effort is combined with each structured contract on gateway, direct OpenAI, and direct Anthropic fixtures; tool options never replace or add a reasoning-related provider option.
 - Existing warning normalization, directly returned gateway cost, direct-transport zero-cost fallback, reasoning-part discard, and error classification remain unchanged.
 
@@ -1044,6 +1093,7 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 - Missing-call, multiple-call, refusal, incompatible-termination, and malformed-call rejections each retain one bounded canonical violation source without fabricating a tool submission or retaining rejected raw argument bodies.
 - SDK/API rejection, stream error, external cancellation, guard abort, process loss, completed refusal, output-limit truncation, and successful tool termination follow the closed effect-versus-violation classification without double-finalization.
 - Adapter guard aborts retain their originating violation; only an external/outbox abort records cancellation.
+- Guard-aborted responses retain `usage: null`; their budget debit uses one turn, measured wall time, and the retained input estimate plus output reserve with `usageSource: "conservative-guard-estimate"`.
 - Failed model effects retain the same `ModelEffectFailureCode` in `EffectOutcomeRecorded.modelFailure` and `ModelCallTerminated.failureCode`, including recovery between those commits.
 - Text completion requires a matching chunk/message digest; structured completion requires exactly one submission or violation and forbids a response message.
 - A second consecutive violation fails the run without executing either submission.
@@ -1068,7 +1118,7 @@ Implementation must begin by testing the merged predecessor baseline and recordi
 ### Protocol and TUI
 
 - Public capabilities report strict, runtime-validated, unknown, and unavailable agent-tool-set states.
-- Unsupported models fail before a model request when known.
+- Unsupported models fail before run admission when known; no initiating task message, `AgentRunRequested`, model request, or effect is committed.
 - Agent-run tool deltas never appear as conversation prose.
 - Committed TypeScript source and observations remain expandable.
 - `/raw` distinguishes formal submissions and contract violations.
@@ -1088,7 +1138,7 @@ The linked executable matrix must prove:
 8. detach, service recovery, and resume do not repeat the provider call, action, cell, or effect;
 9. child agent `AgentRun` work receives the same two-tool set;
 10. a pre-cutover database fails before projection with explicit reset guidance;
-11. a model without formal tool capability fails truthfully without a prompt-JSON fallback;
+11. a model without formal tool capability fails truthfully before run admission, commits no task message or run, and has no prompt-JSON fallback;
 12. refinement uses a formal structured submission rather than assistant JSON text;
 13. a missing-information question appears in a blocked `finish` assistant response, and the user's later response is an ordinary subsequent instruction;
 14. blocked and failed `finish` calls produce distinct non-success exits;
@@ -1111,6 +1161,9 @@ The migration is complete when:
 - AI SDK formal tool calls map to the existing canonical `AgentAction` and commit before execution or run-control application;
 - all executable capabilities remain inside the Bun TypeScript SDK;
 - known unsupported model/transport combinations fail visibly without fallback;
+- known unsupported agent contracts fail before run admission and leave no partial durable run;
+- guard-aborted responses retain partial provenance without invented provider usage and receive the conservative budget debit;
+- accepted tool input is retained exactly once, and no rejected raw argument body enters durable output;
 - streaming tool arguments remain provisional and non-executable;
 - recovery preserves exact complete dispatches and does not duplicate model calls or actions;
 - version-1 and version-2 workspace histories are rejected with reset guidance and never executed;
