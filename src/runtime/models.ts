@@ -9,6 +9,7 @@ import {
   type BudgetLimits,
   type JsonValue,
   type ModelConfiguration,
+  type ModelConfigurationInput,
   type NewAgentEvent,
   type RecursiveModelOutcome,
 } from "../domain/index.ts";
@@ -43,7 +44,7 @@ export interface StartRecursiveModelInput {
   readonly inputs?: readonly RecursiveModelInput[];
   /** Backwards-compatible exact ordered document chunk set. */
   readonly inputSetId?: string;
-  readonly model?: ModelConfiguration;
+  readonly model?: ModelConfigurationInput;
   readonly budget?: BudgetLimits;
   readonly run?: boolean;
   /** Stable command identity for crash-safe retry. */
@@ -163,7 +164,7 @@ export class RecursiveModelService {
         const plan = plans[index]!;
         const child = item.handle;
         const handleId = `model-${child.taskId}`;
-        const model = plan.normalized.model ?? parent.model;
+        const model = item.model;
         events.push({
           sessionId: parentSessionId,
           branchId: parentBranchId,
@@ -205,7 +206,8 @@ export class RecursiveModelService {
       const child = children[index]!;
       const plan = plans[index]!;
       const handle = await this.#load(`model-${child.taskId}`);
-      const expectedModel = plan.normalized.model ?? parent.model;
+      const childState = projectEvents(await this.storage.loadEvents(child.sessionId, { branchId: child.branchId }));
+      const expectedModel = childState.model;
       if (handle.parentSessionId !== parentSessionId || handle.parentBranchId !== parentBranchId ||
           handle.childSessionId !== child.sessionId || handle.childBranchId !== child.branchId ||
           handle.inputSetId !== (plan.normalized.inputSetId ?? null) ||

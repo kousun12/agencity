@@ -125,7 +125,7 @@ Interactive setup:
 /model
 /model login openai
 /model logout openai
-/model openai:gpt-5.6-sol
+/model openai:openai/gpt-5.6-sol
 ```
 
 On first interactive launch with no usable provider, Agencity asks for OpenAI, Anthropic, or Vercel AI Gateway, accepts the key through hidden input, and asks for the exact model ID.
@@ -291,6 +291,8 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 9. Inspect recovery, unknown effects, provider status, and sync status before admitting new work.
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
+
+The reasoning-effort/model-capability revision is an explicit pre-release cutover: version-1 workspace events and legacy profile databases are rejected instead of migrated. Back up or move aside the affected workspace `.agencity` and selected profile directory before first startup. The rejection does not delete retained data; see [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

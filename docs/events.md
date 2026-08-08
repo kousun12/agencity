@@ -1,6 +1,6 @@
-# Event schemas (version 1)
+# Event schemas (version 2)
 
-`events` is the canonical append-only history. Version 1 is validated at the storage boundary; any other schema version is rejected. Released payload meaning must not be edited in place. Evolution requires a new event schema version and an explicit tested projection/upcast path. No upcaster exists because only event schema version 1 exists. Child-session ancestry fields remain optional in version 1 so retained `SessionCreated` events without those fields continue to validate and project as root sessions.
+`events` is the canonical append-only history. Version 2 is validated at the storage boundary; any other schema version is rejected. This pre-release schema cutover adds complete model dispatch records and intentionally does not upcast version-1 workspaces. Opening a workspace with version-1 events fails with reset guidance and does not delete the data. Released payload meaning must not be edited in place; future evolution requires a new event schema version and an explicit tested projection/upcast path.
 
 ## Header
 
@@ -12,11 +12,11 @@ Every stored event has:
 | `id` | non-empty string | Globally unique event identity (normally ULID). Consumers deduplicate on this field. |
 | `sessionId` | non-empty string | Owning session. |
 | `branchId` | non-empty string | Branch where the event was appended. Lineage reads may also include ancestor-branch events. |
-| `causationId` | string or `null` | Direct causal event when supplied. Version 1 does not require it on every append. |
+| `causationId` | string or `null` | Direct causal event when supplied. Version 2 does not require it on every append. |
 | `correlationId` | string or `null` | Cross-event operation correlation when supplied. |
 | `type` | `EventType` | Payload discriminator listed below. |
-| `schemaVersion` | positive integer | Payload/header version; currently exactly `1`. |
-| `committedAt` | string (normally ISO datetime) | Commit timestamp supplied or generated at the storage boundary. The v1 validator does not yet reject a caller-supplied non-ISO string. |
+| `schemaVersion` | positive integer | Payload/header version; currently exactly `2`. |
+| `committedAt` | string (normally ISO datetime) | Commit timestamp supplied or generated at the storage boundary. |
 | `producer` | non-empty string | Usually `supervisor`, `console`, `model`, `executor`, `client`, or `recovery`. |
 | `idempotencyKey` | string or `null` | Unique within `(sessionId, type)` when present. Same payload/branch deduplicates; changed meaning conflicts. |
 | `payload` | JSON value | Typed by `type` and validated before append. |
@@ -48,13 +48,13 @@ type Usage = {
 }; // all nonnegative
 ```
 
-A model configuration has required non-empty `provider` and `model`, with optional finite `temperature` and nonnegative `maxOutputTokens`. Budget limits optionally contain nonnegative `tokenLimit`, `costLimitUsd`, `turnLimit`, and `wallTimeLimitMs`.
+A model configuration has required non-empty `provider`, canonical `creator/model`, and `reasoningEffort`, with optional finite `temperature` and nonnegative `maxOutputTokens`. Reasoning effort is `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Budget limits optionally contain nonnegative `tokenLimit`, `costLimitUsd`, `turnLimit`, and `wallTimeLimitMs`.
 
 ## Payload registry
 
 Optional fields are marked `?`. All IDs/names required by schema are non-empty strings unless a stricter note is shown.
 
-| Event type | Version 1 payload | Projection/semantic effect |
+| Event type | Version 2 payload | Projection/semantic effect |
 |---|---|---|
 | `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, sessionName?, initialBranchName?, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Initializes a root or normal child session, including optional human display labels. Child creation requires the complete parent/root/depth/task tuple; retained rows without ancestry fields project self as root and depth zero. |
 | `BranchCreated` | `{ branchId, parentBranchId, forkCursor: decimal string, name?: string }` | Selects the new active branch projection. Storage records ancestry through the exact parent cursor. |
@@ -74,12 +74,12 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `EffectAttemptStarted` | `{ effectId, attempt: positive integer }` | Records an execution attempt and projects running status. |
 | `EffectOutcomeRecorded` | `{ effectId, attempt: positive integer, outcome: EffectOutcome, output?: JsonValue, error?: string, observedAt: ISO datetime }` | Canonical terminal observation. Unknown remains visibly distinct. |
 | `EffectReconciliationRecorded` | `{ reconciliationId, effectId, assessment: "succeeded" | "failed" | "no_effect" | "still_unknown", summary, evidence?: JsonValue, recordedBy, recordedAt }` | Append-only operator evidence for an already-unknown effect. It never changes effect/outbox status and never retries work. |
-| `ContextCompactionRequested` | `{ compactionId, strategy, reason, requestedBy, instructions?, throughCursor, sourceEventIds, sourceDigest, frozenSources, capacity?, ancestorContextId?, rematerializedFromContextId? }` | Freezes the exact ordered narrative source envelopes, cursors, payloads, and digest before any summarizing effect. Requests never delete or rewrite their sources. |
+| `ContextCompactionRequested` | `{ compactionId, strategy, reason, requestedBy, instructions?, throughCursor, sourceEventIds, sourceDigest, frozenSources, capacity?, modelDispatch?, ancestorContextId?, rematerializedFromContextId? }` | Freezes the exact ordered narrative source envelopes, cursors, payloads, digest, and model dispatch before any model-summary effect. Requests never delete or rewrite their sources. |
 | `ContextCompactionFailed` | `{ compactionId, requestEventId, strategy, outcome, error, effectId? }` | Makes failed, unknown, protected-only, and non-shrinking compaction terminal states explicit. Unknown model effects are not retried. |
 | `ContextMaterialized` | `{ contextId, records, contentHash, context, harnessProvenance?, derivation? }` | Records exact model context and provenance; an optional typed compaction derivation names strategy, request, leaf/source digests, generation, capacity, effects, and usage. Also inserts immutable `context_records`. |
-| `ModelCallRequested` | `{ callId, contextId, effectId, provider, model, attempt?, retryOfCallId?, contextWindow? }` | Links a logical model call or attributed overflow retry to exact context, capacity provenance, and durable effect. |
+| `ModelCallRequested` | `{ callId, contextId, effectId, modelDispatch, attempt?, retryOfCallId?, contextWindow? }` | Links a logical model call or attributed overflow retry to exact context, immutable configuration/capability/endpoint dispatch, capacity provenance, and durable effect. The matching model `EffectRequested` input must contain the same dispatch. |
 | `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends authoritative projected output text. The current runtime commits one sequence-0 chunk in the terminal success batch; live provider deltas are deliberately not this event. |
-| `ModelCallCompleted` | `{ callId, responseMessageId?, finishReason: string, usage: Usage }` | Marks model call succeeded and records usage. `responseMessageId` is present for ordinary diagnostic text turns and absent when the output is an internal agent-action encoding. |
+| `ModelCallCompleted` | `{ callId, responseMessageId?, finishReason: string, usage: Usage, warnings?: ModelWarning[] }` | Marks model call succeeded and records usage plus bounded normalized AI SDK warnings. `responseMessageId` is present for ordinary diagnostic text turns and absent when the output is an internal agent-action encoding. |
 | `ModelCallTerminated` | `{ callId, outcome: "failed" | "cancelled" | "unknown", error?: string }` | Visible non-success terminal state; no fabricated response. |
 | `BudgetDebited` | `{ callId, tokens, costUsd, turns, wallTimeMs }` (all nonnegative) | Adds usage to projected counters. |
 | `BudgetExceeded` | `{ dimension: "tokens" | "cost" | "turns" | "wallTime", limit: nonnegative, spent: nonnegative }` | Sets exceeded and idle; future turns reject. Boundary comparison is `>=`. |
@@ -108,7 +108,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
 
-Mailbox intent, artifact, follow-up, and receipt-link fields remain optional in version 1 so retained `MailboxMessageSent` and `MailboxMessageDelivered` events without those fields remain valid. Replay treats those paired retained events as already context-delivered, with no intent/artifact/follow-up metadata, and rebuild initializes their query rows accordingly. New messages always carry an intent and require an explicit context-delivery event before acknowledgement.
+Mailbox intent, artifact, follow-up, and receipt-link fields are optional in version 2. Replay treats paired events without those fields as already context-delivered, with no intent/artifact/follow-up metadata, and rebuild initializes their query rows accordingly. New messages always carry an intent and require an explicit context-delivery event before acknowledgement.
 
 ## Lifecycle groupings
 
@@ -198,7 +198,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. Synchronized envelopes use a separate ingestion path that quarantines invalid remote rows rather than weakening local validation.
-- Snapshots include `reducerVersion: 7`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 8`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 
@@ -206,12 +206,12 @@ Events are made visible to subscribers only after database commit. Durable commi
 
 ## Current evolution limitations
 
-The runtime validates one uniform `EVENT_SCHEMA_VERSION = 1`. There is no per-event version registry, persisted reducer package hash, or upcaster. Before changing any released payload, introduce a new accepted version, an explicit deterministic projection path, fixtures for old history, and protocol compatibility tests.
+The runtime validates one uniform `EVENT_SCHEMA_VERSION = 2`. There is no per-event version registry, persisted reducer package hash, or upcaster. Version-1 workspaces are rejected by the pre-release cutover. Before changing any released payload again, introduce a new accepted version, an explicit deterministic projection path, fixtures for retained version-2 history, and protocol compatibility tests.
 
 
 ## Harness, evaluation, and exact-version events
 
-All harness and refinement payloads use schema version 1 and retain stable entry/version/proposal/candidate/allocation/observation/decision identifiers. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
+Embedded harness and refinement content retains its own version-1 formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-2 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
 
 | Event | Durable meaning |
 |---|---|
@@ -242,7 +242,7 @@ All harness and refinement payloads use schema version 1 and retain stable entry
 
 ## Synchronization conflict resolution
 
-| Event type | Version 1 payload | Projection/semantic effect |
+| Event type | Version 2 payload | Projection/semantic effect |
 |---|---|---|
 | `SyncConflictResolved` | `{ conflictId, action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge", resolvedBy, chosenEventId?, note?, resolvedAt }` | Records explicit authority over a surfaced reconciliation. It updates the local reconciliation projection and replicates as ordinary canonical history; it never rewrites either claim or branch. |
 

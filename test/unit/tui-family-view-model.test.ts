@@ -22,7 +22,7 @@ function family(
     taskId: `${sessionId}-task`,
     taskStatus: "completed",
     task: `Task for ${sessionId}`,
-    model: { provider: "fixture", model: "family-model" },
+    model: { provider: "fixture", model: "family-model", reasoningEffort: "provider-default" },
     cancellationRequested: false,
     activity,
     activityReason: null,

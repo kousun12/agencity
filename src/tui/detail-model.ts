@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentState, ModelConfiguration } from "../domain/index.ts";
+import type { AgentEvent, AgentState, ModelConfiguration, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import { scrubText } from "../security/index.ts";
 
@@ -42,6 +42,7 @@ export interface TerminalModelDetail {
   readonly current: ModelConfiguration;
   readonly workspaceDefault: string | null;
   readonly providers: readonly TerminalModelProviderDetail[];
+  readonly catalogModels: readonly ModelDescriptor[];
   readonly raw: unknown;
 }
 
@@ -52,7 +53,21 @@ export interface TerminalRawDetail {
   readonly raw: unknown;
 }
 
-export type TerminalDetail = TerminalInspectionDetail | TerminalModelDetail | TerminalRawDetail;
+export interface TerminalEffortDetail {
+  readonly kind: "effort";
+  readonly command: "/effort";
+  readonly title: "Reasoning effort";
+  readonly current: ReasoningEffort;
+  readonly model: string;
+  readonly capability: "listed" | "unverified" | "unsupported";
+  readonly options: readonly ReasoningEffort[];
+  readonly stale: boolean;
+  readonly catalogOrigin?: string;
+  readonly catalogError?: string;
+  readonly raw: unknown;
+}
+
+export type TerminalDetail = TerminalInspectionDetail | TerminalModelDetail | TerminalEffortDetail | TerminalRawDetail;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -766,6 +781,7 @@ export function buildTerminalModelDetail(input: {
   readonly current: ModelConfiguration;
   readonly workspaceDefault: string | null;
   readonly providers: readonly ModelProviderDescriptor[];
+  readonly catalogModels?: readonly ModelDescriptor[];
 }): TerminalModelDetail {
   const providers = input.providers.filter(provider => provider.name !== "echo").map(provider => ({
     name: provider.name,
@@ -789,9 +805,11 @@ export function buildTerminalModelDetail(input: {
     current: input.current,
     workspaceDefault: input.workspaceDefault,
     providers,
+    catalogModels: Object.freeze([...(input.catalogModels ?? [])]),
     raw: {
       current: `${input.current.provider}:${input.current.model}`,
       workspaceDefault: input.workspaceDefault,
+      catalogModels: input.catalogModels ?? [],
       providers: providers.map(provider => ({
         name: provider.name,
         displayName: provider.displayName,
@@ -800,6 +818,36 @@ export function buildTerminalModelDetail(input: {
         ...(provider.remediation === undefined ? {} : { remediation: provider.remediation }),
       })),
     },
+  };
+}
+
+export function buildTerminalEffortDetail(input: {
+  readonly model: ModelConfiguration;
+  readonly capability: {
+    readonly status: "listed" | "unverified" | "unsupported";
+    readonly levels: readonly ReasoningEffort[];
+  };
+  readonly catalog?: {
+    readonly origin?: string;
+    readonly stale?: boolean;
+    readonly error?: string;
+  };
+}): TerminalEffortDetail {
+  const options: readonly ReasoningEffort[] = input.capability.status === "unsupported"
+    ? ["provider-default"]
+    : ["provider-default", ...input.capability.levels.filter(level => level !== "provider-default")];
+  return {
+    kind: "effort",
+    command: "/effort",
+    title: "Reasoning effort",
+    current: input.model.reasoningEffort,
+    model: input.model.model,
+    capability: input.capability.status,
+    options,
+    stale: input.catalog?.stale ?? true,
+    ...(input.catalog?.origin ? { catalogOrigin: input.catalog.origin } : {}),
+    ...(input.catalog?.error ? { catalogError: input.catalog.error } : {}),
+    raw: input,
   };
 }
 
@@ -837,6 +885,8 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
   }
   if (detail.kind === "model") {
     const currentProvider = detail.providers.find(provider => provider.name === detail.current.provider);
+    const catalogModels = detail.catalogModels.filter(model =>
+      detail.current.provider === "vercel" || model.model.startsWith(`${detail.current.provider}/`));
     const lines = [
       "MODEL",
       "",
@@ -850,8 +900,26 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
       "",
       "Providers",
       ...detail.providers.map(provider => `${provider.usable ? "✓" : "○"} ${provider.displayName} — ${provider.credentialLabel}`),
+      ...(catalogModels.length ? [
+        "",
+        "Catalog models",
+        ...catalogModels.slice(0, 12).map(formatCatalogModel),
+      ] : []),
     ];
     if (options.footer !== false) lines.push("", "Enter choose · L login · X logout · Shift-R raw · Esc close");
+    return lines.join("\n");
+  }
+  if (detail.kind === "effort") {
+    const lines = [
+      "REASONING EFFORT",
+      "",
+      `Model: ${detail.model}`,
+      `Capability: ${detail.capability}${detail.stale ? " · stale catalog" : ""}`,
+      ...(detail.catalogError ? [`Catalog: ${detail.catalogError}`] : []),
+      "",
+      ...detail.options.map(effort => `${effort === detail.current ? ">" : " "} ${effort}${detail.capability === "unverified" && effort !== "provider-default" ? " · unverified" : ""}`),
+    ];
+    if (options.footer !== false) lines.push("", "↑/↓ effort · Enter select · Shift-R raw · Esc close");
     return lines.join("\n");
   }
   const lines = [detail.title.toUpperCase()];
@@ -867,4 +935,13 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
   }
   if (options.footer !== false) lines.push("", "Shift-R raw diagnostics · PgUp/PgDn scroll · Esc close");
   return lines.join("\n");
+}
+
+function formatCatalogModel(model: ModelDescriptor): string {
+  const capacity = model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`;
+  const reasoning = model.reasoning.status === "listed" ? "effort"
+    : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed";
+  const price = model.pricing === null ? "price unknown"
+    : `$${(model.pricing.inputUsdPerToken * 1_000_000).toFixed(2)}/$${(model.pricing.outputUsdPerToken * 1_000_000).toFixed(2)} per 1M`;
+  return `• ${model.displayName} — ${model.model}\n  ${capacity} · ${price} · ${reasoning}${model.stale ? " · stale" : ""}`;
 }

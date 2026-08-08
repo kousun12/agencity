@@ -170,13 +170,25 @@ for (let index = 0; index < migrationVersions.length; index++) {
     break;
   }
 }
-const allMigrationSql = migrationSources.map(({ source }) => source).join("\n")
+const profileMigrationSource = await Bun.file(resolve(src, "storage/profile-migrations.ts")).text();
+const profileMigrationVersions = [...profileMigrationSource.matchAll(/\bversion:\s*(\d+),/g)].map((match) => Number(match[1]));
+if (profileMigrationVersions.length === 0 || profileMigrationVersions[0] !== 1) {
+  violations.push("profile migration: version 1 is required");
+}
+for (let index = 0; index < profileMigrationVersions.length; index++) {
+  if (profileMigrationVersions[index] !== index + 1) {
+    violations.push(`profile migration: versions must be contiguous from 1 (found ${profileMigrationVersions.join(", ")})`);
+    break;
+  }
+}
+const allMigrationSql = `${migrationSources.map(({ source }) => source).join("\n")}\n${profileMigrationSource}`
   .replace(/--[^\n]*/g, "")
   .replace(/\/\*[\s\S]*?\*\//g, "");
 const migratedTables = new Set<string>();
 for (const match of allMigrationSql.matchAll(/\bCREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?([A-Za-z_][A-Za-z0-9_]*)/gi)) {
   migratedTables.add(match[1]!.toLowerCase());
 }
+migratedTables.add("profile_schema_migrations");
 if (/\bAUTOINCREMENT\b/i.test(allMigrationSql)) migratedTables.add("sqlite_sequence");
 
 const validClassMutability: Readonly<Record<string, "mutable" | "immutable">> = {
@@ -282,8 +294,8 @@ for (const file of sourceFiles) {
       violations.push(`${fileRel}: immutable table ${table} may be inserted only by its storage adapter`);
     }
     const mutatingUpsert = new RegExp(
-      `\\bINSERT[\\s\\S]{0,600}?INTO\\s+${target}[\\s\\S]{0,600}?` +
-      "ON\\s+CONFLICT[\\s\\S]{0,300}?DO\\s+UPDATE\\b",
+      `\\bINSERT[\\s\\S]{0,256}?INTO\\s+${target}[\\s\\S]{0,256}?` +
+      "ON\\s+CONFLICT[\\s\\S]{0,160}?DO\\s+UPDATE\\b",
       "i",
     );
     if (mutatingUpsert.test(source)) violations.push(`${fileRel}: forbidden mutating upsert of immutable table ${table}`);
@@ -337,6 +349,6 @@ if (violations.length) {
 }
 console.log(
   `Architecture check passed: ${sourceFiles.length} source modules, ` +
-  `${Object.keys(expectedExports).length} exports, ${migrationFiles.length} migration(s), ` +
+  `${Object.keys(expectedExports).length} exports, ${migrationFiles.length} workspace and ${profileMigrationVersions.length} profile migration(s), ` +
   `${classifications.size} classified tables; adapter/type/canonical boundaries intact.`,
 );

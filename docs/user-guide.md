@@ -44,20 +44,24 @@ Open the provider and model inspector at any time:
 /model
 ```
 
-Use Up/Down to select a provider, `L` to enter a key, `X` to remove a stored key, and Enter to enter a model ID. Direct forms are also available:
+Use Up/Down to select a provider, `L` to enter a key, and `X` to remove a stored key. Press Enter on a usable provider, type to filter its catalog models, use Up/Down to choose a match, and press Enter to select it. An exact canonical model ID remains accepted when the catalog has no match. Direct forms are also available:
 
 ```text
 /model login openai
-/model openai:gpt-5.6-sol
+/model openai:openai/gpt-5.6-sol
 /model login vercel
 /model vercel:openai/gpt-5.6-sol
 ```
 
-Model identifiers use `provider:model`. The model part may contain `/`. A session branch retains its selected model; starting Agencity again does not silently replace it. Create new work to use a different model:
+Model identifiers use `provider:creator/model`. The model part is the canonical Vercel AI Gateway catalog ID. A session branch retains its selected model; starting Agencity again does not silently replace it. Create new work to use a different model:
 
 ```sh
-agencity new --model openai:gpt-5.6-sol "start a separate review"
+agencity new --model openai:openai/gpt-5.6-sol --effort high "start a separate review"
 ```
+
+Reasoning effort is retained with the branch model. Open the effort inspector with `/effort` (or `/thinking`), use Up/Down and Enter to select a catalog-supported level, or enter a direct command such as `/effort high`. `/effort refresh` refreshes the public Gateway catalog. `provider-default` omits an explicit reasoning override and lets the selected provider decide.
+
+The inspector distinguishes catalog-listed, unverified, unsupported, and stale capability data. An explicit unsupported selection fails. A stored choice that becomes invalid falls back visibly to `provider-default`. The available levels are `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
 Agencity has no product demo mode or credential-free fallback. Internal deterministic providers are test-only and do not appear in product selection.
 

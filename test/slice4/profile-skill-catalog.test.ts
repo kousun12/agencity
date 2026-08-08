@@ -79,12 +79,12 @@ describe("profile global skill catalog storage",()=>{
   const raw=createClient({url:store.url});await expect(raw.execute("UPDATE profile_skill_versions SET name='rewritten'")).rejects.toThrow("append-only");await expect(raw.execute("DELETE FROM profile_skill_actions")).rejects.toThrow("append-only");raw.close();
  });
 
- test("migrates and reopens the original profile skill rows without rewriting or losing them",async()=>{
+ test("rejects a pre-cutover profile without rewriting or losing its rows",async()=>{
   directory=await mkdtemp(join(tmpdir(),"ag-profile-skills-old-"));const url=`file:${directory}/profile.db`,raw=createClient({url});
   await raw.executeMultiple("CREATE TABLE profile_skill_versions(version_id TEXT PRIMARY KEY,skill_id TEXT NOT NULL,name TEXT NOT NULL,definition_json TEXT NOT NULL,digest TEXT NOT NULL,created_at TEXT NOT NULL);CREATE TABLE profile_skills(skill_id TEXT PRIMARY KEY,current_version_id TEXT NOT NULL,name TEXT NOT NULL,updated_at TEXT NOT NULL);");
   const legacyDefinition={runtime:"bun",source:"export default () => null"},json=JSON.stringify(legacyDefinition);const hasher=new Bun.CryptoHasher("sha256");hasher.update(json);const digest=hasher.digest("hex"),at="2026-08-06T00:00:00.000Z";
   await raw.execute({sql:"INSERT INTO profile_skill_versions VALUES(?,?,?,?,?,?)",args:["version:old","skill:old","old",json,digest,at]});await raw.execute({sql:"INSERT INTO profile_skills VALUES(?,?,?,?)",args:["skill:old","version:old","old",at]});raw.close();
-  profile=await ProfileStore.open(url);const migrated=await profile.getGlobalSkill("skill:old");expect(migrated?.provenance).toEqual({source:"legacy"});expect(migrated?.availability).toBe("enabled");expect((await profile.getGlobalSkillHistory("skill:old"))?.actions).toHaveLength(1);
-  profile.close();profile=await ProfileStore.open(url);expect((await profile.getGlobalSkillVersion("version:old"))?.definition).toEqual(legacyDefinition);expect((await profile.getGlobalSkillHistory("skill:old"))?.actions).toHaveLength(1);
+  await expect(ProfileStore.open(url)).rejects.toThrow("predates the reasoning/model-capability schema cutover");
+  const retained=createClient({url});const rows=await retained.execute("SELECT version_id,definition_json FROM profile_skill_versions");expect(rows.rows.map(row=>({version_id:String(row.version_id),definition_json:String(row.definition_json)}))).toEqual([{version_id:"version:old",definition_json:json}]);retained.close();
  });
 });

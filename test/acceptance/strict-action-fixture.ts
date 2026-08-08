@@ -29,10 +29,15 @@ export class StrictActionFixture {
     this.server = Bun.serve({ port: 0, fetch: request => this.handle(request) });
   }
 
-  get baseUrl(): string { return `http://127.0.0.1:${this.server.port}/v1`; }
+  get baseUrl(): string { return `http://127.0.0.1:${this.server.port}`; }
 
   environment(): Record<string, string> {
-    return { OPENAI_API_KEY: "acceptance-fixture-key", OPENAI_BASE_URL: this.baseUrl, OPENAI_MODEL: "fixture-v1" };
+    return {
+      OPENAI_API_KEY: "acceptance-fixture-key",
+      OPENAI_BASE_URL: this.baseUrl,
+      OPENAI_MODEL: "openai/fixture-v1",
+      AI_GATEWAY_BASE_URL: this.baseUrl,
+    };
   }
 
   script(task: string, replies: readonly (Reply | ReplyFactory)[]): void {
@@ -68,12 +73,27 @@ export class StrictActionFixture {
 
   private async handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/v1/models") {
+      return Response.json({
+        data: [{
+          id: "openai/fixture-v1",
+          name: "OpenAI fixture v1",
+          type: "language",
+          context_window: 128_000,
+          max_tokens: 16_384,
+          pricing: { input: "0", output: "0" },
+          tags: ["reasoning"],
+          reasoning_options: [{ type: "effort", values: ["low", "medium", "high"] }],
+        }],
+      });
+    }
     if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const authorization = request.headers.get("authorization");
     if (authorization !== "Bearer acceptance-fixture-key") return new Response("unauthorized", { status: 401 });
     const body = await request.json() as { model?: unknown; stream?: unknown; messages?: Array<{ role?: unknown; content?: unknown }> };
     if (typeof body.model !== "string" || !Array.isArray(body.messages)) return new Response("invalid request", { status: 400 });
-    const lastUserText = [...body.messages].reverse().find(item => item.role === "user" && typeof item.content === "string")?.content as string | undefined ?? "";
+    const lastUser = [...body.messages].reverse().find(item => item.role === "user");
+    const lastUserText = messageText(lastUser?.content);
     const durable = this.readDurableStep(lastUserText);
     const probe: FixtureProbe = {
       task: durable?.task ?? null,
@@ -96,14 +116,29 @@ export class StrictActionFixture {
         : `fixture recursive response: ${lastUserText.slice(-200)}`;
     const reply = typeof selected === "function" ? selected(probe) : selected ?? fallback;
     const text = typeof reply === "string" ? reply : JSON.stringify(reply);
-    if (body.stream !== true) return Response.json({ choices: [{ message: { content: text }, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4) } });
+    if (body.stream !== true) return Response.json({
+      id: "fixture-completion",
+      object: "chat.completion",
+      created: 1,
+      model: body.model,
+      choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4), total_tokens: 7 + Math.ceil(text.length / 4) },
+    });
     const chunks = split(text, 3);
     return new Response(new ReadableStream<Uint8Array>({
       start(controller) {
         const encoder = new TextEncoder();
-        for (const chunk of chunks) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: chunk }, finish_reason: null }] })}\n\n`));
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4) } })}\n\n`));
+        const envelope = (choices: unknown[], usage?: unknown) => ({
+          id: "fixture-chunk",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: body.model,
+          choices,
+          ...(usage === undefined ? {} : { usage }),
+        });
+        for (const chunk of chunks) controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta: { content: chunk }, finish_reason: null }]))}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta: {}, finish_reason: "stop" }]))}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([], { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4), total_tokens: 7 + Math.ceil(text.length / 4) }))}\n\n`));
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       },
@@ -121,6 +156,18 @@ export class StrictActionFixture {
   }
 
   private key(task: string, step: number): string { return `${task}\0${step}`; }
+}
+
+function messageText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value.map(part =>
+    part && typeof part === "object" && !Array.isArray(part) &&
+    (part as { type?: unknown }).type === "text" &&
+    typeof (part as { text?: unknown }).text === "string"
+      ? (part as { text: string }).text
+      : "",
+  ).join("");
 }
 
 function split(text: string, parts: number): string[] {

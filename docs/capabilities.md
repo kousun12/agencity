@@ -27,9 +27,11 @@ Status meanings:
 
 | Capability | Status | Current behavior |
 |---|---|---|
-| OpenAI | Conditional | Built-in OpenAI-compatible provider; requires a stored/programmatic key or `OPENAI_API_KEY` and an explicit model ID. |
-| Anthropic | Conditional | Built-in Anthropic-compatible provider; requires a stored/programmatic key or `ANTHROPIC_API_KEY` and an explicit model ID. |
-| Vercel AI Gateway | Conditional | Built-in gateway provider; requires a stored/programmatic key or `AI_GATEWAY_API_KEY` and an explicit gateway model ID, which may contain `/`. |
+| OpenAI | Conditional | Built-in Vercel AI SDK OpenAI transport; requires a stored/programmatic key or `OPENAI_API_KEY` and a canonical `openai/...` model ID. |
+| Anthropic | Conditional | Built-in Vercel AI SDK Anthropic transport; requires a stored/programmatic key or `ANTHROPIC_API_KEY` and a canonical `anthropic/...` model ID. |
+| Vercel AI Gateway | Conditional | Built-in Vercel AI SDK Gateway transport; requires a stored/programmatic key or `AI_GATEWAY_API_KEY` and a canonical `creator/model` ID. |
+| Public model catalog | Conditional | The Gateway `/v1/models` catalog is normalized and cached for capacity, output limits, pricing, and reasoning metadata. Offline refresh uses a visibly stale digest-checked cache when available; model execution remains credential-gated. |
+| Reasoning-effort selection | Supported | `--effort`, `/effort`, the product protocol, and `ModelConfiguration` support provider-default, none, minimal, low, medium, high, and xhigh. Explicit unsupported choices fail; unverified catalog choices remain labeled. |
 | Custom embedded provider | Conditional | An embedding host can pass `modelProviders` to `Supervisor.open`; the provider must implement the model contract and truthful capabilities. |
 | Provider streaming | Conditional | Used only when a provider declares streaming and implements `stream`. Deltas are cursorless temporary progress; the full terminal response remains atomic. |
 | Provider/model onboarding | Supported | Interactive missing configuration offers OpenAI, Anthropic, or Vercel, hides key input, and asks for the exact model ID. Non-interactive missing configuration fails with setup guidance. |

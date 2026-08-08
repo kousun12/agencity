@@ -179,7 +179,7 @@ describe("transactional process execution fencing", () => {
       payload: {
         workspaceId: "workspace-1",
         initialBranchId: "main",
-        model: { provider: "echo", model: "echo" },
+        model: { provider: "echo", model: "echo", reasoningEffort: "provider-default" },
         budget: {},
       },
     }]);

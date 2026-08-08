@@ -598,6 +598,7 @@ describe("autonomous durable agent runs", () => {
     const session = await supervisor.createSession({ workspaceId: "recovery", model: { provider: provider.name, model: "v1" } });
     const runId = newId(); const stepId = `agent-run-${runId}-step-1`; const contextId = `${stepId}-context`; const callId = `${stepId}-call`; const actionId = `${stepId}-action`;
     const effectKey = `agent-run-model:${runId}:1`; const effectId = stableEffectId(session.sessionId, effectKey);
+    const modelDispatch = supervisor.modelExecutor.resolveDispatch({ provider: provider.name, model: "v1", reasoningEffort: "provider-default" });
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
       payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Recover this run" },
@@ -612,9 +613,9 @@ describe("autonomous durable agent runs", () => {
       payload: { contextId, records: [], contentHash: "a".repeat(64), context: { run: { stepOrdinal: 1 }, messages: [] } },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
-      payload: { callId, contextId, effectId, provider: provider.name, model: "v1" },
+      payload: { callId, contextId, effectId, modelDispatch },
     }]);
-    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context: { run: { stepOrdinal: 1 }, messages: [] }, configuration: { provider: provider.name, model: "v1" } }, idempotencyKey: effectKey, idempotent: false });
+    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context: { run: { stepOrdinal: 1 }, messages: [] }, modelDispatch } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
     expect((await supervisor.outbox.run(effectId)).outcome).toBe("succeeded");
     expect(provider.calls).toBe(1);
     const rawAction = JSON.stringify(action({ type: "final", content: "Recovered exactly once." }));
@@ -656,6 +657,7 @@ describe("autonomous durable agent runs", () => {
     const session = await supervisor.createSession({ workspaceId: "pending-recovery", model: { provider: provider.name, model: "v1" } });
     const runId = newId(); const stepId = `agent-run-${runId}-step-1`; const contextId = `${stepId}-context`; const callId = `${stepId}-call`; const actionId = `${stepId}-action`;
     const effectKey = `agent-run-model:${runId}:1`; const effectId = stableEffectId(session.sessionId, effectKey);
+    const modelDispatch = supervisor.modelExecutor.resolveDispatch({ provider: provider.name, model: "v1", reasoningEffort: "provider-default" });
     const context = { run: { stepOrdinal: 1 }, messages: [] };
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
@@ -671,9 +673,9 @@ describe("autonomous durable agent runs", () => {
       payload: { contextId, records: [], contentHash: "b".repeat(64), context },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
-      payload: { callId, contextId, effectId, provider: provider.name, model: "v1" },
+      payload: { callId, contextId, effectId, modelDispatch },
     }]);
-    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context, configuration: { provider: provider.name, model: "v1" } }, idempotencyKey: effectKey, idempotent: false });
+    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context, modelDispatch } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
     expect(provider.calls).toBe(0);
     await supervisor.close();
 

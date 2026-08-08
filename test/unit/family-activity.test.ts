@@ -8,7 +8,7 @@ import {
   type TaskRecord,
 } from "../../src/index.ts";
 
-const model = { provider: "fixture", model: "test" };
+const model = { provider: "fixture", model: "test", reasoningEffort: "provider-default" as const };
 
 function state(overrides: Partial<AgentState> = {}): AgentState {
   const created: AgentEvent = {
@@ -18,7 +18,7 @@ function state(overrides: Partial<AgentState> = {}): AgentState {
     causationId: null,
     correlationId: null,
     type: "SessionCreated",
-    schemaVersion: 1,
+    schemaVersion: 2,
     producer: "supervisor",
     idempotencyKey: "created",
     committedAt: "2026-08-07T00:00:00.000Z",

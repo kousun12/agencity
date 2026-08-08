@@ -8,9 +8,9 @@
 
 ## Context
 
-The runtime currently accepts schema version 1 for every event and has no general per-event version registry or upcaster pipeline. A materialized model context is stored inline in its canonical `ContextMaterialized` event, copied into `context_records`, and repeated in context-backed model effect input. Successive contexts often share most of their content, so this representation can amplify durable storage across events, outbox rows, projections, snapshots, synchronization envelopes, and exports.
+The runtime currently accepts schema version 2 for every event and has no general per-event version registry or upcaster pipeline. Version 2 was allocated by the pre-release complete-model-dispatch cutover; version-1 workspaces are rejected with reset guidance. A materialized model context is stored inline in its canonical `ContextMaterialized` event, copied into `context_records`, and repeated in context-backed model effect input. Successive contexts often share most of their content, so this representation can amplify durable storage across events, outbox rows, projections, snapshots, synchronization envelopes, and exports.
 
-Reducing those copies must not change the exact value sent to a provider, discard attribution, introduce a projection-only source of truth, depend on unreplicated artifact bytes, or reinterpret retained version-1 history.
+Reducing those copies must not change the exact value sent to a provider, discard attribution, introduce a projection-only source of truth, depend on unreplicated artifact bytes, or reinterpret retained version-2 history.
 
 This ADR remains proposed until the linked implementation plan is complete and referenced contexts are the verified default for new writes.
 
@@ -18,23 +18,23 @@ This ADR remains proposed until the linked implementation plan is complete and r
 
 ### Explicit event-version compatibility
 
-Introduce a registry keyed by event type and schema version. Version 1 remains accepted for every existing event. The first additional accepted pair is version 2 for `ContextMaterialized`; other unsupported type/version pairs fail with a typed compatibility error.
+Introduce a registry keyed by event type and schema version. Version 2 remains accepted for every existing event. The first additional accepted pair is version 3 for `ContextMaterialized`; other unsupported type/version pairs fail with a typed compatibility error.
 
-Storage reads, protocol events, synchronization envelopes, and exports preserve each event's original schema version. Reducers and resolvers handle retained version-1, new version-2, and mixed histories deterministically. Compatibility tests must include retained version-1 fixtures and mixed-version replay, rebuild, synchronization, export, and client behavior.
+Storage reads, protocol events, synchronization envelopes, and exports preserve each event's original schema version. Reducers and resolvers handle retained version-2, new version-3, and mixed histories deterministically. Compatibility tests must include retained version-2 fixtures and mixed-version replay, rebuild, synchronization, export, and client behavior.
 
 An upcaster may provide a current in-memory view when a caller needs one, but it must be deterministic and must not update retained records. Ordinary event loading must not inflate every referenced context back into the old inline payload shape.
 
 ### Canonical lossless context references
 
-Version-2 context events carry a complete, versioned manifest plus immutable fragment definitions and references to earlier definitions visible in the same session and branch ancestry. Fragment identity covers the exact tagged UTF-8 bytes of `JSON.stringify(fragment)`. Resolution must reconstruct the exact JSON value and verify the existing full-context hash before token estimation, effect admission, or provider execution.
+Version-3 context events carry a complete, versioned manifest plus immutable fragment definitions and references to earlier definitions visible in the same session and branch ancestry. Fragment identity covers the exact tagged UTF-8 bytes of `JSON.stringify(fragment)`. Resolution must reconstruct the exact JSON value and verify the existing full-context hash before token estimation, effect admission, or provider execution.
 
 Fragment definitions remain in canonical events. Rebuildable indexes may accelerate lookup but cannot supply unique bytes. References cannot cross independent sessions, point into sibling-only history, depend on future events, or use mutable profile state. Missing, invisible, malformed, oversized, or digest-mismatched dependencies fail explicitly.
 
-New context-backed model effect requests retain only the context identity, content hash, call identity, and model configuration. The model executor resolves and verifies the context after claiming the effect and before contacting the provider. Retained version-1 inline effects and context-independent model effects remain supported.
+New context-backed model effect requests retain only the context identity, content hash, call identity, and model dispatch. The model executor resolves and verifies the context after claiming the effect and before contacting the provider. Retained version-2 inline effects and context-independent model effects remain supported.
 
 ### No retained-history rewrite
 
-No migration edits a retained event payload, changes its schema version, recalculates its historical hash under new rules, or retrofits version-1 contexts into references. Version-1 and version-2 readers remain available. Canonical fragment definitions remain retained while any visible context references them.
+No migration edits a retained event payload, changes its schema version, recalculates its historical hash under new rules, or retrofits version-2 contexts into references. Version-2 and version-3 readers remain available. Canonical fragment definitions remain retained while any visible context references them.
 
 ## Consequences
 
@@ -48,8 +48,8 @@ No migration edits a retained event payload, changes its schema version, recalcu
 
 ## Rejected alternatives and limitations
 
-1. **Rewrite retained version-1 events.** Rejected because it would change canonical evidence, hashes, and synchronization identity.
-2. **Silently reinterpret version 1 as a new payload shape.** Rejected because released event meanings are immutable.
+1. **Rewrite retained version-2 events.** Rejected because it would change canonical evidence, hashes, and synchronization identity.
+2. **Silently reinterpret version 2 as a new payload shape.** Rejected because released event meanings are immutable.
 3. **Store context fragments only in projections or process caches.** Rejected because replay and recovery must remain self-contained.
 4. **Use the external artifact store for canonical context fragments.** Rejected because automatic artifact replication is not implemented; synchronized events could become unresolvable.
 5. **Reference fragments across independent sessions.** Rejected because it would complicate ownership, branch visibility, export, and deletion boundaries.

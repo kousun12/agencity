@@ -62,7 +62,7 @@ export async function seedSession(
     payload: {
       workspaceId: options.workspaceId ?? "workspace-1",
       initialBranchId: branchId,
-      model: options.model ?? { provider: "echo", model: "echo-1" },
+      model: options.model ?? { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" },
       budget: options.budget ?? {},
     },
   }]);

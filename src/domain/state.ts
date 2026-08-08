@@ -1,12 +1,13 @@
 import type {
   AgentRunGoalMode, AgentRunInputKind, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
-  FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, ModelConfiguration, RecursiveModelOutcome, RecursiveModelStatus,
+  FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
   RefinementReviewLifecycleStatus, ScheduleStatus, SessionStatus, TaskStatus, Usage, WakeStatus, WorkingValue,
 } from "./events.ts";
+import type { ModelConfiguration, ModelDispatch, ModelWarning } from "./model.ts";
 import type { AgentAction } from "./agent-action.ts";
 import type { JsonValue } from "./json.ts";
 
-export const REDUCER_VERSION = 7 as const;
+export const REDUCER_VERSION = 8 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
@@ -14,13 +15,14 @@ export interface CellState { readonly id: string; readonly code: string; readonl
 export interface WorkingValueState { readonly name: string; readonly version: number; readonly value: WorkingValue; readonly eventId: string; }
 export interface EffectState { readonly id: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotencyKey: string; readonly idempotent: boolean; readonly attempts: number; readonly status: "requested" | "started" | EffectOutcome; readonly output?: JsonValue; readonly error?: string; readonly eventId: string; }
 export interface EffectReconciliationState { readonly id: string; readonly effectId: string; readonly assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; readonly summary: string; readonly evidence?: JsonValue; readonly recordedBy: string; readonly recordedAt: string; readonly eventId: string; }
-export interface ModelCallState { readonly id: string; readonly contextId: string; readonly effectId: string; readonly provider: string; readonly model: string; readonly attempt: number; readonly retryOfCallId?: string; readonly contextWindow?: ContextCapacityProvenance; readonly chunks: string[]; readonly status: "requested" | EffectOutcome; readonly responseMessageId?: string; readonly finishReason?: string; readonly usage?: Usage; readonly error?: string; readonly eventId: string; }
+export interface ModelCallState { readonly id: string; readonly contextId: string; readonly effectId: string; readonly modelDispatch: ModelDispatch; readonly attempt: number; readonly retryOfCallId?: string; readonly contextWindow?: ContextCapacityProvenance; readonly chunks: string[]; readonly status: "requested" | EffectOutcome; readonly responseMessageId?: string; readonly finishReason?: string; readonly usage?: Usage; readonly warnings?: ModelWarning[]; readonly error?: string; readonly eventId: string; }
 export interface ContextState { readonly id: string; readonly records: ContextRecordReference[]; readonly contentHash: string; readonly derivation?: ContextCompactionDerivation; readonly eventId: string; }
 export interface ContextCompactionState {
   readonly id: string; readonly strategy: ContextCompactionStrategy; readonly reason: ContextCompactionReason;
   readonly requestedBy: ContextCompactionRequester; readonly instructions?: string; readonly throughCursor: string;
   readonly sourceEventIds: string[]; readonly sourceDigest: string; readonly frozenSources: FrozenContextCompactionSource[];
   readonly capacity?: ContextCapacityProvenance; readonly ancestorContextId?: string; readonly rematerializedFromContextId?: string;
+  readonly modelDispatch?: ModelDispatch;
   readonly status: "requested" | "completed" | "failed" | "unknown" | "protected-only" | "no-progress";
   readonly requestEventId: string; readonly contextId?: string; readonly effectIds?: string[]; readonly error?: string; readonly eventId: string;
 }

@@ -172,3 +172,11 @@ export function defaultProfilePath(environment: NodeJS.ProcessEnv = process.env)
 export function workspacePreferenceKey(workspaceId: string, preference: "recent" | "model"): string {
   return `workspace:${workspaceId}:${preference}`;
 }
+
+export function modelEffortPreferenceKey(
+  workspaceId: string,
+  catalogEndpointId: string,
+  canonicalModel: string,
+): string {
+  return `workspace:${workspaceId}:model-effort:${catalogEndpointId}:${encodeURIComponent(canonicalModel)}`;
+}

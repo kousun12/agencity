@@ -14,7 +14,7 @@ describe("durable product display names", () => {
       idempotencyKey: "session:named-session",
       payload: {
         workspaceId: "workspace", initialBranchId: "main",
-        model: { provider: "echo", model: "echo-1" }, budget: {},
+        model: { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" }, budget: {},
         sessionName: "Initial task", initialBranchName: "main",
       },
     }]);

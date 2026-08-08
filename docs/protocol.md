@@ -63,7 +63,9 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 | Method and path | Result |
 |---|---|
 | `GET /health` | Managed authenticated identity/version/config/readiness, or basic embedded health. |
-| `GET /capabilities` | Protocol version, trusted-local mode, snapshot/resume, progress, historical projection, managed-service/catalog availability, sync capabilities, and raw provider descriptors. |
+| `GET /capabilities` | Protocol version, trusted-local mode, snapshot/resume, progress, historical projection, managed-service/catalog availability, reasoning-effort support, sync capabilities, and raw provider descriptors. |
+| `GET /model-catalog` | Normalized Gateway language-model descriptors, catalog endpoint identity, origin, freshness, capacity, pricing, and reasoning capability. It refreshes an absent or stale cache and reports cached fallback or unavailability explicitly. |
+| `POST /model-catalog/refresh` | Bounded public Gateway catalog refresh, with an explicit cached-fallback or unavailable result. |
 | `GET /model-providers` | Secret-free raw supervisor provider descriptors. Product UIs must apply product policy; Echo is an internal test fixture, not a product-selectable provider. |
 | `GET /service/status` | Managed-only lifecycle, recovery, idle deadline, attached clients, keep-alive reasons, and resident root workers. |
 | `POST /service/shutdown` | Managed-only accepted graceful drain. It does not cancel sessions. |
@@ -71,8 +73,9 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 | `GET /product/sessions` | Managed-only human-readable product session/branch catalog. |
 | `POST /product/select` | Managed-only `{ target?, branchId? }` selection; returns `{ sessionId, branchId }`. |
 | `POST /product/rename` | Managed-only `{ sessionId, branchId?, name }`. |
-| `GET /product/config` | Managed-only workspace default model, opaque credential references, and secret-free provider descriptors. |
-| `POST /product/config/model` | Managed-only `{ model: "provider:model" \| null }`. |
+| `GET /product/config?model=CREATOR%2FMODEL` | Managed-only workspace default model, normalized catalog/execution origins, the model-specific effort preference, opaque credential references, and secret-free provider descriptors. |
+| `POST /product/config/model` | Managed-only `{ model: "provider:creator/model" \| null }`. |
+| `POST /product/config/reasoning-effort` | Managed-only `{ model: "creator/model", effort: ReasoningEffort \| null }`; sets or clears the workspace/catalog/model preference. |
 | `POST /product/config/provider-key` | Managed-only `{ provider, apiKey: string \| null }`; stores or removes a supported key and returns status without the value. |
 | `POST /product/config/credential-reference` | Managed-only `{ provider, reference, label }`; stores an opaque reference, not credential bytes. |
 
@@ -82,8 +85,8 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 
 | Method and path | Input and result |
 |---|---|
-| `POST /sessions` | `{ workspaceId?, model?, budget?, sessionName?, branchName? }` → `{ sessionId, branchId }`. |
-| `POST /sessions/:session/model?branch=:branch` | `{ model: { provider, model } }` → explicit idle-branch model change. |
+| `POST /sessions` | `{ workspaceId?, model?, budget?, sessionName?, branchName? }` → `{ sessionId, branchId }`; product model configuration includes `reasoningEffort`. |
+| `POST /sessions/:session/model?branch=:branch` | `{ model: { provider, model, reasoningEffort? } }` → explicit idle-branch model or effort change. |
 | `GET /sessions/:session/snapshot?branch=:branch` | `{ cursor, state }`. |
 | `GET /sessions/:session/history?branch=:branch` | Ordered branch-lineage `AgentEvent[]`. |
 | `GET /sessions/:session/stream?branch=:branch&after=:cursor` | Committed-event SSE plus cursorless progress. |
@@ -106,6 +109,8 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 | `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | Append `{ reconciliationId?, assessment, summary, evidence?, recordedBy }`; durable effect status remains unknown. |
 
 Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start` and holds the request through the next terminal or user-waiting boundary.
+
+`reasoningEffort` is `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Clients that send an effort configuration first require `reasoningEffortSelection` from `/capabilities`; an older server fails with `CAPABILITY_UNAVAILABLE` rather than ignoring the field. Existing clients remain compatible because omitted effort normalizes to `provider-default`.
 
 Reconciliation is evidence-only. It never rewrites an unknown effect, reports a retry, or executes a successor operation.
 
@@ -265,7 +270,11 @@ import { AgentClient } from "@prime-agent/runtime/protocol";
 
 const client = new AgentClient(serviceUrl, bearerToken);
 const session = await client.createSession("example", {
-  model: { provider: "openai", model: "gpt-5.6-sol" },
+  model: {
+    provider: "openai",
+    model: "openai/gpt-5.6-sol",
+    reasoningEffort: "high",
+  },
 });
 
 const admitted = await client.startRun(session.sessionId, session.branchId, {
@@ -360,6 +369,7 @@ The exported `ProtocolRequest` and `ProtocolResponse` unions in `protocol/types.
 ## Security and compatibility limits
 
 - Protocol version 1 is trusted-local.
+- Additive capabilities are negotiated through `/capabilities`; effort-aware clients must not send an effort field when `reasoningEffortSelection` is absent.
 - Managed authentication is owner-local bearer access, not multi-tenant authorization.
 - The embedded diagnostic server is unauthenticated.
 - No WebSocket transport, TLS termination, non-loopback deployment, or in-place protocol upgrade negotiation is provided.

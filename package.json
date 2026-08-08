@@ -38,9 +38,13 @@
     "test:acceptance:matrix": "bun run scripts/release-acceptance-matrix.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.36",
+    "@ai-sdk/gateway": "4.0.46",
+    "@ai-sdk/openai": "4.0.36",
     "@libsql/client": "^0.15.15",
     "@opentui/core": "^0.5.1",
     "@tursodatabase/sync": "0.7.2",
+    "ai": "7.0.58",
     "typescript": "^5.9.3",
     "ulid": "^3.0.1",
     "zod": "^4.1.12"

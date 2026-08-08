@@ -1,6 +1,6 @@
 # Relational table classification registry
 
-This registry is part of the architecture contract. `bun run check:architecture` extracts every `CREATE TABLE` from every migration (plus SQLite's `sqlite_sequence` when `AUTOINCREMENT` is used), parses the rows below, rejects a missing/unknown classification, and verifies physical guards for immutable classes.
+This registry is part of the architecture contract. `bun run check:architecture` extracts every `CREATE TABLE` from workspace and profile migrations (plus SQLite's `sqlite_sequence` when `AUTOINCREMENT` is used), parses the rows below, rejects a missing/unknown classification, and verifies physical guards for immutable classes.
 
 ## Machine-checked registry
 
@@ -55,6 +55,16 @@ Do not change the first three columns or class tokens without updating the archi
 | `sync_reconciliations` | `operational-projection` | `mutable` | Surfaced duplicate intents, divergent advances, rejected mutations, and task claims. A user resolution is explicit metadata; it never rewrites canonical history or silently chooses a claim. |
 | `data_manifests` | `operational-projection` | `mutable` | Ownership-checked export/deletion plan enumerating workspace/profile/artifact resources, every replica status/watermark/catalog placement, managed URLs and unaddressable identities. Planned/blocked/partial is never evidence that physical deletion completed. |
 | `sqlite_sequence` | `engine-metadata` | `mutable` | SQLite-owned allocator created by `events.sequence INTEGER PRIMARY KEY AUTOINCREMENT`. It preserves increasing local cursors and is recoverable from the greatest retained sequence under SQLite rules. Application/model code must not mutate it directly. |
+| `profile_schema_migrations` | `migration-metadata` | `mutable` | Profile migrator-owned contiguous ledger with immutable source digests. Unknown, missing, or changed applied versions prevent the profile from opening. |
+| `profile_identity` | `operational-projection` | `mutable` | Profile-owned identity control record. It is separate from workspace event history and is included in profile backup and deletion scopes. |
+| `devices` | `operational-projection` | `mutable` | Profile-owned device identities used for origin attribution and local execution ownership. |
+| `preferences` | `operational-projection` | `mutable` | Profile-owned user and workspace preferences, including model-specific effort defaults. Preferences do not rewrite existing session configuration. |
+| `credential_references` | `operational-projection` | `mutable` | Opaque profile-owned credential handles and non-secret metadata; credential values are stored outside this table. |
+| `profile_skill_versions` | `canonical-append-only` | `immutable` | Immutable profile skill definitions, provenance, and test evidence guarded against update and deletion. |
+| `profile_skills` | `operational-projection` | `mutable` | Current profile skill version and availability routing derived from retained profile skill actions. |
+| `profile_skill_actions` | `canonical-append-only` | `immutable` | Immutable profile skill lifecycle actions guarded against update and deletion. |
+| `workspace_catalog` | `operational-projection` | `mutable` | Profile-owned workspace discovery, placement, and credential-reference catalog. Workspace canonical state remains in each workspace database. |
+| `model_catalog_cache` | `operational-projection` | `mutable` | Bounded, digest-checked normalized Gateway catalog cache keyed by normalized endpoint identity. It is safe to delete and refetch and never owns committed dispatch provenance. |
 
 ### Allowed classification vocabulary
 
@@ -66,6 +76,8 @@ Do not change the first three columns or class tokens without updating the archi
 - `engine-metadata`: database-engine-owned state, not an application write surface.
 
 No table is an unclassified mutable source of business truth. New migrations must add registry rows in the same change. Any lease, synchronization, or index table must use an allowed operational class or extend this policy deliberately.
+
+The machine-checked registry covers both the canonical workspace database migrations and the separately opened profile database's immutable migration ledger. Profile preferences and catalogs remain profile-owned configuration/control records rather than workspace event authority.
 
 ## Per-table write rules
 

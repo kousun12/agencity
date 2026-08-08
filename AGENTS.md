@@ -142,7 +142,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 
 ### Incomplete product surfaces
 
-- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. First interactive startup without a usable provider asks the user to choose OpenAI, Anthropic, or Vercel AI Gateway, accepts the key through hidden input, and asks for the model ID before creating a session. The TUI `/model` inspector is a keyboard-driven provider/model picker; it stores owner-only provider keys outside canonical/profile preference databases and selects durable `provider:model` configurations, including gateway IDs containing `/`. Environment keys remain supported fallbacks. The package remains private and has no claimed registry or standalone release channel.
+- `agencity`, `bun run dev`, workspace discovery, durable no-ID resume/selection, explicit provider/model onboarding, and source/link installation are implemented. First interactive startup without a usable provider asks the user to choose OpenAI, Anthropic, or Vercel AI Gateway, accepts the key through hidden input, and asks for the canonical `creator/model` ID before creating a session. Gateway, direct OpenAI, and direct Anthropic execution share one Vercel AI SDK core with thin transport factories. The public Gateway catalog is the source for model capacity, pricing, and reasoning metadata and is retained in a bounded endpoint-keyed profile cache. The TUI `/model` inspector is a keyboard-driven provider/model picker; `/effort` selects durable provider-default, none, minimal, low, medium, high, or xhigh reasoning at an idle model boundary. Owner-only provider keys remain outside canonical/profile preference databases. Environment keys remain supported fallbacks. The package remains private and has no claimed registry or standalone release channel.
 - The product has no demo mode. Echo remains an internal deterministic test provider and is filtered from product selection, help, status, and onboarding. Ordinary non-interactive work without a usable provider fails with setup guidance.
 - The ordinary task route drives the strict `agencity.agent-action` version-1 autonomous loop. Only validated TypeScript actions execute generated work; final, clarification, permission, blocked, and failed are typed run control. Raw action JSON remains internal attributable history. A rejected action is retained and, when run bounds permit, delivered exactly once to one correction step; rejected code never executes, and a second consecutive rejection terminates the run.
 - Console cells support notebook observation, bounded `inspect`, artifact spill, `state.list`, and retained `cells.list/get`; lexical bindings remain deliberately non-durable.
@@ -293,15 +293,15 @@ Physical owned-scope deletion is a separate, guarded data-control operation. Do 
 
 ### Event evolution is versioned
 
-Released event meanings are immutable. The current runtime accepts event schema version 1 only and does not yet have a general event-version registry or upcaster pipeline. Before introducing a new version:
+Released event meanings are immutable. The current pre-release runtime accepts event schema version 2 only and does not have a general event-version registry or upcaster pipeline. The reasoning/model-capability cutover deliberately rejects version-1 workspace events and legacy unversioned profiles with reset guidance; it does not rewrite or delete them. Before introducing a later version:
 
 - implement explicit version acceptance and deterministic projection/upcasting;
-- preserve and replay retained version-1 fixtures;
+- define whether retained version-2 fixtures remain directly accepted or require an explicit deterministic upcaster;
 - add validation and protocol compatibility tests;
 - update the event documentation;
 - keep mixed-history projection behavior explicit.
 
-Compatible optional version-1 data may be added only when old retained records, reducers, validators, storage, and clients continue to behave deterministically.
+Compatible optional version-2 data may be added only when retained records, reducers, validators, storage, and clients continue to behave deterministically.
 
 Never rewrite retained history as a migration shortcut.
 

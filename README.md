@@ -35,7 +35,9 @@ cd /path/to/a/repository
 agencity
 ```
 
-On the first interactive launch without a usable provider, Agencity asks you to choose OpenAI, Anthropic, or Vercel AI Gateway, accepts the API key through hidden terminal input, and asks for the exact model ID before creating a session. Stored keys live in an owner-only profile `auth.json`; environment credentials remain supported fallbacks.
+On the first interactive launch without a usable provider, Agencity asks you to choose OpenAI, Anthropic, or Vercel AI Gateway, accepts the API key through hidden terminal input, and asks for the canonical `creator/model` ID before creating a session. Stored keys live in an owner-only profile `auth.json`; environment credentials remain supported fallbacks.
+
+Model execution uses the Vercel AI SDK for Gateway, direct OpenAI, and direct Anthropic transports. `/effort` selects a durable reasoning level for the current idle branch, and `--effort LEVEL` selects it for new work. Agencity uses the public Gateway catalog for model capacity, pricing, and reasoning metadata; stale or unverified capability data remains visible.
 
 There is no product demo mode or credential-free fallback. Echo is an internal deterministic test provider and is unavailable in product selection. Non-interactive new work fails with setup guidance until a provider and model are configured.
 

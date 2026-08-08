@@ -98,7 +98,11 @@ async function configuration(prefix: string): Promise<ManagedServiceConfiguratio
 }
 
 async function opened(config: ManagedServiceConfiguration): Promise<ManagedWorkspaceService> {
-  const service = await ManagedWorkspaceService.open(config, "0.1.0-test");
+  const service = await ManagedWorkspaceService.open(config, "0.1.0-test", {
+    modelCatalog: {
+      fetch: (async () => Response.json({ data: [] })) as unknown as typeof fetch,
+    },
+  });
   services.push(service);
   return service;
 }
@@ -130,15 +134,24 @@ describe("managed workspace service", () => {
       });
       expect((await stat(join(config.workspace.stateDirectory, "auth.json"))).mode & 0o077).toBe(0);
 
-      await terminal.execute("/model anthropic:fable-5");
+      await terminal.execute("/model anthropic:anthropic/claude.fable.5");
       expect((await client.snapshot(session.sessionId, session.branchId)).state.model).toEqual({
         provider: "anthropic",
-        model: "claude-fable-5",
+        model: "anthropic/claude.fable.5",
+        reasoningEffort: "provider-default",
       });
       expect(output).toContain("Saved API key for anthropic in the owner-only local auth file.");
-      expect(output).toContain("Selected branch model: anthropic:claude-fable-5.");
+      expect(output).toContain("Selected branch model: anthropic:anthropic/claude.fable.5.");
       expect(output).not.toContain(secret);
       expect(JSON.stringify(await client.history(session.sessionId, session.branchId))).not.toContain(secret);
+
+      expect((await client.capabilities()).reasoningEffortSelection).toBe(true);
+      expect((await client.modelCatalog()).endpointId).toMatch(/^[a-f0-9]{64}$/);
+      await terminal.execute("/effort high");
+      expect((await client.snapshot(session.sessionId, session.branchId)).state.model.reasoningEffort).toBe("high");
+      expect((await client.productConfig("anthropic/claude.fable.5")).selectedModelEffortPreference).toBe("high");
+      expect(output).toContain("Selected reasoning effort: high.");
+      expect(output).toContain("Capability: unverified");
 
       await terminal.execute("/model logout anthropic");
       expect((await client.productConfig()).providers?.find(provider => provider.name === "anthropic")!).toMatchObject({
@@ -308,7 +321,7 @@ describe("managed workspace service", () => {
       const effectId = "crash-non-idempotent";
       await raw.appendEvents([{
         sessionId: session.sessionId, branchId: session.branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "crash:effect",
-        payload: { effectId, executor: "model", operation: "complete", input: {}, idempotencyKey: "crash:effect", idempotent: false },
+        payload: { effectId, executor: "shell", operation: "run", input: { command: "printf crash-test" }, idempotencyKey: "crash:effect", idempotent: false },
       }], fence);
       expect((await raw.claimEffect(effectId, "dead-service", undefined, fence))?.status).toBe("running");
       process.kill(first.manifest.pidHint, "SIGKILL");

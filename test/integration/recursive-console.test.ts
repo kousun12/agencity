@@ -125,7 +125,7 @@ describe("FU-013 model-facing durable rlm API", () => {
       const results = await Promise.all(handles.map((handle) => supervisor.models.result(handle.handleId, { timeoutMs: 5_000 })));
       expect(results.map((item) => item.status)).toEqual(["succeeded", "failed", "succeeded"]);
       expect(handles.map((item) => (item.input as any).position)).toEqual([0, 1, 2]);
-      expect(results[1]?.error).toContain("selected provider failure");
+      expect(results[1]?.error).toContain("Model provider request failed");
       expect(results[0]?.provenance.providerAttemptEffectIds).toHaveLength(1);
     } finally { await supervisor.close(); }
   });

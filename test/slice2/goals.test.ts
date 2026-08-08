@@ -15,22 +15,21 @@ async function open(temp: TempRuntime, providers: readonly RecordingProvider[] =
 describe("Slice 2 current-version goal gates and autonomous recovery", () => {
   test("a gate result is stale when the branch/workspace cursor changes during evaluation", async () => {
     const temp = await makeTempRuntime("agencity-slice2-goal-stale-"); temps.push(temp);
-    let supervisor!: Supervisor;
-    let root!: { sessionId: string; branchId: string };
-    const provider = new RecordingProvider("gate-mutator", async (_context, call) => {
-      if (call === 1) await supervisor.appendMessage(root.sessionId, root.branchId, "user", "workspace changed while gate ran");
-    });
-    supervisor = await open(temp, [provider]);
+    const supervisor = await open(temp);
     try {
-      root = await supervisor.createSession({ workspaceId: "stale" });
+      const root = await supervisor.createSession({ workspaceId: "stale" });
       const goal = await supervisor.goals.create(root.sessionId, root.branchId, {
         description: "validated against exact version",
         gates: [{
-          name: "mutating gate", executor: "model", operation: "complete", idempotent: false,
-          input: { context: { messages: [] }, configuration: { provider: provider.name, model: "gate" } },
+          name: "concurrent gate", executor: "shell", operation: "run", idempotent: false,
+          input: { command: "sleep 0.1" },
         }],
       });
-      const evaluated = await supervisor.goals.requestCompletion(root.sessionId, root.branchId, goal.goalId);
+      const completion = supervisor.goals.requestCompletion(root.sessionId, root.branchId, goal.goalId);
+      await waitFor(async () => (await supervisor.storage.loadEvents(root.sessionId, { branchId: root.branchId }))
+        .some(event => event.type === "GoalGateStatusChanged" && (event.payload as { status?: string }).status === "running"));
+      await supervisor.appendMessage(root.sessionId, root.branchId, "user", "workspace changed while gate ran");
+      const evaluated = await completion;
       expect(evaluated.status).toBe("blocked");
       expect(evaluated.reason?.toLowerCase()).toMatch(/stale|cursor|workspace|version/);
       expect(evaluated.gates[0]?.status).not.toBe("passed");
