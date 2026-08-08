@@ -94,7 +94,7 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 | `POST /sessions/:session/runs?branch=:branch` | `{ task, requestKey?, goalMode?, goalId? }` → run result or managed acceptance. |
 | `GET /sessions/:session/runs/:run?branch=:branch` | Current retained `AgentRunResult`. |
 | `POST /sessions/:session/runs/:run/resume?branch=:branch` | Advance the retained run. |
-| `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | `{ response, approved? }`; permission requires boolean `approved`. |
+| `POST /sessions/:session/runs/:run/input/:request?branch=:branch` | Transitional pre-release route for the current clarification/permission implementation; removed by the formal-tool cutover. |
 | `POST /sessions/:session/runs/:run/cancel?branch=:branch` | `{ reason? }` → cancellation-reconciled result. |
 | `POST /sessions/:session/stop?branch=:branch` | Managed-only `{ reason? }` → cancel the active run, if any. |
 | `POST /sessions/:session/turns?branch=:branch` | Advanced diagnostic one-turn model result. |
@@ -108,7 +108,7 @@ The supported product providers are OpenAI, Anthropic, and Vercel AI Gateway. Ec
 | `GET /sessions/:session/effects/:effect/reconciliation?branch=:branch` | One unknown effect and assessment history. |
 | `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | Append `{ reconciliationId?, assessment, summary, evidence?, recordedBy }`; durable effect status remains unknown. |
 
-Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start` and holds the request through the next terminal or user-waiting boundary.
+Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start`. The current pre-release server may also stop at its older user-waiting boundary; [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) removes that boundary and the input route. Missing information becomes a blocked `finish`, and a later user message starts an ordinary new run.
 
 `reasoningEffort` is `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Clients that send an effort configuration first require `reasoningEffortSelection` from `/capabilities`; an older server fails with `CAPABILITY_UNAVAILABLE` rather than ignoring the field. Existing clients remain compatible because omitted effort normalizes to `provider-default`.
 
@@ -149,7 +149,7 @@ Reconciliation is evidence-only. It never rewrites an unknown effect, reports a 
 | `GET /sessions/:session/schedules/wakes?branch=:branch&status=...` | Durable wake records. |
 | `POST /schedules/:id/tick\|pause\|resume\|clear` | Schedule lifecycle operation. |
 
-The family roster is an additive deterministic read projection. Each item contains the exact `sessionId` and `branchId`, display name, relationship, depth, session status, related task identity and status, task summary, model configuration, cancellation-request flag, activity, and bounded activity reason. Activity is one of `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable`. Reasons are `waiting_for_user`, `permission_required`, `blocked`, `failed`, `budget_exceeded`, `unknown`, `cancellation_pending`, `cancelled`, `archived`, `missing_state`, or `null`.
+The family roster is an additive deterministic read projection. Each item contains the exact `sessionId` and `branchId`, display name, relationship, depth, session status, related task identity and status, task summary, model configuration, cancellation-request flag, activity, and bounded activity reason. The current pre-release projection can report `waiting`, `waiting_for_user`, and `permission_required`; the formal-tool cutover removes those values. The target activities are `working`, `idle`, `attention`, `ended`, or `unavailable`, with reasons `blocked`, `failed`, `budget_exceeded`, `unknown`, `cancellation_pending`, `cancelled`, `archived`, `missing_state`, or `null`.
 
 `working` requires a running task, queued/running agent run, or running session. An admitted child with no active run is `idle`. A parent row retains the task edge that relates it to the current child, but its activity is derived from the parent route rather than from that child task.
 
@@ -240,7 +240,7 @@ The client exposes typed methods for all route groups:
 - discovery and service: `health`, `capabilities`, `serviceStatus`, `shutdownService`, `serviceAgents`;
 - product catalog/configuration: `productSessions`, `productSelect`, `productRename`, `productConfig`, `productSetModel`, `productSetProviderKey`, `productCredentialReference`, `modelProviders`;
 - session lifecycle: `createSession`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
-- autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `respondToRun`, `cancelRun`, `turn`, `cell`;
+- autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`; the current pre-release client also exposes transitional `respondToRun`, which the formal-tool cutover removes;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
 - agents and recursive work: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mailbox methods, follow-up/cancel methods, documents, input sets, recursive model methods;
@@ -286,14 +286,11 @@ const run = "accepted" in admitted && admitted.accepted
   ? await client.run(session.sessionId, session.branchId, admitted.runId)
   : admitted;
 
-if (run.status === "waiting_for_user" && run.pendingInput) {
-  await client.respondToRun(
-    session.sessionId,
-    session.branchId,
-    run.runId,
-    run.pendingInput.id,
-    { response: "continue" },
-  );
+if (run.status === "blocked") {
+  await client.startRun(session.sessionId, session.branchId, {
+    task: "Here is the missing information: continue.",
+    requestKey: "protocol-example-follow-up",
+  });
 }
 ```
 

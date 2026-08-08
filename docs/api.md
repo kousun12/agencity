@@ -103,15 +103,17 @@ The Echo provider exists inside the low-level runtime as a deterministic test fi
 
 Product tasks use the strict autonomous-run service:
 
-- `runs.start` admits a task and advances it through typed model actions, cells, observations, inputs, budget accounting, goals, and a terminal or waiting boundary.
+- `runs.start` admits a task and advances it through typed model actions, cells, observations, budget accounting, goals, and a terminal boundary.
 - `runs.get` reads the retained run.
 - `runs.advance` resumes a retained run without inventing action identity.
-- `runs.respond` records a clarification or permission response. Permission responses require an explicit boolean decision.
+- `runs.respond` is a transitional pre-release method for the current clarification/permission implementation.
 - `runs.cancel` commits cancellation intent before aborting admitted work.
 
 An exact `requestKey` retry returns the same run; reuse with changed durable meaning conflicts. `unknown`, `cancelled`, `budget_exceeded`, `blocked`, and `failed` are distinct outcomes.
 
-Agent actions are strict `agencity.agent-action` version-1 JSON values. Only the `typescript` variant executes generated work. Shell, file, SQL, model, subagent, memory, skill, and artifact operations are typed APIs inside the cell. The supervisor never heuristically executes prose. See [Generated TypeScript console SDK](./console-sdk.md).
+The accepted architecture replaces textual action JSON with exactly two formal provider tools: `bun_console` and `finish`. Only `bun_console` executes generated work. Shell, file, SQL, model, subagent, memory, skill, and artifact operations are typed APIs inside the cell. `finish` ends the run as successful, blocked, or failed; missing information uses blocked `finish` and a later ordinary run. The supervisor never heuristically executes prose. See [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) and [Generated TypeScript console SDK](./console-sdk.md).
+
+The current pre-release implementation still exposes textual version-1 actions and `runs.respond`. The formal-tool cutover removes clarification, permission, request-input, and waiting-for-user types and methods without a compatibility layer.
 
 `modelLoop.turn` and `modelLoop.run` remain low-level diagnostic paths. They are not substitutes for `runs` in a product task integration.
 
@@ -146,7 +148,7 @@ const terminal = await supervisor.models.result(call.handleId, {
 });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived `working`, `waiting`, `idle`, `attention`, `ended`, or `unavailable` activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Its bounded reason codes distinguish user input, permission, blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state cases. Missing retained state stays unavailable instead of resolving to another branch.
+`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. The current pre-release projection includes waiting/input/permission reasons; the formal-tool cutover removes them. The target values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 
 Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
 

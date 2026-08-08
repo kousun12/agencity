@@ -265,6 +265,8 @@ Interactive startup discovers usable providers, makes model choice explicit, and
 
 **Status:** Done
 
+**Superseded run-control detail:** This entry records the completed pre-formal-tool implementation. [ADR 0010](../docs/decisions/0010-formal-model-tool-contracts.md) removes clarification, permission, pending-input, and waiting-for-user behavior. The replacement uses only `bun_console` and `finish`; missing information ends the current run as blocked and a later user message starts an ordinary new run.
+
 ### Gap
 
 The original PRD preserves Prime Agent's central RLM property: the model writes TypeScript that can inspect durable context, execute tools, call models, and coordinate subagents. The current ordinary model loop commits one model response as text. Console cells and tool surfaces exist, but a normal user task does not automatically drive a complete recoverable model-to-program execution loop.

@@ -1,6 +1,6 @@
 # Event schemas (version 2)
 
-`events` is the canonical append-only history. Version 2 is validated at the storage boundary; any other schema version is rejected. This pre-release schema cutover adds complete model dispatch records and intentionally does not upcast version-1 workspaces. Opening a workspace with version-1 events fails with reset guidance and does not delete the data. Released payload meaning must not be edited in place; future evolution requires a new event schema version and an explicit tested projection/upcast path.
+`events` is the canonical append-only history. The current implementation validates version 2 at the storage boundary and rejects any other schema version. The accepted formal-tool architecture will cut over to version 3 only, reject version-1/version-2 workspaces with reset guidance, and remove textual action and pending-input events without an upcaster. These are pre-release reset boundaries; no released history is being migrated. After release, payload evolution requires a new schema version and an explicit tested projection/upcast path.
 
 ## Header
 
@@ -102,9 +102,9 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `AgentRunStepStarted` | `{ runId, stepId, ordinal, contextId, callId, effectId, actionId, observationEventIds }` | Starts the next deterministic step and freezes the exact not-previously-delivered execution/input observation IDs for its dependent context. |
 | `AgentRunModelAttemptStarted` | `{ runId, stepId, ordinal, attempt, contextId, callId, effectId, reason, estimatedInputTokens, contextWindow, retryOfCallId? }` | Attributes the exact initial or provider-overflow model attempt. Only typed provider-confirmed overflow may create a later attempt over a strictly smaller candidate. |
 | `AgentRunActionCommitted` / `AgentRunActionRejected` | Run/step/action/call identity plus raw authoritative response and either strict v1 parsed action or rejection reason. | Retains internal attributable model-action history. Raw action JSON never becomes an ordinary assistant message or executable code unless strict parsing admits the `typescript` variant. When run bounds permit, the first consecutive rejection is delivered exactly once to one correction step; another rejection terminates the run. |
-| `AgentRunUserInputRequested` / `AgentRunUserInputReceived` | Stable request/action IDs, clarification/permission kind and question, optional permission, then response and explicit approval decision. | Projects a durable waiting boundary and exact-once response. |
+| `AgentRunUserInputRequested` / `AgentRunUserInputReceived` | Stable request/action IDs, clarification/permission kind and question, optional permission, then response and explicit approval decision. | Transitional version-2 behavior removed by the version-3 formal-tool cutover. |
 | `AgentRunCancellationRequested` | `{ runId, reason? }` | Records cancellation intent before effect abort/terminal cancellation; the first retained reason wins. |
-| `AgentRunStatusChanged` | `{ runId, status, reason?, finalMessageId? }` | Projects waiting or distinct succeeded/blocked/failed/cancelled/budget-exceeded/unknown terminal state. Only succeeded links the separately appended validated-final assistant message. |
+| `AgentRunStatusChanged` | `{ runId, status, reason?, finalMessageId? }` | Version 2 projects waiting or distinct terminal states and links only succeeded messages. Version 3 removes waiting and permits an accepted `finish` to link succeeded, blocked, or failed assistant messages; runtime-originated terminal outcomes do not fabricate messages. |
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
 
@@ -150,6 +150,8 @@ A normal turn appends status-running, `ContextMaterialized`, `ModelCallRequested
 
 ### Autonomous agent run
 
+The following diagram documents the current version-2 implementation. Version 3 removes `WaitingForUser`; `finish` transitions directly to succeeded, blocked, or failed, and a later user message starts a separate ordinary run.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Requested
@@ -184,7 +186,7 @@ stateDiagram-v2
     Unknown --> [*]
 ```
 
-Every step context records its source events and an exact-once `run.observations` list. The model's authoritative JSON response is retained in `ModelOutputChunk` and the action event, while its `ModelCallCompleted` intentionally has no `responseMessageId`. This internal protocol encoding is not conversation. Only a strict validated final action appends an assistant `MessageAppended`; clarification and permission are typed waiting states. Recovery owns agent-run calls separately from diagnostic model-turn finalization, so a crash after the model effect commits cannot accidentally publish raw action JSON or call the provider again.
+Every current version-2 step context records its source events and an exact-once `run.observations` list. The provider's authoritative JSON response is retained internally rather than becoming conversation. This textual transport and its clarification/permission waiting states are removed by version 3. Formal tool submissions remain internal; an accepted `finish` appends the exact assistant message for succeeded, blocked, or failed status. Recovery owns agent-run calls separately from diagnostic text-turn finalization, so a crash after the model effect commits cannot publish protocol data or call the provider again.
 
 ### Goal gate and heartbeat
 
@@ -206,7 +208,7 @@ Events are made visible to subscribers only after database commit. Durable commi
 
 ## Current evolution limitations
 
-The runtime validates one uniform `EVENT_SCHEMA_VERSION = 2`. There is no per-event version registry, persisted reducer package hash, or upcaster. Version-1 workspaces are rejected by the pre-release cutover. Before changing any released payload again, introduce a new accepted version, an explicit deterministic projection path, fixtures for retained version-2 history, and protocol compatibility tests.
+The current runtime validates one uniform `EVENT_SCHEMA_VERSION = 2`. The formal-tool implementation replaces it with version 3 and rejects version-1/version-2 workspaces before projection. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
 
 
 ## Harness, evaluation, and exact-version events

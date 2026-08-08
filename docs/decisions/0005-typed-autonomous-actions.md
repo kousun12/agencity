@@ -1,11 +1,14 @@
 # ADR 0005: Typed autonomous actions
 
-- **Status:** Accepted
+- **Status:** Superseded
 - **Date:** 2026-08-07
 - **Scope:** Autonomous model action protocol and executable action boundary
 - **Extends:** [ADR 0001](./0001-durable-local-runtime-foundations.md)
+- **Superseded by:** [ADR 0010](./0010-formal-model-tool-contracts.md)
 
 ## Context
+
+This record describes the implemented pre-formal-tool architecture. ADR 0010 replaces its textual JSON transport, clarification/permission lifecycle, waiting-for-user state, and success-only message-linkage rule. The strict admission boundary and single TypeScript execution surface remain in force.
 
 An autonomous run must distinguish executable work from user-facing text and from supervisor control decisions. Heuristically extracting code from model prose would make execution ambiguous, weaken attribution, and make validation and recovery depend on formatting guesses. Giving the provider a separate tool for every runtime capability would also split the programming model into privileged paths with different durability semantics.
 

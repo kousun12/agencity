@@ -67,14 +67,16 @@ Agencity has no product demo mode or credential-free fallback. Internal determin
 
 ## Tasks and runs
 
-A task is the instruction you give Agencity. A run is one durable attempt to carry that task forward. During a run, the model returns typed actions such as:
+A task is the instruction you give Agencity. A run is one durable attempt to carry that task forward. The current pre-release checkout uses strict textual actions and may expose clarification/permission input states. Those surfaces are transitional and carry no compatibility commitment.
 
-- a TypeScript cell that uses the console SDK for files, shell commands, SQL, models, subagents, memory, skills, or artifacts;
-- a clarification or permission request;
-- a final answer;
-- an explicit blocked or failed result.
+The accepted formal-tool architecture replaces them with two model choices:
 
-Every response must contain exactly one valid versioned action. If validation rejects a response, Agencity retains it without executing its code and gives the model one bounded correction step with the exact error. A second consecutive rejection ends the run. Normal budget and step limits also apply to the correction.
+- `bun_console`, which submits a TypeScript cell using the console SDK for files, shell commands, SQL, models, subagents, memory, skills, or artifacts;
+- `finish`, which returns a successful answer or an explicit blocked or failed result.
+
+Every autonomous response must contain exactly one valid call from that set. If validation rejects a response, Agencity retains it without executing its code and gives the model one bounded correction step with the exact error. A second consecutive rejection ends the run. Normal budget and step limits also apply to the correction.
+
+There is no clarification, permission, request-input, or waiting-for-user run state after this cutover. If information is missing, `finish` returns a blocked response containing the question. Your later message starts an ordinary new run on the same branch.
 
 Agencity records a requested external effect before executing it. A dependent model step starts only after the result is committed. A final answer may also be checked by a completion gate:
 
@@ -113,7 +115,7 @@ The conversation uses the full main width while no contextual inspector is activ
 
 Normal, compact, and minimum height modes reduce chrome in a fixed order. The main view always retains usable space, while very short terminals omit the optional family summary and reduce an active inspector to its required control.
 
-- Type plain text to start a task or answer a pending clarification.
+- Type plain text to start a task or provide more information after a blocked result.
 - `Ctrl-P` opens command search.
 - `Ctrl-O` expands or collapses recent run activity.
 - Page Up/Down scrolls the active view.

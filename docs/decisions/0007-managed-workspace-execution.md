@@ -19,7 +19,7 @@ Execution ownership uses local compare-and-swap leases with monotonically retain
 
 The current fence proof is checked in the same LibSQL transaction as existing-session canonical appends and outbox claim or reset operations. A process that loses ownership cannot continue committing after another process takes over, even if its code is still running. Lease expiry or explicit release permits same-device process takeover and increments the fence.
 
-The service shuts down admission and drains admitted protocol handlers and resident workers during graceful shutdown. It may exit after its configured quiescent period when no active run, effect, wake, schedule, heartbeat, resident worker, or attached client requires it. A run waiting only for user input remains durable but does not by itself keep the service alive.
+The service shuts down admission and drains admitted protocol handlers and resident workers during graceful shutdown. It may exit after its configured quiescent period when no active run, effect, wake, schedule, heartbeat, resident worker, or attached client requires it. Under [ADR 0010](./0010-formal-model-tool-contracts.md), missing information ends the run as blocked; the retained blocked branch does not by itself keep the service alive.
 
 ## Consequences
 
