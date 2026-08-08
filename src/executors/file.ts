@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { lstat, mkdir, realpath, rename, rm } from "node:fs/promises";
 import type { JsonValue } from "../domain/json.ts";
 import { ValidationError } from "../domain/index.ts";
@@ -23,14 +23,7 @@ export class FileExecutor implements EffectExecutor {
 
   #path(value: JsonValue | undefined): string {
     if (typeof value !== "string") throw new ValidationError("File operation requires path");
-    const path = resolve(this.root, value);
-    this.#assertLexical(path);
-    return path;
-  }
-
-  #assertLexical(path: string): void {
-    const rel = relative(this.root, path);
-    if (rel.startsWith("..") || isAbsolute(rel)) throw new ValidationError("File path escapes executor root");
+    return resolve(this.root, value);
   }
 
   async #assertResolvedInside(path: string, parentOnly = false): Promise<void> {
@@ -45,7 +38,9 @@ export class FileExecutor implements EffectExecutor {
       }
     }
     const rel = relative(root, candidate);
-    if (rel.startsWith("..") || isAbsolute(rel)) throw new ValidationError("File path escapes executor root through a symlink");
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new ValidationError("File path escapes executor root");
+    }
   }
 
   async execute(
