@@ -16,6 +16,7 @@ import type {
 import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
 import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
+import type { ProductBranchSummary } from "../product/index.ts";
 
 
 export interface ProtocolCapabilities {
@@ -133,7 +134,7 @@ export class AgentClient {
   serviceStatus(): Promise<unknown> { return this.#json("/service/status"); }
   shutdownService(): Promise<unknown> { return this.#post("/service/shutdown"); }
   serviceAgents(): Promise<any[]> { return this.#json("/service/agents"); }
-  productSessions(): Promise<any[]> { return this.#json("/product/sessions"); }
+  productSessions(): Promise<ProductBranchSummary[]> { return this.#json("/product/sessions"); }
   productSelect(target?: string, branchId?: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/product/select", { ...(target === undefined ? {} : { target }), ...(branchId === undefined ? {} : { branchId }) }); }
   productRename(sessionId: string, branchId: string | undefined, name: string): Promise<unknown> { return this.#post("/product/rename", { sessionId, ...(branchId === undefined ? {} : { branchId }), name }); }
   productConfig(model?: string): Promise<{ defaultModel: string | null; catalogEndpointId: string; catalogOrigin: string; executionOrigins: Record<string, string>; selectedModelEffortPreference: ReasoningEffort | null; credentialReferences: unknown[]; providers?: ModelProviderDescriptor[] }> { return this.#json(`/product/config${model ? `?model=${encodeURIComponent(model)}` : ""}`); }

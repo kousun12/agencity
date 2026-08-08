@@ -76,6 +76,8 @@ Ordinary `agencity` product flows discover or start a per-workspace `ManagedWork
 
 The managed service is a product lifecycle component, not a hosted multi-tenant service and not a placement adapter. It binds to `127.0.0.1`, authenticates every route with an owner bearer from an owner-only manifest, and retains trusted-local OS authority. See [Public client protocol](./protocol.md).
 
+The public client exposes the managed workspace catalog as `AgentClient.productSessions(): Promise<ProductBranchSummary[]>`. Each summary contains exact session and branch IDs, human-readable names, model configuration, exact session status, task summary, active-goal and unresolved-work counts, timestamps, and `root` and `initialBranch` classifications. Product clients can filter `root === true` without reconstructing family relationships. `AgentClient.productSelect(target, branchId)` selects an exact retained route and updates the managed workspace's remembered resume selection; catalog reads alone do not change selection.
+
 Do not run an embedded supervisor against a workspace database currently owned by the managed product service.
 
 ## Model providers

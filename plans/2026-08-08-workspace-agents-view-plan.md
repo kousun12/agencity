@@ -1,6 +1,6 @@
 # Workspace Agents view plan
 
-**Status:** Proposed  
+**Status:** Implemented
 **Date:** August 8, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Extends:** [Ergonomic agent-family navigation](./2026-08-07-ergonomic-agent-family-navigation-plan.md)
@@ -363,3 +363,32 @@ The feature is complete when:
 9. Unit, OpenTUI, controller, and installed pseudo-terminal tests cover the complete path.
 10. `bun run typecheck`, `bun run check:architecture`, relevant focused tests, and `bun run verify` pass.
 11. Public documentation and `AGENTS.md` describe the shipped behavior and limitations accurately.
+
+## Implementation summary
+
+Implementation completed on August 8, 2026.
+
+### Delivered behavior
+
+- `AgentClient.productSessions()` returns `Promise<ProductBranchSummary[]>`.
+- The terminal view model filters root branches, groups exact statuses, applies deterministic sorting and visible-field search, retains stable route-key selection, and formats responsive rows without exposing internal IDs.
+- The terminal controller owns disposable workspace Agents state, race-safe one-shot catalog refresh, stale-row preservation, historical-mode rejection, `/agents` and `/tree` command separation, and exact root selection through `productSelect`.
+- Empty-composer Left opens the workspace Agents view only when the retained family projection classifies the current route as a root. Nested Left navigation remains parent-directed.
+- The OpenTUI screen replaces the conversation while open, preserves the trusted-local footer and search composer, renders the human workspace label, exact status sections, and retained-root counts, keeps variable-height selection visible, prevents hidden modal state, and keeps failed and archived rows visible but non-resumable.
+- Successful root opening reuses the serialized snapshot-first route transition, leaves one branch watch, and updates the remembered no-ID resume route only after the target conversation is open.
+- Catalog text and stale selection failures are scrubbed at the terminal boundary so workspace and route IDs remain internal.
+- Public README, user, TypeScript API, protocol, verification, and canonical repository documentation describe the shipped behavior.
+
+### Implementation deviations
+
+- `src/product/catalog.ts` required no change because the existing catalog already supplied the required fields and root classification.
+- The linked pseudo-terminal journey opens the workspace screen with `/agents` after climbing grandchild-to-child-to-root with Left. Deterministic OpenTUI input coverage separately proves that Left from an empty root composer opens the same screen and that Left with a draft retains editor behavior. This split avoids making the installed journey depend on terminal-specific root-Left timing while retaining behavioral coverage of both entry paths.
+
+### Verification evidence
+
+- Focused view-model, terminal-controller, and OpenTUI tests: 36 passed, 0 failed.
+- Linked installed-product pseudo-terminal journey: 1 passed, 0 failed.
+- `bun run typecheck`: passed.
+- `bun run check:architecture`: passed.
+- `bun run verify`: passed. The deterministic core reported 845 passed, 2 skipped, and 0 failed. Installed-product acceptance reported 14 passed, 1 skipped, and 0 failed.
+- The skipped rows were external or dependency-gated checks: official Turso Sync server conformance, real Turso Cloud smoke, and the real-provider installed-product smoke. They are not claimed as verified.

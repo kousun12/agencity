@@ -332,7 +332,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       // mode. Release the prompt listener before the full-screen renderer
       // enables terminal protocols so the two consumers cannot race.
       prompter.close();
-      await attachManagedClient(client, selection.sessionId, selection.branchId);
+      await attachManagedClient(client, selection.sessionId, selection.branchId, workspace.name);
     }
   } finally {
     // Closing a client is detach-only. The resident service owns durable work.
@@ -816,13 +816,13 @@ async function waitForRun(
   }
 }
 
-async function attachManagedClient(client: AgentClient, sessionId: string, branchId: string): Promise<void> {
+async function attachManagedClient(client: AgentClient, sessionId: string, branchId: string, workspaceLabel: string): Promise<void> {
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
   if (interactive) {
-    await new OpenTerminalUI(client).run(sessionId, branchId);
+    await new OpenTerminalUI(client, { workspaceLabel }).run(sessionId, branchId);
     return;
   }
-  await new TerminalUI(client, { interactive: false }).run(sessionId, branchId);
+  await new TerminalUI(client, { interactive: false, workspaceLabel }).run(sessionId, branchId);
 }
 
 async function manageAutonomyClient(client: AgentClient, sessionId: string, branchId: string, parsed: ParsedCliArgs): Promise<void> {

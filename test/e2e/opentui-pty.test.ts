@@ -28,7 +28,7 @@ async function cli(executable: string, workspace: string, home: string, args: re
   return { code, stdout, stderr };
 }
 
-test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI navigates a retained child, detaches, and resumes the root through a real pseudo-terminal", async () => {
+test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI navigates ancestry and workspace roots, then resumes the selected root", async () => {
   const provider = new StrictActionFixture();
   const directory = await mkdtemp(join(tmpdir(), "agencity-opentui-pty-"));
   directories.push(directory);
@@ -37,6 +37,15 @@ test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI
   const installation = join(directory, "bun-install");
   await mkdir(workspace);
   await mkdir(home);
+  const initialized = Bun.spawn(["git", "init", "--quiet"], {
+    cwd: workspace,
+    env: process.env,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const [initCode, initError] = await Promise.all([initialized.exited, new Response(initialized.stderr).text()]);
+  expect(initCode, initError).toBe(0);
   const linked = Bun.spawn([process.execPath, "link", "--cwd", root], {
     cwd: root,
     env: { ...process.env, HOME: home, BUN_INSTALL: installation },
@@ -49,6 +58,12 @@ test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI
   const executable = join(installation, "bin", "agencity");
   const task = "OpenTUI pseudo-terminal\nround trip";
   const childTask = "PTY retained child";
+  const childRunTask = "Create the PTY grandchild";
+  const grandchildTask = "PTY retained grandchild";
+  provider.script(childRunTask, [
+    action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(grandchildTask)}, name: "PTY grandchild", run: false }); return "spawned grandchild";`),
+    action("final", `fixture completed: ${childRunTask}`),
+  ]);
   provider.script(task, [
     action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer", run: false }); return "spawned";`),
     action("final", `fixture completed: ${task}`),
@@ -56,7 +71,7 @@ test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI
   const script = String.raw`
 import fcntl, json, os, pty, select, signal, struct, subprocess, sys, termios, time
 
-workspace, home, executable, task = sys.argv[1:]
+workspace, home, executable, task, child_run_task = sys.argv[1:]
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(workspace)
@@ -141,7 +156,7 @@ if task_complete and cell_rendered:
     if post_cell_inspector:
         os.write(fd, b"\x1b")
         time.sleep(0.2)
-family_summary = pump(10, "1 agent: 1 idle")
+family_summary = pump(10, "1 agent:")
 summary_mark = len(output)
 if family_summary:
     os.write(fd, b"\x1b[B")
@@ -154,11 +169,58 @@ child_mark = len(output)
 if family_browser:
     os.write(fd, b"\x1b[C")
 child_open = pump(8, "PTY reviewer / unnamed branch", child_mark)
-parent_mark = len(output)
+grandchild_summary_mark = len(output)
 if child_open:
+    os.write(fd, child_run_task.encode() + b"\r")
+grandchild_summary = child_open and pump(10, "1 agent:", grandchild_summary_mark)
+grandchild_summary_focus_mark = len(output)
+if grandchild_summary:
+    os.write(fd, b"\x1b[B")
+grandchild_summary_focus = grandchild_summary and pump(5, "> 1 agent", grandchild_summary_focus_mark)
+grandchild_browser_mark = len(output)
+if grandchild_summary_focus:
+    os.write(fd, b"\x1b[C")
+grandchild_browser = grandchild_summary_focus and pump(5, "AGENT FAMILY", grandchild_browser_mark) and pump(2, "PTY grandchild", grandchild_browser_mark)
+grandchild_mark = len(output)
+if grandchild_browser:
+    time.sleep(0.5)
+    os.write(fd, b"\r")
+grandchild_open = grandchild_browser and pump(8, "PTY grandchild / unnamed branch", grandchild_mark)
+grandchild_parent_ready = grandchild_open and pump(8, "← parent", grandchild_mark)
+child_return_mark = len(output)
+if grandchild_parent_ready:
+    time.sleep(1)
     os.write(fd, b"\x1b[D")
-parent_open = pump(8, "1 agent: 1 idle", parent_mark)
+child_return = grandchild_parent_ready and pump(8, "Agencity — PTY reviewer", child_return_mark)
+child_parent_ready = child_return and pump(8, "← parent", child_return_mark)
+parent_mark = len(output)
+if child_parent_ready:
+    time.sleep(1)
+    os.write(fd, b"\x1b[D")
+parent_open = child_parent_ready and pump(8, "Agencity — New session", parent_mark)
+alternate_mark = len(output)
+if parent_open:
+    time.sleep(0.3)
+    os.write(fd, b"/new Alternate root\r")
+alternate_root = parent_open and pump(8, "Agencity — Alternate root", alternate_mark)
+alternate_agents_ready = alternate_root
+agents_mark = len(output)
+if alternate_agents_ready:
+    time.sleep(1)
+    os.write(fd, b"/agents\r")
+workspace_agents = alternate_agents_ready and pump(8, "Agencity — Agents", agents_mark)
+workspace_named = workspace_agents and pump(8, "Alternate root", agents_mark)
+workspace_original = workspace_agents and pump(8, "OpenTUI pseudo-terminal round trip", agents_mark)
+workspace_roots = workspace_named and workspace_original
+root_selection_mark = len(output)
+if workspace_roots:
+    os.write(fd, b"\x1b[B")
+    time.sleep(0.1)
+    os.write(fd, b"\x1b[C")
+root_selection = workspace_roots and pump(8, "Agencity — New session", root_selection_mark) and pump(8, "1 agent:", root_selection_mark)
 if ready:
+    if root_selection:
+        time.sleep(1)
     os.write(fd, b"/quit\r")
     pump(4, "workspace service will stop automatically")
 exit_code = wait_exit(5)
@@ -193,6 +255,8 @@ if exit_code == 0:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
     os.close(fd)
+with open(os.path.join(workspace, ".agencity", "workspace-id"), "rb") as marker:
+    workspace_id = marker.read().strip()
 print(json.dumps({
     "providerPrompt": provider_prompt,
     "credentialPrompt": credential_prompt,
@@ -207,12 +271,24 @@ print(json.dumps({
     "summaryFocus": summary_focus,
     "familyBrowser": family_browser,
     "childOpen": child_open,
+    "grandchildSummary": grandchild_summary,
+    "grandchildSummaryFocus": grandchild_summary_focus,
+    "grandchildBrowser": grandchild_browser,
+    "grandchildOpen": grandchild_open,
+    "grandchildParentReady": grandchild_parent_ready,
+    "childReturn": child_return,
+    "childParentReady": child_parent_ready,
     "parentOpen": parent_open,
+    "alternateRoot": alternate_root,
+    "workspaceAgents": workspace_agents,
+    "workspaceRoots": workspace_roots,
+    "rootSelection": root_selection,
     "exitCode": exit_code,
     "resumeRoot": resume_root,
     "resumeExitCode": resume_exit_code,
     "idleDetach": b"workspace service will stop automatically" in output,
     "secretHidden": b"acceptance-fixture-key" not in output,
+    "workspaceIdHidden": bool(workspace_id) and workspace_id not in output,
     "nativeSelectionAvailable": not any(sequence in output for sequence in (
         b"\x1b[?1000h",
         b"\x1b[?1002h",
@@ -232,7 +308,7 @@ print(json.dumps({
       AI_GATEWAY_API_KEY: _gateway,
       ...cleanEnvironment
     } = process.env;
-    const processResult = Bun.spawn([python!, "-c", script, workspace, home, executable, task], {
+    const processResult = Bun.spawn([python!, "-c", script, workspace, home, executable, task, childRunTask], {
       cwd: root,
       env: { ...cleanEnvironment, HOME: home, OPENAI_BASE_URL: provider.baseUrl },
       stdin: "ignore",
@@ -260,12 +336,24 @@ print(json.dumps({
       summaryFocus: true,
       familyBrowser: true,
       childOpen: true,
+      grandchildSummary: true,
+      grandchildSummaryFocus: true,
+      grandchildBrowser: true,
+      grandchildOpen: true,
+      grandchildParentReady: true,
+      childReturn: true,
+      childParentReady: true,
       parentOpen: true,
+      alternateRoot: true,
+      workspaceAgents: true,
+      workspaceRoots: true,
+      rootSelection: true,
       exitCode: 0,
       resumeRoot: true,
       resumeExitCode: 0,
       idleDetach: true,
       secretHidden: true,
+      workspaceIdHidden: true,
       nativeSelectionAvailable: true,
     });
 

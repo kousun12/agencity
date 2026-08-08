@@ -25,9 +25,11 @@ import {
   familyRefreshSuffix,
   formatManagedDetach,
   toggleAllRunDetails,
+  workspaceAgentsLines,
   type OpenTuiController,
 } from "../../src/tui/opentui.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
+import type { ProductBranchSummary } from "../../src/product/index.ts";
 import { TerminalTranscript } from "../../src/tui/transcript.ts";
 import { createTerminalSyntaxStyle } from "../../src/tui/theme.ts";
 import { buildTerminalScreen, type TerminalScreenView } from "../../src/tui/view-model.ts";
@@ -77,6 +79,41 @@ describe("OpenTUI interactive terminal", () => {
     expect(familyRefreshSuffix("refreshing")).toBe("");
     expect(familyRefreshSuffix("stale")).toBe(" · stale");
     expect(familyRefreshSuffix("unavailable")).toBe(" · unavailable");
+  });
+
+  test("renders bounded workspace agent sections with explicit degraded and non-resumable states", () => {
+    const failed = {
+      key: "failed-key",
+      sessionId: "hidden-session-id",
+      branchId: "hidden-branch-id",
+      sessionName: "Failed root",
+      branchName: "main",
+      displayName: "Failed root",
+      model: "openai:gpt-test",
+      status: "failed",
+      task: "Inspect a deliberately long failure summary for responsive rendering.",
+      unresolvedWork: 2,
+      activeGoals: 1,
+      createdAt: "2026-08-08T11:00:00.000Z",
+      updatedAt: "2026-08-08T12:00:00.000Z",
+      resumable: false,
+    } as const;
+    const lines = workspaceAgentsLines({
+      open: true,
+      returnRoute: { sessionId: "return", branchId: "return" },
+      rows: [failed],
+      sections: [{ status: "failed", title: "Failed", rows: [failed] }],
+      selectedKey: failed.key,
+      query: "",
+      refresh: "stale",
+      fetchedAt: "2026-08-08T12:00:00.000Z",
+    }, 44, Date.parse("2026-08-08T12:05:00.000Z"));
+
+    expect(lines.map(line => line.text).join("\n")).toContain("Catalog stale");
+    expect(lines.map(line => line.text).join("\n")).toContain("FAILED");
+    expect(lines.map(line => line.text).join("\n")).toContain("cannot open");
+    expect(lines.every(line => line.text.length <= 44)).toBe(true);
+    expect(lines.map(line => line.text).join("\n")).not.toMatch(/hidden-session-id|hidden-branch-id/);
   });
 
   test("maps alternate-scroll wheel input without consuming physical Kitty arrow keys", () => {
@@ -809,6 +846,198 @@ describe("OpenTUI interactive terminal", () => {
     }
   });
 
+  test("opens, searches, refreshes, and selects workspace roots without exposing route IDs", async () => {
+    const temp = await makeTempRuntime("agencity-opentui-workspace-agents-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const first = await supervisor.createSession({
+      workspaceId: "terminal-workspace-agents",
+      sessionName: "First root",
+      branchName: "main",
+      model: { provider: "echo", model: "echo-1" },
+    });
+    const second = await supervisor.createSession({
+      workspaceId: "terminal-workspace-agents",
+      sessionName: "Second root",
+      branchName: "main",
+      model: { provider: "echo", model: "echo-1" },
+    });
+    const child = await supervisor.agents.spawn(first.sessionId, first.branchId, {
+      task: "Nested route command entry",
+      name: "Nested child",
+      run: false,
+    });
+    const catalogRow = (
+      sessionId: string,
+      branchId: string,
+      sessionName: string,
+      status: ProductBranchSummary["status"],
+      root = true,
+    ): ProductBranchSummary => ({
+      sessionId,
+      branchId,
+      sessionName,
+      branchName: "main",
+      model: { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" },
+      status,
+      taskSummary: `${sessionName} retained task`,
+      activeGoals: sessionName === "First root" ? 1 : 0,
+      unresolvedWork: sessionName === "First root" ? 2 : 0,
+      createdAt: "2026-08-08T11:00:00.000Z",
+      updatedAt: "2026-08-08T12:00:00.000Z",
+      root,
+      initialBranch: true,
+    });
+    const catalogRows = [
+      catalogRow(first.sessionId, first.branchId, "First root", "idle"),
+      catalogRow(second.sessionId, second.branchId, "Second root", "stopped"),
+      catalogRow(child.sessionId, child.branchId, "Nested child", "idle", false),
+      catalogRow("failed-internal-session", "failed-internal-branch", "Failed root", "failed"),
+      catalogRow("archived-internal-session", "archived-internal-branch", "Archived root", "archived"),
+    ];
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const selections: Array<[string | undefined, string | undefined]> = [];
+    let catalogCalls = 0;
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "capabilities") return async () => ({
+          ...await base.capabilities(),
+          productCatalog: true,
+        });
+        if (property === "productSessions") return async () => {
+          catalogCalls++;
+          return catalogRows;
+        };
+        if (property === "productSelect") return async (sessionId?: string, branchId?: string) => {
+          selections.push([sessionId, branchId]);
+          return { sessionId: sessionId!, branchId: branchId! };
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    let app: OpenTuiApp | null = null;
+    const terminal = new TerminalUI(client, {
+      workspaceLabel: "Fixture workspace",
+      interactive: false,
+      manageSignals: false,
+      onOutput: value => app?.showOutput(value),
+      onDetail: detail => app?.showDetail(detail),
+    });
+    await terminal.attach(first.sessionId, first.branchId, false);
+    const setup = await createTestRenderer({ width: 112, height: 28, kittyKeyboard: true });
+    app = new OpenTuiApp(setup.renderer, terminal);
+    try {
+      let frame = await setup.waitForFrame(value => value.includes("First root / main") && value.includes("← agents"));
+      const composer = setup.renderer.root.findDescendantById("agencity-composer") as TextareaRenderable;
+
+      await setup.mockInput.typeText("draft stays");
+      setup.mockInput.pressKey("\u001b[D");
+      frame = await setup.waitForFrame(value => value.includes("draft stays") && value.includes("First root / main"));
+      expect(frame).not.toContain("Catalog current");
+      setup.mockInput.pressKey("a", { ctrl: true });
+      setup.mockInput.pressKey("k", { ctrl: true });
+
+      setup.mockInput.pressKey("\u001b[D");
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value =>
+        value.includes("Agents")
+        && value.includes("First root")
+        && value.includes("Second root")
+        && value.includes("Failed root")
+        && value.includes("Archived root")
+        && value.includes("Search retained root work"));
+      expect(frame).toContain("Fixture workspace");
+      expect(frame).not.toContain("terminal-workspace-agents");
+      expect(frame).toContain("cannot open");
+      expect(frame).toContain("TRUSTED-LOCAL");
+      expect(frame).not.toMatch(/failed-internal-session|failed-internal-branch|Nested child/);
+      expect(selections).toEqual([]);
+      setup.mockInput.pressKey("p", { ctrl: true });
+      frame = await setup.waitForFrame(value => value.includes("Close Agents before opening commands."));
+      expect(frame).toContain("Agents");
+      expect(frame).not.toContain("COMMANDS");
+      setup.mockInput.pressEscape();
+      frame = await setup.waitForFrame(value => value.includes("First root / main"));
+      expect(frame).not.toContain("COMMANDS");
+
+      setup.mockInput.pressKey("\u001b[D");
+      expect(await app.settle()).toBe(true);
+      await setup.waitForFrame(value => value.includes("Agents") && value.includes("First root"));
+      setup.mockInput.pressKey("\u001b[6~");
+      frame = await setup.waitForFrame(value => value.includes("› Archived root"));
+      expect(frame).toContain("cannot open");
+      setup.mockInput.pressKey("\u001b[5~");
+      await setup.waitForFrame(value => value.includes("› First root"));
+
+      await setup.mockInput.typeText("failed");
+      frame = await setup.waitForFrame(value => value.includes("Failed root") && !value.includes("Second root"));
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value => value.includes("Failed root is failed and cannot be opened"));
+      expect(selections).toEqual([]);
+      setup.mockInput.pressEscape();
+      frame = await setup.waitForFrame(value => value.includes("Second root") && composer.plainText === "");
+      expect(frame).toContain("Agents");
+      setup.mockInput.pressKey("\u001b[D");
+      frame = await setup.waitForFrame(value => value.includes("Agents") && value.includes("Second root"));
+      expect(terminal.presentation.workspaceAgents.open).toBe(true);
+      setup.mockInput.pressEscape();
+      frame = await setup.waitForFrame(value => value.includes("First root / main") && !value.includes("Catalog current"));
+
+      await terminal.openFamilyChild(child.sessionId, child.branchId);
+      await setup.waitForFrame(value => value.includes("First root › Nested child"));
+      await setup.mockInput.typeText("/agents");
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("Agents") && value.includes("Second root"));
+      expect(terminal.presentation.workspaceAgents.returnRoute).toEqual({
+        sessionId: child.sessionId,
+        branchId: child.branchId,
+      });
+      setup.mockInput.pressEscape();
+      await setup.waitForFrame(value => value.includes("First root › Nested child"));
+      await terminal.openFamilyParent();
+      await setup.waitForFrame(value => value.includes("First root / main"));
+
+      setup.mockInput.pressKey("\u001b[D");
+      expect(await app.settle()).toBe(true);
+      await setup.waitForFrame(value => value.includes("Agents") && value.includes("Second root"));
+      setup.mockInput.pressKey("\u001b[B");
+      setup.mockInput.pressKey("\u001b[C");
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("Second root / main") && value.includes("← agents"));
+      expect(selections).toEqual([[second.sessionId, second.branchId]]);
+      expect(catalogCalls).toBe(5);
+
+      setup.mockInput.pressKey("\u001b[D");
+      expect(await app.settle()).toBe(true);
+      const beforeRefresh = catalogCalls;
+      setup.mockInput.pressKey("r", { ctrl: true });
+      expect(await app.settle()).toBe(true);
+      expect(catalogCalls).toBe(beforeRefresh + 1);
+      setup.resize(58, 9);
+      frame = await setup.waitForFrame(value =>
+        value.includes("Agents") && value.includes("Second root") && value.includes("TRUSTED-LOCAL"));
+      expect(frame).toContain("Search retained root work");
+      setup.resize(48, 6);
+      frame = await setup.waitForFrame(value =>
+        value.includes("AGENTS") && value.includes("Second root") && value.includes("TRUSTED-LOCAL"));
+      expect(frame).toContain("Esc back");
+      setup.mockInput.pressKey("\u001b[6~");
+      frame = await setup.waitForFrame(value => value.includes("AGENTS") && value.includes("Failed root"));
+      expect(frame).toContain("cannot open");
+    } finally {
+      app.destroy();
+      setup.renderer.destroy();
+      await terminal.detach(false);
+      await supervisor.close();
+    }
+  });
+
   test("retains committed message and cell renderables across unrelated updates", async () => {
     const setup = await createTestRenderer({ width: 100, height: 30 });
     const host = new ScrollBoxRenderable(setup.renderer, {
@@ -824,6 +1053,7 @@ describe("OpenTUI interactive terminal", () => {
     const syntaxStyle = createTerminalSyntaxStyle();
     const view: TerminalScreenView = {
       workspaceId: "workspace",
+      workspaceLabel: "Workspace",
       sessionName: "Transcript",
       branchName: "main",
       model: "fixture:model",
@@ -885,7 +1115,18 @@ describe("OpenTUI interactive terminal", () => {
       familyChildren: [],
       familyParent: null,
       familySummary: null,
+      familyRoot: true,
       familyRefresh: "current",
+      workspaceAgents: {
+        open: false,
+        returnRoute: { sessionId: "session", branchId: "branch" },
+        rows: [],
+        sections: [],
+        selectedKey: null,
+        query: "",
+        refresh: "unavailable",
+        fetchedAt: null,
+      },
       runState: "succeeded",
       composerPlaceholder: "Ask Agencity…",
       attentionCount: 0,

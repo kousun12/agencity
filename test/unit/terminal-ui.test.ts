@@ -12,6 +12,7 @@ import {
   type EffectProgressNotification,
 } from "../../src/index.ts";
 import { TERMINAL_COMMAND_REGISTRY, TerminalInterruptPolicy, TerminalUI, renderEvent, renderTerminalError } from "../../src/tui/index.ts";
+import type { ProductBranchSummary } from "../../src/product/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -417,6 +418,240 @@ describe("FU-005 protocol-backed terminal UI", () => {
     } finally {
       await ui.detach(false);
       expect(activeWatches).toBe(0);
+      await supervisor.close();
+    }
+  });
+
+  test("opens root work through exact product selection while retaining failed and archived catalog rows", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-workspace-agents-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const first = await supervisor.createSession({
+      workspaceId: "terminal-workspace-agents",
+      sessionName: "First root",
+      branchName: "main",
+    });
+    const second = await supervisor.createSession({
+      workspaceId: "terminal-workspace-agents",
+      sessionName: "Second root",
+      branchName: "main",
+    });
+    const child = await supervisor.agents.spawn(first.sessionId, first.branchId, {
+      task: "Child is excluded from the workspace view",
+      name: "Nested child",
+      run: false,
+    });
+    const row = (
+      sessionId: string,
+      branchId: string,
+      sessionName: string,
+      status: ProductBranchSummary["status"],
+      root = true,
+    ): ProductBranchSummary => ({
+      sessionId,
+      branchId,
+      sessionName,
+      branchName: "main",
+      model: { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" },
+      status,
+      taskSummary: `${sessionName} task`,
+      activeGoals: 0,
+      unresolvedWork: 0,
+      createdAt: "2026-08-08T12:00:00.000Z",
+      updatedAt: "2026-08-08T12:00:00.000Z",
+      root,
+      initialBranch: true,
+    });
+    const rows = [
+      row(first.sessionId, first.branchId, "First root", "idle"),
+      row(second.sessionId, second.branchId, "Second root", "stopped"),
+      row(child.sessionId, child.branchId, "Nested child", "idle", false),
+      row("failed-session", "failed-branch", "Failed root", "failed"),
+      row("archived-session", "archived-branch", "Archived root", "archived"),
+    ];
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const selections: Array<[string | undefined, string | undefined]> = [];
+    let catalogCalls = 0;
+    let activeWatches = 0;
+    let maximumActiveWatches = 0;
+    let selectionError: Error | null = null;
+    let transitionError: Error | null = null;
+    let familyError = false;
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "capabilities") return async () => ({
+          ...await base.capabilities(),
+          productCatalog: true,
+        });
+        if (property === "productSessions") return async () => {
+          catalogCalls++;
+          return rows;
+        };
+        if (property === "productSelect") return async (sessionId?: string, branchId?: string) => {
+          if (selectionError) throw selectionError;
+          selections.push([sessionId, branchId]);
+          return { sessionId: sessionId!, branchId: branchId! };
+        };
+        if (property === "snapshot") return async (sessionId: string, branchId: string) => {
+          if (transitionError && sessionId === second.sessionId && branchId === second.branchId) {
+            throw transitionError;
+          }
+          return base.snapshot(sessionId, branchId);
+        };
+        if (property === "agents") return async (sessionId: string, branchId: string) => {
+          if (familyError && sessionId === second.sessionId && branchId === second.branchId) {
+            throw new ProtocolClientError("UNAVAILABLE", "Family projection unavailable", 503);
+          }
+          return base.agents(sessionId, branchId);
+        };
+        if (property === "watchBranch") return async (...args: Parameters<AgentClient["watchBranch"]>) => {
+          activeWatches++;
+          maximumActiveWatches = Math.max(maximumActiveWatches, activeWatches);
+          try {
+            return await base.watchBranch(...args);
+          } finally {
+            activeWatches--;
+          }
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const ui = new TerminalUI(client, { interactive: false, manageSignals: false });
+    try {
+      await ui.attach(first.sessionId, first.branchId, false);
+      expect(ui.presentation.family.root).toBe(true);
+      await ui.openWorkspaceAgents();
+      expect(selections).toEqual([]);
+      expect(ui.presentation.workspaceAgents).toMatchObject({
+        open: true,
+        returnRoute: { sessionId: first.sessionId, branchId: first.branchId },
+        refresh: "current",
+      });
+      expect(ui.presentation.workspaceAgents.rows).toHaveLength(5);
+      await expect(ui.openWorkspaceAgent("failed-session", "failed-branch")).rejects.toThrow(/failed and cannot be opened/);
+      await expect(ui.openWorkspaceAgent("archived-session", "archived-branch")).rejects.toThrow(/archived and cannot be opened/);
+      expect(selections).toEqual([]);
+
+      transitionError = new Error(`Session or branch not found: ${second.sessionId}/${second.branchId}`);
+      const failedTransition = await ui.openWorkspaceAgent(second.sessionId, second.branchId).catch(error => error);
+      expect(failedTransition).toBeInstanceOf(Error);
+      expect((failedTransition as Error).message).toBe("Could not open Second root. Refresh Agents and try again.");
+      expect((failedTransition as Error).message).not.toContain(second.sessionId);
+      expect((failedTransition as Error).message).not.toContain(second.branchId);
+      expect(selections).toEqual([]);
+      expect(ui.presentation.state.sessionId).toBe(first.sessionId);
+      expect(ui.presentation.workspaceAgents.open).toBe(true);
+      transitionError = null;
+      familyError = true;
+
+      await ui.openWorkspaceAgent(second.sessionId, second.branchId);
+      expect(selections).toEqual([[second.sessionId, second.branchId]]);
+      expect(ui.presentation.state.sessionId).toBe(second.sessionId);
+      expect(ui.presentation.workspaceAgents.open).toBe(false);
+      expect(ui.presentation.family).toMatchObject({ root: true, refresh: "unavailable" });
+      expect(catalogCalls).toBe(2);
+      expect(maximumActiveWatches).toBe(1);
+      expect(activeWatches).toBe(1);
+
+      await ui.openWorkspaceAgents();
+      selectionError = new Error(`Session or branch not found: ${first.sessionId}/${first.branchId}`);
+      const failedSelection = await ui.openWorkspaceAgent(first.sessionId, first.branchId).catch(error => error);
+      expect(failedSelection).toBeInstanceOf(Error);
+      expect((failedSelection as Error).message)
+        .toBe("First root is open, but could not be selected for resume. Reopen Agents and try again.");
+      expect((failedSelection as Error).message).not.toContain(first.sessionId);
+      expect((failedSelection as Error).message).not.toContain(first.branchId);
+      expect(selections).toEqual([[second.sessionId, second.branchId]]);
+      expect(ui.presentation.state.sessionId).toBe(first.sessionId);
+      expect(ui.presentation.workspaceAgents.open).toBe(false);
+    } finally {
+      await ui.detach(false);
+      await supervisor.close();
+    }
+  });
+
+  test("keeps stale workspace rows, ignores superseded refreshes, and rejects historical /agents", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-workspace-agents-refresh-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const root = await supervisor.createSession({
+      workspaceId: "terminal-workspace-agents-refresh",
+      sessionName: "Stable root",
+      branchName: "main",
+    });
+    const catalogRow = (sessionName: string): ProductBranchSummary => ({
+      sessionId: root.sessionId,
+      branchId: root.branchId,
+      sessionName,
+      branchName: "main",
+      model: { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" },
+      status: "idle",
+      taskSummary: "Retained task",
+      activeGoals: 0,
+      unresolvedWork: 0,
+      createdAt: "2026-08-08T12:00:00.000Z",
+      updatedAt: "2026-08-08T12:00:00.000Z",
+      root: true,
+      initialBranch: true,
+    });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const responses: Array<() => Promise<ProductBranchSummary[]>> = [
+      async () => [catalogRow("Stable root")],
+    ];
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "capabilities") return async () => ({
+          ...await base.capabilities(),
+          productCatalog: true,
+        });
+        if (property === "productSessions") return () => {
+          const response = responses.shift();
+          if (!response) throw new Error("No catalog response was queued");
+          return response();
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const ui = new TerminalUI(client, { interactive: false, manageSignals: false });
+    try {
+      await ui.attach(root.sessionId, root.branchId, false);
+      await ui.openWorkspaceAgents();
+      responses.push(async () => { throw new Error("catalog unavailable"); });
+      await ui.refreshWorkspaceAgents();
+      expect(ui.presentation.workspaceAgents.refresh).toBe("stale");
+      expect(ui.presentation.workspaceAgents.rows[0]?.sessionName).toBe("Stable root");
+
+      let resolveOld!: (rows: ProductBranchSummary[]) => void;
+      let resolveCurrent!: (rows: ProductBranchSummary[]) => void;
+      responses.push(
+        () => new Promise(resolve => { resolveOld = resolve; }),
+        () => new Promise(resolve => { resolveCurrent = resolve; }),
+      );
+      const oldRefresh = ui.refreshWorkspaceAgents();
+      const currentRefresh = ui.refreshWorkspaceAgents();
+      resolveCurrent([catalogRow("Current root")]);
+      await currentRefresh;
+      resolveOld([catalogRow("Superseded root")]);
+      await oldRefresh;
+      expect(ui.presentation.workspaceAgents.rows[0]?.sessionName).toBe("Current root");
+
+      ui.closeWorkspaceAgents();
+      const cursor = ui.presentation.state.cursor;
+      await ui.execute(`/history ${cursor}`);
+      await expect(ui.execute("/agents")).rejects.toThrow("Return to live with /live before opening Agents");
+      expect(ui.presentation.workspaceAgents.open).toBe(false);
+    } finally {
+      await ui.detach(false);
       await supervisor.close();
     }
   });

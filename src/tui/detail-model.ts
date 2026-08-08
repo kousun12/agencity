@@ -343,7 +343,7 @@ function familyDetail(command: string, value: unknown): TerminalInspectionDetail
   const taskRows = tasksRows(source.tasks ?? (command === "/tasks" || command === "/cancel-task" ? value : []));
   const messages = mailboxRows(source.mailbox ?? (command === "/mailbox" ? value : []));
   const sections: TerminalDetailSection[] = [];
-  if (command === "/agents" || command === "/tree") {
+  if (command === "/tree") {
     sections.push(family.length ? {
       title: `Family · ${family.length}`,
       rows: family.map(item => {
@@ -797,7 +797,7 @@ export function buildTerminalDetail(command: string, value: unknown): TerminalIn
   if (command === "/snapshot" || command === "/history-snapshot") return snapshotDetail(value);
   if (command === "/budget") return budgetDetail(value);
   if (command === "/cells" || command === "/cell") return cellsDetail(command, value);
-  if (["/agents", "/tree", "/mailbox", "/tasks", "/cancel-task"].includes(command)) return familyDetail(command, value);
+  if (["/tree", "/mailbox", "/tasks", "/cancel-task"].includes(command)) return familyDetail(command, value);
   if (command === "/goal" || command === "/goals") return goalsDetail(command, value);
   if (command === "/heartbeat" || command === "/heartbeats") return heartbeatsDetail(command, value);
   if (command === "/schedule" || command === "/schedules") return schedulesDetail(command, value);
