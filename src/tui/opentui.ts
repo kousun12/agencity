@@ -507,6 +507,7 @@ export class OpenTuiApp {
   readonly #timeline: ScrollBoxRenderable;
   readonly #transcript: TerminalTranscript;
   readonly #details: ScrollBoxRenderable;
+  readonly #noticeText: TextRenderable;
   readonly #detailsText: TextRenderable;
   readonly #composerBox: BoxRenderable;
   readonly #composerContent: BoxRenderable;
@@ -589,6 +590,15 @@ export class OpenTuiApp {
       scrollY: true,
       scrollX: false,
       stickyScroll: false,
+    });
+    this.#noticeText = new TextRenderable(renderer, {
+      id: "agencity-notice",
+      width: "100%",
+      height: "auto",
+      fg: TERMINAL_THEME.muted,
+      wrapMode: "word",
+      selectable: true,
+      visible: false,
     });
     this.#detailsText = new TextRenderable(renderer, {
       id: "agencity-details-text",
@@ -710,6 +720,7 @@ export class OpenTuiApp {
       wrapMode: "none",
     });
 
+    this.#details.add(this.#noticeText);
     this.#details.add(this.#detailsText);
     this.#main.add(this.#timeline);
     this.#main.add(this.#details);
@@ -1745,7 +1756,7 @@ export class OpenTuiApp {
     const fullDetails = notice ? `${notice}\n${baseDetails ? `\n${baseDetails}` : ""}` : baseDetails;
     const details = layout.mode === "minimum" && activeInspector
       ? this.#minimumInspectorText(fullDetails)
-      : fullDetails;
+      : baseDetails;
     const history = this.#view.historicalCursor ? ` · history@${this.#view.historicalCursor}` : "";
     const breadcrumb = formatTerminalBreadcrumb(
       this.#view.ancestry,
@@ -1763,24 +1774,26 @@ export class OpenTuiApp {
         : primaryHeader;
     this.#header.fg = this.#view.connection === "connected" ? TERMINAL_THEME.text : TERMINAL_THEME.warning;
     this.#transcript.reconcile(this.#view, this.#expandedRunIds);
-    const styledFamily = familyBrowserActive && !notice && layout.mode !== "minimum"
+    const styledFamily = familyBrowserActive && layout.mode !== "minimum"
       ? styledFamilyBrowser(
           familyBrowserLines(this.#view, this.#familySelectedKey, compact, width >= 96, detailsContentWidth),
           detailsContentWidth,
         )
       : null;
-    const styledWorkspace = workspaceAgentsActive && !notice && layout.mode !== "minimum"
+    const styledWorkspace = workspaceAgentsActive && layout.mode !== "minimum"
       ? styledWorkspaceAgents(
           workspaceAgentsLines(this.#view.workspaceAgents, detailsContentWidth),
           detailsContentWidth,
         )
       : null;
+    this.#noticeText.visible = Boolean(notice) && layout.mode !== "minimum";
+    this.#noticeText.content = notice ? `${notice}\n` : "";
+    this.#noticeText.fg = terminalToneColor(this.#notice?.tone ?? "normal");
     this.#detailsText.wrapMode = styledWorkspace || styledFamily ? "none" : "word";
     this.#detailsText.content = styledWorkspace ?? styledFamily ?? details;
     const selectedFamily = this.#view.familyChildren.find(child => child.key === this.#familySelectedKey);
-    const noticeTone = this.#notice?.tone ?? "normal";
-    this.#detailsText.fg = this.#notice
-      ? terminalToneColor(noticeTone)
+    this.#detailsText.fg = layout.mode === "minimum" && this.#notice
+      ? terminalToneColor(this.#notice.tone)
       : provisional
         ? TERMINAL_THEME.provisional
         : workspaceAgentsActive

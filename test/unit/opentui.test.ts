@@ -801,6 +801,14 @@ describe("OpenTUI interactive terminal", () => {
       frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("› ○ Reviewer · idle"));
       expect(frame).toContain("Review the implementation");
       expect(frame).toContain("echo:echo-1");
+      app.showOutput("Switched to Root agent/main.");
+      frame = await setup.waitForFrame(value =>
+        value.includes("Switched to Root agent/main.")
+        && value.includes("› ○ Reviewer · idle"));
+      const familyList = setup.renderer.root.findDescendantById("agencity-details-text") as TextRenderable;
+      const selectedChild = familyList.chunks.find(chunk =>
+        chunk.text.includes("Reviewer") && chunk.bg?.toInts().slice(0, 3).join(",") === "38,79,120");
+      expect(selectedChild).toBeDefined();
 
       setup.resize(72, 16);
       frame = await setup.waitForFrame(value => value.includes("AGENT FAMILY") && value.includes("TRUSTED-LOCAL"));
@@ -957,6 +965,19 @@ describe("OpenTUI interactive terminal", () => {
       expect(frame).toContain("TRUSTED-LOCAL");
       expect(frame).not.toMatch(/failed-internal-session|failed-internal-branch|Nested child/);
       expect(selections).toEqual([]);
+      app.showOutput("Switched to First root/main.");
+      frame = await setup.waitForFrame(value =>
+        value.includes("Switched to First root/main.")
+        && value.includes("First root")
+        && value.includes("Second root"));
+      const notice = setup.renderer.root.findDescendantById("agencity-notice") as TextRenderable;
+      const agentsList = setup.renderer.root.findDescendantById("agencity-details-text") as TextRenderable;
+      const selectedAgent = agentsList.chunks.find(chunk =>
+        chunk.text.includes("First root") && chunk.bg?.toInts().slice(0, 3).join(",") === "38,79,120");
+      expect(notice.visible).toBe(true);
+      expect(notice.fg?.toInts().slice(0, 3)).toEqual([63, 185, 80]);
+      expect(selectedAgent).toBeDefined();
+      expect(agentsList.fg?.toInts().slice(0, 3)).toEqual([139, 148, 158]);
       setup.mockInput.pressKey("p", { ctrl: true });
       frame = await setup.waitForFrame(value => value.includes("Close Agents before opening commands."));
       expect(frame).toContain("Agents");
