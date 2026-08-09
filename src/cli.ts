@@ -4,7 +4,8 @@ import { resolve } from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { parseCliArgs, type ParsedCliArgs } from "./cli-args.ts";
-import { CLI_HELP_GROUPS, buildDataDeleteConfirmation, parseAdvancedArgv, type AdvancedCommandPath } from "./cli/advanced.ts";
+import { buildDataDeleteConfirmation, parseAdvancedArgv, type AdvancedCommandPath } from "./cli/advanced.ts";
+import { cliHelpColorEnabled, renderCliHelp } from "./cli/help.ts";
 import { createCliErrorEnvelope, createCliSuccessEnvelope, planCliOutput, type CliJsonValue } from "./cli/output.ts";
 import { CliRunInterruptCoordinator } from "./cli/run-interrupt.ts";
 import {
@@ -1326,29 +1327,8 @@ async function printVersion(): Promise<void> { console.log(`agencity ${await app
 Bun ${Bun.version} (supported: >=1.2.0)`); }
 
 function printHelp(): void {
-  const sections = CLI_HELP_GROUPS.map((group) => [
-    `${group.title}:`,
-    `  ${group.description}`,
-    ...group.commands.map((command) => {
-      const aliases = command.legacyAliases.length ? ` (legacy: ${command.legacyAliases.join(", ")})` : "";
-      const destructive = command.destructive ? " [DESTRUCTIVE: exact confirmation required]" : "";
-      return `  ${command.invocation}\n      ${command.summary}${aliases}${destructive}`;
-    }),
-  ].join("\n"));
-  console.log([
-    "agencity - terminal-first durable agent runtime (trusted-local mode)",
-    "",
-    ...sections.flatMap((section) => [section, ""]),
-    "Common product options:",
-    "  --workspace PATH --model PROVIDER:CREATOR/MODEL --effort LEVEL --new --detach --completion-gate COMMAND --json --version --help",
-    "Advanced options:",
-    "  --session ID --branch ID --cursor N --db PATH --artifacts PATH --workspace-root PATH",
-    "  --sync-url URL --replica PATH --scope KIND --scope-id ID --destination PATH",
-    "  --confirmation 'DELETE <scope> <id>' --receipt-dir PATH --requested-by ID",
-    "  reconciliation: --reconciliation-id ID --evidence JSON",
-    "Canonical advanced --json output is the stable agencity.cli-output v1 envelope.",
-    "Exact legacy aliases remain silent and preserve their historical output during the compatibility window.",
-    "Use agencity -- TASK to force command-like text through the product route.",
-    "Interactive startup asks for provider credentials when none are configured. Provider credentials remain supervisor-side.",
-  ].join("\n"));
+  process.stdout.write(`${renderCliHelp({
+    color: cliHelpColorEnabled(),
+    width: process.stdout.columns,
+  })}\n`);
 }

@@ -78,12 +78,13 @@ describe("FU-008 canonical advanced CLI integration", () => {
   test("help prioritizes product, advanced diagnostics, sync, and guarded data control", async () => {
     const help = await cli(["--help"]);
     expect(help).toMatchObject({ code: 0, stderr: "" });
-    const positions = ["Product commands:", "Advanced diagnostics:", "Sync:", "Data control:"].map((label) => help.stdout.indexOf(label));
+    const positions = ["Product commands", "Advanced diagnostics", "Sync", "Data control"].map((label) => help.stdout.indexOf(label));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((left, right) => left - right));
     expect(help.stdout).toContain("agencity debug history");
-    expect(help.stdout).toContain("legacy: history");
+    expect(help.stdout).toContain("(legacy: history)");
     expect(help.stdout).toContain("agencity.cli-output v1");
     expect(help.stdout).toContain("DESTRUCTIVE: exact confirmation required");
+    expect(help.stdout).not.toContain("\u001b[");
   });
 });

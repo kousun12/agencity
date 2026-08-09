@@ -315,7 +315,7 @@ export const CLI_HELP_GROUPS: readonly CliHelpGroup[] = Object.freeze([
       productHelp("agencity attach [NAME|ID]", "Open the protocol-backed terminal client."),
       productHelp("agencity unknown [EFFECT_ID]", "Inspect unknown external effects without retrying them."),
       productHelp("agencity reconcile EFFECT_ID ASSESSMENT SUMMARY", "Append operator evidence without rewriting effect status."),
-      productHelp("agencity refine [INSTRUCTIONS]", "Run an attributable trajectory review; use `refine propose-json` only for advanced diagnostics."),
+      productHelp("agencity refine [INSTRUCTIONS]", "Run an attributable trajectory review. Advanced diagnostics use refine propose-json."),
       productHelp("agencity skills [list|show|install|propose|test|enable|disable|remove]", "Manage tested workspace and profile skills; local code installation requires an exact digest confirmation."),
       productHelp("agencity context", "Inspect effective context, capacity, and compaction provenance."),
       productHelp("agencity compact [GUIDANCE] [--strategy extractive|summary]", "Compact retained narrative without deleting canonical history."),
