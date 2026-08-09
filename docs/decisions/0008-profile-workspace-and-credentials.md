@@ -4,6 +4,7 @@
 - **Date:** 2026-08-07
 - **Scope:** Durable identity, ownership, preferences, model selection, and credential values
 - **Extends:** [ADR 0001](./0001-durable-local-runtime-foundations.md)
+- **Extended by:** [ADR 0012](./0012-durable-agent-profiles-automated-refinement-governance.md), which adds workspace-owned agent profiles while preserving profile/device and credential boundaries
 
 ## Context
 

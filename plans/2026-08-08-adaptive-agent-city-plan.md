@@ -1,11 +1,11 @@
 # Durable agent profiles and automated refinement review plan
 
-**Status:** Proposed and gated
+**Status:** Accepted — implementation in progress
 **Date:** August 8, 2026
 **Last revised:** August 9, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)
 **Related plans:** [Workspace Agents view](./2026-08-08-workspace-agents-view-plan.md), [Ergonomic agent-family navigation](./2026-08-07-ergonomic-agent-family-navigation-plan.md), and [Lossless context-reference storage](./2026-08-07-lossless-context-references-plan.md)
-**Related decision:** [Durable agent relationships](../docs/decisions/0006-durable-agent-relationships.md)
+**Related decisions:** [Event-sourced relational memory and measured refinement](../docs/decisions/0002-relational-memory-refinement.md), [Durable agent relationships](../docs/decisions/0006-durable-agent-relationships.md), [Profile, workspace, and credential boundaries](../docs/decisions/0008-profile-workspace-and-credentials.md), and [Durable agent profiles and automated refinement governance](../docs/decisions/0012-durable-agent-profiles-automated-refinement-governance.md)
 
 ## Summary
 
@@ -633,7 +633,34 @@ The current harness refinement implementation already supplies durable proposals
 
 Skills retain mandatory compile and declared runtime tests before activation. A reviewer cannot approve a failing skill. Other artifact kinds rely on deterministic validation plus charter review before activation.
 
-This changes the repository's current refinement constitution, which treats pre-activation observed success as the normal authority for activation. Shipping the change requires an explicit constitutional amendment in `AGENTS.md` and ADR 0002, plus synchronized event, protocol, recovery, security, and public-document updates.
+This changes the repository's current refinement constitution, which treats pre-activation observed success as the normal authority for activation. Shipping the change requires an explicit constitutional amendment in `AGENTS.md` and a new ADR for durable agent profiles and automated refinement governance. The new ADR supersedes ADR 0002's promotion and activation rules while preserving its unaffected memory, retrieval, immutable-version, provenance, generated-skill test, and rollback decisions. It extends ADR 0006's durable-session model and ADR 0008's agent-profile versus user/device-profile boundary. Accepted ADR text is not rewritten to express the new decision; supersession and extension metadata, backlinks, statuses, and the decision index are updated according to the repository ADR policy.
+
+## Documentation and decision-record obligations
+
+Documentation is part of each shipping phase rather than a final cleanup task. A phase is not complete until its implemented behavior, public contract, operational consequences, and remaining limitations are reflected in the authoritative documents affected by that phase.
+
+Before implementation begins:
+
+- create the new ADR for durable agent profiles and automated refinement governance;
+- record exactly which ADR 0002 rules it supersedes and which rules remain in force;
+- record that it extends ADRs 0006 and 0008 without replacing their durable relationship or ownership boundaries;
+- update `docs/decisions/README.md`, the affected ADR metadata and backlinks, and the decision list in `docs/README.md`;
+- update `AGENTS.md` only after the constitutional decision is accepted, while keeping proposed behavior distinct from shipped capability.
+
+As behavior ships, update every affected public reference:
+
+- `docs/architecture.md` for profile ownership, workspace agent-control streams, prompt composition, and refinement boundaries;
+- `docs/events.md` and `docs/mutable-tables.md` for canonical events, projections, stream addressing, classifications, and rebuild semantics;
+- `docs/protocol.md`, `docs/api.md`, and `docs/console-sdk.md` for public profile, proposal, review-result, rollback, wait, detach, and capability contracts;
+- `docs/user-guide.md` for owner-visible profile inspection, proposal outcomes, rollback, and terminal behavior;
+- `docs/operator-guide.md` and `docs/recovery.md` for review recovery, terminal-notice redelivery, unknown outcomes, stale application, and reconciliation procedures;
+- `docs/security.md` for sealed-reviewer boundaries, untrusted proposal content, secret handling, and the trusted-local limitation;
+- `docs/capabilities.md` for implemented, unavailable, and partially shipped profile and refinement behavior;
+- `docs/data-lifecycle.md` for retention, export completeness, backup, restore, and deletion behavior;
+- `docs/configuration.md` for any charter, reviewer-model, policy, bounds, or automatic-refinement configuration that becomes public;
+- `docs/verification.md` for deterministic, installed-product, sync, and externally gated verification evidence and explicit skips.
+
+Update `docs/README.md` when public pages or decision links change. Update `plans/README.md` and this plan's status and revision metadata when the plan is accepted, implemented, partially implemented, superseded, or retired. Remove the exploratory “adaptive agent city” description once this narrower plan becomes the accepted implementation contract. Public documentation must describe only shipped behavior; planned operations and schemas remain labeled as planning until their black-box product paths pass.
 
 ### End-to-end refinement flow
 
@@ -797,8 +824,9 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Define the sealed reviewer model contract and proposer-reviewer separation.
 - Define terminal notification, synchronous wait, detached recovery, and bounded reproposal semantics.
 - Define profile size and revision-rate bounds.
-- Amend `AGENTS.md` and ADR 0002 to authorize automatic charter review and immediate version activation in place of mandatory pre-activation outcome evidence.
-- Add an ADR for durable agent profiles and automated refinement review.
+- Accept a new ADR for durable agent profiles and automated refinement governance that explicitly supersedes ADR 0002's promotion and activation rules, preserves its unaffected decisions, and extends ADRs 0006 and 0008.
+- Update ADR statuses, metadata, backlinks, `docs/decisions/README.md`, and the decision list in `docs/README.md`.
+- Amend `AGENTS.md` to authorize the accepted automatic charter-review and activation model while distinguishing accepted direction from shipped capability.
 
 ### Phase 1 — Durable profiles
 
@@ -835,8 +863,9 @@ No migration rewrites retained event rows or silently interprets an initial task
 
 - Add installed-product journeys for profile creation, proposal, approval, rejection, bounded reproposal, rollback, restart, and inspection.
 - Add sync divergence, export, and deletion-plan coverage.
-- Update public protocol, API, user, operator, recovery, security, capability, event, mutable-table, data-lifecycle, and verification documentation.
-- Update `AGENTS.md` only for capabilities that ship.
+- Complete the documentation and decision-record obligations in this plan for architecture, events, tables, protocol, API, Console SDK, user operation, recovery, security, capabilities, configuration, data lifecycle, and verification.
+- Update `docs/README.md`, `plans/README.md`, ADR indexes and backlinks, and this plan's status and revision metadata.
+- Update `AGENTS.md` current implementation status only for capabilities demonstrated through the installed-product path; keep unshipped behavior explicit.
 
 ## Test plan
 
@@ -1006,8 +1035,10 @@ The plan is complete when:
 15. Dormant agents consume no execution capacity merely because their identity persists.
 16. Restart, branch, sync, export, and deletion behavior preserve proposal, review, profile, and notification provenance.
 17. The installed terminal journey demonstrates approval, rejection, bounded reproposal, activation, rollback, detach, and resume without internal IDs.
-18. `AGENTS.md`, ADR 0002, and public documentation describe the shipped automatic governance model and remaining limits accurately.
-19. Typecheck, architecture checks, deterministic tests, and acceptance pass; gated external checks are reported separately.
+18. A new accepted ADR records durable agent profiles and automated refinement governance, explicitly supersedes ADR 0002's affected promotion and activation rules, preserves its unaffected decisions, and extends ADRs 0006 and 0008.
+19. ADR statuses, metadata, backlinks, `docs/decisions/README.md`, and the decision list in `docs/README.md` agree.
+20. `AGENTS.md`, all affected public documentation named by this plan, `plans/README.md`, and this plan's status describe shipped behavior, unavailable behavior, and remaining limits accurately.
+21. Typecheck, architecture checks, deterministic tests, and acceptance pass; gated external checks are reported separately.
 
 ## Deferred extensions
 
@@ -1027,3 +1058,13 @@ The plan is complete when:
 - Distributed agent placement.
 - Embedding-based semantic agent search.
 - Automatic physical garbage collection of retained histories.
+
+## Implementation log
+
+### 2026-08-09 — Phase 0: constitutional foundation
+
+- Accepted [ADR 0012](../docs/decisions/0012-durable-agent-profiles-automated-refinement-governance.md) for durable per-session behavioral profiles and automated refinement governance.
+- Superseded only ADR 0002 Decision item 4's mandatory pre-activation allocation/exposure/observation path and Decision item 5's promotion thresholds and named-approval rules. ADR 0002's retrieval, immutable-version, provenance, generated-skill test, compare-and-swap, evaluation, and rollback rules remain in force.
+- Recorded that ADR 0012 extends ADR 0006 and ADR 0008 without changing durable relationship, workspace ownership, profile/device, or credential boundaries.
+- Amended the repository constitution and plan indexes to make this plan the accepted implementation contract while keeping all profile and automated-governance runtime capabilities explicitly unshipped.
+- Clarified that reviewer approval establishes charter compliance rather than empirical improvement and that candidate/control exposure remains available for attributable evaluation without being mandatory activation authority.
