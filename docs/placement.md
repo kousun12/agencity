@@ -1,6 +1,6 @@
 # Placement adapters and conformance
 
-Agencity separates relational state, artifact storage, memory candidate generation, and effect execution from their physical placement. The package provides local adapters, remote HTTP client adapters, and matching server handlers.
+Agencity separates relational state, artifact storage, memory candidate generation, and effect execution from their physical placement. The package provides local adapters, remote HTTP client adapters, and matching server handlers. [ADR 0011](./decisions/0011-capability-preserving-placement-contracts.md) records the governing placement decision.
 
 An implemented adapter is not a managed deployment. This repository does not provision, host, authenticate, monitor, or operate a remote relational service, object store, candidate-index service, or execution sandbox. An integrator supplies the endpoint and its security, availability, and isolation controls.
 
@@ -161,4 +161,4 @@ The object map and loopback executor used by tests are fixtures. There is no in-
 6. Back up relational state and referenced artifact bytes together.
 7. Treat executor isolation as an operator assertion that requires an actual external sandbox.
 
-See [TypeScript integration API](./api.md), [Capability matrix](./capabilities.md), [Trusted-local security boundary](./security.md), and [Crash recovery and unknown effects](./recovery.md).
+See [ADR 0011](./decisions/0011-capability-preserving-placement-contracts.md), [TypeScript integration API](./api.md), [Capability matrix](./capabilities.md), [Trusted-local security boundary](./security.md), and [Crash recovery and unknown effects](./recovery.md).

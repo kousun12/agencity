@@ -18,7 +18,7 @@ The current runtime does not provide:
 - remote executor attestation;
 - enforcement that generated code uses only the injected SDK.
 
-Do not expose `ProtocolServer` directly to an untrusted network. The product-managed service binds loopback and authenticates requests with a random bearer stored in an owner-only manifest. This protects against accidental cross-process use by other local users when filesystem permissions hold; it is not multi-tenant authorization and does not make generated code hostile-safe. The advanced `serve` command binds loopback but remains unauthenticated. Preserve those defaults or add a separately administered authenticated boundary.
+Do not expose `ProtocolServer` directly to an untrusted network. The product-managed service binds loopback and authenticates requests with a random bearer stored in an owner-only manifest. This protects against accidental cross-process use by other local users when filesystem permissions hold; it is not multi-tenant authorization and does not make generated code hostile-safe. The advanced `agencity debug protocol-serve` command binds loopback but remains unauthenticated; `serve` is only its legacy compatibility alias. Preserve those defaults or add a separately administered authenticated boundary.
 
 ## Defense in depth that is implemented
 

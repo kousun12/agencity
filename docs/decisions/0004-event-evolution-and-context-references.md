@@ -4,7 +4,7 @@
 - **Date:** 2026-08-07
 - **Scope:** Mixed event versions and referenced context storage
 - **Extends:** [ADR 0001](./0001-durable-local-runtime-foundations.md)
-- **Implementation plan:** [Lossless context-reference storage plan](../../plans/2026-08-07-lossless-context-references-plan.md)
+- **Deferred planning material:** [Lossless context-reference storage plan](../../plans/2026-08-07-lossless-context-references-plan.md)
 
 This proposal is deferred and requires a new readiness review before implementation. [ADR 0010](./0010-formal-model-tool-contracts.md) establishes a single current workspace schema with reset guidance for older state until the first release. The context exactness and canonical-reference goals remain proposed; mixed pre-release event versions are not part of this decision.
 
@@ -14,7 +14,7 @@ The runtime uses one uniform pre-release workspace schema and has no general per
 
 Reducing those copies must not change the exact value sent to a provider, discard attribution, introduce a projection-only source of truth, or depend on unreplicated artifact bytes.
 
-This ADR remains proposed until the linked implementation plan is complete and referenced contexts are the verified default for new writes.
+This ADR remains deferred. The linked plan is non-authoritative planning material; adoption requires a new readiness review and an explicit accepted decision before referenced contexts become the default for new writes.
 
 ## Decision
 

@@ -1,10 +1,10 @@
 # Lossless context-reference storage plan
 
-**Status:** Deferred until the formal model-tool cutover; requires a new readiness review
+**Status:** Deferred; requires a new readiness review
 **Date:** August 7, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)
 
-The former mixed-version compatibility design is superseded by [ADR 0010](../docs/decisions/0010-formal-model-tool-contracts.md). This revision targets one current workspace schema, rejects older workspaces with reset guidance, and contains no per-event version registry, mixed-history projection, old inline-effect execution, or dual-version client requirement. The context-fragment exactness and storage goals require a fresh readiness review after the formal model-tool cutover establishes the implementation baseline.
+The former mixed-version compatibility design is superseded by [ADR 0010](../docs/decisions/0010-formal-model-tool-contracts.md). The formal model-tool cutover is complete and establishes the current implementation baseline. This revision targets one current workspace schema, rejects older workspaces with reset guidance, and contains no per-event version registry, mixed-history projection, old inline-effect execution, or dual-version client requirement. The context-fragment exactness and storage goals remain deferred until a fresh readiness review accepts them against that baseline.
 
 ## Summary
 

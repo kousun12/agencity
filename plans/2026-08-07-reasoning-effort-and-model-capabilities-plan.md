@@ -1,16 +1,18 @@
 # Reasoning effort and model capabilities plan
 
-**Status:** Ready for implementation  
+**Status:** Implemented and verified
 **Date:** August 7, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related terminal work:** [Rich terminal rendering and layout](./2026-08-07-rich-terminal-rendering-and-layout-plan.md)
 **Later provider-contract work:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md)
 
+The reasoning-effort, shared AI SDK transport, public model-catalog, durable dispatch, and terminal/protocol selection work in this plan is implemented. Problem statements and sequencing below describe the pre-implementation baseline; the later formal model-tool plan extends the resulting model transport and dispatch contracts.
+
 ## Summary
 
-Agencity lets a user select a provider and model, but `ModelConfiguration` has no reasoning setting and the provider adapters never send reasoning parameters. A user cannot choose how much reasoning a supported model performs.
+Before this work, Agencity let a user select a provider and model, but `ModelConfiguration` had no reasoning setting and the provider adapters did not send reasoning parameters. A user could not choose how much reasoning a supported model performed.
 
-This plan delivers reasoning-effort selection by consolidating model execution onto one implementation:
+This plan delivered reasoning-effort selection by consolidating model execution onto one implementation:
 
 1. **All product model execution goes through the Vercel AI SDK.** One shared adapter core behind the existing `ModelProvider` contract replaces the three hand-written HTTP adapters (OpenAI-compatible, Anthropic-compatible, and the gateway instantiated through the Anthropic adapter). Three thin transport factories instantiate the core: the Vercel AI Gateway (`@ai-sdk/gateway`, the recommended default), direct OpenAI (`@ai-sdk/openai`), and direct Anthropic (`@ai-sdk/anthropic`).
 2. **The gateway's public model catalog is the single source of model and capability metadata for every transport** — model IDs, display names, context windows, output limits, pricing, and per-model reasoning levels. Agencity maintains no hand-written model catalog, no per-provider level maps, and no per-provider discovery adapters.

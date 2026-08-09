@@ -51,7 +51,7 @@ Missing user information is stated in a blocked message. A later user message st
 
 ### Durable schema and recovery
 
-The accepted workspace event schema is version 3 and the reducer is version 11. Version-1 and version-2 workspaces are rejected with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted.
+The accepted workspace event schema is version 3. Version-1 and version-2 workspaces are rejected with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. Projection snapshots are rebuildable and are discarded whenever their reducer version differs from the runtime; the current reducer version belongs in the event reference rather than this decision record.
 
 The retained model dispatch is `agencity.model-dispatch.v2`, and the authoritative successful effect output is `agencity.model-effect-output.v2`. One complete accepted tool input is retained in that effect output. `ModelCallCompleted`, `AgentRunActionCommitted`, and `AgentRunActionRejected` use result and input digests, provider call identity, and model-call references instead of copying the input. Rejected raw arguments are never retained in events, logs, artifacts, diagnostics, or progress.
 

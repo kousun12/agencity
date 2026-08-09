@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-05
 - **Scope:** Canonical local state, disposable execution, effects, artifacts, mutation, and trust boundary
-- **Extended by:** [ADR 0002](./0002-relational-memory-refinement.md), [ADR 0003](./0003-turso-envelope-sync.md), [ADR 0004](./0004-event-evolution-and-context-references.md), [ADR 0005](./0005-typed-autonomous-actions.md), [ADR 0006](./0006-durable-agent-relationships.md), [ADR 0007](./0007-managed-workspace-execution.md), [ADR 0008](./0008-profile-workspace-and-credentials.md), [ADR 0009](./0009-owned-data-deletion.md), and [ADR 0010](./0010-formal-model-tool-contracts.md)
+- **Extended by:** [ADR 0002](./0002-relational-memory-refinement.md), [ADR 0003](./0003-turso-envelope-sync.md), [ADR 0004](./0004-event-evolution-and-context-references.md), [ADR 0005](./0005-typed-autonomous-actions.md), [ADR 0006](./0006-durable-agent-relationships.md), [ADR 0007](./0007-managed-workspace-execution.md), [ADR 0008](./0008-profile-workspace-and-credentials.md), [ADR 0009](./0009-owned-data-deletion.md), [ADR 0010](./0010-formal-model-tool-contracts.md), and [ADR 0011](./0011-capability-preserving-placement-contracts.md)
 
 ## Context
 
@@ -55,7 +55,7 @@ Deployments that require filesystem, network, process, resource, or tenant isola
 - Generated programs use one general TypeScript surface while canonical writes remain validated and attributable.
 - Trusted-local operation is usable without claiming hostile-code isolation.
 
-Later ADRs preserve these foundations while adding relational memory and refinement, immutable envelope synchronization, event-version evolution, typed autonomous actions, durable agent relationships, managed detached execution, profile and credential separation, guarded physical deletion, and formal provider-tool response contracts. ADR 0010 supersedes ADR 0005's textual action transport while preserving this ADR's durable outbox, attributable state, and single generated TypeScript execution surface. Under ADR 0010, declaration-only provider tools select either a proposed console cell or a typed terminal outcome; only a validated, durably committed console action reaches the disposable worker and its injected SDK.
+Later ADRs preserve these foundations while adding relational memory and refinement, immutable envelope synchronization, event-version evolution, typed autonomous actions, durable agent relationships, managed detached execution, profile and credential separation, guarded physical deletion, formal provider-tool response contracts, and capability-preserving placement. ADR 0010 supersedes ADR 0005's textual action transport while preserving this ADR's durable outbox, attributable state, and single generated TypeScript execution surface. Under ADR 0010, declaration-only provider tools select either a proposed console cell or a typed terminal outcome; only a validated, durably committed console action reaches the disposable worker and its injected SDK.
 
 ## Rejected alternatives and limitations
 

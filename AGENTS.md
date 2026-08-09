@@ -1,7 +1,7 @@
 # AGENTS.md
 
 **Role:** Canonical repository guide  
-**Last reviewed:** August 8, 2026
+**Last reviewed:** August 9, 2026
 
 This file is the current source of truth for Agencity's purpose, product intention, design principles, supported behavior, known gaps, architecture, and implementation rules. A new reader should not need another product document to understand what the project is trying to build or what is currently real.
 
@@ -9,7 +9,7 @@ This file is the current source of truth for Agencity's purpose, product intenti
 
 Update this file whenever a change alters the product direction, supported user journey, durable domain model, security boundary, major capability, or known limitation.
 
-Authoritative implementation plans are the [parent TypeScript/Turso rewrite PRD](./plans/2026-08-05-prime-agent-typescript-turso-rewrite-prd.md), the [FU-001–FU-019 follow-up backlog](./plans/2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md), and the [formal model-tool contracts plan](./plans/2026-08-07-formal-model-tool-contracts-plan.md), in that order after this guide. The [lossless context-reference storage plan](./plans/2026-08-07-lossless-context-references-plan.md) is deferred and requires a new readiness review.
+Authoritative implementation plans are the [parent TypeScript/Turso rewrite PRD](./plans/2026-08-05-prime-agent-typescript-turso-rewrite-prd.md), the [FU-001–FU-019 follow-up backlog](./plans/2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md), and the [formal model-tool contracts plan](./plans/2026-08-07-formal-model-tool-contracts-plan.md), in that order after this guide. The [lossless context-reference storage plan](./plans/2026-08-07-lossless-context-references-plan.md) is deferred and requires a new readiness review. The [adaptive agent city plan](./plans/2026-08-08-adaptive-agent-city-plan.md) is exploratory, directionally useful planning rather than an accepted implementation contract.
 
 ## What Agencity is
 
@@ -25,6 +25,8 @@ Agencity takes those ideas in a different systems direction. The model's intende
 The console is disposable: its heap may accelerate a healthy run, but it is never the source of truth. Python workloads can run through trusted shell execution, but Python does not own the agent session and there is no dedicated Python executor.
 
 The central thesis is that an agent can program over its own context without making a language process its identity. Programs may be temporary, while committed work, relationships, evidence, and reasons remain durable and inspectable.
+
+Directionally, useful agent specializations should be able to persist and evolve into a bounded, inspectable organization instead of being rediscovered as disposable helpers for every task. Organizational change must remain evidence-governed, authority-bounded, and reversible where possible. The concrete agent-city model is speculative and is not part of current supported behavior.
 
 Agencity is inspired by Prime Agent rather than a compatibility port. It does not aim to preserve Prime Agent's Python modules, file formats, extension APIs, or persistent-kernel design, and it does not claim benchmark gains merely from adopting a different architecture.
 
@@ -89,7 +91,7 @@ Agencity does not claim or require:
 - exactly-once execution of arbitrary external effects;
 - durability of closures, sockets, module instances, subprocesses, or uncommitted console variables;
 - unrestricted model writes to canonical relational tables;
-- a hostile-code sandbox, authentication system, multi-tenant authorization boundary, or network isolation in the current trusted-local runtime;
+- a hostile-code sandbox, network-facing authentication or authorization system, multi-tenant authorization boundary, or network isolation in the current trusted-local runtime;
 - PostgreSQL, embeddings, or distributed coordination as prerequisites for the local product;
 - one database blob containing all durable bytes—artifacts may live outside the database and remain required for complete recovery;
 - a fixed planning ceremony, delegation topology, or ever-growing set of privileged model tools.
@@ -166,7 +168,8 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 - embedding-based semantic retrieval;
 - automatic artifact replication and garbage collection;
 - browser execution;
-- production Cloud administrative deletion through the installed Turso data client.
+- production Cloud administrative deletion through the installed Turso data client;
+- a formal adaptive-organization layer beyond the implemented durable agent-family model.
 
 Do not describe Agencity as a complete autonomous product or production-ready system merely because its runtime test suite passes.
 
@@ -254,6 +257,7 @@ Primary source areas:
 - `src/executors/` — typed effect executors for models, shell, files, skills, and related boundaries.
 - `src/console/` — disposable Bun worker and supervisor-owned RPC interface.
 - `src/runtime/` — supervisor and domain services: model loop, outbox, agents, goals, memory, refinement, recovery, sync integration.
+- `src/product/` — workspace discovery, product catalog and selection, provider onboarding, managed-service discovery, and product lifecycle composition.
 - `src/protocol/` — loopback HTTP/JSON, SSE, and typed client surfaces.
 - `src/tui/` — terminal client.
 - `src/security/` — SQL restrictions, secret handling, and trusted-local safeguards.
@@ -359,7 +363,7 @@ The current system is **trusted-local**, not a hostile-code sandbox.
 - Model-generated TypeScript and shell commands can exercise the OS authority of the runtime process.
 - The separate Bun console worker provides crash and protocol isolation, not security isolation.
 - The shell executor constrains its initial working directory but is not an OS sandbox.
-- The HTTP server is unauthenticated and should bind to loopback unless protected externally.
+- The product-managed HTTP service is bearer-authenticated from an owner-only discovery manifest and binds to loopback. The advanced embedded diagnostic server is unauthenticated and must remain on loopback unless protected by an external boundary.
 - Read-only SQL is a shared diagnostic surface, not a confidentiality boundary between candidates or workspaces.
 - Scope filtering controls behavior and context selection; it must not be described as protection against hostile local SQL/code.
 

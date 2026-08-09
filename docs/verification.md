@@ -82,13 +82,17 @@ The package is private. This verifies the documented source and `bun link` workf
 
 ### Recorded baseline
 
-The last recorded repository evidence for the runtime baseline at commit `2d2536f` on August 8, 2026 is:
+The current recorded local evidence was produced on August 9, 2026 against runtime commit `1ec7114` plus documentation-only working-tree changes:
 
-- `bun run test:core`: 828 passes and 2 documented external skips;
-- `bun run test:e2e`: 3 passes;
+- `bun run verify`: passed;
+- `bun run test:core` within that gate: 845 passes and 2 documented external skips;
 - `bun run test:acceptance`: 14 passes and 1 credential-gated real-provider skip;
-- deterministic release matrix: passed;
+- deterministic installed acceptance matrix row: passed;
 - real-provider, official Turso Sync server, and Turso Cloud rows: skipped and unverified.
+
+An independent same-tree rerun then exposed an unresolved OpenTUI test instability. `bun run test:core` and one focused `bun test test/unit/opentui.test.ts` rerun both timed out waiting for the first stable workspace frame in `renders a stable workspace, preserves input during protocol updates, responds to resize, and detaches`; a later focused rerun passed all 12 OpenTUI tests. The passing full gate above is therefore recorded evidence, but not yet repeatable all-green evidence.
+
+This is a dated, commit-scoped verification record rather than a claim about later revisions. Refresh it after code or test changes when current repository evidence is required, and do not describe this revision as merge-ready until the OpenTUI instability is resolved or disproved.
 
 The linked acceptance suite does not include a known-unsupported-model row. That condition cannot currently be represented truthfully through a shipped product transport or the public Gateway catalog: shipped transports prove the required primitives, while exact catalog model support remains `unknown`. Protocol tests use a genuine text-only provider to prove pre-admission rejection with no message, run, effect, child, or provider call. Linked tests separately prove missing-provider behavior and absence of text fallback.
 

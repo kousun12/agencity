@@ -100,6 +100,8 @@ Recursive model calls use the same foundation. A call returns a durable handle a
 
 There is one coordination model for root agents, subagents, recursive calls, the UI, and recovery workers.
 
+Durable relationships also open a longer-term direction. Useful specializations should not have to disappear and be rediscovered for every task; a workspace should be able to retain them and gradually develop a bounded, inspectable organization. Any such evolution must be driven by retained evidence, limited by explicit authority, and reversible where possible. The concrete organization model remains exploratory rather than shipped behavior.
+
 ## Autonomy is bounded and inspectable
 
 A session may carry a goal, completion gates, token and cost limits, a turn limit, a timeout, and scheduled heartbeats. The supervisor can continue the run until the goal is complete, a bound is reached, the agent requests help, or an outcome blocks safe continuation.
