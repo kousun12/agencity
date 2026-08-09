@@ -13,6 +13,7 @@ import {
 } from "../console/index.ts";
 import {
   CapabilityUnavailableError,
+  SEALED_ROOT_AGENT_PROFILE,
   assertNoReservedModelDispatchInputFields,
   assertJsonValue,
   jsonBytes,
@@ -23,6 +24,7 @@ import {
   projectEvents,
   ValidationError,
   type AgentEvent,
+  type AgentProfileInput,
   type ArtifactReference,
   type BudgetLimits,
   type JsonValue,
@@ -57,6 +59,7 @@ import {
   type SupportedModelProviderName,
 } from "../security/index.ts";
 import { AgentService } from "./agents.ts";
+import { AgentProfileService } from "./agent-profiles.ts";
 import { DocumentService } from "./documents.ts";
 import { GoalService } from "./goals.ts";
 import { HeartbeatService } from "./heartbeats.ts";
@@ -143,6 +146,7 @@ export interface CreateSessionOptions {
   readonly branchId?: string;
   readonly sessionName?: string;
   readonly branchName?: string;
+  readonly agentProfile?: AgentProfileInput;
 }
 
 /** Serializes committed cell boundaries per branch without retaining domain state. */
@@ -286,6 +290,7 @@ export class Supervisor {
   readonly compactions: CompactionService;
   readonly modelLoop: ModelLoop;
   readonly agents: AgentService;
+  readonly agentProfiles: AgentProfileService;
   readonly documents: DocumentService;
   readonly models: PublicRecursiveModelService;
   readonly #recursiveModels: RecursiveModelService;
@@ -307,6 +312,7 @@ export class Supervisor {
   readonly restartConsoleAfterCell: boolean;
   readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
   readonly #cells = new BranchQueue();
+  readonly #sessionCreations = new BranchQueue();
   #closed = false;
 
   private constructor(
@@ -347,6 +353,7 @@ export class Supervisor {
         modelExecutor.resolveExecutionDescriptor(model),
       ),
     );
+    this.agentProfiles = this.agents.profiles;
     this.skills = new SkillService(storage, outbox, skillPermissionAllowlist, userScopeKey);
     this.harness = new HarnessService(storage, this.skills, userScopeKey);
     this.memory = new MemoryService(storage, undefined, userScopeKey);
@@ -357,7 +364,7 @@ export class Supervisor {
     this.executionLeases = executionLeases;
     this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
     this.compactions = new CompactionService(storage, outbox, modelExecutor);
-    this.modelLoop = new ModelLoop(storage, this.contexts, outbox, this.compactions, modelExecutor);
+    this.modelLoop = new ModelLoop(storage, this.contexts, outbox, this.compactions, modelExecutor, this.agentProfiles);
     this.documents = new DocumentService(storage);
     this.goals = new GoalService(storage, outbox);
     this.heartbeats = new HeartbeatService(storage);
@@ -374,7 +381,7 @@ export class Supervisor {
     );
     this.models = this.#recursiveModels;
     this.restartConsoleAfterCell = restartConsoleAfterCell;
-    this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), acceptanceAgentRunMaxSteps(), this.compactions, modelExecutor);
+    this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), acceptanceAgentRunMaxSteps(), this.compactions, modelExecutor, this.agentProfiles);
     this.effectReconciliation = new EffectReconciliationService(storage);
     this.refiner = new RefinerService(
       storage,
@@ -612,6 +619,14 @@ export class Supervisor {
       options.model,
       "Public model configuration",
     );
+    const sessionId = options.sessionId ?? newId();
+    return this.#sessionCreations.run(sessionId, () => this.#createSessionWithIdentity(sessionId, options));
+  }
+
+  async #createSessionWithIdentity(
+    sessionId: string,
+    options: CreateSessionOptions,
+  ): Promise<{ sessionId: string; branchId: string }> {
     if (this.sync.capabilities.configured && options.workspaceId !== this.sync.workspaceId) {
       throw new ValidationError(`Configured cloud replica belongs to workspace ${this.sync.workspaceId}, not ${options.workspaceId}`);
     }
@@ -622,9 +637,31 @@ export class Supervisor {
     }
     if (catalog?.deletedAt) throw new ValidationError("Workspace was deleted and cannot be silently reclaimed", { workspaceId: options.workspaceId, deletedAt: catalog.deletedAt });
     if (!catalog) await this.profile.putWorkspace({ workspaceId: options.workspaceId, name: options.workspaceId, databaseUrl: this.sync.databaseUrl, replicaUrl: null, syncUrl: null, credentialReference: null, ownerProfileId: this.device.profileId, createdAt: now, updatedAt: now, deletedAt: null });
-    const sessionId = options.sessionId ?? newId();
-    const branchId = options.branchId ?? newId();
     const model = await this.#normalizeSelectedModel(options.model ?? { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" });
+    const existing = await this.storage.loadEvents(sessionId);
+    const existingCreated = existing.find((event) => event.type === "SessionCreated") as AgentEvent<"SessionCreated"> | undefined;
+    const branchId = options.branchId ?? existingCreated?.payload.initialBranchId ?? newId();
+    const requestedProfile = options.agentProfile ?? SEALED_ROOT_AGENT_PROFILE;
+    const profileMetadata = {
+      profileVersionId: `agent-profile-${sessionId}-v1`,
+      agentSessionId: sessionId,
+      createdBy: options.agentProfile
+        ? { kind: "user" as const, profileId: this.device.profileId }
+        : { kind: "system" as const, componentId: "agencity.sealed-root-profile", version: 1 },
+      reason: options.agentProfile ? "Explicit owner-supplied initial profile" : "Sealed root admission profile",
+      createdAt: existingCreated?.payload.agentProfile.createdAt ?? now,
+    };
+    const agentProfile = this.agentProfiles.materializeInitial(requestedProfile, profileMetadata);
+    if (existingCreated) {
+      const payload = existingCreated.payload;
+      if (payload.workspaceId !== options.workspaceId || payload.initialBranchId !== branchId ||
+          !Bun.deepEquals(payload.model, model) || !Bun.deepEquals(payload.budget, options.budget ?? {}) ||
+          payload.sessionName !== options.sessionName || payload.initialBranchName !== options.branchName ||
+          !Bun.deepEquals(payload.agentProfile, agentProfile)) {
+        throw new ValidationError("Session identity was reused with different durable meaning");
+      }
+      return { sessionId, branchId };
+    }
     await this.storage.appendEvents([{
       sessionId,
       branchId,
@@ -636,6 +673,7 @@ export class Supervisor {
         initialBranchId: branchId,
         model,
         budget: options.budget ?? {},
+        agentProfile,
         ...(options.sessionName === undefined ? {} : { sessionName: options.sessionName }),
         ...(options.branchName === undefined ? {} : { initialBranchName: options.branchName }),
       },
@@ -716,6 +754,33 @@ export class Supervisor {
     }]);
     if (!event) throw new Error("Message not committed");
     return event as AgentEvent<"MessageAppended">;
+  }
+
+  /** Retained diagnostic compatibility route using the canonical AgentRun boundary. */
+  async diagnosticTurn(sessionId: string, branchId: string): Promise<{
+    readonly outcome: "succeeded" | "failed" | "cancelled" | "unknown";
+    readonly message?: string;
+    readonly error?: string;
+    readonly runId: string;
+  }> {
+    const events = await this.storage.loadEvents(sessionId, { branchId });
+    if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
+    const state = projectEvents(events);
+    const task = [...state.messages].reverse().find((message) => message.role === "user")?.content;
+    if (!task) throw new ValidationError("Diagnostic turn requires a retained user message");
+    const result = await this.runs.start(sessionId, branchId, {
+      task,
+      goalMode: "none",
+      requestKey: `diagnostic-turn:${newId()}`,
+      suppressTaskMessage: true,
+    });
+    if (result.status === "succeeded") {
+      return { outcome: "succeeded", runId: result.runId, ...(result.final === undefined ? {} : { message: result.final }) };
+    }
+    if (result.status === "cancelled" || result.status === "unknown") {
+      return { outcome: result.status, runId: result.runId, ...(result.reason === undefined ? {} : { error: result.reason }) };
+    }
+    return { outcome: "failed", runId: result.runId, error: result.reason ?? `Agent run ${result.status}` };
   }
 
   /** Rebuilds and reattaches to a durable branch without changing execution ownership. */

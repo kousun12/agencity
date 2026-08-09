@@ -17,6 +17,8 @@ Only a committed terminal event and its committed exports become later state. Th
 
 Unless `recover: false`, `Supervisor.open` performs:
 
+Before this sequence, storage admission verifies that every retained event uses schema version 4. A workspace containing schema version 1, 2, or 3 fails closed with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. The runtime does not upcast, rewrite, or delete that history. Back up or move aside the incompatible workspace state before creating a fresh schema-version-4 workspace.
+
 1. **Outbox reconciliation.** Each mutable `running` row whose owner disappeared is inspected.
 2. **Safe requeue.** An effect declared idempotent returns to `pending` with its attempt count retained.
 3. **Visible uncertainty.** A non-idempotent running effect gets a canonical `EffectOutcomeRecorded { outcome: "unknown" }`; it is not requeued. An anomalous pending non-idempotent row with a retained prior attempt is treated the same way; a normal pending first attempt remains safe to drain because it was never claimed.
@@ -28,12 +30,20 @@ Unless `recover: false`, `Supervisor.open` performs:
 9. **Status reconciliation.** A branch left `running` by a crash before model-request/finalization commits is returned to `idle` with a recovery event.
 10. **Heartbeat recovery.** Due active schedules append one aligned tick plus wake message; paused/cancelled schedules are ignored.
 11. **Goal recovery.** Running gate effects are reconciled to passed/failed/cancelled/unknown, the canonical gate-definition/workspace-material pin is re-checked before recovered success can pass, matching terminal evaluations are reused, and ambiguous or stale required gates block completion. An active goal without a typed run association is attached to a stable `AgentRun`; recovery does not route autonomous work through the diagnostic text loop.
-12. **Recursive-handle recovery.** Running terminal child calls finalize their durable task/model handle and atomically attribute direct usage to ancestors; safe pending handles re-enter the shared provider limiter. A committed handle resolves after console-worker or supervisor restart without repeating admission. Terminal `succeeded`, `failed`, `cancelled`, `budget-exceeded`, and `unknown` outcomes are retained separately; non-idempotent ambiguous calls are unknown and are never generated twice. Large completed values resolve through their registered content-addressed result artifact.
+12. **Recursive-handle recovery.** Running terminal child calls finalize their durable task/model handle and atomically attribute direct usage to ancestors; safe pending handles re-enter the shared provider limiter. A committed handle resolves after console-worker or supervisor restart without repeating admission. Its retained profile pin fixes the child profile version, prompt digest, and prompt contract used by every recovered model call. Terminal `succeeded`, `failed`, `cancelled`, `budget-exceeded`, and `unknown` outcomes are retained separately; non-idempotent ambiguous calls are unknown and are never generated twice. Large completed values resolve through their registered content-addressed result artifact.
 13. **Refinement-review recovery.** Every nonterminal review is relaunched in the background from its canonical request and frozen trajectory snapshot. A retained child link reuses the same recursive-model handle and its exact structured `responseAdmission`. A successful child result is reconstructed from the authoritative model effect and bound to the child completion without creating an assistant message. A retained decision reuses the stable proposal identity and resumes validation, candidate activation, or exact allocation without duplication. A child `unknown` outcome becomes terminal `unknown` and is never retried. Deterministic malformed/over-scoped output becomes visible `failed`; infrastructure failure leaves the last committed boundary for later recovery rather than inventing success.
 14. **Family-delivery recovery.** A committed send missing its recipient-delivery event completes that prefix (or records failed if the target became unavailable). Accepted queued messages enter context once; a context-delivered retained follow-up whose stable run request is missing schedules that same run ID. Acknowledged rows are left terminal.
-15. **Agent-run recovery.** Queued/running typed runs reconcile retained formal submissions or violations, cells, gate evidence, cancellation, and unknown effects before another model call. An accepted action is applied from its digest-linked committed source rather than resubmitted. Blocked and failed finishes use one atomic message/status batch; successful finishes materialize a message only after gates pass. Family follow-up terminal replies use the same retained run/message IDs and are not regenerated on repeated startup.
+15. **Agent-run recovery.** Queued/running typed runs reconcile retained formal submissions or violations, cells, gate evidence, cancellation, and unknown effects before another model call. Recovery resolves the immutable profile version named by `AgentRunRequested.profilePin`; it does not substitute a later active profile. Context, call, and effect prompt provenance must agree with that invocation pin before dependent work continues. An accepted action is applied from its digest-linked committed source rather than resubmitted. Blocked and failed finishes use one atomic message/status batch; successful finishes materialize a message only after gates pass. Family follow-up terminal replies use the same retained run/message IDs and are not regenerated on repeated startup.
 
 Recovery commands use stable branch-scoped idempotency keys, so repeating startup does not duplicate terminal state. Projection rebuild is a separate effect-free replay operation and does not run any of these schedulers or queues. Family message acceptance, context insertion, linked-artifact registration, and the two endpoint receipt updates are each atomic append batches; the only intentional asynchronous boundary is between context delivery and retained follow-up run admission.
+
+## Agent-profile and prompt-pin recovery
+
+The initial immutable profile is complete inside `SessionCreated`. Later `AgentProfileVersionCreated` and `AgentProfileActivated` events are session-wide control records addressed through the session's initial branch. `agent_profile_versions` and `workspace_agent_profiles` are rebuildable projections; deleting and replaying them in global cursor order reconstructs exact versions and the active pointer without rendering new text or calling a model.
+
+An active profile pointer is used only when admitting a new autonomous run or recursive-model invocation. Admission writes an immutable profile pin before model work. Prompt composition then uses the retained exact agent prompt and fixed component order, and records the effective-system-prompt digest and component references in context and model-call provenance. If the active pointer changes later, recovery of the older invocation continues with its pinned version. A missing version, digest mismatch, or prompt-component mismatch is a dependency/validation failure, not permission to use the newer profile.
+
+Projection rebuild never creates a profile revision or activation. Public profile revision and automated-governance recovery do not exist yet.
 
 ## Refinement review boundaries
 
@@ -83,6 +93,8 @@ File write helps make retry safe by writing atomically, accepting an expected pr
 | Staged state/artifact reference before cell commit | No `WorkingValueSet`/`ArtifactRegistered` event. | Do not expose it. Unreferenced CAS bytes may remain. |
 | Cell commit succeeds, process dies before notification | Complete canonical batch. | Snapshot/subscriber catch-up reads it from storage. |
 | Model effect terminal, model-call finalization missing | Requested call plus terminal effect. | Finalize once without another provider call. |
+| Profile activation commits after a run or recursive invocation was admitted | New active pointer plus older invocation profile pin. | Continue the admitted invocation with its older pinned profile; use the activation only for later invocations. |
+| Profile/context/recursive projections are missing or stale | Canonical session, profile-control, invocation, and prompt-provenance events remain. | Rebuild projections in global cursor order; do not execute a model or render replacement profile content. |
 | Formal action committed, application incomplete | Digest-linked action plus authoritative model effect. | Apply the same action once; do not call the provider again. |
 | Blocked/failed finish terminal batch interrupted | Either no message/status batch or the complete atomic batch. | Reapply the same stable message/status identities without duplication. |
 | Status set running, crash before/after model request finalization | Branch remains `running` without live ownership. | Finish any terminal call, then append recovery-to-idle once. |
@@ -110,6 +122,7 @@ Guaranteed by implemented paths:
 
 - canonical appends and their operational projection writes share one local transaction;
 - exact duplicate event idempotency keys return the original event; changed meaning conflicts;
+- profile versions, active pointers, invocation pins, and effective-system-prompt provenance rebuild from canonical schema-version-4 events;
 - non-idempotent lost ownership becomes unknown;
 - projection replay never invokes effects;
 - post-commit notification loss is repaired by cursor catch-up.

@@ -94,7 +94,10 @@ export class ProjectionService {
     };
 
     const unsubscribe = this.storage.onCommitted((events) => {
-      if (events.some((event) => event.sessionId === sessionId && event.branchId === branchId)) {
+      if (events.some((event) => event.sessionId === sessionId &&
+          (event.branchId === branchId ||
+            event.type === "AgentProfileVersionCreated" ||
+            event.type === "AgentProfileActivated"))) {
         dirty = true;
         void pump();
       }

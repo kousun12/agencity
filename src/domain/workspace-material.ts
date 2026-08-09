@@ -9,6 +9,8 @@ export type WorkspaceMaterialEventClass = "material" | "file-effect" | "non-mate
  */
 export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   SessionCreated: "non-material",
+  AgentProfileVersionCreated: "non-material",
+  AgentProfileActivated: "non-material",
   BranchCreated: "non-material",
   SessionNamed: "non-material",
   BranchNamed: "non-material",

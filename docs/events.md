@@ -1,6 +1,6 @@
-# Event schemas (version 3)
+# Event schemas (version 4)
 
-`events` is the canonical append-only history. The runtime accepts schema version 3 only. Version-1 and version-2 workspaces reject with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. After release, payload evolution requires a new schema version and an explicit tested projection path.
+`events` is the canonical append-only history. The runtime accepts schema version 4 only. Workspaces containing schema version 1, 2, or 3 reject with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. After release, payload evolution requires a new schema version and an explicit tested projection path.
 
 ## Header
 
@@ -15,7 +15,7 @@ Every stored event has:
 | `causationId` | string or `null` | Direct causal event when supplied. |
 | `correlationId` | string or `null` | Cross-event operation correlation when supplied. |
 | `type` | `EventType` | Payload discriminator listed below. |
-| `schemaVersion` | positive integer | Payload/header version; exactly `3`. |
+| `schemaVersion` | positive integer | Payload/header version; exactly `4`. |
 | `committedAt` | string (normally ISO datetime) | Commit timestamp supplied or generated at the storage boundary. |
 | `producer` | non-empty string | Usually `supervisor`, `console`, `model`, `executor`, `client`, or `recovery`. |
 | `idempotencyKey` | string or `null` | Unique within `(sessionId, type)` when present. Same payload/branch deduplicates; changed meaning conflicts. |
@@ -46,6 +46,41 @@ type ArtifactReference = {
 type Usage = {
   inputTokens: number; outputTokens: number; costUsd: number;
 }; // all nonnegative
+
+type AgentProfileVersion = {
+  profileVersionId: string; agentSessionId: string; revision: number;
+  role: string; purpose: string; instructions: string;
+  exactAgentPrompt: string;
+  promptContractId: "agencity.agent-profile.v1";
+  promptDigest: string; // SHA-256 hex
+  createdBy:
+    | { kind: "user"; profileId: string }
+    | { kind: "agent"; sessionId: string; branchId: string }
+    | { kind: "system"; componentId: string; version: number };
+  sourceSpecEntryId: string | null;
+  sourceSpecVersionId: string | null;
+  reason: string; evidenceEventIds: string[];
+  supersedesProfileVersionId: string | null;
+  restoresProfileVersionId: string | null;
+  sourceProposalId: string | null;
+  reviewDecisionId: string | null;
+  createdAt: string;
+};
+
+type InvocationPromptProvenance = {
+  invocationKind: "agent-run" | "recursive-model";
+  invocationId: string;
+  profileVersionId: string;
+  agentPromptDigest: string;
+  effectiveSystemPromptDigest: string;
+  systemPromptContractId: "agencity.system-prompt.v1";
+  components: {
+    basePolicy: { componentId: string; version: number; digest: string };
+    agentProfile: { componentId: string; version: number; digest: string };
+    responseContract: { componentId: string; version: number; digest: string };
+    executionGuidance: { componentId: string; version: number; digest: string };
+  };
+};
 ```
 
 A model configuration has required non-empty `provider`, canonical `creator/model`, and `reasoningEffort`, with optional finite `temperature` and nonnegative `maxOutputTokens`. Reasoning effort is `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Budget limits optionally contain nonnegative `tokenLimit`, `costLimitUsd`, `turnLimit`, and `wallTimeLimitMs`.
@@ -54,9 +89,11 @@ A model configuration has required non-empty `provider`, canonical `creator/mode
 
 Optional fields are marked `?`. All IDs/names required by schema are non-empty strings unless a stricter note is shown.
 
-| Event type | Version 3 payload | Projection/semantic effect |
+| Event type | Version 4 payload | Projection/semantic effect |
 |---|---|---|
-| `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, sessionName?, initialBranchName?, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Initializes a root or normal child session, including optional human display labels. Child creation requires the complete parent/root/depth/task tuple; retained rows without ancestry fields project self as root and depth zero. |
+| `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, agentProfile, sessionName?, initialBranchName?, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Atomically initializes a root or normal child session and its complete revision-1 profile. Child creation requires the complete parent/root/depth/task tuple. The embedded profile retains exact rendered prompt, digest, creator, reason, and optional specification source; initial proposal/review/rollback provenance is null. |
+| `AgentProfileVersionCreated` | `{ agentProfile, expectedActiveProfileVersionId }` | Retains a later immutable version after compare-and-swap against the session-wide active pointer. The event must use the session's initial branch. Public revision and governance commands are not implemented. |
+| `AgentProfileActivated` | `{ profileVersionId, expectedActiveProfileVersionId, reason }` | Moves the session-wide active pointer to an existing retained version after compare-and-swap. The event must use the session's initial branch; later invocations on any branch use the new pointer. |
 | `BranchCreated` | `{ branchId, parentBranchId, forkCursor: decimal string, name?: string }` | Selects the new active branch projection. Storage records ancestry through the exact parent cursor. |
 | `SessionNamed` | `{ name }` | Changes the human session label without changing durable identity or retained task text. Product listing resolves the latest attributable rename across retained branches. |
 | `BranchNamed` | `{ name }` | Changes the current branch label; the rebuildable branch routing projection mirrors it. |
@@ -76,8 +113,8 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `EffectReconciliationRecorded` | `{ reconciliationId, effectId, assessment: "succeeded" | "failed" | "no_effect" | "still_unknown", summary, evidence?: JsonValue, recordedBy, recordedAt }` | Append-only operator evidence for an already-unknown effect. It never changes effect/outbox status and never retries work. |
 | `ContextCompactionRequested` | `{ compactionId, strategy, reason, requestedBy, instructions?, throughCursor, sourceEventIds, sourceDigest, frozenSources, capacity?, modelDispatch?, ancestorContextId?, rematerializedFromContextId? }` | Freezes the exact ordered narrative source envelopes, cursors, payloads, digest, and model dispatch before any model-summary effect. Requests never delete or rewrite their sources. |
 | `ContextCompactionFailed` | `{ compactionId, requestEventId, strategy, outcome, error, effectId? }` | Makes failed, unknown, protected-only, and non-shrinking compaction terminal states explicit. Unknown model effects are not retried. |
-| `ContextMaterialized` | `{ contextId, records, contentHash, context, harnessProvenance?, derivation? }` | Records exact model context and provenance; an optional typed compaction derivation names strategy, request, leaf/source digests, generation, capacity, effects, and usage. Also inserts immutable `context_records`. |
-| `ModelCallRequested` | `{ callId, contextId, effectId, modelDispatch, estimatedInputTokens, attempt?, retryOfCallId?, contextWindow? }` | Links a logical model call or attributed overflow retry to exact context, immutable `agencity.model-dispatch.v2` configuration/capability/endpoint dispatch, input estimate, capacity provenance, and durable effect. The matching model `EffectRequested` input must contain the same dispatch. |
+| `ContextMaterialized` | `{ contextId, records, contentHash, context, harnessProvenance?, promptProvenance?, derivation? }` | Records exact model context and provenance. Autonomous and recursive calls retain invocation kind/ID, profile version and prompt digest, effective-system-prompt digest, prompt contract, and immutable base/profile/response/guidance component references. An optional typed compaction derivation names strategy, request, leaf/source digests, generation, capacity, effects, and usage. Also inserts immutable `context_records`. |
+| `ModelCallRequested` | `{ callId, contextId, effectId, modelDispatch, estimatedInputTokens, promptProvenance, attempt?, retryOfCallId?, contextWindow? }` | Links a logical model call or attributed overflow retry to exact context, immutable `agencity.model-dispatch.v2` configuration/capability/endpoint dispatch, input estimate, capacity provenance, durable effect, and the invocation's exact profile/effective-prompt provenance. The matching model `EffectRequested` input must contain the same dispatch and prompt provenance. |
 | `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends authoritative projected output for a text-result call. Text paths commit one sequence-0 chunk in the terminal success batch; live provider deltas and formal arguments are deliberately not this event. |
 | `ModelCallCompleted` | `{ callId, responseMessageId?, result, resultDigest, termination, usage, warnings, usageSource }` | Marks model success and binds the response summary to the authoritative `agencity.model-effect-output.v2`. Text results may link an assistant message; formal submissions and violations retain only digest-linked summaries. |
 | `ModelCallTerminated` | `{ callId, outcome: "failed" | "cancelled" | "unknown", error?, failureCode? }` | Visible non-success terminal state with a closed model-failure classification; no fabricated response. |
@@ -97,8 +134,8 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `HeartbeatCreated` / `HeartbeatTicked` / `HeartbeatStatusChanged` | Interval/due time/goal/prompt/owner, monotonic coalesced tick timing, and active/paused/cancelled state. | Ticks atomically enqueue a durable wake; they do not call the diagnostic text loop. User-owned records cannot be changed by generated code. |
 | `ScheduleCreated` / `ScheduleTicked` / `ScheduleStatusChanged` | One-time/interval prompt, explicit goal mode, due time, coalesced tick, owner, and lifecycle. | One-time schedules complete after one queued tick; recurring missed intervals coalesce into one wake. |
 | `WakeQueued` / `WakeClaimed` / `WakeDelivered` / `WakeDeliveryUnknown` | Stable source/tick/wake identity, prompt/goal provenance, claim, AgentRun ID, and explicit uncertain delivery. | Delivery is claim-before-run through `AgentRunService`; stable IDs reconcile crashes without a second execution loop or blind prompt replay. |
-| `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs, exact `responseAdmission`, bounded materialized input plus identity provenance/hash, lifecycle status, distinct terminal outcome, and bounded result/artifact reference. | Public recursive calls retain text admission. Sealed structured children retain their exact contract/capability seed and may complete with a typed message-free result bound to the child model completion. |
-| `AgentRunRequested` | `{ runId, task, requestKey, goalId? }` | Commits stable autonomous-run intent. One branch has at most one nonterminal run and an exact request-key retry cannot change durable meaning. |
+| `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs, exact `responseAdmission`, immutable `profilePin`, bounded materialized input plus identity provenance/hash, lifecycle status, distinct terminal outcome, and bounded result/artifact reference. | Public recursive calls retain text admission. The profile pin fixes the child profile version, prompt digest, and prompt contract for the whole invocation. Sealed structured children retain their exact response contract/capability seed and may complete with a typed message-free result bound to the child model completion. |
+| `AgentRunRequested` | `{ runId, task, requestKey, profilePin, goalId?, goalMode?, wakeId? }` | Commits stable autonomous-run intent and the exact active profile version, prompt digest, and profile prompt contract used by every call in the run. One branch has at most one nonterminal run and an exact request-key retry cannot change durable meaning. |
 | `AgentRunStepStarted` | `{ runId, stepId, ordinal, contextId, callId, effectId, actionId, observationEventIds }` | Starts the next deterministic step and freezes the exact not-previously-delivered execution/input observation IDs for its dependent context. |
 | `AgentRunModelAttemptStarted` | `{ runId, stepId, ordinal, attempt, contextId, callId, effectId, reason, estimatedInputTokens, contextWindow, retryOfCallId? }` | Attributes the exact initial or provider-overflow model attempt. Only typed provider-confirmed overflow may create a later attempt over a strictly smaller candidate. |
 | `AgentRunActionCommitted` | `{ runId, stepId, ordinal, actionId, source: { kind: "tool-submission", modelCallId, providerToolCallId, resultDigest }, action }` | Retains one validated canonical `agencity.agent-action` derived from the accepted `bun_console` or `finish` formal call. The full accepted input remains only in the model effect output. |
@@ -112,6 +149,12 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 Mailbox intent, artifact, follow-up, and receipt-link fields are optional by schema. New messages carry an intent and require an explicit context-delivery event before acknowledgement.
 
 ## Lifecycle groupings
+
+### Agent profile and invocation pins
+
+The initial profile is part of `SessionCreated`; a runnable session never exists without it. Profile version and activation events are session-wide control records carried on the existing event header using the session's initial branch. This is an addressing compromise rather than branch-local identity: storage checks the active-version compare-and-swap against `workspace_agent_profiles`, profile lookup replays all events for the session, and projection rebuild applies profile events in global cursor order. Conversation branches do not receive independent active-profile pointers.
+
+`AgentRunRequested.profilePin` and `RecursiveModelStarted.profilePin` freeze one version for an invocation. Each associated `ContextMaterialized.promptProvenance` and `ModelCallRequested.promptProvenance` must agree with that pin. Retries and later steps in the same invocation retain it even if a later profile activation changes the session-wide active pointer.
 
 ### Console cell
 
@@ -198,7 +241,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. Synchronized envelopes use a separate ingestion path that quarantines invalid remote rows rather than weakening local validation.
-- Snapshots include `reducerVersion: 12`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 13`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 
@@ -206,12 +249,12 @@ Events are made visible to subscribers only after database commit. Durable commi
 
 ## Current evolution limitations
 
-The runtime validates one uniform `EVENT_SCHEMA_VERSION = 3`. Version-1/version-2 workspaces reject before product migration, decoding, projection, synchronization, and recovery. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
+The runtime validates one uniform `EVENT_SCHEMA_VERSION = 4`. Workspaces containing version 1, 2, or 3 reject before product migration, decoding, projection, synchronization, and recovery. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
 
 
 ## Harness, evaluation, and exact-version events
 
-Embedded harness and refinement content retains its own versioned formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-3 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
+Embedded harness and refinement content retains its own versioned formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-4 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
 
 | Event | Durable meaning |
 |---|---|
@@ -242,7 +285,7 @@ Embedded harness and refinement content retains its own versioned formats and st
 
 ## Synchronization conflict resolution
 
-| Event type | Version 3 payload | Projection/semantic effect |
+| Event type | Version 4 payload | Projection/semantic effect |
 |---|---|---|
 | `SyncConflictResolved` | `{ conflictId, action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge", resolvedBy, chosenEventId?, note?, resolvedAt }` | Records explicit authority over a surfaced reconciliation. It updates the local reconciliation projection and replicates as ordinary canonical history; it never rewrites either claim or branch. |
 

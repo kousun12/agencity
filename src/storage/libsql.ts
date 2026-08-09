@@ -1,5 +1,5 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
-import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
+import type { AgentEvent, AgentProfileVersion, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
 import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, ValidationError, canonicalSkillDigest, createRefinementReviewRecursiveResult, newId, projectEvents, reduceAgentState, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
@@ -117,11 +117,13 @@ function rowToRecursiveModel(row: Row): RecursiveModelRecord {
   const inputProvenance = optionalJson(row, "input_provenance_json");
   const result = optionalJson(row, "result_json");
   const responseAdmission = optionalJson(row, "response_admission_json");
+  const profilePin = optionalJson(row, "profile_pin_json");
   if (!responseAdmission || typeof responseAdmission !== "object" || Array.isArray(responseAdmission)) throw new ValidationError("Recursive model projection is missing its response admission");
+  if (!profilePin || typeof profilePin !== "object" || Array.isArray(profilePin)) throw new ValidationError("Recursive model projection is missing its profile pin");
   const admission = responseAdmission as unknown as RecursiveModelRecord["responseAdmission"];
   const contract = validateModelResponseContract(admission.responseContract);
   validateModelResponseContractCapability(contract, admission.responseCapability);
-  return { handleId: String(row.handle_id), taskId: String(row.task_id), parentSessionId: String(row.parent_session_id), parentBranchId: String(row.parent_branch_id), childSessionId: String(row.child_session_id), childBranchId: String(row.child_branch_id), model: JSON.parse(String(row.model_json)), responseAdmission: admission, inputSetId: row.input_set_id === null ? null : String(row.input_set_id), ...(input === undefined ? {} : { input }), ...(inputProvenance === undefined ? {} : { inputProvenance }), ...(row.input_hash === null || row.input_hash === undefined ? {} : { inputHash: String(row.input_hash) }), status: String(row.status) as RecursiveModelRecord["status"], ...(row.outcome === null || row.outcome === undefined ? {} : { outcome: String(row.outcome) as NonNullable<RecursiveModelRecord["outcome"]> }), ...(row.result_message_id === null ? {} : { resultMessageId: String(row.result_message_id) }), ...(result === undefined ? {} : { result }), ...(row.result_artifact_id === null || row.result_artifact_id === undefined ? {} : { resultArtifactId: String(row.result_artifact_id) }), ...(row.error === null ? {} : { error: String(row.error) }), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+  return { handleId: String(row.handle_id), taskId: String(row.task_id), parentSessionId: String(row.parent_session_id), parentBranchId: String(row.parent_branch_id), childSessionId: String(row.child_session_id), childBranchId: String(row.child_branch_id), model: JSON.parse(String(row.model_json)), responseAdmission: admission, profilePin: profilePin as unknown as RecursiveModelRecord["profilePin"], inputSetId: row.input_set_id === null ? null : String(row.input_set_id), ...(input === undefined ? {} : { input }), ...(inputProvenance === undefined ? {} : { inputProvenance }), ...(row.input_hash === null || row.input_hash === undefined ? {} : { inputHash: String(row.input_hash) }), status: String(row.status) as RecursiveModelRecord["status"], ...(row.outcome === null || row.outcome === undefined ? {} : { outcome: String(row.outcome) as NonNullable<RecursiveModelRecord["outcome"]> }), ...(row.result_message_id === null ? {} : { resultMessageId: String(row.result_message_id) }), ...(result === undefined ? {} : { result }), ...(row.result_artifact_id === null || row.result_artifact_id === undefined ? {} : { resultArtifactId: String(row.result_artifact_id) }), ...(row.error === null ? {} : { error: String(row.error) }), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
 }
 function rowToReplicaStatus(row: Row): WorkspaceReplicaStatusRecord { return {
   replicaId:String(row.replica_id), replicaIncarnation:row.replica_incarnation===null?null:String(row.replica_incarnation),
@@ -314,6 +316,7 @@ export class LibSqlStorage implements AgentStorage {
         { version: 13, name: "skill-management", url: new URL("./migrations/013_skill_management.sql", import.meta.url) },
         { version: 14, name: "context-compaction", url: new URL("./migrations/014_context_compaction.sql", import.meta.url) },
         { version: 15, name: "recursive-model-response-admission", url: new URL("./migrations/015_recursive_model_response_admission.sql", import.meta.url) },
+        { version: 16, name: "agent-profiles", url: new URL("./migrations/016_agent_profiles.sql", import.meta.url) },
       ];
       for (const migration of migrations) {
         const script = await Bun.file(migration.url).text();
@@ -649,6 +652,30 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       args: [event.sessionId, event.branchId],
     });
     if (!branch.rows.length) throw new NotFoundError("branch", `${event.sessionId}/${event.branchId}`);
+    if (event.type === "AgentProfileVersionCreated" || event.type === "AgentProfileActivated") {
+      const sessionControl = await tx.execute({
+        sql: "SELECT initial_branch_id FROM sessions WHERE session_id=?",
+        args: [event.sessionId],
+      });
+      if (String(sessionControl.rows[0]?.initial_branch_id) !== event.branchId) {
+        throw new ValidationError("Session-wide agent profile control events must use the initial branch");
+      }
+      const current = await tx.execute({
+        sql: "SELECT active_profile_version_id FROM workspace_agent_profiles WHERE agent_session_id=?",
+        args: [event.sessionId],
+      });
+      const active = current.rows[0] ? String(current.rows[0].active_profile_version_id) : null;
+      const expected = event.type === "AgentProfileVersionCreated"
+        ? (event.payload as EventPayloads["AgentProfileVersionCreated"]).expectedActiveProfileVersionId
+        : (event.payload as EventPayloads["AgentProfileActivated"]).expectedActiveProfileVersionId;
+      if (active !== expected) {
+        throw new ConflictError("Agent profile active-version compare-and-swap failed", {
+          sessionId: event.sessionId,
+          expectedActiveProfileVersionId: expected,
+          activeProfileVersionId: active,
+        });
+      }
+    }
     if (event.type === "TaskCreated") {
       const payload = event.payload as EventPayloads["TaskCreated"];
       if (payload.parentSessionId !== event.sessionId || payload.parentBranchId !== event.branchId) throw new ValidationError("Task event must be appended to its parent branch");
@@ -737,6 +764,43 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const task = await tx.execute({ sql: "SELECT task_id,child_session_id,child_branch_id,parent_branch_id,model_json FROM tasks WHERE task_id=?", args: [payload.taskId] }); const taskRow = task.rows[0];
       const inputSet = payload.inputSetId === undefined ? { rows: [{}] } : await tx.execute({ sql: "SELECT input_set_id FROM input_sets WHERE input_set_id=?", args: [payload.inputSetId] });
       if (!taskRow || String(taskRow.child_session_id) !== payload.childSessionId || String(taskRow.child_branch_id) !== payload.childBranchId || String(taskRow.parent_branch_id) !== payload.parentBranchId || payload.parentSessionId !== event.sessionId || !Bun.deepEquals(JSON.parse(String(taskRow.model_json)), payload.model) || !inputSet.rows.length) throw new ValidationError("Recursive model handle does not match its child task and input set");
+      const admitted = await tx.execute({
+        sql: "SELECT e.payload_json FROM sessions s JOIN events e ON e.id=s.created_event_id WHERE s.session_id=?",
+        args: [payload.childSessionId],
+      });
+      const childCreated = admitted.rows[0]
+        ? JSON.parse(String(admitted.rows[0].payload_json)) as EventPayloads["SessionCreated"]
+        : undefined;
+      if (!childCreated || !Bun.deepEquals(payload.profilePin, {
+        profileVersionId: childCreated.agentProfile.profileVersionId,
+        agentPromptDigest: childCreated.agentProfile.promptDigest,
+        promptContractId: childCreated.agentProfile.promptContractId,
+      })) {
+        throw new ValidationError("Recursive model profile pin does not match the child admission profile");
+      }
+    }
+    if (event.type === "ModelCallRequested") {
+      const payload = event.payload as EventPayloads["ModelCallRequested"];
+      if (payload.promptProvenance.invocationKind === "recursive-model") {
+        const sessionRow = await tx.execute({ sql: "SELECT task_id FROM sessions WHERE session_id=?", args: [event.sessionId] });
+        if (sessionRow.rows[0]?.task_id !== null && sessionRow.rows[0]?.task_id !== undefined) {
+          const retained = await tx.execute({
+            sql: "SELECT payload_json FROM events WHERE type='RecursiveModelStarted' AND json_extract(payload_json,'$.handleId')=? AND json_extract(payload_json,'$.childSessionId')=? ORDER BY sequence DESC LIMIT 1",
+            args: [payload.promptProvenance.invocationId, event.sessionId],
+          });
+          const started = retained.rows[0]
+            ? JSON.parse(String(retained.rows[0].payload_json)) as EventPayloads["RecursiveModelStarted"]
+            : undefined;
+          const childLineage = started
+            ? await syncBranchLineage(tx, event.sessionId, started.childBranchId)
+            : [];
+          if (!started || !childLineage.includes(event.branchId) ||
+              started.profilePin.profileVersionId !== payload.promptProvenance.profileVersionId ||
+              started.profilePin.agentPromptDigest !== payload.promptProvenance.agentPromptDigest) {
+            throw new ValidationError("Recursive model call does not match its retained handle invocation pin");
+          }
+        }
+      }
     }
     if (event.type === "RecursiveModelStatusChanged") {
       const payload = event.payload as EventPayloads["RecursiveModelStatusChanged"];
@@ -972,18 +1036,47 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     reduceAgentState(projectEvents(history), event);
   }
 
+  async #insertAgentProfileVersion(tx: Transaction, profile: AgentProfileVersion, event: AgentEvent): Promise<void> {
+    await tx.execute({
+      sql: "INSERT INTO agent_profile_versions(profile_version_id,agent_session_id,revision,role,purpose,instructions,exact_agent_prompt,prompt_contract_id,prompt_digest,created_by_json,source_spec_entry_id,source_spec_version_id,reason,evidence_event_ids_json,supersedes_profile_version_id,restores_profile_version_id,source_proposal_id,review_decision_id,created_event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      args: [
+        profile.profileVersionId, profile.agentSessionId, profile.revision, profile.role, profile.purpose,
+        profile.instructions, profile.exactAgentPrompt, profile.promptContractId, profile.promptDigest,
+        json(profile.createdBy), profile.sourceSpecEntryId, profile.sourceSpecVersionId, profile.reason,
+        json(profile.evidenceEventIds), profile.supersedesProfileVersionId, profile.restoresProfileVersionId,
+        profile.sourceProposalId, profile.reviewDecisionId, event.id, profile.createdAt,
+      ],
+    });
+  }
+
   async #applyOperationalRows(tx: Transaction, event: AgentEvent): Promise<void> {
     if (event.type === "SessionCreated") {
       const p = event.payload as EventPayloads["SessionCreated"];
       await tx.execute({ sql: "INSERT OR IGNORE INTO sessions(session_id,workspace_id,initial_branch_id,created_event_id,parent_session_id,parent_branch_id,root_session_id,depth,task_id,execution_owner_device_id) VALUES(?,?,?,?,?,?,?,?,?,?)", args: [event.sessionId,p.workspaceId,p.initialBranchId,event.id,p.parentSessionId ?? null,p.parentBranchId ?? null,p.rootSessionId ?? event.sessionId,p.depth ?? 0,p.taskId ?? null,event.originDeviceId] });
       await tx.execute({ sql: "INSERT OR IGNORE INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,NULL,NULL,?,?)", args: [event.sessionId,p.initialBranchId,p.initialBranchName ?? null,event.id] });
+      await this.#insertAgentProfileVersion(tx, p.agentProfile, event);
+      await tx.execute({
+        sql: "INSERT INTO workspace_agent_profiles(agent_session_id,active_profile_version_id,activated_event_id,updated_at) VALUES(?,?,?,?)",
+        args: [event.sessionId, p.agentProfile.profileVersionId, event.id, event.committedAt],
+      });
     }
     const ownerResult = await tx.execute({ sql:"SELECT execution_owner_device_id FROM sessions WHERE session_id=?", args:[event.sessionId] });
     const executionOwner = ownerResult.rows[0]?.execution_owner_device_id;
     const executionOwned = executionOwner === null || executionOwner === undefined || String(executionOwner) === "legacy" || String(executionOwner) === this.#deviceId;
     if (event.type === "BranchCreated") { const p = event.payload as EventPayloads["BranchCreated"]; await tx.execute({ sql: "INSERT INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,?,?,?,?)", args: [event.sessionId,p.branchId,p.parentBranchId,p.forkCursor,p.name ?? null,event.id] }); }
     if (event.type === "BranchNamed") { const p = event.payload as EventPayloads["BranchNamed"]; await tx.execute({ sql: "UPDATE branches SET name=? WHERE session_id=? AND branch_id=?", args: [p.name,event.sessionId,event.branchId] }); }
-    if (event.type === "ContextMaterialized") { const p = event.payload as EventPayloads["ContextMaterialized"]; await tx.execute({ sql: "INSERT INTO context_records(context_id,session_id,branch_id,event_id,content_hash,records_json,context_json,created_at,harness_provenance_json,derivation_json) VALUES(?,?,?,?,?,?,?,?,?,?)", args: [p.contextId,event.sessionId,event.branchId,event.id,p.contentHash,json(p.records),json(p.context),event.committedAt,p.harnessProvenance === undefined ? null : json(p.harnessProvenance),p.derivation === undefined ? null : json(p.derivation)] }); }
+    if (event.type === "AgentProfileVersionCreated") {
+      await this.#insertAgentProfileVersion(tx, (event.payload as EventPayloads["AgentProfileVersionCreated"]).agentProfile, event);
+    }
+    if (event.type === "AgentProfileActivated") {
+      const p = event.payload as EventPayloads["AgentProfileActivated"];
+      const changed = await tx.execute({
+        sql: "UPDATE workspace_agent_profiles SET active_profile_version_id=?,activated_event_id=?,updated_at=? WHERE agent_session_id=? AND active_profile_version_id=?",
+        args: [p.profileVersionId, event.id, event.committedAt, event.sessionId, p.expectedActiveProfileVersionId],
+      });
+      if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Agent profile activation compare-and-swap failed", { sessionId: event.sessionId });
+    }
+    if (event.type === "ContextMaterialized") { const p = event.payload as EventPayloads["ContextMaterialized"]; await tx.execute({ sql: "INSERT INTO context_records(context_id,session_id,branch_id,event_id,content_hash,records_json,context_json,created_at,harness_provenance_json,derivation_json,prompt_provenance_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)", args: [p.contextId,event.sessionId,event.branchId,event.id,p.contentHash,json(p.records),json(p.context),event.committedAt,p.harnessProvenance === undefined ? null : json(p.harnessProvenance),p.derivation === undefined ? null : json(p.derivation),p.promptProvenance === undefined ? null : json(p.promptProvenance)] }); }
     if (event.type === "EffectRequested" && executionOwned) { const p = event.payload as EventPayloads["EffectRequested"]; await tx.execute({ sql: "INSERT INTO outbox(effect_id,session_id,branch_id,executor,operation,input_json,idempotency_key,idempotent,status,requested_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.effectId,event.sessionId,event.branchId,p.executor,p.operation,json(p.input),p.idempotencyKey,p.idempotent ? 1 : 0,"pending",event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "EffectAttemptStarted" && executionOwned) { const p = event.payload as EventPayloads["EffectAttemptStarted"]; await tx.execute({ sql: "UPDATE outbox SET status='running',attempt=?,updated_at=? WHERE effect_id=? AND status IN ('pending','running')", args: [p.attempt,event.committedAt,p.effectId] }); }
     if (event.type === "EffectOutcomeRecorded" && executionOwned) { const p = event.payload as EventPayloads["EffectOutcomeRecorded"]; await tx.execute({ sql: "UPDATE outbox SET status=?,attempt=?,owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=?", args: [p.outcome,p.attempt,event.committedAt,p.effectId] }); }
@@ -1049,7 +1142,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         if (new TextEncoder().encode(content).byteLength !== Number(documentRow.size) || sha256(content) !== String(documentRow.digest)) throw new ValidationError("Document chunks do not match imported document integrity metadata");
       }
     }
-    if (event.type === "RecursiveModelStarted" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStarted"]; await tx.execute({ sql: "INSERT INTO recursive_model_handles(handle_id,task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,model_json,response_admission_json,input_set_id,input_json,input_provenance_json,input_hash,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", args: [p.handleId,p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,json(p.model),json(p.responseAdmission),p.inputSetId ?? null,p.input === undefined ? null : json(p.input),p.inputProvenance === undefined ? null : json(p.inputProvenance),p.inputHash ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "RecursiveModelStarted" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStarted"]; await tx.execute({ sql: "INSERT INTO recursive_model_handles(handle_id,task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,model_json,response_admission_json,profile_pin_json,input_set_id,input_json,input_provenance_json,input_hash,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", args: [p.handleId,p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,json(p.model),json(p.responseAdmission),json(p.profilePin),p.inputSetId ?? null,p.input === undefined ? null : json(p.input),p.inputProvenance === undefined ? null : json(p.inputProvenance),p.inputHash ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "RecursiveModelStatusChanged" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; await tx.execute({ sql: "UPDATE recursive_model_handles SET status=?,outcome=COALESCE(?,outcome),result_message_id=COALESCE(?,result_message_id),result_json=COALESCE(?,result_json),result_artifact_id=COALESCE(?,result_artifact_id),error=COALESCE(?,error),last_event_id=?,updated_at=? WHERE handle_id=?", args: [p.status,p.outcome ?? null,p.resultMessageId ?? null,p.result === undefined ? null : json(p.result),p.resultArtifactId ?? null,p.error ?? null,event.id,event.committedAt,p.handleId] }); }
     if (event.type === "UserCorrection") { const p = event.payload as EventPayloads["UserCorrection"]; await tx.execute({ sql: "INSERT INTO user_corrections(correction_id,session_id,branch_id,corrected_event_ids_json,correction_text,event_id,created_at) VALUES(?,?,?,?,?,?,?)", args: [p.correctionId,event.sessionId,event.branchId,json(p.correctedEventIds),p.correction,event.id,event.committedAt] }); }
     if (event.type === "RefinementReviewRequested") { const p = event.payload as EventPayloads["RefinementReviewRequested"]; await tx.execute({ sql: "INSERT INTO refinement_reviews(review_id,session_id,branch_id,fingerprint,mode,requested_scope,requested_scope_key,allowed_kinds_json,trigger_id,trigger_kind,trigger_fingerprint,trigger_key,nonterminal_key,trigger_evidence_through_cursor,evidence_event_ids_json,source_event_ids_json,source_snapshot_hash,source_through_cursor,instructions,request_json,snapshot_json,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'requested',?,?,?,?)", args: [p.reviewId,event.sessionId,event.branchId,p.fingerprint,p.mode,p.requestedScope,p.requestedScopeKey,json(p.allowedKinds),p.triggerId,p.triggerKind,p.triggerFingerprint,p.triggerKey ?? null,p.nonterminalKey ?? null,p.triggerEvidenceThroughCursor ?? null,json(p.evidenceEventIds),json(p.sourceEventIds),p.sourceSnapshotHash,p.sourceThroughCursor,p.instructions ?? null,json(p.request),p.snapshot === undefined ? null : json(p.snapshot),event.id,event.id,event.committedAt,event.committedAt] }); }
@@ -1169,7 +1262,16 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     }
     const until = untilCursor === undefined ? Number.MAX_SAFE_INTEGER : sequenceOf(untilCursor);
     const after = afterCursor === undefined ? -1 : sequenceOf(afterCursor);
-    return events
+    const control = await executor.execute({
+      sql: "SELECT * FROM events WHERE session_id=? AND type IN ('AgentProfileVersionCreated','AgentProfileActivated') AND sequence>? AND sequence<=? ORDER BY sequence",
+      args: [sessionId, after, until],
+    });
+    const merged = new Map(events.map((event) => [event.id, event]));
+    for (const row of control.rows) {
+      const event = rowToEvent(row);
+      merged.set(event.id, event);
+    }
+    return [...merged.values()]
       .filter((event) => sequenceOf(event.cursor) > after && sequenceOf(event.cursor) <= until)
       .sort((left, right) => sequenceOf(left.cursor) - sequenceOf(right.cursor));
   }
@@ -1208,6 +1310,15 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
           const value = Number(sequence);
           latest = latest === null ? value : Math.max(latest, value);
         }
+      }
+      const control = await this.#client.execute({
+        sql: "SELECT MAX(sequence) AS sequence FROM events WHERE session_id=? AND type IN ('AgentProfileVersionCreated','AgentProfileActivated')",
+        args: [sessionId],
+      });
+      const controlSequence = control.rows[0]?.sequence;
+      if (controlSequence !== null && controlSequence !== undefined) {
+        const value = Number(controlSequence);
+        latest = latest === null ? value : Math.max(latest, value);
       }
       return latest === null ? null : cursorOf(latest);
     }, { kind: "ordinary", operation: "load latest branch cursor" });
@@ -1565,9 +1676,9 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
 
   async rebuildOperationalProjections(): Promise<void> {
     await this.#writes.run(() => this.#withTransaction(async (tx) => {
-      for (const table of ["refinement_trigger_consumptions","user_corrections","refinement_reviews","memory_fts","subagent_spec_invocations","skill_executions","skill_availability_actions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
+      for (const table of ["refinement_trigger_consumptions","user_corrections","refinement_reviews","memory_fts","subagent_spec_invocations","skill_executions","skill_availability_actions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","workspace_agent_profiles","agent_profile_versions","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
       const rows = await tx.execute("SELECT * FROM events ORDER BY sequence");
-      const selected = new Set(["SessionCreated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","UserCorrection","RefinementReviewRequested","RefinementReviewChildLinked","RefinementReviewStatusChanged","RefinementTriggerConsumed","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillAvailabilityChanged","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
+      const selected = new Set(["SessionCreated","AgentProfileVersionCreated","AgentProfileActivated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","UserCorrection","RefinementReviewRequested","RefinementReviewChildLinked","RefinementReviewStatusChanged","RefinementTriggerConsumed","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillAvailabilityChanged","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
       for (const row of rows.rows) { const event = rowToEvent(row); if (selected.has(event.type)) await this.#applyOperationalRows(tx,event); }
     }, { kind: "ordinary", operation: "rebuild operational projections" }));
   }
@@ -1707,6 +1818,8 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         await remove("document_chunks", "DELETE FROM document_chunks WHERE document_id IN (SELECT document_id FROM documents WHERE session_id=?)", [sessionId]);
         await remove("sync_quarantine", "DELETE FROM sync_quarantine WHERE json_extract(envelope_json,'$.body.sessionId')=?", [sessionId]);
         await remove("process_execution_leases", "DELETE FROM process_execution_leases WHERE scope_kind='root' AND scope_id=?", [sessionId]);
+        await remove("workspace_agent_profiles", "DELETE FROM workspace_agent_profiles WHERE agent_session_id=?", [sessionId]);
+        await remove("agent_profile_versions", "DELETE FROM agent_profile_versions WHERE agent_session_id=?", [sessionId]);
         for (const table of ["wake_queue", "schedules", "heartbeats", "goals", "input_sets", "documents", "outbox", "snapshots", "context_records", "branches"]) {
           await remove(table, `DELETE FROM ${table} WHERE session_id=?`, [sessionId]);
         }

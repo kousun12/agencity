@@ -8,6 +8,8 @@ export * from "./model-catalog.ts";
 export * from "./outbox.ts";
 export * from "./execution-leases.ts";
 export * from "./agents.ts";
+export * from "./agent-profiles.ts";
+export * from "./agent-system-prompt.ts";
 export * from "./documents.ts";
 export * from "./models.ts";
 export * from "./goals.ts";

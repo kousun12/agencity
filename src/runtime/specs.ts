@@ -22,7 +22,16 @@ export class SubagentSpecService {
     const spec = version.content as Extract<HarnessContent,{kind:"subagent_spec"}>;
     if(input.model!==undefined && spec.model!==undefined && !Bun.deepEquals(input.model,spec.model)) throw new ValidationError("Invocation cannot override the pinned subagent specification model policy");
     const task = [`Role: ${spec.role}`,spec.prompt,`Invocation criteria: ${spec.invocationCriteria}`,`Expected artifact: ${spec.expectedArtifact}`,input.task ? `Invocation task: ${input.task}` : ""].filter(Boolean).join("\n\n");
-    const [handle] = await this.agents.spawnManyWithEvents(parentSessionId,parentBranchId,[{ task, ...(spec.completionCriteria === undefined ? {} : { completionCriteria: spec.completionCriteria }), ...((spec.model ?? input.model) ? { model: spec.model ?? input.model } : {}), ...(spec.budget === undefined ? {} : { budget: spec.budget }), idempotencyKey: input.idempotencyKey ?? `spec:${version.versionId}:${newId()}` }],(items) => items.filter((item) => !item.existing).map((item) => ({ sessionId: parentSessionId, branchId: parentBranchId, type: "SubagentSpecInvoked" as const, producer: "supervisor", idempotencyKey: `subagent-spec-invoked:${item.handle.taskId}`, payload: { entryId, versionId: version.versionId, taskId: item.handle.taskId, childSessionId: item.handle.sessionId, childBranchId: item.handle.branchId } })));
+    const profile = {
+      role: spec.role,
+      purpose: `Fulfill the reusable subagent specification "${version.name}".`,
+      instructions: [
+        spec.prompt,
+        `Invocation criteria: ${spec.invocationCriteria}`,
+        `Expected artifact: ${spec.expectedArtifact}`,
+      ].join("\n\n"),
+    };
+    const [handle] = await this.agents.spawnManyWithEvents(parentSessionId,parentBranchId,[{ task, profile, ...(spec.completionCriteria === undefined ? {} : { completionCriteria: spec.completionCriteria }), ...((spec.model ?? input.model) ? { model: spec.model ?? input.model } : {}), ...(spec.budget === undefined ? {} : { budget: spec.budget }), idempotencyKey: input.idempotencyKey ?? `spec:${version.versionId}:${newId()}` }],(items) => items.filter((item) => !item.existing).map((item) => ({ sessionId: parentSessionId, branchId: parentBranchId, type: "SubagentSpecInvoked" as const, producer: "supervisor", idempotencyKey: `subagent-spec-invoked:${item.handle.taskId}`, payload: { entryId, versionId: version.versionId, taskId: item.handle.taskId, childSessionId: item.handle.sessionId, childBranchId: item.handle.branchId } })), { profileSources: [{ entryId, versionId: version.versionId }] });
     if (!handle) throw new Error("Subagent specification admission returned no handle");
     return { ...handle, specEntryId: entryId, specVersionId: version.versionId };
   }

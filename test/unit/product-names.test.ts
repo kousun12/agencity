@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { projectEvents } from "../../src/domain/index.ts";
-import { makeTempRuntime, openTempStorage, removeTempRuntime, type TempRuntime } from "../helpers.ts";
+import { fixtureAgentProfile, makeTempRuntime, openTempStorage, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
@@ -15,6 +15,7 @@ describe("durable product display names", () => {
       payload: {
         workspaceId: "workspace", initialBranchId: "main",
         model: { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" }, budget: {},
+        agentProfile: fixtureAgentProfile("named-session"),
         sessionName: "Initial task", initialBranchName: "main",
       },
     }]);

@@ -187,7 +187,7 @@ export class ProtocolServer {
       }
       if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await request.json() as any;
-        return Response.json(await this.supervisor.createSession({ workspaceId: String(body.workspaceId ?? "default"), ...(body.model ? { model: body.model } : {}), ...(body.budget ? { budget: body.budget } : {}), ...(typeof body.sessionName === "string" ? { sessionName: body.sessionName } : {}), ...(typeof body.branchName === "string" ? { branchName: body.branchName } : {}) }));
+        return Response.json(await this.supervisor.createSession({ workspaceId: String(body.workspaceId ?? "default"), ...(body.model ? { model: body.model } : {}), ...(body.budget ? { budget: body.budget } : {}), ...(body.agentProfile ? { agentProfile: body.agentProfile } : {}), ...(typeof body.sessionName === "string" ? { sessionName: body.sessionName } : {}), ...(typeof body.branchName === "string" ? { branchName: body.branchName } : {}) }));
       }
       if (parts[0] === "models" && parts[1]) {
         if (request.method === "GET") return Response.json(await this.supervisor.models.get(parts[1]));
@@ -219,6 +219,8 @@ export class ProtocolServer {
       }
       if (parts[0] === "sessions" && parts[1]) {
         const sessionId = parts[1]; const branchId = url.searchParams.get("branch") ?? parts[3];
+        if (request.method === "GET" && parts[2] === "agent-profile") return Response.json(await this.supervisor.agentProfiles.get(sessionId, { includePrompt: url.searchParams.get("detail") === "full" }));
+        if (request.method === "GET" && parts[2] === "agent-profiles") return Response.json(await this.supervisor.agentProfiles.list(sessionId, { includePrompt: url.searchParams.get("detail") === "full", ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}) }));
         if (request.method === "GET" && parts[2] === "snapshot" && branchId) return Response.json(await this.supervisor.projections.getSnapshot(sessionId, branchId));
         if (request.method === "GET" && parts[2] === "model-contract-diagnostics" && branchId) {
           const snapshot = await this.supervisor.projections.getSnapshot(sessionId, branchId);
@@ -251,8 +253,9 @@ export class ProtocolServer {
           if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.runs.cancel(sessionId, branchId, parts[3], typeof body.reason === "string" ? body.reason : undefined)); }
           if (request.method === "POST" && parts[3] && parts[4] === "resume") return Response.json(await this.supervisor.runs.advance(sessionId, branchId, parts[3]));
         }
-        // Retained diagnostic chat route; product tasks use /runs.
-        if (request.method === "POST" && parts[2] === "turns" && branchId) return Response.json(await this.supervisor.modelLoop.turn(sessionId, branchId));
+        // Retained diagnostic compatibility route uses the same canonical
+        // AgentRunRequested profile-pin boundary as ordinary product work.
+        if (request.method === "POST" && parts[2] === "turns" && branchId) return Response.json(await this.supervisor.diagnosticTurn(sessionId, branchId));
         if (request.method === "POST" && parts[2] === "cells" && branchId) { const body = await jsonBody(request); return Response.json(await this.supervisor.executeCell(sessionId, branchId, String(body.code ?? ""))); }
         if (request.method === "POST" && parts[2] === "branches" && branchId) { const body = await jsonBody(request); const strategy = body.compactionStrategy === "deterministic-extractive-v1" || body.compactionStrategy === "model-summary-v1" ? body.compactionStrategy : undefined; return Response.json({ branchId: await this.supervisor.fork(sessionId, branchId, String(body.cursor), typeof body.name === "string" ? body.name : undefined, strategy) }); }
         if (request.method === "POST" && parts[2] === "resume" && branchId) return Response.json(await this.supervisor.resume(sessionId,branchId));

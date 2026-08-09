@@ -323,6 +323,11 @@ const child = await sdk.agents.spawn({
   task: "Inspect the first failure",
   completionCriteria: "Return root cause and evidence",
   name: "investigator",
+  profile: {
+    role: "Test investigator",
+    purpose: "Investigate the admitted failing test.",
+    instructions: "- Stay within the admitted task.\n- Return attributable evidence.",
+  },
 });
 
 await sdk.agents.send({
@@ -351,13 +356,20 @@ The executing session and branch always supply sender identity. Targets are limi
 
 Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one authorized task reference and up to eight sender-registered artifact IDs. Intent keys provide stable deduplication. Rate and pending-queue bounds are enforced. Receipts distinguish queued, delivered to context, acknowledged, and failed.
 
-`spawn` runs the child by default; `{ run: false }` admits without immediate runnable execution. `followUp` reuses an idle or stopped retained child session and schedules a normal durable run.
+`spawn` runs the child by default; `{ run: false }` admits without immediate runnable execution. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile. The profile is committed atomically with child admission and participates in idempotency checks. `followUp` reuses an idle or stopped retained child session and schedules a normal durable run.
+
+The generated agent facade does not expose profile inspection, proposal, activation, or rollback methods. Profile revision governance is not implemented.
 
 ## `rlm` and `sdk.rlm`
 
 ```ts
 const handle = await rlm.start({
   prompt: "Summarize these sources",
+  profile: {
+    role: "Source summarizer",
+    purpose: "Summarize one bounded recursive input.",
+    instructions: "- Preserve source attribution and uncertainty.",
+  },
   inputs: [
     { kind: "artifact", artifactId },
     { kind: "event", eventId },
@@ -379,11 +391,11 @@ Methods:
 - `result(handleId | handle, { wait?, timeoutMs? })`
 - `cancel(handleId | handle, reason?)`
 
-Inputs can contain inline JSON or attributable artifact ranges, document ranges, events, memories, SQL rows, and input-set IDs. Admission freezes input provenance and hash. Inline materialized input is bounded.
+Inputs can contain inline JSON or attributable artifact ranges, document ranges, events, memories, SQL rows, and input-set IDs. `profile: { role, purpose, instructions }` supplies an explicit initial profile for the retained recursive child; omission uses the sealed task-specialist profile. Admission freezes input provenance, input hash, and the child profile pin. Inline materialized input is bounded.
 
 Returned handles contain durable parent/child/task/model/input/status identity. Convenience `result`, `cancel`, and `refresh` functions are non-enumerable, so serializing the handle preserves only JSON identity. Save `handleId` in working state when another worker must resolve it.
 
-Handles are scoped to the executing parent session and branch. A child inherits the parent's model unless existing policy authorizes a narrower override; generated code cannot widen provider/model or budget authority. Lost non-idempotent model execution becomes terminal `unknown` and is not replayed.
+Handles are scoped to the executing parent session and branch. A child inherits the parent's model unless existing policy authorizes a narrower override; generated code cannot widen provider/model or budget authority. The handle's durable profile pin fixes the profile version, prompt digest, and prompt contract for the entire recursive invocation. Lost non-idempotent model execution becomes terminal `unknown` and is not replayed.
 
 ## `sdk.goals`
 

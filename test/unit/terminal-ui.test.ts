@@ -7,6 +7,8 @@ import {
   ProtocolClientError,
   ProtocolServer,
   Supervisor,
+  EVENT_SCHEMA_VERSION,
+  agentProfilePin,
   type AgentEvent,
   type BranchWatchHandlers,
   type EffectProgressNotification,
@@ -27,7 +29,7 @@ function event(type: AgentEvent["type"], payload: Record<string, unknown>, curso
     causationId: null,
     correlationId: null,
     type,
-    schemaVersion: 3,
+    schemaVersion: EVENT_SCHEMA_VERSION,
     committedAt: "2026-08-07T00:00:00.000Z",
     producer: "supervisor",
     idempotencyKey: null,
@@ -272,7 +274,7 @@ describe("FU-005 protocol-backed terminal UI", () => {
     };
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "supervisor", idempotencyKey: "progress-run",
-      payload: { runId, task: "exercise structured progress", requestKey: "progress-run", goalMode: "none" },
+      payload: { runId, task: "exercise structured progress", requestKey: "progress-run", profilePin: agentProfilePin(await supervisor.agentProfiles.active(session.sessionId)), goalMode: "none" },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunStepStarted", producer: "supervisor", idempotencyKey: "progress-step",
       payload: { runId, stepId, ordinal: 1, contextId: "context-internal-id", callId: "call-internal-id", effectId: initialEffectId, actionId: "action-internal-id", observationEventIds: [] },
@@ -876,7 +878,7 @@ describe("FU-006 terminal interrupt semantics", () => {
       type: "AgentRunRequested",
       producer: "supervisor",
       idempotencyKey: "terminal:active-run",
-      payload: { runId: "run-active", task: "keep running", requestKey: "terminal:active-run", goalMode: "none" },
+      payload: { runId: "run-active", task: "keep running", requestKey: "terminal:active-run", profilePin: agentProfilePin(await supervisor.agentProfiles.active(session.sessionId)), goalMode: "none" },
     }]);
     const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
     const secret = "sk-test-TERMINAL-INTERRUPT-1234567890";

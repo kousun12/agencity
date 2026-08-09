@@ -64,7 +64,7 @@ PostgreSQL remains unavailable. Optional Turso Cloud exchange uses a **separate 
 
 ## Turso Cloud synchronization
 
-`ProfileStore` is a separate local LibSQL database containing a restart-stable device/profile identity, cross-workspace preferences, version-pinned globally installed skills, opaque credential references, and a workspace catalog. Credential values are never accepted. Each workspace retains its own canonical database and configured content-addressed artifact placement.
+`ProfileStore` is a separate local LibSQL database containing a restart-stable device/profile identity, cross-workspace preferences, version-pinned globally installed skills, opaque credential references, and a workspace catalog. This device and preference state is named `userProfile` when it appears beside session-owned profile state. Credential values are never accepted. Each workspace retains its own canonical database and configured content-addressed artifact placement.
 
 ```mermaid
 flowchart LR
@@ -130,6 +130,23 @@ Documents are imported as metadata plus ordered, digested `DocumentChunkAdded` r
 
 Goals own typed completion gates which execute through the existing request-before-effect outbox. Completion pins a workspace-relevant branch cursor, rejects stale or unknown evidence, and re-evaluates gates after continuation changes. Startup reconciles incomplete gates, re-checks each persisted workspace pin, and resumes active goals. Heartbeats project interval, next due time, monotonic ticks, and pause/cancel state; an aligned tick and wake message commit atomically. Startup fires due active schedules and a live database-polling scheduler continues firing future due rows until `Supervisor.close()`. No JavaScript timer or queue object is durable identity.
 
+## Durable agent profiles and prompt pins
+
+Every newly runnable session owns one immutable initial `agentProfile` in workspace canonical state. The complete profile is embedded in `SessionCreated`, so root, delegated-child, specification-child, and recursive-child admission cannot commit without role, purpose, instructions, exact rendered agent prompt, prompt contract, digest, creator, and source provenance. Root callers may supply an explicit profile; otherwise admission uses the sealed repository-agent profile. Delegated and recursive helpers may supply an explicit profile and otherwise use the sealed task-specialist profile. A subagent specification materializes its role and instructions into the child's initial profile and retains the exact specification entry/version source.
+
+An agent profile belongs to the durable `Session`, not to one conversation branch. The profile is behavioral instruction only: tasks, goals, messages, memories, model and budget configuration, credentials, SDK authority, effect policy, and operating-system authority remain separately owned. The workspace-canonical session profile is named `agentProfile`; the separate profile/device-store identity and preferences are named `userProfile`. Contracts that expose both do not use the unqualified name `profile`.
+
+Schema version 4 introduces `AgentProfileVersionCreated` and `AgentProfileActivated` for the accepted session-wide revision model, although public revision commands and automated governance are not implemented. These control events are currently addressed through the session's initial branch instead of a new workspace stream-address type. Storage enforces the initial-branch address and compares `expectedActiveProfileVersionId` against the mutable `workspace_agent_profiles` projection in the append transaction. `agent_profile_versions` and `workspace_agent_profiles` are rebuildable from `SessionCreated` and the profile control events in global cursor order. Runtime profile lookup reads the complete session event history, so activation governs later invocations on every branch while historical branch history remains unchanged.
+
+Every autonomous run pins the active profile in `AgentRunRequested`; every retained recursive invocation pins it in `RecursiveModelStarted`. All model calls for that invocation preserve the same version, prompt digest, and prompt-contract ID. Context and model-call records additionally retain the effective-system-prompt digest and immutable component references. The provider-facing system content has a fixed order:
+
+1. immutable Agencity base policy;
+2. exact pinned agent prompt;
+3. invocation response/run-control contract; and
+4. invocation execution guidance.
+
+Dynamic task, conversation, memory, artifact, mailbox, and observation context remains outside those standing system components. A later profile activation affects only a later run or recursive invocation. Recovery resolves the retained version named by the invocation pin and rejects a mismatch rather than silently composing with the currently active profile.
+
 ## Autonomous typed runs
 
 `AgentRunService` is the ordinary product path. Every autonomous model request commits a required-tool-set dispatch containing exactly two declaration-only provider tools:
@@ -145,7 +162,7 @@ A successful `finish` remains provisional until required completion gates pass. 
 
 Run, step, context, call, effect, action, and cell IDs are stable across recovery. Committed cell/effect observations enter exactly one dependent step with their event IDs. A pending unclaimed model effect drains once; a retained succeeded outcome finalizes without a second provider call; a lost started non-idempotent effect becomes unknown. Started cells are abandoned rather than replayed. Budget admission uses the existing `>=` limits, and a generated finish may be accepted at the exact turn boundary while a new effectful cell is not.
 
-The canonical writer accepts event schema 3, reducer 12, `agencity.model-dispatch.v2`, and `agencity.model-effect-output.v2`. Version-1/version-2 workspaces reject with reset guidance before migration, decoding, projection, synchronization, or recovery. The effect output retains one full accepted formal input. Completion and action events carry result digests, input digests, provider call identity, and model-call references; rejected raw arguments are not retained.
+The canonical writer accepts event schema 4, reducer 13, `agencity.model-dispatch.v2`, and `agencity.model-effect-output.v2`. Workspaces containing schema versions 1, 2, or 3 reject with reset guidance before migration, decoding, projection, synchronization, or recovery. The effect output retains one full accepted formal input. Completion and action events carry result digests, input digests, provider call identity, model-call references, and invocation prompt provenance; rejected raw arguments are not retained.
 
 ## Artifact storage
 
@@ -180,7 +197,7 @@ Cancellation is best effort: an abort signal can stop an in-process executor, bu
 
 ## Retrieval and context
 
-`ContextMaterializer` deterministically selects the base policy, session/branch/status, recent messages, active working values and artifact references, budget events, completed/failed activity, scoped harness entries, and attributable retrieval provenance. It records every selected source event ID, event type, schema version, reason, and a hash of the exact JSON context in immutable `context_records`. The exact bytes remain in the canonical context event and immutable record, while `AgentState.contexts` projects provenance metadata rather than copying every historical full context into snapshots.
+`ContextMaterializer` deterministically selects the pinned agent profile, base policy, session/branch/status, recent messages, active working values and artifact references, budget events, completed/failed activity, scoped harness entries, and attributable retrieval provenance. For autonomous and recursive invocations it composes the fixed system prompt and records the profile version, agent-prompt digest, effective-system-prompt digest, and immutable component references. It also records every selected source event ID, event type, schema version, reason, and a hash of the exact JSON context in immutable `context_records`. The exact bytes remain in the canonical context event and immutable record, while `AgentState.contexts` projects provenance metadata rather than copying every historical full context into snapshots.
 
 The document service imports ordered chunks and creates exact input sets; agent and recursive-model services delegate those references through normal child sessions. Relational memory and refinement are implemented through canonical harness events, rebuildable projections, and a disposable FTS5 candidate index. `HttpMemoryCandidateIndex` provides the same candidate-generation boundary over capability-negotiated HTTP. Local and HTTP candidate-index adapters return stable entry/version IDs and ranks only; authoritative scope, status, policy, conflict, and exposure filtering remains in the runtime and is recorded in context provenance.
 

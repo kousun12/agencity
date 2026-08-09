@@ -64,6 +64,14 @@ The envelope digest detects corruption; it is not a signature or writer authoriz
 
 Event headers/payloads and JSON values are validated before append. Working JSON is finite, plain, acyclic JSON. Immutable-table triggers prevent update/delete even through another database connection. Typed SDK commands, not model-visible SQL, own writes.
 
+### Agent profiles are behavior, not authority
+
+Each runnable session has an immutable initial agent profile containing role, purpose, instructions, and an exact rendered prompt. The profile influences provider-facing behavior only. It cannot select a provider or model, reveal or resolve credentials, widen budgets, add SDK methods, change effect or completion-gate policy, authorize publication, grant filesystem/network access, or alter the runtime's trusted-local OS authority.
+
+Root, child, recursive, and specification-derived profile admission runs through the supervisor. Role, purpose, and instructions are normalized and bounded, and any registered brokered secret value in those fields rejects the entire admission before `SessionCreated` commits. The error does not echo the matched credential. Exact profile text and its digest are retained for provenance, so profile content must never be used as a secret store.
+
+Invocation prompt pins and fixed prompt-component ordering provide attribution and recovery consistency; they are not isolation or authorization controls. Public profile revision, sealed governance review, automatic activation, and rollback are not implemented, so the current profile inspection routes are read-only.
+
 ### Generated skills
 
 TypeScript skills compile and execute in disposable Bun child processes with credential-shaped environment variables removed and bounded captured output/time. Compile, test, and invocation are durable outbox effects pinned to an immutable version. `Supervisor.open({ skillPermissionAllowlist })` supplies the exact permission-name allowlist (empty by default); validation reports disallowed names and activation plus invocation recheck the configured boundary. Reopening with a narrower allowlist therefore blocks an already-active version from invocation. This is recovery/lifecycle isolation only: skill source retains the OS authority of the trusted-local runtime and may use ambient Bun APIs. Permission declarations are an enforced admission/invocation policy, not an OS capability sandbox, so operators must still sandbox the whole trusted-local runtime.

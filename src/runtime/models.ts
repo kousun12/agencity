@@ -12,7 +12,9 @@ import {
   projectEvents,
   validateModelEffectOutputV2,
   type ArtifactReference,
+  type AgentProfileInput,
   type BudgetLimits,
+  type EventPayloads,
   type JsonValue,
   type ModelConfiguration,
   type ModelConfigurationInput,
@@ -61,6 +63,7 @@ export interface StartRecursiveModelInput {
   readonly inputSetId?: string;
   readonly model?: ModelConfigurationInput;
   readonly budget?: BudgetLimits;
+  readonly profile?: AgentProfileInput;
   readonly run?: boolean;
   /** Stable command identity for crash-safe retry. */
   readonly idempotencyKey?: string;
@@ -85,6 +88,8 @@ export interface RecursiveModelResult {
     readonly inputHash?: string;
     readonly inputProvenance?: JsonValue;
     readonly model: ModelConfiguration;
+    readonly profileVersionId: string;
+    readonly agentPromptDigest: string;
     readonly contextIds: readonly string[];
     readonly modelCallIds: readonly string[];
     readonly providerAttemptEffectIds: readonly string[];
@@ -292,6 +297,7 @@ export class RecursiveModelService {
       idempotencyKey: plan.admissionKey,
       ...(plan.normalized.model === undefined ? {} : { model: plan.normalized.model }),
       ...(plan.normalized.budget === undefined ? {} : { budget: plan.normalized.budget }),
+      ...(plan.normalized.profile === undefined ? {} : { profile: plan.normalized.profile }),
     })), (items) => {
       const events: NewAgentEvent[] = [];
       for (let index = 0; index < items.length; index++) {
@@ -316,6 +322,11 @@ export class RecursiveModelService {
             childBranchId: child.branchId,
             model,
             responseAdmission: plan.responseAdmission,
+            profilePin: {
+              profileVersionId: item.profile.profileVersionId,
+              agentPromptDigest: item.profile.promptDigest,
+              promptContractId: item.profile.promptContractId,
+            },
             ...(plan.normalized.inputSetId === undefined ? {} : { inputSetId: plan.normalized.inputSetId }),
             ...(plan.materialized.value === undefined ? {} : { input: plan.materialized.value }),
             ...(plan.materialized.provenance === undefined ? {} : { inputProvenance: plan.materialized.provenance }),
@@ -343,15 +354,22 @@ export class RecursiveModelService {
       const child = children[index]!;
       const plan = plans[index]!;
       const handle = await this.#load(`model-${child.taskId}`);
-      const childState = projectEvents(await this.storage.loadEvents(child.sessionId, { branchId: child.branchId }));
-      const expectedModel = childState.model;
+      const childEvents = await this.storage.loadEvents(child.sessionId, { branchId: child.branchId });
+      const created = childEvents.find((event) => event.type === "SessionCreated");
+      if (!created) throw new ValidationError("Recursive model child has no retained admission");
+      const admission = created.payload as EventPayloads["SessionCreated"];
       if (handle.parentSessionId !== parentSessionId || handle.parentBranchId !== parentBranchId ||
           handle.childSessionId !== child.sessionId || handle.childBranchId !== child.branchId ||
           handle.inputSetId !== (plan.normalized.inputSetId ?? null) ||
           handle.inputHash !== plan.materialized.hash ||
           !Bun.deepEquals(handle.input, plan.materialized.value) ||
           !Bun.deepEquals(handle.inputProvenance, plan.materialized.provenance) ||
-          !Bun.deepEquals(handle.model, expectedModel) ||
+          !Bun.deepEquals(handle.model, admission.model) ||
+          !Bun.deepEquals(handle.profilePin, {
+            profileVersionId: admission.agentProfile.profileVersionId,
+            agentPromptDigest: admission.agentProfile.promptDigest,
+            promptContractId: admission.agentProfile.promptContractId,
+          }) ||
           !Bun.deepEquals(handle.responseAdmission, plan.responseAdmission)) {
         throw new ValidationError("Recursive model idempotency key was reused with a different request");
       }
@@ -501,7 +519,10 @@ export class RecursiveModelService {
         await this.#runStructuredTurn(handle, remaining);
         return;
       }
-      const turn = this.modelLoop.turn(handle.childSessionId, handle.childBranchId);
+      const turn = this.modelLoop.turn(handle.childSessionId, handle.childBranchId, {
+        invocationId: handle.handleId,
+        profilePin: handle.profilePin,
+      });
       if (remaining === undefined) {
         await this.#finish(handle, await turn);
         return;
@@ -536,6 +557,7 @@ export class RecursiveModelService {
       handle.childSessionId,
       handle.childBranchId,
       handle.responseAdmission,
+      { invocationId: handle.handleId, profilePin: handle.profilePin },
     );
     const timed = remaining === undefined
       ? { kind: "result" as const, result: await turn }
@@ -832,6 +854,8 @@ export class RecursiveModelService {
         ...(handle.inputHash === undefined ? {} : { inputHash: handle.inputHash }),
         ...(handle.inputProvenance === undefined ? {} : { inputProvenance: handle.inputProvenance }),
         model: handle.model,
+        profileVersionId: handle.profilePin.profileVersionId,
+        agentPromptDigest: handle.profilePin.agentPromptDigest,
         contextIds,
         modelCallIds,
         providerAttemptEffectIds,

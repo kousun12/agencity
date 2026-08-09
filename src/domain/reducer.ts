@@ -41,6 +41,8 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       reducerVersion: REDUCER_VERSION, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
       parentSessionId, parentBranchId, rootSessionId: p.rootSessionId ?? event.sessionId,
       depth: p.depth ?? 0, taskId: p.taskId ?? null,
+      agentProfiles: { [p.agentProfile.profileVersionId]: p.agentProfile },
+      activeAgentProfileVersionId: p.agentProfile.profileVersionId,
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
       status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, contexts: {}, compactions: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
@@ -51,6 +53,24 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
   const next = withBase(state, event);
   switch (event.type) {
     case "SessionCreated": return state;
+    case "AgentProfileVersionCreated": {
+      const p = event.payload as EventPayloads["AgentProfileVersionCreated"];
+      const profile = p.agentProfile;
+      if (p.expectedActiveProfileVersionId !== state.activeAgentProfileVersionId ||
+          profile.revision !== Object.keys(state.agentProfiles).length + 1 ||
+          profile.supersedesProfileVersionId !== state.activeAgentProfileVersionId ||
+          state.agentProfiles[profile.profileVersionId]) {
+        throw new InvalidTransitionError("agentProfile", state.activeAgentProfileVersionId, profile.profileVersionId);
+      }
+      return { ...next, agentProfiles: { ...state.agentProfiles, [profile.profileVersionId]: profile } };
+    }
+    case "AgentProfileActivated": {
+      const p = event.payload as EventPayloads["AgentProfileActivated"];
+      if (p.expectedActiveProfileVersionId !== state.activeAgentProfileVersionId || !state.agentProfiles[p.profileVersionId]) {
+        throw new InvalidTransitionError("agentProfileActivation", state.activeAgentProfileVersionId, p.profileVersionId);
+      }
+      return { ...next, activeAgentProfileVersionId: p.profileVersionId };
+    }
     case "BranchCreated": { const p = event.payload as EventPayloads["BranchCreated"]; return { ...next, branch: { id: p.branchId, parentBranchId: p.parentBranchId, forkCursor: p.forkCursor, name: p.name ?? null } }; }
     case "SessionNamed": return { ...next, sessionName: (event.payload as EventPayloads["SessionNamed"]).name };
     case "BranchNamed": return { ...next, branch: { ...state.branch, name: (event.payload as EventPayloads["BranchNamed"]).name } };
@@ -166,6 +186,13 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "ContextMaterialized": {
       const p = event.payload as EventPayloads["ContextMaterialized"];
       if (state.contexts[p.contextId]) throw new InvalidTransitionError("context", "materialized", "materialized");
+      if (p.promptProvenance) {
+        const profile = state.agentProfiles[p.promptProvenance.profileVersionId];
+        if (!profile || profile.promptDigest !== p.promptProvenance.agentPromptDigest ||
+            profile.revision !== p.promptProvenance.components.agentProfile.version) {
+          throw new ValidationError("Invocation context does not reference a retained agent profile");
+        }
+      }
       let compactions = state.compactions;
       if (p.derivation) {
         const request = state.compactions[p.derivation.compactionId];
@@ -174,7 +201,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         }
         compactions = { ...state.compactions, [request.id]: { ...request, status: "completed", contextId: p.contextId, ...(p.derivation.effectIds === undefined ? {} : { effectIds: [...p.derivation.effectIds] }), eventId: event.id } };
       }
-      return { ...next, compactions, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records.map((record) => ({ ...record })), contentHash: p.contentHash, ...(p.derivation === undefined ? {} : { derivation: p.derivation }), eventId: event.id } } };
+      return { ...next, compactions, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records.map((record) => ({ ...record })), contentHash: p.contentHash, ...(p.promptProvenance === undefined ? {} : { promptProvenance: p.promptProvenance }), ...(p.derivation === undefined ? {} : { derivation: p.derivation }), eventId: event.id } } };
     }
     case "ModelCallRequested": {
       const p = event.payload as EventPayloads["ModelCallRequested"];
@@ -183,10 +210,19 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         throw new ValidationError("A model effect can belong to only one model call");
       }
       if (!Bun.deepEquals(p.modelDispatch.configuration, state.model)) throw new ValidationError("Model call dispatch configuration must match the committed branch configuration");
+      const retainedContext = state.contexts[p.contextId]!;
+      if (!retainedContext.promptProvenance || !Bun.deepEquals(retainedContext.promptProvenance, p.promptProvenance)) {
+        throw new ValidationError("Model call prompt provenance must exactly match its retained context");
+      }
+      const callProfile = state.agentProfiles[p.promptProvenance.profileVersionId];
+      if (!callProfile || callProfile.promptDigest !== p.promptProvenance.agentPromptDigest) {
+        throw new ValidationError("Model call does not reference a retained agent profile");
+      }
       const ownedStep = Object.values(state.agentRuns)
         .flatMap((run) => run.steps)
         .find((candidate) => candidate.callId === p.callId || candidate.modelAttempts.some((attempt) => attempt.callId === p.callId));
       if (ownedStep) {
+        const owner = Object.values(state.agentRuns).find((run) => run.steps.includes(ownedStep));
         const ownedAttempt = ownedStep.modelAttempts.at(-1);
         if (!ownedAttempt || ownedAttempt.callId !== p.callId || ownedAttempt.effectId !== p.effectId ||
             ownedAttempt.contextId !== p.contextId || ownedAttempt.estimatedInputTokens !== p.estimatedInputTokens ||
@@ -194,12 +230,19 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
             !Bun.deepEquals(ownedAttempt.contextWindow, p.contextWindow)) {
           throw new ValidationError("Agent-run model call must be atomically bound to its retained attempt");
         }
+        if (!owner || p.promptProvenance.invocationKind !== "agent-run" ||
+            p.promptProvenance.invocationId !== owner.id ||
+            p.promptProvenance.profileVersionId !== owner.profilePin.profileVersionId ||
+            p.promptProvenance.agentPromptDigest !== owner.profilePin.agentPromptDigest) {
+          throw new ValidationError("Agent-run model call does not match its invocation profile pin");
+        }
       }
       if (p.retryOfCallId !== undefined) {
         const prior = state.modelCalls[p.retryOfCallId];
-        if (!prior || !Bun.deepEquals(prior.modelDispatch, p.modelDispatch)) throw new ValidationError("Model overflow retries must reuse the complete prior dispatch");
+        if (!prior || !Bun.deepEquals(prior.modelDispatch, p.modelDispatch) ||
+            !Bun.deepEquals(prior.promptProvenance, p.promptProvenance)) throw new ValidationError("Model overflow retries must reuse the complete prior dispatch and prompt pin");
       }
-      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, estimatedInputTokens: p.estimatedInputTokens, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
+      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, estimatedInputTokens: p.estimatedInputTokens, promptProvenance: p.promptProvenance, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
       return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } };
     }
     case "ModelOutputChunk": {
@@ -468,7 +511,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     }
     case "RecursiveModelStarted": {
       const p = event.payload as EventPayloads["RecursiveModelStarted"]; if (state.recursiveModels[p.handleId]) throw new InvalidTransitionError("recursiveModel", "existing", "pending");
-      const handle: RecursiveModelState = { id: p.handleId, taskId: p.taskId, parentSessionId: p.parentSessionId, parentBranchId: p.parentBranchId, childSessionId: p.childSessionId, childBranchId: p.childBranchId, model: p.model, responseAdmission: p.responseAdmission, inputSetId: p.inputSetId ?? null, ...(p.input === undefined ? {} : { input: p.input }), ...(p.inputProvenance === undefined ? {} : { inputProvenance: p.inputProvenance }), ...(p.inputHash === undefined ? {} : { inputHash: p.inputHash }), status: "pending", eventId: event.id };
+      const handle: RecursiveModelState = { id: p.handleId, taskId: p.taskId, parentSessionId: p.parentSessionId, parentBranchId: p.parentBranchId, childSessionId: p.childSessionId, childBranchId: p.childBranchId, model: p.model, responseAdmission: p.responseAdmission, profilePin: p.profilePin, inputSetId: p.inputSetId ?? null, ...(p.input === undefined ? {} : { input: p.input }), ...(p.inputProvenance === undefined ? {} : { inputProvenance: p.inputProvenance }), ...(p.inputHash === undefined ? {} : { inputHash: p.inputHash }), status: "pending", eventId: event.id };
       return { ...next, recursiveModels: { ...state.recursiveModels, [p.handleId]: handle } };
     }
     case "RecursiveModelStatusChanged": {
@@ -503,11 +546,16 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "AgentRunRequested": {
       const p = event.payload as EventPayloads["AgentRunRequested"];
       if (state.agentRuns[p.runId]) throw new InvalidTransitionError("agentRun", state.agentRuns[p.runId]!.status, "queued");
+      const profile = state.agentProfiles[p.profilePin.profileVersionId];
+      if (!profile || profile.promptDigest !== p.profilePin.agentPromptDigest ||
+          profile.promptContractId !== p.profilePin.promptContractId) {
+        throw new ValidationError("Agent run profile pin does not reference a retained profile version");
+      }
       if (Object.values(state.agentRuns).some((run) => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status))) {
         throw new InvalidTransitionError("agentRun", "active-run-exists", "queued");
       }
       const run: AgentRunState = {
-        id: p.runId, task: p.task, requestKey: p.requestKey, goalId: p.goalId ?? null, goalMode: p.goalMode ?? (p.goalId ? "current" : "none"), wakeId: p.wakeId ?? null, status: "queued",
+        id: p.runId, task: p.task, requestKey: p.requestKey, profilePin: p.profilePin, goalId: p.goalId ?? null, goalMode: p.goalMode ?? (p.goalId ? "current" : "none"), wakeId: p.wakeId ?? null, status: "queued",
         steps: [], goalChecks: {}, cancellationRequested: false, requestEventId: event.id, eventId: event.id,
       };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: run } };
@@ -722,7 +770,10 @@ function validateModelEffectRelation(
   }
   if (callId !== undefined) {
     const call = state.modelCalls[callId];
-    if (!call || call.effectId !== payload.effectId || !Bun.deepEquals(call.modelDispatch, dispatch)) {
+    const promptProvenance = input.promptProvenance;
+    if (!call || call.effectId !== payload.effectId || !Bun.deepEquals(call.modelDispatch, dispatch) ||
+        !promptProvenance || typeof promptProvenance !== "object" || Array.isArray(promptProvenance) ||
+        !Bun.deepEquals(call.promptProvenance, promptProvenance)) {
       throw new ValidationError("Model effect does not agree with its admitted model call");
     }
     return;

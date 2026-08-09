@@ -148,6 +148,7 @@ Startup recovery:
 - records lost non-idempotent ownership as `unknown`;
 - abandons interrupted cells instead of replaying their code;
 - finalizes already-committed model outcomes and applies retained formal actions without another provider call;
+- restores each autonomous or recursive invocation from its retained agent-profile pin and effective-system-prompt provenance rather than selecting the currently active profile;
 - recovers structured refinement from retained recursive `responseAdmission` and exact child-completion evidence;
 - restores branch status, cancellation, goals, schedules, child work, and typed runs from retained boundaries; and
 - never re-executes effects during projection rebuild.
@@ -164,6 +165,12 @@ agencity reconcile EFFECT_ID succeeded "provider audit confirms one request"
 Allowed assessments are `succeeded`, `failed`, `no_effect`, and `still_unknown`. They are evidence only. The durable effect remains unknown and is not retried. Start any successor operation only after independently deciding it is safe and give it a new logical intent.
 
 Do not edit `events` or `outbox` to manufacture an outcome.
+
+### Projection repair
+
+`agencity debug rebuild --session SESSION_ID --branch BRANCH_ID` discards and deterministically rebuilds the selected branch snapshot from canonical events. The storage-level operational rebuild also reconstructs session/branch routing, agent-profile versions and active pointers, recursive handles and their profile pins, and context prompt provenance in global cursor order. Neither form executes models, cells, tools, schedules, or other effects.
+
+Agent-profile control events are session-wide but use the session's initial branch as their canonical address. `workspace_agent_profiles` is a compare-and-swap projection, not independent authority. Do not repair it with SQL; rebuild it from `SessionCreated`, `AgentProfileVersionCreated`, and `AgentProfileActivated`.
 
 See [Recovery](./recovery.md) for the complete state machine.
 
@@ -295,7 +302,7 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
 
-The current workspace format accepts only event schema version 3. Version-1 and version-2 workspace histories are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. The rejection does not delete retained data; see [Data lifecycle](./data-lifecycle.md).
+The current workspace format accepts only event schema version 4. Workspace histories containing schema version 1, 2, or 3 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-4 sessions with complete initial profiles; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

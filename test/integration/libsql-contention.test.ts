@@ -61,6 +61,7 @@ describe("LibSQL contention boundaries", () => {
     // create their own LibSQL connections to the same workspace database.
     const worker = String.raw`
       import { LibSqlStorage } from "./src/storage/index.ts";
+      import { materializeInitialAgentProfile } from "./src/domain/index.ts";
       const databaseUrl = process.env.AGENCITY_CONTENTION_DATABASE_URL!;
       const workerId = process.env.AGENCITY_CONTENTION_WORKER!;
       const barrier = process.env.AGENCITY_CONTENTION_BARRIER!;
@@ -72,7 +73,7 @@ describe("LibSQL contention boundaries", () => {
           id: "contention-root-created", sessionId: "contention-root", branchId: "main",
           type: "SessionCreated", producer: "test", idempotencyKey: "contention-root-created",
           committedAt: "2026-08-06T00:00:00.000Z",
-          payload: { workspaceId: "contention-workspace", initialBranchId: "main", model: { provider: "echo", model: "echo", reasoningEffort: "provider-default" }, budget: {} },
+          payload: { workspaceId: "contention-workspace", initialBranchId: "main", model: { provider: "echo", model: "echo", reasoningEffort: "provider-default" }, budget: {}, agentProfile: materializeInitialAgentProfile({ role: "Test agent", purpose: "Exercise concurrent storage.", instructions: "- Append deterministic test events." }, { profileVersionId: "agent-profile-contention-root-v1", agentSessionId: "contention-root", createdBy: { kind: "system", componentId: "agencity.contention-test", version: 1 }, reason: "Concurrent test profile", createdAt: "2026-08-06T00:00:00.000Z" }) },
         }]);
         for (let index = 0; index < 12; index++) {
           const suffix = workerId + "-" + index;

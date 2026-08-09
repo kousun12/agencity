@@ -53,6 +53,12 @@ The profile default is intentionally not derived from the workspace database. Th
 
 `--db`, `--artifacts`, and `--profile` do not move the workspace identity marker or managed-service discovery files.
 
+### Initial agent profiles
+
+An agent profile is session-owned workspace state, not a profile-database preference. Ordinary product root creation uses the sealed repository-agent profile. The public TypeScript and HTTP APIs may instead supply a complete `{ role, purpose, instructions }` value when creating a root. Delegated and recursive spawn inputs may supply the same explicit shape and otherwise use the sealed task-specialist profile; specification spawn derives it from the exact specification version.
+
+There is no environment variable, profile-database preference, or TUI control that changes these defaults. Existing sessions retain the exact initial profile committed in workspace history. Public profile revision and automated-governance configuration are not available.
+
 ## Provider credentials and models
 
 Agencity's product provider choices are OpenAI, Anthropic, and Vercel AI Gateway. Internal deterministic test providers are not available through product setup.

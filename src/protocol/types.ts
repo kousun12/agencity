@@ -1,9 +1,9 @@
-import type { AgentEvent, AgentState, BudgetLimits, JsonValue, ModelConfigurationInput } from "../domain/index.ts";
+import type { AgentEvent, AgentProfileInput, AgentState, BudgetLimits, JsonValue, ModelConfigurationInput } from "../domain/index.ts";
 import type { ResolveConflictInput } from "../sync/index.ts";
 import type { CompactContextInput, CreateGoalInput, CreateHeartbeatInput, CreateScheduleInput, CreateInputSetInput, ImportDocumentInput, SendMessageInput, SpawnAgentInput, StartRecursiveModelInput, CreateMemoryInput, ProposeRefinementInput, ActivateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput, StartRefinementReviewInput, InvokeSkillOptions, SpawnSpecInput } from "../runtime/index.ts";
 
 export type ProtocolRequest =
-  | { type: "createSession"; workspaceId: string; model?: ModelConfigurationInput; budget?: BudgetLimits }
+  | { type: "createSession"; workspaceId: string; model?: ModelConfigurationInput; budget?: BudgetLimits; agentProfile?: AgentProfileInput }
   | { type: "message"; sessionId: string; branchId: string; content: string }
   | { type: "turn"; sessionId: string; branchId: string }
   | { type: "cell"; sessionId: string; branchId: string; code: string }

@@ -33,7 +33,7 @@ import type { ProductBranchSummary } from "../../src/product/index.ts";
 import { TerminalTranscript } from "../../src/tui/transcript.ts";
 import { createTerminalSyntaxStyle } from "../../src/tui/theme.ts";
 import { buildTerminalScreen, type TerminalScreenView } from "../../src/tui/view-model.ts";
-import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
+import { fixtureAgentProfile, makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
@@ -151,6 +151,7 @@ describe("OpenTUI interactive terminal", () => {
       onDetail: detail => app?.showDetail(detail),
     });
     await controller.attach(session.sessionId, session.branchId, false);
+    const displayProfile = fixtureAgentProfile(session.sessionId);
     const proposedFinal = buildTerminalScreen({
       ...controller.presentation,
       state: {
@@ -160,6 +161,7 @@ describe("OpenTUI interactive terminal", () => {
             id: "gated-run",
             task: "Try gated completion",
             requestKey: "gated-run",
+            profilePin: { profileVersionId: displayProfile.profileVersionId, agentPromptDigest: displayProfile.promptDigest, promptContractId: displayProfile.promptContractId },
             goalId: "goal",
             goalMode: "current",
             wakeId: null,
@@ -197,6 +199,7 @@ describe("OpenTUI interactive terminal", () => {
       id: "typescript-run",
       task: "Inspect with TypeScript",
       requestKey: "typescript-run",
+      profilePin: { profileVersionId: displayProfile.profileVersionId, agentPromptDigest: displayProfile.promptDigest, promptContractId: displayProfile.promptContractId },
       goalId: null,
       goalMode: "none",
       wakeId: null,

@@ -53,6 +53,11 @@ async function usingRuntime() {
         reasoningEffort: "high",
       },
       budget: { tokenLimit: 10_000, turnLimit: 20 },
+      agentProfile: {
+        role: "Repository reviewer",
+        purpose: "Advance the requested repository review.",
+        instructions: "- Use attributable evidence.\n- Preserve unresolved risks.",
+      },
     });
 
     const result = await supervisor.runs.start(sessionId, branchId, {
@@ -98,7 +103,7 @@ Structured requests use response-aware `agencity.model-dispatch.v2` and return `
 
 ## Sessions, branches, and autonomous runs
 
-- `createSession` appends `SessionCreated`; optional caller IDs and names support deterministic provisioning.
+- `createSession` appends `SessionCreated` with a complete immutable initial agent profile; optional caller IDs, names, and `agentProfile: { role, purpose, instructions }` support deterministic provisioning. Omission uses the sealed root profile.
 - `selectModel` normalizes provider shorthand, checks availability, requires an idle model boundary, and appends `SessionModelChanged`.
 - `appendMessage` scrubs known credentials and appends a message event.
 - `fork` creates a durable branch from a validated lineage cursor without changing the parent.
@@ -120,6 +125,23 @@ A successful finish publishes its exact message only after required gates pass. 
 
 `modelLoop.turn` and `modelLoop.run` remain low-level diagnostic paths. They are not substitutes for `runs` in a product task integration.
 
+### Agent-profile inspection
+
+`Supervisor.agentProfiles` exposes session-wide, read-only profile inspection:
+
+```ts
+const summary = await supervisor.agentProfiles.get(sessionId);
+const detail = await supervisor.agentProfiles.get(sessionId, {
+  includePrompt: true,
+});
+const history = await supervisor.agentProfiles.list(sessionId, {
+  includePrompt: false,
+  limit: 20,
+});
+```
+
+The default summary omits instructions and exact prompt text. Full detail includes the exact rendered prompt and revision provenance. History is newest-first, defaults to 20 records, and accepts a limit from 1 through 100. The corresponding `AgentClient.agentProfile` and `AgentClient.agentProfiles` methods use the public protocol. Public profile proposal, activation, and rollback methods are not available; automated profile-refinement governance remains unimplemented.
+
 ## Durable recursive work
 
 Root agents, delegated agents, and recursive model calls use retained sessions, tasks, budgets, mailboxes, and JSON handles.
@@ -128,6 +150,11 @@ Root agents, delegated agents, and recursive model calls use retained sessions, 
 const child = await supervisor.agents.spawn(parentSessionId, parentBranchId, {
   task: "Investigate the failing tests",
   completionCriteria: "Return root cause and verified evidence",
+  profile: {
+    role: "Test investigator",
+    purpose: "Investigate the admitted test failure.",
+    instructions: "- Stay within the admitted task.\n- Return attributable evidence.",
+  },
   idempotencyKey: "investigate-tests-v1",
 });
 
@@ -143,6 +170,11 @@ const family = await supervisor.agents.listFamily(parentSessionId, parentBranchI
 const call = await supervisor.models.start(parentSessionId, parentBranchId, {
   prompt: "Summarize the selected log ranges",
   inputSetId,
+  profile: {
+    role: "Log summarizer",
+    purpose: "Summarize one bounded recursive input.",
+    instructions: "- Distinguish observations from inference.",
+  },
   idempotencyKey: "summarize-log-v1",
 });
 
@@ -151,7 +183,9 @@ const terminal = await supervisor.models.result(call.handleId, {
 });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
+`agents.spawnMany` validates and admits the complete batch atomically. Each input may supply `profile`; omission uses the sealed task-specialist profile. Recursive `models.start/startMany` use the same explicit-or-default rule and retain the resulting profile pin on the handle. Specification spawn materializes a profile from the exact active specification version and records those source IDs. Profile meaning participates in idempotent admission, so reusing an idempotency key with changed standing behavior is rejected.
+
+`agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 
 Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
 
@@ -235,7 +269,7 @@ interface AgentStorage {
 
 Canonical writes go through validated event and service commands. `readonlyQuery({ sql, args })` is a bounded LibSQL-oriented analytical surface, not a portable mutation interface. The local adapter advertises offline writes, analytical SQL, in-process notifications, and same-device process fencing. It does not advertise distributed leases.
 
-Snapshots and operational tables are projections. Historical rebuild is deterministic and never re-executes effects.
+Snapshots and operational tables are projections. `agent_profile_versions` and `workspace_agent_profiles` are rebuilt from schema-version-4 session/profile events; recursive-handle and context projections rebuild their retained profile and effective-prompt provenance. Historical rebuild is deterministic and never re-executes effects.
 
 ```ts
 const { cursor, state } =

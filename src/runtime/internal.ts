@@ -1,4 +1,4 @@
-import { ValidationError, type RecursiveResponseAdmission } from "../domain/index.ts";
+import { ValidationError, type AgentInvocationProfilePin, type RecursiveResponseAdmission } from "../domain/index.ts";
 import type { ModelLoop, StructuredModelTurnResult } from "./model-loop.ts";
 import type {
   RecursiveModelHandle,
@@ -21,6 +21,7 @@ export type StructuredModelTurnRunner = (
   sessionId: string,
   branchId: string,
   responseAdmission: RecursiveResponseAdmission,
+  invocation: { readonly invocationId: string; readonly profilePin: AgentInvocationProfilePin },
 ) => Promise<StructuredModelTurnResult>;
 
 export type StructuredRefinementReviewStarter = (

@@ -521,6 +521,7 @@ describe("FU-016 durable RefinerService", () => {
         handle.childSessionId,
         handle.childBranchId,
         handle.responseAdmission,
+        { invocationId: handle.handleId, profilePin: handle.profilePin },
       );
       expect(turn.outcome).toBe("succeeded");
       // Simulate a crash between the terminal task transition and the handle
@@ -597,6 +598,7 @@ describe("FU-016 durable RefinerService", () => {
         handle.childSessionId,
         handle.childBranchId,
         handle.responseAdmission,
+        { invocationId: handle.handleId, profilePin: handle.profilePin },
       );
       stopProgress();
       expect(turn.outcome).toBe("failed");

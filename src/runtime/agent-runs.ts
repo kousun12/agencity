@@ -1,6 +1,8 @@
 import {
   AGENT_TOOL_CONTRACT_ID,
+  AGENT_TOOL_CONTRACT_VERSION,
   AGENT_TOOL_SELECTION_POLICY,
+  agentProfilePin,
   agentActionFromToolSubmission,
   assertNoReservedModelDispatchInputFields,
   newId,
@@ -38,6 +40,8 @@ import {
   type ModelContextWindowConfiguration, type ProviderModelErrorClassification,
 } from "./context-window.ts";
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
+import { AgentProfileService } from "./agent-profiles.ts";
+import { composeAgentSystemPrompt } from "./agent-system-prompt.ts";
 
 export interface StartAgentRunInput {
   readonly task: string;
@@ -143,6 +147,7 @@ export class AgentRunService {
     readonly maxSteps = 128,
     readonly compactions?: CompactionService,
     readonly modelExecutor?: ModelExecutor,
+    readonly profiles: AgentProfileService = new AgentProfileService(storage),
   ) {
     if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) throw new ValidationError("Agent run maxSteps must be positive");
   }
@@ -190,6 +195,7 @@ export class AgentRunService {
       // Resolve the required formal contract before goal preparation or any
       // initiating run event is allowed to become durable.
       this.#agentDispatch(state);
+      const profile = await this.profiles.active(sessionId);
       const runId = normalized.requestedRunId ?? newId();
       const currentGoal = Object.values(state.goals).find((goal) => !["completed", "failed", "cancelled"].includes(goal.status));
       let goalId = normalized.goalId;
@@ -216,7 +222,7 @@ export class AgentRunService {
         sessionId, branchId, type: "AgentRunRequested" as const, producer: "client",
         idempotencyKey: `agent-run-request:${runId}`,
         payload: {
-          runId, task, requestKey, goalMode: requestedGoalMode,
+          runId, task, requestKey, profilePin: agentProfilePin(profile), goalMode: requestedGoalMode,
           ...(goalId === undefined ? {} : { goalId }),
           ...(normalized.wakeId === undefined ? {} : { wakeId: normalized.wakeId }),
         },
@@ -412,6 +418,7 @@ export class AgentRunService {
     if (!attempt && state.contexts[step.contextId]) {
       const retainedContextEvent = events.find((event) => event.type === "ContextMaterialized" && (event.payload as EventPayloads["ContextMaterialized"]).contextId === step.contextId) as AgentEvent<"ContextMaterialized"> | undefined;
       if (!retainedContextEvent) throw new ValidationError(`Agent run retained context is unavailable: ${step.contextId}`);
+      if (!retainedContextEvent.payload.promptProvenance) throw new ValidationError(`Agent run retained context has no prompt provenance: ${step.contextId}`);
       const modelDispatch = this.#agentDispatch(state);
       const estimatedInputTokens = estimateContextWindow(retainedContextEvent.payload.context).estimatedTokens;
       await this.storage.appendEvents([{
@@ -430,7 +437,7 @@ export class AgentRunService {
         idempotencyKey: `agent-run-model-call:${step.callId}`,
         payload: {
           callId: step.callId, contextId: step.contextId, effectId: step.effectId,
-          modelDispatch, estimatedInputTokens, attempt: 1, contextWindow: window.provenance,
+          modelDispatch, estimatedInputTokens, promptProvenance: retainedContextEvent.payload.promptProvenance, attempt: 1, contextWindow: window.provenance,
         },
       }]);
       const loaded = await this.#load(sessionId, branchId, run.id);
@@ -438,6 +445,7 @@ export class AgentRunService {
     }
     if (!attempt) {
       const modelDispatch = this.#agentDispatch(state);
+      const prompt = await this.#runPrompt(sessionId, run, modelDispatch);
       let materialized;
       let proactiveCompactions = 0;
       if (this.compactions) {
@@ -446,7 +454,9 @@ export class AgentRunService {
             contextId: completedCompactions === 0 ? step.contextId : `${step.contextId}-window-${completedCompactions}`,
             idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}:window:${completedCompactions}`,
             additionalRecordIds: step.observationEventIds,
-            transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch),
+            promptProvenance: prompt.provenance,
+            agentProfileVersionId: run.profilePin.profileVersionId,
+            transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch, prompt.content),
           }),
           estimate: (candidate) => estimateContextWindow(candidate.context).estimatedTokens,
           compact: async ({ iteration }) => {
@@ -468,7 +478,9 @@ export class AgentRunService {
         if (!contextEvent) contextEvent = (await this.contexts.materialize(sessionId, branchId, {
           contextId: step.contextId, idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}`,
           additionalRecordIds: step.observationEventIds,
-          transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch),
+          promptProvenance: prompt.provenance,
+          agentProfileVersionId: run.profilePin.profileVersionId,
+          transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch, prompt.content),
         })).event;
         materialized = { contextId: step.contextId, context: contextEvent.payload.context, event: contextEvent };
       }
@@ -491,7 +503,7 @@ export class AgentRunService {
         idempotencyKey: `agent-run-model-call:${step.callId}`,
         payload: {
           callId: step.callId, contextId: materialized.contextId, effectId: step.effectId,
-          modelDispatch, estimatedInputTokens, attempt: 1, contextWindow: window.provenance,
+          modelDispatch, estimatedInputTokens, promptProvenance: materialized.event.payload.promptProvenance!, attempt: 1, contextWindow: window.provenance,
         },
       }]);
       const loaded = await this.#load(sessionId, branchId, run.id);
@@ -515,7 +527,7 @@ export class AgentRunService {
       this.#agentDispatch(current);
       const requestedEffectId = await this.outbox.request({
         sessionId, branchId, executor: "model", operation: "complete",
-        input: { callId: attempt.callId, context, modelDispatch: retainedDispatch as unknown as JsonValue },
+        input: { callId: attempt.callId, context, modelDispatch: retainedDispatch as unknown as JsonValue, promptProvenance: admittedCall.promptProvenance as unknown as JsonValue },
         idempotencyKey: effectKey, idempotent: false,
       });
       if (requestedEffectId !== attempt.effectId) throw new ValidationError("Agent run model effect identity is not stable");
@@ -553,7 +565,16 @@ export class AgentRunService {
             contextId: `${step.contextId}-overflow-${nextAttempt}`,
             idempotencyKey: `agent-run-overflow-context:${run.id}:${step.ordinal}:${nextAttempt}`,
             additionalRecordIds: step.observationEventIds,
-            transform: (base) => agentProviderContext(base, run, step.ordinal, observations, call.modelDispatch),
+            promptProvenance: call.promptProvenance,
+            agentProfileVersionId: run.profilePin.profileVersionId,
+            transform: (base) => agentProviderContext(
+              base,
+              run,
+              step.ordinal,
+              observations,
+              call.modelDispatch,
+              systemPromptFromContext(context),
+            ),
           });
           const nextEstimate = estimateContextWindow(nextContext.context).estimatedTokens;
           const retry = planContextWindowOverflowRetry({
@@ -582,7 +603,7 @@ export class AgentRunService {
               idempotencyKey: `agent-run-model-call:${callId}`,
               payload: {
                 callId, contextId: nextContext.contextId, effectId,
-                modelDispatch: call.modelDispatch, estimatedInputTokens: nextEstimate,
+                modelDispatch: call.modelDispatch, estimatedInputTokens: nextEstimate, promptProvenance: call.promptProvenance,
                 attempt: nextAttempt, retryOfCallId: attempt.callId, contextWindow: window.provenance,
               },
             }]);
@@ -796,6 +817,33 @@ export class AgentRunService {
       ? new ModelEffectAdmissionService(this.modelExecutor)
           .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, state.model).modelDispatch
       : fallbackDispatch(state);
+  }
+
+  async #runPrompt(sessionId: string, run: AgentRunState, modelDispatch: ModelDispatch) {
+    if (modelDispatch.responseContract.kind !== "required-tool-set") {
+      throw new ValidationError("Agent run prompt requires its retained required-tool response contract");
+    }
+    const agentProfile = await this.profiles.getVersion(sessionId, run.profilePin.profileVersionId);
+    return composeAgentSystemPrompt({
+      invocationKind: "agent-run",
+      invocationId: run.id,
+      profilePin: run.profilePin,
+      agentProfile,
+      responseContract: {
+        id: modelDispatch.responseContract.contractId,
+        version: modelDispatch.responseContract.version ?? AGENT_TOOL_CONTRACT_VERSION,
+        text: `${AGENT_TOOL_SELECTION_POLICY}\nRetained response contract: ${JSON.stringify({
+          contractId: modelDispatch.responseContract.contractId,
+          version: modelDispatch.responseContract.version,
+          contractDigest: modelDispatch.responseContract.contractDigest,
+        })}`,
+      },
+      executionGuidance: {
+        id: "agencity.agent-run.execution-guidance",
+        version: 1,
+        text: SDK_GUIDE,
+      },
+    });
   }
 
   async #finishNonSuccess(
@@ -1012,19 +1060,25 @@ function agentProviderContext(
   stepOrdinal: number,
   observations: readonly { eventId: string; type: string; payload: JsonValue }[],
   modelDispatch: ModelDispatch,
+  systemPrompt: string,
 ): JsonValue {
   if (modelDispatch.responseContract.kind !== "required-tool-set") {
     throw new ValidationError("Agent provider context requires its retained formal tool contract");
   }
   const durable = base && typeof base === "object" && !Array.isArray(base) ? base as Record<string, JsonValue> : {};
-  const existingMessages = Array.isArray(durable.messages) ? durable.messages.filter((message) =>
-    message && typeof message === "object" && !Array.isArray(message) &&
-    ["system", "user", "assistant", "tool"].includes(String(message.role)) && typeof message.content === "string") : [];
+  const existingMessages = Array.isArray(durable.messages) ? durable.messages.flatMap((message) => {
+    if (!message || typeof message !== "object" || Array.isArray(message) ||
+        !["system", "user", "assistant", "tool"].includes(String(message.role)) ||
+        typeof message.content !== "string") return [];
+    return message.role === "system"
+      ? [{ ...message, role: "user", content: `DURABLE SYSTEM RECORD\n${message.content}` }]
+      : [message];
+  }) : [];
   const recentActivity = Array.isArray(durable.recentActivity)
     ? durable.recentActivity.filter((item) => !item || typeof item !== "object" || Array.isArray(item) || !OBSERVATION_TYPES.has(String(item.type)))
     : [];
   const durableContext = Object.fromEntries([
-    "runtime", "profile", "session", "budget", "goal", "tasks", "mailbox",
+    "runtime", "agentProfile", "userProfile", "session", "budget", "goal", "tasks", "mailbox",
     "terminalNotices", "recursiveModels", "documents", "inputSets", "heartbeats", "schedules", "wakes", "activeRuns",
     "harness", "compactions", "workingValues", "artifacts", "queryHints",
   ].filter((key) => durable[key] !== undefined).map((key) => [key, durable[key]]));
@@ -1054,11 +1108,24 @@ function agentProviderContext(
     },
     run: stepInput,
     messages: [
-      { role: "system", content: `${String(durable.basePolicy ?? "")}\n\n${AGENT_TOOL_SELECTION_POLICY}\n\n${SDK_GUIDE}` },
+      { role: "system", content: systemPrompt },
       ...existingMessages,
       { role: "user", content: `AGENCITY DURABLE RUN STEP\n${JSON.stringify(stepInput)}` },
     ],
   })) as JsonValue;
+}
+
+function systemPromptFromContext(context: JsonValue): string {
+  if (!context || typeof context !== "object" || Array.isArray(context) || !Array.isArray(context.messages)) {
+    throw new ValidationError("Provider context is missing its effective system prompt");
+  }
+  const system = context.messages.find((message) =>
+    message && typeof message === "object" && !Array.isArray(message) &&
+    message.role === "system" && typeof message.content === "string");
+  if (!system || typeof system !== "object" || Array.isArray(system) || typeof system.content !== "string") {
+    throw new ValidationError("Provider context is missing its effective system prompt");
+  }
+  return system.content;
 }
 
 function providerClassification(

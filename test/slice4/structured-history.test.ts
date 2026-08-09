@@ -6,7 +6,7 @@ let root: string | undefined;
 let a: Replica | undefined, b: Replica | undefined;
 afterEach(async () => { if (root) await closeAll(root, a, b); root = undefined; a = b = undefined; });
 
-describe("Slice 4 structured version-3 history boundaries", () => {
+describe("Slice 4 structured version-4 history boundaries", () => {
   test("a formal agent-run history forks, rebuilds, and synchronizes with exact structured provenance", async () => {
     root = await makeRoot();
     const hub = new DeterministicSyncHub();

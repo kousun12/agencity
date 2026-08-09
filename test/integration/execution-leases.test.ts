@@ -3,7 +3,7 @@ import { createClient } from "@libsql/client";
 import { LibSqlStorage } from "../../src/storage/index.ts";
 import { ExecutionLeaseService, ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "../../src/runtime/execution-leases.ts";
 import { AgentService } from "../../src/runtime/agents.ts";
-import { makeTempRuntime, removeTempRuntime, seedSession, type TempRuntime } from "../helpers.ts";
+import { fixtureAgentProfile, makeTempRuntime, removeTempRuntime, seedSession, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 const storages: LibSqlStorage[] = [];
@@ -181,6 +181,7 @@ describe("transactional process execution fencing", () => {
         initialBranchId: "main",
         model: { provider: "echo", model: "echo", reasoningEffort: "provider-default" },
         budget: {},
+        agentProfile: fixtureAgentProfile("remote-root"),
       },
     }]);
     const service = new ExecutionLeaseService(store, {

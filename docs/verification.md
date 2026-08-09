@@ -41,7 +41,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 
 These are static constraints. They do not replace replay, recovery, protocol, security, or product behavior tests.
 
-`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Together, their current coverage includes schema-3 event replay and rebuild, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
+`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Together, their current coverage includes schema-4 event replay and rebuild, durable initial agent profiles and prompt pins, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
 
 Those tests use local fixtures, temporary databases, deterministic providers, and in-process or loopback test services where appropriate. A pass supports the behaviors exercised by those tests. It does not establish hostile-code isolation, exactly-once external effects, automatic cross-device failover, or correctness at every possible machine-instruction crash boundary.
 
@@ -80,9 +80,20 @@ It records a focused family-projection benchmark with 25 relatives and branch hi
 
 The package is private. This verifies the documented source and `bun link` workflow; it is not evidence of a package-registry or standalone-binary release.
 
-### Recorded baseline
+### Durable-profile implementation evidence
 
-The current recorded local evidence was produced on August 9, 2026 against runtime commit `1ec7114` plus documentation-only working-tree changes:
+The schema-version-4 durable-profile and prompt-pin implementation was verified on August 9, 2026 with:
+
+- `bun run verify`: passed;
+- deterministic core suite: 856 passed, 2 skipped, 0 failed;
+- deterministic installed acceptance: 14 passed, 1 skipped, 0 failed;
+- aggregate tests: 870 passed, 3 skipped, 0 failed.
+
+The skipped rows were gated and remain unverified. This evidence does not establish that any live model provider, official Turso Sync server, or Turso Cloud integration passed. The installed linked-product journey for profile proposal, sealed governance review, approval/rejection, activation, rollback, detach, and recovery is absent. Automated profile refinement governance and the complete installed profile-governance journey therefore remain unverified and unavailable.
+
+### Previous recorded baseline
+
+The preceding schema-version-3 baseline was produced on August 9, 2026 against runtime commit `1ec7114` plus documentation-only working-tree changes:
 
 - `bun run verify`: passed;
 - `bun run test:core` within that gate: 845 passes and 2 documented external skips;

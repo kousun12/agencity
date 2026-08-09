@@ -473,6 +473,10 @@ describe("Slice 3 subagent specification invocation identity", () => {
     });
     expect(stableAgain.taskId).toBe(stableFirst.taskId);
     expect(stableAgain.sessionId).toBe(stableFirst.sessionId);
+    const materializedProfile = await s.agentProfiles.active(stableFirst.sessionId);
+    expect(materializedProfile.sourceSpecEntryId).toBe(spec.entryId);
+    expect(materializedProfile.sourceSpecVersionId).toBe(spec.current.versionId);
+    expect(materializedProfile.role).toBe("reviewer");
 
     const invocations = await s.storage.readonlyQuery({
       sql: "SELECT version_id,task_id FROM subagent_spec_invocations WHERE entry_id=? ORDER BY task_id",

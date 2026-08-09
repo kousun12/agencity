@@ -1111,7 +1111,7 @@ async function runAdvanced(parsed: ParsedCliArgs): Promise<void> {
     } else if (path === "debug turn") {
       required(sessionId, "session"); required(branchId, "branch");
       await supervisor.appendMessage(sessionId!, branchId!, "user", parsed.positionals.join(" "));
-      emitAdvanced(parsed, path, await supervisor.modelLoop.turn(sessionId!, branchId!));
+      emitAdvanced(parsed, path, await supervisor.diagnosticTurn(sessionId!, branchId!));
     } else if (path === "debug cell") {
       required(sessionId, "session"); required(branchId, "branch");
       emitAdvanced(parsed, path, await supervisor.executeCell(sessionId!, branchId!, parsed.positionals.join(" ")));

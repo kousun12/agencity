@@ -93,6 +93,14 @@ A successful finish is provisional until every required gate passes. Failed gate
 
 A session is a durable agent identity with its conversation, model, budget, goals, and child work. A branch is one retained line of that session's history.
 
+Every new session also has one durable initial agent profile: a concise role, standing purpose, and agent-specific instructions. The profile is behavioral guidance for model calls. It does not grant file, shell, credential, model, budget, publication, or other runtime authority.
+
+Ordinary root creation uses Agencity's sealed repository-agent profile. Delegated and recursive helpers use a sealed task-specialist profile unless the creating API or generated TypeScript supplies a narrower explicit profile. Reusable subagent specifications materialize their exact active specification version into the new child's profile and retain that source provenance. The current task and completion criteria remain separate from standing profile behavior.
+
+Each autonomous run and recursive-model invocation pins the exact profile version and effective system-prompt provenance before model work. A restart uses that retained pin rather than silently selecting different instructions.
+
+The public protocol and TypeScript client can inspect the active profile and bounded profile history, with full prompt text available only through an explicit detail option. The terminal UI does not currently provide a profile inspector or profile editing controls. Profile revision, automated governance review, activation, and rollback are not available.
+
 Common commands:
 
 ```sh

@@ -54,7 +54,7 @@ Unknown routes return 404/`NOT_FOUND`. `AgentClient` raises `ProtocolClientError
 
 ## Route conventions
 
-Session mutations and reads are branch-scoped. The documented form is `?branch=<branchId>`. Snapshot, history, and stream also accept the retained path-segment compatibility form, but new integrations should use the query parameter.
+Conversation, run, and branch mutations and reads are branch-scoped. The documented form is `?branch=<branchId>`. Snapshot, history, and stream also accept the retained path-segment compatibility form, but new integrations should use the query parameter. Agent-profile inspection is session-scoped because the active profile belongs to the session across all conversation branches.
 
 Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cursors are decimal strings and may exceed JavaScript's safe integer range; retain them as strings.
 
@@ -89,7 +89,9 @@ Selected capability query values must be nonblank UTF-8 strings. Provider is lim
 
 | Method and path | Input and result |
 |---|---|
-| `POST /sessions` | `{ workspaceId?, model?, budget?, sessionName?, branchName? }` → `{ sessionId, branchId }`; product model configuration includes `reasoningEffort`. |
+| `POST /sessions` | `{ workspaceId?, model?, budget?, agentProfile?: { role, purpose, instructions }, sessionName?, branchName? }` → `{ sessionId, branchId }`; omitted `agentProfile` uses the sealed root profile and product model configuration includes `reasoningEffort`. |
+| `GET /sessions/:session/agent-profile` | Bounded active profile summary. Add `?detail=full` to include instructions, exact rendered prompt, evidence IDs, and revision provenance. |
+| `GET /sessions/:session/agent-profiles` | Newest-first bounded history with `{ activeProfileVersionId, items }`. Optional `detail=full`; `limit` defaults to 20 and must be 1–100. |
 | `POST /sessions/:session/model?branch=:branch` | `{ model: { provider, model, reasoningEffort? } }` → explicit idle-branch model or effort change. |
 | `GET /sessions/:session/snapshot?branch=:branch` | `{ cursor, state }`. |
 | `GET /sessions/:session/model-contract-diagnostics?branch=:branch` | Projection-derived fixed-cardinality formal submission and violation diagnostics for the branch. |
@@ -101,7 +103,7 @@ Selected capability query values must be nonblank UTF-8 strings. Provider is lim
 | `POST /sessions/:session/runs/:run/resume?branch=:branch` | Advance the retained run. |
 | `POST /sessions/:session/runs/:run/cancel?branch=:branch` | `{ reason? }` → cancellation-reconciled result. |
 | `POST /sessions/:session/stop?branch=:branch` | Managed-only `{ reason? }` → cancel the active run, if any. |
-| `POST /sessions/:session/turns?branch=:branch` | Advanced diagnostic one-turn model result. |
+| `POST /sessions/:session/turns?branch=:branch` | Advanced diagnostic compatibility run using the branch's latest retained user message and the canonical `AgentRunRequested` profile-pin boundary. |
 | `POST /sessions/:session/cells?branch=:branch` | `{ code }` → `{ cellId, result, logs }`. |
 | `POST /sessions/:session/branches?branch=:parent` | `{ cursor, name?, compactionStrategy? }` → `{ branchId }`. |
 | `POST /sessions/:session/resume?branch=:branch` | Rebuild and reattach to a retained branch. |
@@ -113,6 +115,8 @@ Selected capability query values must be nonblank UTF-8 strings. Provider is lim
 | `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | Append `{ reconciliationId?, assessment, summary, evidence?, recordedBy }`; durable effect status remains unknown. |
 
 Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start`. Missing information becomes a blocked `finish`; a later user message starts an ordinary new run. There is no separate run-input route or retained input-request state.
+
+Profile summaries include version/session IDs, revision, role, purpose, prompt contract and digest, creator, optional specification source IDs, reason, creation time, and active status. Full detail additionally returns `instructions`, `exactAgentPrompt`, evidence IDs, supersession/restoration IDs, and proposal/review IDs. Normal reads omit the prompt-bearing fields to keep agent lists and inspection bounded. These routes are observational; profile proposal, activation, rollback, and automated-governance routes are not implemented.
 
 Model-contract diagnostics always return three submission counters—`bun_console`, `finish`, and sealed refinement review—nine violation counters, an unclassified-submission count, and at most 32 recent bounded outcomes plus an omitted count. They derive from canonical projections and retained structured recursive results. They add no mutable table and never expose rejected argument bodies.
 
@@ -245,7 +249,7 @@ The client exposes typed methods for all route groups:
 
 - discovery and service: `health`, `capabilities`, `serviceStatus`, `shutdownService`, `serviceAgents`;
 - product catalog/configuration: `productSessions`, `productSelect`, `productRename`, `productConfig`, `productSetModel`, `productSetReasoningEffort`, `productSetProviderKey`, `productCredentialReference`, `modelProviders`, `modelCatalog`;
-- session lifecycle: `createSession`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
+- session lifecycle and profile inspection: `createSession`, `agentProfile`, `agentProfiles`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
 - autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`, `agentToolCapability`, and `modelContractDiagnostics`;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
@@ -281,6 +285,18 @@ const session = await client.createSession("example", {
     model: "openai/gpt-5.6-sol",
     reasoningEffort: "high",
   },
+  agentProfile: {
+    role: "Repository reviewer",
+    purpose: "Inspect this repository for the requested task.",
+    instructions: "- Cite attributable evidence.\n- Preserve unresolved risks.",
+  },
+});
+
+const activeProfile = await client.agentProfile(session.sessionId);
+const fullProfile = await client.agentProfile(session.sessionId, true);
+const profileHistory = await client.agentProfiles(session.sessionId, {
+  includePrompt: false,
+  limit: 20,
 });
 
 const admitted = await client.startRun(session.sessionId, session.branchId, {
