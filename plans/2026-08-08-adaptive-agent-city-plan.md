@@ -92,7 +92,7 @@ The runtime already provides:
 - append-only canonical history and rebuildable projections;
 - attributable materialized model context;
 - immutable versioned prompt notes, memories, skills, and subagent specifications;
-- governed harness refinement with proposals, validation, candidates, observations, decisions, and rollback;
+- governed harness refinement with proposals, validation, versioned decisions, and rollback;
 - typed goals, gates, outbox effects, unknown outcomes, cancellation, schedules, wakes, and recovery;
 - product branch discovery, human-readable selection, and remembered root routes.
 
@@ -183,7 +183,7 @@ Profile versions and activation changes remain attributable. Historical invocati
 
 An authorized actor may propose a new profile version. The proposer cannot activate it. Deterministic validation and one independent sealed LLM review produce a terminal approval or rejection. Approval atomically creates and activates the new version for future invocations. Rejection changes no active content.
 
-No person must approve an ordinary proposal. Exact inputs, typed outputs, immutable history, conflict detection, terminal notification, post-activation observation, and rollback provide the control model.
+No person must approve an ordinary proposal. Exact inputs, typed outputs, immutable history, conflict detection, terminal notification, ordinary run evidence, and rollback provide the control model.
 
 ### Runtime services remain authoritative
 
@@ -381,7 +381,7 @@ type EventStreamAddress =
 
 This is a pre-release schema cutover. Older workspaces fail closed before decode, projection, sync ingestion, or recovery unless a separately reviewed importer exists. Retained events are never silently reinterpreted.
 
-### Candidate events
+### Proposed canonical events
 
 - `RefinementProposed`;
 - `RefinementValidated`;
@@ -571,9 +571,34 @@ Automatic reproposal is allowed only under an explicit bounded policy. The initi
 
 ### Rollback
 
-Rollback creates and activates a new profile version whose content matches an exact prior version. It records the actor, reason, prior active version, and restored source version without deleting intervening history.
+Rollback is one explicit typed restoration command:
 
-Exact rollback to previously approved content is a recovery action, not new refinement content, and does not require another LLM review. Scope and actor authorization still apply. Operators and agents may compare completion outcomes, corrections, unresolved effects, usage, latency, or task-specific evidence after activation. Clear typed failure may trigger automatic rollback under a separately bounded rollback policy.
+```ts
+interface RollbackRefinementInput {
+  targetKind: "agent_profile" | "memory" | "prompt_note" | "skill" | "subagent_spec";
+  targetId: string;
+  expectedCurrentVersionId: string;
+  restoreVersionId: string;
+  reason: string;
+  evidenceEventIds: string[];
+}
+```
+
+The runtime accepts rollback only when:
+
+- the caller has ordinary revision authority for the target;
+- `expectedCurrentVersionId` is still active;
+- `restoreVersionId` is an exact earlier approved version of the same target;
+- the referenced evidence exists and belongs to the caller's visible scope;
+- restoring the version does not change runtime authority or violate current compatibility policy.
+
+One transaction appends the rollback decision, creates a new immutable restoration version with the exact earlier content and digest, and activates that restoration for future invocations. It records the failed version, restored source version, actor, reason, and evidence. It never deletes or rewrites the intervening versions.
+
+An active invocation keeps its pinned profile or harness versions. Later invocations use the restoration. A stale compare-and-swap or missing artifact fails without changing active state.
+
+Rollback does not require another LLM review because it introduces no new content. If the caller modifies the earlier content, the operation is a new proposal and must be reviewed. An agent, its authorized parent, the workspace owner, or the automatic refiner may invoke rollback within its existing scope.
+
+Ordinary later runs already produce attributable failures, gate results, corrections, and effect outcomes. An authorized actor may use that evidence to invoke rollback through the typed command.
 
 ### Branch semantics
 
@@ -597,20 +622,18 @@ proposed
             -> apply_conflict | apply_failed | applied
 ```
 
-The current harness refinement implementation already supplies durable proposals, validation, immutable artifact versions, candidate records, observations, decisions, and rollback. This plan reuses its proposal identity, validation, recovery, and versioning foundations while changing the ordinary decision path:
+The current harness refinement implementation already supplies durable proposals, validation, immutable artifact versions, decisions, and rollback. This plan reuses its proposal identity, validation, recovery, and versioning foundations while changing the ordinary decision path:
 
 - a separate LLM reviewer replaces per-proposal human approval;
 - reviewer approval precedes activation;
 - approved behavioral content applies automatically;
 - rejection reasons return to the proposer;
 - optional reproposal always creates a new proposal;
-- post-activation evidence informs later refinement or rollback rather than blocking every activation behind a manual candidate experiment.
+- ordinary later run evidence may inform another proposal or an explicit rollback.
 
-Skills retain mandatory compile and declared runtime tests before activation. A reviewer cannot approve a failing skill. Other artifact kinds rely on deterministic validation plus charter review before activation and attributable outcome observation afterward.
+Skills retain mandatory compile and declared runtime tests before activation. A reviewer cannot approve a failing skill. Other artifact kinds rely on deterministic validation plus charter review before activation.
 
-Candidate allocation, bounded exposure, and evaluator observations may remain available for explicit experiments, but they are not required in the ordinary automatic refinement path. Existing candidate records are not silently reinterpreted. The domain review must define whether pre-cutover candidates finish under their original lifecycle or terminate with explicit migration status.
-
-This changes the repository's current refinement constitution, which treats pre-promotion observed success as the normal authority for activation. Shipping the change requires an explicit constitutional amendment in `AGENTS.md` and ADR 0002, plus synchronized event, protocol, recovery, security, and public-document updates.
+This changes the repository's current refinement constitution, which treats pre-activation observed success as the normal authority for activation. Shipping the change requires an explicit constitutional amendment in `AGENTS.md` and ADR 0002, plus synchronized event, protocol, recovery, security, and public-document updates.
 
 ### End-to-end refinement flow
 
@@ -773,9 +796,8 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Define the immutable product constitution, workspace charter, and reviewer-policy components supplied to governance review.
 - Define the sealed reviewer model contract and proposer-reviewer separation.
 - Define terminal notification, synchronous wait, detached recovery, and bounded reproposal semantics.
-- Decide how existing candidate refinements terminate or migrate at the governance cutover.
 - Define profile size and revision-rate bounds.
-- Amend `AGENTS.md` and ADR 0002 to authorize automatic charter review and post-activation evidence in place of mandatory pre-promotion outcome evidence.
+- Amend `AGENTS.md` and ADR 0002 to authorize automatic charter review and immediate version activation in place of mandatory pre-activation outcome evidence.
 - Add an ADR for durable agent profiles and automated refinement review.
 
 ### Phase 1 — Durable profiles
@@ -807,8 +829,7 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Remove per-proposal human approval as an ordinary promotion dependency.
 - Apply approved immutable versions automatically.
 - Keep generated-skill compilation and declared runtime tests mandatory before activation.
-- Retain optional candidate experiments for explicit evaluation without making them the default application path.
-- Add post-activation outcome observation and bounded automatic rollback policy.
+- Add the shared typed rollback command over exact earlier approved versions.
 
 ### Phase 4 — Product hardening
 
@@ -866,9 +887,9 @@ No migration rewrites retained event rows or silently interprets an initial task
 
 - Memory, prompt-note, skill, subagent-specification, and profile proposals use the same governance reviewer contract.
 - Skills compile and pass declared runtime tests before approved content becomes active.
-- Existing pre-cutover candidates are never silently promoted under the new rule.
-- Optional experiments remain attributable but are not required for ordinary automatic application.
-- Post-activation outcome evidence can trigger a new proposal or bounded rollback; it does not rewrite the original review decision.
+- Rollback requires an exact earlier approved version and current-version compare-and-swap.
+- Rollback creates a new immutable restoration version and never rewrites history.
+- Modified restoration content is a new proposal, not rollback.
 
 ### Root and task behavior
 
@@ -942,7 +963,7 @@ A proposal may attempt to instruct the reviewer to approve it or ignore policy. 
 
 ### Self-revision drift
 
-Repeated self-proposals can degrade behavior even with independent review. Separate proposer and reviewer roles, hard reproposal limits, expected-version checks, exact diffs, outcome observation, and rollback make drift bounded and inspectable. Runtime authority remains outside the profile.
+Repeated self-proposals can degrade behavior even with independent review. Separate proposer and reviewer roles, hard reproposal limits, expected-version checks, exact diffs, ordinary run evidence, and rollback make drift bounded and inspectable. Runtime authority remains outside the profile.
 
 ### Reviewer bottleneck
 
