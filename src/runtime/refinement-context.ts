@@ -1079,7 +1079,6 @@ function sanitizeText(text: string, secrets: readonly string[]): Sanitized<strin
     value = value.split(secret).join("[REDACTED]");
     redacted = true;
   }
-  if (containsCredentialShape(value)) throw new RefinementContextError("secret-escape", "Model-visible refinement context contains credential-shaped material");
   return { value, redacted };
 }
 function normalizeSecrets(values: readonly string[]): string[] {
@@ -1089,31 +1088,17 @@ function normalizeSecrets(values: readonly string[]): string[] {
 }
 function assertSafeMetadata(values: readonly string[], secrets: readonly string[]): void {
   for (const value of values) {
-    if (secrets.some((secret) => value.includes(secret)) || containsCredentialShape(value)) {
-      throw new RefinementContextError("secret-escape", "Credential material cannot appear in refinement attribution metadata");
+    if (secrets.some((secret) => value.includes(secret))) {
+      throw new RefinementContextError("secret-escape", "Brokered secret values cannot appear in refinement attribution metadata");
     }
   }
 }
 function assertNoSecretEscape(value: RefinementCanonicalJsonValue, secrets: readonly string[]): void {
   for (const text of stringLeaves(value)) {
-    if (secrets.some((secret) => text.includes(secret)) || containsCredentialShape(text)) {
-      throw new RefinementContextError("secret-escape", "Credential material escaped into the refinement snapshot");
+    if (secrets.some((secret) => text.includes(secret))) {
+      throw new RefinementContextError("secret-escape", "A brokered secret value escaped into the refinement snapshot");
     }
   }
-}
-function containsCredentialShape(text: string): boolean {
-  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) return true;
-  if (/(?:^|\s)(?:Bearer|Basic)\s+[A-Za-z0-9+/_.=-]{8,}(?:$|\s)/i.test(text)) return true;
-  if (/(?:^|[^A-Za-z0-9_-])(?:sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9_-]{8,}/.test(text)) return true;
-  if (/(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:$|[^A-Za-z0-9_-])/.test(text)) return true;
-  if (/(?:password|passwd|secret|auth[_-]?token|api[_-]?key)\s*[:=]\s*[^\s,;]+/i.test(text)) return true;
-  for (const match of text.matchAll(/(?:https?|libsql):\/\/[^\s]+/gi)) {
-    try {
-      const url = new URL(match[0]);
-      if (url.username || url.password || [...url.searchParams.keys()].some((key) => /(?:api_?key|token|secret|password|credential|authorization|auth)/i.test(key))) return true;
-    } catch { /* owning field validation handles malformed URLs */ }
-  }
-  return false;
 }
 function* stringLeaves(value: RefinementCanonicalJsonValue): Generator<string> {
   if (typeof value === "string") { yield value; return; }

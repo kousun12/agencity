@@ -48,6 +48,7 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 - Inputs containing an actual known environment or stored model secret value are rejected before durable append.
 - Known secret byte strings are redacted from executor outputs, logs, and errors before they become durable.
 - Benign domain fields named `token`, `auth`, `password`, and similar are preserved; key names alone never trigger data mutation.
+- Model-visible refinement context and review content are scrubbed of known secret values only. Retained history that merely looks credential-shaped (for example `api_key=...` in a captured error) is not heuristically blocked, so a secret unknown to the supervisor can reach the refinement model through retained trajectory data.
 
 This is best-effort accidental-leak prevention. Names outside the heuristic, short secret values, credentials in other files/agents/keychains, encoded values, or alternate process channels may still be visible to trusted code. Generated code has the same OS-user authority and can read the profile credential file through ambient filesystem APIs. The model credential store is a narrow supervisor broker, not a general secret vault or hostile-code boundary; opaque references remain available for externally managed credentials.
 

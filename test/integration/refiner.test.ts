@@ -929,7 +929,7 @@ describe("FU-016 durable RefinerService", () => {
     }
   });
 
-  test("credential-shaped retained failure evidence skips automatic refinement without blocking the AgentRun", async () => {
+  test("credential-shaped retained failure evidence is ordinary refinement evidence rather than a blocker", async () => {
     const provider = new ReviewProvider("review-credential-shaped-evidence");
     const { supervisor, sessionId, branchId } = await fixture(provider);
     try {
@@ -944,16 +944,16 @@ describe("FU-016 durable RefinerService", () => {
         }]);
       }
       await supervisor.refiner.setAutomatic(true);
-      expect(await supervisor.refiner.scanBoundary(sessionId, branchId, "direct-credential-scan")).toEqual([]);
-      const run = await supervisor.runs.start(sessionId, branchId, { task: "continue despite unsafe refinement evidence", goalMode: "none" });
+      const admitted = await supervisor.refiner.scanBoundary(sessionId, branchId, "direct-credential-scan");
+      expect(admitted).toHaveLength(1);
+      await waitFor(async () => (await supervisor.refiner.get(admitted[0]!.reviewId)).status === "no_change", "credential-shaped review terminal", 5_000);
+      const run = await supervisor.runs.start(sessionId, branchId, { task: "continue with credential-shaped refinement evidence", goalMode: "none" });
       expect(run.status).toBe("succeeded");
-      expect(await supervisor.refiner.list({ sessionId, branchId })).toHaveLength(0);
       const events = await supervisor.storage.loadEvents(sessionId, { branchId });
       const observations = events.filter((event) => event.type === "MessageAppended" && String((event.payload as any).messageId).startsWith("refinement-scan-observation-"));
-      expect(observations).toHaveLength(2);
-      expect(JSON.stringify(observations.map((event) => event.payload))).not.toContain("retained-credential-shaped-value");
+      expect(observations).toHaveLength(0);
       expect(provider.runCalls).toBe(1);
-      expect(provider.calls).toBe(0);
+      expect(provider.calls).toBe(1);
     } finally { await supervisor.close(); }
   });
 

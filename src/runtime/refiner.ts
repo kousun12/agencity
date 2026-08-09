@@ -202,8 +202,8 @@ export class RefinerService {
       for (const trigger of detected) admitted.push(await this.#admitAutomatic(trigger));
       return admitted;
     } catch (error) {
-      // The observation is deliberately fixed-shape: neither malformed policy
-      // values nor credential-shaped retained errors are copied into history.
+      // The observation is deliberately fixed-shape: malformed retained policy
+      // values or error text are never copied into history.
       await this.#recordBoundaryScanFailure(sessionId, branchId, boundaryKey, error).catch(() => {});
       return [];
     }

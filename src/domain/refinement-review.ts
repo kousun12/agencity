@@ -681,27 +681,10 @@ function assertContentPolicy(content: HarnessContent): void {
 function assertNoCredentialMaterial(value: JsonValue, brokeredCredentialValues: readonly string[], label: string): void {
   const secrets = brokeredCredentialValues.filter((secret) => byteLength(secret) >= 4);
   for (const text of stringLeaves(value)) {
-    if (secrets.some((secret) => text.includes(secret)) || containsCredentialShape(text)) {
-      throw new ValidationError(`${label} contains credential or brokered secret material`);
+    if (secrets.some((secret) => text.includes(secret))) {
+      throw new ValidationError(`${label} contains a brokered secret value`);
     }
   }
-}
-
-function containsCredentialShape(text: string): boolean {
-  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) return true;
-  if (/(?:^|\s)(?:Bearer|Basic)\s+[A-Za-z0-9+/_.=-]{8,}(?:$|\s)/i.test(text)) return true;
-  if (/(?:^|[^A-Za-z0-9_-])(?:sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9_-]{8,}/.test(text)) return true;
-  if (/(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:$|[^A-Za-z0-9_-])/.test(text)) return true;
-  if (/(?:password|passwd|secret|auth[_-]?token|api[_-]?key)\s*[:=]\s*[^\s,;]+/i.test(text)) return true;
-  for (const match of text.matchAll(/(?:https?|libsql):\/\/[^\s]+/gi)) {
-    try {
-      const url = new URL(match[0]);
-      if (url.username || url.password || [...url.searchParams.keys()].some((key) => /(?:api_?key|token|secret|password|credential|authorization|auth)/i.test(key))) return true;
-    } catch {
-      // Malformed URLs are rejected by their owning field where applicable.
-    }
-  }
-  return false;
 }
 
 function* stringLeaves(value: JsonValue): Generator<string> {

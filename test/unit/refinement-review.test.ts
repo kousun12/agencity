@@ -128,6 +128,11 @@ describe("refinement review request", () => {
     expect(scrubRefinementReviewText(`a ${secret} b ${secret}`, [secret])).toBe("a [REDACTED] b [REDACTED]");
   });
 
+  test("retains credential-shaped text that is not a brokered value", () => {
+    const built = createRefinementReviewRequest(requestInput({ instructions: "Investigate the failing api_key=example-placeholder flow" }));
+    expect(built.instructions).toContain("api_key=example-placeholder");
+  });
+
   test.each([
     ["invisible trigger evidence", requestInput({ trigger: { kind: "manual", summary: "review", evidenceEventIds: ["event-hidden"] } })],
     ["no visible durable source", requestInput({ visibleSourceEventIds: [] })],
@@ -136,7 +141,6 @@ describe("refinement review request", () => {
     ["manual automatic trigger mismatch", requestInput({ trigger: { kind: "repeated_gate_failure", summary: "failed", evidenceEventIds: ["event-1"] } })],
     ["skill mode with broad kinds", requestInput({ mode: "skill_creation", trigger: { kind: "skill_creation", summary: "package it", evidenceEventIds: ["event-1"] } })],
     ["target outside scope", requestInput({ editableTargets: [{ entryId: "other", currentVersionId: "v1", kind: "memory", scope: "workspace", scopeKey: "work", name: "other" }] })],
-    ["credential-shaped instructions", requestInput({ instructions: "Use api_key=not-a-safe-value" })],
   ])("rejects invalid request: %s", (_name, input) => {
     expect(() => createRefinementReviewRequest(input)).toThrow();
   });
@@ -515,23 +519,25 @@ describe("determinism and adversarial material", () => {
     expect(changed.proposalId).not.toBe(left.proposalId);
   });
 
-  test.each([
-    ["brokered exact value", "brokered-value-abcdef", { brokeredCredentialValues: ["brokered-value-abcdef"] }],
-    ["OpenAI-shaped key", "sk-proj-abcdefghijklmnopqrstuvwxyz", {}],
-    ["GitHub-shaped key", "github_pat_abcdefghijklmnopqrstuvwxyz", {}],
-    ["bearer credential", "Bearer abcdefghijklmnop", {}],
-    ["private key", "-----BEGIN PRIVATE KEY-----", {}],
-    ["credential assignment", "password=hunter2-value", {}],
-    ["credential URL", "https://user:password@example.com/path", {}],
-  ])("rejects %s anywhere in model-produced content", (_name, text, sensitive) => {
+  test("rejects a registered brokered secret value anywhere in model-produced content", () => {
     const req = request();
-    const value = proposeObject(req.reviewId, { edits: [{ ...createMemory, content: { kind: "memory", memoryKind: "observation", text } }] });
+    const value = proposeObject(req.reviewId, { edits: [{ ...createMemory, content: { kind: "memory", memoryKind: "observation", text: "run with brokered-value-abcdef" } }] });
     expect(() => validateRefinementReviewValue(
       value,
       req,
-      sensitive,
+      { brokeredCredentialValues: ["brokered-value-abcdef"] },
       canonicalJsonByteLength(value as any),
-    )).toThrow("credential or brokered secret material");
+    )).toThrow("brokered secret value");
+  });
+
+  test.each([
+    ["OpenAI-shaped key", "sk-proj-abcdefghijklmnopqrstuvwxyz"],
+    ["credential assignment", "password=hunter2-value"],
+    ["credential URL", "https://user:password@example.com/path"],
+  ])("retains %s that is not a registered brokered value", (_name, text) => {
+    const req = request();
+    const value = proposeObject(req.reviewId, { edits: [{ ...createMemory, content: { kind: "memory", memoryKind: "observation", text } }] });
+    expect(parseObject(value, req).status).toBe("propose");
   });
 
   test("opaque credential handles and ordinary credential labels remain valid", () => {

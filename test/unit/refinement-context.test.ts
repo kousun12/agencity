@@ -311,7 +311,7 @@ describe("FU-016 pure refinement trajectory context", () => {
     expect(canonicalRefinementSnapshotJson(snapshot as never)).not.toContain("�");
   });
 
-  test("scrubs supplied brokered values before hashing and rejects unsupplied credential escape", () => {
+  test("scrubs supplied brokered values before hashing and retains other credential-shaped text", () => {
     const brokered = "brokered-value-123456";
     const snapshot = buildRefinementTrajectorySnapshot(base({
       events: [event("event-1", "1", "MessageAppended", { role: "user", content: `run with ${brokered}` })],
@@ -324,9 +324,10 @@ describe("FU-016 pure refinement trajectory context", () => {
     expect(snapshot.harnessVersions[0]!.redacted).toBe(true);
     expect(snapshot.harnessVersions[0]!.editable).toBe(false);
 
-    expect(() => buildRefinementTrajectorySnapshot(base({
+    const shaped = buildRefinementTrajectorySnapshot(base({
       events: [event("event-1", "1", "MessageAppended", { role: "user", content: "api_key=not-brokered-value" })],
-    }))).toThrow(expect.objectContaining({ code: "secret-escape" }));
+    }));
+    expect(canonicalRefinementSnapshotJson(shaped as never)).toContain("api_key=not-brokered-value");
 
     // Excluded foreign and unexposed content is never made model-visible and
     // therefore is neither rendered nor used to reject the safe snapshot.
