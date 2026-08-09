@@ -10,7 +10,9 @@
 
 Agencity evolves from durable agent families into a workspace-scoped **agent city**: a long-lived organization of durable agents whose roles, purposes, relationships, work, and changes remain attributable over time.
 
-Every agent has a required, immutable, versioned **charter**. The charter defines the agent's role, mission, standing context, responsibilities, operating principles, success criteria, delegation rules, escalation rules, and authority envelope. The charter contains the exact agent-specific system-prompt text supplied to the model whenever that agent runs. A task, conversation, retrieved memory, or compacted summary can add dynamic context, but none substitutes for the charter.
+Every agent has a required, immutable, versioned **charter**. The charter defines the agent's bounded mandate: its role, mission, standing context, responsibilities, standing aspirations, operating principles, success criteria, delegation rules, escalation rules, and authority envelope. The charter contains the exact agent-specific system-prompt text supplied to the model whenever that agent runs. A task, conversation, retrieved memory, or compacted summary can add dynamic context, but none substitutes for the charter.
+
+A charter is not a longer task prompt. A standing agent's mandate may continue indefinitely, but its goals, assignments, runs, and effects remain finite, budgeted episodes. The mandate does not authorize continuous execution or self-created work. When no admitted assignment or policy-authorized trigger capable of creating one is ready, the correct state is dormant.
 
 Every child is created with a charter. Promptless child admission is invalid. A managing parent can revise a direct child's charter for future work, pause the child, or retire it within the authority inherited from the parent. Revisions never rewrite earlier work: each run pins one exact charter version, and every model call in that run uses it.
 
@@ -24,7 +26,7 @@ Retirement removes an agent from future routing, follow-up, schedules, and the d
 
 The city has its own workspace-scoped canonical control stream. City state does not live on an operator conversation branch or in a mutable directory table. The control stream owns the operator pointer, active management hierarchy, charter and grant activation, session-wide lifecycle, service routes, assignment admission, organization revisions, and governance decisions. Agent conversations remain session/branch streams. All streams share the workspace's ordered canonical event universe.
 
-The end state is not one model with every historical record in its prompt. It is one durable workspace institution containing many separately identified actors, plus a stable operator and directory through which the institution can be queried and changed.
+The end state is not one model with every historical record in its prompt. It is one durable workspace institution containing many separately identified actors, plus a stable operator and directory through which the institution can be queried and changed. Finite work occurs inside continuing, revisable mandates; the institution persists even while all of its agents are idle.
 
 ## End-state shape
 
@@ -81,6 +83,8 @@ Returning with `agencity` enters the same city operator. A user can navigate dir
 
 The city grows from observed need. A new workspace may begin with only the operator. Repeated work can justify specialization. Persistent failures, bottlenecks, or redundant roles can justify charter revision, a split, a successor, or retirement. The resulting organization is retained as history rather than reconstructed from the latest prompt or an undocumented convention.
 
+The first implementation remains intentionally local and organizational. Agents execute on the same trusted machine and may use ordinary workspace files, artifacts, shell/file effects, and locally created databases when their runtime grants permit. Cross-agent work uses assignments and the retained family communication model. This plan does not add agent-published RPC interfaces, a shared city application-data plane, per-agent service hosting, or distributed agent placement.
+
 ## Verified current foundation
 
 The current runtime already provides foundations that this plan extends:
@@ -117,6 +121,8 @@ Current prompt notes are optional harness context. They are not required identit
 ## Goals
 
 - Give every root, delegated, and recursive agent a required durable charter before it can run.
+- Express each charter as a bounded mandate rather than a task prompt or claim of perpetual execution.
+- Keep enduring mission, responsibilities, and standing aspirations separate from finite goals, assignments, and runs.
 - Supply the exact active agent charter as system-prompt content on every agent model call.
 - Keep the global immutable runtime policy separate from agent-specific purpose.
 - Preserve exact charter-version and effective-prompt provenance for every run and model effect.
@@ -151,6 +157,11 @@ Current prompt notes are optional harness context. They are not required identit
 - Building an unbounded autonomous bureaucracy. Agent counts, depth, budgets, proposal rates, and evaluation exposure remain bounded.
 - Treating management edges as mailbox, cancellation-tree, task-ownership, or budget-attribution edges.
 - Claiming that charter text enforces an OS sandbox or technical permission boundary.
+- Requiring agents to remain active, invent work, or spend budget merely because their mandate continues.
+- Adding agent-published typed RPC, capability-contract registries, stable service bindings, or generated cross-agent service clients.
+- Adding a canonical city application-data plane or mixing agent-defined tables into the runtime's canonical event database.
+- Provisioning per-agent virtual machines, containers, databases, TCP endpoints, or supervised application services.
+- Distributing active city agents across hosts or treating network placement as part of agent identity.
 
 ## Design principles
 
@@ -173,6 +184,16 @@ No agent is admitted with only a task string. The runtime can answer:
 ### Static purpose and dynamic work are separate
 
 The charter contains durable identity and standing context. The current task, recent observations, messages, retrieved memories, working values, and artifacts remain dynamic execution context.
+
+### Mandates continue; work terminates
+
+A standing charter expresses a continuing responsibility, not an endless run. Goals describe desired states. Assignments fund and authorize finite units of work. Runs are bounded attempts to advance one assignment. Effects are individually admitted external actions.
+
+Completion is local to a goal, assignment, or run. It does not imply that a standing mandate has ended. Conversely, a continuing mandate does not permit an agent to create work, reserve budget, or remain active without an admitted assignment or a policy-authorized trigger that creates one.
+
+### Quiescence is valid
+
+An idle city is not failing. Agents remain reconstructable and eligible for later work while consuming no model or console execution. Standing aspirations may inform future goals when authorized capacity exists, but they do not create an obligation to generate activity. The runtime must not reward busywork or infer that unused budget should be spent.
 
 ### Organizational power follows an explicit tree
 
@@ -208,6 +229,8 @@ The city operator can inspect all agent charters and directory metadata. This do
 - **Agent:** A durable `Session` identity. The plan does not introduce a second competing agent identity above sessions.
 - **Route:** One exact `(sessionId, branchId)` execution history.
 - **Charter:** The durable definition of an agent's purpose and operating boundaries.
+- **Mandate:** The continuing or assignment-bounded responsibility expressed by one active charter. It is not a separate domain aggregate.
+- **Standing aspiration:** A bounded, role-defining direction recorded in a charter. It may motivate later goals but has no independent execution, budget, priority, or completion lifecycle.
 - **Charter version:** One immutable charter revision with exact system-prompt text and provenance.
 - **Effective system prompt:** The exact provider-facing system content composed from immutable base policy, one charter version, the invocation-specific response/run-control contract, and its execution guidance.
 - **Creation parent:** The session and branch that admitted the agent. This relationship is immutable provenance.
@@ -244,6 +267,9 @@ The following rules govern every later section:
 16. Retirement blocks future execution but permits narrowly classified recovery, effect reconciliation, sync, export, deletion planning, and historical annotation.
 17. Retired agents remain explicitly enumerable by the operator and owner, although normal routing and active views exclude them.
 18. Internal canonical transitions are completed, blocked, failed, conflicted, or partially applied and recoverable. `unknown` remains reserved for external effects whose outcome cannot be proven.
+19. A continuing mandate never admits execution by itself. Every ordinary run resolves to a finite assignment; narrowly classified recovery and control actions retain their own explicit work records.
+20. Standing aspirations do not reserve budget, create assignments, or authorize effects. Any work derived from one follows ordinary goal, assignment, grant, and budget admission.
+21. No agent process or model call remains active solely to preserve agent identity. Quiescent agents reconstruct from durable state when admitted work arrives.
 
 ## Core identity decision
 
@@ -290,6 +316,7 @@ The operator charter includes:
 - permission to create and manage agents only inside the workspace's declared limits;
 - escalation rules for user approval;
 - prohibition on treating visibility as execution authority;
+- obligation to leave agents dormant rather than invent work when no authorized assignment or policy-authorized trigger capable of creating one is ready;
 - evaluation criteria for routing quality, duplication, unresolved work, cost, and user correction.
 
 ### Operator succession
@@ -323,6 +350,7 @@ interface AgentCharterVersion {
   responsibilities: string[];
   nonResponsibilities: string[];
   standingContext: string[];
+  standingAspirations: AgentCharterAspiration[];
   operatingPrinciples: string[];
   successCriteria: AgentCharterCriterion[];
   delegationPolicy: AgentDelegationPolicy;
@@ -347,6 +375,12 @@ type CityPrincipalReference =
   | { kind: "user"; profileId: string }
   | { kind: "agent"; sessionId: string; branchId: string }
   | { kind: "system"; componentId: string; version: number };
+
+interface AgentCharterAspiration {
+  aspirationKey: string;
+  direction: string;
+  evidenceSignals: string[];
+}
 ```
 
 The exact field limits and nested schemas are domain constants. Every string and collection is bounded before canonical admission. Known secret values, credential-shaped values, and brokered credential references that would reveal secret material are rejected.
@@ -372,6 +406,9 @@ OUT OF SCOPE
 ...
 
 STANDING CONTEXT
+...
+
+STANDING ASPIRATIONS
 ...
 
 OPERATING PRINCIPLES
@@ -403,13 +440,36 @@ Examples include:
 
 Task-specific data, changing repository state, recent failures, and large evidence belong in dynamic context or referenced artifacts. A standing fact that becomes stale requires a charter revision with evidence.
 
+### Mandate and standing aspirations
+
+The charter's mission, responsibilities, exclusions, standing aspirations, success criteria, and escalation rules together express the agent's mandate. `mandate` is explanatory language for this combined meaning, not another stored object beside the charter.
+
+A standing aspiration describes a durable direction such as reducing recurring incident classes, improving evidence quality, or shortening feedback time without weakening correctness. It belongs in the charter only when removing it would materially change the agent's purpose. The list is bounded and may be empty, especially for task agents.
+
+Standing aspirations deliberately omit mutable portfolio state: current priority, funding, deadlines, progress, attempts, blockers, and terminal status. Those belong to goals and assignments. An aspiration can produce work only when an authorized sponsor creates or funds a finite goal or assignment through ordinary admission. Revising, adding, or removing an aspiration is a behavioral charter revision.
+
 ### Charter and task separation
 
 A charter answers, “Who is this agent and how does it operate?”
 
 A task answers, “What work should this agent do now?”
 
+A goal answers, “What finite desired state should this admitted work advance?”
+
 The same standing agent can receive many assignments and tasks under one charter. A new assignment does not revise the charter. A charter revision does not retroactively alter earlier assignments or tasks.
+
+The conceptual ordering is:
+
+```text
+immutable base policy
+  -> agent charter and mandate
+  -> finite goal
+  -> finite assignment
+  -> bounded run
+  -> admitted effects
+```
+
+Not every assignment requires a distinct persisted goal, but every run has one attributable finite work source. No layer may use the continuing mandate to bypass the authority, budget, cancellation, or completion rules of the layers below it.
 
 The immutable creation task explains why a child session originally came into existence. It does not own every later unit of work. Later routed work uses the assignment aggregate defined below.
 
@@ -422,7 +482,7 @@ A parent declares the new agent kind at creation:
 - **standing:** a durable function eligible for repeated routing and assignments;
 - **task:** an assignment-scoped specialist created for one bounded unit of work.
 
-Task agents receive complete charters because every model actor needs explicit purpose. They are excluded from normal standing-function routing. After the creation assignment becomes terminal, they enter `disposition_pending`; the manager may use their evidence to propose a new standing successor, but the task-agent identity itself retires.
+Standing agents carry continuing mandates until revision, pause, succession, or retirement. Task agents receive complete charters because every model actor needs explicit purpose, but their mandate is bounded by their creation assignment and disposition policy. They are excluded from normal standing-function routing. After the creation assignment becomes terminal, they enter `disposition_pending`; the manager may use their evidence to propose a new standing successor, but the task-agent identity itself retires.
 
 This distinction preserves complete prompt provenance for recursive and one-off children without filling the active city hierarchy with every historical helper.
 
@@ -445,7 +505,7 @@ The child subsequently owns its charter history. Replacing the reusable specific
 
 ### Purpose
 
-An assignment sends a new bounded task to an agent. It is the city-wide equivalent of durable delegated work without changing the target's creation parent or granting arbitrary cross-family messaging.
+An assignment sends a new bounded task to an agent. It is the finite unit through which a standing mandate receives funded work and the city-wide equivalent of durable delegated work without changing the target's creation parent or granting arbitrary cross-family messaging.
 
 Each assignment records:
 
@@ -506,6 +566,8 @@ This preserves one coherent long-lived conversation for the agent while keeping 
 
 The assignment sponsor owns the economic reservation and charge.
 
+- The workspace owner establishes the city-level user-work budget and any separately bounded improvement capacity.
+- Managers allocate only delegated portions of that budget; a charter or standing aspiration carries no economic reservation.
 - A manager-sponsored assignment reserves from that manager's delegated assignment budget.
 - A user-sponsored assignment reserves from the city user-work budget.
 - The assignment ledger receives direct provider/tool usage and is the sole economic charge record.
@@ -621,6 +683,7 @@ Before creating a child, the parent defines:
 - role and mission;
 - standing context;
 - responsibilities and exclusions;
+- bounded standing aspirations, which may be empty;
 - completion and quality expectations;
 - authority and data scope;
 - model and budget envelope;
@@ -1488,6 +1551,8 @@ The runtime remains trusted-local.
 - Filesystem and network restrictions remain prompt-level expectations unless the complete runtime is placed in an external sandbox; the plan does not misstate them as local containment.
 - Hostile multi-agent or multi-tenant operation requires authenticated principals, isolated storage, capability grants, external sandboxing, resource limits, and a separate deployment plan.
 
+The first implementation runs active city agents under one governance owner on the same trusted machine. Agents may exchange information through retained messages and assignments or through workspace files, artifacts, and locally created databases available to their ordinary tools and grants. Such files and databases are user/workspace data, not a new canonical city data plane, per-agent security boundary, managed service, or durable agent identity. The plan makes no guarantee that local agents are isolated from one another at the OS level.
+
 ## Retention, export, and deletion
 
 ### Retention
@@ -1662,6 +1727,8 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Specification spawn records exact specification and charter versions.
 - Recursive children receive explicit charters.
 - Charter renderer output and digest are deterministic.
+- Standing aspirations are bounded, render deterministically, and remain distinguishable from goals and assignments.
+- Adding, changing, or removing a standing aspiration is a behavioral charter revision.
 - Secret-bearing charter content is rejected without echoing the value.
 - Idempotency-key reuse with changed charter meaning conflicts.
 
@@ -1716,6 +1783,7 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Duplicate assignment admission or terminal recovery does not duplicate work or usage.
 - Sponsor charge, session attribution, ancestor attribution, unused release, and conservative unknown usage never double debit.
 - Child work funded by an active assignment cannot reserve beyond that assignment's remaining delegation allowance.
+- A mandate or standing aspiration cannot create a run, assignment, reservation, or effect without an authorized finite work record.
 - Agent-route proposal submission and assignment delivery bridge to the city stream with exact provenance.
 - Creation commits queued work and reaches `AgentRunRequested` only through the ordinary claim path.
 
@@ -1733,6 +1801,7 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Reconciliation, recovery closure, sync resolution, export, deletion planning, and historical annotation remain available without reactivation.
 - A renewed function requires a successor agent rather than reactivation.
 - Task-agent terminal work enters disposition-pending before successor creation or automatic retirement.
+- A standing agent with no admitted work becomes dormant without losing identity and resumes from durable state when a later assignment is claimed.
 
 ### Adaptation and governance
 
@@ -1795,7 +1864,8 @@ A linked `agencity` executable in a fresh repository must:
 11. create a successor or split function with retained lineage;
 12. retire an agent and remove it from ordinary routing;
 13. inspect the retired agent through the archive while reconciling retained evidence;
-14. detach, restart the service, and reproduce the same city hierarchy, assignment state, and charter map without duplicate work.
+14. show that a standing agent remains dormant after finite work completes instead of inventing work from its mandate or aspirations;
+15. detach, restart the service, and reproduce the same city hierarchy, assignment state, and charter map without duplicate work.
 
 The black-box path uses only the documented executable and public protocol-backed terminal product.
 
@@ -1808,6 +1878,7 @@ The implementation defines and tests bounds for:
 - queued assignments per agent and city;
 - assignment steering and result payloads;
 - charter encoded bytes and collection counts;
+- standing aspirations per charter and aspiration evidence references;
 - directory page size;
 - full-prompt detail requests;
 - organization proposal rate;
@@ -1825,6 +1896,10 @@ The lossless context-reference plan should deduplicate repeated charter and base
 ### Prompt accumulation
 
 Large charters can consume context and become stale. Structured bounds, exact diffs, standing-context review, and separation from dynamic memory prevent the charter from becoming an unbounded knowledge dump.
+
+### Mandate-induced busywork
+
+A continuing mandate or standing aspiration can be misread as an instruction to remain active, consume spare budget, or manufacture goals. Run admission always requires a finite authorized work record and budget. Quiescence is valid, aspirations carry no reservation, and operator evaluation penalizes unnecessary activity.
 
 ### Organizational churn
 
@@ -1875,6 +1950,8 @@ The adaptive agent city is complete when:
 15. The installed terminal journey demonstrates organic specialization, assignment, charter revision, succession, retirement, archive inspection, detach, and resume without internal IDs.
 16. Public documentation and `AGENTS.md` describe shipped behavior and remaining limits accurately.
 17. Typecheck, architecture checks, deterministic tests, and acceptance pass; credential- or service-gated external checks are reported separately as pass, fail, or skip.
+18. Standing mandates remain durable while every goal, assignment, run, and effect stays finite, attributable, and separately admitted.
+19. Standing aspirations can inform authorized goals but cannot independently create work, reserve budget, or keep an agent active.
 
 ## Deferred extensions
 
@@ -1882,6 +1959,10 @@ The adaptive agent city is complete when:
 - Hosted multi-tenant cities.
 - Authenticated third-party agent participation.
 - Distributed organization ownership and failover.
+- Agent-published typed RPC, capability-contract registries, stable service aliases, and generated cross-agent clients.
+- A shared canonical city application-data plane or agent-defined tables inside the runtime event database.
+- Per-agent isolated compute, managed SQLite/Postgres resources, containers, TCP endpoints, and supervised application-service lifecycles.
+- Distributed agent placement and cross-host agent execution.
 - A marketplace of independently governed agent charters.
 - Embedding-based semantic directory search.
 - Automatic physical garbage collection of retired histories.
