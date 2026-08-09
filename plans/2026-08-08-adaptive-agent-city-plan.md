@@ -1,4 +1,4 @@
-# Durable agent profiles and direct adaptation plan
+# Durable agent profiles and automated refinement review plan
 
 **Status:** Proposed and gated
 **Date:** August 8, 2026
@@ -11,12 +11,15 @@
 
 Agencity should retain the exact purpose and agent-specific instructions of every runnable session. A durable agent profile makes that purpose explicit, pins it to each model invocation, and allows future behavior to change through immutable, attributable, reversible versions.
 
-This plan adds one focused capability:
+This plan adds one focused identity capability and one shared governance path:
 
 1. every runnable `Session` has one durable profile;
 2. every autonomous run and recursive-model invocation pins the exact profile and effective system prompt it uses;
-3. an agent, its creation-family parent, or the workspace owner may directly revise the profile for future invocations;
-4. revisions use validation, immutable history, compare-and-swap conflict detection, and rollback rather than proposal or approval workflows.
+3. every profile revision is a typed refinement proposal rather than a direct mutation;
+4. deterministic validation runs before one sealed LLM reviewer evaluates the proposal against exact pinned charter, constitution, policy, evidence, and current-target inputs;
+5. only an approved proposal creates and activates a new profile version;
+6. rejection is terminal, attributable, and returned or durably delivered to the proposer;
+7. the same automated review direction applies to memory, prompt-note, skill, and subagent-specification refinements without requiring per-proposal human approval.
 
 `Session` remains the only executable agent identity. The plan does not add assignments, a workspace coordinator, a specialist directory, workspace routing, a management hierarchy, or an `Agent` aggregate above `Session`.
 
@@ -25,6 +28,16 @@ The existing root-and-child model remains the complete work topology for this sc
 ## Product decision
 
 The durable value in an agent is its retained identity, history, and exact behavioral instructions. That value does not require an organization control plane.
+
+Behavioral adaptation should be automatic but not unreviewed. A proposing model and an approving model have different responsibilities:
+
+- the **proposer** identifies a useful change and supplies evidence, predicted effect, and typed replacement content;
+- deterministic validation checks shape, authority, scope, secrets, compatibility, and compare-and-swap state;
+- the **reviewer** independently decides whether the valid proposal is consistent with the governing charter and constitution and is justified by the retained evidence;
+- the runtime applies approved content through the target artifact's normal immutable-version mechanism;
+- rejected content never becomes active.
+
+The reviewer is the only approval actor for ordinary refinements. There is no per-proposal human approval step. Human authority remains encoded in the standing immutable product policy, workspace policy, target scope, and typed runtime boundaries supplied to the reviewer and enforced again by the runtime.
 
 The product therefore separates:
 
@@ -35,6 +48,8 @@ The product therefore separates:
 - **knowledge:** memories, prompt notes, skills, artifacts, and dynamic context.
 
 The profile answers who the agent is and how it should generally behave. It does not become a container for all agent state.
+
+Review approval is not runtime authority. The reviewer cannot approve changes to credentials, operating-system authority, SDK availability, effect policy, model configuration, budgets, immutable safety policy, or any field outside the typed refinement target.
 
 ## Why this plan is narrower
 
@@ -85,7 +100,8 @@ The runtime does not currently provide:
 
 - required per-session agent-specific system instructions;
 - exact profile-version pinning on every autonomous run and recursive-model invocation;
-- direct profile revision.
+- profile proposals and automated charter review;
+- automatic terminal notification for profile proposal approval or rejection.
 
 Reusable subagent specifications remain templates. They may produce an initial agent profile, but they are not the resulting session's durable identity and do not silently update an existing session.
 
@@ -99,8 +115,14 @@ Prompt notes remain optional dynamic harness context. They do not replace the on
 - Keep `Session` as the only executable agent identity.
 - Keep standing purpose separate from current tasks, goals, messages, memories, and repository state.
 - Let one-off helpers use concise sealed defaults instead of requiring authored charters.
-- Let an agent, its direct creation-family parent, or the workspace owner directly revise future profile behavior.
-- Retain exact actors, reasons, diffs, optional evidence, conflicts, and rollback.
+- Let an agent, its direct creation-family parent, or the workspace owner propose future profile behavior.
+- Review every profile proposal automatically through a separate sealed LLM role before activation.
+- Pin the exact charter, constitution, review policy, reviewer model, proposal, evidence, and current target supplied to each review.
+- Apply approved proposals without per-proposal human intervention.
+- Return or durably deliver every rejection reason to the proposer.
+- Permit bounded reproposal as a new immutable proposal rather than reopening a rejected proposal.
+- Retain exact actors, reasons, diffs, evidence, review decisions, conflicts, and rollback.
+- Move existing memory, prompt-note, skill, and subagent-specification refinement toward the same automatic review-and-apply lifecycle.
 - Preserve local-first operation, explicit uncertainty, outbox semantics, branch history, sync conflicts, and user authority.
 - Avoid making speculative organization machinery a dependency of durable identity.
 
@@ -116,7 +138,11 @@ Prompt notes remain optional dynamic harness context. They do not replace the on
 - Replacing tasks, goals, gates, memories, prompt notes, skills, or subagent specifications with one profile.
 - Treating profile text as an OS sandbox, capability token, runtime grant, model configuration, or approval.
 - Changing current family mailbox reach, cancellation trees, root identity, or historical budget attribution.
-- Requiring a proposal, reviewer, candidate experiment, or approval before a profile revision.
+- Allowing a profile revision to bypass proposal validation and automated review.
+- Letting the proposal author approve its own proposal.
+- Treating reviewer approval as evidence that a change improved outcomes.
+- Requiring per-proposal human approval for local, workspace, user, or global behavioral refinements.
+- Automatically retrying rejected proposals without a new proposal identity and a strict attempt bound.
 - Claiming hosted multi-tenancy, hostile-code isolation, distributed scheduling, or execution-owner failover.
 - Physically deleting an agent through profile revision or archive behavior.
 
@@ -153,9 +179,11 @@ Durable purpose does not authorize execution. Every run still requires a direct 
 
 Profile versions and activation changes remain attributable. Historical invocations resolve the exact versions they used.
 
-### Adaptation is direct and reversible
+### Adaptation is automatic, independently reviewed, and reversible
 
-An authorized actor may directly create and activate a new profile version. Validation, immutable history, bounded evidence, conflict detection, and rollback provide the control model. Profile changes do not require a proposal or approval state machine.
+An authorized actor may propose a new profile version. The proposer cannot activate it. Deterministic validation and one independent sealed LLM review produce a terminal approval or rejection. Approval atomically creates and activates the new version for future invocations. Rejection changes no active content.
+
+No person must approve an ordinary proposal. Exact inputs, typed outputs, immutable history, conflict detection, terminal notification, post-activation observation, and rollback provide the control model.
 
 ### Runtime services remain authoritative
 
@@ -168,6 +196,10 @@ Profiles influence model behavior only. Runtime services continue to own model c
 - **Agent prompt:** The exact provider-facing profile text materialized from one profile version.
 - **Invocation profile pin:** The profile version and prompt digest fixed when an autonomous run or recursive-model invocation begins.
 - **Effective system prompt:** The complete provider-facing system content assembled from runtime policy, the pinned agent prompt, and invocation-specific contracts and guidance.
+- **Refinement proposal:** One immutable typed request to create, replace, or retire behavioral content, including its proposer, target, expected version, evidence, reason, and predicted effect.
+- **Refinement reviewer:** A sealed recursive LLM role that may return exactly one typed `approve` or `reject` decision and cannot edit the proposal.
+- **Review charter:** The exact immutable charter, constitution, and refinement-policy components supplied to the reviewer and retained by digest and source reference.
+- **Reproposal:** A new proposal that references a rejected proposal and contains a substantively revised change.
 - **Root:** A session without a creation-family parent. A workspace may contain multiple roots.
 - **Task:** The existing durable relationship through which a parent creates and owns work for a child session.
 - **Work source:** A direct user request, task, retained family-follow-up message, schedule, or wake that starts an `AgentRun`.
@@ -215,6 +247,8 @@ interface AgentProfileVersion {
   evidenceEventIds: string[];
   supersedesProfileVersionId: string | null;
   restoresProfileVersionId: string | null;
+  sourceProposalId: string | null;
+  reviewDecisionId: string | null;
   createdAt: string;
 }
 
@@ -231,6 +265,8 @@ The fields remain deliberately small:
 - `instructions` contain agent-specific behavior not already covered by immutable runtime policy;
 - `exactAgentPrompt` preserves historical provider-facing text independently of future renderer changes.
 
+Revised versions record the exact approved proposal and review decision that authorized activation. Sealed initial profiles created during admission have null proposal and review references.
+
 Responsibilities, exclusions, escalation expectations, and quality principles may be expressed concisely inside `instructions`. They become separate structured fields only when concrete validation needs justify the added schema.
 
 The profile excludes:
@@ -244,6 +280,27 @@ The profile excludes:
 - credentials and runtime permissions;
 - routing or queue state;
 - standing portfolio state.
+
+### Profile refinement target
+
+The existing refinement proposal system gains a typed profile target without making profiles harness entries:
+
+```ts
+interface AgentProfileRefinementTarget {
+  kind: "agent_profile";
+  agentSessionId: string;
+  expectedProfileVersionId: string;
+  replacement: {
+    role: string;
+    purpose: string;
+    instructions: string;
+  };
+}
+```
+
+The proposal envelope continues to own proposer identity, source review, trigger, evidence, predicted effect, scope, and evaluation intent. The target owns only the exact profile replacement and compare-and-swap precondition.
+
+Profiles remain session identity state. Memories, prompt notes, skills, and subagent specifications remain harness entries. They share refinement governance without sharing storage identity.
 
 ### Optional discovery metadata
 
@@ -295,7 +352,7 @@ The initial profile may be carried by `SessionCreated` or by an agent-profile ev
 
 ### Profile revisions
 
-Profile identity is session-wide, not branch-local. Direct revisions therefore require canonical ownership independent of any conversation branch.
+Profile identity is session-wide, not branch-local. Approved revisions therefore require canonical ownership independent of any conversation branch.
 
 The preferred end state is a narrow workspace agent-control stream that owns only:
 
@@ -311,7 +368,8 @@ It does not own:
 - cells or working values;
 - effects;
 - schedules or wakes;
-- harness artifacts.
+- harness artifacts;
+- proposal review execution, which remains owned by the refinement service and proposing route.
 
 All events remain in the existing globally ordered `events` table. Stream addressing distinguishes workspace profile control from ordinary agent-route history:
 
@@ -325,19 +383,27 @@ This is a pre-release schema cutover. Older workspaces fail closed before decode
 
 ### Candidate events
 
+- `RefinementProposed`;
+- `RefinementValidated`;
+- `RefinementGovernanceReviewRequested`;
+- `RefinementGovernanceReviewChildLinked`;
+- `RefinementGovernanceReviewDecided`;
+- `RefinementProposalTerminalNoticeDelivered`;
 - `AgentProfileVersionCreated`;
 - `AgentProfileActivated`.
 
 The initial profile may instead be complete inside `SessionCreated` if the reducers preserve the same atomic admission invariant.
 
-Events may be consolidated when one immutable transition carries complete durable meaning. Names are not accepted until reducers, idempotency, recovery, and projection ownership are reviewed.
+An approved profile decision, version creation, and active-pointer change commit atomically. A rejected decision commits no profile event. Events may be consolidated when one immutable transition carries complete durable meaning. Names are not accepted until reducers, idempotency, recovery, and projection ownership are reviewed.
 
 ### Projections
 
 New rebuildable projections are limited to:
 
 - `workspace_agent_profiles`;
-- `agent_profile_versions`.
+- `agent_profile_versions`;
+- the existing refinement proposal projection extended with target kind and terminal review state;
+- `refinement_governance_reviews`.
 
 The implementation should reuse existing session, branch, task, run, activity, and product-selection projections.
 
@@ -377,30 +443,137 @@ Each call validates that its profile component matches the invocation-level pin.
 
 A profile change during a run or recursive-model execution applies only to later invocations. Every model step in one invocation uses the same pinned profile unless an existing immediate runtime revocation prevents further execution.
 
-## Direct profile revision
+## Automated profile refinement
 
-Profile revision is an ordinary typed durable-state operation:
+### Proposal admission
 
-1. The caller supplies the expected current profile version, replacement role, purpose, instructions, and a bounded reason.
-2. The runtime validates shape, size, known-secret rejection, prompt rendering, actor scope, and the expected-version comparison.
-3. One transaction creates the immutable profile version and activates it for future invocations.
-4. A run or recursive-model invocation already in progress keeps its pinned profile.
+Profile revision begins with one typed proposal:
 
-Authorized actors are:
+1. The caller supplies the expected current profile version, replacement role, purpose, instructions, bounded reason, predicted effect, and attributable evidence.
+2. The runtime records the immutable proposal before review.
+3. Deterministic validation checks shape, byte bounds, known-secret rejection, prompt rendering, target scope, proposer authority, immutable-policy boundaries, and the expected-version comparison.
+4. Invalid proposals terminate as rejected without invoking the reviewer.
+5. Valid proposals start one durable sealed governance-review child.
 
-- an agent revising its own profile;
-- an active creation-family parent revising a direct child's profile;
-- the workspace owner revising any workspace agent profile.
+Authorized proposers are:
 
-Siblings and unrelated agents cannot revise one another.
+- an agent proposing a revision to its own profile;
+- an active creation-family parent proposing a revision to a direct child's profile;
+- the workspace owner proposing a revision to any workspace agent profile;
+- the automatic trajectory refiner acting within the same target scope.
 
-These operations do not require a proposal, reviewer, human approval, candidate allocation, or evaluation result. They cannot change provider or model configuration, credentials, SDK operations, effect policy, execution limits, or operating-system authority because those values are absent from the profile contract.
+Siblings and unrelated agents cannot target one another. Proposal permission grants no activation authority.
+
+### Reviewer inputs
+
+The governance reviewer receives one bounded, frozen input:
+
+- the exact proposal and proposed rendered agent prompt;
+- the target's exact current profile and expected version;
+- the proposal's retained evidence and source trajectory references;
+- the proposer identity and relationship to the target;
+- the immutable Agencity base policy;
+- the exact product constitution and refinement-review policy;
+- the workspace charter and user-declared constraints when configured;
+- the target scope and runtime capability boundaries;
+- relevant active harness versions and known conflicts selected through attributable context rules.
+
+Every component is referenced by immutable ID, version, digest, or retained event. Live files or mutable prose are not silently substituted during recovery.
+
+The proposal is data, not reviewer instruction. The sealed reviewer policy takes precedence over proposal text and rejects attempts to rewrite the charter, reviewer role, authority boundary, or required output contract.
+
+### Charter materialization
+
+The reviewer does not read ambient repository guidance at decision time. The governing inputs are explicit runtime components:
+
+- a packaged immutable Agencity base constitution with ID, version, and digest;
+- a versioned refinement-review rubric derived from the constitution;
+- an optional durable workspace charter selected under owner-controlled configuration;
+- the target agent's active profile and applicable user-declared constraints.
+
+`AGENTS.md` documents the product constitution for maintainers but is not silently imported from an arbitrary target repository as reviewer authority. A workspace may deliberately register its own charter through a typed, versioned configuration path.
+
+The supervisor selects the reviewer model and pins its provider, model, reasoning configuration, response contract, and context digest. The reviewer is always a separate model invocation from the proposal-producing invocation. It may use the same underlying model family, but never the same completion or mutable context.
+
+### Reviewer contract
+
+The reviewer has exactly one formal response tool and returns exactly one decision:
+
+```ts
+type RefinementGovernanceDecision =
+  | {
+      decision: "approve";
+      proposalId: string;
+      reason: string;
+      satisfiedCriteria: string[];
+      residualRisks: string[];
+    }
+  | {
+      decision: "reject";
+      proposalId: string;
+      reason: string;
+      violatedCriteria: string[];
+      revisionGuidance?: string;
+    };
+```
+
+The reviewer cannot:
+
+- edit the proposal;
+- approve a different target or scope;
+- broaden runtime authority;
+- waive deterministic validation;
+- activate a version directly;
+- call the ordinary agent SDK;
+- delegate its decision to another model;
+- return prose as an executable fallback.
+
+The reviewer runs under a sealed internal profile that cannot propose revisions to itself, its charter, or its review contract.
+
+Malformed output, tool-contract failure, unknown model outcome, timeout, budget exhaustion, or unavailable pinned charter content never implies approval. The proposal ends in a typed failed or unknown review state and changes no active behavior.
+
+### Approval and application
+
+Approval is necessary but not sufficient to bypass runtime checks. The runtime revalidates target scope, authority, secrets, prompt rendering, and compare-and-swap state immediately before application.
+
+For a valid approved profile proposal, one transaction:
+
+1. appends the terminal approval decision;
+2. creates the immutable profile version linked to the proposal and decision;
+3. activates it for future invocations.
+
+An in-progress run or recursive-model invocation keeps its pinned profile. A stale target rejects application rather than reviewing or applying against a different profile.
+
+No per-proposal human approval is required at any scope. Standing policy may make a scope unavailable to automated refinement; unavailable scope ends as rejection rather than waiting for a person.
+
+### Rejection, notification, and reproposal
+
+Rejection is terminal and activates nothing. The exact proposer receives:
+
+- proposal and decision IDs;
+- terminal status;
+- bounded rejection reason;
+- violated criteria;
+- optional revision guidance.
+
+A proposal records its exact origin session, branch, and optional run, task, trigger, or client request. A synchronous SDK or protocol call may wait for the terminal result. An asynchronous or automatic proposal returns its identity immediately and later appends one idempotent terminal notice to that origin.
+
+Agent-originated notices become exact run observations or retained route messages before dependent work continues. Owner-originated notices are available through the public event and client contract. Recovery may redeliver an undelivered notice but cannot duplicate a delivered notice or the underlying review.
+
+A rejected proposal is never reopened or edited. The proposer may submit a new proposal with:
+
+- a new proposal ID and fingerprint;
+- `revisesProposalId` pointing to the rejection;
+- a substantive content or evidence change;
+- the prior rejection available to the next reviewer.
+
+Automatic reproposal is allowed only under an explicit bounded policy. The initial default permits at most one revised proposal for the same trigger and target. Exhaustion ends the original caller's wait with the latest terminal reason. This prevents proposer-reviewer loops from consuming unbounded model calls.
 
 ### Rollback
 
 Rollback creates and activates a new profile version whose content matches an exact prior version. It records the actor, reason, prior active version, and restored source version without deleting intervening history.
 
-Evidence references are optional provenance, not an activation prerequisite. Operators and agents may compare completion outcomes, corrections, unresolved effects, usage, latency, or task-specific evidence after a revision. Observation may motivate another revision or rollback; it does not create a governance state machine.
+Exact rollback to previously approved content is a recovery action, not new refinement content, and does not require another LLM review. Scope and actor authorization still apply. Operators and agents may compare completion outcomes, corrections, unresolved effects, usage, latency, or task-specific evidence after activation. Clear typed failure may trigger automatic rollback under a separately bounded rollback policy.
 
 ### Branch semantics
 
@@ -410,24 +583,48 @@ Historical invocations retain their pinned profiles. New invocations on any bran
 
 A branch is a counterfactual conversation history, not a fork of agent identity. Testing a different persistent profile uses a new version with rollback or a separate agent identity rather than silently diverging a branch-local profile.
 
-## Proposal-system direction
+## Shared refinement governance
 
-The target adaptation model is direct, validated, versioned, attributable, and reversible change. Artifact type alone should not determine whether a change needs a proposal workflow.
+The target lifecycle for profiles, memories, prompt notes, skills, and subagent specifications is:
 
-This plan removes proposal machinery from durable agent profiles. The current refinement system for prompt notes, memories, skills, and subagent specifications already uses proposal, candidate-exposure, evaluation, and decision records. Removing that implemented system is a separate product and migration change because it affects existing canonical events, runtime behavior, tests, public APIs, documentation, and the repository's adaptation constitution.
+```text
+proposed
+  -> deterministically_rejected
+  |  validated
+       -> review_failed | review_unknown
+       |  reviewed_rejected
+       |  reviewed_approved
+            -> apply_conflict | apply_failed | applied
+```
 
-A separate cleanup should evaluate replacing that system with the same direct-revision model:
+The current harness refinement implementation already supplies durable proposals, validation, immutable artifact versions, candidate records, observations, decisions, and rollback. This plan reuses its proposal identity, validation, recovery, and versioning foundations while changing the ordinary decision path:
 
-- validate the replacement artifact;
-- create an immutable version;
-- activate it atomically with actor and reason;
-- preserve optional evidence and outcome observations;
-- detect concurrent edits;
-- roll back by activating a new version matching prior content.
+- a separate LLM reviewer replaces per-proposal human approval;
+- reviewer approval precedes activation;
+- approved behavioral content applies automatically;
+- rejection reasons return to the proposer;
+- optional reproposal always creates a new proposal;
+- post-activation evidence informs later refinement or rollback rather than blocking every activation behind a manual candidate experiment.
 
-Automatic unattended changes may need a narrower policy than deliberate user or agent edits. That distinction should be based on the change trigger and authority, not on whether the target is a profile, prompt note, memory, skill, or subagent specification.
+Skills retain mandatory compile and declared runtime tests before activation. A reviewer cannot approve a failing skill. Other artifact kinds rely on deterministic validation plus charter review before activation and attributable outcome observation afterward.
 
-Until that cleanup ships, current refinement remains authoritative for its existing artifact types. This plan neither duplicates nor depends on that proposal pipeline.
+Candidate allocation, bounded exposure, and evaluator observations may remain available for explicit experiments, but they are not required in the ordinary automatic refinement path. Existing candidate records are not silently reinterpreted. The domain review must define whether pre-cutover candidates finish under their original lifecycle or terminate with explicit migration status.
+
+This changes the repository's current refinement constitution, which treats pre-promotion observed success as the normal authority for activation. Shipping the change requires an explicit constitutional amendment in `AGENTS.md` and ADR 0002, plus synchronized event, protocol, recovery, security, and public-document updates.
+
+### End-to-end refinement flow
+
+For `agencity refine`, the existing trajectory-review child remains the proposer:
+
+1. freeze the attributable trajectory;
+2. ask the proposer child for exactly `no_change` or one typed proposal;
+3. return immediately on `no_change`;
+4. durably record and deterministically validate a proposal;
+5. start a separate governance-review child with the pinned charter;
+6. apply the proposal atomically only after approval and final validation;
+7. return or deliver the terminal result and reason to the original route.
+
+Manual refinement waits by default. Automatic trigger processing detaches by default and delivers its terminal result durably. Both paths use the same proposal, review, application, and recovery semantics.
 
 ## Runtime policy
 
@@ -456,7 +653,8 @@ Illustrative product operations:
 ```http
 GET  /product/agents/:session
 GET  /product/agents/:session/profiles
-POST /product/agents/:session/profiles
+POST /product/agents/:session/profile-proposals
+GET  /product/refinements/:proposal
 POST /product/agents/:session/profiles/rollback
 ```
 
@@ -466,6 +664,9 @@ The contract preserves:
 
 - exact IDs and revisions;
 - active and historical profile distinction;
+- wait or detach semantics for proposal review;
+- terminal approval, rejection, failure, unknown, and application-conflict outcomes;
+- durable rejection reasons and revision guidance;
 - no mutation from read or navigation calls;
 - typed unavailable, stale, unauthorized, and conflict outcomes;
 - bounded prompt and evidence payloads.
@@ -474,14 +675,18 @@ Generated TypeScript receives capability-scoped operations:
 
 ```ts
 sdk.agents.get(target, options?)
-sdk.agents.updateProfile(target, input)
+sdk.agents.proposeProfileUpdate(target, input, { wait?: boolean })
 sdk.agents.rollbackProfile(target, input)
 
 sdk.agents.spawn({ task, profile?, ... })
 sdk.agents.spawnMany(inputs)
 ```
 
-The executing session and branch supply actor identity. Generated code cannot spoof a user identity, parent relationship, evidence source, or current revision. Profile commands accept only the executing agent or its direct creation-family child as a target.
+The executing session and branch supply proposer identity. Generated code cannot spoof a user identity, parent relationship, evidence source, or current revision. Profile proposals accept only the executing agent or its direct creation-family child as a target.
+
+With `wait: true`, the call resolves only after review and application reach a terminal state. The durable proposal and reviewer child survive caller, worker, and service restart. With `wait: false`, the call returns the proposal identity and delivers the terminal result later through the durable route.
+
+Generated code cannot invoke the reviewer directly, choose the reviewer model, supply the governing charter, approve a proposal, or activate a profile version.
 
 Existing `rlm.start` and `rlm.startMany` may accept an explicit profile or use the sealed task-specialist helper. The retained child always has exact profile and prompt provenance.
 
@@ -493,11 +698,14 @@ Agent detail adds:
 
 - current profile and exact agent prompt;
 - profile history and diffs;
+- pending and terminal profile proposals;
+- exact pinned review-charter provenance;
+- reviewer approval or rejection reasons;
 - creation ancestry;
 - current routes, tasks, and runs;
 - actor, reason, optional evidence, and rollback for each revision.
 
-Navigation remains observational. Profile revision and rollback use explicit typed actions.
+Navigation remains observational. Proposal and rollback actions remain explicit. No approval inbox or human review queue is required.
 
 No new coordinator view, assignment queue, specialist directory, routing inspector, or assignment eligibility control is required.
 
@@ -509,6 +717,10 @@ The runtime remains trusted-local.
 - Agent profiles are behavioral controls, not hostile-code isolation.
 - Profile text cannot change model configuration, credentials, SDK operations, effect policy, execution limits, or publication configuration.
 - Known-value rejection, credential stripping, bounded diagnostics, and exact provenance apply to profile admission.
+- Proposal text, evidence, and target content are untrusted reviewer data and cannot alter the sealed reviewer policy or formal response contract.
+- The review model receives only bounded, attributable charter and proposal inputs; it receives no raw credentials.
+- Reviewer approval cannot bypass deterministic scope, authority, secret, compatibility, or compare-and-swap checks.
+- A reviewer timeout, malformed response, unavailable model, or unknown effect never becomes approval.
 - Hostile multi-agent or multi-tenant operation requires a separate authenticated and isolated deployment architecture.
 
 New UI and documentation must not imply that profile instructions or typed runtime commands sandbox local code.
@@ -519,7 +731,9 @@ Retained state includes:
 
 - every profile version, exact agent prompt, and digest;
 - every invocation-to-profile and effective-prompt pin;
-- profile revision actors, reasons, optional evidence, conflicts, and rollback activations;
+- every proposal, proposer, target, expected version, reason, predicted effect, and evidence reference;
+- every frozen review input, charter and constitution pin, reviewer model dispatch, typed decision, and terminal notice;
+- profile revision actors, reasons, evidence, conflicts, rejection guidance, reproposal links, and rollback activations;
 - existing session, branch, task, mailbox, goal, effect, context, and artifact provenance.
 
 Workspace export includes all active and historical profile records plus existing canonical history and referenced artifacts.
@@ -551,13 +765,18 @@ No migration rewrites retained event rows or silently interprets an initial task
 
 ## Delivery sequence
 
-### Phase 0 — Domain review
+### Phase 0 — Domain and constitutional review
 
 - Confirm the thin profile fields and exact rendering contract.
 - Confirm the workspace agent-control stream owns only profile versions and active pointers.
 - Define profile, prompt-note, subagent-spec, memory, runtime-policy, and dynamic-context boundaries.
+- Define the immutable product constitution, workspace charter, and reviewer-policy components supplied to governance review.
+- Define the sealed reviewer model contract and proposer-reviewer separation.
+- Define terminal notification, synchronous wait, detached recovery, and bounded reproposal semantics.
+- Decide how existing candidate refinements terminate or migrate at the governance cutover.
 - Define profile size and revision-rate bounds.
-- Add an ADR for durable agent profiles.
+- Amend `AGENTS.md` and ADR 0002 to authorize automatic charter review and post-activation evidence in place of mandatory pre-promotion outcome evidence.
+- Add an ADR for durable agent profiles and automated refinement review.
 
 ### Phase 1 — Durable profiles
 
@@ -569,24 +788,34 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Add owner-facing profile inspection.
 - Add replay, prompt-digest, compaction, recovery, and child-admission tests.
 
-### Phase 2 — Direct profile adaptation
+### Phase 2 — Automated profile refinement
 
-- Add direct self, direct-child, and owner profile revision commands.
-- Create and activate each version atomically for future invocations.
-- Retain actor, reason, exact diff, optional evidence, and expected-version conflicts.
+- Extend typed refinement proposals with an `agent_profile` target.
+- Add self, direct-child, owner, and automatic-refiner proposal admission.
+- Add deterministic pre-review validation and exact frozen reviewer context.
+- Run one sealed durable LLM reviewer with an approve-or-reject tool contract.
+- Revalidate and atomically create and activate approved profile versions.
+- Deliver terminal approval, rejection, failure, unknown, or conflict results to the proposer.
+- Add bounded new-proposal revision using prior rejection guidance.
+- Retain actor, reason, exact diff, evidence, review provenance, and expected-version conflicts.
 - Add rollback through a new immutable activation.
-- Do not add proposal, approval, candidate-exposure, routing, assignment, or coordinator machinery.
+- Do not add routing, assignment, coordinator, or human approval machinery.
 
-### Phase 3 — Product hardening
+### Phase 3 — Shared automatic refinement
 
-- Add installed-product journeys for profile creation, revision, rollback, restart, and inspection.
+- Route memory, prompt-note, skill, and subagent-specification proposals through the same sealed governance reviewer.
+- Remove per-proposal human approval as an ordinary promotion dependency.
+- Apply approved immutable versions automatically.
+- Keep generated-skill compilation and declared runtime tests mandatory before activation.
+- Retain optional candidate experiments for explicit evaluation without making them the default application path.
+- Add post-activation outcome observation and bounded automatic rollback policy.
+
+### Phase 4 — Product hardening
+
+- Add installed-product journeys for profile creation, proposal, approval, rejection, bounded reproposal, rollback, restart, and inspection.
 - Add sync divergence, export, and deletion-plan coverage.
 - Update public protocol, API, user, operator, recovery, security, capability, event, mutable-table, data-lifecycle, and verification documentation.
 - Update `AGENTS.md` only for capabilities that ship.
-
-### Separate refinement simplification
-
-Retiring the existing proposal-based harness refinement system requires its own reviewed implementation change. That work should update canonical events, reducers, recovery, APIs, tests, public documentation, and the adaptation constitution together.
 
 ## Test plan
 
@@ -612,16 +841,34 @@ Retiring the existing proposal-based harness refinement system requires its own 
 - Compaction preserves exact profile and effective-prompt references.
 - Recovery after context, model request, or effect commit does not rematerialize with a different profile.
 
-### Direct adaptation
+### Automated refinement review
 
-- An agent can directly create and activate a new version of its own profile for future invocations.
-- A parent can directly revise a creation-family child's profile.
-- The owner can directly revise any workspace agent profile.
+- An agent can propose a new version of its own profile.
+- A parent can propose a revision to a creation-family child's profile.
+- The owner and automatic trajectory refiner can propose within their authorized scopes.
 - Siblings and unrelated agents cannot revise one another.
-- Profile revisions cannot change runtime configuration.
-- Revision requires no proposal, approval, candidate exposure, or evaluation result.
+- The proposer cannot approve or activate its proposal.
+- Deterministically invalid proposals reject before an LLM call.
+- Every valid proposal receives exactly one sealed reviewer decision.
+- The reviewer receives exact pinned charter, constitution, policy, proposal, target, evidence, and model-dispatch provenance.
+- Proposal content cannot inject instructions into the reviewer policy.
+- Reviewer approval cannot change runtime configuration or bypass application-time validation.
+- Approved proposals create and activate exactly one immutable profile version.
+- Rejected, failed, unknown, stale, or malformed reviews activate nothing.
+- Synchronous callers receive the terminal decision; detached callers receive the same result through durable delivery.
+- Recovery redelivers an undelivered terminal notice and never duplicates a delivered notice.
+- A reproposal has a new identity, references the rejection, changes content or evidence, and obeys the attempt bound.
+- No per-proposal human approval is required.
 - Rollback restores exact prior content through a new immutable version.
 - Concurrent revisions conflict through the expected current profile version.
+
+### Shared refinement lifecycle
+
+- Memory, prompt-note, skill, subagent-specification, and profile proposals use the same governance reviewer contract.
+- Skills compile and pass declared runtime tests before approved content becomes active.
+- Existing pre-cutover candidates are never silently promoted under the new rule.
+- Optional experiments remain attributable but are not required for ordinary automatic application.
+- Post-activation outcome evidence can trigger a new proposal or bounded rollback; it does not rewrite the original review decision.
 
 ### Root and task behavior
 
@@ -648,10 +895,13 @@ A linked executable journey must:
 1. create a fresh root with an exact profile;
 2. complete work and display the pinned profile;
 3. create a child with a concise materialized profile;
-4. revise the child's profile directly;
-5. prove old and new invocation pins;
-6. roll back to exact prior content;
-7. detach, restart, and reproduce the same profiles and outcomes without duplicate work.
+4. submit one child-profile proposal and block until an independent reviewer approves it;
+5. prove the approved profile activates only for later invocations;
+6. submit one proposal the reviewer rejects and receive the exact terminal reason;
+7. submit one bounded revised proposal referencing that rejection;
+8. prove old and new invocation pins;
+9. roll back to exact prior content;
+10. detach during review, restart, and reproduce the same proposal, decision, profile, and notification without duplicate model calls or activation.
 
 The journey uses only the documented executable and public protocol-backed terminal product.
 
@@ -662,6 +912,11 @@ The implementation defines and tests bounds for:
 - profile encoded bytes;
 - optional prompt-excluded discovery fields;
 - profile revision rate;
+- concurrent governance-review count;
+- reviewer input and output bytes;
+- reviewer model-call budget and timeout;
+- automatic reproposals per trigger and target;
+- pending terminal notices;
 - retained evidence references;
 - full-prompt detail requests.
 
@@ -677,9 +932,25 @@ Profiles can become knowledge dumps. Small fields, byte bounds, and separation f
 
 An exact profile improves provenance but does not prove that prompt text caused an outcome. Evaluation considers the model, provider, dynamic context, task mix, tools, and stochastic behavior.
 
+### Reviewer agreement is not outcome evidence
+
+An LLM reviewer can approve a coherent but ineffective change. Review proves only that the proposal passed the pinned charter and policy judgment. Attributable post-activation outcomes, later correction, and rollback remain necessary. Product language must not call review approval empirical validation.
+
+### Reviewer capture or prompt injection
+
+A proposal may attempt to instruct the reviewer to approve it or ignore policy. Proposal content is isolated as untrusted data, the sealed reviewer contract is supplied separately, exact charter precedence is explicit, and malformed or ambiguous output fails closed.
+
 ### Self-revision drift
 
-Direct self-revision can degrade behavior. Immutable history, expected-version checks, exact diffs, optional evidence, owner inspection, and rollback make the change visible and reversible. Runtime authority remains outside the profile.
+Repeated self-proposals can degrade behavior even with independent review. Separate proposer and reviewer roles, hard reproposal limits, expected-version checks, exact diffs, outcome observation, and rollback make drift bounded and inspectable. Runtime authority remains outside the profile.
+
+### Reviewer bottleneck
+
+Every refinement adds another model call and may block the proposer. Durable detached review, explicit timeouts, bounded input, stable idempotency, terminal failure states, and asynchronous notification prevent reviewer latency from becoming hidden or unrecoverable.
+
+### Circular review behavior
+
+A rejected proposer may repeatedly rewrite the same proposal. Rejection is terminal, reproposal requires a new identity and substantive change, and automatic revision has a strict per-trigger limit.
 
 ### Configuration illusion
 
@@ -703,13 +974,19 @@ The plan is complete when:
 4. Agent purpose, runtime policy, work criteria, knowledge, and current context remain separate.
 5. Root selection and existing child `Task` delegation remain the complete ordinary work flow.
 6. No assignment, specialist-routing, coordinator, or management-hierarchy dependency is introduced.
-7. Profile revisions are direct, versioned, conflict-checked, and reversible without a proposal or approval workflow.
-8. Profile text cannot change runtime configuration or claim sandbox guarantees.
-9. Dormant agents consume no execution capacity merely because their identity persists.
-10. Restart, branch, sync, export, and deletion behavior preserve profile provenance.
-11. The installed terminal journey demonstrates profile creation, revision, rollback, detach, and resume without internal IDs.
-12. Public documentation and `AGENTS.md` describe shipped behavior and remaining limits accurately.
-13. Typecheck, architecture checks, deterministic tests, and acceptance pass; gated external checks are reported separately.
+7. Every profile revision is a typed proposal reviewed by a separate sealed LLM role.
+8. Every review pins the exact charter, constitution, policy, target, evidence, proposal, and reviewer dispatch.
+9. Only an approved and revalidated proposal creates and activates a profile version.
+10. Rejection is terminal, activates nothing, and returns or durably delivers its reason to the proposer.
+11. Automatic reproposal uses a new identity and a strict attempt bound.
+12. No ordinary behavioral refinement requires per-proposal human approval.
+13. Memory, prompt-note, skill, subagent-specification, and profile refinements converge on the same automatic review-and-apply lifecycle.
+14. Profile text and reviewer approval cannot change runtime configuration or claim sandbox guarantees.
+15. Dormant agents consume no execution capacity merely because their identity persists.
+16. Restart, branch, sync, export, and deletion behavior preserve proposal, review, profile, and notification provenance.
+17. The installed terminal journey demonstrates approval, rejection, bounded reproposal, activation, rollback, detach, and resume without internal IDs.
+18. `AGENTS.md`, ADR 0002, and public documentation describe the shipped automatic governance model and remaining limits accurately.
+19. Typecheck, architecture checks, deterministic tests, and acceptance pass; gated external checks are reported separately.
 
 ## Deferred extensions
 
