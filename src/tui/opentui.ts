@@ -303,7 +303,7 @@ export function workspaceAgentsLines(
     lines.push({ text: "", tone: "context" });
   }
   lines.push({
-    text: truncateFamilyText("↑/↓ select · PgUp/PgDn page · Enter/→ open · Ctrl-R refresh · Esc back", maximum),
+    text: truncateFamilyText("Ctrl-N new · ↑/↓ select · PgUp/PgDn page · Enter/→ open · Ctrl-R refresh · Esc back", maximum),
     tone: "help",
   });
   return lines;
@@ -474,6 +474,7 @@ export interface OpenTuiController {
   setWorkspaceAgentsQuery?(query: string): void;
   selectWorkspaceAgent?(selectedKey: string | null): void;
   openWorkspaceAgent?(sessionId: string, branchId: string): Promise<void>;
+  createWorkspaceAgent?(): Promise<void>;
   abortPendingOperations?(): void;
 }
 
@@ -960,6 +961,12 @@ export class OpenTuiApp {
         key.preventDefault();
         key.stopPropagation();
         void this.#refreshWorkspaceAgents();
+        return;
+      }
+      if (key.ctrl && key.name === "n") {
+        key.preventDefault();
+        key.stopPropagation();
+        void this.#createWorkspaceAgent();
         return;
       }
       if (!key.ctrl && !key.meta) {
@@ -1452,6 +1459,14 @@ export class OpenTuiApp {
     return this.#runFamilyTransition(() => this.controller.refreshWorkspaceAgents!());
   }
 
+  #createWorkspaceAgent(): Promise<void> {
+    if (!this.controller.createWorkspaceAgent) {
+      this.#showNotice("Creating a workspace agent is unavailable in this terminal.", "warning");
+      return Promise.resolve();
+    }
+    return this.#runFamilyTransition(() => this.controller.createWorkspaceAgent!());
+  }
+
   #moveWorkspaceAgentSelection(delta: number): void {
     const rows = this.#view.workspaceAgents.rows;
     if (!rows.length) return;
@@ -1656,7 +1671,7 @@ export class OpenTuiApp {
     if (this.controller.pendingSecretInput) return "Enter save · Esc cancel";
     if (this.#view.workspaceAgents.open) {
       const count = this.#view.workspaceAgents.rows.length;
-      return `${count} ${count === 1 ? "agent" : "agents"} · ↑/↓ select · Enter/→ open · Ctrl-R refresh · Esc back`;
+      return `${count} ${count === 1 ? "agent" : "agents"} · Ctrl-N new · ↑/↓ select · Enter/→ open · Ctrl-R refresh · Esc back`;
     }
     if (this.#modelEntryProvider) return "Enter save · Esc back";
     if (this.#activeModelDetail()) return "↑/↓ provider · Enter choose · Esc close";
@@ -1673,8 +1688,8 @@ export class OpenTuiApp {
       const selected = this.#view.workspaceAgents.rows.find(row =>
         row.key === this.#view.workspaceAgents.selectedKey);
       return selected
-        ? `AGENTS · ${selected.displayName} · ${selected.status} · ${selected.resumable ? "Enter/→ open" : "cannot open"} · Esc back`
-        : `AGENTS · ${this.#view.workspaceAgents.refresh} · Esc back`;
+        ? `AGENTS · ${selected.displayName} · ${selected.status} · ${selected.resumable ? "Enter/→ open" : "cannot open"} · Ctrl-N new · Esc back`
+        : `AGENTS · ${this.#view.workspaceAgents.refresh} · Ctrl-N new · Esc back`;
     }
     if (this.#paletteQuery) return "COMMANDS · type to filter · Esc close";
     if (this.#provisionalOutput.size > 0) return "PROVISIONAL OUTPUT · PgUp/PgDn scroll";

@@ -577,6 +577,12 @@ export class TerminalUI {
     await this.refreshWorkspaceAgents();
   }
 
+  async createWorkspaceAgent(): Promise<void> {
+    this.#assertWorkspaceAgentsAvailable();
+    if (!this.#workspaceAgents.open) throw new Error("The workspace Agents view is not open");
+    await this.#createRootSession();
+  }
+
   subscribePresentation(listener: TerminalPresentationListener): () => void {
     this.#presentationListeners.add(listener);
     if (this.#viewState && this.#capabilities) listener(this.presentation);
@@ -626,28 +632,9 @@ export class TerminalUI {
     if (line === "/sessions") { this.#detail("/sessions", await this.client.productSessions()); return "continue"; }
     if (line.startsWith("/sessions select ")) { const target=line.slice(17).trim(); const selected=await this.client.productSelect(target); await this.#queueRouteTransition(selected.sessionId, selected.branchId); return "continue"; }
     if (line === "/new" || line.startsWith("/new ")) {
-      const current=this.#liveState;
       const requestedName=line.slice(5).trim();
-      let model:ModelConfiguration|undefined=current?{...current.model,reasoningEffort:"provider-default"}:undefined;
-      if(model){
-        try {
-          const config=await this.client.productConfig(model.model);
-          model={...model,reasoningEffort:config.selectedModelEffortPreference??"provider-default"};
-        } catch(error) {
-          if(!(error instanceof ProtocolClientError)||!["NOT_FOUND","CAPABILITY_UNAVAILABLE"].includes(error.code))throw error;
-        }
-      }
-      let created;
-      try {
-        created=await this.client.createSession(this.options.workspaceId ?? current?.workspaceId ?? "default", model ? { model, ...(requestedName ? { sessionName: requestedName } : {}) } : {});
-      } catch (error) {
-        if(!model||model.reasoningEffort==="provider-default"||!isReasoningSelectionError(error))throw error;
-        model={...model,reasoningEffort:"provider-default"};
-        created=await this.client.createSession(this.options.workspaceId ?? current?.workspaceId ?? "default",{model,...(requestedName?{sessionName:requestedName}:{})});
-        this.#write(`Stored reasoning effort is no longer valid for ${model.model}; using provider-default.\n`);
-      }
-      if(this.#productCatalog)await this.client.productSelect(created.sessionId, created.branchId);
-      await this.#queueRouteTransition(created.sessionId, created.branchId); return "continue";
+      await this.#createRootSession(requestedName);
+      return "continue";
     }
     if (line === "/model" || line.startsWith("/model ")) { await this.#model(line.slice(6).trim()); return "continue"; }
     if (line === "/effort" || line.startsWith("/effort ")) { await this.#effort(line.slice(7).trim()); return "continue"; }
@@ -883,6 +870,57 @@ export class TerminalUI {
     if (this.#historicalCursor !== null) throw new Error("Return to live with /live before opening Agents");
     if (this.#pendingCredentialProvider !== null) throw new Error("Finish or cancel provider login before opening Agents");
     if (!this.#productCatalog) throw new Error("The workspace Agents catalog is unavailable");
+  }
+
+  async #createRootSession(requestedName = ""): Promise<void> {
+    const current = this.#liveState;
+    let model: ModelConfiguration | undefined = current
+      ? { ...current.model, reasoningEffort: "provider-default" }
+      : undefined;
+    if (model) {
+      try {
+        const config = await this.client.productConfig(model.model);
+        model = {
+          ...model,
+          reasoningEffort: config.selectedModelEffortPreference ?? "provider-default",
+        };
+      } catch (error) {
+        if (
+          !(error instanceof ProtocolClientError)
+          || !["NOT_FOUND", "CAPABILITY_UNAVAILABLE"].includes(error.code)
+        ) throw error;
+      }
+    }
+    let created;
+    try {
+      created = await this.client.createSession(
+        this.options.workspaceId ?? current?.workspaceId ?? "default",
+        model ? { model, ...(requestedName ? { sessionName: requestedName } : {}) } : {},
+      );
+    } catch (error) {
+      if (!model || model.reasoningEffort === "provider-default" || !isReasoningSelectionError(error)) {
+        throw error;
+      }
+      model = { ...model, reasoningEffort: "provider-default" };
+      created = await this.client.createSession(
+        this.options.workspaceId ?? current?.workspaceId ?? "default",
+        { model, ...(requestedName ? { sessionName: requestedName } : {}) },
+      );
+      this.#write(`Stored reasoning effort is no longer valid for ${model.model}; using provider-default.\n`);
+    }
+    if (this.#productCatalog) await this.client.productSelect(created.sessionId, created.branchId);
+    await this.#queueRouteTransition(created.sessionId, created.branchId);
+    if (this.#workspaceAgents.open) {
+      this.#workspaceAgents = {
+        ...this.#workspaceAgents,
+        open: false,
+        returnRoute: { sessionId: created.sessionId, branchId: created.branchId },
+        query: "",
+        selectedKey: terminalWorkspaceAgentKey(created),
+        generation: this.#workspaceAgents.generation + 1,
+      };
+      this.#publish();
+    }
   }
 
   #queueRouteTransition(sessionId: string, branchId: string): Promise<void> {

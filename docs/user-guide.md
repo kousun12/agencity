@@ -159,11 +159,12 @@ The view contains only retained root branches in the current workspace. Rows are
 - Type to search visible names, task text, model, or status.
 - Use Up and Down to move one row, or Page Up and Page Down to move by a visible page.
 - Press Enter or Right to open a resumable row.
+- Press Ctrl-N to create a new root session with the current model configuration and open it immediately.
 - Press Ctrl-R to refresh without clearing the search.
 - Press Escape once to clear a non-empty search, or with an empty search to return to the conversation that opened the view.
 - Left remains at workspace scope.
 
-Opening the view has no durable effect and does not change the remembered branch. Opening a row uses exact retained route identity and updates the workspace's remembered resume selection. A later no-argument `agencity` therefore resumes the selected root. The catalog loads on open, on explicit refresh, and after selection; it does not poll while the view is open. A failed refresh keeps prior rows visible and marks them stale.
+Opening the view has no durable effect and does not change the remembered branch. Opening a row uses exact retained route identity and updates the workspace's remembered resume selection. Ctrl-N creates durable root work, selects it for resume, and leaves the Agents view for its conversation. A later no-argument `agencity` therefore resumes the opened or newly created root. The catalog loads on open, on explicit refresh, and after selection; it does not poll while the view is open. A failed refresh keeps prior rows visible and marks them stale.
 
 ## Detach and cancel
 

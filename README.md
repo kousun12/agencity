@@ -70,7 +70,7 @@ A successful `finish` message is published only after required completion gates 
 
 When the current agent has retained direct children, the full-screen client keeps a compact family summary above the footer. With an empty composer, press Down to focus it, Enter or Right to open the child browser, and Up or Down to select a child. Enter or Right opens that child's conversation; Left from an empty child composer returns to the exact retained parent branch. Opening another family member is observational: it does not cancel, resume, retry, or change the workspace's remembered root selection.
 
-Left from an empty top-level root composer opens the workspace Agents view. `/agents` opens the same view from any live conversation. It shows retained root branches grouped by exact status, supports search and keyboard selection, and keeps failed or archived roots visible as non-resumable. Opening a resumable row changes the remembered workspace selection, so the next no-argument `agencity` resumes that root. The catalog refreshes when opened or with Ctrl-R; it does not poll continuously.
+Left from an empty top-level root composer opens the workspace Agents view. `/agents` opens the same view from any live conversation. It shows retained root branches grouped by exact status, supports search and keyboard selection, and keeps failed or archived roots visible as non-resumable. Ctrl-N creates a new root session with the current model configuration and opens it immediately. Opening a resumable row or creating a root changes the remembered workspace selection, so the next no-argument `agencity` resumes that root. The catalog refreshes when opened or with Ctrl-R; it does not poll continuously.
 
 Useful commands:
 

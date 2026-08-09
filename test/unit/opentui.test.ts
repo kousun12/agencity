@@ -962,6 +962,7 @@ describe("OpenTUI interactive terminal", () => {
       expect(frame).toContain("Fixture workspace");
       expect(frame).not.toContain("terminal-workspace-agents");
       expect(frame).toContain("cannot open");
+      expect(frame).toContain("Ctrl-N new");
       expect(frame).toContain("TRUSTED-LOCAL");
       expect(frame).not.toMatch(/failed-internal-session|failed-internal-branch|Nested child/);
       expect(selections).toEqual([]);
@@ -1048,9 +1049,19 @@ describe("OpenTUI interactive terminal", () => {
       frame = await setup.waitForFrame(value =>
         value.includes("AGENTS") && value.includes("Second root") && value.includes("TRUSTED-LOCAL"));
       expect(frame).toContain("Esc back");
+      expect(frame).toContain("Ctrl-N new");
       setup.mockInput.pressKey("\u001b[6~");
       frame = await setup.waitForFrame(value => value.includes("AGENTS") && value.includes("Failed root"));
       expect(frame).toContain("cannot open");
+      const previousSessionId = terminal.presentation.state.sessionId;
+      setup.mockInput.pressKey("n", { ctrl: true });
+      expect(await app.settle()).toBe(true);
+      expect(terminal.presentation.state.sessionId).not.toBe(previousSessionId);
+      expect(terminal.presentation.workspaceAgents.open).toBe(false);
+      expect(selections.at(-1)).toEqual([
+        terminal.presentation.state.sessionId,
+        terminal.presentation.state.branch.id,
+      ]);
     } finally {
       app.destroy();
       setup.renderer.destroy();
