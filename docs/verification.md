@@ -104,7 +104,15 @@ Installed governance acceptance then passed:
 
 This evidence covers deterministic validation, proposer/reviewer separation, authority, frozen inputs, current-model dispatch, automatic application, staged tested-skill activation, terminal delivery, rollback, managed-service recovery, fail-closed profile sync divergence, export audit, deletion refusal, migration/rebuild reopening, and the installed no-ID governance journey. The installed journey uses graceful service shutdown and restart; lower-level lifecycle tests cover committed hard process-loss boundaries.
 
-The final post-hardening `bun run verify` remains pending. The three externally gated rows—live provider, official Turso Sync server, and Turso Cloud—remain skipped and unverified.
+Final post-hardening verification then passed:
+
+- `bun run verify`: passed;
+- deterministic core suite: 893 passed, 2 externally gated skips, 0 failed;
+- deterministic installed acceptance within the gate: 15 passed, 1 credential-gated skip, 0 failed;
+- aggregate test evidence within the gate: 908 passed, 3 skips, 0 failed; and
+- `bun run test:acceptance:matrix`: 1 deterministic row passed, 3 external rows skipped, 0 failed.
+
+The externally gated rows—live provider, official Turso Sync server, and Turso Cloud—remain skipped and unverified.
 
 ### Previous recorded baseline
 
