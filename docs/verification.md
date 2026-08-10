@@ -137,6 +137,16 @@ The August 10, 2026 deterministic run produced:
 
 Provider-reported input tokens were skipped because no live credential-gated provider run was enabled. Live-provider, official Turso Sync server, and Turso Cloud results remain unverified; the deterministic estimate is not presented as provider-reported usage.
 
+Final context-efficiency verification on August 10, 2026 passed:
+
+- `bun run verify`: passed;
+- deterministic core suite: 937 passed, 2 externally gated skips, 0 failed;
+- end-to-end suite: 3 passed, 0 failed;
+- deterministic installed acceptance: 16 passed, 1 credential-gated skip, 0 failed; and
+- independent final review: no remaining blockers.
+
+The skipped checks are the live-provider smoke, official Turso Sync server conformance, and Turso Cloud smoke. They remain unverified.
+
 ### Previous recorded baseline
 
 The preceding schema-version-3 baseline was produced on August 9, 2026 against runtime commit `1ec7114` plus documentation-only working-tree changes:

@@ -1,6 +1,6 @@
 # Agent context and observation efficiency plan
 
-**Status:** Proposed  
+**Status:** Implemented and verified
 **Date:** August 9, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md) and [Lossless context-reference storage](./2026-08-07-lossless-context-references-plan.md)
@@ -338,3 +338,29 @@ This plan is complete when:
 7. disposable-console restart semantics remain unchanged;
 8. deterministic, recovery, adversarial, and installed-product tests pass;
 9. public documentation and `AGENTS.md` accurately describe the implemented behavior and remaining limitations.
+
+## Implementation log
+
+### 2026-08-10 — Exact provider input and bounded context
+- Completed: Added the versioned `agencity.provider-input.v1` candidate, immutable dispatch/capacity recovery pins, bounded active-run and model-facing preference projections, unknown-capacity product limits, and selective-observation prompt guidance.
+- Validation: `bun run benchmark:context-efficiency` used the production provider-input builder and measured 297,997 baseline provider-message bytes versus 106,198 shipped bytes, a 64.36% reduction.
+- Plan notes: The coordinated pre-release cutover uses event schema 5 and reducer 15; schema versions 1 through 4 fail closed.
+- Remaining: Live provider token usage remains credential-gated and unverified.
+
+### 2026-08-10 — Observation ownership and effect origins
+- Completed: Added required typed effect origins, migration 019, exact request/attempt ownership validation, a complete canonical observation ledger, and a derived model-facing projection in which the cell terminal event owns successful linked effect output.
+- Validation: Replay, crash, branch, synchronization, export, deletion, idempotency, and failure/unknown observation coverage passed within `bun run verify`.
+- Plan notes: Failed, cancelled, and unknown effects retain separate bounded evidence; only duplicate successful linked output is removed from automatic provider observations.
+- Remaining: None.
+
+### 2026-08-10 — Bounded output, spill, and range retrieval
+- Completed: Added `BoundedOutputV1`, streaming scrubbed shell spill, bounded file pages, immutable artifact ranges, streaming oversized-cell JSON staging, strict nested envelope validation, remote placement checks, and absolute 56 KiB item/64 KiB step observation guards.
+- Validation: Focused adversarial suites for shell capture, secrets, artifacts, files, observations, and placement passed; linked installed-product acceptance recovered an unexpected large shell result through an artifact range.
+- Plan notes: Runtime-owned capture and diagnostic buffers are bounded. Arbitrary trusted generated TypeScript remains outside the memory-bound claim.
+- Remaining: General artifact garbage collection remains outside this plan.
+
+### 2026-08-10 — Final verification and review
+- Completed: Reconciled public documentation and `AGENTS.md`, corrected aggregate fixtures, hardened adversarial event identities, credential streams, CAS deduplication, remote error bodies, empty ranges, and file cancellation, and cleared independent final review.
+- Validation: `bun run verify` passed: core 937 passed, 2 external skips, 0 failed; end-to-end 3 passed, 0 failed; acceptance 16 passed, 1 external skip, 0 failed.
+- Plan notes: None.
+- Remaining: The live-provider, official Turso Sync server, and Turso Cloud checks were skipped because their external prerequisites were unavailable; they remain explicitly unverified.
