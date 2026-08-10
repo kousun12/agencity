@@ -261,29 +261,12 @@ describe("FU-005 protocol-backed terminal UI", () => {
     const runId = "run-internal-id";
     const stepId = "step-internal-id";
     const initialEffectId = "agent-effect-internal-id";
-    const retryEffectId = "agent-retry-effect-internal-id";
-    const contextWindow = {
-      provider: "fixture",
-      model: "fixture-model",
-      source: "model-catalog" as const,
-      contextWindowTokens: 8_192,
-      outputReserveTokens: 512,
-      estimatorId: "fixture-estimator",
-      triggerRatio: 0.8,
-      targetRatio: 0.6,
-    };
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "supervisor", idempotencyKey: "progress-run",
       payload: { runId, task: "exercise structured progress", requestKey: "progress-run", profilePin: agentProfilePin(await supervisor.agentProfiles.active(session.sessionId)), goalMode: "none" },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunStepStarted", producer: "supervisor", idempotencyKey: "progress-step",
       payload: { runId, stepId, ordinal: 1, contextId: "context-internal-id", callId: "call-internal-id", effectId: initialEffectId, actionId: "action-internal-id", observationEventIds: [] },
-    }, {
-      sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor", idempotencyKey: "progress-attempt-1",
-      payload: { runId, stepId, ordinal: 1, attempt: 1, contextId: "context-internal-id", callId: "call-internal-id", effectId: initialEffectId, reason: "initial", estimatedInputTokens: 20, contextWindow },
-    }, {
-      sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor", idempotencyKey: "progress-attempt-2",
-      payload: { runId, stepId, ordinal: 1, attempt: 2, contextId: "retry-context-internal-id", callId: "retry-call-internal-id", effectId: retryEffectId, reason: "provider-overflow", estimatedInputTokens: 10, contextWindow, retryOfCallId: "call-internal-id" },
     }]);
 
     const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
@@ -321,8 +304,8 @@ describe("FU-005 protocol-backed terminal UI", () => {
     const beforeReconnect = output;
     await handlers!.onReconnect?.(2, "00000000000000000042");
     expect(output).toBe(beforeReconnect);
-    await handlers!.onProgress?.(progress(retryEffectId, rawSuffix));
-    await handlers!.onProgressDiscard?.([retryEffectId], "committed");
+    await handlers!.onProgress?.(progress(initialEffectId, rawSuffix));
+    await handlers!.onProgressDiscard?.([initialEffectId], "committed");
     expect(output.slice(transcriptStart).match(/\[agent working…\]/g)).toHaveLength(1);
     expect(output.slice(transcriptStart)).not.toContain(rawPrefix);
     expect(output.slice(transcriptStart)).not.toContain(rawSuffix);

@@ -61,7 +61,11 @@ describe("executor path aliases", () => {
     );
     expect(shell).toMatchObject({
       outcome: "succeeded",
-      output: { stdout: value.canonicalRoot },
+      output: {
+        protocol: "agencity.bounded-output.v1",
+        completeness: "inline",
+        value: { exitCode: 0, stdout: value.canonicalRoot, stderr: "" },
+      },
     });
 
     const path = join(value.alias, "test.txt");
