@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Supervisor } from "../../src/index.ts";
+import { PROVIDER_INPUT_ESTIMATOR_ID, Supervisor, buildProviderInputCandidate, estimateProviderInputCandidate } from "../../src/index.ts";
 import { FIXTURE_EFFECTIVE_SYSTEM_PROMPT, fixturePromptProvenanceForPin, makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 import { BlockingProvider, RecordingProvider } from "./helpers.ts";
 
@@ -90,19 +90,24 @@ describe("Slice 2 recursive model concurrency, cancellation, and recovery", () =
     const callId = "lost-provider-call";
     const modelDispatch = supervisor.modelExecutor.resolveDispatch({ provider: provider.name, model: "model", reasoningEffort: "provider-default" });
     const promptProvenance = fixturePromptProvenanceForPin(handle.profilePin, handle.handleId);
+    const context = { messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] };
+    const resolvedCapacity = supervisor.modelExecutor.contextCapacity(modelDispatch.configuration);
+    const contextWindow = { ...resolvedCapacity, outputReserveTokens: 0, estimatorId: PROVIDER_INPUT_ESTIMATOR_ID, triggerRatio: 0.8, targetRatio: 0.6 };
+    const providerInput = buildProviderInputCandidate({ context, modelDispatch, capacity: contextWindow });
+    const estimatedInputTokens = estimateProviderInputCandidate(providerInput).estimatedTokens;
     await supervisor.storage.appendEvents([{
       sessionId: root.sessionId, branchId: root.branchId, type: "RecursiveModelStatusChanged", producer: "supervisor",
       idempotencyKey: `test-running:${handle.handleId}`, payload: { handleId: handle.handleId, status: "running" },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ContextMaterialized", producer: "supervisor",
-      idempotencyKey: "test-context:lost-context", payload: { contextId: "lost-context", records: [], contentHash: "0".repeat(64), context: { messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] }, promptProvenance },
+      idempotencyKey: "test-context:lost-context", payload: { contextId: "lost-context", records: [], contentHash: "0".repeat(64), context, promptProvenance },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ModelCallRequested", producer: "supervisor",
-      idempotencyKey: `test-call:${callId}`, payload: { callId, contextId: "lost-context", effectId, modelDispatch, estimatedInputTokens: 0, promptProvenance },
+      idempotencyKey: `test-call:${callId}`, payload: { callId, contextId: "lost-context", effectId, modelDispatch, providerInput, estimatedInputTokens, promptProvenance, contextWindow },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor",
       idempotencyKey: `test-effect:${effectId}`, payload: {
-        effectId, executor: "model", operation: "complete", input: { context: { messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] }, callId, modelDispatch, promptProvenance } as any,
+        effectId, executor: "model", operation: "complete", input: { providerInput, callId, modelDispatch, promptProvenance } as any,
         idempotencyKey: `test-effect:${effectId}`, idempotent: false,
       },
     }, {

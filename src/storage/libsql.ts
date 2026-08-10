@@ -1,6 +1,6 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentProfileVersion, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, REFINEMENT_GOVERNANCE_CONTRACT_ID, ValidationError, canonicalJsonDigest, canonicalSkillDigest, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, newId, normalizeAgentProfileInput, projectEvents, reduceAgentState, refinementPrincipalToAgentPrincipal, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateRefinementGovernanceDecision, validateRefinementGovernanceRecursiveResult, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, REFINEMENT_GOVERNANCE_CONTRACT_ID, ValidationError, canonicalJsonDigest, canonicalSkillDigest, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, newId, normalizeAgentProfileInput, projectEvents, reduceAgentState, refinementPrincipalToAgentPrincipal, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateProviderInputCandidate, validateRefinementGovernanceDecision, validateRefinementGovernanceRecursiveResult, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
@@ -1050,6 +1050,20 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     }
     if (event.type === "ModelCallRequested") {
       const payload = event.payload as EventPayloads["ModelCallRequested"];
+      const retainedContext = await tx.execute({
+        sql: "SELECT context_json FROM context_records WHERE context_id=?",
+        args: [payload.contextId],
+      });
+      if (!retainedContext.rows[0] || !payload.contextWindow) {
+        throw new ValidationError(
+          "Model call cannot reconstruct provider input from retained context and capacity",
+        );
+      }
+      validateProviderInputCandidate(payload.providerInput, {
+        context: JSON.parse(String(retainedContext.rows[0].context_json)) as JsonValue,
+        modelDispatch: payload.modelDispatch,
+        capacity: payload.contextWindow,
+      });
       if (payload.promptProvenance.invocationKind === "recursive-model") {
         const sessionRow = await tx.execute({ sql: "SELECT task_id FROM sessions WHERE session_id=?", args: [event.sessionId] });
         if (sessionRow.rows[0]?.task_id !== null && sessionRow.rows[0]?.task_id !== undefined) {

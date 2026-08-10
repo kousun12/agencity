@@ -17,6 +17,7 @@ import {
   type ModelContextWindowConfiguration,
   type ProviderModelErrorClassification,
 } from "../../src/runtime/context-window.ts";
+import { ProviderInputProductLimitError } from "../../src/domain/index.ts";
 
 interface Candidate {
   readonly version: number;
@@ -239,6 +240,58 @@ describe("FU-019 pure context-window admission", () => {
       reason: "explicit-request",
       selection: OLDEST_ELIGIBLE_PREFIX,
     }));
+  });
+
+  test("unknown capacity compacts toward 384 KiB and rejects above 512 KiB before execution", async () => {
+    const unknown = capacity({
+      provenance: {
+        provider: "opaque-provider",
+        model: "opaque-model",
+        source: ModelContextCapacitySource.Unknown,
+      },
+      contextWindowTokens: null,
+      maxOutputReserveTokens: 4_096,
+    });
+    let underHardCompactions = 0;
+    const underHard = await admitContextWindow(unknown, {
+      buildCandidate: () => ({ version: 0, tokens: 500 * 1024 / 4 }),
+      estimate: (candidate) => candidate.tokens,
+      measureUtf8Bytes: () => 500 * 1024,
+      compact: () => {
+        underHardCompactions++;
+        return { outcome: "protected-only" as const, protectedSourceCount: 0 };
+      },
+    });
+    expect(underHard.reason).toBe("unknown-capacity");
+    expect(underHardCompactions).toBe(0);
+
+    let version = 0;
+    const bytes = [600 * 1024, 380 * 1024];
+    const compacted = await admitContextWindow(unknown, {
+      buildCandidate: () => ({ version, tokens: bytes[version]! / 4 }),
+      estimate: (candidate) => candidate.tokens,
+      measureUtf8Bytes: () => bytes[version]!,
+      compact: () => {
+        version++;
+        return {
+          outcome: "compacted" as const,
+          provenance: {
+            compactionId: `byte-${version}`,
+            sourceEventIds: [`event-${version}`],
+          },
+        };
+      },
+    });
+    expect(compacted.reason).toBe("unknown-capacity");
+    expect(compacted.compactions).toHaveLength(1);
+    expect(compacted.compactions[0]!.reason).toBe("product-byte-ceiling");
+
+    await expect(admitContextWindow(unknown, {
+      buildCandidate: () => ({ version: 0, tokens: 600 * 1024 / 4 }),
+      estimate: (candidate) => candidate.tokens,
+      measureUtf8Bytes: () => 600 * 1024,
+      compact: () => ({ outcome: "protected-only" as const, protectedSourceCount: 4 }),
+    })).rejects.toBeInstanceOf(ProviderInputProductLimitError);
   });
 
   test("rejects inconsistent capacity and estimator configuration before callbacks", async () => {

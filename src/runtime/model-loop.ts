@@ -1,14 +1,20 @@
 import {
   CapabilityUnavailableError,
   NotFoundError,
+  ProviderInputProductLimitError,
+  PROVIDER_INPUT_ESTIMATOR_ID,
   ValidationError,
   TEXT_MODEL_RESPONSE_CONTRACT,
   agentProfilePin,
+  assertProviderInputWithinProductLimit,
+  buildProviderInputCandidate,
+  estimateProviderInputCandidate,
   newId,
   projectEvents,
   resolveModelDispatch,
   STANDARD_UNVERIFIED_REASONING_LEVELS,
   validateModelEffectOutputV2,
+  validateProviderInputCandidate,
   type AgentState,
   type AgentInvocationProfilePin,
   type BudgetLimits,
@@ -34,7 +40,6 @@ import {
   type ModelContextWindowConfiguration,
   type ProviderModelErrorClassification,
 } from "./context-window.ts";
-import { estimateContextWindow } from "./compaction-core.ts";
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import { registerStructuredModelTurn } from "./internal.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
@@ -83,7 +88,23 @@ export class ModelLoop {
       }
       return this.#turns.run(
         `${sessionId}/${branchId}`,
-        () => this.#turnStructured(sessionId, branchId, responseAdmission, invocation),
+        async () => {
+          try {
+            return await this.#turnStructured(
+              sessionId,
+              branchId,
+              responseAdmission,
+              invocation,
+            );
+          } catch (error) {
+            if (!(error instanceof ProviderInputProductLimitError)) throw error;
+            await this.#markProductLimitIdle(sessionId, branchId, error);
+            return {
+              outcome: "failed",
+              error: `${error.code}: ${error.message}`,
+            };
+          }
+        },
       );
     });
   }
@@ -93,7 +114,18 @@ export class ModelLoop {
     branchId: string,
     invocation?: { readonly invocationId: string; readonly profilePin: AgentInvocationProfilePin },
   ): Promise<{ outcome: EffectOutcome; message?: string; error?: string }> {
-    return this.#turns.run(`${sessionId}/${branchId}`, () => this.#turn(sessionId, branchId, invocation));
+    return this.#turns.run(`${sessionId}/${branchId}`, async () => {
+      try {
+        return await this.#turn(sessionId, branchId, invocation);
+      } catch (error) {
+        if (!(error instanceof ProviderInputProductLimitError)) throw error;
+        await this.#markProductLimitIdle(sessionId, branchId, error);
+        return {
+          outcome: "failed",
+          error: `${error.code}: ${error.message}`,
+        };
+      }
+    });
   }
 
   async #turn(
@@ -142,14 +174,27 @@ export class ModelLoop {
     let materialized;
     if (this.compactions) {
       const admission = await new ContextWindowController(window.configuration).admit({
-        buildCandidate: ({ completedCompactions }) => this.contexts.materialize(sessionId, branchId, {
-          contextId: `legacy-turn-${turnId}-context-${completedCompactions}`,
-          idempotencyKey: `legacy-turn-context:${turnId}:${completedCompactions}`,
-          promptProvenance: prompt.provenance,
-          agentProfileVersionId: pin.profileVersionId,
-          transform: (context) => withProviderSystemPrompt(context, prompt.content),
-        }),
-        estimate: (candidate) => estimateContextWindow(candidate.context).estimatedTokens,
+        buildCandidate: async ({ completedCompactions }) => {
+          const retained = await this.contexts.materialize(sessionId, branchId, {
+            contextId: `legacy-turn-${turnId}-context-${completedCompactions}`,
+            idempotencyKey: `legacy-turn-context:${turnId}:${completedCompactions}`,
+            promptProvenance: prompt.provenance,
+            agentProfileVersionId: pin.profileVersionId,
+            transform: (context) => withProviderSystemPrompt(context, prompt.content),
+          });
+          return {
+            ...retained,
+            providerInput: buildProviderInputCandidate({
+              context: retained.context,
+              modelDispatch,
+              capacity: window.provenance,
+            }),
+          };
+        },
+        estimate: (candidate) =>
+          estimateProviderInputCandidate(candidate.providerInput).estimatedTokens,
+        measureUtf8Bytes: (candidate) =>
+          candidate.providerInput.exactUtf8Bytes,
         compact: async ({ iteration }) => {
           const compacted = await this.compactions!.compact(sessionId, branchId, {
             strategy: "deterministic-extractive-v1", reason: "automatic-threshold", requestedBy: "supervisor",
@@ -162,13 +207,25 @@ export class ModelLoop {
         },
       });
       materialized = admission.candidate;
-    } else materialized = await this.contexts.materialize(sessionId, branchId, {
-      promptProvenance: prompt.provenance,
-      agentProfileVersionId: pin.profileVersionId,
-      transform: (context) => withProviderSystemPrompt(context, prompt.content),
-    });
+    } else {
+      const retained = await this.contexts.materialize(sessionId, branchId, {
+        promptProvenance: prompt.provenance,
+        agentProfileVersionId: pin.profileVersionId,
+        transform: (context) => withProviderSystemPrompt(context, prompt.content),
+      });
+      materialized = {
+        ...retained,
+        providerInput: buildProviderInputCandidate({
+          context: retained.context,
+          modelDispatch,
+          capacity: window.provenance,
+        }),
+      };
+    }
 
-    let rejectedEstimate = estimateContextWindow(materialized.context).estimatedTokens;
+    let rejectedEstimate =
+      estimateProviderInputCandidate(materialized.providerInput).estimatedTokens;
+    assertProviderInputWithinProductLimit(materialized.providerInput);
     let priorCallId: string | undefined;
     for (let attempt = 1; attempt <= 1 + 2; attempt++) {
       const callId = `legacy-turn-${turnId}-call-${attempt}`;
@@ -181,13 +238,13 @@ export class ModelLoop {
         sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
         idempotencyKey: `model-call:${callId}`,
         payload: {
-          callId, contextId: materialized.contextId, effectId, modelDispatch, estimatedInputTokens: rejectedEstimate, promptProvenance: prompt.provenance,
+          callId, contextId: materialized.contextId, effectId, modelDispatch, providerInput: materialized.providerInput, estimatedInputTokens: rejectedEstimate, promptProvenance: prompt.provenance,
           attempt, ...(priorCallId === undefined ? {} : { retryOfCallId: priorCallId }), contextWindow: window.provenance,
         },
       }, {
         sessionId, branchId, type: "EffectRequested", producer: "supervisor",
         idempotencyKey: effectKey,
-        payload: { effectId, executor: "model", operation: "complete", input: { callId, context: materialized.context, modelDispatch: modelDispatch as unknown as JsonValue, promptProvenance: prompt.provenance as unknown as JsonValue }, idempotencyKey: effectKey, idempotent: false },
+        payload: { effectId, executor: "model", operation: "complete", input: { callId, providerInput: materialized.providerInput as unknown as JsonValue, modelDispatch: modelDispatch as unknown as JsonValue, promptProvenance: prompt.provenance as unknown as JsonValue }, idempotencyKey: effectKey, idempotent: false },
       }]);
       const execution = await this.outbox.run(effectId);
       if (execution.outcome === "succeeded") {
@@ -220,13 +277,20 @@ export class ModelLoop {
         agentProfileVersionId: pin.profileVersionId,
         transform: (context) => withProviderSystemPrompt(context, prompt.content),
       });
-      const nextEstimate = estimateContextWindow(next.context).estimatedTokens;
+      const nextProviderInput = buildProviderInputCandidate({
+        context: next.context,
+        modelDispatch,
+        capacity: window.provenance,
+      });
+      const nextEstimate =
+        estimateProviderInputCandidate(nextProviderInput).estimatedTokens;
+      assertProviderInputWithinProductLimit(nextProviderInput);
       const retry = planContextWindowOverflowRetry({ classification, retriesAlreadyAttempted: attempt - 1, rejectedEstimatedInputTokens: rejectedEstimate, nextEstimatedInputTokens: nextEstimate });
       if (!retry.retry) {
         await this.#markIdle(sessionId, branchId, callId, `provider overflow retry refused: ${retry.reason}`);
         return { outcome: execution.outcome, error: execution.error ?? `Provider overflow retry refused: ${retry.reason}` };
       }
-      materialized = next;
+      materialized = { ...next, providerInput: nextProviderInput };
       rejectedEstimate = nextEstimate;
       priorCallId = callId;
     }
@@ -289,16 +353,27 @@ export class ModelLoop {
     let materialized;
     if (this.compactions) {
       const admitted = await new ContextWindowController(window.configuration).admit({
-        buildCandidate: ({ completedCompactions }) =>
-          this.contexts.materialize(sessionId, branchId, {
+        buildCandidate: async ({ completedCompactions }) => {
+          const retained = await this.contexts.materialize(sessionId, branchId, {
             contextId: `structured-turn-${turnId}-context-${completedCompactions}`,
             idempotencyKey: `structured-turn-context:${turnId}:${completedCompactions}`,
             promptProvenance: prompt.provenance,
             agentProfileVersionId: pin.profileVersionId,
             transform: (context) => withProviderSystemPrompt(context, prompt.content),
-          }),
+          });
+          return {
+            ...retained,
+            providerInput: buildProviderInputCandidate({
+              context: retained.context,
+              modelDispatch,
+              capacity: window.provenance,
+            }),
+          };
+        },
         estimate: (candidate) =>
-          estimateContextWindow(candidate.context).estimatedTokens,
+          estimateProviderInputCandidate(candidate.providerInput).estimatedTokens,
+        measureUtf8Bytes: (candidate) =>
+          candidate.providerInput.exactUtf8Bytes,
         compact: async ({ iteration }) => {
           const compacted = await this.compactions!.compact(sessionId, branchId, {
             strategy: "deterministic-extractive-v1",
@@ -331,15 +406,24 @@ export class ModelLoop {
       });
       materialized = admitted.candidate;
     } else {
-      materialized = await this.contexts.materialize(sessionId, branchId, {
+      const retained = await this.contexts.materialize(sessionId, branchId, {
         promptProvenance: prompt.provenance,
         agentProfileVersionId: pin.profileVersionId,
         transform: (context) => withProviderSystemPrompt(context, prompt.content),
       });
+      materialized = {
+        ...retained,
+        providerInput: buildProviderInputCandidate({
+          context: retained.context,
+          modelDispatch,
+          capacity: window.provenance,
+        }),
+      };
     }
 
     let rejectedEstimate =
-      estimateContextWindow(materialized.context).estimatedTokens;
+      estimateProviderInputCandidate(materialized.providerInput).estimatedTokens;
+    assertProviderInputWithinProductLimit(materialized.providerInput);
     let priorCallId: string | undefined;
     for (let attempt = 1; attempt <= 3; attempt++) {
       const callId = `structured-turn-${turnId}-call-${attempt}`;
@@ -356,6 +440,7 @@ export class ModelLoop {
           contextId: materialized.contextId,
           effectId,
           modelDispatch,
+          providerInput: materialized.providerInput,
           estimatedInputTokens: rejectedEstimate,
           promptProvenance: prompt.provenance,
           attempt,
@@ -374,7 +459,7 @@ export class ModelLoop {
           operation: "complete",
           input: {
             callId,
-            context: materialized.context,
+            providerInput: materialized.providerInput as unknown as JsonValue,
             modelDispatch: modelDispatch as unknown as JsonValue,
             promptProvenance: prompt.provenance as unknown as JsonValue,
           },
@@ -451,7 +536,14 @@ export class ModelLoop {
         agentProfileVersionId: pin.profileVersionId,
         transform: (context) => withProviderSystemPrompt(context, prompt.content),
       });
-      const nextEstimate = estimateContextWindow(next.context).estimatedTokens;
+      const nextProviderInput = buildProviderInputCandidate({
+        context: next.context,
+        modelDispatch,
+        capacity: window.provenance,
+      });
+      const nextEstimate =
+        estimateProviderInputCandidate(nextProviderInput).estimatedTokens;
+      assertProviderInputWithinProductLimit(nextProviderInput);
       const retry = planContextWindowOverflowRetry({
         classification,
         retriesAlreadyAttempted: attempt - 1,
@@ -472,7 +564,7 @@ export class ModelLoop {
             `Provider overflow retry refused: ${retry.reason}`,
         };
       }
-      materialized = next;
+      materialized = { ...next, providerInput: nextProviderInput };
       rejectedEstimate = nextEstimate;
       priorCallId = callId;
     }
@@ -502,6 +594,20 @@ export class ModelLoop {
       );
       for (const call of Object.values(state.modelCalls)) {
         if (call.status !== "requested" || agentRunCallIds.has(call.id)) continue;
+        const contextEvent = events.find((event) =>
+          event.type === "ContextMaterialized" &&
+          (event.payload as EventPayloads["ContextMaterialized"]).contextId ===
+            call.contextId) as import("../domain/index.ts").AgentEvent<"ContextMaterialized"> | undefined;
+        if (!contextEvent || !call.contextWindow) {
+          throw new ValidationError(
+            `Model call ${call.id} cannot reconstruct its retained provider input`,
+          );
+        }
+        validateProviderInputCandidate(call.providerInput, {
+          context: contextEvent.payload.context,
+          modelDispatch: call.modelDispatch,
+          capacity: call.contextWindow,
+        });
         const effect = state.effects[call.effectId];
         if (!effect || effect.status === "requested" || effect.status === "started") continue;
         if (effect.status === "succeeded") {
@@ -553,7 +659,7 @@ export class ModelLoop {
     const configuration: ModelContextWindowConfiguration = {
       provenance: { provider: resolved.provider, model: resolved.model, source },
       contextWindowTokens: resolved.contextWindowTokens, maxOutputReserveTokens: outputReserveTokens,
-      estimatorId: "utf8-bytes-per-token-v1", triggerRatio: 0.8, targetRatio: 0.6,
+      estimatorId: PROVIDER_INPUT_ESTIMATOR_ID, triggerRatio: 0.8, targetRatio: 0.6,
     };
     return { configuration, provenance: { provider: resolved.provider, model: resolved.model, source, contextWindowTokens: resolved.contextWindowTokens, outputReserveTokens, estimatorId: configuration.estimatorId, triggerRatio: configuration.triggerRatio, targetRatio: configuration.targetRatio } };
   }
@@ -592,6 +698,24 @@ export class ModelLoop {
       producer: "supervisor",
       idempotencyKey: `turn-idle:${callId}`,
       payload: { status: "idle", reason },
+    }]);
+  }
+
+  async #markProductLimitIdle(
+    sessionId: string,
+    branchId: string,
+    error: ProviderInputProductLimitError,
+  ): Promise<void> {
+    await this.storage.appendEvents([{
+      sessionId,
+      branchId,
+      type: "SessionStatusChanged",
+      producer: "supervisor",
+      idempotencyKey: `provider-input-product-limit:${newId()}`,
+      payload: {
+        status: "idle",
+        reason: `${error.code}: ${error.message}`,
+      },
     }]);
   }
 

@@ -27,8 +27,16 @@ import {
   type AgentProfileVersion,
   type InvocationPromptProvenance,
 } from "./agent-profile.ts";
+import {
+  PROVIDER_INPUT_VERSION,
+  estimateProviderInputCandidate,
+  reconstructProviderInputCandidate,
+  validateProviderInputCandidate,
+  type ProviderInputAdmission,
+  type ProviderInputCandidate,
+} from "./provider-input.ts";
 
-export const EVENT_SCHEMA_VERSION = 4 as const;
+export const EVENT_SCHEMA_VERSION = 5 as const;
 export const eventTypes = [
   "SessionCreated", "AgentProfileVersionCreated", "AgentProfileActivated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
@@ -152,8 +160,8 @@ export interface EventPayloads {
     compactionId: string; requestEventId: string; strategy: ContextCompactionStrategy;
     outcome: "failed" | "unknown" | "protected-only" | "no-progress"; error: string; effectId?: string;
   };
-  ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue; promptProvenance?: InvocationPromptProvenance; derivation?: ContextCompactionDerivation };
-  ModelCallRequested: { callId: string; contextId: string; effectId: string; modelDispatch: ModelDispatch; estimatedInputTokens: number; promptProvenance: InvocationPromptProvenance; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
+  ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue; promptProvenance?: InvocationPromptProvenance; providerInputAdmission?: ProviderInputAdmission; derivation?: ContextCompactionDerivation };
+  ModelCallRequested: { callId: string; contextId: string; effectId: string; modelDispatch: ModelDispatch; providerInput: ProviderInputCandidate; estimatedInputTokens: number; promptProvenance: InvocationPromptProvenance; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
   ModelOutputChunk: { callId: string; sequence: number; text: string };
   ModelCallCompleted: { callId: string; responseMessageId?: string; result: ModelCallResult; resultDigest: Sha256Digest; termination: ModelCallTermination; usage: Usage | null; warnings: ModelWarning[]; usageSource: ModelUsageSource };
   ModelCallTerminated: { callId: string; outcome: Exclude<EffectOutcome, "succeeded">; error?: string; failureCode?: ModelEffectFailureCode };
@@ -226,7 +234,7 @@ export interface EventPayloads {
   SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
   AgentRunRequested: { runId: string; task: string; requestKey: string; profilePin: AgentInvocationProfilePin; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
-  AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; retryOfCallId?: string };
+  AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; providerInputVersion: typeof PROVIDER_INPUT_VERSION; providerInputDigest: Sha256Digest; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; retryOfCallId?: string };
   AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; action: AgentAction };
   AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "contract-violation" }>; error: string };
   AgentRunGoalCheckRecorded: { runId: string; actionId: string; goalId: string; requestId: string; status: "passed" | "failed" | "unknown"; summary: string; gateEvaluationEventIds: string[] };
@@ -497,8 +505,8 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     compactionId: id, requestEventId: id, strategy: compactionStrategySchema,
     outcome: z.enum(["failed", "unknown", "protected-only", "no-progress"]), error: z.string().min(1), effectId: id.optional(),
   }).strict(),
-  ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional(), promptProvenance: promptProvenanceSchema.optional(), derivation: compactionDerivationSchema.optional() }).strict(),
-  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, modelDispatch: modelDispatchSchema, estimatedInputTokens: z.number().int().nonnegative(), promptProvenance: promptProvenanceSchema, attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }).strict(),
+  ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional(), promptProvenance: promptProvenanceSchema.optional(), providerInputAdmission: jsonValueSchema.optional(), derivation: compactionDerivationSchema.optional() }).strict(),
+  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, modelDispatch: modelDispatchSchema, providerInput: jsonValueSchema, estimatedInputTokens: z.number().int().nonnegative(), promptProvenance: promptProvenanceSchema, attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }).strict(),
   ModelOutputChunk: z.object({ callId: id, sequence: z.number().int().nonnegative(), text: z.string() }),
   ModelCallCompleted: z.object({ callId: id, responseMessageId: id.optional(), result: modelCallResultSchema, resultDigest: fingerprint, termination: terminationSchema, usage: usageSchema.nullable(), warnings: z.array(modelWarningSchema).max(8), usageSource: usageSourceSchema }).strict(),
   ModelCallTerminated: z.object({ callId: id, outcome: z.enum(["failed", "cancelled", "unknown"]), error: z.string().optional(), failureCode: modelFailureCodeSchema.optional() }).strict().superRefine((value, context) => {
@@ -591,7 +599,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
   AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, profilePin: profilePinSchema, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
   AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
-  AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, retryOfCallId: id.optional() }).strict(),
+  AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), providerInputVersion: z.literal(PROVIDER_INPUT_VERSION), providerInputDigest: fingerprint, estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, retryOfCallId: id.optional() }).strict(),
   AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceSubmissionSchema, action: agentActionSchema }).strict(),
   AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceViolationSchema, error: z.string().min(1) }).strict(),
   AgentRunGoalCheckRecorded: z.object({ runId: id, actionId: id, goalId: id, requestId: id, status: z.enum(["passed", "failed", "unknown"]), summary: z.string().min(1).max(65536), gateEvaluationEventIds: z.array(id) }).strict(),
@@ -621,9 +629,22 @@ export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): 
   if (event.type === "ContextMaterialized") {
     const context = event.payload as unknown as EventPayloads["ContextMaterialized"];
     if (context.promptProvenance) validateContextPromptProvenance(context);
+    if (context.providerInputAdmission) {
+      reconstructProviderInputCandidate(
+        context.context,
+        context.providerInputAdmission,
+      );
+    }
   }
   if (event.type === "ModelCallRequested") {
-    validatePromptProvenance((event.payload as unknown as EventPayloads["ModelCallRequested"]).promptProvenance);
+    const modelCall = event.payload as unknown as EventPayloads["ModelCallRequested"];
+    validatePromptProvenance(modelCall.promptProvenance);
+    const providerInput = validateProviderInputCandidate(modelCall.providerInput);
+    if (!Bun.deepEquals(providerInput.provenance.capacity, modelCall.contextWindow) ||
+        providerInput.provenance.dispatchDigest !== canonicalJsonDigest(modelCall.modelDispatch as unknown as JsonValue) ||
+        estimateProviderInputCandidate(providerInput).estimatedTokens !== modelCall.estimatedInputTokens) {
+      throw new ValidationError("Model call provider input disagrees with retained dispatch, capacity, or estimate");
+    }
   }
   if (event.type === "ContextCompactionRequested") validateCompactionRequestIntegrity(event.payload as unknown as EventPayloads["ContextCompactionRequested"]);
   if (event.type === "RecursiveModelStarted") {

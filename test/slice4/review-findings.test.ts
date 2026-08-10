@@ -8,7 +8,7 @@ afterEach(async()=>{if(root)await closeAll(root,a,b);a=b=undefined;});
 
 function rootEnvelope(originDeviceId:string,content:string):ReplicatedEnvelope{
   const createdAt=originDeviceId==="device-a"?"2026-01-01T00:00:00.000Z":"2026-01-01T00:00:01.000Z";
-  const body={id:"colliding-event",sessionId:"colliding-session",branchId:"colliding-branch",causationId:null,correlationId:null,type:"SessionCreated" as const,schemaVersion:4,committedAt:createdAt,producer:"supervisor",idempotencyKey:`session:${originDeviceId}`,payload:{workspaceId:"workspace",initialBranchId:"colliding-branch",model:{provider:"echo",model:content,reasoningEffort:"provider-default" as const},budget:{},agentProfile:JSON.parse(JSON.stringify(fixtureAgentProfile("colliding-session")))},streamParentId:null};
+  const body={id:"colliding-event",sessionId:"colliding-session",branchId:"colliding-branch",causationId:null,correlationId:null,type:"SessionCreated" as const,schemaVersion:5,committedAt:createdAt,producer:"supervisor",idempotencyKey:`session:${originDeviceId}`,payload:{workspaceId:"workspace",initialBranchId:"colliding-branch",model:{provider:"echo",model:content,reasoningEffort:"provider-default" as const},budget:{},agentProfile:JSON.parse(JSON.stringify(fixtureAgentProfile("colliding-session")))},streamParentId:null};
   const identity={workspaceId:"workspace",originDeviceId,originSequence:1,entityKind:"event" as const,entityId:body.id,dependencies:[],body};const envelopeId=replicatedEnvelopeId(identity);
   const without={protocolVersion:1 as const,envelopeId,...identity,createdAt};return{...without,digest:envelopeDigest(without)};
 }

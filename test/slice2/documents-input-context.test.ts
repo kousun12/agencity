@@ -85,7 +85,7 @@ describe("Slice 2 deterministic, scoped document inputs", () => {
     } finally { await Bun.sleep(30); await supervisor.close(); }
   });
 
-  test("a root model call receives metadata, never the full over-context document", async () => {
+  test("a root model call excludes retained document metadata and full over-context content", async () => {
     const temp = await makeTempRuntime("agencity-slice2-root-context-"); temps.push(temp);
     const provider = new RecordingProvider("capture-root");
     const supervisor = await open(temp, [provider]);
@@ -96,8 +96,13 @@ describe("Slice 2 deterministic, scoped document inputs", () => {
       await supervisor.appendMessage(root.sessionId, root.branchId, "user", "Summarize by querying selected ranges");
       expect((await supervisor.modelLoop.turn(root.sessionId, root.branchId)).outcome).toBe("succeeded");
       const serialized = JSON.stringify(provider.contexts[0]);
-      expect(serialized).toContain(document.documentId);
-      expect(serialized).toContain(document.digest);
+      const contextEvent = (await supervisor.storage.loadEvents(root.sessionId, {
+        branchId: root.branchId,
+      })).find((event) => event.type === "ContextMaterialized");
+      expect(JSON.stringify((contextEvent?.payload as any)?.context))
+        .toContain(document.documentId);
+      expect(serialized).not.toContain(document.documentId);
+      expect(serialized).not.toContain(document.digest);
       expect(serialized).not.toContain(huge);
       expect(new TextEncoder().encode(serialized).byteLength).toBeLessThan(new TextEncoder().encode(huge).byteLength / 4);
     } finally { await supervisor.close(); }

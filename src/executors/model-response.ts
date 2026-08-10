@@ -38,6 +38,7 @@ import {
   type ModelEffectOutputV2,
   type ModelResponseBlock,
   type ModelResponseToolDefinition,
+  type ProviderInputTool,
   type ModelToolCallSummary,
   type ModelToolSubmission,
   type ModelWarning,
@@ -124,8 +125,10 @@ export class ModelResponseGuard {
 
 export function compileRequiredToolSet(
   contract: RequiredToolSetModelResponseContract,
+  resolvedTools: readonly (ModelResponseToolDefinition | ProviderInputTool)[] =
+    contract.tools,
 ): ToolSet {
-  const entries = contract.tools.map((definition) => [
+  const entries = resolvedTools.map((definition) => [
     definition.name,
     tool({
       description: definition.description,
@@ -145,7 +148,9 @@ export function compileRequiredToolSet(
                 error: new Error("Declaration-only tool output is inert"),
               },
       }),
-      ...(contract.schemaEnforcement === "provider-strict"
+      ...(("strict" in definition
+            ? definition.strict
+            : contract.schemaEnforcement === "provider-strict")
         ? { strict: true }
         : {}),
     }),
@@ -161,13 +166,16 @@ export function compileRequiredToolSet(
  */
 export function requiredToolGenerationOptions(
   contract: RequiredToolSetModelResponseContract,
+  resolvedTools: readonly (ModelResponseToolDefinition | ProviderInputTool)[] =
+    contract.tools,
+  toolChoice: "required" = "required",
 ): {
   readonly tools: ToolSet;
   readonly toolChoice: "required";
 } {
   return {
-    tools: compileRequiredToolSet(contract),
-    toolChoice: "required",
+    tools: compileRequiredToolSet(contract, resolvedTools),
+    toolChoice,
   };
 }
 

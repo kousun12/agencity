@@ -12,6 +12,7 @@ import {
   type ModelEffectOutputV2,
 } from "./model-response.ts";
 import { validateModelDispatch, type ModelDispatch } from "./model.ts";
+import { validateProviderInputCandidate } from "./provider-input.ts";
 import { validateRefinementReviewRecursiveResult } from "./refinement-review-contract.ts";
 import {
   REFINEMENT_GOVERNANCE_CONTRACT_ID,
@@ -205,7 +206,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         }
         compactions = { ...state.compactions, [request.id]: { ...request, status: "completed", contextId: p.contextId, ...(p.derivation.effectIds === undefined ? {} : { effectIds: [...p.derivation.effectIds] }), eventId: event.id } };
       }
-      return { ...next, compactions, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records.map((record) => ({ ...record })), contentHash: p.contentHash, ...(p.promptProvenance === undefined ? {} : { promptProvenance: p.promptProvenance }), ...(p.derivation === undefined ? {} : { derivation: p.derivation }), eventId: event.id } } };
+      return { ...next, compactions, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records.map((record) => ({ ...record })), contentHash: p.contentHash, ...(p.promptProvenance === undefined ? {} : { promptProvenance: p.promptProvenance }), ...(p.providerInputAdmission === undefined ? {} : { providerInputAdmission: p.providerInputAdmission }), ...(p.derivation === undefined ? {} : { derivation: p.derivation }), eventId: event.id } } };
     }
     case "ModelCallRequested": {
       const p = event.payload as EventPayloads["ModelCallRequested"];
@@ -226,10 +227,22 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         .flatMap((run) => run.steps)
         .find((candidate) => candidate.callId === p.callId || candidate.modelAttempts.some((attempt) => attempt.callId === p.callId));
       if (ownedStep) {
+        const admission = retainedContext.providerInputAdmission;
+        if (!admission ||
+            admission.version !== p.providerInput.version ||
+            admission.digest !== p.providerInput.digest ||
+            !Bun.deepEquals(admission.modelDispatch, p.modelDispatch) ||
+            !Bun.deepEquals(admission.capacity, p.contextWindow)) {
+          throw new ValidationError(
+            "Agent-run model call differs from its context-bound provider admission",
+          );
+        }
         const owner = Object.values(state.agentRuns).find((run) => run.steps.includes(ownedStep));
         const ownedAttempt = ownedStep.modelAttempts.at(-1);
         if (!ownedAttempt || ownedAttempt.callId !== p.callId || ownedAttempt.effectId !== p.effectId ||
             ownedAttempt.contextId !== p.contextId || ownedAttempt.estimatedInputTokens !== p.estimatedInputTokens ||
+            ownedAttempt.providerInputVersion !== p.providerInput.version ||
+            ownedAttempt.providerInputDigest !== p.providerInput.digest ||
             ownedAttempt.attempt !== (p.attempt ?? 1) || ownedAttempt.retryOfCallId !== p.retryOfCallId ||
             !Bun.deepEquals(ownedAttempt.contextWindow, p.contextWindow)) {
           throw new ValidationError("Agent-run model call must be atomically bound to its retained attempt");
@@ -246,7 +259,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         if (!prior || !Bun.deepEquals(prior.modelDispatch, p.modelDispatch) ||
             !Bun.deepEquals(prior.promptProvenance, p.promptProvenance)) throw new ValidationError("Model overflow retries must reuse the complete prior dispatch and prompt pin");
       }
-      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, estimatedInputTokens: p.estimatedInputTokens, promptProvenance: p.promptProvenance, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
+      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, providerInput: p.providerInput, estimatedInputTokens: p.estimatedInputTokens, promptProvenance: p.promptProvenance, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
       return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } };
     }
     case "ModelOutputChunk": {
@@ -587,12 +600,16 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const p = event.payload as EventPayloads["AgentRunModelAttemptStarted"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
       const expectedAttempt = (step?.modelAttempts.length ?? 0) + 1;
       const prior = step?.modelAttempts.at(-1);
+      const admission = state.contexts[p.contextId]?.providerInputAdmission;
       if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || p.attempt !== expectedAttempt ||
           (p.attempt === 1 && (p.callId !== step.callId || p.effectId !== step.effectId)) ||
-          (p.attempt > 1 && p.retryOfCallId !== prior?.callId) || step.action !== undefined || step.rejection !== undefined) {
+          (p.attempt > 1 && p.retryOfCallId !== prior?.callId) || step.action !== undefined || step.rejection !== undefined ||
+          !admission || admission.version !== p.providerInputVersion ||
+          admission.digest !== p.providerInputDigest ||
+          !Bun.deepEquals(admission.capacity, p.contextWindow)) {
         throw new InvalidTransitionError("agentRunModelAttempt", run?.status ?? "missing-run", "started");
       }
-      const attempt = { attempt: p.attempt, contextId: p.contextId, callId: p.callId, effectId: p.effectId, reason: p.reason, estimatedInputTokens: p.estimatedInputTokens, contextWindow: p.contextWindow, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), eventId: event.id };
+      const attempt = { attempt: p.attempt, contextId: p.contextId, callId: p.callId, effectId: p.effectId, reason: p.reason, providerInputVersion: p.providerInputVersion, providerInputDigest: p.providerInputDigest, estimatedInputTokens: p.estimatedInputTokens, contextWindow: p.contextWindow, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), eventId: event.id };
       const updated = { ...step, modelAttempts: [...step.modelAttempts, attempt], eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
     }
@@ -782,6 +799,7 @@ function validateModelEffectRelation(
   const callId = typeof input.callId === "string" ? input.callId : undefined;
   const compactionId = typeof input.compactionId === "string" ? input.compactionId : undefined;
   const dispatch = input.modelDispatch;
+  const providerInput = input.providerInput;
   if (!dispatch || typeof dispatch !== "object" || Array.isArray(dispatch)) {
     throw new ValidationError("Model effects require a complete immutable model dispatch");
   }
@@ -792,6 +810,8 @@ function validateModelEffectRelation(
     const call = state.modelCalls[callId];
     const promptProvenance = input.promptProvenance;
     if (!call || call.effectId !== payload.effectId || !Bun.deepEquals(call.modelDispatch, dispatch) ||
+        !providerInput || typeof providerInput !== "object" || Array.isArray(providerInput) ||
+        !Bun.deepEquals(call.providerInput, providerInput) ||
         !promptProvenance || typeof promptProvenance !== "object" || Array.isArray(promptProvenance) ||
         !Bun.deepEquals(call.promptProvenance, promptProvenance)) {
       throw new ValidationError("Model effect does not agree with its admitted model call");
@@ -803,6 +823,12 @@ function validateModelEffectRelation(
       !compaction.modelDispatch || !Bun.deepEquals(compaction.modelDispatch, dispatch)) {
     throw new ValidationError("Model effect does not agree with its pinned compaction dispatch");
   }
+  const candidate = validateProviderInputCandidate(providerInput);
+  validateProviderInputCandidate(candidate, {
+    context: { messages: candidate.messages as unknown as import("./json.ts").JsonValue },
+    modelDispatch: compaction.modelDispatch,
+    capacity: candidate.provenance.capacity,
+  });
 }
 
 function modelDispatchFromEffectInput(input: import("./json.ts").JsonValue): ModelDispatch {

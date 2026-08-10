@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   ModelExecutor,
+  PROVIDER_INPUT_ESTIMATOR_ID,
+  buildProviderInputCandidate,
   createAnthropicModelProvider,
   createOpenAIModelProvider,
   createVercelModelProvider,
@@ -219,13 +221,25 @@ describe("AI SDK product model providers", () => {
     ]);
     const configuration = { provider: "openai", model: "openai/gpt-5.4", reasoningEffort: "provider-default" } as const;
     const dispatch = executor.resolveDispatch(configuration);
+    const resolvedCapacity = executor.contextCapacity(dispatch.configuration);
+    const providerInput = buildProviderInputCandidate({
+      context: { messages: [{ role: "user", content: "hello" }] },
+      modelDispatch: dispatch,
+      capacity: {
+        ...resolvedCapacity,
+        outputReserveTokens: 0,
+        estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+        triggerRatio: 0.8,
+        targetRatio: 0.6,
+      },
+    });
     const execution = await executor.execute({
       effectId: "effect-output-limit",
       sessionId: "session",
       branchId: "branch",
       executor: "model",
       operation: "complete",
-      input: { callId: "call-output-limit", context: { messages: [{ role: "user", content: "hello" }] }, modelDispatch: dispatch } as any,
+      input: { callId: "call-output-limit", providerInput, modelDispatch: dispatch } as any,
       idempotencyKey: "effect-output-limit",
       idempotent: false,
       attempt: 1,
@@ -251,13 +265,25 @@ describe("AI SDK product model providers", () => {
       }]);
       const configuration = { provider: "fixture", model: "fixture-model", reasoningEffort: "provider-default" } as const;
       const dispatch = executor.resolveDispatch(configuration);
+      const resolvedCapacity = executor.contextCapacity(dispatch.configuration);
+      const providerInput = buildProviderInputCandidate({
+        context: {},
+        modelDispatch: dispatch,
+        capacity: {
+          ...resolvedCapacity,
+          outputReserveTokens: 0,
+          estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+          triggerRatio: 0.8,
+          targetRatio: 0.6,
+        },
+      });
       const execution = await executor.execute({
         effectId: "effect-warning-redaction",
         sessionId: "session",
         branchId: "branch",
         executor: "model",
         operation: "complete",
-        input: { callId: "call-warning-redaction", context: {}, modelDispatch: dispatch } as any,
+        input: { callId: "call-warning-redaction", providerInput, modelDispatch: dispatch } as any,
         idempotencyKey: "effect-warning-redaction",
         idempotent: false,
         attempt: 1,

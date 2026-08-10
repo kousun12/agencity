@@ -13,8 +13,8 @@ afterEach(async () => {
   directory = undefined;
 });
 
-describe("reasoning/model-capability schema cutover", () => {
-  test.each([1, 2, 3])("rejects version-%d workspace events before applying migrations or deleting data", async (schemaVersion) => {
+describe("provider-input schema cutover", () => {
+  test.each([1, 2, 3, 4])("rejects version-%d workspace events before applying migrations or deleting data", async (schemaVersion) => {
     directory = await mkdtemp(join(tmpdir(), "ag-schema-cutover-"));
     const url = `file:${directory}/agent.db`;
     const raw = createClient({ url });
@@ -42,7 +42,7 @@ describe("reasoning/model-capability schema cutover", () => {
     retained.close();
   });
 
-  test.each([1, 2, 3])("rejects version-%d events before payload projection", (schemaVersion) => {
+  test.each([1, 2, 3, 4])("rejects version-%d events before payload projection", (schemaVersion) => {
     const event = {
       cursor: "1",
       id: `legacy-${schemaVersion}`,
