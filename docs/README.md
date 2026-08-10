@@ -30,12 +30,14 @@ This index is the public documentation entrypoint. Start with the user guide for
 ## Understand
 
 - [Architecture](./architecture.md) — durable state, execution, storage, and capability boundaries.
+- [Glossary](./glossary.md) — canonical definitions of the main product and architecture terms, ordered by conceptual importance.
 - [Capabilities](./capabilities.md) — implemented, unavailable, and placement-dependent behavior.
 - [Product thesis](./stable/BLOG.md) — why Agencity treats context and agent work as durable data.
 - [Repository guide](../AGENTS.md) — canonical product direction, current status, and implementation rules.
 
 ## Reference
 
+- [Glossary](./glossary.md) — authority, identity, work, execution, adaptation, persistence, and deployment vocabulary.
 - [Configuration](./configuration.md) — runtime defaults and overrides.
 - [Event schemas](./events.md) — canonical event headers and payloads.
 - [Relational table registry](./mutable-tables.md) — authoritative, derived, and operational data.
