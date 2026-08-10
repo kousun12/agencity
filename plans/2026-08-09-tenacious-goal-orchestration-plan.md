@@ -37,7 +37,7 @@ Agencity currently has a durable inner run loop:
 
 The default product path creates no required completion gate. In that path, a successful `finish` is accepted as the model's completion claim without an independent semantic evaluator.
 
-The existing `GoalCreated.maxTurns` field is validated and retained but is not enforced. The name is also ambiguous because current budget `turns` count provider model calls, while product discussions may use “turn” to mean a complete top-level autonomous episode.
+The existing `GoalCreated.maxTurns` field is validated and retained but is not enforced. The name is also ambiguous because current session-budget `turns` debit successful provider model completions, while product discussions may use “turn” to mean a complete top-level autonomous episode.
 
 Prime Agent's `/goal` behavior does not create another durable agent identity or an independent judge. It attaches goal state to the current thread and injects another goal prompt after each ordinary assistant turn until the model explicitly calls `goal.complete()`, a token bound is reached, or the user stops it. Agencity needs equivalent tenacity without adopting process or thread state as identity and without weakening its existing gate, outbox, and recovery semantics.
 
@@ -46,6 +46,8 @@ Prime Agent's `/goal` behavior does not create another durable agent identity or
 Agencity will add a **goal episode coordinator** over successor `AgentRun`s on the same session branch.
 
 The implementation reuses the sealed structured-model-operation pattern established by refinement governance: a supervisor-selected model dispatch, one immutable internal profile, one bounded frozen input, one required response tool, strict result validation, durable recursive-child provenance, idempotent recovery, and fail-closed unknown outcomes. Goal compilation and semantic completion review have separate profiles, policies, contracts, and result types; they reuse orchestration machinery rather than refinement-review judgment.
+
+The implementation first extracts a small supervisor-private sealed structured-operation substrate from the existing refinement-specific paths. This is not a public framework. It supports only registered built-in operations and owns the operation's contract, sealed profile, exclusive frozen context, model dispatch, result decoder, and terminal validation. Goal compilation and semantic completion review register separate descriptors on that substrate; they do not reuse refinement policy or admit ambient session context.
 
 The product model is:
 
@@ -78,6 +80,7 @@ Tenacious goal mode is explicit. Ordinary tasks keep the current single-run beha
 - Continue detached through the managed workspace service and recover every committed boundary without duplicate model calls, reviews, effects, or successor runs.
 - Keep the provider-facing tool names fixed at `bun_console` and `finish`.
 - Preserve user pause, cancellation, steering, budget, and completion authority.
+- Keep tactical steering simple: it guides later execution but does not mutate the original request or compiled completion contract.
 
 ## Non-goals
 
@@ -127,6 +130,8 @@ One separate, sealed, read-only model invocation that translates the exact origi
 
 The immutable typed evaluator input produced by the goal compiler. It records the desired state, atomic completion criteria, expected evidence, constraints, non-goals, and unresolved ambiguities together with exact source references and a digest. It is a derived interpretation; the retained original request remains authoritative whenever the two disagree.
 
+The contract is not amended in place. Steering may change tactics, priorities, or the next focus, but completion is still evaluated against the exact original request and optional criteria. A user who wants to change the desired state or completion criteria stops the current goal and starts a new one. This keeps compilation single-shot and avoids hidden reinterpretation.
+
 ### Semantic completion review
 
 One separate, sealed, read-only model invocation that judges a frozen completion claim against the exact original request, compiled goal contract, user-supplied criteria, and attributable evidence. It returns a strict typed decision. Its decision is an independent semantic assessment, not objective proof or runtime authority.
@@ -157,7 +162,7 @@ agencity goal --criteria "all documented release gates pass" --detach \
   "finish the release hardening work"
 ```
 
-Starting a tenacious goal uses two durable stages:
+Starting a tenacious goal uses this durable pipeline:
 
 1. resolve or create the selected root session and branch;
 2. atomically record the exact user request, optional user-supplied criteria, goal identity, completion policy, aggregate bounds, initiating user message, and sealed compilation request;
@@ -180,6 +185,8 @@ The compiler receives only:
 - fixed field definitions and compilation policy;
 - immutable product constraints relevant to goal interpretation; and
 - its strict response contract.
+
+This is an exclusive sealed context, not the ordinary recursive-agent context projection. It contains no retrieved memories, prompt notes, skills, preferences, unrelated messages, active tasks, or other ambient branch state. The same exclusive-context rule applies to semantic completion review.
 
 The compiler prompt instructs the model to:
 
@@ -262,9 +269,13 @@ An active tenacious goal owns root-run admission on its branch. Plain user text 
 - between episodes or while blocked on a user decision, the instruction becomes the exact trigger for coordinator reconciliation and one successor episode;
 - a user who intends unrelated work must stop the goal, create a branch, or select another root.
 
+Steering is execution guidance only. It does not amend the original request, user-supplied criteria, or compiled goal contract. The semantic reviewer receives steering records as attributable execution context, but it evaluates completion against the unchanged original request and compiled contract. If steering expresses a different desired state or completion rule, the user stops this goal and starts a new goal with that request.
+
 Schedules and heartbeats targeting a tenacious goal also enter through the coordinator as wake or steering triggers. They cannot attach an ordinary single-run path to that goal.
 
-`AgentRunService.admit` rejects any direct or `goalMode: "auto"` attachment to a tenacious goal unless the request carries the exact coordinator-issued episode identity and causal decision. This domain check applies to the CLI, TUI, protocol, SDK, schedules, heartbeats, recovery, and internal callers, preventing an ordinary run from bypassing child quiescence, aggregate bounds, gates, or semantic review.
+`AgentRunService.admit` rejects any direct or `goalMode: "auto"` attachment to a tenacious goal unless the internal request carries a reducer-validated `goalEpisodeAdmission` containing the exact goal ID, episode ID, predecessor decision ID, and steering-through cursor selected for that episode. Public callers cannot supply this reserved field. The same admission check applies to the CLI, TUI, protocol, SDK, schedules, heartbeats, recovery, and internal callers, preventing an ordinary run from bypassing child quiescence, aggregate bounds, gates, or semantic review.
+
+The existing orphan-goal recovery path skips tenacious goals. Compilation and successor recovery are owned only by the goal coordinator. Managed product starts, wake delivery, explicit run resume, and startup recovery all enter the same root-session execution queue before invoking coordinator or run advancement.
 
 ### Inspecting and controlling work
 
@@ -288,17 +299,19 @@ Status shows:
 - outstanding goal-attributable child work;
 - the latest progress claim or rejected-completion feedback;
 - the next continuation reason;
-- any stop, uncertainty, or no-progress reason.
+- any stop or uncertainty reason.
 
 `/goal pause` prevents successor admission and requests cancellation of an active root episode according to existing cancellation semantics. It does not cancel child tasks unless the user explicitly requests tree cancellation. `/goal resume` re-enters coordinator reconciliation from durable state.
 
 `/goal stop` records user cancellation and prevents future successor admission. It never rewrites completed effects or child outcomes.
 
-`/goal complete` is an explicit owner completion request. It still requires every owner-configured deterministic gate to pass. It may bypass the optional semantic reviewer because the reviewer cannot overrule the principal, but that bypass and its actor are recorded explicitly.
+`/goal complete` is an explicit owner completion request. It is accepted only while no root episode, gate evaluation, compiler/reviewer operation, or goal-attributable child dependency is active. If work is active, the command gives direct guidance to pause or wait first. It still requires every owner-configured deterministic gate to pass. It may bypass the optional semantic reviewer because the reviewer cannot overrule the principal, but that bypass and its actor are recorded explicitly. Owner completion changes goal status without synthesizing an assistant answer or marking a model run successful.
+
+Pause and stop are atomic owner-control commands. When a root episode is active, the same transaction records the goal lifecycle change and `AgentRunCancellationRequested`; effect cancellation follows existing reconciliation semantics. Pause and stop do not cancel child tasks unless the user separately requests tree cancellation.
 
 The existing `/goal create` command remains an advanced single-run goal-definition operation. `/goal start` is the only command that atomically enables tenacious orchestration and admits episode 1. Existing `/goal clear` becomes a compatibility alias for `/goal stop`; it does not physically erase history. The legacy `continueGoal(maxTurns)` protocol operation is retired in favor of explicit resume, steering, and episode inspection with model-call and episode vocabulary.
 
-A paused or blocked goal continues to occupy the branch's single current-goal slot. Starting another goal fails with direct guidance to resume or stop the current goal, branch the work, or select another root. No incidental command silently replaces a retained goal.
+A paused or blocked goal continues to occupy the branch's single current-goal slot. Starting another goal fails with direct guidance to resume when the stop kind is actionable, stop the current goal, branch the work, or select another root. No incidental command silently replaces a retained goal.
 
 ## Provider contract
 
@@ -350,7 +363,7 @@ The canonical action protocol and `AgentRunStatus` gain explicit continuation/ev
 
 ### Goal-seeking prompt component
 
-Every episode pins a versioned immutable goal-seeking policy component in its effective system-prompt provenance. The component instructs the root to:
+Every episode uses a versioned immutable goal-seeking execution-guidance component in its effective system-prompt provenance. It occupies the existing `executionGuidance` prompt-provenance slot for that invocation rather than adding another prompt-component schema. The component instructs the root to:
 
 - treat the original goal and criteria as user-provided task data;
 - make concrete progress toward the complete desired state;
@@ -380,16 +393,15 @@ interface GoalOrchestrationPolicy {
   completionReview: "none" | "required";
   maxEpisodes: number;
   maxModelCalls: number;
-  maxConsecutiveNoProgressEpisodes: number;
   tokenLimit?: number;
   costLimitUsd?: number;
   wallTimeLimitMs?: number;
 }
 ```
 
-All automatic-continuation policies are finite. Product defaults must be conservative and visible. The first implementation should calibrate numeric defaults through deterministic long-task fixtures before making `/goal start` generally available. Explicit user limits may narrow but never widen a retained session budget.
+All automatic-continuation policies are finite. Product defaults must be conservative and visible. The first implementation should calibrate numeric defaults through deterministic long-task fixtures before making `/goal start` generally available. Explicit user limits may narrow but never widen a retained session budget. `wallTimeLimitMs` is elapsed wall-clock time from the initial goal commit, including child waits and pauses; it is intentionally conservative and simple.
 
-`GoalCreated.maxTurns` is replaced by or deterministically interpreted as `maxModelCalls`. Public surfaces use “model calls” and “episodes” instead of the ambiguous term “turn.” The implementation follows the repository's pre-release event-version policy rather than silently reinterpreting retained history.
+The schema cutover removes `GoalCreated.maxTurns` and adds `maxModelCalls`. It advances the accepted workspace event schema from version 4 to version 5 and rejects version-4 workspaces with reset guidance. Public surfaces use “model calls” and “episodes” instead of the ambiguous term “turn”; retained version-4 values are never silently reinterpreted.
 
 ### Owner lifecycle and orchestration state
 
@@ -417,6 +429,15 @@ terminal
 ```
 
 This separation prevents a transient review or admission stage from being confused with user pause, goal completion, or failure.
+
+`GoalOrchestrationStopped` preserves the more precise effective stop kind without expanding owner lifecycle:
+
+- user-input and reviewer blockers project owner status `blocked` and may be resumed after new steering;
+- exhausted bounds, unavailable capability, missing/corrupt evidence, and unknown outcomes project owner status `blocked` with a non-resumable stop kind;
+- model-declared failure projects owner status `failed`;
+- user cancellation projects owner status `cancelled`.
+
+Non-resumable blocked goals still occupy the branch's current-goal slot until the owner stops the goal, branches, or selects another root. The coordinator never retries an unknown outcome through `/goal resume`.
 
 The schema cutover removes `completion_requested` from owner `GoalStatus`. A goal remains `active` while a completion claim, gates, or semantic review is pending; the episode and coordinator projections carry those transient states. The existing `GoalCompletionRequested` and `recoverIncomplete` paths are replaced by claim-bound gate/review reconciliation for both single-run and tenacious modes. Retained older event schemas fail before projection according to the repository's pre-release compatibility policy.
 
@@ -453,8 +474,6 @@ The implementation adds canonical events equivalent to:
   - episode/run/action IDs, continuation or completion claim, bounded progress, remaining work, proposed final message digest, material pin, and usage summary;
 - `GoalSteeringRecorded`
   - exact user, schedule, or heartbeat trigger; target goal and active/next episode; retained message/event references; and delivery state;
-- `GoalProgressSnapshotRecorded`
-  - episode ID, normalized semantic-outcome digest, unresolved-gap fingerprint, contributing evidence IDs, and consecutive no-progress count;
 - `GoalCompletionReviewRequested`
   - claim/review IDs, frozen review input and digest, reviewer dispatch, and expected coordinator state;
 - `GoalCompletionReviewChildLinked`
@@ -466,7 +485,7 @@ The implementation adds canonical events equivalent to:
 - `GoalOrchestrationStopped`
   - typed stop kind, reason, bound or uncertainty evidence, and actor where applicable.
 
-Names may be adjusted to match the final event registry, but the durable distinctions are required. A projection must never infer a missing review, decision, or successor admission from “the latest run looks terminal.”
+Names may be adjusted to match the final event registry, but the durable distinctions are required. Every claim, review application, owner command, and successor admission carries the expected goal lifecycle, current episode, latest steering-through cursor, and predecessor decision. A stale compare-and-append fails without applying completion or admitting a run. A projection must never infer a missing review, decision, or successor admission from “the latest run looks terminal.”
 
 Operational tables may index current episode/review state for service queries, but canonical meaning remains in events. New tables require classification in `docs/mutable-tables.md`, replay coverage, idempotent migration/open tests, and architecture checks.
 
@@ -487,7 +506,7 @@ review ID: completion claim
 successor decision ID: predecessor episode + accepted decision
 ```
 
-Exact encodings are implementation details, but retries must resolve to the same IDs and durable meaning. Idempotency-key reuse with changed meaning conflicts.
+The successor decision freezes a steering-through cursor. Steering committed after that cursor belongs to the admitted episode's next boundary rather than changing the already-derived admission meaning. Exact encodings are implementation details, but retries must resolve to the same IDs and durable meaning. Idempotency-key reuse with changed meaning conflicts.
 
 ### Durable compilation and atomic first episode
 
@@ -513,7 +532,7 @@ Successor episodes run on the same session and branch because they are continued
 - exact selected root and user resume behavior;
 - the one-active-run-per-branch invariant.
 
-Creating a new root session per episode would incorrectly create new durable identities, fragment budget and context, and turn ordinary continuation into cross-session assignment. Only the sealed reviewer uses a separate retained child session.
+Creating a new root session per episode would incorrectly create new durable identities, fragment budget and context, and turn ordinary continuation into cross-session assignment. The sealed goal compiler and completion reviewer use separate retained child sessions.
 
 ## Context for successor episodes
 
@@ -528,9 +547,9 @@ The first model call of every successor episode receives a supervisor-generated 
 - goal-attributable child tasks, recursive handles, mailbox receipts, and terminal notices;
 - relevant cells, effects, artifacts, working values, and unknown outcomes;
 - exact profile and effective-prompt pins for the new episode;
-- no-progress evidence and next continuation reason.
+- next continuation reason.
 
-The original goal event and current goal definition are protected context records and are always selected deliberately; they are not recoverable only from a generated summary. Large prior evidence may be referenced through existing artifacts and compaction derivations.
+The original goal event and compiled contract are protected context records and are always selected deliberately; they are not recoverable only from a generated summary. The context materializer gains a fail-closed `requiredRecordIds` option for goal episodes: every required record must exist, be visible on the selected route or authorized child-evidence set, match the goal, and appear exactly once in the committed `ContextMaterialized.records`. Large prior evidence may be referenced through existing artifacts and compaction derivations.
 
 The initial user goal message is appended once. Successor episodes receive canonical continuation records rather than duplicate fake user messages. The context materializer includes their exact event IDs through `additionalRecordIds`, and every `ContextMaterialized` event retains those references.
 
@@ -538,17 +557,27 @@ Profile changes activated between episodes apply according to existing profile s
 
 ## Child and recursive work
 
-Tasks and recursive handles created from a goal episode inherit correlation metadata:
+Tasks and recursive handles created from a goal episode inherit one immutable `GoalWorkCorrelation`:
 
 - goal ID;
 - episode ID;
 - origin run and action IDs;
 - creation event ID.
 
+The correlation propagates transitively to descendants. Later retained follow-up work inherits the correlation only when it is explicitly admitted as continuation of the correlated task. Owner-authorized independence stops future dependency waiting, but already-incurred usage and retained provenance remain goal-attributed.
+
 Before automatic goal completion, the supervisor applies a built-in quiescence invariant:
 
 - every goal-attributable child task and recursive handle is terminal; and
 - every required terminal result or notice is committed and available to the root context.
+
+The coordinator does not require task and recursive-handle terminal events to be atomic. It reconciles after either event and advances only when each logical dependency is ready:
+
+- an agent task is ready at its exact `TaskTerminalNoticeDelivered` event;
+- a recursive handle is ready at its terminal `RecursiveModelStatusChanged` event carrying its retained result or failure;
+- the paired task notice for a recursive handle is not counted as a second dependency.
+
+This preserves the existing recoverable split while preventing a task notice from racing ahead of a required typed recursive result.
 
 An active child does not cause busy re-prompting or leave a root run occupying the branch indefinitely. When the root submits `continue` or a completion claim while goal-attributable children remain active:
 
@@ -579,8 +608,9 @@ A tenacious completion claim is evaluated in this order:
    - the completion claim binds to that immutable contract version.
 3. **Dependency quiescence**
    - goal-attributable child work is terminal and delivered.
-4. **Material pin**
-   - the claim records the exact workspace material version and source event IDs.
+4. **Material and evidence pin**
+   - the claim records the exact root-branch material version and source event IDs;
+   - correlated child work is already quiescent and its selected terminal/effect evidence IDs are pinned separately.
 5. **Required deterministic gates**
    - existing outbox-backed gates evaluate against that pin;
    - unchanged definitions and material may reuse exact cached evaluations;
@@ -595,6 +625,8 @@ A tenacious completion claim is evaluated in this order:
 
 Required deterministic gates cannot be waived by the root or semantic reviewer. A user completion request may bypass semantic review but not retained required gates.
 
+The first implementation deliberately keeps the existing branch-local material pin. It does not invent a workspace-global event order across independent sessions. Goal-correlated children must be quiescent before a claim, and their exact terminal and selected effect evidence is included through the separate evidence pin. Unrelated roots are outside this goal's completion pin.
+
 ### Gate behavior across episodes
 
 Gate evaluation is separated from final goal completion. The current `GoalService.requestCompletion` combines those operations and must be split into:
@@ -607,11 +639,13 @@ In single-run mode, existing failed-gate repair may continue in the same run.
 
 In tenacious mode, a `finish` seals the current episode. A failed gate records one bounded rejection and causes a successor episode rather than reopening a supposedly terminal model response. The successor sees the exact gate output and material pin.
 
-If workspace material has not changed, an identical failed gate is not executed repeatedly. The coordinator counts the repeated unchanged rejection as no progress.
+If root-branch material has not changed, an identical failed gate is not executed repeatedly. The cached rejection may cause another bounded successor, but every such episode and model call consumes the finite retained limits.
+
+A cancelled required gate stops the goal as `blocked` with stop kind `gate_cancelled`. A stale gate result is retained as stale evidence and may cause a successor only when the claim remains current and a changed-context repair path exists.
 
 ### Sealed semantic reviewer
 
-The semantic reviewer and goal compiler use the shared sealed structured-model-operation foundation already exercised by refinement governance: durable recursive sessions, supervisor-owned structured-contract admission, exact effect/result provenance, stable operation identity, recovery, and terminal unknown handling. The goal compiler and completion reviewer remain distinct operations with separate sealed profiles and contracts.
+The semantic reviewer and goal compiler use the small supervisor-private sealed structured-operation substrate extracted before goal orchestration. The extraction reuses durable recursive sessions, supervisor-owned structured-contract admission, exact effect/result provenance, stable operation identity, recovery, and terminal unknown handling from refinement governance, while adding an exclusive frozen-context materializer and operation-specific descriptor. The goal compiler and completion reviewer remain distinct operations with separate sealed profiles, contracts, input validators, and result decoders.
 
 The semantic reviewer has:
 
@@ -631,9 +665,10 @@ The frozen input contains:
 - goal owner and orchestration policy;
 - the root's exact completion claim and proposed final response;
 - all required gate definitions and current evaluations;
-- workspace material pin and selected attributable evidence;
+- root-branch material pin and selected attributable evidence;
 - goal-attributable task and recursive-work outcomes;
 - prior semantic decisions and the changes made in response;
+- exact steering records delivered through the claim's steering-through cursor, as execution context rather than amended completion criteria;
 - aggregate usage and remaining bounds;
 - the immutable completion-review policy and response contract.
 
@@ -669,7 +704,7 @@ type GoalCompletionReviewDecision =
     };
 ```
 
-The runtime validates IDs, exact claim binding, schema, byte bounds, evidence existence, and current coordinator state. Supplemental text is diagnostic-only.
+The runtime validates IDs, exact claim binding, schema, byte bounds, evidence membership in the frozen review manifest, and the expected goal/episode/steering coordinator state. Supplemental text is diagnostic-only.
 
 Reviewer `complete` is an independent semantic judgment, not proof that external reality matches the claim. Required gates and explicit uncertainty remain authoritative.
 
@@ -679,7 +714,7 @@ Reviewer `blocked` stops automatic continuation and surfaces the missing require
 
 Malformed output, contract violation, model failure, budget exhaustion, missing frozen evidence, or an unknown model effect never implies completion or continuation. The goal stops in a visible review-failed, review-unavailable, or unknown state according to the exact outcome.
 
-## Bounds and no-progress control
+## Bounds and repetition control
 
 Tenacity is not unbounded retry.
 
@@ -688,30 +723,16 @@ Before every model call, review, and successor admission, the coordinator enforc
 - retained session budget;
 - aggregate goal token, cost, model-call, and wall-time limits;
 - maximum episode count;
-- maximum consecutive no-progress episodes;
 - child budget reservations and attributed usage;
 - cancellation and execution-owner state.
 
 Goal-compilation and semantic-review usage count against the goal. Goal-attributable child usage remains attributed through existing task accounting and also contributes to the goal aggregate.
 
-The goal `maxModelCalls` counter includes the goal-compiler call, root model calls, semantic-review calls, and model calls attributed from goal-correlated descendants. The retained session `turnLimit` continues to count model calls under the existing budget projection. Admission uses the lower remaining allowance. Reaching the session limit produces the existing session/run `budget_exceeded` outcome; reaching the narrower goal limit appends `GoalOrchestrationStopped { kind: "model_call_limit" }`. Neither admits a successor.
+The goal `maxModelCalls` counter counts every attributable `ModelCallRequested`, including failed, cancelled, unknown, compiler, reviewer, overflow-retry, root, and descendant calls. The retained session `turnLimit` keeps its current accounting semantics; goal admission separately checks the stricter remaining goal allowance.
 
-No progress is a deterministic observation, not a reviewer feeling and not a comparison of raw workspace-material cursors. `MessageAppended` and `CellCommitted` are material events, so their new event IDs alone cannot prove progress.
+Goal-correlated child admission reuses the existing declared task-budget reservation model. Active correlated tasks reserve their declared token, cost, model-call, and wall-time allowances from the goal; actual terminal attribution releases unused reservation, and an unknown child conservatively consumes its remaining reservation. Compiler and reviewer children each use fixed one-model-call budgets and bounded token, cost, and wall-time limits. Before a root call, child admission, compiler, reviewer, or successor admission, the coordinator checks actual usage plus active reservations against both the session and goal limits.
 
-At each episode boundary, the coordinator records a canonical `GoalProgressSnapshot` digest over normalized semantic outcomes:
-
-- current required-gate definition and result digests;
-- terminal goal-correlated child/task result digests;
-- artifact and working-value content/version digests;
-- normalized successful file, shell, skill, and other effect outcomes attributable to the episode;
-- completion criteria resolved so far;
-- the current continuation or reviewer-gap fingerprint.
-
-Control events, context/model-call IDs, timestamps, message IDs, and repeated identical cell/effect results do not change the progress digest. Existing workspace-material classification and gate-staleness semantics remain unchanged.
-
-An episode counts as no progress when its normalized progress digest and unresolved-gap fingerprint equal the preceding episode's values. A semantic change resets the count even when a reviewer still requests continuation.
-
-Reaching the no-progress bound stops the goal as blocked with exact evidence. It does not keep prompting the same model with equivalent context.
+The first implementation does not add semantic no-progress digests. Finite `maxEpisodes`, `maxModelCalls`, token, cost, and wall-time bounds prevent unbounded repetition. A versioned semantic no-progress detector may be proposed later if retained trajectories show that the simpler bounds are insufficient.
 
 Hard session-budget exhaustion remains `budget_exceeded`. Unknown effects remain `unknown`. Neither automatically admits a successor.
 
@@ -733,7 +754,6 @@ Automatic successor admission is forbidden after:
 - unknown effect, gate, child, or reviewer outcome;
 - exhausted goal or session bound;
 - execution-owner conflict;
-- repeated no progress;
 - unavailable required semantic-review capability;
 - missing or corrupt required evidence.
 
@@ -764,7 +784,9 @@ Reconciliation reads canonical state and performs only the next legal stage. It 
 - after user pause, resume, completion, or cancellation;
 - during startup recovery.
 
-The implementation must replace the current single mutable run-terminal observer with composable lifecycle subscribers or an equivalent canonical event-driven handoff. Agent task finalization, automatic refinement, and goal coordination cannot overwrite one another's observers.
+The implementation replaces the current mutable run-terminal and boundary observer setters with idempotent canonical reconciliation triggers. Process-local notifications are latency hints only; agent task finalization, automatic refinement, mailbox delivery, and goal coordination recover independently from retained events and cannot overwrite one another's observers.
+
+Startup recovery explicitly skips tenacious goals in `AgentRunService.recoverOrphanGoals`, recovers model/outbox and recursive-handle outcomes first, delivers terminal task evidence, reconciles goal coordination, and only then advances coordinator-admitted root runs.
 
 ### Crash boundaries
 
@@ -806,7 +828,7 @@ The public protocol adds typed inspection for:
 - gate and semantic-review state;
 - successor causal links;
 - outstanding goal-attributable child work;
-- stop and no-progress reasons.
+- stop reasons.
 
 Mutation routes remain owner-scoped:
 
@@ -860,80 +882,94 @@ Implementation requires:
 - historical projection and branch-fork tests;
 - architecture checks for new tables and adapter boundaries.
 
-The repository is pre-release and currently rejects unsupported event schema versions. If the implementation changes released-in-branch goal or run event meaning, it must perform an explicit accepted-schema cutover and fail older workspaces with reset guidance. It must not silently reinterpret retained rows.
+This implementation advances the accepted workspace event schema from version 4 to version 5. Version-4 workspaces fail before projection with reset guidance. The cutover updates goal, run, task, recursive-handle, and formal-action schemas together and never reinterprets retained rows.
 
 ## Implementation slices
 
-### Slice 1 — Domain model and explicit continuation
+Internal deterministic tenacious fixtures remain disabled until Slice 3 exits, and no supported product route exists until Slice 7. Earlier slices may expose types, but no route may start a tenacious goal whose completion could bypass quiescence, gates, or review.
+
+### Slice 1 — Sealed operations and lifecycle reconciliation
+
+- Extract the minimal supervisor-private structured-operation descriptor and registry from the refinement-specific implementation.
+- Add an exclusive frozen-context materializer used only by registered sealed operations.
+- Register the existing refinement operations on the extracted substrate without changing their policies or results.
+- Replace mutable terminal and boundary observer setters with idempotent retained-event reconciliation triggers.
+- Preserve current ordinary run, child-finalization, mailbox, refinement, and recovery behavior.
+
+**Exit:** existing refinement and ordinary-run suites pass unchanged, a sealed-operation fixture proves ambient memory/harness/messages cannot enter the invocation, and multiple lifecycle consumers recover independently without callback ordering being correctness-critical.
+
+### Slice 2 — Version-5 domain and admission cutover
 
 - Define exact goal-source, compiled-contract, orchestration policy, episode, claim, review, and continuation types.
 - Add the sealed goal-compiler profile, prompt policy, one-tool contract, strict validation, and immutable source binding.
 - Add canonical events, schemas, reducers, and projections.
-- Replace ambiguous `maxTurns` with enforced model-call and episode limits.
+- Add transitive `GoalWorkCorrelation` to task and recursive-work admission and retained terminal evidence.
+- Add reserved coordinator-issued episode admission provenance and reducer validation.
+- Replace `maxTurns` with enforced model-call and episode limits under the explicit version-5 reset cutover.
 - Version the one global formal agent contract with the `finish.status = "continue"` variant and domain rejection outside tenacious episodes.
 - Add canonical agent action and run states for continuation and completion evaluation.
-- Remove transient `completion_requested` from owner goal lifecycle and replace its recovery path with claim-bound reconciliation.
+- Add goal usage and active correlated-task reservation projections using existing declared task budgets.
+- Add goal-seeking execution guidance through the existing prompt-provenance slot.
 - Keep ordinary single-run behavior unchanged.
 
-**Exit:** reducer and contract tests prove exact source retention, compiler non-overreach shape and source binding, valid transitions, invalid cross-goal claims, duplicate no-ops, bounds, and compatibility behavior.
+**Exit:** reducer and contract tests prove exact source retention, valid transition/CAS fences, coordinator-only admission, transitive child correlation, reservation accounting, duplicate no-ops, formal-contract v2 behavior, and version-4 rejection. No public tenacious start route exists.
 
-### Slice 2 — Goal episode context and same-branch successor admission
+### Slice 3 — One complete goal episode
 
-- Run and recover compilation through the shared sealed structured-model-operation foundation before admitting episode 1.
+- Run and recover compilation through the sealed structured-operation substrate before admitting episode 1.
 - Atomically bind the validated compiled contract to first-episode admission.
-- Add the immutable goal-seeking prompt component.
+- Materialize fail-closed goal context with exact required records.
 - Pin goal/episode/profile/policy context to every episode invocation.
-- Atomically create the first episode and successor episodes.
-- Suppress duplicate user messages.
-- Route plain user steering, schedules, and heartbeats through the coordinator while a tenacious goal owns the branch.
-- Reject direct non-coordinator run attachment to a tenacious goal.
-- Add aggregate usage and no-progress projections.
-- Add composable run-lifecycle observation.
-
-**Exit:** one exact user request produces one validated compiled contract before root work starts, and an explicit continuation finish starts exactly one successor `AgentRun` on the same session branch with both goal forms and predecessor evidence.
-
-### Slice 3 — Child correlation and waiting
-
-- Correlate child tasks and recursive handles to their origin goal and episode.
-- Add the completion quiescence invariant.
-- Wait on child terminal notices without polling.
-- Reconcile child completion into one successor episode.
-
-**Exit:** a detached root can yield while several children work, then resume exactly once with all committed terminal results.
-
-### Slice 4 — Gate separation and outer-loop repair
-
 - Separate gate evaluation from final goal completion.
+- Remove transient `completion_requested` and replace its ordinary single-run recovery path with claim-bound reconciliation.
 - Preserve exact material pins and cache semantics.
-- Convert rejected tenacious completion claims into successor episodes.
 - Retain current same-run repair for ordinary single-run work.
-
-**Exit:** a failed gate never publishes the provisional final answer and gives the next episode exact bounded repair evidence without duplicate gate execution on unchanged material.
-
-### Slice 5 — Sealed semantic completion review
-
-- Reuse the compiler/refinement-governance structured-operation foundation without reusing either operation's policy or result contract.
-- Add the immutable completion-review policy and sealed reviewer profile.
+- Add the immutable completion-review policy, sealed reviewer profile, and operation descriptor.
 - Register a dedicated built-in one-tool response contract.
 - Freeze and retain review input and model dispatch.
 - Run the reviewer through a durable recursive child.
-- Validate and apply complete, continue, and blocked decisions.
+- Validate complete, continue, and blocked decisions against exact claim, evidence-manifest, and steering-through state.
+- Publish the final assistant message only in the accepted claim transaction.
+- Implement owner pause, stop, and quiescent owner completion semantics.
 - Stop visibly on malformed, unavailable, failed, exhausted, or unknown review.
 
-**Exit:** a premature completion claim rejected by the sealed reviewer causes one attributable successor episode; an accepted claim plus passed gates completes the goal exactly once.
+**Exit:** one internally admitted goal compiles once, runs one episode, withholds its provisional finish, passes quiescence and gates, receives an accepted sealed review, and publishes exactly one final answer. Rejected claims stop as continuation-ready but do not yet admit another episode. Ordinary single-run gates remain compatible.
 
-### Slice 6 — Managed service and recovery
+### Slice 4 — Continuation and correlated child waiting
+
+- Atomically create same-branch successor episodes from explicit continuation, rejected gates, reviewer continuation, or completed child waits.
+- Suppress duplicate user messages and freeze each successor's steering-through cursor.
+- Route plain user steering through the coordinator while a tenacious goal owns the branch.
+- Apply the logical dependency readiness rules for agent tasks and recursive handles.
+- Wait on retained terminal events without polling or callback dependence.
+- Enforce aggregate usage plus active task reservations before every call, child admission, review, and successor.
+- Keep semantic no-progress detection deferred; finite limits remain the repetition bound.
+
+**Exit:** an explicit continuation and one premature completion each admit exactly one successor on the same branch, and a detached root can yield while several correlated children work, then resume exactly once with all committed terminal results.
+
+### Slice 5 — Managed service, wakes, and recovery
 
 - Wire coordinator reconciliation into resident root queues and startup recovery.
+- Route product starts, schedules, heartbeats, explicit resume, and orphan-goal recovery through coordinator ownership rules.
 - Add goal-coordinator keep-alive reporting.
 - Cover every crash boundary and non-idempotent unknown outcome.
 - Preserve graceful shutdown and process fencing.
 
 **Exit:** detach and service restart during any review or successor boundary neither loses work nor duplicates a model call, gate, review, or run.
 
+### Slice 6 — Sync, export, and public protocol
+
+- Add cross-stream sync dependencies and branch-remapping rules for compiler/reviewer links, child evidence, claims, and successors.
+- Extend export completeness and deletion-refusal checks over the complete goal provenance graph.
+- Add typed protocol and TypeScript client inspection/control models.
+- Prove pulled non-owner replicas remain inspection-only for orchestration.
+
+**Exit:** replay, sync divergence, export audit, and owned-scope deletion preserve or fail closed on every retained goal dependency.
+
 ### Slice 7 — Product surfaces and documentation
 
 - Add CLI, protocol client, TypeScript API, and TUI start/control/inspection paths.
+- Route `/goal start`, steering, pause, stop, and completion through the managed product service.
 - Present nested episode and review state without internal IDs in normal use.
 - Add installed-product black-box coverage.
 - Update `AGENTS.md`, README, user guide, API, protocol, events, recovery, security, configuration, verification, and mutable-table documentation.
@@ -951,6 +987,7 @@ The repository is pre-release and currently rejects unsupported event schema ver
 - only one nonterminal root episode exists per branch;
 - episode ordinals and predecessor links cannot fork;
 - a continuation decision admits one exact successor;
+- a successor admission fails when lifecycle, episode, predecessor decision, or steering-through cursor is stale;
 - direct `auto`/`current` attachment cannot bypass a tenacious coordinator;
 - duplicate events are true no-ops;
 - changed idempotent meaning conflicts;
@@ -961,6 +998,7 @@ The repository is pre-release and currently rejects unsupported event schema ver
 ### Provider and context contracts
 
 - the goal compiler receives only frozen exact user input and the sealed compilation policy;
+- ambient memories, harness entries, preferences, unrelated messages, tasks, and activity cannot enter compiler or reviewer context;
 - compiled criteria cite exact source text, preserve ambiguity, and cannot contain authority changes or implementation instructions;
 - malformed, failed, exhausted, or unknown compilation admits no episode;
 - every episode and completion reviewer receives both the exact original request and compiled contract;
@@ -971,7 +1009,8 @@ The repository is pre-release and currently rejects unsupported event schema ver
 - every episode receives the original goal and exact continuation records;
 - goal text cannot rewrite the goal-seeking or reviewer system policy;
 - profile and effective-prompt pins remain exact across every step;
-- context compaction cannot remove the only exact goal or decision reference.
+- context compaction cannot remove the only exact goal or decision reference;
+- missing, off-lineage, duplicate, or wrong-goal required records fail before `ContextMaterialized`.
 
 ### Completion and review
 
@@ -980,7 +1019,7 @@ The repository is pre-release and currently rejects unsupported event schema ver
 - no-gate, no-review policy accepts a root claim explicitly and visibly;
 - required gates pass before semantic review;
 - failed, stale, cancelled, and unknown gates remain distinct;
-- unchanged failed evidence is cached and contributes to no-progress detection;
+- unchanged failed evidence is cached and is not executed again;
 - reviewer complete, continue, blocked, malformed, failed, unavailable, budget-exceeded, and unknown outcomes are covered;
 - accepted completion atomically publishes the exact root message and completes the goal;
 - rejected completion never publishes the provisional message;
@@ -992,15 +1031,17 @@ The repository is pre-release and currently rejects unsupported event schema ver
 - no completion is accepted while goal-attributable child work is nonterminal;
 - waiting closes the prior root run before child completion triggers a successor;
 - terminal child notices trigger one root successor;
+- recursive work does not become ready until its terminal typed handle result is retained, even if its paired task notice arrived first;
 - child failure reaches the next root context as evidence;
 - cancellation tree behavior remains unchanged;
 - child and reviewer usage is attributed to the correct session and goal.
 
 ### Bounds and stopping
 
-- episode, model-call, token, cost, wall-time, and no-progress bounds stop at exact boundaries;
-- repeated identical messages, inspection cells, and effect results do not evade the normalized no-progress bound;
-- session `turnLimit` and goal `maxModelCalls` use the lower remaining allowance and retain distinct stop evidence;
+- episode, model-call, token, cost, and wall-time bounds stop at exact boundaries;
+- every attributable `ModelCallRequested`, including failed, cancelled, unknown, and overflow retries, counts against `maxModelCalls`;
+- active correlated task reservations plus actual usage cannot exceed goal limits;
+- session `turnLimit` and goal `maxModelCalls` retain their distinct accounting and stop evidence;
 - pause prevents a successor already decided but not admitted;
 - cancellation during active root work prevents future admission;
 - blocked and failed root finishes do not auto-continue;
@@ -1018,6 +1059,8 @@ The repository is pre-release and currently rejects unsupported event schema ver
 - installed `agencity goal` works without copied session, branch, goal, run, or review IDs;
 - TUI quit detaches without cancelling the active goal;
 - plain user text, schedules, and heartbeats steer the active tenacious goal instead of creating a bypass run;
+- steering guides execution without changing the original request or compiled completion contract;
+- changing the desired state requires stopping and starting a new goal;
 - starting unrelated work while a paused or blocked goal occupies the branch gives deterministic branch/stop guidance;
 - normal `agencity "TASK"` behavior remains compatible and single-run.
 
@@ -1027,14 +1070,14 @@ The repository is pre-release and currently rejects unsupported event schema ver
 - The exact request is retained verbatim and one sealed compiler produces a bounded source-linked evaluation contract without user confirmation before episode 1.
 - The original request and compiled contract are both visible to every episode and final evaluator, and the original request controls conflicts.
 - The goal remains on one durable root session and branch across at least two `AgentRun` episodes.
-- Every successor episode receives the original goal, current criteria, remaining bounds, exact predecessor evidence, and active profile pin.
+- Every successor episode receives the original goal, original criteria, remaining bounds, exact predecessor evidence, and active profile pin.
 - An explicit continuation finish admits exactly one successor without appending a duplicate user instruction.
 - A premature completion claim can be rejected by deterministic gates or the configured semantic reviewer and produces one attributable successor episode.
 - Required gates and child quiescence pass before goal completion.
 - Only an accepted completion publishes the final assistant answer and appends `GoalStatusChanged(completed)`.
-- Pause, cancellation, blocker, budget exhaustion, no progress, unavailable capability, and unknown outcome stop continuation distinctly.
+- Pause, cancellation, blocker, budget exhaustion, unavailable capability, and unknown outcome stop continuation distinctly.
 - Client detachment and process restart do not duplicate model calls, child work, gates, reviews, messages, or successor runs.
-- Documented finite product defaults allow a deterministic two-episode progress fixture to complete and stop a deterministic repeated-no-op fixture at the configured no-progress bound without exceeding any aggregate limit.
+- Documented finite product defaults allow a deterministic two-episode fixture to complete and stop a deterministic repeated-continuation fixture at the episode or model-call bound without exceeding any aggregate limit.
 - Ordinary single-run tasks retain their current behavior.
 - Full typecheck, architecture checks, unit, integration, end-to-end, acceptance, and acceptance-matrix gates pass; credential-gated external rows are reported separately as pass, fail, or skip.
 
@@ -1042,7 +1085,7 @@ The repository is pre-release and currently rejects unsupported event schema ver
 
 ### Runaway cost
 
-Finite aggregate limits, reviewer accounting, no-progress detection, explicit service status, pause, and cancellation bound automatic continuation.
+Finite aggregate limits, reviewer accounting, explicit service status, pause, and cancellation bound automatic continuation.
 
 ### Reviewer false acceptance
 
@@ -1054,7 +1097,7 @@ The decision and unmet criteria are visible. Bounded continuation prevents infin
 
 ### Repeated equivalent work
 
-Material-version checks, gap fingerprints, gate caching, and the consecutive no-progress bound stop equivalent episodes.
+Gate caching avoids repeating unchanged deterministic checks. Finite episode, model-call, token, cost, and wall-time bounds stop repeated equivalent work. Semantic no-progress detection remains deferred until retained trajectories justify its complexity.
 
 ### Context drift
 
@@ -1064,9 +1107,9 @@ The original goal, criteria, policy, and predecessor evidence are exact canonica
 
 Goal correlation, terminal-notice delivery, dependency quiescence, stable successor IDs, and one active root run per branch prevent premature completion and duplicate wake-up.
 
-### Observer conflicts
+### Reconciliation conflicts
 
-Composable lifecycle subscribers or canonical reconciliation replace the current single mutable terminal observer.
+Idempotent canonical reconciliation replaces correctness-critical mutable terminal and boundary observers. Process-local notifications remain latency hints only.
 
 ### Product confusion
 
@@ -1084,7 +1127,7 @@ The feature is done when the documented installed-product path can:
 6. reject one premature completion claim with attributable feedback;
 7. accept completion only after child quiescence, required gates, and configured semantic review;
 8. survive terminal detachment and managed-service restart at durable boundaries;
-9. stop safely on user authority, bounds, no progress, unavailable capability, or uncertainty; and
+9. stop safely on user authority, finite bounds, unavailable capability, or uncertainty; and
 10. expose the complete compilation, episode, evidence, review, budget, and causal history through public product surfaces.
 
 Until those conditions are reproduced, Agencity should describe the shipped behavior as a durable goal-aware single-run loop with optional completion gates, not as tenacious cross-run goal orchestration.
