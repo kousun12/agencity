@@ -449,6 +449,27 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressKey("r", { shift: true });
       frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS") && !value.includes('"snapshotCursorResume"'));
 
+      setup.mockInput.pressEscape();
+      await setup.mockInput.typeText("/profile");
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value =>
+        value.includes("AGENT PROFILE") && value.includes("Behavioral instructions only"));
+      expect(frame).toContain("Behavioral instructions only");
+      expect(frame).toContain("TRUSTED-LOCAL");
+      setup.mockInput.pressKey("\u001b[6~");
+      frame = await setup.waitForFrame(value => value.includes("Exact active agent prompt"));
+      expect(frame).toContain("Role: Repository agent");
+      setup.resize(78, 22);
+      frame = await setup.waitForFrame(value =>
+        value.includes("AGENT PROFILE") && value.includes("Behavioral instructions only"));
+      expect(frame).toContain("not sandboxed");
+      setup.resize(112, 30);
+      await setup.waitForFrame(value => value.includes("AGENT PROFILE"));
+      setup.mockInput.pressEscape();
+      await setup.mockInput.typeText("/info");
+      setup.mockInput.pressEnter();
+      await setup.waitForFrame(value => value.includes("WORKSPACE STATUS"));
+
       await Bun.sleep(20);
       setup.mockInput.pressKey("\u001b[6~");
       frame = await setup.waitForFrame(value => value.includes("Esc close") && !value.includes("WORKSPACE STATUS"));

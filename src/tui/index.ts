@@ -1,6 +1,14 @@
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { AgentRuntimeError, normalizeReasoningEffort, projectEvents, reduceAgentState, type AgentEvent, type AgentState } from "../domain/index.ts";
+import {
+  AgentRuntimeError,
+  normalizeReasoningEffort,
+  projectEvents,
+  reduceAgentState,
+  type AgentEvent,
+  type AgentState,
+  type GovernedRefinementRecord,
+} from "../domain/index.ts";
 import {
   ProtocolClientError,
   type AgentClient, type BranchWatchHandlers, type ProtocolCapabilities,
@@ -34,7 +42,7 @@ export type TerminalAgentClient = Pick<AgentClient,
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
   "heartbeats" | "createHeartbeat" | "pauseHeartbeat" | "resumeHeartbeat" | "cancelHeartbeat" |
   "schedules" | "createSchedule" | "pauseSchedule" | "resumeSchedule" | "clearSchedule" |
-  "memoryList" | "memorySearch" | "harnessList" | "listSkills" | "getSkill" | "previewSkillImport" | "installSkill" | "enableSkill" | "disableSkill" | "removeSkill" | "proposeSkill" | "refinements" | "requestRefinement" | "refinementReviews" | "refinementPolicy" | "setAutomaticRefinement" | "userCorrection" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
+  "memoryList" | "memorySearch" | "harnessList" | "listSkills" | "getSkill" | "previewSkillImport" | "installSkill" | "enableSkill" | "disableSkill" | "removeSkill" | "proposeSkill" | "agentProfile" | "agentProfiles" | "proposeProfileUpdate" | "governedRefinements" | "rollbackRefinement" | "refinements" | "requestRefinement" | "refinementReviews" | "refinementPolicy" | "setAutomaticRefinement" | "userCorrection" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
   "syncStatus" | "syncNow" | "syncConflicts" | "resolveSyncConflict" | "recoverySummary" | "unknownEffects" |
   "inspectUnknownEffect" | "reconcileUnknownEffect"
 > & Partial<Pick<AgentClient, "abortPendingRequests" | "serviceStatus">>;
@@ -101,6 +109,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/skills", aliases: [], category: "status", usage: "/skills [show|preview|install|test|enable|disable|remove|propose]", summary: "Inspect and manage the unified workspace/profile skill catalog." },
   { name: "/skill", aliases: [], category: "status", usage: "/skill ENTRY_ID JSON", summary: "Invoke a retained skill version." },
   { name: "/skill-test", aliases: [], category: "status", usage: "/skill-test ENTRY_ID [VERSION_ID]", summary: "Run a retained skill test." },
+  { name: "/profile", aliases: [], category: "status", usage: "/profile [show|history|proposals|propose JSON|repropose latest|N JSON|rollback REVISION JSON]", summary: "Inspect and explicitly govern this agent's behavioral profile." },
   { name: "/refine", aliases: [], category: "status", usage: "/refine [INSTRUCTIONS|status|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Run a trajectory review; raw proposal JSON is an advanced diagnostic." },
   { name: "/rollback", aliases: [], category: "status", usage: "/rollback PROPOSAL_ID REASON", summary: "Request governed refinement rollback." },
   { name: "/sync", aliases: [], category: "operations", usage: "/sync", summary: "Run explicit synchronization." },
@@ -212,6 +221,8 @@ export function renderEvent(event: AgentEvent): string | null {
       return Array.isArray(payload.warnings) && payload.warnings.length
         ? payload.warnings.map((warning) => `[model warning] ${conciseValue((warning as { message?: unknown }).message)}`).join("\n")
         : null;
+    case "RefinementProposalTerminalNoticeDelivered":
+      return renderGovernanceNotice(payload.result);
     case "AgentRunStatusChanged": {
       const reason = payload.reason ? ` — ${conciseValue(payload.reason)}` : "";
       switch (payload.status) {
@@ -227,6 +238,40 @@ export function renderEvent(event: AgentEvent): string | null {
     default:
       return null;
   }
+}
+
+const GOVERNANCE_STATUS_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  proposed: "pending validation",
+  validated: "validated; reviewer pending",
+  reviewing: "reviewing",
+  deterministically_rejected: "deterministically rejected",
+  reviewed_rejected: "reviewer rejected",
+  review_failed: "review failed",
+  review_unknown: "review outcome unknown",
+  reviewed_approved: "reviewer approved; application pending",
+  apply_conflict: "apply conflict",
+  apply_failed: "apply failed",
+  applied: "applied",
+});
+
+export function renderGovernanceNotice(value: unknown): string {
+  const record = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const status = String(record.status ?? "unknown");
+  const decision = record.decision && typeof record.decision === "object" && !Array.isArray(record.decision)
+    ? record.decision as Record<string, unknown>
+    : {};
+  const reason = record.reason ?? decision.reason;
+  const guidance = decision.revisionGuidance;
+  const suffix = [
+    reason ? `Reason: ${conciseValue(reason)}` : "",
+    guidance ? `Guidance: ${conciseValue(guidance)}` : "",
+    status === "applied"
+      ? "Reviewer approval establishes policy consistency, not proven improvement."
+      : "",
+  ].filter(Boolean).join(" ");
+  return `[profile governance: ${GOVERNANCE_STATUS_LABELS[status] ?? status.replaceAll("_", " ")}]${suffix ? ` ${suffix}` : ""}`;
 }
 
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]);
@@ -368,9 +413,33 @@ export class TerminalUI {
     };
     await this.#refreshFamily(true);
     const recovery = await this.client.recoverySummary(sessionId, branchId);
+    let profileGovernance: GovernedRefinementRecord[] = [];
+    let profileGovernanceUnavailable = false;
+    try {
+      profileGovernance = await this.#profileGovernanceRecords();
+    } catch {
+      profileGovernanceUnavailable = true;
+    }
     if (announce) {
       this.#write(`${renderStartupStatus(snapshot.state, capabilities, recovery, agentTools.selected)}\n`);
       if (recovery.unknownEffects.length) this.#write("Unknown effects require inspection with /unknown and evidence-only /reconcile; resume never retries them.\n");
+      if (profileGovernanceUnavailable) this.#write("Profile governance notices are temporarily unavailable; profile inspection remains available.\n");
+      const pendingGovernance = profileGovernance.filter(record => ![
+        "deterministically_rejected", "reviewed_rejected", "review_failed", "review_unknown",
+        "apply_conflict", "apply_failed", "applied",
+      ].includes(record.status));
+      if (pendingGovernance.length) {
+        this.#write(`Profile governance: ${pendingGovernance.length} pending. Inspect with /profile proposals.\n`);
+      }
+      const latestNotice = profileGovernance.find(record => record.noticeDelivered && [
+        "deterministically_rejected", "reviewed_rejected", "review_failed", "review_unknown",
+        "apply_conflict", "apply_failed", "applied",
+      ].includes(record.status));
+      if (latestNotice) this.#write(`${renderGovernanceNotice({
+        status: latestNotice.status,
+        reason: latestNotice.terminalReason,
+        decision: latestNotice.decision,
+      })}\n`);
       this.#write("/help opens the command palette. /quit detaches without cancellation.\n");
     }
     await this.#startWatch();
@@ -656,6 +725,61 @@ export class TerminalUI {
     if (line === "/schedules" || line === "/schedule") { this.#detail("/schedules", await this.client.schedules(this.#sessionId,this.#branchId)); return "continue"; }
     if (line.startsWith("/schedule ")) { await this.#schedule(line.slice(10).trim()); return "continue"; }
     if (line === "/memory" || line.startsWith("/memory ")) { const q=line.slice(7).trim();this.#detail("/memory", q?await this.client.memorySearch(this.#sessionId,this.#branchId,q):await this.client.memoryList(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/profile" || line === "/profile show") { this.#detail("/profile", await this.client.agentProfile(this.#sessionId,true));return "continue"; }
+    if (line === "/profile history") {
+      const [profiles,proposals]=await Promise.all([
+        this.client.agentProfiles(this.#sessionId,{includePrompt:true,limit:100}),
+        this.#profileGovernanceRecords(),
+      ]);
+      this.#detail("/profile-history",{...profiles,proposals});return "continue";
+    }
+    if (line === "/profile proposals" || line === "/profile notices") { this.#detail("/profile-proposals",await this.#profileGovernanceRecords());return "continue"; }
+    if (line.startsWith("/profile propose ")) {
+      this.#assertLiveProfileMutation();
+      const input=parseTerminalProfileProposal(line.slice(17));
+      const current=await this.client.agentProfile(this.#sessionId);
+      this.#detail("/profile-proposal",await this.client.proposeProfileUpdate(this.#sessionId,this.#branchId,{
+        expectedProfileVersionId:current.profileVersionId,
+        ...input,
+        evidenceEventIds:input.evidenceEventIds??[],
+        wait:input.wait??true,
+      }));return "continue";
+    }
+    if (line.startsWith("/profile repropose ")) {
+      this.#assertLiveProfileMutation();
+      const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(19));
+      if(!match)throw new Error("/profile repropose requires latest|NUMBER PROPOSAL_JSON");
+      const rejected=(await this.#profileGovernanceRecords()).filter(record=>record.status==="deterministically_rejected"||record.status==="reviewed_rejected");
+      const previous=match[1]==="latest"?rejected[0]:rejected[Number(match[1])-1];
+      if(!previous)throw new Error("Rejected profile proposal selection was not found");
+      const input=parseTerminalProfileProposal(match[2]!);
+      const current=await this.client.agentProfile(this.#sessionId);
+      this.#detail("/profile-proposal",await this.client.proposeProfileUpdate(this.#sessionId,this.#branchId,{
+        expectedProfileVersionId:current.profileVersionId,
+        ...input,
+        evidenceEventIds:input.evidenceEventIds??[],
+        revisesProposalId:previous.proposalId,
+        wait:input.wait??true,
+      }));return "continue";
+    }
+    if (line.startsWith("/profile rollback ")) {
+      this.#assertLiveProfileMutation();
+      const match=/^(\d+)\s+([\s\S]+)$/.exec(line.slice(18));
+      if(!match)throw new Error("/profile rollback requires REVISION ROLLBACK_JSON");
+      const input=parseTerminalProfileRollback(match[2]!);
+      const history=await this.client.agentProfiles(this.#sessionId,{limit:100});
+      const current=history.items.find(item=>item.active);
+      const restore=history.items.find(item=>item.revision===Number(match[1]));
+      if(!current||!restore)throw new Error(`Profile revision ${match[1]} was not found`);
+      if(restore.active)throw new Error(`Profile revision ${match[1]} is already active`);
+      this.#detail("/profile-rollback",await this.client.rollbackRefinement(this.#sessionId,this.#branchId,{
+        targetKind:"agent_profile",targetId:this.#sessionId,
+        expectedCurrentVersionId:current.profileVersionId,
+        restoreVersionId:restore.profileVersionId,
+        reason:input.reason,evidenceEventIds:input.evidenceEventIds??[],
+      }));return "continue";
+    }
+    if (line.startsWith("/profile ")) throw new Error("/profile requires show|history|proposals|propose|repropose or rollback");
     if (line === "/skills") { this.#detail("/skills", await this.client.listSkills(this.#sessionId,this.#branchId,true));return "continue"; }
     if (line.startsWith("/skills ")) { const [action,reference,...rest]=line.slice(8).trim().split(/\s+/);if(action==="show"&&reference)this.#detail("/skills", await this.client.getSkill(this.#sessionId,this.#branchId,reference));else if(action==="preview"&&reference){const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);this.#detail("/skills-preview", preview);}else if(action==="install"&&reference){const [scope,digest]=rest;if((scope!=="workspace"&&scope!=="profile")||!digest)throw new Error("/skills install requires DIRECTORY workspace|profile CONFIRMATION_DIGEST");const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);if(digest!==preview.confirmationDigest)throw new Error(`Confirmation digest must equal ${preview.confirmationDigest}`);this.#detail("/skills", await this.client.installSkill(this.#sessionId,this.#branchId,{directory:reference,scope,confirmationDigest:digest,installedBy:"tui-owner"}));}else if(action==="test"&&reference)this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,reference));else if(action==="enable"&&reference)this.#detail("/skills", await this.client.enableSkill(this.#sessionId,this.#branchId,reference));else if(action==="disable"&&reference)this.#detail("/skills", await this.client.disableSkill(this.#sessionId,this.#branchId,reference));else if(action==="remove"&&reference)this.#detail("/skills", await this.client.removeSkill(this.#sessionId,this.#branchId,reference));else if(action==="propose"&&reference)this.#detail("/refine", await this.client.proposeSkill(this.#sessionId,this.#branchId,[reference,...rest].join(" ")));else throw new Error("/skills requires show|preview|install|test|enable|disable|remove or propose");return "continue"; }
     if (line.startsWith("/skill-test ")) { const [entryId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires NAME_OR_ID");this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,entryId));return "continue"; }
@@ -870,6 +994,18 @@ export class TerminalUI {
     if (this.#historicalCursor !== null) throw new Error("Return to live with /live before opening Agents");
     if (this.#pendingCredentialProvider !== null) throw new Error("Finish or cancel provider login before opening Agents");
     if (!this.#productCatalog) throw new Error("The workspace Agents catalog is unavailable");
+  }
+
+  #assertLiveProfileMutation(): void {
+    if (this.#historicalCursor !== null) throw new Error("Return to live with /live before changing the agent profile");
+  }
+
+  async #profileGovernanceRecords(): Promise<GovernedRefinementRecord[]> {
+    return (await this.client.governedRefinements({limit:100}))
+      .filter(record=>record.proposal.target.kind==="agent_profile"&&
+        record.proposal.target.agentSessionId===this.#sessionId)
+      .sort((left,right)=>right.createdAt.localeCompare(left.createdAt)||
+        right.proposalId.localeCompare(left.proposalId));
   }
 
   async #createRootSession(requestedName = ""): Promise<void> {
@@ -1291,4 +1427,44 @@ function redactSubmittedSecret(error:unknown,secret:string):unknown{
     return safe;
   }
   return new Error(redact(String(error)));
+}
+
+type TerminalProfileProposalInput={
+  replacement:{role:string;purpose:string;instructions:string};
+  reason:string;
+  predictedEffect:string;
+  evidenceEventIds?:string[];
+  wait?:boolean;
+};
+
+function parseTerminalJsonObject(value:string,label:string):Record<string,unknown>{
+  let parsed:unknown;
+  try{parsed=JSON.parse(value);}
+  catch{throw new Error(`${label} must be valid JSON`);}
+  if(!parsed||Array.isArray(parsed)||typeof parsed!=="object")throw new Error(`${label} must be a JSON object`);
+  return parsed as Record<string,unknown>;
+}
+
+function parseTerminalProfileProposal(value:string):TerminalProfileProposalInput{
+  const parsed=parseTerminalJsonObject(value,"Profile proposal");
+  const replacement=parsed.replacement;
+  if(!replacement||Array.isArray(replacement)||typeof replacement!=="object")throw new Error("Profile proposal requires replacement role, purpose, and instructions");
+  const fields=replacement as Record<string,unknown>;
+  if(![fields.role,fields.purpose,fields.instructions].every(item=>typeof item==="string"&&item.trim()))throw new Error("Profile proposal requires non-empty replacement role, purpose, and instructions");
+  if(typeof parsed.reason!=="string"||!parsed.reason.trim()||typeof parsed.predictedEffect!=="string"||!parsed.predictedEffect.trim())throw new Error("Profile proposal requires non-empty reason and predictedEffect");
+  if(parsed.evidenceEventIds!==undefined&&(!Array.isArray(parsed.evidenceEventIds)||!parsed.evidenceEventIds.every(item=>typeof item==="string")))throw new Error("Profile proposal evidenceEventIds must be an array of event IDs");
+  if(parsed.wait!==undefined&&typeof parsed.wait!=="boolean")throw new Error("Profile proposal wait must be boolean");
+  return{
+    replacement:{role:fields.role as string,purpose:fields.purpose as string,instructions:fields.instructions as string},
+    reason:parsed.reason,predictedEffect:parsed.predictedEffect,
+    ...(parsed.evidenceEventIds===undefined?{}:{evidenceEventIds:parsed.evidenceEventIds as string[]}),
+    ...(parsed.wait===undefined?{}:{wait:parsed.wait}),
+  };
+}
+
+function parseTerminalProfileRollback(value:string):{reason:string;evidenceEventIds?:string[]}{
+  const parsed=parseTerminalJsonObject(value,"Profile rollback");
+  if(typeof parsed.reason!=="string"||!parsed.reason.trim())throw new Error("Profile rollback requires a non-empty reason");
+  if(parsed.evidenceEventIds!==undefined&&(!Array.isArray(parsed.evidenceEventIds)||!parsed.evidenceEventIds.every(item=>typeof item==="string")))throw new Error("Profile rollback evidenceEventIds must be an array of event IDs");
+  return{reason:parsed.reason,...(parsed.evidenceEventIds===undefined?{}:{evidenceEventIds:parsed.evidenceEventIds as string[]})};
 }

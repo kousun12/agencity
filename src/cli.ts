@@ -52,7 +52,7 @@ import {
 import { TerminalUI } from "./tui/index.ts";
 import { OpenTerminalUI } from "./tui/opentui.ts";
 
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "refine", "skills", "context", "compact"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact"]);
 
 let activeParsed: ParsedCliArgs | null = null;
 let canonicalHint: { path: AdvancedCommandPath; json: boolean } | null = null;
@@ -163,7 +163,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const reconciliationCommand = parsed.command === "unknown" || parsed.command === "reconcile";
     if (reconciliationCommand && existing.length === 0) throw new ValidationError("No retained session is available for effect reconciliation");
     if ((parsed.command === "branch" || parsed.command === "history") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command}`);
-    if (parsed.command === "refine" && existing.length === 0) throw new ValidationError("No retained session is available for trajectory refinement");
+    if ((parsed.command === "profile" || parsed.command === "refine") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command === "profile" ? "profile management" : "trajectory refinement"}`);
     if (parsed.command === "skills" && existing.length === 0) throw new ValidationError("No retained session is available for skill management");
     if ((parsed.command === "context" || parsed.command === "compact") && existing.length === 0) throw new ValidationError("No retained session is available for context management");
     const forceNew = parsed.command === "new" || parsed.flags.has("new");
@@ -277,6 +277,10 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       }), parsed.flags.has("json"));
       return;
     }
+    if (parsed.command === "profile") {
+      await manageProfileClient(client, selection.sessionId, selection.branchId, parsed);
+      return;
+    }
     if (parsed.command === "refine") {
       const [mode, ...rest] = parsed.positionals;
       if (mode === "status" || mode === "history") {
@@ -373,6 +377,134 @@ async function selectManagedSession(
       ? client.productSelect(byNumber.sessionId, byNumber.branchId)
       : client.productSelect(answer);
   }
+}
+
+type ProfileProposalInput = {
+  readonly replacement: { readonly role: string; readonly purpose: string; readonly instructions: string };
+  readonly reason: string;
+  readonly predictedEffect: string;
+  readonly evidenceEventIds?: readonly string[];
+  readonly wait?: boolean;
+};
+
+function profileProposalInput(encoded: string): ProfileProposalInput {
+  const value = parseJsonObject(encoded, "profile proposal");
+  const replacement = value.replacement;
+  if (!replacement || Array.isArray(replacement) || typeof replacement !== "object") {
+    throw new ValidationError("profile proposal requires replacement role, purpose, and instructions");
+  }
+  const fields = replacement as Record<string, unknown>;
+  if (![fields.role, fields.purpose, fields.instructions].every(item => typeof item === "string" && item.trim())) {
+    throw new ValidationError("profile proposal requires non-empty replacement role, purpose, and instructions");
+  }
+  if (typeof value.reason !== "string" || !value.reason.trim() || typeof value.predictedEffect !== "string" || !value.predictedEffect.trim()) {
+    throw new ValidationError("profile proposal requires non-empty reason and predictedEffect");
+  }
+  if (value.evidenceEventIds !== undefined && (!Array.isArray(value.evidenceEventIds) || !value.evidenceEventIds.every(item => typeof item === "string"))) {
+    throw new ValidationError("profile proposal evidenceEventIds must be an array of event IDs");
+  }
+  if (value.wait !== undefined && typeof value.wait !== "boolean") throw new ValidationError("profile proposal wait must be boolean");
+  return {
+    replacement: {
+      role: fields.role as string,
+      purpose: fields.purpose as string,
+      instructions: fields.instructions as string,
+    },
+    reason: value.reason,
+    predictedEffect: value.predictedEffect,
+    ...(value.evidenceEventIds === undefined ? {} : { evidenceEventIds: value.evidenceEventIds as string[] }),
+    ...(value.wait === undefined ? {} : { wait: value.wait }),
+  };
+}
+
+async function profileGovernanceRecords(client: AgentClient, sessionId: string) {
+  return (await client.governedRefinements({ limit: 100 }))
+    .filter(record => record.proposal.target.kind === "agent_profile" &&
+      record.proposal.target.agentSessionId === sessionId)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) ||
+      right.proposalId.localeCompare(left.proposalId));
+}
+
+async function manageProfileClient(
+  client: AgentClient,
+  sessionId: string,
+  branchId: string,
+  parsed: ParsedCliArgs,
+): Promise<void> {
+  const [action = "show", selector, ...rest] = parsed.positionals;
+  const json = parsed.flags.has("json");
+  if (action === "show" || action === "current") {
+    if (selector !== undefined) throw new ValidationError(`profile ${action} accepts no additional arguments`);
+    printValue(await client.agentProfile(sessionId, true), json);
+    return;
+  }
+  if (action === "history") {
+    if (selector !== undefined) throw new ValidationError("profile history accepts no additional arguments");
+    const [profiles, proposals] = await Promise.all([
+      client.agentProfiles(sessionId, { includePrompt: true, limit: 100 }),
+      profileGovernanceRecords(client, sessionId),
+    ]);
+    printValue({ ...profiles, proposals }, json);
+    return;
+  }
+  if (action === "proposals" || action === "notices") {
+    if (selector !== undefined) throw new ValidationError(`profile ${action} accepts no additional arguments`);
+    printValue(await profileGovernanceRecords(client, sessionId), json);
+    return;
+  }
+  if (action === "propose") {
+    const input = profileProposalInput([selector, ...rest].filter(Boolean).join(" "));
+    const current = await client.agentProfile(sessionId);
+    printValue(await client.proposeProfileUpdate(sessionId, branchId, {
+      expectedProfileVersionId: current.profileVersionId,
+      ...input,
+      evidenceEventIds: input.evidenceEventIds ?? [],
+      wait: input.wait ?? true,
+    }), json);
+    return;
+  }
+  if (action === "repropose") {
+    if (!selector) throw new ValidationError("profile repropose requires latest|NUMBER and proposal JSON");
+    const proposals = (await profileGovernanceRecords(client, sessionId))
+      .filter(record => record.status === "deterministically_rejected" || record.status === "reviewed_rejected");
+    const previous = selector === "latest" ? proposals[0] : proposals[Number(selector) - 1];
+    if (!previous) throw new ValidationError("Rejected profile proposal selection was not found");
+    const input = profileProposalInput(rest.join(" "));
+    const current = await client.agentProfile(sessionId);
+    printValue(await client.proposeProfileUpdate(sessionId, branchId, {
+      expectedProfileVersionId: current.profileVersionId,
+      ...input,
+      evidenceEventIds: input.evidenceEventIds ?? [],
+      revisesProposalId: previous.proposalId,
+      wait: input.wait ?? true,
+    }), json);
+    return;
+  }
+  if (action === "rollback") {
+    if (!selector) throw new ValidationError("profile rollback requires REVISION and rollback JSON");
+    const revision = Number(selector);
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new ValidationError("profile rollback REVISION must be a positive integer");
+    const input = parseJsonObject(rest.join(" "), "profile rollback");
+    if (typeof input.reason !== "string" || !input.reason.trim()) throw new ValidationError("profile rollback requires a non-empty reason");
+    if (input.evidenceEventIds !== undefined && (!Array.isArray(input.evidenceEventIds) || !input.evidenceEventIds.every(item => typeof item === "string"))) {
+      throw new ValidationError("profile rollback evidenceEventIds must be an array of event IDs");
+    }
+    const history = await client.agentProfiles(sessionId, { limit: 100 });
+    const current = history.items.find(item => item.active);
+    const restore = history.items.find(item => item.revision === revision);
+    if (!current || !restore) throw new ValidationError(`Profile revision ${revision} was not found`);
+    if (restore.active) throw new ValidationError(`Profile revision ${revision} is already active`);
+    printValue(await client.rollbackRefinement(sessionId, branchId, {
+      targetKind: "agent_profile",
+      targetId: sessionId,
+      expectedCurrentVersionId: current.profileVersionId,
+      restoreVersionId: restore.profileVersionId,
+      reason: input.reason,
+      evidenceEventIds: (input.evidenceEventIds as string[] | undefined) ?? [],
+    }), json);
+    return;
+  }
+  throw new ValidationError("profile action must be show, history, proposals, propose, repropose, or rollback");
 }
 
 async function manageSkillsClient(client:AgentClient,sessionId:string,branchId:string,parsed:ParsedCliArgs,prompter:ProductPrompter,interactive:boolean):Promise<void>{
@@ -1233,7 +1365,7 @@ async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspac
 }
 
 function taskFor(parsed: ParsedCliArgs): string | undefined {
-  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile", "refine", "skills", "context", "compact"].includes(parsed.command)) return undefined;
+  if (["resume", "attach", "goals", "heartbeats", "schedules", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact"].includes(parsed.command)) return undefined;
   const task = parsed.positionals.join(" ").trim();
   if (parsed.command === "run" && !task) throw new ValidationError("run requires TASK");
   return task || undefined;
@@ -1241,6 +1373,7 @@ function taskFor(parsed: ParsedCliArgs): string | undefined {
 
 function commandRequiresUsableModel(parsed: ParsedCliArgs, task: string | undefined): boolean {
   if (task !== undefined || ["product", "resume", "attach", "refine", "compact"].includes(parsed.command)) return true;
+  if (parsed.command === "profile") return ["propose", "repropose"].includes(parsed.positionals[0] ?? "show");
   if (parsed.command === "heartbeats") return parsed.positionals[0] === "create";
   if (parsed.command === "schedules") return ["once", "every"].includes(parsed.positionals[0] ?? "");
   return false;

@@ -5,10 +5,12 @@ import {
   MODEL_RESPONSE_CONTRACT_SELECTION,
   MODEL_RESPONSE_CONTRACT_SUPPLEMENTAL_TEXT,
   MODEL_RESPONSE_CONTRACT_VERSION,
+  REFINEMENT_GOVERNANCE_CONTRACT_ID,
   REFINEMENT_REVIEW_CONTRACT_ID,
   REFINEMENT_REVIEW_TOOL_NAME,
   ValidationError,
   validateModelEffectOutputV2,
+  validateRefinementGovernanceRecursiveResult,
   validateRefinementReviewRecursiveResult,
   type AgentState,
   type ModelConfiguration,
@@ -266,9 +268,13 @@ export function deriveModelContractDiagnostics(
       continue;
     }
     try {
-      const result = validateRefinementReviewRecursiveResult(recursive.result, {
-        contractDigest: contract.contractDigest,
-      });
+      const result = contract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID
+        ? validateRefinementGovernanceRecursiveResult(recursive.result, {
+            contractDigest: contract.contractDigest,
+          })
+        : validateRefinementReviewRecursiveResult(recursive.result, {
+            contractDigest: contract.contractDigest,
+          });
       countSubmission(result.contractId, result.toolName);
       outcomes.push({
         kind: "formal-submission",

@@ -67,6 +67,7 @@ export interface RecursiveModelState { readonly id: string; readonly taskId: str
 export interface UserCorrectionState { readonly id: string; readonly correctedEventIds: string[]; readonly correction: string; readonly eventId: string; }
 export interface RefinementReviewState {
   readonly id: string; readonly fingerprint: string; readonly mode: "manual" | "automatic" | "skill_creation";
+  readonly waitForGovernance: boolean;
   readonly requestedScope: "local" | "workspace" | "user" | "global"; readonly requestedScopeKey: string;
   readonly allowedKinds: ("memory" | "prompt_note" | "skill" | "subagent_spec")[];
   readonly triggerId: string; readonly triggerKind: string; readonly triggerFingerprint: string;

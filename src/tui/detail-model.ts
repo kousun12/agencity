@@ -137,9 +137,9 @@ function titleCase(value: string): string {
 
 function markerTone(status: unknown): TerminalDetailTone {
   const normalized = string(status).toLowerCase();
-  if (["succeeded", "completed", "active", "online", "connected", "passed", "validated", "promoted", "enabled"].includes(normalized)) return "success";
-  if (["failed", "blocked", "unknown", "error", "quarantined", "rejected"].includes(normalized)) return "danger";
-  if (["pending", "running", "completion_requested", "offline", "paused", "revision_required"].includes(normalized)) return "warning";
+  if (["succeeded", "completed", "active", "online", "connected", "passed", "validated", "promoted", "enabled", "applied"].includes(normalized)) return "success";
+  if (["failed", "blocked", "unknown", "error", "quarantined", "rejected", "deterministically_rejected", "reviewed_rejected", "review_failed", "review_unknown", "apply_conflict", "apply_failed"].includes(normalized)) return "danger";
+  if (["pending", "proposed", "reviewing", "reviewed_approved", "running", "completion_requested", "offline", "paused", "revision_required"].includes(normalized)) return "warning";
   return "normal";
 }
 
@@ -555,6 +555,188 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
   };
 }
 
+const GOVERNANCE_STATUS_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  proposed: "pending validation",
+  validated: "validated · reviewer pending",
+  reviewing: "reviewing",
+  deterministically_rejected: "deterministically rejected",
+  reviewed_rejected: "reviewer rejected",
+  review_failed: "review failed",
+  review_unknown: "review outcome unknown",
+  reviewed_approved: "reviewer approved · application pending",
+  apply_conflict: "apply conflict",
+  apply_failed: "apply failed",
+  applied: "applied",
+});
+
+function governanceStatus(value: unknown): string {
+  const status = string(value, "unknown");
+  return GOVERNANCE_STATUS_LABELS[status] ?? displayStatus(status);
+}
+
+function principalLabel(value: unknown): string {
+  const principal = record(value);
+  if (principal.kind === "owner") return "workspace owner";
+  if (principal.kind === "automatic_refiner") return "automatic trajectory refiner";
+  if (principal.kind === "agent") return "agent";
+  if (principal.kind === "user") return "user";
+  if (principal.kind === "system") return "sealed system";
+  return displayStatus(principal.kind);
+}
+
+function boundedMultiline(value: unknown, max = 9_600): string {
+  const normalized = scrubText(string(value)).trim();
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
+}
+
+function profileDiff(current: UnknownRecord, previous: UnknownRecord | undefined): string {
+  if (!previous) return "Initial materialized profile.";
+  const changed = (["role", "purpose", "instructions"] as const).filter(field => current[field] !== previous[field]);
+  if (!changed.length) return "Content exactly restored from an earlier approved version.";
+  return changed.map(field =>
+    `${titleCase(field)}: ${oneLine(previous[field], 90)} → ${oneLine(current[field], 90)}`).join("\n");
+}
+
+function governanceProposalRow(item: UnknownRecord, index: number): TerminalDetailRow {
+  const proposal = record(item.proposal);
+  const decision = record(item.decision);
+  const frozen = record(item.frozenInput);
+  const constitution = record(frozen.constitution);
+  const policy = record(frozen.reviewPolicy);
+  const dispatch = record(frozen.reviewerDispatch);
+  const reviewerModel = record(dispatch.model);
+  const reason = item.terminalReason ?? decision.reason ?? proposal.reason;
+  const guidance = decision.revisionGuidance;
+  const criteria = Array.isArray(decision.violatedCriteria)
+    ? decision.violatedCriteria.map(String)
+    : Array.isArray(decision.satisfiedCriteria)
+      ? decision.satisfiedCriteria.map(String)
+      : [];
+  const provenance = [
+    frozen.proposerRelationship ? `Proposer relationship: ${displayStatus(frozen.proposerRelationship)}` : "",
+    Object.keys(constitution).length
+      ? `Constitution: ${string(constitution.componentId)} v${number(constitution.version) ?? "?"} · ${string(constitution.digest)}`
+      : "",
+    Object.keys(policy).length
+      ? `Review policy: ${string(policy.componentId)} v${number(policy.version) ?? "?"} · ${string(policy.digest)}`
+      : "",
+    frozen.canonicalDigest ? `Frozen review input: ${string(frozen.canonicalDigest)}` : "",
+    Object.keys(dispatch).length
+      ? `Reviewer dispatch: ${reviewerModel.provider && reviewerModel.model ? `${model(reviewerModel)} · ` : ""}${oneLine(dispatch, 600)}`
+      : "",
+    item.reviewerSessionId ? `Reviewer route: ${string(item.reviewerSessionId)} / ${string(item.reviewerBranchId, "—")}` : "",
+    item.reviewDecisionId ? `Review decision: ${string(item.reviewDecisionId)}` : "",
+  ].filter(Boolean);
+  return {
+    label: `${index + 1}. ${sentence(proposal.predictedEffect, 120)}`,
+    value: governanceStatus(item.status),
+    detail: [
+      `Proposer: ${principalLabel(proposal.principal)}`,
+      reason ? `Reason: ${sentence(reason, 500)}` : "",
+      criteria.length ? `Criteria: ${criteria.join("; ")}` : "",
+      guidance ? `Revision guidance: ${sentence(guidance, 800)}` : "",
+      ...provenance,
+      item.noticeDelivered === true ? "Terminal notice delivered durably." : item.status ? "Terminal notice pending or not applicable." : "",
+      item.status === "applied" ? "Reviewer approval establishes policy consistency, not proven improvement." : "",
+    ].filter(Boolean).join("\n"),
+    tone: markerTone(item.status),
+  };
+}
+
+function profileDetail(command: string, value: unknown): TerminalInspectionDetail {
+  const source = record(value);
+  if (command === "/profile-proposal") {
+    return {
+      kind: "inspection",
+      command,
+      title: "Profile proposal",
+      summary: governanceStatus(source.status),
+      sections: [{ title: "Governance result", rows: [governanceProposalRow(source, 0)] }],
+      raw: value,
+    };
+  }
+  if (command === "/profile-rollback") {
+    return {
+      kind: "inspection",
+      command,
+      title: "Profile rollback",
+      summary: "Exact earlier content was restored through a new immutable version.",
+      sections: [{
+        title: "Restoration",
+        rows: [{
+          label: "Rollback applied",
+          value: "applied",
+          detail: [
+            `Previous version: ${string(source.previousVersionId, "—")}`,
+            `Restore source: ${string(source.restoreSourceVersionId, "—")}`,
+            `New restoration version: ${string(source.restorationVersionId, "—")}`,
+          ].join("\n"),
+          tone: "success",
+        }],
+      }],
+      raw: value,
+    };
+  }
+  const proposals = records(source.proposals ?? (command === "/profile-proposals" ? value : []));
+  const profiles = records(source.items ?? (command === "/profile" ? [value] : []))
+    .sort((left, right) => (number(right.revision) ?? 0) - (number(left.revision) ?? 0));
+  const profilesAscending = [...profiles].sort((left, right) =>
+    (number(left.revision) ?? 0) - (number(right.revision) ?? 0));
+  const profileRows = profiles.map(profile => {
+    const revision = number(profile.revision) ?? 0;
+    const previous = profilesAscending.find(item => (number(item.revision) ?? 0) === revision - 1);
+    const proposal = proposals.find(item => record(item.proposal).proposalId === profile.sourceProposalId ||
+      item.proposalId === profile.sourceProposalId);
+    const frozen = record(proposal?.frozenInput);
+    const constitution = record(frozen.constitution);
+    const policy = record(frozen.reviewPolicy);
+    return {
+      label: `Revision ${revision} · ${string(profile.role, "Unnamed role")}`,
+      value: profile.active === true ? "ACTIVE" : "historical",
+      detail: [
+        `Purpose: ${sentence(profile.purpose, 600)}`,
+        `Created by: ${principalLabel(profile.createdBy)} · ${dateTime(profile.createdAt)}`,
+        `Reason: ${sentence(profile.reason, 500)}`,
+        profile.restoresProfileVersionId ? "Restoration: exact earlier approved content." : "",
+        profileDiff(profile, previous),
+        profile.sourceProposalId ? `Proposal: ${string(profile.sourceProposalId)}` : "Initial sealed profile; no proposal.",
+        profile.reviewDecisionId ? `Review decision: ${string(profile.reviewDecisionId)}` : "",
+        Object.keys(constitution).length
+          ? `Constitution: ${string(constitution.componentId)} v${number(constitution.version) ?? "?"} · ${string(constitution.digest)}`
+          : "",
+        Object.keys(policy).length
+          ? `Review policy: ${string(policy.componentId)} v${number(policy.version) ?? "?"} · ${string(policy.digest)}`
+          : "",
+      ].filter(Boolean).join("\n"),
+      tone: profile.active === true ? "success" as const : "muted" as const,
+    };
+  });
+  const sections: TerminalDetailSection[] = [];
+  if (profiles.length) {
+    sections.push({ title: profiles.length === 1 ? "Current profile" : `Profile history · ${profiles.length}`, rows: profileRows });
+    const active = profiles.find(profile => profile.active === true) ?? profiles[0]!;
+    if (active.instructions) sections.push({
+      title: "Active behavioral instructions",
+      rows: [{ label: "Instructions", detail: boundedMultiline(active.instructions) }],
+    });
+    if (active.exactAgentPrompt) sections.push({
+      title: "Exact active agent prompt",
+      rows: [{ label: string(active.promptContractId, "agencity.agent-profile.v1"), detail: boundedMultiline(active.exactAgentPrompt) }],
+    });
+  }
+  sections.push(proposals.length
+    ? { title: `Governance proposals · ${proposals.length}`, rows: proposals.map(governanceProposalRow) }
+    : emptySection("Governance proposals", "No retained profile proposals."));
+  return {
+    kind: "inspection",
+    command,
+    title: command === "/profile" ? "Agent profile" : command === "/profile-proposals" ? "Profile governance" : "Profile history",
+    summary: "Behavioral instructions only. Runtime authority remains trusted-local and is not sandboxed.",
+    sections,
+    raw: value,
+  };
+}
+
 function contextDetail(command: string, value: unknown): TerminalInspectionDetail {
   const item = record(value);
   const inspection = "canonicalEventCount" in item;
@@ -802,6 +984,7 @@ export function buildTerminalDetail(command: string, value: unknown): TerminalIn
   if (command === "/heartbeat" || command === "/heartbeats") return heartbeatsDetail(command, value);
   if (command === "/schedule" || command === "/schedules") return schedulesDetail(command, value);
   if (command === "/memory") return memoryDetail(value);
+  if (command.startsWith("/profile")) return profileDetail(command, value);
   if (command.startsWith("/skill")) return skillsDetail(command, value);
   if (command === "/refine" || command === "/rollback") return refinementDetail(command, value);
   if (command === "/context" || command === "/compact") return contextDetail(command, value);

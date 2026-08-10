@@ -2,7 +2,7 @@ import {
   isValidSkillName, newId, NotFoundError, ValidationError, type AgentEvent, type CandidateAllocationRecord,
   type EvaluationObservationRecord, type HarnessContent, type HarnessEdit, type HarnessKind,
   type HarnessRecord, type HarnessScope, type HarnessVersionRecord, type HarnessVersionStatus,
-  type JsonValue, type ObjectiveEvaluation, type RefinementDecisionRecord, type RefinementProposalRecord,
+  type JsonValue, type NewAgentEvent, type ObjectiveEvaluation, type RefinementDecisionRecord, type RefinementProposalRecord,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { SkillService } from "./skills.ts";
@@ -484,6 +484,234 @@ export class HarnessService {
     const rows = await this.storage.readonlyQuery({ sql: `SELECT * FROM refinement_proposals${status ? " WHERE status=?" : ""} ORDER BY created_at,proposal_id`, args: status ? [status] : [] });
     return rows.map((row: any) => rowToProposal(row));
   }
+
+  /** Prepares the complete deterministic event plan without mutating canonical state. */
+  async prepareGoverned(
+    sessionId: string,
+    branchId: string,
+    proposalId: string,
+    targetKind: HarnessKind,
+    edits: readonly HarnessEdit[],
+    evidenceEventIds: readonly string[],
+    createdBy: string,
+  ): Promise<{
+    readonly versionIds: readonly string[];
+    readonly skillVersionIds: readonly string[];
+    readonly creationEvents: readonly NewAgentEvent[];
+    readonly finalEvents: readonly NewAgentEvent[];
+  }> {
+    await this.#session(sessionId, branchId);
+    if (!edits.length || edits.length > MAX_EDITS) {
+      throw new ValidationError(`A governed refinement requires 1-${MAX_EDITS} edits`);
+    }
+    const visible = new Set((await this.storage.loadEvents(sessionId, { branchId })).map((event) => event.id));
+    for (const evidenceId of evidenceEventIds) {
+      if (!visible.has(evidenceId)) throw new ValidationError("Governed refinement evidence is outside the authorized route");
+    }
+    const versionIds: string[] = [];
+    const skillVersionIds: string[] = [];
+    const creationEvents: NewAgentEvent[] = [];
+    const finalEvents: NewAgentEvent[] = [];
+    const touched = new Set<string>();
+    const intendedNames = new Set<string>();
+    for (const [index, edit] of edits.entries()) {
+      assertEditShape(edit);
+      if (edit.operation !== "create") {
+        if (touched.has(edit.entryId)) throw new ValidationError(`Multiple governed edits target ${edit.entryId}`);
+        touched.add(edit.entryId);
+      }
+      if (edit.operation === "retire") {
+        const entry = await this.get(edit.entryId);
+        if (!entry) throw new NotFoundError("harness entry", edit.entryId);
+        await this.#assertEntryScopeAuthority(sessionId, entry);
+        if (entry.kind !== targetKind) throw new ValidationError(`Harness target kind mismatch for ${edit.entryId}`);
+        if (entry.currentVersionId !== edit.expectedVersionId) {
+          throw new ValidationError(`Harness compare-and-swap failed for ${edit.entryId}`);
+        }
+        if (entry.status === "retired") continue;
+        finalEvents.push({
+          sessionId, branchId, type: "HarnessVersionStatusChanged", producer: "supervisor",
+          idempotencyKey: `governed-harness-retire:${proposalId}:${edit.entryId}`,
+          payload: { entryId: edit.entryId, versionId: edit.expectedVersionId, status: "retired", reason: edit.reason ?? "Approved governed retirement", proposalId },
+        });
+        continue;
+      }
+      const entryId = edit.operation === "create" ? `entry-${stableId(`${proposalId}:${index}`)}` : edit.entryId;
+      const versionId = `version-${stableId(`governed:${proposalId}:${index}`)}`;
+      const existingVersion = await this.getVersion(versionId);
+      if (existingVersion) {
+        if (existingVersion.entryId !== entryId || existingVersion.proposalId !== proposalId ||
+            existingVersion.kind !== targetKind) {
+          throw new ValidationError("Governed harness version identity collision");
+        }
+        versionIds.push(versionId);
+        if (targetKind === "skill") {
+          skillVersionIds.push(versionId);
+          if (existingVersion.status === "candidate") {
+            finalEvents.push({
+              sessionId, branchId, type: "HarnessVersionStatusChanged", producer: "supervisor",
+              idempotencyKey: `governed-skill-activated:${versionId}`,
+              payload: { entryId, versionId, status: "active", reason: "Approved governed refinement passed declared tests", proposalId },
+            });
+          } else if (existingVersion.status !== "active") {
+            throw new ValidationError(`Generated skill ${versionId} is terminal ${existingVersion.status}`);
+          }
+        } else if (existingVersion.status !== "active") {
+          throw new ValidationError(`Governed harness version ${versionId} is not active`);
+        }
+        continue;
+      }
+      const previous = edit.operation === "replace" ? await this.get(edit.entryId) : null;
+      if (edit.operation === "replace") {
+        if (!previous) throw new NotFoundError("harness entry", edit.entryId);
+        await this.#assertEntryScopeAuthority(sessionId, previous);
+        if (previous.kind !== targetKind) throw new ValidationError(`Harness target kind mismatch for ${edit.entryId}`);
+        if (previous.currentVersionId !== edit.expectedVersionId) throw new ValidationError(`Harness compare-and-swap failed for ${edit.entryId}`);
+      } else if (edit.kind !== targetKind) {
+        throw new ValidationError("Harness create edit kind does not match its governed target");
+      }
+      const kind = edit.operation === "create" ? edit.kind : previous!.kind;
+      const contentErrors: string[] = [];
+      validateContent(kind, edit.content, contentErrors);
+      if (contentErrors.length) throw new ValidationError(contentErrors.join("; "));
+      if (kind === "skill") {
+        assertSkillName(edit.operation === "create" ? edit.name : edit.name ?? previous!.name);
+        this.#assertSkillPermissions(edit.content);
+      }
+      const scope = edit.operation === "create" ? edit.scope : previous!.scope;
+      const scopeKey = edit.operation === "create" ? await this.#scopeKey(sessionId, scope, edit.scopeKey) : previous!.scopeKey;
+      const name = edit.operation === "create" ? edit.name : edit.name ?? previous!.name;
+      const nameKey = `${kind}:${scope}:${scopeKey}:${name}`;
+      if (intendedNames.has(nameKey)) throw new ValidationError(`Conflicting governed harness name ${name}`);
+      intendedNames.add(nameKey);
+      const duplicate = await this.storage.readonlyQuery({
+        sql: "SELECT entry_id FROM harness_entries WHERE kind=? AND scope=? AND scope_key=? AND name=? AND status IN ('active','candidate') AND entry_id<>?",
+        args: [kind,scope,scopeKey,name,entryId],
+      });
+      if (duplicate.length) throw new ValidationError(`Conflicting active harness name ${name}`);
+      const status = kind === "skill" ? "candidate" as const : "active" as const;
+      creationEvents.push({
+        sessionId, branchId, type: "HarnessVersionCreated", producer: "supervisor",
+        idempotencyKey: `governed-harness-version:${versionId}`,
+        payload: {
+          entryId, versionId, version: previous ? previous.current.version + 1 : 1,
+          kind, scope, scopeKey,
+          name,
+          content: edit.content as unknown as JsonValue,
+          tags: unique([...(edit.tags ?? previous?.current.tags ?? [])]),
+          confidence: edit.confidence ?? previous?.current.confidence ?? 0.5,
+          status,
+          evidenceEventIds: unique([...evidenceEventIds, ...(edit.evidenceEventIds ?? [])]),
+          conflictEntryIds: unique([...(edit.conflictEntryIds ?? previous?.current.conflictEntryIds ?? [])]),
+          ...(previous ? { supersedesVersionId: previous.currentVersionId } : {}),
+          proposalId, createdBy, lastConfirmedAt: new Date().toISOString(),
+        },
+      });
+      versionIds.push(versionId);
+      if (kind === "skill") {
+        skillVersionIds.push(versionId);
+        finalEvents.push({
+          sessionId, branchId, type: "HarnessVersionStatusChanged", producer: "supervisor",
+          idempotencyKey: `governed-skill-activated:${versionId}`,
+          payload: { entryId, versionId, status: "active", reason: "Approved governed refinement passed declared tests", proposalId },
+        });
+      }
+    }
+    return { versionIds, skillVersionIds, creationEvents, finalEvents };
+  }
+
+  async testGovernedSkill(
+    sessionId: string,
+    branchId: string,
+    proposalId: string,
+    versionId: string,
+  ): Promise<void> {
+    const version = await this.getVersion(versionId);
+    if (!version || version.kind !== "skill" || version.proposalId !== proposalId) {
+      throw new ValidationError("Governed skill version is unavailable or belongs to another proposal");
+    }
+    if (version.status === "active") return;
+    if (version.status !== "candidate") {
+      throw new ValidationError(`Generated skill ${versionId} is terminal ${version.status}`);
+    }
+    if (!this.skills) throw new ValidationError("Generated skill tests are unavailable");
+    const report = await this.skills.test(sessionId, branchId, version.entryId, versionId, false, {
+      idempotencyKey: `governed-skill-test:${versionId}`,
+    });
+    if (report.outcome !== "succeeded" || !report.compiled || report.failed > 0) {
+      await this.storage.appendEvents([{
+        sessionId, branchId, type: "HarnessVersionStatusChanged", producer: "supervisor",
+        idempotencyKey: `governed-skill-rejected:${versionId}`,
+        payload: { entryId: version.entryId, versionId, status: "rejected", reason: "Generated skill compile/runtime tests failed", proposalId },
+      }]);
+      throw new ValidationError(`Generated skill ${versionId} failed compile/runtime tests`);
+    }
+  }
+
+  async prepareRestoreGoverned(
+    sessionId: string,
+    branchId: string,
+    input: {
+      readonly targetId: string;
+      readonly expectedCurrentVersionId: string;
+      readonly restoreVersionId: string;
+      readonly rollbackId: string;
+      readonly reason: string;
+      readonly evidenceEventIds: readonly string[];
+      readonly createdBy: string;
+    },
+  ): Promise<{ readonly version: HarnessVersionRecord; readonly events: readonly NewAgentEvent[] }> {
+    const entry = await this.get(input.targetId);
+    if (!entry) throw new NotFoundError("harness entry", input.targetId);
+    await this.#assertEntryScopeAuthority(sessionId, entry);
+    if (entry.currentVersionId !== input.expectedCurrentVersionId) {
+      throw new ValidationError("Harness rollback compare-and-swap failed");
+    }
+    const source = await this.getVersion(input.restoreVersionId);
+    if (!source || source.entryId !== entry.entryId || source.version >= entry.current.version ||
+        source.status === "candidate" || source.status === "rejected") {
+      throw new ValidationError("Harness rollback requires an exact earlier approved version of the same target");
+    }
+    const visible = new Set((await this.storage.loadEvents(sessionId, { branchId })).map((event) => event.id));
+    if (input.evidenceEventIds.some((id) => !visible.has(id))) throw new ValidationError("Rollback evidence is outside the authorized route");
+    const versionId = `version-${stableId(`restore:${input.rollbackId}:${entry.entryId}`)}`;
+    const event: NewAgentEvent = {
+      sessionId, branchId, type: "HarnessVersionCreated", producer: "supervisor",
+      idempotencyKey: `harness-restoration:${input.rollbackId}`,
+      payload: {
+        entryId: entry.entryId, versionId, version: entry.current.version + 1,
+        kind: entry.kind, scope: entry.scope, scopeKey: entry.scopeKey, name: source.name,
+        content: source.content as unknown as JsonValue, tags: source.tags, confidence: source.confidence,
+        status: "active", evidenceEventIds: [...input.evidenceEventIds],
+        conflictEntryIds: source.conflictEntryIds,
+        supersedesVersionId: entry.currentVersionId, createdBy: input.createdBy,
+        lastConfirmedAt: new Date().toISOString(),
+      },
+    };
+    const version: HarnessVersionRecord = {
+      versionId,
+      entryId: entry.entryId,
+      version: entry.current.version + 1,
+      kind: entry.kind,
+      scope: entry.scope,
+      scopeKey: entry.scopeKey,
+      name: source.name,
+      content: source.content,
+      tags: [...source.tags],
+      confidence: source.confidence,
+      status: "active",
+      evidenceEventIds: [...input.evidenceEventIds],
+      conflictEntryIds: [...source.conflictEntryIds],
+      supersedesVersionId: entry.currentVersionId,
+      proposalId: null,
+      createdBy: input.createdBy,
+      createdEventId: `pending:${input.rollbackId}`,
+      createdAt: new Date().toISOString(),
+      lastConfirmedAt: (event.payload as any).lastConfirmedAt,
+    };
+    return { version, events: [event] };
+  }
+
   async allocations(candidateId: string): Promise<CandidateAllocationRecord[]> { return (await this.storage.readonlyQuery({ sql: "SELECT * FROM candidate_allocations WHERE candidate_id=? ORDER BY ordinal", args: [candidateId] })).map((row: any) => rowToAllocation(row)); }
 
   async #assertEntryScopeAuthority(sessionId: string, entry: HarnessRecord): Promise<void> {

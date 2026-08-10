@@ -10,11 +10,12 @@ import type {
   StartAgentRunInput, AgentRunResult, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
   RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
   StartRefinementReviewInput, RefinementReviewRecord, RefinementTriggerPolicyV1,
+  SubmitGovernedRefinementInput,
   SkillManagementView, SkillImportPreview, InstallLocalSkillInput,
   AgentToolContractCapabilityView, ModelContractDiagnosticsView,
   AgentProfileDetail, AgentProfileSummary,
 } from "../runtime/index.ts";
-import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
+import type { CandidateAllocationRecord, EvaluationObservationRecord, GovernedRefinementRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, RefinementRollbackResult, RollbackRefinementInput, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
 import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
 import type { ProductBranchSummary } from "../product/index.ts";
@@ -159,6 +160,36 @@ export class AgentClient {
     if (options.includePrompt) query.set("detail", "full");
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     return this.#json(`/sessions/${sessionId}/agent-profiles${query.size ? `?${query}` : ""}`);
+  }
+  proposeProfileUpdate(sessionId: string, branchId: string, input: {
+    readonly expectedProfileVersionId: string;
+    readonly replacement: AgentProfileInput;
+    readonly reason: string;
+    readonly predictedEffect: string;
+    readonly evidenceEventIds: readonly string[];
+    readonly revisesProposalId?: string;
+    readonly clientRequestId?: string;
+    readonly wait?: boolean;
+  }): Promise<GovernedRefinementRecord> {
+    return this.#post(`/sessions/${sessionId}/profile-proposals?branch=${encodeURIComponent(branchId)}`, input);
+  }
+  governedRefinement(proposalId: string): Promise<GovernedRefinementRecord> {
+    return this.#json(`/governed-refinements/${encodeURIComponent(proposalId)}`);
+  }
+  proposeGovernedRefinement(sessionId: string, branchId: string, input: SubmitGovernedRefinementInput): Promise<GovernedRefinementRecord> {
+    return this.#post(`/sessions/${sessionId}/governed-refinements?branch=${encodeURIComponent(branchId)}`, input);
+  }
+  governedRefinements(options: { readonly status?: string; readonly limit?: number } = {}): Promise<GovernedRefinementRecord[]> {
+    const query = new URLSearchParams();
+    if (options.status) query.set("status", options.status);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return this.#json(`/governed-refinements${query.size ? `?${query}` : ""}`);
+  }
+  rollbackRefinement(sessionId: string, branchId: string, input: RollbackRefinementInput): Promise<RefinementRollbackResult> {
+    return this.#post(`/sessions/${sessionId}/profiles/rollback?branch=${encodeURIComponent(branchId)}`, input);
+  }
+  refinementCapabilities(): Promise<JsonValue> {
+    return this.#json("/refinement-capabilities");
   }
   modelContractDiagnostics(sessionId: string, branchId: string): Promise<ModelContractDiagnosticsView> { return this.#json(`/sessions/${sessionId}/model-contract-diagnostics?branch=${branchId}`); }
   message(sessionId: string, branchId: string, content: string): Promise<AgentEvent> { return this.#post(`/sessions/${sessionId}/messages?branch=${branchId}`, { content }); }

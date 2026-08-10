@@ -7,6 +7,7 @@ export * from "./agent-tool-contract.ts";
 export * from "./agent-profile.ts";
 export * from "./refinement-review.ts";
 export * from "./refinement-review-contract.ts";
+export * from "./refinement-governance.ts";
 export * from "./json.ts";
 export * from "./state.ts";
 export * from "./reducer.ts";

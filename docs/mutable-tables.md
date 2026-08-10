@@ -38,6 +38,8 @@ Do not change the first three columns or class tokens without updating the archi
 | `refinement_trigger_consumptions` | `rebuildable-projection` | `mutable` | Per-branch automatic-trigger evidence frontier derived from canonical consumption events; it suppresses duplicate review admission but never hides the cited evidence. |
 | `user_corrections` | `rebuildable-projection` | `mutable` | Typed user correction query projection; the correction text and exact earlier corrected event IDs remain in canonical `UserCorrection` events. |
 | `refinement_proposals` | `rebuildable-projection` | `mutable` | Current proposal lifecycle, bounds, validation, and approval summary derived from refinement events. |
+| `governed_refinement_proposals` | `rebuildable-projection` | `mutable` | Current sealed-governance lifecycle, frozen reviewer input, exact reviewer child/decision, application outcome, and terminal-delivery pointer derived from canonical governed-refinement events. |
+| `refinement_restorations` | `rebuildable-projection` | `mutable` | Query projection of exact-content profile and harness restoration events; prior and new immutable version identities, actor, reason, and evidence remain canonical. |
 | `candidate_allocations` | `rebuildable-projection` | `mutable` | Bounded allocation/exposure projection; allocation and exposure events are canonical. |
 | `refinement_observations` | `rebuildable-projection` | `mutable` | Objective evaluation observation projection retaining event/evidence linkage. |
 | `refinement_decisions` | `rebuildable-projection` | `mutable` | Promotion/revise/reject decision projection; evaluator, baseline, observations, and rule remain canonical. |

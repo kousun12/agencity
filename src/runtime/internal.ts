@@ -29,11 +29,17 @@ export type StructuredRefinementReviewStarter = (
   parentBranchId: string,
   input: StartRecursiveModelInput,
 ) => Promise<RecursiveModelHandle>;
+export type StructuredRefinementGovernanceStarter =
+  StructuredRefinementReviewStarter;
 
 const STRUCTURED_TURN_RUNNERS = new WeakMap<ModelLoop, StructuredModelTurnRunner>();
 const REFINEMENT_REVIEW_STARTERS = new WeakMap<
   RecursiveModelService,
   StructuredRefinementReviewStarter
+>();
+const REFINEMENT_GOVERNANCE_STARTERS = new WeakMap<
+  RecursiveModelService,
+  StructuredRefinementGovernanceStarter
 >();
 
 /** @internal Called once by the `ModelLoop` constructor. */
@@ -79,6 +85,32 @@ export function internalRefinementReviewStarter(
   if (!starter) {
     throw new ValidationError(
       "Recursive model service has no registered refinement-review capability",
+    );
+  }
+  return starter;
+}
+
+/** @internal Called once by the `RecursiveModelService` constructor. */
+export function registerRefinementGovernanceStarter(
+  service: RecursiveModelService,
+  starter: StructuredRefinementGovernanceStarter,
+): void {
+  if (REFINEMENT_GOVERNANCE_STARTERS.has(service)) {
+    throw new ValidationError(
+      "Recursive model service already registered its refinement-governance capability",
+    );
+  }
+  REFINEMENT_GOVERNANCE_STARTERS.set(service, starter);
+}
+
+/** @internal Supervisor-only accessor for the sealed governance capability. */
+export function internalRefinementGovernanceStarter(
+  service: RecursiveModelService,
+): StructuredRefinementGovernanceStarter {
+  const starter = REFINEMENT_GOVERNANCE_STARTERS.get(service);
+  if (!starter) {
+    throw new ValidationError(
+      "Recursive model service has no registered refinement-governance capability",
     );
   }
   return starter;

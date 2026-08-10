@@ -13,6 +13,10 @@ import {
 } from "./model-response.ts";
 import { validateModelDispatch, type ModelDispatch } from "./model.ts";
 import { validateRefinementReviewRecursiveResult } from "./refinement-review-contract.ts";
+import {
+  REFINEMENT_GOVERNANCE_CONTRACT_ID,
+  validateRefinementGovernanceRecursiveResult,
+} from "./refinement-governance.ts";
 
 function withBase(state: AgentState, event: AgentEvent): AgentState {
   return { ...state, cursor: event.cursor, appliedEventIds: [...state.appliedEventIds, event.id] };
@@ -530,10 +534,18 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
               "Successful structured recursive completion requires one typed result",
             );
           }
-          validateRefinementReviewRecursiveResult(p.result, {
-            contractDigest:
-              old.responseAdmission.responseContract.contractDigest,
-          });
+          if (old.responseAdmission.responseContract.contractId ===
+              REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+            validateRefinementGovernanceRecursiveResult(p.result, {
+              contractDigest:
+                old.responseAdmission.responseContract.contractDigest,
+            });
+          } else {
+            validateRefinementReviewRecursiveResult(p.result, {
+              contractDigest:
+                old.responseAdmission.responseContract.contractDigest,
+            });
+          }
         } else if (p.result !== undefined) {
           throw new ValidationError(
             "Non-successful structured recursive status cannot retain a result",
@@ -707,7 +719,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const p = event.payload as EventPayloads["RefinementReviewRequested"];
       if (state.refinementReviews[p.reviewId]) throw new InvalidTransitionError("refinementReview", state.refinementReviews[p.reviewId]!.status, "requested");
       if (p.sourceEventIds.some((id) => !state.appliedEventIds.includes(id)) || p.evidenceEventIds.some((id) => !p.sourceEventIds.includes(id))) throw new ValidationError("Refinement review sources must be earlier visible trajectory events");
-      const review = { id: p.reviewId, fingerprint: p.fingerprint, mode: p.mode, requestedScope: p.requestedScope, requestedScopeKey: p.requestedScopeKey, allowedKinds: [...p.allowedKinds], triggerId: p.triggerId, triggerKind: p.triggerKind, triggerFingerprint: p.triggerFingerprint, ...(p.triggerKey === undefined ? {} : { triggerKey: p.triggerKey }), ...(p.nonterminalKey === undefined ? {} : { nonterminalKey: p.nonterminalKey }), ...(p.triggerEvidenceThroughCursor === undefined ? {} : { triggerEvidenceThroughCursor: p.triggerEvidenceThroughCursor }), evidenceEventIds: [...p.evidenceEventIds], sourceEventIds: [...p.sourceEventIds], sourceSnapshotHash: p.sourceSnapshotHash, sourceThroughCursor: p.sourceThroughCursor, ...(p.instructions === undefined ? {} : { instructions: p.instructions }), status: "requested" as const, requestEventId: event.id, eventId: event.id };
+      const review = { id: p.reviewId, fingerprint: p.fingerprint, mode: p.mode, waitForGovernance: p.waitForGovernance, requestedScope: p.requestedScope, requestedScopeKey: p.requestedScopeKey, allowedKinds: [...p.allowedKinds], triggerId: p.triggerId, triggerKind: p.triggerKind, triggerFingerprint: p.triggerFingerprint, ...(p.triggerKey === undefined ? {} : { triggerKey: p.triggerKey }), ...(p.nonterminalKey === undefined ? {} : { nonterminalKey: p.nonterminalKey }), ...(p.triggerEvidenceThroughCursor === undefined ? {} : { triggerEvidenceThroughCursor: p.triggerEvidenceThroughCursor }), evidenceEventIds: [...p.evidenceEventIds], sourceEventIds: [...p.sourceEventIds], sourceSnapshotHash: p.sourceSnapshotHash, sourceThroughCursor: p.sourceThroughCursor, ...(p.instructions === undefined ? {} : { instructions: p.instructions }), status: "requested" as const, requestEventId: event.id, eventId: event.id };
       return { ...next, refinementReviews: { ...state.refinementReviews, [p.reviewId]: review } };
     }
     case "RefinementReviewChildLinked": {
@@ -741,6 +753,14 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "RefinementApproved":
     case "RefinementRollbackApproved":
     case "RefinementRolledBack":
+    case "GovernedRefinementProposed":
+    case "GovernedRefinementValidated":
+    case "RefinementGovernanceReviewRequested":
+    case "RefinementGovernanceReviewChildLinked":
+    case "RefinementGovernanceReviewDecided":
+    case "GovernedRefinementApplied":
+    case "RefinementProposalTerminalNoticeDelivered":
+    case "RefinementRollbackApplied":
     case "SkillImported":
     case "SkillAvailabilityChanged":
     case "SkillInvocationRecorded":

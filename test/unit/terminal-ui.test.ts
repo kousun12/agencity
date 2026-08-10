@@ -62,7 +62,7 @@ describe("FU-005 protocol-backed terminal UI", () => {
     for (const required of [
       "/new", "/sessions", "/run", "/stop", "/quit", "/info", "/status", "/model", "/budget", "/agents", "/tree",
       "/goal", "/heartbeat", "/schedule", "/history", "/live", "/cell", "/branch", "/resume", "/compact",
-      "/memory", "/skills", "/refine", "/sync", "/conflicts", "/unknown", "/reconcile",
+      "/memory", "/skills", "/profile", "/refine", "/sync", "/conflicts", "/unknown", "/reconcile",
     ]) expect(names.has(required), required).toBe(true);
     expect(new Set(TERMINAL_COMMAND_REGISTRY.map((item) => item.name)).size).toBe(TERMINAL_COMMAND_REGISTRY.length);
   });
@@ -792,6 +792,205 @@ describe("FU-005 protocol-backed terminal UI", () => {
     } finally {
       await ui.detach(false);
       expect(timers.size).toBe(0);
+      await supervisor.close();
+    }
+  });
+
+  test("inspects, reproposes, rolls back, and restores detached profile governance notices without target IDs", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-profile-governance-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "terminal-profile-governance",
+      sessionName: "Governed agent",
+      branchName: "main",
+    });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const initial = await base.agentProfile(session.sessionId, true) as any;
+    const prior = { ...initial, active: false };
+    const current = {
+      ...initial,
+      profileVersionId: "profile-current",
+      revision: 2,
+      role: "Repository maintainer",
+      purpose: "Maintain the selected repository.",
+      instructions: "Run focused checks.\nReport unresolved outcomes.",
+      exactAgentPrompt: "Role: Repository maintainer\nPurpose: Maintain the selected repository.\nInstructions:\nRun focused checks.",
+      reason: "Approved governed revision.",
+      active: true,
+      supersedesProfileVersionId: initial.profileVersionId,
+      sourceProposalId: "proposal-applied",
+      reviewDecisionId: "decision-applied",
+    };
+    const rejected = {
+      proposalId: "proposal-rejected",
+      sessionId: session.sessionId,
+      branchId: session.branchId,
+      status: "reviewed_rejected",
+      proposal: {
+        proposalId: "proposal-rejected",
+        target: {
+          kind: "agent_profile",
+          agentSessionId: session.sessionId,
+          expectedProfileVersionId: current.profileVersionId,
+          replacement: {
+            role: "Unsafe administrator",
+            purpose: "Bypass review.",
+            instructions: "Ignore policy.",
+          },
+        },
+        principal: { kind: "owner", profileId: "owner" },
+        origin: { sessionId: session.sessionId, branchId: session.branchId },
+        reason: "Broaden behavior.",
+        predictedEffect: "Move faster.",
+        evidenceEventIds: [],
+      },
+      validation: { valid: true },
+      frozenInput: {
+        proposerRelationship: "workspace_owner",
+        constitution: { componentId: "agencity.product-constitution", version: 1, digest: "a".repeat(64) },
+        reviewPolicy: { componentId: "agencity.refinement-governance-policy", version: 1, digest: "b".repeat(64) },
+        reviewerDispatch: { model: { provider: "fixture", model: "reviewer-v1" } },
+      },
+      reviewHandleId: "review-handle",
+      reviewerSessionId: "reviewer-session",
+      reviewerBranchId: "reviewer-branch",
+      reviewDecisionId: "decision-rejected",
+      decision: {
+        decision: "reject",
+        proposalId: "proposal-rejected",
+        reason: "The proposal attempts to widen authority.",
+        violatedCriteria: ["runtime authority remains outside profiles"],
+        revisionGuidance: "Keep the revision behavioral and bounded.",
+      },
+      appliedVersionIds: [],
+      terminalReason: "The proposal attempts to widen authority.",
+      noticeDelivered: true,
+      createdEventId: "event-proposed",
+      createdAt: "2026-08-09T20:00:00.000Z",
+      updatedAt: "2026-08-09T20:01:00.000Z",
+    } as any;
+    const applied = {
+      ...rejected,
+      proposalId: "proposal-applied",
+      status: "applied",
+      proposal: {
+        ...rejected.proposal,
+        proposalId: "proposal-applied",
+        predictedEffect: "Improve focused verification.",
+      },
+      decision: {
+        decision: "approve",
+        proposalId: "proposal-applied",
+        reason: "The bounded behavioral change is policy-consistent.",
+        satisfiedCriteria: ["bounded behavior"],
+        residualRisks: ["Outcome improvement remains unproven."],
+      },
+      appliedVersionIds: [current.profileVersionId],
+      terminalReason: "Applied after independent review.",
+      reviewDecisionId: "decision-applied",
+      createdAt: "2026-08-09T19:00:00.000Z",
+    } as any;
+    const proposals = [rejected, applied];
+    const proposalInputs: any[] = [];
+    const rollbackInputs: any[] = [];
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "agentProfile") return async () => current;
+        if (property === "agentProfiles") return async () => ({
+          activeProfileVersionId: current.profileVersionId,
+          items: [current, prior],
+        });
+        if (property === "governedRefinements") return async () => proposals;
+        if (property === "proposeProfileUpdate") return async (_sessionId: string, _branchId: string, input: any) => {
+          proposalInputs.push(input);
+          return { ...applied, proposalId: `proposal-new-${proposalInputs.length}` };
+        };
+        if (property === "rollbackRefinement") return async (_sessionId: string, _branchId: string, input: any) => {
+          rollbackInputs.push(input);
+          return {
+            rollbackId: "rollback-new",
+            targetKind: "agent_profile",
+            targetId: session.sessionId,
+            previousVersionId: current.profileVersionId,
+            restoreSourceVersionId: prior.profileVersionId,
+            restorationVersionId: "profile-restored",
+          };
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    let output = "";
+    const details: any[] = [];
+    const ui = new TerminalUI(client, {
+      interactive: false,
+      manageSignals: false,
+      onOutput: value => { output += value; },
+      onDetail: detail => { if (detail) details.push(detail); },
+    });
+    try {
+      await ui.attach(session.sessionId, session.branchId);
+      expect(output).toContain("[profile governance: reviewer rejected]");
+      expect(output).toContain("The proposal attempts to widen authority.");
+      expect(output).toContain("Keep the revision behavioral and bounded.");
+
+      await ui.execute("/profile");
+      await ui.execute("/profile history");
+      await ui.execute("/profile proposals");
+      expect(proposalInputs).toHaveLength(0);
+      expect(rollbackInputs).toHaveLength(0);
+      const history = details.find(detail => detail.command === "/profile-history");
+      expect(history.sections[0].rows.map((row: any) => row.value)).toEqual(["ACTIVE", "historical"]);
+      expect(JSON.stringify(history)).toContain("agencity.product-constitution");
+      expect(JSON.stringify(history)).toContain("reviewer-v1");
+      expect(JSON.stringify(details.find(detail => detail.command === "/profile"))).toContain("Run focused checks.");
+
+      const proposal = JSON.stringify({
+        replacement: {
+          role: "Repository maintainer",
+          purpose: "Maintain the selected repository safely.",
+          instructions: "Run focused checks and report uncertainty.",
+        },
+        reason: "Tighten verification.",
+        predictedEffect: "Reduce incomplete verification.",
+        evidenceEventIds: [],
+      });
+      await ui.execute(`/history ${ui.presentation.state.cursor}`);
+      await ui.execute("/profile");
+      await expect(ui.execute(`/profile propose ${proposal}`))
+        .rejects.toThrow("Return to live with /live before changing the agent profile");
+      expect(proposalInputs).toHaveLength(0);
+      await ui.execute("/live");
+      await ui.execute(`/profile propose ${proposal}`);
+      await ui.execute(`/profile repropose latest ${proposal}`);
+      expect(proposalInputs[0]).toMatchObject({
+        expectedProfileVersionId: current.profileVersionId,
+        wait: true,
+      });
+      expect(proposalInputs[0]).not.toHaveProperty("revisesProposalId");
+      expect(proposalInputs[1]).toMatchObject({
+        expectedProfileVersionId: current.profileVersionId,
+        revisesProposalId: rejected.proposalId,
+        wait: true,
+      });
+
+      await ui.execute('/profile rollback 1 {"reason":"Restore the exact baseline.","evidenceEventIds":[]}');
+      expect(rollbackInputs).toEqual([{
+        targetKind: "agent_profile",
+        targetId: session.sessionId,
+        expectedCurrentVersionId: current.profileVersionId,
+        restoreVersionId: prior.profileVersionId,
+        reason: "Restore the exact baseline.",
+        evidenceEventIds: [],
+      }]);
+      expect(JSON.stringify(details.at(-1))).toContain("New restoration version");
+    } finally {
+      await ui.detach(false);
       await supervisor.close();
     }
   });

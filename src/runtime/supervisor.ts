@@ -69,6 +69,7 @@ import {
   type PublicRecursiveModelService,
 } from "./models.ts";
 import {
+  internalRefinementGovernanceStarter,
   internalRefinementReviewStarter,
   internalStructuredModelTurn,
 } from "./internal.ts";
@@ -80,6 +81,7 @@ import { AgentRunService } from "./agent-runs.ts";
 import { ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "./execution-leases.ts";
 import { EffectReconciliationService } from "./effect-reconciliation.ts";
 import { RefinerService } from "./refiner.ts";
+import { RefinementGovernanceService } from "./refinement-governance.ts";
 import { SkillManagementService } from "./skill-management.ts";
 import { CompactionService, type CompactContextInput, type ContextCompactionView, type ContextInspection } from "./context-compaction.ts";
 import { ModelCatalog, type ModelCatalogOptions } from "./model-catalog.ts";
@@ -305,6 +307,7 @@ export class Supervisor {
   readonly runs: AgentRunService;
   readonly effectReconciliation: EffectReconciliationService;
   readonly refiner: RefinerService;
+  readonly refinementGovernance: RefinementGovernanceService;
   /** Process-local executor/provider catalog; descriptors contain no credential material. */
   readonly modelExecutor: ModelExecutor;
   readonly modelEffectAdmission: ModelEffectAdmissionService;
@@ -391,6 +394,16 @@ export class Supervisor {
       profile,
       userScopeKey,
     );
+    this.refinementGovernance = new RefinementGovernanceService(
+      storage,
+      this.#recursiveModels,
+      internalRefinementGovernanceStarter(this.#recursiveModels),
+      this.agentProfiles,
+      this.harness,
+      this.modelEffectAdmission,
+      device.profileId,
+    );
+    this.refiner.attachGovernance(this.refinementGovernance);
     this.skillManagement = new SkillManagementService(storage, profile, this.harness, this.skills, this.refiner, userScopeKey, device.profileId);
     this.skills.attachCatalog(this.skillManagement);
     this.contexts.attachSkillCatalog(this.skillManagement);
@@ -564,6 +577,7 @@ export class Supervisor {
     await this.goals.recoverIncomplete();
     await this.#recursiveModels.recoverIncomplete();
     await this.refiner.recoverIncomplete();
+    await this.refinementGovernance.recoverIncomplete();
     await this.agents.recoverDeliveries();
     await this.runs.recoverIncomplete();
     await this.runs.recoverOrphanGoals();
@@ -585,6 +599,7 @@ export class Supervisor {
     await this.schedules.close();
     await this.console.stop();
     await this.refiner.close();
+    await this.refinementGovernance.close();
     await this.#recursiveModels.close();
     await this.sync.stop();
     await this.executionLeases?.close();
@@ -600,6 +615,7 @@ export class Supervisor {
     await this.schedules.close();
     await this.console.stop();
     await this.refiner.close();
+    await this.refinementGovernance.close();
     await this.#recursiveModels.close();
     await this.outbox.quiesceForDeletion();
     try { return await this.sync.deleteOwnedData(input); }
@@ -1018,6 +1034,84 @@ export class Supervisor {
         const idempotencyKey = typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method);
         if (input.run !== false) return this.agents.spawnRunnable(sessionId, branchId, { ...input, idempotencyKey } as any);
         return this.agents.spawn(sessionId, branchId, { ...input, idempotencyKey } as any);
+      }
+      if (method === "agents.spawnMany") {
+        if (!Array.isArray(args[0]) || args[0].length === 0 || args[0].length > 16) {
+          throw new ValidationError("agents.spawnMany requires 1-16 inputs");
+        }
+        return Promise.all(args[0].map((raw, index) => {
+          const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
+          if (!input || typeof input !== "object" || Array.isArray(input)) {
+            throw new ValidationError("agents.spawnMany inputs must be task strings or objects");
+          }
+          const normalized = {
+            ...input,
+            idempotencyKey: typeof input.idempotencyKey === "string"
+              ? input.idempotencyKey
+              : `${nextRpcKey(method)}:${index + 1}`,
+          };
+          return input.run === false
+            ? this.agents.spawn(sessionId, branchId, normalized as any)
+            : this.agents.spawnRunnable(sessionId, branchId, normalized as any);
+        }));
+      }
+      if (method === "agents.get") {
+        const target = typeof args[0] === "string" && args[0] ? args[0] : sessionId;
+        if (target !== sessionId) {
+          const rows = await this.storage.readonlyQuery({
+            sql: "SELECT parent_session_id,parent_branch_id FROM sessions WHERE session_id=?",
+            args: [target],
+          });
+          if (!rows[0] || String((rows[0] as any).parent_session_id ?? "") !== sessionId ||
+              String((rows[0] as any).parent_branch_id ?? "") !== branchId) {
+            throw new ValidationError("agents.get may inspect only self or a direct child");
+          }
+        }
+        return this.agentProfiles.get(target, { includePrompt: true });
+      }
+      if (method === "agents.proposeProfileUpdate") {
+        const target = typeof args[0] === "string" && args[0] ? args[0] : sessionId;
+        const input = args[1] as Record<string, unknown>;
+        const options = args[2] && typeof args[2] === "object" && !Array.isArray(args[2])
+          ? args[2] as Record<string, unknown>
+          : {};
+        if (!input || typeof input !== "object" || Array.isArray(input)) {
+          throw new ValidationError("agents.proposeProfileUpdate requires typed input");
+        }
+        return this.refinementGovernance.proposeAgent(sessionId, branchId, {
+          target: {
+            kind: "agent_profile",
+            agentSessionId: target,
+            expectedProfileVersionId: String(input.expectedProfileVersionId ?? ""),
+            replacement: input.replacement as AgentProfileInput,
+          },
+          reason: String(input.reason ?? ""),
+          predictedEffect: String(input.predictedEffect ?? ""),
+          evidenceEventIds: Array.isArray(input.evidenceEventIds)
+            ? input.evidenceEventIds.map(String)
+            : [],
+          ...(typeof input.revisesProposalId === "string"
+            ? { revisesProposalId: input.revisesProposalId }
+            : {}),
+          wait: options.wait !== false,
+        });
+      }
+      if (method === "agents.rollbackProfile") {
+        const target = typeof args[0] === "string" && args[0] ? args[0] : sessionId;
+        const input = args[1] as Record<string, unknown>;
+        if (!input || typeof input !== "object" || Array.isArray(input)) {
+          throw new ValidationError("agents.rollbackProfile requires typed input");
+        }
+        return this.refinementGovernance.rollbackAgent(sessionId, branchId, {
+          targetKind: "agent_profile",
+          targetId: target,
+          expectedCurrentVersionId: String(input.expectedCurrentVersionId ?? ""),
+          restoreVersionId: String(input.restoreVersionId ?? ""),
+          reason: String(input.reason ?? ""),
+          evidenceEventIds: Array.isArray(input.evidenceEventIds)
+            ? input.evidenceEventIds.map(String)
+            : [],
+        });
       }
       if (method === "agents.list") return this.agents.listFamily(sessionId, branchId);
       if (method === "agents.send") {

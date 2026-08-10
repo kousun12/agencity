@@ -182,6 +182,12 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   const specs = { spawn: (entryId:string,input:JsonValue={}) => call("specs.spawn",[entryId,input]) };
   const agents = {
     spawn: (input: unknown) => call("agents.spawn", [input]),
+    spawnMany: (inputs: unknown[]) => call("agents.spawnMany", [inputs]),
+    get: (target?: string) => call("agents.get", [target]),
+    proposeProfileUpdate: (target: string | undefined, input: unknown, options: Record<string, unknown> = {}) =>
+      call("agents.proposeProfileUpdate", [target, input, options]),
+    rollbackProfile: (target: string | undefined, input: unknown) =>
+      call("agents.rollbackProfile", [target, input]),
     list: () => call("agents.list", []),
     send: (input: unknown, content?: string) => call("agents.send", [input, content]),
     messages: (options: Record<string, unknown> = {}) => call("agents.messages", [options]),

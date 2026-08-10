@@ -24,6 +24,7 @@ export * from "./agent-runs.ts";
 export * from "./schedules.ts";
 export * from "./effect-reconciliation.ts";
 export * from "./refiner.ts";
+export * from "./refinement-governance.ts";
 export * from "./refinement-context.ts";
 export * from "./refinement-triggers.ts";
 export * from "./context-compaction.ts";

@@ -2,12 +2,17 @@ import {
   NotFoundError,
   ValidationError,
   materializeInitialAgentProfile,
+  normalizeAgentProfileInput,
+  renderExactAgentPrompt,
+  sha256,
   validateAgentProfileVersion,
   type AgentEvent,
   type AgentProfileAdmissionMetadata,
   type AgentProfileInput,
   type AgentProfileVersion,
   type EventPayloads,
+  type NewAgentEvent,
+  type AgentPrincipalReference,
 } from "../domain/index.ts";
 import { containsBrokeredSecret } from "../security/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
@@ -86,6 +91,149 @@ export class AgentProfileService {
     return { activeProfileVersionId: projected.activeProfileVersionId, items: profiles };
   }
 
+  async prepareApproved(input: {
+    readonly targetSessionId: string;
+    readonly eventBranchId: string;
+    readonly expectedActiveProfileVersionId: string;
+    readonly replacement: AgentProfileInput;
+    readonly createdBy: AgentPrincipalReference;
+    readonly reason: string;
+    readonly evidenceEventIds: readonly string[];
+    readonly proposalId: string;
+    readonly reviewDecisionId: string;
+  }): Promise<{ readonly profile: AgentProfileVersion; readonly events: readonly NewAgentEvent[] }> {
+    const active = await this.active(input.targetSessionId);
+    if (active.profileVersionId !== input.expectedActiveProfileVersionId) {
+      throw new ValidationError("Agent profile application compare-and-swap failed");
+    }
+    if (containsBrokeredSecret(input.replacement as unknown as Record<string, string>)) {
+      throw new ValidationError("Brokered credentials cannot enter an agent profile");
+    }
+    const replacement = normalizeAgentProfileInput(input.replacement);
+    if (active.role === replacement.role && active.purpose === replacement.purpose &&
+        active.instructions === replacement.instructions) {
+      throw new ValidationError("Agent profile reproposal must make a substantive change");
+    }
+    await this.#assertEvidenceVisible(
+      input.targetSessionId,
+      input.eventBranchId,
+      input.evidenceEventIds,
+    );
+    const createdAt = new Date().toISOString();
+    const profileVersionId = stableId(
+      "agent-profile-version",
+      `${input.proposalId}:${input.targetSessionId}:${input.expectedActiveProfileVersionId}`,
+    );
+    const exactAgentPrompt = renderExactAgentPrompt(replacement);
+    const profile = validateAgentProfileVersion({
+      profileVersionId,
+      agentSessionId: input.targetSessionId,
+      revision: active.revision + 1,
+      ...replacement,
+      exactAgentPrompt,
+      promptContractId: active.promptContractId,
+      promptDigest: sha256(exactAgentPrompt),
+      createdBy: input.createdBy,
+      sourceSpecEntryId: null,
+      sourceSpecVersionId: null,
+      reason: input.reason.trim(),
+      evidenceEventIds: [...new Set(input.evidenceEventIds)],
+      supersedesProfileVersionId: active.profileVersionId,
+      restoresProfileVersionId: null,
+      sourceProposalId: input.proposalId,
+      reviewDecisionId: input.reviewDecisionId,
+      createdAt,
+    });
+    const events: NewAgentEvent[] = [{
+      sessionId: input.targetSessionId,
+      branchId: input.eventBranchId,
+      type: "AgentProfileVersionCreated",
+      producer: "supervisor",
+      idempotencyKey: `agent-profile-approved:${input.proposalId}`,
+      payload: {
+        agentProfile: profile,
+        expectedActiveProfileVersionId: active.profileVersionId,
+      },
+    }, {
+      sessionId: input.targetSessionId,
+      branchId: input.eventBranchId,
+      type: "AgentProfileActivated",
+      producer: "supervisor",
+      idempotencyKey: `agent-profile-activated:${input.proposalId}`,
+      payload: {
+        profileVersionId,
+        expectedActiveProfileVersionId: active.profileVersionId,
+        reason: input.reason.trim(),
+      },
+    }];
+    return { profile, events };
+  }
+
+  async prepareRestore(input: {
+    readonly targetSessionId: string;
+    readonly eventBranchId: string;
+    readonly expectedCurrentVersionId: string;
+    readonly restoreVersionId: string;
+    readonly createdBy: AgentPrincipalReference;
+    readonly reason: string;
+    readonly evidenceEventIds: readonly string[];
+    readonly rollbackId: string;
+  }): Promise<{ readonly profile: AgentProfileVersion; readonly events: readonly NewAgentEvent[] }> {
+    const active = await this.active(input.targetSessionId);
+    if (active.profileVersionId !== input.expectedCurrentVersionId) {
+      throw new ValidationError("Agent profile rollback compare-and-swap failed");
+    }
+    const restore = await this.getVersion(input.targetSessionId, input.restoreVersionId);
+    if (restore.revision >= active.revision) {
+      throw new ValidationError("Agent profile rollback requires an earlier version");
+    }
+    await this.#assertEvidenceVisible(
+      input.targetSessionId,
+      input.eventBranchId,
+      input.evidenceEventIds,
+    );
+    const profileVersionId = stableId(
+      "agent-profile-restoration",
+      `${input.rollbackId}:${input.targetSessionId}:${active.profileVersionId}:${restore.profileVersionId}`,
+    );
+    const restored = validateAgentProfileVersion({
+      ...restore,
+      profileVersionId,
+      revision: active.revision + 1,
+      createdBy: input.createdBy,
+      reason: input.reason.trim(),
+      evidenceEventIds: [...new Set(input.evidenceEventIds)],
+      supersedesProfileVersionId: active.profileVersionId,
+      restoresProfileVersionId: restore.profileVersionId,
+      sourceProposalId: null,
+      reviewDecisionId: null,
+      createdAt: new Date().toISOString(),
+    });
+    const events: NewAgentEvent[] = [{
+      sessionId: input.targetSessionId,
+      branchId: input.eventBranchId,
+      type: "AgentProfileVersionCreated",
+      producer: "supervisor",
+      idempotencyKey: `agent-profile-restoration-version:${input.rollbackId}`,
+      payload: {
+        agentProfile: restored,
+        expectedActiveProfileVersionId: active.profileVersionId,
+      },
+    }, {
+      sessionId: input.targetSessionId,
+      branchId: input.eventBranchId,
+      type: "AgentProfileActivated",
+      producer: "supervisor",
+      idempotencyKey: `agent-profile-restoration-activated:${input.rollbackId}`,
+      payload: {
+        profileVersionId,
+        expectedActiveProfileVersionId: active.profileVersionId,
+        reason: input.reason.trim(),
+      },
+    }];
+    return { profile: restored, events };
+  }
+
   async #project(sessionId: string): Promise<{ versions: Map<string, AgentProfileVersion>; activeProfileVersionId: string }> {
     const events = await this.storage.loadEvents(sessionId);
     const created = events.find((event) => event.type === "SessionCreated") as AgentEvent<"SessionCreated"> | undefined;
@@ -115,6 +263,31 @@ export class AgentProfileService {
       }
     }
     return { versions, activeProfileVersionId };
+  }
+
+  async #assertEvidenceVisible(
+    sessionId: string,
+    _branchId: string,
+    evidenceEventIds: readonly string[],
+  ): Promise<void> {
+    if (evidenceEventIds.length > 32 || new Set(evidenceEventIds).size !== evidenceEventIds.length) {
+      throw new ValidationError("Agent profile evidence must contain at most 32 distinct events");
+    }
+    const targetRows = await this.storage.readonlyQuery({
+      sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
+      args: [sessionId],
+    });
+    const workspaceId = String((targetRows[0] as any)?.workspace_id ?? "");
+    for (const eventId of evidenceEventIds) {
+      const event = await this.storage.getEvent(eventId);
+      const sourceRows = event ? await this.storage.readonlyQuery({
+        sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
+        args: [event.sessionId],
+      }) : [];
+      if (!event || String((sourceRows[0] as any)?.workspace_id ?? "") !== workspaceId) {
+        throw new ValidationError("Agent profile evidence is outside the authorized route");
+      }
+    }
   }
 }
 
@@ -148,4 +321,10 @@ function publicProfile(
     sourceProposalId: profile.sourceProposalId,
     reviewDecisionId: profile.reviewDecisionId,
   } : summary;
+}
+
+function stableId(prefix: string, value: string): string {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(value);
+  return `${prefix}-${hash.digest("hex").slice(0, 32)}`;
 }

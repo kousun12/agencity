@@ -212,6 +212,21 @@ export class ProtocolServer {
         if (request.method === "PUT") { const body = await jsonBody(request); return Response.json(await this.supervisor.refiner.setAutomatic(body.enabled as boolean)); }
       }
       if (parts[0] === "refinement-reviews" && request.method === "GET") return Response.json(await this.supervisor.refiner.list({ ...(url.searchParams.has("status") ? { status: url.searchParams.get("status") as any } : {}) }));
+      if (parts[0] === "refinement-capabilities" && request.method === "GET") return Response.json({
+        governance: "sealed-automatic-v1",
+        targets: ["agent_profile", "memory", "prompt_note", "skill", "subagent_spec"],
+        wait: true,
+        detach: true,
+        rollback: true,
+        reviewerSelectableByCaller: false,
+      });
+      if (parts[0] === "governed-refinements") {
+        if (request.method === "GET" && parts[1]) return Response.json(await this.supervisor.refinementGovernance.get(parts[1]));
+        if (request.method === "GET") return Response.json(await this.supervisor.refinementGovernance.list({
+          ...(url.searchParams.has("status") ? { status: url.searchParams.get("status") as any } : {}),
+          ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
+        }));
+      }
       if (parts[0] === "harness") {
         if (request.method === "GET" && parts[1] === "refinements") return Response.json(await this.supervisor.harness.proposals(url.searchParams.get("status") as any ?? undefined));
         if (request.method === "GET" && parts[1] && parts[2] === "history") return Response.json(await this.supervisor.harness.history(parts[1]));
@@ -221,6 +236,72 @@ export class ProtocolServer {
         const sessionId = parts[1]; const branchId = url.searchParams.get("branch") ?? parts[3];
         if (request.method === "GET" && parts[2] === "agent-profile") return Response.json(await this.supervisor.agentProfiles.get(sessionId, { includePrompt: url.searchParams.get("detail") === "full" }));
         if (request.method === "GET" && parts[2] === "agent-profiles") return Response.json(await this.supervisor.agentProfiles.list(sessionId, { includePrompt: url.searchParams.get("detail") === "full", ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}) }));
+        if (parts[2] === "profile-proposals" && branchId) {
+          if (request.method === "POST") {
+            const body = await jsonBody(request) as any;
+            return Response.json(await this.supervisor.refinementGovernance.proposeOwner(
+              sessionId,
+              branchId,
+              {
+                target: {
+                  kind: "agent_profile",
+                  agentSessionId: sessionId,
+                  expectedProfileVersionId: String(body.expectedProfileVersionId ?? ""),
+                  replacement: body.replacement,
+                },
+                reason: String(body.reason ?? ""),
+                predictedEffect: String(body.predictedEffect ?? ""),
+                evidenceEventIds: Array.isArray(body.evidenceEventIds) ? body.evidenceEventIds.map(String) : [],
+                ...(typeof body.revisesProposalId === "string" ? { revisesProposalId: body.revisesProposalId } : {}),
+                ...(typeof body.clientRequestId === "string" ? { clientRequestId: body.clientRequestId } : {}),
+                wait: body.wait !== false,
+              },
+            ));
+          }
+        }
+        if (parts[2] === "profiles" && parts[3] === "rollback" && branchId && request.method === "POST") {
+          return Response.json(await this.supervisor.refinementGovernance.rollbackOwner(
+            sessionId,
+            branchId,
+            await jsonBody(request) as any,
+          ));
+        }
+        if (parts[2] === "governed-refinements" && branchId) {
+          if (request.method === "POST") {
+            const body = await jsonBody(request) as any;
+            return Response.json(await this.supervisor.refinementGovernance.proposeOwner(
+              sessionId,
+              branchId,
+              {
+                target: body.target,
+                reason: String(body.reason ?? ""),
+                predictedEffect: String(body.predictedEffect ?? ""),
+                evidenceEventIds: Array.isArray(body.evidenceEventIds)
+                  ? body.evidenceEventIds.map(String)
+                  : [],
+                ...(typeof body.revisesProposalId === "string"
+                  ? { revisesProposalId: body.revisesProposalId }
+                  : {}),
+                ...(typeof body.clientRequestId === "string"
+                  ? { clientRequestId: body.clientRequestId }
+                  : {}),
+                wait: body.wait !== false,
+              },
+            ));
+          }
+          if (request.method === "GET") {
+            return Response.json(await this.supervisor.refinementGovernance.list({
+              sessionId,
+              branchId,
+              ...(url.searchParams.has("status")
+                ? { status: url.searchParams.get("status") as any }
+                : {}),
+              ...(url.searchParams.has("limit")
+                ? { limit: Number(url.searchParams.get("limit")) }
+                : {}),
+            }));
+          }
+        }
         if (request.method === "GET" && parts[2] === "snapshot" && branchId) return Response.json(await this.supervisor.projections.getSnapshot(sessionId, branchId));
         if (request.method === "GET" && parts[2] === "model-contract-diagnostics" && branchId) {
           const snapshot = await this.supervisor.projections.getSnapshot(sessionId, branchId);

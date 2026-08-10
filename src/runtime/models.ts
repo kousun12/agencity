@@ -1,11 +1,13 @@
 import {
   NotFoundError,
+  REFINEMENT_GOVERNANCE_CONTRACT_ID,
   REFINEMENT_REVIEW_CONTRACT_ID,
   RESERVED_MODEL_DISPATCH_INPUT_FIELDS,
   TEXT_MODEL_RESPONSE_CONTRACT,
   ValidationError,
   assertNoReservedModelDispatchInputFields,
   assertJsonValue,
+  createRefinementGovernanceRecursiveResult,
   createRefinementReviewRecursiveResult,
   jsonBytes,
   newId,
@@ -30,6 +32,7 @@ import type { AgentService } from "./agents.ts";
 import type { MemoryService } from "./memory.ts";
 import type { ModelLoop } from "./model-loop.ts";
 import {
+  registerRefinementGovernanceStarter,
   registerRefinementReviewStarter,
   type StructuredModelTurnRunner,
 } from "./internal.ts";
@@ -149,6 +152,13 @@ export class RecursiveModelService {
     // internal capability registry; see src/runtime/internal.ts.
     registerRefinementReviewStarter(this, (parentSessionId, parentBranchId, input) =>
       this.#startRefinementReview(parentSessionId, parentBranchId, input));
+    registerRefinementGovernanceStarter(this, (parentSessionId, parentBranchId, input) =>
+      this.#startSealedStructured(
+        parentSessionId,
+        parentBranchId,
+        input,
+        REFINEMENT_GOVERNANCE_CONTRACT_ID,
+      ));
   }
 
   start(parentSessionId: string, parentBranchId: string, input: StartRecursiveModelInput | string): Promise<RecursiveModelHandle> {
@@ -174,9 +184,25 @@ export class RecursiveModelService {
     parentBranchId: string,
     input: StartRecursiveModelInput,
   ): Promise<RecursiveModelHandle> {
+    return this.#startSealedStructured(
+      parentSessionId,
+      parentBranchId,
+      input,
+      REFINEMENT_REVIEW_CONTRACT_ID,
+    );
+  }
+
+  async #startSealedStructured(
+    parentSessionId: string,
+    parentBranchId: string,
+    input: StartRecursiveModelInput,
+    contractId:
+      | typeof REFINEMENT_REVIEW_CONTRACT_ID
+      | typeof REFINEMENT_GOVERNANCE_CONTRACT_ID,
+  ): Promise<RecursiveModelHandle> {
     if (!input.idempotencyKey?.trim()) {
       throw new ValidationError(
-        "Structured refinement review requires a stable idempotency key",
+        "Structured refinement operation requires a stable idempotency key",
       );
     }
     const existing = await this.#recursive.getRecursiveModel(
@@ -191,7 +217,7 @@ export class RecursiveModelService {
       if (existing.responseAdmission.responseContract.kind !==
           "required-tool-set" ||
           existing.responseAdmission.responseContract.contractId !==
-            REFINEMENT_REVIEW_CONTRACT_ID) {
+            contractId) {
         throw new ValidationError(
           "Structured refinement idempotency key belongs to another response contract",
         );
@@ -209,7 +235,7 @@ export class RecursiveModelService {
       }
       const parent = projectEvents(events);
       const admitted = this.modelEffectAdmission.requestBuiltInStructured(
-        REFINEMENT_REVIEW_CONTRACT_ID,
+        contractId,
         input.model ?? parent.model,
       ).modelDispatch;
       responseAdmission = Object.freeze({
@@ -706,7 +732,18 @@ export class RecursiveModelService {
       );
     }
     const submission = output.result.submission;
-    const result = createRefinementReviewRecursiveResult({
+    const result = call.modelDispatch.responseContract.contractId ===
+        REFINEMENT_GOVERNANCE_CONTRACT_ID
+      ? createRefinementGovernanceRecursiveResult({
+          contractDigest: call.modelDispatch.responseContract.contractDigest,
+          modelCallId,
+          providerToolCallId: submission.providerToolCallId,
+          modelResultDigest: output.resultDigest,
+          transportInput: submission.input,
+          transportInputDigest: submission.inputDigest,
+          transportInputBytes: submission.inputBytes,
+        })
+      : createRefinementReviewRecursiveResult({
       contractDigest: call.modelDispatch.responseContract.contractDigest,
       modelCallId,
       providerToolCallId: submission.providerToolCallId,
@@ -714,7 +751,7 @@ export class RecursiveModelService {
       transportInput: submission.input,
       transportInputDigest: submission.inputDigest,
       transportInputBytes: submission.inputBytes,
-    });
+      });
     if (childState.budget.exceeded) {
       const error =
         "[budget-exceeded] Structured recursive model completed after exhausting its delegated budget";
@@ -890,15 +927,26 @@ export class RecursiveModelService {
       });
       if (output.result.kind !== "tool-submission") return undefined;
       const submission = output.result.submission;
-      return createRefinementReviewRecursiveResult({
-        contractDigest: call.modelDispatch.responseContract.contractDigest,
-        modelCallId: call.id,
-        providerToolCallId: submission.providerToolCallId,
-        modelResultDigest: output.resultDigest,
-        transportInput: submission.input,
-        transportInputDigest: submission.inputDigest,
-        transportInputBytes: submission.inputBytes,
-      }) as unknown as JsonValue;
+      return (call.modelDispatch.responseContract.contractId ===
+          REFINEMENT_GOVERNANCE_CONTRACT_ID
+        ? createRefinementGovernanceRecursiveResult({
+            contractDigest: call.modelDispatch.responseContract.contractDigest,
+            modelCallId: call.id,
+            providerToolCallId: submission.providerToolCallId,
+            modelResultDigest: output.resultDigest,
+            transportInput: submission.input,
+            transportInputDigest: submission.inputDigest,
+            transportInputBytes: submission.inputBytes,
+          })
+        : createRefinementReviewRecursiveResult({
+            contractDigest: call.modelDispatch.responseContract.contractDigest,
+            modelCallId: call.id,
+            providerToolCallId: submission.providerToolCallId,
+            modelResultDigest: output.resultDigest,
+            transportInput: submission.input,
+            transportInputDigest: submission.inputDigest,
+            transportInputBytes: submission.inputBytes,
+          })) as unknown as JsonValue;
     }
     const response = [...child.messages].reverse().find((message) => message.role === "assistant");
     if (!response) return undefined;
