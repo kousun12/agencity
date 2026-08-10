@@ -252,7 +252,7 @@ export class ManagedWorkspaceService {
   static async open(
     config: ManagedServiceConfiguration,
     appVersion: string,
-    options: Pick<SupervisorOptions, "modelCatalog"> = {},
+    options: Pick<SupervisorOptions, "modelCatalog" | "modelProviders"> = {},
   ): Promise<ManagedWorkspaceService> {
     const normalized = normalizedConfiguration(config);
     const instanceId = `service-${newId()}`;

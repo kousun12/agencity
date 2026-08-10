@@ -1,4 +1,5 @@
 import {
+  ConflictError,
   NotFoundError,
   ValidationError,
   materializeInitialAgentProfile,
@@ -240,11 +241,21 @@ export class AgentProfileService {
     if (!created) throw new NotFoundError("session", sessionId);
     const initial = validateAgentProfileVersion(created.payload.agentProfile);
     const versions = new Map([[initial.profileVersionId, initial]]);
+    const successorClaims = new Map<string, string>();
     let activeProfileVersionId = initial.profileVersionId;
     for (const event of events) {
       if (event.type === "AgentProfileVersionCreated") {
         const payload = event.payload as EventPayloads["AgentProfileVersionCreated"];
         const profile = validateAgentProfileVersion(payload.agentProfile);
+        const priorClaim = successorClaims.get(payload.expectedActiveProfileVersionId);
+        if (priorClaim !== undefined && priorClaim !== profile.profileVersionId) {
+          throw new ConflictError("Agent profile has divergent immutable version claims", {
+            sessionId,
+            expectedActiveProfileVersionId: payload.expectedActiveProfileVersionId,
+            profileVersionIds: [priorClaim, profile.profileVersionId].sort(),
+          });
+        }
+        successorClaims.set(payload.expectedActiveProfileVersionId, profile.profileVersionId);
         if (payload.expectedActiveProfileVersionId !== activeProfileVersionId ||
             profile.agentSessionId !== sessionId ||
             profile.revision !== versions.size + 1 ||

@@ -116,16 +116,17 @@ Export first records an ownership-checked manifest. For an owned scope it writes
 - `events.jsonl` for selected workspace or session event history;
 - `profile.json` with device, preferences, profile skills, opaque credential references, and workspace catalog metadata;
 - `replica-envelopes.jsonl` when a configured transport can enumerate envelopes;
-- selected verified artifact bytes under `artifacts/`; and
-- `manifest.json` with counts, resources, status, and missing-artifact IDs.
+- selected verified artifact bytes under `artifacts/`;
+- `export-audit.json` with profile, invocation-pin, governance, review, decision, restoration, evidence, and artifact completeness checks; and
+- `manifest.json` with counts, resources, status, missing-artifact IDs, and the same completeness audit.
 
 Raw provider key values are not exported from `auth.json`. Workspace source files and external service state are also not included.
 
-For schema-version-4 sessions, `events.jsonl` carries initial agent profiles and invocation prompt pins because those values are canonical event payloads. It also carries later profile version/activation events and context/model-call prompt provenance when those records exist. The rebuildable `agent_profile_versions` and `workspace_agent_profiles` tables are not separate authority that must be exported beside their source events.
+For schema-version-4 workspaces, `events.jsonl` carries initial and historical agent profiles, invocation profile pins, context/model-call effective-prompt provenance, governed proposals, frozen reviewer inputs and dispatch, reviewer-child links, decisions, terminal notices, and restoration provenance because those values are canonical event payloads. The rebuildable profile and governance projection tables are not separate authority that must be exported beside their source events.
 
-The current exporter does not add a profile-specific completeness validator beyond its existing event selection, artifact verification, and manifest reporting. Export remains an inspection and portability artifact rather than a proven round-trip restore format.
+The completeness audit checks that profile versions and digests referenced by invocations are present, governance and reviewer records form an attributable chain, applied/restored versions and evidence records exist, and registered artifact bytes verify by digest and size. A missing required record, missing artifact, or corrupt artifact marks the export `partial`.
 
-An export with a missing or corrupt referenced artifact is marked `partial`. Treat that as incomplete evidence, not a successful backup.
+Treat every `partial` export as incomplete evidence, not a successful backup. A completed audit does not turn export into a supported round-trip restore format.
 
 ### Export is not restore
 
@@ -156,7 +157,7 @@ Deletion is separate from append-only domain history. Ordinary runtime transitio
 
 ### Session deletion
 
-Session deletion is available only for an independently erasable local session. The runtime refuses when retained relationships or evidence make narrow erasure unsafe, including recursive links, replication, harness/refinement references, cross-session artifact references, or protected quarantine records.
+Session deletion is available only for an independently erasable local session. The runtime refuses when retained relationships or evidence make narrow erasure unsafe, including governed proposals and reviewer children, terminal notices, restorations, family or reconciliation provenance, recursive links, replication, harness/refinement references, cross-session artifact references, or protected quarantine records. Initial and historical profile rows are removed only when the complete independent session is otherwise erasable.
 
 The runtime preflights references before deleting artifact bytes, rechecks inside the relational erasure transaction, and retains shared artifact content that other sessions still reference.
 

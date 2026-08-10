@@ -1092,3 +1092,10 @@ The plan is complete when:
 - Validation: 57 TUI unit tests, 16 CLI integration tests, and 46 protocol/governance integration tests passed. Typecheck, architecture checks, lints, and `git diff --check` passed.
 - Plan notes: the no-ID terminal flow uses route-relative profile revision numbers and `latest|N` proposal selectors. Internal proposal and version IDs remain available in advanced diagnostics.
 - Remaining: the linked-executable end-to-end governance journey, lifecycle hardening, documentation, independent review, aggregate verification, and gated external checks.
+
+### 2026-08-09 — Phase 4: lifecycle hardening
+
+- Completed: added managed-service recovery and deduplication coverage for governed review and terminal delivery; fail-closed offline profile-revision divergence with retained competing histories; workspace export auditing for profile, invocation-pin, proposal, frozen-review, decision, notice, restoration, and artifact provenance; governance-aware deletion planning and refusal; complete workspace erasure; and migration/rebuild reopen coverage.
+- Validation: 106 focused lifecycle, migration, profile, and governance tests passed with 0 skips and 0 failures. Typecheck, architecture checks, lints, and `git diff --check` passed.
+- Plan notes: exported bundles now include `export-audit.json`; missing required provenance or artifact dependencies make the manifest partial rather than successful. Concurrent offline profile claims remain explicit conflicts, and runnable profile lookup fails instead of inventing an active winner.
+- Remaining: a linked-executable process-loss journey must cover the governance child-link/model-wait boundary together with approval, rejection, reproposal, rollback, notice deduplication, and resume.

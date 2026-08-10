@@ -4,9 +4,12 @@ import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { LibSqlStorage } from "../../src/storage/index.ts";
 import { ScriptedAgentActionProvider } from "../../src/executors/index.ts";
+import type { ModelProvider, TextModelResponse } from "../../src/executors/model.ts";
+import { formalOutputFromAgentAction, formalOutputFromRefinementGovernanceDecision } from "../../src/executors/model-response.ts";
 import { Supervisor } from "../../src/runtime/index.ts";
 import { ManagedWorkspaceService, connectManagedService, managedServiceConfigurationHash, readServiceManifest, resolveWorkspace, serviceStatePaths, type ManagedServiceConfiguration, type ServiceManifestV1 } from "../../src/product/index.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
+import { REFINEMENT_GOVERNANCE_CONTRACT_ID, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2 } from "../../src/domain/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -98,14 +101,69 @@ async function configuration(prefix: string): Promise<ManagedServiceConfiguratio
   return config;
 }
 
-async function opened(config: ManagedServiceConfiguration): Promise<ManagedWorkspaceService> {
+async function opened(config: ManagedServiceConfiguration, modelProviders?: ModelProvider[]): Promise<ManagedWorkspaceService> {
   const service = await ManagedWorkspaceService.open(config, "0.1.0-test", {
     modelCatalog: {
       fetch: (async () => Response.json({ data: [] })) as unknown as typeof fetch,
     },
+    ...(modelProviders === undefined ? {} : { modelProviders }),
   });
   services.push(service);
   return service;
+}
+
+class ManagedGovernanceProvider implements ModelProvider {
+  readonly name = "managed-governance";
+  readonly capabilities = {
+    streaming: false,
+    requiredToolSet: {
+      status: "provider-strict",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "provider-disabled",
+      streaming: true,
+      adapter: "agencity.managed-governance-test.v1",
+    },
+  } as const;
+  governanceCalls = 0;
+  runCalls = 0;
+  async complete(_context: JsonValue, _configuration: ModelConfiguration, _signal: AbortSignal): Promise<TextModelResponse> {
+    return { text: "unused", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } };
+  }
+  async streamResponse(context: JsonValue, dispatch: ModelDispatch): Promise<ModelEffectOutputV2> {
+    if (dispatch.responseContract.kind !== "required-tool-set") {
+      throw new Error("Unexpected managed governance test contract");
+    }
+    if (dispatch.responseContract.contractId !== REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+      this.runCalls++;
+      return formalOutputFromAgentAction({
+        action: { protocol: "agencity.agent-action", version: 1, type: "final", content: "Managed governance run completed." },
+        dispatch,
+        providerToolCallId: `managed-run-${this.runCalls}`,
+        provider: this.name,
+        adapter: this.capabilities.requiredToolSet.adapter,
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+      });
+    }
+    const proposalId = JSON.stringify(context).match(
+      /proposalId[^A-Za-z0-9]+(governed-refinement-proposal-[a-f0-9]{32}|[0-9A-HJKMNP-TV-Z]{26})/,
+    )?.[1];
+    if (!proposalId) throw new Error("Missing managed governance proposal ID");
+    this.governanceCalls++;
+    return formalOutputFromRefinementGovernanceDecision({
+      decision: {
+        decision: "approve",
+        proposalId,
+        reason: "The bounded managed-service proposal follows the frozen policy.",
+        satisfiedCriteria: ["scope", "evidence", "runtime-boundaries"],
+        residualRisks: ["Outcome improvement remains unproven."],
+      },
+      dispatch,
+      providerToolCallId: `managed-governance-${this.governanceCalls}`,
+      provider: this.name,
+      adapter: this.capabilities.requiredToolSet.adapter,
+      usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+    });
+  }
 }
 
 describe("managed workspace service", () => {
@@ -208,6 +266,128 @@ describe("managed workspace service", () => {
     expect(status).toMatchObject({ attachedClients: 0, idleShutdownMs: 60_000 });
     expect(status.keepAliveReasons).not.toContainEqual(expect.objectContaining({ kind: "attached_clients" }));
     expect(new Date(status.idleShutdownAt).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  test("detached governance resumes once across managed-service request and terminal-boundary restarts", async () => {
+      const boundary = "request" as const;
+      const config = await configuration(`agencity-managed-governance-${boundary}-`);
+      const provider = new ManagedGovernanceProvider();
+      const first = await opened(config, [provider]);
+      const client = (await connectManagedService(config, { spawn: false })).client;
+      const session = await client.createSession(config.workspace.workspaceId, {
+        model: { provider: provider.name, model: "fixture" },
+      });
+      const evidence = await client.message(session.sessionId, session.branchId, "Managed governance restart evidence");
+      const active = await client.agentProfile(session.sessionId, true);
+      const append = LibSqlStorage.prototype.appendEvents;
+      const crashType = "RefinementGovernanceReviewRequested";
+      let crashed = false;
+      LibSqlStorage.prototype.appendEvents = async function(events: any[], fence?: any) {
+        const committed = await append.call(this, events, fence);
+        if (!crashed && events.some(event => event.sessionId === session.sessionId && event.type === crashType)) {
+          crashed = true;
+          throw new Error(`simulated managed-service crash after ${boundary}`);
+        }
+        return committed;
+      };
+      let admitted;
+      try {
+        admitted = await client.proposeProfileUpdate(session.sessionId, session.branchId, {
+          expectedProfileVersionId: active.profileVersionId,
+          replacement: {
+            role: active.role,
+            purpose: active.purpose,
+            instructions: `${(active as any).instructions}\n- Resume detached governance exactly once.`,
+          },
+          reason: "Exercise managed-service governance recovery.",
+          predictedEffect: "One recovered review applies one immutable profile.",
+          evidenceEventIds: [evidence.id],
+          clientRequestId: `managed-governance-${boundary}`,
+          wait: false,
+        });
+        await waitFor(async () => {
+          const history = await client.history(session.sessionId, session.branchId);
+          return history.some(event => event.type === crashType);
+        }, `managed governance ${boundary} boundary`, 5_000);
+      } finally {
+        LibSqlStorage.prototype.appendEvents = append;
+      }
+      expect(crashed).toBe(true);
+      await first.close();
+
+      const reopened = await opened(config, [provider]);
+      const resumed = (await connectManagedService(config, { spawn: false })).client;
+      await waitFor(async () => (await resumed.governedRefinement(admitted!.proposalId)).status === "applied", "managed governance recovery", 5_000);
+      await reopened.supervisor.refinementGovernance.recoverIncomplete();
+      await reopened.supervisor.refinementGovernance.recoverIncomplete();
+      const record = await resumed.governedRefinement(admitted!.proposalId);
+      const history = await resumed.history(session.sessionId, session.branchId);
+      expect(record).toMatchObject({ status: "applied", noticeDelivered: true });
+      expect(history.filter(event => event.type === "GovernedRefinementProposed")).toHaveLength(1);
+      expect(history.filter(event => event.type === "RefinementGovernanceReviewRequested")).toHaveLength(1);
+      expect(history.filter(event => event.type === "RefinementGovernanceReviewChildLinked")).toHaveLength(1);
+      expect(history.filter(event => event.type === "RefinementGovernanceReviewDecided")).toHaveLength(1);
+      expect(history.filter(event => event.type === "GovernedRefinementApplied")).toHaveLength(1);
+      expect(history.filter(event => event.type === "RefinementProposalTerminalNoticeDelivered")).toHaveLength(1);
+      expect((await resumed.agentProfiles(session.sessionId)).items).toHaveLength(2);
+      const revisedRun = await resumed.startRun(session.sessionId, session.branchId, {
+        task: "Use the approved profile after managed recovery.",
+        goalMode: "none",
+      });
+      await waitFor(async () => (await resumed.run(session.sessionId, session.branchId, revisedRun.runId)).status === "succeeded", "post-revision managed run", 5_000);
+      const revisedVersionId = record.appliedVersionIds[0]!;
+      const rollback = await resumed.rollbackRefinement(session.sessionId, session.branchId, {
+        targetKind: "agent_profile",
+        targetId: session.sessionId,
+        expectedCurrentVersionId: revisedVersionId,
+        restoreVersionId: active.profileVersionId,
+        reason: "Verify restoration export provenance.",
+        evidenceEventIds: [evidence.id],
+      });
+      const restoredRun = await resumed.startRun(session.sessionId, session.branchId, {
+        task: "Use the restored profile.",
+        goalMode: "none",
+      });
+      await waitFor(async () => (await resumed.run(session.sessionId, session.branchId, restoredRun.runId)).status === "succeeded", "post-restoration managed run", 5_000);
+
+      const destination = join(config.workspace.root, `governance-export-${boundary}`);
+      const exported = await resumed.exportData(destination, "workspace", config.workspace.workspaceId, "owner");
+      expect(exported.status).toBe("completed");
+      const bundleEvents = (await Bun.file(join(destination, "events.jsonl")).text()).trim().split("\n").map(line => JSON.parse(line));
+      const bundleTypes = bundleEvents.map(event => event.type);
+      for (const requiredType of [
+        "SessionCreated", "AgentProfileVersionCreated", "AgentProfileActivated",
+        "AgentRunRequested", "RecursiveModelStarted", "ContextMaterialized", "ModelCallRequested",
+        "GovernedRefinementProposed", "RefinementGovernanceReviewRequested",
+        "RefinementGovernanceReviewChildLinked", "RefinementGovernanceReviewDecided",
+        "GovernedRefinementApplied", "RefinementProposalTerminalNoticeDelivered",
+        "RefinementRollbackApplied",
+      ]) expect(bundleTypes).toContain(requiredType);
+      expect(bundleEvents.find(event => event.type === "RefinementGovernanceReviewRequested").payload.frozenInput.reviewerDispatch.configuration).toBeTruthy();
+      expect(bundleEvents.some(event => event.type === "AgentRunRequested" && event.payload.profilePin.profileVersionId === revisedVersionId)).toBe(true);
+      expect(bundleEvents.some(event => event.type === "AgentRunRequested" && event.payload.profilePin.profileVersionId === rollback.restorationVersionId)).toBe(true);
+      expect(bundleEvents.some(event => event.type === "ModelCallRequested" && typeof event.payload.promptProvenance.effectiveSystemPromptDigest === "string")).toBe(true);
+      const audit = JSON.parse(await Bun.file(join(destination, "export-audit.json")).text());
+      expect(audit).toMatchObject({ complete: true, governedProposalCount: 1, decisionCount: 1 });
+      expect(audit.profileVersionCount).toBeGreaterThanOrEqual(4);
+      expect(JSON.parse(await Bun.file(join(destination, "manifest.json")).text())).toMatchObject({ status: "completed", resources: { exportAudit: { complete: true } } });
+      await reopened.supervisor.storage.rebuildOperationalProjections?.();
+      await reopened.supervisor.storage.rebuildOperationalProjections?.();
+      expect(await resumed.governedRefinement(admitted!.proposalId)).toMatchObject({ status: "applied", noticeDelivered: true });
+      expect((await resumed.agentProfiles(session.sessionId)).items).toHaveLength(3);
+      await reopened.close();
+      const terminalRestart = await opened(config, [provider]);
+      const terminalClient = (await connectManagedService(config, { spawn: false })).client;
+      await terminalRestart.supervisor.refinementGovernance.recoverIncomplete();
+      const terminalHistory = await terminalClient.history(session.sessionId, session.branchId);
+      expect(terminalHistory.filter(event => event.type === "GovernedRefinementProposed")).toHaveLength(1);
+      expect(terminalHistory.filter(event => event.type === "RefinementGovernanceReviewChildLinked")).toHaveLength(1);
+      expect(terminalHistory.filter(event => event.type === "RefinementGovernanceReviewDecided")).toHaveLength(1);
+      expect(terminalHistory.filter(event => event.type === "GovernedRefinementApplied")).toHaveLength(1);
+      expect(terminalHistory.filter(event => event.type === "RefinementProposalTerminalNoticeDelivered")).toHaveLength(1);
+      expect((await terminalClient.agentProfiles(session.sessionId)).items).toHaveLength(3);
+      expect(provider.governanceCalls).toBe(1);
+      expect(provider.runCalls).toBe(2);
   });
 
   test("rejects incompatible client configuration and runs schedule delivery only under the resident owner", async () => {

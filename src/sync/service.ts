@@ -139,7 +139,8 @@ export class SyncService {
     const replicas=this.transport?await this.transport.listEnvelopes(this.workspaceId):[];await Bun.write(join(destination,"replica-envelopes.jsonl"),replicas.map(row=>stableJson(row)).join("\n")+(replicas.length?"\n":""));
     const artifacts=events.filter(e=>e.type==="ArtifactRegistered").map(e=>e.payload as EventPayloads["ArtifactRegistered"]);const seen=new Set<string>();const missing:string[]=[];let artifactCount=0;
     for(const artifact of artifacts){if(seen.has(artifact.digest))continue;seen.add(artifact.digest);if(!this.artifactDirectory){missing.push(artifact.artifactId);continue;}const source=join(this.artifactDirectory,artifact.digest.slice(0,2),artifact.digest.slice(2));const file=Bun.file(source);if(!await file.exists()){missing.push(artifact.artifactId);continue;}const bytes=new Uint8Array(await file.arrayBuffer());const hasher=new Bun.CryptoHasher("sha256");hasher.update(bytes);if(bytes.byteLength!==artifact.size||hasher.digest("hex")!==artifact.digest){missing.push(artifact.artifactId);continue;}await mkdir(join(destination,"artifacts"),{recursive:true});await copyFile(source,join(destination,"artifacts",artifact.digest));artifactCount++;}
-    const resources={...(manifest.resources as Record<string,JsonValue>),bundlePath:destination,eventCount:events.length,artifactCount,missingArtifacts:missing,replicaEnvelopeCount:replicas.length} as JsonValue;const completed=await this.storage.completeDataManifest(manifest.manifestId,missing.length?"partial":"completed",resources,this.#iso());await Bun.write(join(destination,"manifest.json"),JSON.stringify(completed,null,2)+"\n");return completed;
+    const audit=auditExportCompleteness(events,missing);await Bun.write(join(destination,"export-audit.json"),JSON.stringify(audit,null,2)+"\n");
+    const resources={...(manifest.resources as Record<string,JsonValue>),bundlePath:destination,eventCount:events.length,artifactCount,missingArtifacts:missing,replicaEnvelopeCount:replicas.length,exportAudit:audit as unknown as JsonValue} as JsonValue;const completed=await this.storage.completeDataManifest(manifest.manifestId,audit.complete?"completed":"partial",resources,this.#iso());await Bun.write(join(destination,"manifest.json"),JSON.stringify(completed,null,2)+"\n");return completed;
   }
 
   async createManifest(operation:"export"|"delete",scopeKind:"workspace"|"session"|"profile",scopeId:string,requestedBy:string):Promise<DataManifestRecord>{
@@ -164,6 +165,11 @@ export class SyncService {
       syncWatermarks:evidence.watermarks as unknown as JsonValue,managedSyncUrls:[...syncUrls].sort(),
       unaddressableManagedReplicas:[...unaddressable].sort(),
       canonical:"events",derivedIndexes:["operational projections","memory_fts","snapshots","context records"],
+      retainedGovernance:[
+        "initial and historical agent profiles","invocation profile and effective-prompt pins",
+        "governed proposals and frozen review inputs","reviewer child and model dispatch",
+        "review decisions and terminal notices","restoration provenance and evidence links",
+      ],
       scope:{kind:scopeKind,id:scopeId},remoteManaged,remoteDeletionSupported,
       remoteDeletionAdapter:remoteDeletionSupported?this.remoteDeletionAdmin!.name:null,
     };
@@ -381,7 +387,7 @@ export class SyncService {
       if(!body.streamParentId)throw new ValidationError("A non-root replicated event requires a stream parent");
       mapping=await this.storage.getBranchMapping(envelope.originDeviceId,body.sessionId,body.branchId,body.streamParentId);
       if(mapping)branchId=mapping.derivedBranchId;
-      else {const tip=await this.storage.getDirectBranchTip(body.sessionId,body.branchId);if(!tip)throw new ValidationError("Source branch is unavailable");if(tip.id!==body.streamParentId){const forkCursor=await this.storage.getEventCursor(body.streamParentId);if(!forkCursor)throw new ValidationError("Stream parent is unavailable");const derivedBranchId=deterministicId("sync-branch",envelope.originDeviceId,body.sessionId,body.branchId,body.streamParentId);const mappingId=deterministicId("mapping",envelope.originDeviceId,body.sessionId,body.branchId,body.streamParentId);await this.storage.appendEvents([{id:deterministicId("sync-fork",mappingId),sessionId:body.sessionId,branchId:derivedBranchId,type:"BranchCreated",producer:"sync-derived",idempotencyKey:`sync-fork:${mappingId}`,payload:{branchId:derivedBranchId,parentBranchId:body.branchId,forkCursor,name:`offline ${envelope.originDeviceId.slice(-8)}`}}]);mapping={mappingId,originDeviceId:envelope.originDeviceId,sessionId:body.sessionId,sourceBranchId:body.branchId,forkEventId:body.streamParentId,derivedBranchId,lastSourceEventId:body.streamParentId,createdAt:this.#iso()};await this.storage.putBranchMapping(mapping);branchId=derivedBranchId;const divergentOrigins=[tip.originDeviceId,envelope.originDeviceId].sort();await this.#recordConflict("divergent_session",envelope,[tip.id,body.id],{sourceBranchId:body.branchId,derivedBranchId,forkEventId:body.streamParentId,originDeviceIds:divergentOrigins,policy:"preserve both branches"},"unresolved",null,[this.workspaceId,body.sessionId,body.branchId,body.streamParentId,...divergentOrigins]);conflictCount++;}}
+      else {const tip=await this.storage.getDirectBranchTip(body.sessionId,body.branchId);if(!tip)throw new ValidationError("Source branch is unavailable");if(tip.id!==body.streamParentId){const forkCursor=await this.storage.getEventCursor(body.streamParentId);if(!forkCursor)throw new ValidationError("Stream parent is unavailable");const derivedBranchId=deterministicId("sync-branch",envelope.originDeviceId,body.sessionId,body.branchId,body.streamParentId);const mappingId=deterministicId("mapping",envelope.originDeviceId,body.sessionId,body.branchId,body.streamParentId);await this.storage.appendEvents([{id:deterministicId("sync-fork",mappingId),sessionId:body.sessionId,branchId:derivedBranchId,type:"BranchCreated",producer:"sync-derived",idempotencyKey:`sync-fork:${mappingId}`,payload:{branchId:derivedBranchId,parentBranchId:body.branchId,forkCursor,name:`offline ${envelope.originDeviceId.slice(-8)}`}}]);mapping={mappingId,originDeviceId:envelope.originDeviceId,sessionId:body.sessionId,sourceBranchId:body.branchId,forkEventId:body.streamParentId,derivedBranchId,lastSourceEventId:body.streamParentId,createdAt:this.#iso()};await this.storage.putBranchMapping(mapping);branchId=derivedBranchId;const divergentOrigins=[tip.originDeviceId,envelope.originDeviceId].sort();const profileControl=body.type==="AgentProfileVersionCreated"||body.type==="AgentProfileActivated";await this.#recordConflict("divergent_session",envelope,[tip.id,body.id],{sourceBranchId:body.branchId,derivedBranchId,forkEventId:body.streamParentId,originDeviceIds:divergentOrigins,profileControl,policy:profileControl?"preserve both branches and refuse ambiguous runnable profile lookup":"preserve both branches"},"unresolved",null,[this.workspaceId,body.sessionId,body.branchId,body.streamParentId,...divergentOrigins]);conflictCount++;}}
       if(branchId!==body.branchId)payload=remapPayload(body.type,payload,body.branchId,branchId);
     }
     if(body.type==="TaskStatusChanged"&&(payload as any).status==="running"){const taskId=String((payload as any).taskId);const claims=await this.storage.findTaskClaimEvents(taskId);const others=claims.filter(x=>x.originDeviceId!==envelope.originDeviceId);if(others.length){await this.#recordConflict("task_claim",envelope,[...others.map(x=>x.id),body.id],{taskId,policy:"no automatic winner"},"unresolved",taskId);conflictCount++;}}
@@ -484,3 +490,98 @@ function jsonSafe(value:unknown):JsonValue{try{return JSON.parse(JSON.stringify(
 function eventBody(event:AgentEvent):ReplicatedEventBody{return{id:event.id,sessionId:event.sessionId,branchId:event.branchId,causationId:event.causationId,correlationId:event.correlationId,type:event.type,schemaVersion:event.schemaVersion,committedAt:event.committedAt,producer:event.producer,idempotencyKey:event.idempotencyKey,payload:event.payload as JsonValue,streamParentId:event.streamParentId};}
 function eventClaimDigest(originDeviceId:string,originSequence:number,body:ReplicatedEventBody):string{return sha256Text(stableJson({originDeviceId,originSequence,body}));}
 function remapPayload(type:string,payload:JsonValue,source:string,target:string):JsonValue{if(!payload||typeof payload!=="object"||Array.isArray(payload))return payload;const copy={...payload} as Record<string,JsonValue>;for(const key of ["parentBranchId","fromBranchId","toBranchId","targetBranchId"]){if(copy[key]===source)copy[key]=target;}if(type==="BranchCreated"&&copy.branchId===source)copy.branchId=target;return copy;}
+
+interface ExportCompletenessAudit {
+  readonly version:1;
+  readonly complete:boolean;
+  readonly eventCount:number;
+  readonly profileVersionCount:number;
+  readonly governedProposalCount:number;
+  readonly reviewRequestCount:number;
+  readonly decisionCount:number;
+  readonly missing:string[];
+}
+function auditExportCompleteness(events:readonly AgentEvent[],missingArtifacts:readonly string[]):ExportCompletenessAudit{
+  const eventIds=new Set(events.map(event=>event.id));
+  const sessionIds=new Set(events.filter(event=>event.type==="SessionCreated").map(event=>event.sessionId));
+  const profiles=new Map<string,{digest:string;eventId:string}>();
+  const versions=new Set<string>();
+  const proposals=new Set<string>();
+  const reviewRequests=new Map<string,string>();
+  const reviewChildren=new Map<string,{handleId:string;childSessionId:string}>();
+  const decisions=new Map<string,string>();
+  const modelRequestsBySession=new Set<string>();
+  const recursiveHandles=new Set<string>();
+  const issues=new Set<string>();
+  const missing=(kind:string,id:string)=>issues.add(`${kind}:${id}`);
+  for(const event of events){
+    const payload=event.payload as any;
+    if(event.type==="SessionCreated"){
+      const profile=payload.agentProfile;profiles.set(profile.profileVersionId,{digest:profile.promptDigest,eventId:event.id});versions.add(profile.profileVersionId);
+    }else if(event.type==="AgentProfileVersionCreated"){
+      const profile=payload.agentProfile;profiles.set(profile.profileVersionId,{digest:profile.promptDigest,eventId:event.id});versions.add(profile.profileVersionId);
+    }else if(event.type==="HarnessVersionCreated")versions.add(payload.versionId);
+    else if(event.type==="GovernedRefinementProposed")proposals.add(payload.proposalId);
+    else if(event.type==="RefinementGovernanceReviewRequested")reviewRequests.set(payload.reviewId,payload.proposalId);
+    else if(event.type==="RefinementGovernanceReviewChildLinked")reviewChildren.set(payload.reviewId,{handleId:payload.handleId,childSessionId:payload.childSessionId});
+    else if(event.type==="RefinementGovernanceReviewDecided")decisions.set(payload.decisionId,payload.proposalId);
+    else if(event.type==="RecursiveModelStarted")recursiveHandles.add(payload.handleId);
+    else if(event.type==="ModelCallRequested")modelRequestsBySession.add(event.sessionId);
+  }
+  for(const event of events){
+    const payload=event.payload as any;
+    if(event.type==="SessionCreated"||event.type==="AgentProfileVersionCreated"){
+      const profile=payload.agentProfile;
+      if(profile.supersedesProfileVersionId&&!profiles.has(profile.supersedesProfileVersionId))missing("profile-version",profile.supersedesProfileVersionId);
+      if(profile.restoresProfileVersionId&&!profiles.has(profile.restoresProfileVersionId))missing("restored-profile-version",profile.restoresProfileVersionId);
+      if(profile.sourceProposalId&&!proposals.has(profile.sourceProposalId))missing("governed-proposal",profile.sourceProposalId);
+      if(profile.reviewDecisionId&&!decisions.has(profile.reviewDecisionId))missing("governance-decision",profile.reviewDecisionId);
+      if(profile.sourceSpecVersionId&&!versions.has(profile.sourceSpecVersionId))missing("source-spec-version",profile.sourceSpecVersionId);
+      for(const evidenceId of profile.evidenceEventIds??[])if(!eventIds.has(evidenceId))missing("evidence-event",evidenceId);
+    }
+    if(event.type==="AgentRunRequested"||event.type==="RecursiveModelStarted"){
+      const pin=payload.profilePin;const profile=profiles.get(pin.profileVersionId);
+      if(!profile)missing("invocation-profile",pin.profileVersionId);
+      else if(profile.digest!==pin.agentPromptDigest)missing("invocation-profile-digest",pin.profileVersionId);
+    }
+    if((event.type==="ContextMaterialized"||event.type==="ModelCallRequested")&&payload.promptProvenance){
+      const pin=payload.promptProvenance;const profile=profiles.get(pin.profileVersionId);
+      if(!profile)missing("prompt-profile",pin.profileVersionId);
+      else if(profile.digest!==pin.agentPromptDigest)missing("prompt-profile-digest",pin.profileVersionId);
+    }
+    if(event.type==="GovernedRefinementProposed"){
+      const proposal=payload.proposal;
+      for(const evidenceId of proposal?.evidenceEventIds??[])if(!eventIds.has(evidenceId))missing("proposal-evidence-event",evidenceId);
+      if(proposal?.target?.kind==="agent_profile"&&!profiles.has(proposal.target.expectedProfileVersionId))missing("proposal-target-profile",proposal.target.expectedProfileVersionId);
+    }
+    if(event.type==="RefinementGovernanceReviewRequested"){
+      if(!proposals.has(payload.proposalId))missing("governed-proposal",payload.proposalId);
+      if(!payload.frozenInput?.reviewerDispatch?.configuration)missing("frozen-reviewer-dispatch",payload.reviewId);
+    }
+    if(event.type==="RefinementGovernanceReviewChildLinked"){
+      if(reviewRequests.get(payload.reviewId)!==payload.proposalId)missing("frozen-review-input",payload.reviewId);
+      if(!sessionIds.has(payload.childSessionId))missing("reviewer-child-session",payload.childSessionId);
+      if(!recursiveHandles.has(payload.handleId))missing("reviewer-recursive-handle",payload.handleId);
+    }
+    if(event.type==="RefinementGovernanceReviewDecided"){
+      if(reviewRequests.get(payload.reviewId)!==payload.proposalId)missing("frozen-review-input",payload.reviewId);
+      const child=reviewChildren.get(payload.reviewId);
+      if(!child)missing("reviewer-child-link",payload.reviewId);
+      else if(!modelRequestsBySession.has(child.childSessionId))missing("reviewer-model-dispatch",child.childSessionId);
+    }
+    if(event.type==="GovernedRefinementApplied"){
+      if(decisions.get(payload.decisionId)!==payload.proposalId)missing("governance-decision",payload.decisionId);
+      for(const versionId of payload.appliedVersionIds??[])if(!versions.has(versionId))missing("applied-version",versionId);
+    }
+    if(event.type==="RefinementProposalTerminalNoticeDelivered"){
+      if(!proposals.has(payload.proposalId))missing("governed-proposal",payload.proposalId);
+      if(payload.result?.reviewDecisionId&&!decisions.has(payload.result.reviewDecisionId))missing("governance-decision",payload.result.reviewDecisionId);
+    }
+    if(event.type==="RefinementRollbackApplied"){
+      for(const versionId of [payload.previousVersionId,payload.restoreSourceVersionId,payload.restorationVersionId])if(!versions.has(versionId))missing("restoration-version",versionId);
+      for(const evidenceId of payload.evidenceEventIds??[])if(!eventIds.has(evidenceId))missing("restoration-evidence-event",evidenceId);
+    }
+  }
+  for(const artifactId of missingArtifacts)missing("artifact",artifactId);
+  return{version:1,complete:issues.size===0,eventCount:events.length,profileVersionCount:profiles.size,governedProposalCount:proposals.size,reviewRequestCount:reviewRequests.size,decisionCount:decisions.size,missing:[...issues].sort()};
+}

@@ -658,23 +658,36 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         sql: "SELECT initial_branch_id FROM sessions WHERE session_id=?",
         args: [event.sessionId],
       });
-      if (String(sessionControl.rows[0]?.initial_branch_id) !== event.branchId) {
+      const initialBranchId = String(sessionControl.rows[0]?.initial_branch_id);
+      const divergentReplicatedClaim = initialBranchId !== event.branchId &&
+        event.originDeviceId !== this.#deviceId &&
+        (await tx.execute({
+          sql: "SELECT mapping_id FROM sync_branch_mappings WHERE session_id=? AND derived_branch_id=? LIMIT 1",
+          args: [event.sessionId, event.branchId],
+        })).rows.length > 0;
+      if (initialBranchId !== event.branchId && !divergentReplicatedClaim) {
         throw new ValidationError("Session-wide agent profile control events must use the initial branch");
       }
-      const current = await tx.execute({
-        sql: "SELECT active_profile_version_id FROM workspace_agent_profiles WHERE agent_session_id=?",
-        args: [event.sessionId],
-      });
-      const active = current.rows[0] ? String(current.rows[0].active_profile_version_id) : null;
-      const expected = event.type === "AgentProfileVersionCreated"
-        ? (event.payload as EventPayloads["AgentProfileVersionCreated"]).expectedActiveProfileVersionId
-        : (event.payload as EventPayloads["AgentProfileActivated"]).expectedActiveProfileVersionId;
-      if (active !== expected) {
-        throw new ConflictError("Agent profile active-version compare-and-swap failed", {
-          sessionId: event.sessionId,
-          expectedActiveProfileVersionId: expected,
-          activeProfileVersionId: active,
+      // A replicated offline claim may be preserved on a sync-derived branch.
+      // Its branch reducer validates the alternate immutable history below,
+      // while the session-wide operational pointer deliberately remains
+      // unresolved rather than selecting a last-writer winner.
+      if (!divergentReplicatedClaim) {
+        const current = await tx.execute({
+          sql: "SELECT active_profile_version_id FROM workspace_agent_profiles WHERE agent_session_id=?",
+          args: [event.sessionId],
         });
+        const active = current.rows[0] ? String(current.rows[0].active_profile_version_id) : null;
+        const expected = event.type === "AgentProfileVersionCreated"
+          ? (event.payload as EventPayloads["AgentProfileVersionCreated"]).expectedActiveProfileVersionId
+          : (event.payload as EventPayloads["AgentProfileActivated"]).expectedActiveProfileVersionId;
+        if (active !== expected) {
+          throw new ConflictError("Agent profile active-version compare-and-swap failed", {
+            sessionId: event.sessionId,
+            expectedActiveProfileVersionId: expected,
+            activeProfileVersionId: active,
+          });
+        }
       }
     }
     if (event.type === "TaskCreated") {
@@ -1054,9 +1067,23 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
           args: [payload.restorationVersionId],
         });
         const row = restored.rows[0];
-        if (!row || String(row.agent_session_id) !== payload.targetId ||
-            String(row.supersedes_profile_version_id) !== payload.previousVersionId ||
-            String(row.restores_profile_version_id) !== payload.restoreSourceVersionId) {
+        const projectedMatches = !!row && String(row.agent_session_id) === payload.targetId &&
+          String(row.supersedes_profile_version_id) === payload.previousVersionId &&
+          String(row.restores_profile_version_id) === payload.restoreSourceVersionId;
+        const canonical = projectedMatches ? null : await tx.execute({
+          sql: `SELECT session_id,payload_json FROM events
+            WHERE type='AgentProfileVersionCreated'
+              AND json_extract(payload_json,'$.agentProfile.profileVersionId')=? LIMIT 1`,
+          args: [payload.restorationVersionId],
+        });
+        const canonicalPayload = canonical?.rows[0]
+          ? JSON.parse(String(canonical.rows[0].payload_json)) as EventPayloads["AgentProfileVersionCreated"]
+          : null;
+        const canonicalMatches = event.originDeviceId !== this.#deviceId && canonicalPayload !== null &&
+          String(canonical!.rows[0]!.session_id) === payload.targetId &&
+          canonicalPayload.agentProfile.supersedesProfileVersionId === payload.previousVersionId &&
+          canonicalPayload.agentProfile.restoresProfileVersionId === payload.restoreSourceVersionId;
+        if (!projectedMatches && !canonicalMatches) {
           throw new ValidationError("Profile rollback provenance requires its exact restoration version");
         }
       } else {
@@ -1078,7 +1105,18 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const task = await tx.execute({ sql: "SELECT child_session_id,child_branch_id FROM tasks WHERE task_id=?", args: [payload.taskId] });
       if (String(version.rows[0]?.kind) !== "subagent_spec" || String(task.rows[0]?.child_session_id) !== payload.childSessionId || String(task.rows[0]?.child_branch_id) !== payload.childBranchId) throw new ValidationError("Subagent specification invocation is not pinned to its admitted task");
     }
-    const history = await this.#loadBranchEvents(tx, event.sessionId, event.branchId);
+    const syncDerived = event.originDeviceId !== this.#deviceId && (await tx.execute({
+      sql: "SELECT mapping_id FROM sync_branch_mappings WHERE session_id=? AND derived_branch_id=? LIMIT 1",
+      args: [event.sessionId, event.branchId],
+    })).rows.length > 0;
+    const history = await this.#loadBranchEvents(
+      tx,
+      event.sessionId,
+      event.branchId,
+      undefined,
+      undefined,
+      !syncDerived,
+    );
     if (!history.length) throw new NotFoundError("session branch", `${event.sessionId}/${event.branchId}`);
     reduceAgentState(projectEvents(history), event);
   }
@@ -1113,15 +1151,27 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     if (event.type === "BranchCreated") { const p = event.payload as EventPayloads["BranchCreated"]; await tx.execute({ sql: "INSERT INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,?,?,?,?)", args: [event.sessionId,p.branchId,p.parentBranchId,p.forkCursor,p.name ?? null,event.id] }); }
     if (event.type === "BranchNamed") { const p = event.payload as EventPayloads["BranchNamed"]; await tx.execute({ sql: "UPDATE branches SET name=? WHERE session_id=? AND branch_id=?", args: [p.name,event.sessionId,event.branchId] }); }
     if (event.type === "AgentProfileVersionCreated") {
-      await this.#insertAgentProfileVersion(tx, (event.payload as EventPayloads["AgentProfileVersionCreated"]).agentProfile, event);
+      const session = await tx.execute({
+        sql: "SELECT initial_branch_id FROM sessions WHERE session_id=?",
+        args: [event.sessionId],
+      });
+      if (String(session.rows[0]?.initial_branch_id) === event.branchId) {
+        await this.#insertAgentProfileVersion(tx, (event.payload as EventPayloads["AgentProfileVersionCreated"]).agentProfile, event);
+      }
     }
     if (event.type === "AgentProfileActivated") {
       const p = event.payload as EventPayloads["AgentProfileActivated"];
-      const changed = await tx.execute({
-        sql: "UPDATE workspace_agent_profiles SET active_profile_version_id=?,activated_event_id=?,updated_at=? WHERE agent_session_id=? AND active_profile_version_id=?",
-        args: [p.profileVersionId, event.id, event.committedAt, event.sessionId, p.expectedActiveProfileVersionId],
+      const session = await tx.execute({
+        sql: "SELECT initial_branch_id FROM sessions WHERE session_id=?",
+        args: [event.sessionId],
       });
-      if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Agent profile activation compare-and-swap failed", { sessionId: event.sessionId });
+      if (String(session.rows[0]?.initial_branch_id) === event.branchId) {
+        const changed = await tx.execute({
+          sql: "UPDATE workspace_agent_profiles SET active_profile_version_id=?,activated_event_id=?,updated_at=? WHERE agent_session_id=? AND active_profile_version_id=?",
+          args: [p.profileVersionId, event.id, event.committedAt, event.sessionId, p.expectedActiveProfileVersionId],
+        });
+        if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Agent profile activation compare-and-swap failed", { sessionId: event.sessionId });
+      }
     }
     if (event.type === "ContextMaterialized") { const p = event.payload as EventPayloads["ContextMaterialized"]; await tx.execute({ sql: "INSERT INTO context_records(context_id,session_id,branch_id,event_id,content_hash,records_json,context_json,created_at,harness_provenance_json,derivation_json,prompt_provenance_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)", args: [p.contextId,event.sessionId,event.branchId,event.id,p.contentHash,json(p.records),json(p.context),event.committedAt,p.harnessProvenance === undefined ? null : json(p.harnessProvenance),p.derivation === undefined ? null : json(p.derivation),p.promptProvenance === undefined ? null : json(p.promptProvenance)] }); }
     if (event.type === "EffectRequested" && executionOwned) { const p = event.payload as EventPayloads["EffectRequested"]; await tx.execute({ sql: "INSERT INTO outbox(effect_id,session_id,branch_id,executor,operation,input_json,idempotency_key,idempotent,status,requested_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.effectId,event.sessionId,event.branchId,p.executor,p.operation,json(p.input),p.idempotencyKey,p.idempotent ? 1 : 0,"pending",event.id,event.committedAt,event.committedAt] }); }
@@ -1357,6 +1407,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     branchId: string,
     untilCursor?: string,
     afterCursor?: string,
+    includeSessionProfileControl = true,
   ): Promise<AgentEvent[]> {
     const lineage = await this.#lineage(executor, sessionId, branchId);
     const events: AgentEvent[] = [];
@@ -1370,14 +1421,16 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     }
     const until = untilCursor === undefined ? Number.MAX_SAFE_INTEGER : sequenceOf(untilCursor);
     const after = afterCursor === undefined ? -1 : sequenceOf(afterCursor);
-    const control = await executor.execute({
-      sql: "SELECT * FROM events WHERE session_id=? AND type IN ('AgentProfileVersionCreated','AgentProfileActivated') AND sequence>? AND sequence<=? ORDER BY sequence",
-      args: [sessionId, after, until],
-    });
     const merged = new Map(events.map((event) => [event.id, event]));
-    for (const row of control.rows) {
-      const event = rowToEvent(row);
-      merged.set(event.id, event);
+    if (includeSessionProfileControl) {
+      const control = await executor.execute({
+        sql: "SELECT * FROM events WHERE session_id=? AND type IN ('AgentProfileVersionCreated','AgentProfileActivated') AND sequence>? AND sequence<=? ORDER BY sequence",
+        args: [sessionId, after, until],
+      });
+      for (const row of control.rows) {
+        const event = rowToEvent(row);
+        merged.set(event.id, event);
+      }
     }
     return [...merged.values()]
       .filter((event) => sequenceOf(event.cursor) > after && sequenceOf(event.cursor) <= until)
