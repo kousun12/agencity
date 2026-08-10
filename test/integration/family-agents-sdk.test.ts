@@ -283,7 +283,10 @@ describe("FU-012 retained family messaging", () => {
       const childState = projectEvents(await value.supervisor.storage.loadEvents(child.sessionId, { branchId: child.branchId }));
       expect(childState.artifacts[artifact.artifactId]).toBeDefined();
       expect(childState.messages.find(message => message.mailbox?.mailboxMessageId === receipt.mailboxMessageId)?.mailbox).toMatchObject({ relationship: "parent", taskId: child.taskId, artifactIds: [artifact.artifactId] });
-      const resolved = await value.supervisor.executeCell(child.sessionId, child.branchId, `return artifacts.get("${artifact.artifactId}");`, [], "fresh-worker-artifact-read");
+      const resolved = await value.supervisor.executeCell(child.sessionId, child.branchId, `
+        const range = await artifacts.readRange("${artifact.artifactId}", 0, 22);
+        return new TextDecoder().decode(range.value.bytes);
+      `, [], "fresh-worker-artifact-read");
       expect(resolved.result).toBe("linked family evidence");
       const other = await value.supervisor.createSession({ workspaceId: "family-sdk" });
       const unrelated = await value.supervisor.agents.spawn(other.sessionId, other.branchId, "other task");
@@ -354,7 +357,7 @@ describe("FU-012 retained family messaging", () => {
       sessionId: child.sessionId, branchId: child.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
       payload: { runId, task: "ambiguous work", requestKey: "family-unknown-request", profilePin: agentProfilePin(await value.supervisor.agentProfiles.active(child.sessionId)) },
     }]);
-    const effectId = await value.supervisor.outbox.request({ sessionId: child.sessionId, branchId: child.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, idempotencyKey: "family-ambiguous-effect", idempotent: false });
+    const effectId = await value.supervisor.outbox.request({ sessionId: child.sessionId, branchId: child.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, origin: { kind: "runtime", requestId: "family-ambiguous-effect" }, idempotencyKey: "family-ambiguous-effect", idempotent: false });
     expect(await value.supervisor.storage.claimEffect(effectId, "dead-family-owner")).not.toBeNull();
     await value.supervisor.close();
     try {

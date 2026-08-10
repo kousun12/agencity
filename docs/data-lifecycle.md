@@ -122,7 +122,7 @@ Export first records an ownership-checked manifest. For an owned scope it writes
 
 Raw provider key values are not exported from `auth.json`. Workspace source files and external service state are also not included.
 
-For schema-version-4 workspaces, `events.jsonl` carries initial and historical agent profiles, invocation profile pins, context/model-call effective-prompt provenance, governed proposals, frozen reviewer inputs and dispatch, reviewer-child links, decisions, terminal notices, and restoration provenance because those values are canonical event payloads. The rebuildable profile and governance projection tables are not separate authority that must be exported beside their source events.
+For schema-version-5 workspaces, `events.jsonl` carries initial and historical agent profiles, invocation profile pins, context/model-call effective-prompt and provider-input provenance, typed effect origins, complete observation ledgers, bounded-output artifact references, governed proposals, frozen reviewer inputs and dispatch, reviewer-child links, decisions, terminal notices, and restoration provenance because those values are canonical event payloads. The rebuildable profile, outbox-origin, and governance projection tables are not separate authority that must be exported beside their source events.
 
 The completeness audit checks that profile versions and digests referenced by invocations are present, governance and reviewer records form an attributable chain, applied/restored versions and evidence records exist, and registered artifact bytes verify by digest and size. A missing required record, missing artifact, or corrupt artifact marks the export `partial`.
 
@@ -197,17 +197,19 @@ A filesystem or administration failure produces a partial result. Workspace owne
 
 ## Upgrades and migrations
 
-- The current workspace format accepts event schema version 4, reducer version 13, model dispatch version 2, and model effect output version 2.
-- Workspaces containing event schema version 1, 2, or 3 are rejected with reset guidance and are not decoded, upcast, synchronized, projected, or recovered. Profile model-catalog caches may be discarded and rebuilt.
+- The current workspace format accepts event schema version 5, reducer version 15, provider input version 1, model dispatch version 2, bounded output version 1, and model effect output version 2.
+- Workspaces containing event schema version 1, 2, 3, or 4 are rejected with reset guidance and are not decoded, upcast, synchronized, projected, or recovered. Profile model-catalog caches may be discarded and rebuilt.
 - Opening incompatible state fails before applying product migrations to its retained rows and reports reset guidance. The runtime does not delete the old database.
-- Before using this revision, back up or move aside each affected workspace's `.agencity` directory. Starting again creates a fresh version-4 workspace whose new sessions include complete initial profiles. The separate profile directory (normally `~/.agencity`) does not need to be reset unless startup reports a profile-specific incompatibility; resetting a workspace removes session-owned agent-profile history but not user/device profile state, and resetting the profile store does not remove workspace agent profiles.
+- Before using this revision, back up or move aside each affected workspace's `.agencity` directory. Starting again creates a fresh version-5 workspace whose new sessions include complete initial profiles. The separate profile directory (normally `~/.agencity`) does not need to be reset unless startup reports a profile-specific incompatibility; resetting a workspace removes session-owned agent-profile history but not user/device profile state, and resetting the profile store does not remove workspace agent profiles.
 - Migration 016 creates rebuildable `agent_profile_versions` and `workspace_agent_profiles` projections, adds `profile_pin_json` to recursive handles, and adds `prompt_provenance_json` to immutable context records. Canonical `SessionCreated`, profile-control, invocation, context, and model-call events remain authoritative.
 - Migration 017 adds the `governance_wait` trajectory-review field plus rebuildable `governed_refinement_proposals` and `refinement_restorations` tables. Canonical proposal, validation, frozen-review, child-link, decision, application, notice, and restoration events remain authoritative.
+- Migration 019 adds `outbox.origin_json`. The canonical schema-5 `EffectRequested.origin` remains authoritative; rebuild and recovery copy and validate the exact closed origin rather than infer it from event order.
 - Back up databases, sidecars, artifacts, profile data, and replicas before changing to a source revision with new migrations.
 - Run only one runtime version against a given writable workspace at a time.
 - Do not downgrade a migrated database unless that repository revision explicitly supports it.
 - Do not hand-edit canonical events, migration metadata, outbox state, profile ownership, replica status, or deletion manifests.
 - Keep artifact paths and bytes stable across an upgrade; migrations cannot recreate missing artifacts.
+- Owner-only `.staging` content is transient and may be removed after its process dies. A CAS object placed before a failed canonical registration can remain unreachable; it is not part of a complete export unless a retained artifact reference names it.
 - A projection rebuild replays retained events without executing effects. It is not a database downgrade, artifact restore, or repair for missing canonical history.
 
 See [Configuration](./configuration.md) for path precedence, [Recovery](./recovery.md) for effect handling, and [Relational table registry](./mutable-tables.md) for the authority of each table.

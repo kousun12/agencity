@@ -856,7 +856,7 @@ describe("FU-016 durable RefinerService", () => {
         const effectId = `repeat-effect-${index}`;
         await supervisor.storage.appendEvents([{
           sessionId, branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: `repeat-request-${index}`,
-          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, idempotencyKey: `repeat-${index}`, idempotent: true },
+          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, origin: { kind: "runtime", requestId: `repeat-${index}` }, idempotencyKey: `repeat-${index}`, idempotent: true },
         }, {
           sessionId, branchId, type: "EffectOutcomeRecorded", producer: "executor", idempotencyKey: `repeat-outcome-${index}`,
           payload: { effectId, attempt: 1, outcome: "failed", error: "command timed out", observedAt: new Date().toISOString() },
@@ -954,7 +954,7 @@ describe("FU-016 durable RefinerService", () => {
         const effectId = `boundary-effect-${index}`;
         await supervisor.storage.appendEvents([{
           sessionId, branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: `boundary-request-${index}`,
-          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, idempotencyKey: `boundary-${index}`, idempotent: true },
+          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, origin: { kind: "runtime", requestId: `boundary-${index}` }, idempotencyKey: `boundary-${index}`, idempotent: true },
         }, {
           sessionId, branchId, type: "EffectOutcomeRecorded", producer: "executor", idempotencyKey: `boundary-outcome-${index}`,
           payload: { effectId, attempt: 1, outcome: "failed", error: "same boundary failure", observedAt: new Date().toISOString() },
@@ -1002,7 +1002,7 @@ describe("FU-016 durable RefinerService", () => {
         const effectId = `credential-shaped-effect-${index}`;
         await supervisor.storage.appendEvents([{
           sessionId, branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: `credential-shaped-request-${index}`,
-          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, idempotencyKey: `credential-shaped-${index}`, idempotent: true },
+          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, origin: { kind: "runtime", requestId: `credential-shaped-${index}` }, idempotencyKey: `credential-shaped-${index}`, idempotent: true },
         }, {
           sessionId, branchId, type: "EffectOutcomeRecorded", producer: "executor", idempotencyKey: `credential-shaped-outcome-${index}`,
           payload: { effectId, attempt: 1, outcome: "failed", error: "api_key=retained-credential-shaped-value", observedAt: new Date().toISOString() },

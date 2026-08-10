@@ -2,13 +2,18 @@ import {
   AGENT_TOOL_CONTRACT_ID,
   AGENT_TOOL_CONTRACT_VERSION,
   AGENT_TOOL_SELECTION_POLICY,
+  PROVIDER_INPUT_ESTIMATOR_ID,
   agentProfilePin,
   agentActionFromToolSubmission,
   assertNoReservedModelDispatchInputFields,
+  assertProviderInputWithinProductLimit,
+  estimateProviderInputCandidate,
   newId,
   CapabilityUnavailableError,
   NotFoundError,
+  ProviderInputProductLimitError,
   projectEvents,
+  reconstructProviderInputCandidate,
   resolveModelDispatch,
   resolveBuiltInModelResponseContract,
   STANDARD_UNVERIFIED_REASONING_LEVELS,
@@ -27,6 +32,7 @@ import {
   type ModelEffectFailureCode,
   type ModelEffectOutputV2,
   validateModelEffectOutputV2,
+  validateProviderInputCandidate,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { ContextMaterializer } from "./context.ts";
@@ -34,7 +40,6 @@ import { stableEffectId, type OutboxRunner } from "./outbox.ts";
 import type { CreateGoalInput, GoalHandle, GoalService } from "./goals.ts";
 import type { ModelExecutor } from "../executors/index.ts";
 import { CompactionService, AUTOMATIC_COMPACTION_RECENT_MESSAGES } from "./context-compaction.ts";
-import { estimateContextWindow } from "./compaction-core.ts";
 import {
   ModelContextCapacitySource, ProviderModelErrorCode, ContextWindowController, planContextWindowOverflowRetry,
   type ModelContextWindowConfiguration, type ProviderModelErrorClassification,
@@ -42,6 +47,7 @@ import {
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
 import { composeAgentSystemPrompt } from "./agent-system-prompt.ts";
+import { deriveAgentProviderObservations } from "./agent-observations.ts";
 
 export interface StartAgentRunInput {
   readonly task: string;
@@ -105,12 +111,16 @@ const MAX_ACTION_CORRECTION_ATTEMPTS = 1;
 const SDK_GUIDE = [
   "The only executable action is a TypeScript cell. Do not request parallel provider tools.",
   "Cell globals: sdk, sql, session, console, state, artifacts, tools, inspect, cells, rlm.",
-  "Use tools.readFile(path), tools.writeFile(path, content, expectedSha256?), and tools.shell(command, options?) for repository work.",
-  "Tool results are objects, not strings: readFile returns { content, sha256, size }; writeFile returns { path, sha256, size, unchanged? }; shell returns { exitCode, stdout, stderr, truncated }.",
-  "Read and edit file.content, and pass file.sha256 as expectedSha256 when replacing a previously read file. Shell options use { timeoutMs, cwd?, idempotencyKey? }; the option is timeoutMs, not timeout.",
+  "Use tools.readFile(path, { startLine?, endLine?, expectedSha256? }), tools.writeFile(path, content, expectedSha256?), and tools.shell(command, options?) for repository work.",
+  "Shell and file-read results use agencity.bounded-output.v1. Read complete inline data from result.value; spilled or truncated results include bounded previews and explicit recovery guidance.",
+  "File reads return complete one-based line pages in value with content, startLine, endLine, totalLines, nextLine, and sha256. Continue with expectedSha256 so a mutable-file change fails visibly.",
+  "Use artifacts.put for durable content and artifacts.readRange(artifactId, start, end) for exact zero-based half-open byte ranges up to 64 KiB. Decode or parse returned value.bytes inside the cell.",
+  "Pass file.value.sha256 as expectedSha256 when replacing a previously read file. Shell options use { timeoutMs, cwd?, idempotencyKey? }; the option is timeoutMs, not timeout.",
   "tools.readFile, tools.writeFile, and tools.shell throw when their durable effect does not succeed. Use tools.request(executor, operation, input, options?) when an expected failed outcome must be inspected without failing the cell.",
-  "Use sql`SELECT ... ${value}` only for read-only relational queries; use state.get/set/list for durable JSON and artifacts.put/get for larger content.",
+  "Use sql`SELECT ... ${value}` only for read-only relational queries; use state.get/set/list for durable JSON and artifacts.put/readRange for larger content.",
   "Use cells.list/get for retained notebook history; use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
+  "Keep large read, search, and tool results in local variables while inspecting and transforming them. Do not console.log or return complete tool objects unless the next model decision requires the complete value.",
+  "Return the smallest useful observation: a focused summary, selected slice, count, digest, error, or artifact reference. Use state for small durable JSON and artifacts for large durable content.",
   "A cell's final expression or explicit return is its bounded observation. Values in lexical bindings or globalThis disappear after the committed cell boundary.",
   "Inspect first, make focused changes, run verification, and return a final action only when the task is actually complete.",
 ].join("\n");
@@ -380,7 +390,18 @@ export class AgentRunService {
       }
 
       if (!step.action && !step.rejection) {
-        await this.#completeStepModel(sessionId, branchId, state, events, run, step);
+        try {
+          await this.#completeStepModel(sessionId, branchId, state, events, run, step);
+        } catch (error) {
+          if (!(error instanceof ProviderInputProductLimitError)) throw error;
+          await this.#terminal(
+            sessionId,
+            branchId,
+            run,
+            "failed",
+            `${error.code}: ${error.message}`,
+          );
+        }
         ({ state, events, run } = await this.#load(sessionId, branchId, runId));
         step = run.steps.at(-1)!;
       }
@@ -408,26 +429,26 @@ export class AgentRunService {
     run: AgentRunState,
     step: AgentRunState["steps"][number],
   ): Promise<void> {
-    const observations = step.observationEventIds.map((eventId) => {
-      const event = events.find((candidate) => candidate.id === eventId);
-      if (!event) throw new ValidationError(`Agent run observation event is missing: ${eventId}`);
-      return { eventId: event.id, type: event.type, payload: JSON.parse(JSON.stringify(event.payload)) as JsonValue };
-    });
-    const window = this.#windowConfiguration(state);
+    const observations = deriveAgentProviderObservations(events, step.observationEventIds);
     let attempt = step.modelAttempts.at(-1);
     if (!attempt && state.contexts[step.contextId]) {
       const retainedContextEvent = events.find((event) => event.type === "ContextMaterialized" && (event.payload as EventPayloads["ContextMaterialized"]).contextId === step.contextId) as AgentEvent<"ContextMaterialized"> | undefined;
       if (!retainedContextEvent) throw new ValidationError(`Agent run retained context is unavailable: ${step.contextId}`);
       if (!retainedContextEvent.payload.promptProvenance) throw new ValidationError(`Agent run retained context has no prompt provenance: ${step.contextId}`);
-      const modelDispatch = this.#agentDispatch(state);
-      const estimatedInputTokens = estimateContextWindow(retainedContextEvent.payload.context).estimatedTokens;
+      const providerInput = providerInputFromContextEvent(retainedContextEvent);
+      const admission = retainedContextEvent.payload.providerInputAdmission!;
+      const modelDispatch = admission.modelDispatch;
+      const estimatedInputTokens = estimateProviderInputCandidate(providerInput).estimatedTokens;
+      assertProviderInputWithinProductLimit(providerInput);
       await this.storage.appendEvents([{
         sessionId, branchId, type: "AgentRunModelAttemptStarted", producer: "recovery",
         idempotencyKey: `agent-run-model-attempt:${run.id}:${step.ordinal}:1`,
         payload: {
           runId: run.id, stepId: step.id, ordinal: step.ordinal, attempt: 1,
           contextId: step.contextId, callId: step.callId, effectId: step.effectId, reason: "initial",
-          estimatedInputTokens, contextWindow: window.provenance,
+          providerInputVersion: providerInput.version,
+          providerInputDigest: providerInput.digest,
+          estimatedInputTokens, contextWindow: admission.capacity,
         },
       }, {
         sessionId, branchId, type: "SessionStatusChanged", producer: "recovery",
@@ -437,7 +458,7 @@ export class AgentRunService {
         idempotencyKey: `agent-run-model-call:${step.callId}`,
         payload: {
           callId: step.callId, contextId: step.contextId, effectId: step.effectId,
-          modelDispatch, estimatedInputTokens, promptProvenance: retainedContextEvent.payload.promptProvenance, attempt: 1, contextWindow: window.provenance,
+          modelDispatch, providerInput, estimatedInputTokens, promptProvenance: retainedContextEvent.payload.promptProvenance, attempt: 1, contextWindow: admission.capacity,
         },
       }]);
       const loaded = await this.#load(sessionId, branchId, run.id);
@@ -445,20 +466,34 @@ export class AgentRunService {
     }
     if (!attempt) {
       const modelDispatch = this.#agentDispatch(state);
+      const window = this.#windowConfiguration(state);
       const prompt = await this.#runPrompt(sessionId, run, modelDispatch);
       let materialized;
       let proactiveCompactions = 0;
       if (this.compactions) {
         const admission = await new ContextWindowController(window.configuration).admit({
-          buildCandidate: ({ completedCompactions }) => this.contexts.materialize(sessionId, branchId, {
-            contextId: completedCompactions === 0 ? step.contextId : `${step.contextId}-window-${completedCompactions}`,
-            idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}:window:${completedCompactions}`,
-            additionalRecordIds: step.observationEventIds,
-            promptProvenance: prompt.provenance,
-            agentProfileVersionId: run.profilePin.profileVersionId,
-            transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch, prompt.content),
-          }),
-          estimate: (candidate) => estimateContextWindow(candidate.context).estimatedTokens,
+          buildCandidate: async ({ completedCompactions }) => {
+            const retained = await this.contexts.materialize(sessionId, branchId, {
+              contextId: completedCompactions === 0 ? step.contextId : `${step.contextId}-window-${completedCompactions}`,
+              idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}:window:${completedCompactions}`,
+              additionalRecordIds: step.observationEventIds,
+              promptProvenance: prompt.provenance,
+              agentProfileVersionId: run.profilePin.profileVersionId,
+              transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch, prompt.content),
+              providerInput: {
+                modelDispatch,
+                capacity: window.provenance,
+              },
+            });
+            return {
+              ...retained,
+              providerInput: providerInputFromContextEvent(retained.event),
+            };
+          },
+          estimate: (candidate) =>
+            estimateProviderInputCandidate(candidate.providerInput).estimatedTokens,
+          measureUtf8Bytes: (candidate) =>
+            candidate.providerInput.exactUtf8Bytes,
           compact: async ({ iteration }) => {
             const compacted = await this.compactions!.compact(sessionId, branchId, {
               strategy: "deterministic-extractive-v1", reason: "automatic-threshold", requestedBy: "supervisor",
@@ -481,10 +516,21 @@ export class AgentRunService {
           promptProvenance: prompt.provenance,
           agentProfileVersionId: run.profilePin.profileVersionId,
           transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch, prompt.content),
+          providerInput: {
+            modelDispatch,
+            capacity: window.provenance,
+          },
         })).event;
-        materialized = { contextId: step.contextId, context: contextEvent.payload.context, event: contextEvent };
+        materialized = {
+          contextId: step.contextId,
+          context: contextEvent.payload.context,
+          event: contextEvent,
+          providerInput: providerInputFromContextEvent(contextEvent),
+        };
       }
-      const estimatedInputTokens = estimateContextWindow(materialized.context).estimatedTokens;
+      const estimatedInputTokens =
+        estimateProviderInputCandidate(materialized.providerInput).estimatedTokens;
+      assertProviderInputWithinProductLimit(materialized.providerInput);
       await this.storage.appendEvents([{
         sessionId, branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor",
         idempotencyKey: `agent-run-model-attempt:${run.id}:${step.ordinal}:1`,
@@ -492,6 +538,8 @@ export class AgentRunService {
           runId: run.id, stepId: step.id, ordinal: step.ordinal, attempt: 1,
           contextId: materialized.contextId, callId: step.callId, effectId: step.effectId,
           reason: proactiveCompactions ? "proactive-compaction" : "initial",
+          providerInputVersion: materialized.providerInput.version,
+          providerInputDigest: materialized.providerInput.digest,
           estimatedInputTokens,
           contextWindow: window.provenance,
         },
@@ -503,7 +551,7 @@ export class AgentRunService {
         idempotencyKey: `agent-run-model-call:${step.callId}`,
         payload: {
           callId: step.callId, contextId: materialized.contextId, effectId: step.effectId,
-          modelDispatch, estimatedInputTokens, promptProvenance: materialized.event.payload.promptProvenance!, attempt: 1, contextWindow: window.provenance,
+          modelDispatch, providerInput: materialized.providerInput, estimatedInputTokens, promptProvenance: materialized.event.payload.promptProvenance!, attempt: 1, contextWindow: window.provenance,
         },
       }]);
       const loaded = await this.#load(sessionId, branchId, run.id);
@@ -521,13 +569,19 @@ export class AgentRunService {
     const admittedCall = current.modelCalls[attempt.callId];
     if (!admittedCall) throw new ValidationError("Agent run attempt is missing its atomically retained model call");
     const retainedDispatch = admittedCall.modelDispatch;
+    const retainedProviderInput = validateProviderInputCandidate(
+      admittedCall.providerInput,
+      {
+        context,
+        modelDispatch: retainedDispatch,
+        capacity: attempt.contextWindow,
+      },
+    );
     if (!current.effects[attempt.effectId]) {
-      // Catalog and transport support can drift after run/step admission.
-      // Recheck immediately before committing each new model effect.
-      this.#agentDispatch(current);
       const requestedEffectId = await this.outbox.request({
         sessionId, branchId, executor: "model", operation: "complete",
-        input: { callId: attempt.callId, context, modelDispatch: retainedDispatch as unknown as JsonValue, promptProvenance: admittedCall.promptProvenance as unknown as JsonValue },
+        input: { callId: attempt.callId, providerInput: retainedProviderInput as unknown as JsonValue, modelDispatch: retainedDispatch as unknown as JsonValue, promptProvenance: admittedCall.promptProvenance as unknown as JsonValue },
+        origin: { kind: "model-call", callId: attempt.callId },
         idempotencyKey: effectKey, idempotent: false,
       });
       if (requestedEffectId !== attempt.effectId) throw new ValidationError("Agent run model effect identity is not stable");
@@ -554,6 +608,7 @@ export class AgentRunService {
       const effect = current.effects[attempt.effectId];
       const classification = providerClassification(effect?.modelFailure, call.modelDispatch.configuration.provider, call.modelDispatch.configuration.model, call.status);
       if (this.compactions && classification.code === ProviderModelErrorCode.ProviderConfirmedContextWindowOverflow) {
+        const window = windowConfigurationFromProvenance(attempt.contextWindow);
         const compacted = await this.compactions.compact(sessionId, branchId, {
           strategy: "deterministic-extractive-v1", reason: "provider-overflow", requestedBy: "supervisor",
           idempotencyKey: `agent-run-overflow:${run.id}:${step.ordinal}:${attempt.attempt}`,
@@ -575,14 +630,21 @@ export class AgentRunService {
               call.modelDispatch,
               systemPromptFromContext(context),
             ),
+            providerInput: {
+              modelDispatch: call.modelDispatch,
+              capacity: attempt.contextWindow,
+            },
           });
-          const nextEstimate = estimateContextWindow(nextContext.context).estimatedTokens;
+          const nextProviderInput =
+            providerInputFromContextEvent(nextContext.event);
+          const nextEstimate =
+            estimateProviderInputCandidate(nextProviderInput).estimatedTokens;
+          assertProviderInputWithinProductLimit(nextProviderInput);
           const retry = planContextWindowOverflowRetry({
             classification, retriesAlreadyAttempted: attempt.attempt - 1,
             rejectedEstimatedInputTokens: attempt.estimatedInputTokens, nextEstimatedInputTokens: nextEstimate,
           });
           if (retry.retry) {
-            this.#agentDispatch(current);
             const callId = `${step.id}-call-attempt-${nextAttempt}`;
             const retryEffectKey = `agent-run-model:${run.id}:${step.ordinal}:attempt:${nextAttempt}`;
             const effectId = stableEffectId(sessionId, retryEffectKey);
@@ -592,7 +654,10 @@ export class AgentRunService {
               payload: {
                 runId: run.id, stepId: step.id, ordinal: step.ordinal, attempt: nextAttempt,
                 contextId: nextContext.contextId, callId, effectId,
-                reason: "provider-overflow", estimatedInputTokens: nextEstimate, contextWindow: window.provenance,
+                reason: "provider-overflow",
+                providerInputVersion: nextProviderInput.version,
+                providerInputDigest: nextProviderInput.digest,
+                estimatedInputTokens: nextEstimate, contextWindow: attempt.contextWindow,
                 retryOfCallId: attempt.callId,
               },
             }, {
@@ -603,8 +668,8 @@ export class AgentRunService {
               idempotencyKey: `agent-run-model-call:${callId}`,
               payload: {
                 callId, contextId: nextContext.contextId, effectId,
-                modelDispatch: call.modelDispatch, estimatedInputTokens: nextEstimate, promptProvenance: call.promptProvenance,
-                attempt: nextAttempt, retryOfCallId: attempt.callId, contextWindow: window.provenance,
+                modelDispatch: call.modelDispatch, providerInput: nextProviderInput, estimatedInputTokens: nextEstimate, promptProvenance: call.promptProvenance,
+                attempt: nextAttempt, retryOfCallId: attempt.callId, contextWindow: attempt.contextWindow,
               },
             }]);
             const loaded = await this.#load(sessionId, branchId, run.id);
@@ -808,7 +873,7 @@ export class AgentRunService {
     const source = resolved.source === "provider-metadata" ? ModelContextCapacitySource.ProviderMetadata
       : resolved.source === "model-catalog" ? ModelContextCapacitySource.ModelCatalog
       : resolved.source === "operator-configuration" ? ModelContextCapacitySource.OperatorConfiguration : ModelContextCapacitySource.Unknown;
-    const configuration: ModelContextWindowConfiguration = { provenance: { provider: resolved.provider, model: resolved.model, source }, contextWindowTokens: resolved.contextWindowTokens, maxOutputReserveTokens: outputReserveTokens, estimatorId: "utf8-bytes-per-token-v1", triggerRatio: 0.8, targetRatio: 0.6 };
+    const configuration: ModelContextWindowConfiguration = { provenance: { provider: resolved.provider, model: resolved.model, source }, contextWindowTokens: resolved.contextWindowTokens, maxOutputReserveTokens: outputReserveTokens, estimatorId: PROVIDER_INPUT_ESTIMATOR_ID, triggerRatio: 0.8, targetRatio: 0.6 };
     return { configuration, provenance: { provider: resolved.provider, model: resolved.model, source, contextWindowTokens: resolved.contextWindowTokens, outputReserveTokens, estimatorId: configuration.estimatorId, triggerRatio: configuration.triggerRatio, targetRatio: configuration.targetRatio } };
   }
 
@@ -840,7 +905,7 @@ export class AgentRunService {
       },
       executionGuidance: {
         id: "agencity.agent-run.execution-guidance",
-        version: 1,
+        version: 2,
         text: SDK_GUIDE,
       },
     });
@@ -1047,6 +1112,49 @@ export class AgentRunService {
   }
 }
 
+function providerInputFromContextEvent(
+  event: AgentEvent<"ContextMaterialized">,
+) {
+  if (!event.payload.providerInputAdmission) {
+    throw new ValidationError(
+      `Context ${event.payload.contextId} has no retained provider-input admission`,
+    );
+  }
+  return reconstructProviderInputCandidate(
+    event.payload.context,
+    event.payload.providerInputAdmission,
+  );
+}
+
+function windowConfigurationFromProvenance(
+  provenance: ContextCapacityProvenance,
+): {
+  configuration: ModelContextWindowConfiguration;
+  provenance: ContextCapacityProvenance;
+} {
+  return {
+    configuration: {
+      provenance: {
+        provider: provenance.provider,
+        model: provenance.model,
+        source: provenance.source === "provider-metadata"
+          ? ModelContextCapacitySource.ProviderMetadata
+          : provenance.source === "model-catalog"
+          ? ModelContextCapacitySource.ModelCatalog
+          : provenance.source === "operator-configuration"
+          ? ModelContextCapacitySource.OperatorConfiguration
+          : ModelContextCapacitySource.Unknown,
+      },
+      contextWindowTokens: provenance.contextWindowTokens,
+      maxOutputReserveTokens: provenance.outputReserveTokens,
+      estimatorId: provenance.estimatorId,
+      triggerRatio: provenance.triggerRatio,
+      targetRatio: provenance.targetRatio,
+    },
+    provenance,
+  };
+}
+
 function acceptanceCrashAfterActionCommit(ordinal: number): void {
   if (process.env.AGENCITY_ACCEPTANCE !== "1") return;
   if (process.env.AGENCITY_ACCEPTANCE_FAILPOINT !== `agent-action-committed:${ordinal}`) return;
@@ -1054,7 +1162,7 @@ function acceptanceCrashAfterActionCommit(ordinal: number): void {
   process.exit(86);
 }
 
-function agentProviderContext(
+export function agentProviderContext(
   base: JsonValue,
   run: AgentRunState,
   stepOrdinal: number,
@@ -1089,13 +1197,13 @@ function agentProviderContext(
     stepOrdinal,
     status: run.status,
     observations,
-    durableContext,
     instruction: correctingRejectedAction
       ? "The prior response was rejected without executing any code. Use the exact typed validation error in the observation and call exactly one provided tool with valid input."
       : observations.length
       ? "Continue from these new exact-once durable observations."
       : "Choose the first concrete action for this task.",
   };
+  const providerStep = { run: stepInput, durableContext };
   return JSON.parse(JSON.stringify({
     ...durable,
     recentActivity,
@@ -1110,7 +1218,7 @@ function agentProviderContext(
     messages: [
       { role: "system", content: systemPrompt },
       ...existingMessages,
-      { role: "user", content: `AGENCITY DURABLE RUN STEP\n${JSON.stringify(stepInput)}` },
+      { role: "user", content: `AGENCITY DURABLE RUN STEP\n${JSON.stringify(providerStep)}` },
     ],
   })) as JsonValue;
 }

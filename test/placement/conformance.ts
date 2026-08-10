@@ -99,9 +99,18 @@ export async function executorConformance(executor: EffectExecutor, suffix: stri
     attempt: 1,
   } as const;
   const success = await executor.execute({ ...base, operation: "run", input: { command: "printf conformance" } }, { signal: new AbortController().signal });
-  expect(success).toMatchObject({ outcome: "succeeded", output: { exitCode: 0, stdout: "conformance" } });
+  expect(success).toMatchObject({
+    outcome: "succeeded",
+    output: {
+      completeness: "inline",
+      value: { exitCode: 0, stdout: "conformance" },
+    },
+  });
   const failure = await executor.execute({ ...base, effectId: `${base.effectId}-failed`, operation: "run", input: { command: "printf failure >&2; exit 7" } }, { signal: new AbortController().signal });
-  expect(failure).toMatchObject({ outcome: "failed", output: { exitCode: 7, stderr: "failure" } });
+  expect(failure).toMatchObject({
+    outcome: "failed",
+    output: { completeness: "inline", value: { exitCode: 7, stderr: "failure" } },
+  });
   const cancelled = new AbortController(); cancelled.abort();
   expect(await executor.execute({ ...base, effectId: `${base.effectId}-cancelled`, operation: "run", input: { command: "exit 0" } }, { signal: cancelled.signal })).toMatchObject({ outcome: "cancelled" });
   await expect(Promise.resolve().then(() => executor.execute({ ...base, effectId: `${base.effectId}-unsupported`, operation: "unsupported", input: {} }, { signal: new AbortController().signal }))).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });

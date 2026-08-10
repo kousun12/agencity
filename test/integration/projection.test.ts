@@ -205,6 +205,7 @@ describe("historical projection is effect-free", () => {
       executor: "counting",
       operation: "increment",
       input: { amount: 1 },
+      origin: { kind: "runtime", requestId: "one-visible-effect" },
       idempotencyKey: "one-visible-effect",
       idempotent: false,
     });

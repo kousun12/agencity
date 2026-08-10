@@ -12,6 +12,8 @@ import {
   MAX_MODEL_TOOL_NAME_BYTES,
   ModelEffectAdmissionService,
   ModelExecutor,
+  PROVIDER_INPUT_ESTIMATOR_ID,
+  buildProviderInputCandidate,
   canonicalJsonByteLength,
   canonicalJsonDigest,
   createAnthropicModelProvider,
@@ -152,11 +154,19 @@ describe("formal AI SDK model responses", () => {
           model,
           reasoningEffort: "high",
         }).modelDispatch;
+      const providerInput = candidateFor(executor, dispatch, {
+        messages: [{ role: "user", content: "review" }],
+      });
       await executor.executeResponseAware(
-        { messages: [{ role: "user", content: "review" }] },
+        providerInput as unknown as JsonValue,
         dispatch,
         new AbortController().signal,
       ).catch(() => {});
+      expect(providerInput.options.reasoningEffort).toBe("high");
+      expect(providerInput.policy.toolChoice).toBe("required");
+      expect(providerInput.tools.map((tool) => tool.name)).toEqual([
+        REFINEMENT_REVIEW_TOOL_NAME,
+      ]);
       const tools = transport === "openai"
         ? body!.tools.map((item: any) => item.function)
         : body!.tools;
@@ -239,6 +249,61 @@ describe("formal AI SDK model responses", () => {
     expect(body!.tools.every((item: any) => item.function.strict === undefined))
       .toBe(true);
     expect(requestCount).toBe(1);
+  });
+
+  test("does not serialize provider parallel suppression for runtime-rejected candidate policy", async () => {
+    let body: Record<string, any> | undefined;
+    const provider = createOpenAIModelProvider({
+      origin: "https://openai.example.test",
+      apiKey: () => "openai-test-key",
+      fetch: (async (input, init) => {
+        const request = input instanceof Request
+          ? input
+          : new Request(input, init);
+        body = await request.json() as Record<string, any>;
+        return Response.json(
+          { error: { message: "fixture" } },
+          { status: 500 },
+        );
+      }) as typeof fetch,
+    });
+    const executor = new ModelExecutor([provider]);
+    const base = admittedDispatch(executor, "openai", "openai/gpt-5.4");
+    const contract = resolveBuiltInModelResponseContract(
+      AGENT_TOOL_CONTRACT_ID,
+      "runtime-validated",
+    );
+    const dispatch = modelDispatchWithResponseAdmission(base, {
+      responseContract: contract,
+      responseCapability: {
+        kind: "required-tool-set",
+        capability: {
+          status: "runtime-validated",
+          requiredChoice: "provider-enforced",
+          parallelCalls: "runtime-rejected",
+          streaming: true,
+          catalogDigest: base.reasoning.capability.catalogDigest,
+          adapter: "agencity.vercel-ai-sdk.v7",
+        },
+      },
+    });
+    const providerInput = candidateFor(executor, dispatch, {
+      messages: [{ role: "user", content: "runtime guard" }],
+    });
+    expect(providerInput.policy).toMatchObject({
+      schemaEnforcement: "runtime-validated",
+      toolChoice: "required",
+      parallelCalls: "runtime-rejected",
+    });
+    await executor.executeResponseAware(
+      providerInput as unknown as JsonValue,
+      dispatch,
+      new AbortController().signal,
+    ).catch(() => {});
+    expect(body?.tool_choice).toBe("required");
+    expect(body).not.toHaveProperty("parallel_tool_calls");
+    expect(body?.tools.every((item: any) =>
+      item.function.strict === undefined)).toBe(true);
   });
 
   test("normalizes a Gateway formal stream with retained cost and canonical model identity", async () => {
@@ -462,8 +527,11 @@ describe("formal AI SDK model responses", () => {
           ? "openai/gpt-5.4"
           : "openai/gpt-5.6-sol";
       const dispatch = strictDispatch(executor, transport, model);
+      const providerInput = candidateFor(executor, dispatch, {
+        messages: [{ role: "user", content: "strict" }],
+      });
       await executor.executeResponseAware(
-        { messages: [{ role: "user", content: "strict" }] },
+        providerInput as unknown as JsonValue,
         dispatch,
         new AbortController().signal,
       ).catch(() => {});
@@ -471,6 +539,7 @@ describe("formal AI SDK model responses", () => {
         ? body!.tools.map((item: any) => item.function)
         : body!.tools;
       expect(tools.map((item: any) => item.strict)).toEqual([true, true]);
+      expect(providerInput.tools.every((tool) => tool.strict)).toBe(true);
     }
   });
 
@@ -1170,6 +1239,25 @@ describe("formal AI SDK model responses", () => {
     }
   });
 });
+
+function candidateFor(
+  executor: ModelExecutor,
+  dispatch: ModelDispatch,
+  context: JsonValue,
+) {
+  const capacity = executor.contextCapacity(dispatch.configuration);
+  return buildProviderInputCandidate({
+    context,
+    modelDispatch: dispatch,
+    capacity: {
+      ...capacity,
+      outputReserveTokens: dispatch.configuration.maxOutputTokens ?? 0,
+      estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+      triggerRatio: 0.8,
+      targetRatio: 0.6,
+    },
+  });
+}
 
 function admittedDispatch(
   executor: ModelExecutor,

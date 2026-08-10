@@ -124,6 +124,7 @@ describe("family activity projection", () => {
           executor: "shell",
           operation: "run",
           input: {},
+          origin: { kind: "runtime", requestId: "effect" },
           idempotencyKey: "effect",
           idempotent: false,
           attempts: 1,

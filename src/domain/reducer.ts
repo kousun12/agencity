@@ -12,11 +12,13 @@ import {
   type ModelEffectOutputV2,
 } from "./model-response.ts";
 import { validateModelDispatch, type ModelDispatch } from "./model.ts";
+import { validateProviderInputCandidate } from "./provider-input.ts";
 import { validateRefinementReviewRecursiveResult } from "./refinement-review-contract.ts";
 import {
   REFINEMENT_GOVERNANCE_CONTRACT_ID,
   validateRefinementGovernanceRecursiveResult,
 } from "./refinement-governance.ts";
+import { assertBoundedOutputs } from "./bounded-output.ts";
 
 function withBase(state: AgentState, event: AgentEvent): AgentState {
   return { ...state, cursor: event.cursor, appliedEventIds: [...state.appliedEventIds, event.id] };
@@ -92,7 +94,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "MessageAppended": { const p = event.payload as EventPayloads["MessageAppended"]; return { ...next, messages: [...state.messages, { id: p.messageId, role: p.role, content: p.content, eventId: event.id, eventCursor: event.cursor, schemaVersion: event.schemaVersion, modelCallId: p.modelCallId ?? null, ...(p.mailbox === undefined ? {} : { mailbox: { ...p.mailbox, ...(p.mailbox.artifactIds === undefined ? {} : { artifactIds: [...p.mailbox.artifactIds] }) } }) }] }; }
     case "CellProposed": { const p = event.payload as EventPayloads["CellProposed"]; if (state.cells[p.cellId]) throw new InvalidTransitionError("cell", state.cells[p.cellId]!.status, "proposed"); const cell: CellState = { id: p.cellId, code: p.code, status: "proposed", attempts: 0, logs: [], logStreams: [], eventId: event.id }; return { ...next, cells: { ...state.cells, [p.cellId]: cell } }; }
     case "CellStarted": { const p = event.payload as EventPayloads["CellStarted"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("cell", old?.status ?? "missing", "running"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "running", attempts: p.attempt, eventId: event.id } } }; }
-    case "CellCommitted": { const p = event.payload as EventPayloads["CellCommitted"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "committed"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "committed", result: p.result, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
+    case "CellCommitted": { const p = event.payload as EventPayloads["CellCommitted"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "committed"); assertBoundedOutputs(p.result); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "committed", result: p.result, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
     case "CellFailed": { const p = event.payload as EventPayloads["CellFailed"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "failed"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "failed", error: p.error, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
     case "CellAbandoned": { const p = event.payload as EventPayloads["CellAbandoned"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status)) throw new InvalidTransitionError("cell", old?.status ?? "missing", "abandoned"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "abandoned", error: p.reason, eventId: event.id } } }; }
     case "WorkingValueSet": { const p = event.payload as EventPayloads["WorkingValueSet"]; const old = state.workingValues[p.name]; if (old && p.version <= old.version) throw new ValidationError(`Working value version must increase for ${p.name}`); return { ...next, workingValues: { ...state.workingValues, [p.name]: { name: p.name, version: p.version, value: p.value, eventId: event.id } } }; }
@@ -100,17 +102,25 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "EffectRequested": {
       const p = event.payload as EventPayloads["EffectRequested"];
       if (state.effects[p.effectId]) throw new InvalidTransitionError("effect", state.effects[p.effectId]!.status, "requested");
+      validateEffectOrigin(state, p, true);
       if (p.executor === "model") validateModelEffectRelation(state, p);
-      const effect: EffectState = { id: p.effectId, executor: p.executor, operation: p.operation, input: p.input, idempotencyKey: p.idempotencyKey, idempotent: p.idempotent, attempts: 0, status: "requested", eventId: event.id };
+      const effect: EffectState = { id: p.effectId, executor: p.executor, operation: p.operation, input: p.input, origin: p.origin, idempotencyKey: p.idempotencyKey, idempotent: p.idempotent, attempts: 0, status: "requested", eventId: event.id };
       return { ...next, effects: { ...state.effects, [p.effectId]: effect } };
     }
-    case "EffectAttemptStarted": { const p = event.payload as EventPayloads["EffectAttemptStarted"]; const old = state.effects[p.effectId]; if (!old || !["requested", "started"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("effect", old?.status ?? "missing", "started"); return { ...next, effects: { ...state.effects, [p.effectId]: { ...old, status: "started", attempts: p.attempt, eventId: event.id } } }; }
+    case "EffectAttemptStarted": {
+      const p = event.payload as EventPayloads["EffectAttemptStarted"];
+      const old = state.effects[p.effectId];
+      if (!old || !["requested", "started"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("effect", old?.status ?? "missing", "started");
+      validateEffectOrigin(state, { ...old, effectId: old.id }, false);
+      return { ...next, effects: { ...state.effects, [p.effectId]: { ...old, status: "started", attempts: p.attempt, eventId: event.id } } };
+    }
     case "EffectOutcomeRecorded": {
       const p = event.payload as EventPayloads["EffectOutcomeRecorded"];
       const old = state.effects[p.effectId];
       if (!old || !["requested", "started"].includes(old.status) || p.attempt < Math.max(1, old.attempts)) {
         throw new InvalidTransitionError("effect", old?.status ?? "missing", p.outcome);
       }
+      if (p.output !== undefined) assertBoundedOutputs(p.output);
       if (old.executor === "model") {
         if (p.outcome === "succeeded") {
           if (p.output === undefined || p.modelFailure !== undefined) {
@@ -205,7 +215,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         }
         compactions = { ...state.compactions, [request.id]: { ...request, status: "completed", contextId: p.contextId, ...(p.derivation.effectIds === undefined ? {} : { effectIds: [...p.derivation.effectIds] }), eventId: event.id } };
       }
-      return { ...next, compactions, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records.map((record) => ({ ...record })), contentHash: p.contentHash, ...(p.promptProvenance === undefined ? {} : { promptProvenance: p.promptProvenance }), ...(p.derivation === undefined ? {} : { derivation: p.derivation }), eventId: event.id } } };
+      return { ...next, compactions, contexts: { ...state.contexts, [p.contextId]: { id: p.contextId, records: p.records.map((record) => ({ ...record })), contentHash: p.contentHash, ...(p.promptProvenance === undefined ? {} : { promptProvenance: p.promptProvenance }), ...(p.providerInputAdmission === undefined ? {} : { providerInputAdmission: p.providerInputAdmission }), ...(p.derivation === undefined ? {} : { derivation: p.derivation }), eventId: event.id } } };
     }
     case "ModelCallRequested": {
       const p = event.payload as EventPayloads["ModelCallRequested"];
@@ -226,10 +236,22 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         .flatMap((run) => run.steps)
         .find((candidate) => candidate.callId === p.callId || candidate.modelAttempts.some((attempt) => attempt.callId === p.callId));
       if (ownedStep) {
+        const admission = retainedContext.providerInputAdmission;
+        if (!admission ||
+            admission.version !== p.providerInput.version ||
+            admission.digest !== p.providerInput.digest ||
+            !Bun.deepEquals(admission.modelDispatch, p.modelDispatch) ||
+            !Bun.deepEquals(admission.capacity, p.contextWindow)) {
+          throw new ValidationError(
+            "Agent-run model call differs from its context-bound provider admission",
+          );
+        }
         const owner = Object.values(state.agentRuns).find((run) => run.steps.includes(ownedStep));
         const ownedAttempt = ownedStep.modelAttempts.at(-1);
         if (!ownedAttempt || ownedAttempt.callId !== p.callId || ownedAttempt.effectId !== p.effectId ||
             ownedAttempt.contextId !== p.contextId || ownedAttempt.estimatedInputTokens !== p.estimatedInputTokens ||
+            ownedAttempt.providerInputVersion !== p.providerInput.version ||
+            ownedAttempt.providerInputDigest !== p.providerInput.digest ||
             ownedAttempt.attempt !== (p.attempt ?? 1) || ownedAttempt.retryOfCallId !== p.retryOfCallId ||
             !Bun.deepEquals(ownedAttempt.contextWindow, p.contextWindow)) {
           throw new ValidationError("Agent-run model call must be atomically bound to its retained attempt");
@@ -246,7 +268,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         if (!prior || !Bun.deepEquals(prior.modelDispatch, p.modelDispatch) ||
             !Bun.deepEquals(prior.promptProvenance, p.promptProvenance)) throw new ValidationError("Model overflow retries must reuse the complete prior dispatch and prompt pin");
       }
-      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, estimatedInputTokens: p.estimatedInputTokens, promptProvenance: p.promptProvenance, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
+      const call: ModelCallState = { id: p.callId, contextId: p.contextId, effectId: p.effectId, modelDispatch: p.modelDispatch, providerInput: p.providerInput, estimatedInputTokens: p.estimatedInputTokens, promptProvenance: p.promptProvenance, attempt: p.attempt ?? 1, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), ...(p.contextWindow === undefined ? {} : { contextWindow: p.contextWindow }), chunks: [], status: "requested", eventId: event.id };
       return { ...next, modelCalls: { ...state.modelCalls, [p.callId]: call } };
     }
     case "ModelOutputChunk": {
@@ -587,12 +609,16 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const p = event.payload as EventPayloads["AgentRunModelAttemptStarted"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
       const expectedAttempt = (step?.modelAttempts.length ?? 0) + 1;
       const prior = step?.modelAttempts.at(-1);
+      const admission = state.contexts[p.contextId]?.providerInputAdmission;
       if (!run || run.status !== "running" || !step || step.id !== p.stepId || step.ordinal !== p.ordinal || p.attempt !== expectedAttempt ||
           (p.attempt === 1 && (p.callId !== step.callId || p.effectId !== step.effectId)) ||
-          (p.attempt > 1 && p.retryOfCallId !== prior?.callId) || step.action !== undefined || step.rejection !== undefined) {
+          (p.attempt > 1 && p.retryOfCallId !== prior?.callId) || step.action !== undefined || step.rejection !== undefined ||
+          !admission || admission.version !== p.providerInputVersion ||
+          admission.digest !== p.providerInputDigest ||
+          !Bun.deepEquals(admission.capacity, p.contextWindow)) {
         throw new InvalidTransitionError("agentRunModelAttempt", run?.status ?? "missing-run", "started");
       }
-      const attempt = { attempt: p.attempt, contextId: p.contextId, callId: p.callId, effectId: p.effectId, reason: p.reason, estimatedInputTokens: p.estimatedInputTokens, contextWindow: p.contextWindow, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), eventId: event.id };
+      const attempt = { attempt: p.attempt, contextId: p.contextId, callId: p.callId, effectId: p.effectId, reason: p.reason, providerInputVersion: p.providerInputVersion, providerInputDigest: p.providerInputDigest, estimatedInputTokens: p.estimatedInputTokens, contextWindow: p.contextWindow, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), eventId: event.id };
       const updated = { ...step, modelAttempts: [...step.modelAttempts, attempt], eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
     }
@@ -782,6 +808,7 @@ function validateModelEffectRelation(
   const callId = typeof input.callId === "string" ? input.callId : undefined;
   const compactionId = typeof input.compactionId === "string" ? input.compactionId : undefined;
   const dispatch = input.modelDispatch;
+  const providerInput = input.providerInput;
   if (!dispatch || typeof dispatch !== "object" || Array.isArray(dispatch)) {
     throw new ValidationError("Model effects require a complete immutable model dispatch");
   }
@@ -792,6 +819,8 @@ function validateModelEffectRelation(
     const call = state.modelCalls[callId];
     const promptProvenance = input.promptProvenance;
     if (!call || call.effectId !== payload.effectId || !Bun.deepEquals(call.modelDispatch, dispatch) ||
+        !providerInput || typeof providerInput !== "object" || Array.isArray(providerInput) ||
+        !Bun.deepEquals(call.providerInput, providerInput) ||
         !promptProvenance || typeof promptProvenance !== "object" || Array.isArray(promptProvenance) ||
         !Bun.deepEquals(call.promptProvenance, promptProvenance)) {
       throw new ValidationError("Model effect does not agree with its admitted model call");
@@ -802,6 +831,99 @@ function validateModelEffectRelation(
   if (!compaction || compaction.strategy !== "model-summary-v1" ||
       !compaction.modelDispatch || !Bun.deepEquals(compaction.modelDispatch, dispatch)) {
     throw new ValidationError("Model effect does not agree with its pinned compaction dispatch");
+  }
+  const candidate = validateProviderInputCandidate(providerInput);
+  validateProviderInputCandidate(candidate, {
+    context: { messages: candidate.messages as unknown as import("./json.ts").JsonValue },
+    modelDispatch: compaction.modelDispatch,
+    capacity: candidate.provenance.capacity,
+  });
+}
+
+function validateEffectOrigin(
+  state: AgentState,
+  effect: Pick<EventPayloads["EffectRequested"], "effectId" | "executor" | "operation" | "input" | "origin" | "idempotencyKey">,
+  requestTime: boolean,
+): void {
+  const origin = effect.origin;
+  if (!origin || typeof origin !== "object") {
+    throw new ValidationError("Effect origin is required before execution");
+  }
+  if (effect.executor === "model" &&
+      origin.kind !== "model-call" &&
+      origin.kind !== "context-compaction") {
+    throw new ValidationError("Model effects require a model-call or context-compaction origin");
+  }
+  if (effect.executor === "skill" &&
+      origin.kind !== "cell" &&
+      origin.kind !== "skill-invocation" &&
+      origin.kind !== "skill-test") {
+    throw new ValidationError("Skill effects require a cell or typed skill lifecycle origin");
+  }
+  if (origin.kind === "cell") {
+    const cell = state.cells[origin.cellId];
+    const allowed = requestTime
+      ? cell?.status === "running"
+      : cell !== undefined && cell.status !== "proposed";
+    if (!allowed) {
+      throw new ValidationError(
+        requestTime
+          ? "Cell effect origin must identify the currently running cell"
+          : "Effect attempt has no valid retained cell origin",
+      );
+    }
+    return;
+  }
+  if (origin.kind === "model-call") {
+    const call = state.modelCalls[origin.callId];
+    const inputCallId = effect.input && typeof effect.input === "object" &&
+      !Array.isArray(effect.input) && typeof effect.input.callId === "string"
+      ? effect.input.callId
+      : undefined;
+    if (effect.executor !== "model" || effect.operation !== "complete" ||
+        !call || call.effectId !== effect.effectId || inputCallId !== origin.callId) {
+      throw new ValidationError("Model-call effect origin does not agree with its retained call");
+    }
+    return;
+  }
+  if (origin.kind === "context-compaction") {
+    const compaction = state.compactions[origin.compactionId];
+    const inputCompactionId = effect.input && typeof effect.input === "object" &&
+      !Array.isArray(effect.input) && typeof effect.input.compactionId === "string"
+      ? effect.input.compactionId
+      : undefined;
+    if (effect.executor !== "model" || effect.operation !== "complete" ||
+        !compaction || compaction.strategy !== "model-summary-v1" ||
+        inputCompactionId !== origin.compactionId) {
+      throw new ValidationError("Context-compaction effect origin does not agree with its retained request");
+    }
+    return;
+  }
+  if (origin.kind === "goal-gate") {
+    const goal = state.goals[origin.goalId];
+    const gate = goal?.gates[origin.gateId];
+    if (!goal || !gate || goal.completionRequestId !== origin.requestId ||
+        effect.executor !== gate.executor || effect.operation !== gate.operation ||
+        !Bun.deepEquals(effect.input, gate.input)) {
+      throw new ValidationError("Goal-gate effect origin does not agree with its retained gate evaluation");
+    }
+    return;
+  }
+  if (origin.kind === "runtime") {
+    if (origin.requestId !== effect.idempotencyKey) {
+      throw new ValidationError("Runtime effect origin must bind the exact durable request intent");
+    }
+    return;
+  }
+  const input = effect.input;
+  const inputEntryId = input && typeof input === "object" && !Array.isArray(input) &&
+    typeof input.entryId === "string" ? input.entryId : undefined;
+  const inputVersionId = input && typeof input === "object" && !Array.isArray(input) &&
+    typeof input.versionId === "string" ? input.versionId : undefined;
+  if (effect.executor !== "skill" ||
+      effect.operation !== (origin.kind === "skill-invocation" ? "invoke" : "test") ||
+      origin.entryId !== inputEntryId || origin.versionId !== inputVersionId) {
+    throw new ValidationError("Skill effect origin does not agree with its retained immutable input");
   }
 }
 

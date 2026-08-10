@@ -3,6 +3,8 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ConsoleCellError,
+  ConsoleProcess,
+  EVENT_SCHEMA_VERSION,
   MAX_WORKING_JSON_BYTES,
   Supervisor,
   jsonBytes,
@@ -55,6 +57,100 @@ async function filesBelow(path: string): Promise<string[]> {
 }
 
 describe("disposable TypeScript console process", () => {
+  test("stages oversized result JSON in bounded RPC chunks before terminal IPC", async () => {
+    const console = new ConsoleProcess();
+    let declared = 0;
+    let received = 0;
+    const chunkSizes: number[] = [];
+    try {
+      const execution = await console.execute(
+        `return { data: "🧪".repeat(80_000) };`,
+        { id: "session", branchId: "branch" },
+        {},
+        async (method, args) => {
+          if (method === "observation.stage.begin") {
+            declared = Number(args[0]);
+            return { accepted: true };
+          }
+          if (method === "observation.stage.chunk") {
+            const size = Buffer.from(String(args[0]), "base64").byteLength;
+            chunkSizes.push(size);
+            received += size;
+            return { received };
+          }
+          if (method === "observation.stage.finish") {
+            return {
+              protocol: "agencity.bounded-output.v1",
+              completeness: "spilled",
+              byteLength: received,
+              preview: args[0] as any,
+              artifact: {
+                artifactId: `sha256:${"a".repeat(64)}`,
+                digest: "a".repeat(64),
+                mediaType: "application/json",
+                size: received,
+              },
+              guidance: "fixture",
+            };
+          }
+          throw new Error(`Unexpected RPC method ${method}`);
+        },
+      );
+      expect(declared).toBeGreaterThan(128 * 1024);
+      expect(received).toBe(declared);
+      expect(chunkSizes.length).toBeGreaterThan(1);
+      expect(chunkSizes.every((size) => size <= 64 * 1024)).toBe(true);
+      expect(execution.observation.kind).toBe("staged");
+      expect(execution.observation).not.toHaveProperty("json");
+    } finally {
+      await console.stop();
+    }
+  });
+
+  test("stages an otherwise-inline result when logs would exceed terminal IPC", async () => {
+    const console = new ConsoleProcess();
+    let staged = false;
+    let received = 0;
+    try {
+      const execution = await console.execute(
+        `console.log("\\\\".repeat(60_000)); return { data: "x".repeat(100_000) };`,
+        { id: "session", branchId: "branch" },
+        {},
+        async (method, args) => {
+          if (method === "observation.stage.begin") {
+            staged = true;
+            return { accepted: true };
+          }
+          if (method === "observation.stage.chunk") {
+            received += Buffer.from(String(args[0]), "base64").byteLength;
+            return { received };
+          }
+          if (method === "observation.stage.finish") {
+            return {
+              protocol: "agencity.bounded-output.v1",
+              completeness: "spilled",
+              byteLength: received,
+              preview: args[0] as any,
+              artifact: {
+                artifactId: `sha256:${"b".repeat(64)}`,
+                digest: "b".repeat(64),
+                mediaType: "application/json",
+                size: received,
+              },
+              guidance: "fixture",
+            };
+          }
+          throw new Error(`Unexpected RPC method ${method}`);
+        },
+      );
+      expect(staged).toBe(true);
+      expect(execution.observation.kind).toBe("staged");
+      expect(execution.logs).toHaveLength(1);
+    } finally {
+      await console.stop();
+    }
+  });
+
   test("uses real RPC for state, SQL, artifacts, files, and shell across a worker restart after every cell", async () => {
     const { supervisor, sessionId, branchId } = await open(true);
     const first = await supervisor.executeCell(sessionId, branchId, `
@@ -77,7 +173,10 @@ describe("disposable TypeScript console process", () => {
     const firstResult = first.result as Record<string, any>;
     expect(firstResult.pid).not.toBe(process.pid);
     expect(first.logs).toEqual([expect.stringMatching(/^first-cell json \d+$/)]);
-    expect(firstResult.shell).toMatchObject({ exitCode: 0, stdout: "shell-through-rpc" });
+    expect(firstResult.shell).toMatchObject({
+      completeness: "inline",
+      value: { exitCode: 0, stdout: "shell-through-rpc" },
+    });
     expect(firstResult.eventTypes).toContain("SessionCreated");
     const proposedIndex = firstResult.eventTypes.indexOf("CellProposed");
     expect(proposedIndex).toBeGreaterThanOrEqual(0);
@@ -90,7 +189,8 @@ describe("disposable TypeScript console process", () => {
       if (!artifactValue || artifactValue.kind !== "json" || typeof artifactValue.value !== "string") {
         throw new Error("artifact id was not restored");
       }
-      const body = await artifacts.get(artifactValue.value);
+      const bodyRange = await artifacts.readRange(artifactValue.value, 0, 21);
+      const body = new TextDecoder().decode(bodyRange.value.bytes);
       const file = await tools.readFile("notes/result.txt");
       const shellResult = await tools.shell("cat notes/result.txt");
       const rows = await sql\`SELECT type, payload_json FROM events WHERE session_id = \${session.id} ORDER BY sequence\`;
@@ -112,8 +212,14 @@ describe("disposable TypeScript console process", () => {
     expect(secondResult.counter).toEqual({ kind: "json", value: { value: 41, flags: [true, null] } });
     expect(secondResult.restoredDirectly).toEqual(secondResult.counter);
     expect(secondResult.body).toBe("durable artifact body");
-    expect(secondResult.file).toMatchObject({ content: "file-through-rpc", size: 16 });
-    expect(secondResult.shell).toMatchObject({ exitCode: 0, stdout: "file-through-rpc" });
+    expect(secondResult.file).toMatchObject({
+      completeness: "inline",
+      value: { content: "file-through-rpc", size: 16, startLine: 1, endLine: 1 },
+    });
+    expect(secondResult.shell).toMatchObject({
+      completeness: "inline",
+      value: { exitCode: 0, stdout: "file-through-rpc" },
+    });
     expect(secondResult.shell).not.toHaveProperty("outcome");
     expect(secondResult.rowCount).toBeGreaterThan(firstResult.eventTypes.length);
 
@@ -247,7 +353,7 @@ describe("disposable TypeScript console process", () => {
     `);
     expect(visibility.result).toMatchObject({
       worker: null,
-      shell: { exitCode: 0, stdout: "absent" },
+      shell: { completeness: "inline", value: { exitCode: 0, stdout: "absent" } },
     });
 
     await expect(supervisor.appendMessage(sessionId, branchId, "user", `do not store ${secret}`))
@@ -354,7 +460,8 @@ describe("disposable TypeScript console process", () => {
     const firstResult = first.result as any;
     const secondResult = second.result as any;
     expect(firstResult).toMatchObject({
-      kind: "oversized-json",
+      protocol: "agencity.bounded-output.v1",
+      completeness: "spilled",
       artifact: { mediaType: "application/json" },
       preview: { kind: "inspect", truncated: true },
     });
@@ -370,6 +477,161 @@ describe("disposable TypeScript console process", () => {
     expect(complete).toHaveLength(50_000);
     expect(complete[49_999]).toEqual({ index: 49_999, even: false });
     await supervisor.close();
+  });
+
+  test("streams oversized JSON through validation and secret scrubbing before CAS placement", async () => {
+    const secret = "rpc-broker-secret-a811";
+    process.env.AGENCITY_RPC_TEST_SECRET = secret;
+    const { supervisor, sessionId, branchId } = await open(true);
+    const cell = await supervisor.executeCell(sessionId, branchId, `
+      const reconstructed = ["rpc-broker-", "secret-a811"].join("");
+      return {
+        values: Array.from({ length: 20_000 }, () => reconstructed),
+        keyed: { [reconstructed]: "hidden-key" },
+        escaped: { "line\\nkey": "safe\\nvalue" },
+      };
+    `);
+    const output = cell.result as any;
+    expect(output).toMatchObject({
+      completeness: "spilled",
+      artifact: { mediaType: "application/json" },
+    });
+    const bytes = await supervisor.artifacts.resolve(output.artifact);
+    const serialized = new TextDecoder().decode(bytes);
+    expect(serialized).not.toContain(secret);
+    const complete = JSON.parse(serialized);
+    expect(complete.values).toHaveLength(20_000);
+    expect(new Set(complete.values)).toEqual(new Set(["[REDACTED]"]));
+    expect(complete.keyed).toEqual({ "[REDACTED]": "hidden-key" });
+    expect(complete.escaped).toEqual({ "line\nkey": "safe\nvalue" });
+    await supervisor.close();
+  });
+
+  test("registers a shell spill atomically with its effect outcome", async () => {
+    const { supervisor, sessionId, branchId } = await open(true);
+    const append = supervisor.storage.appendEvents.bind(supervisor.storage);
+    const batches: string[][] = [];
+    Object.defineProperty(supervisor.storage, "appendEvents", {
+      configurable: true,
+      value: async (events: Parameters<typeof append>[0]) => {
+        batches.push(events.map((item) => item.type));
+        return append(events);
+      },
+    });
+    try {
+      const cell = await supervisor.executeCell(sessionId, branchId, `
+        const shell = await tools.shell("bun -e 'process.stdout.write(\\"x\\".repeat(30000))'");
+        return {
+          completeness: shell.completeness,
+          artifactId: shell.completeness === "spilled" ? shell.artifact.artifactId : null,
+        };
+      `);
+      expect(cell.result).toMatchObject({ completeness: "spilled", artifactId: expect.any(String) });
+      const atomic = batches.find((batch) =>
+        batch.includes("ArtifactRegistered") && batch.includes("EffectOutcomeRecorded"));
+      expect(atomic).toEqual(["ArtifactRegistered", "EffectOutcomeRecorded"]);
+      const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+      const outcome = events.find((item) => item.type === "EffectOutcomeRecorded");
+      const artifact = events.find((item) => item.type === "ArtifactRegistered");
+      expect((outcome?.payload as any).output.artifact.artifactId)
+        .toBe((artifact?.payload as any).artifactId);
+    } finally {
+      Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: append });
+      await supervisor.close();
+    }
+  });
+
+  test("does not expose a shell spill reference when atomic registration fails", async () => {
+    const { temp, supervisor, sessionId, branchId } = await open(true);
+    const append = supervisor.storage.appendEvents.bind(supervisor.storage);
+    let failed = false;
+    Object.defineProperty(supervisor.storage, "appendEvents", {
+      configurable: true,
+      value: async (events: Parameters<typeof append>[0]) => {
+        if (!failed && events.some((item) => item.type === "ArtifactRegistered") &&
+            events.some((item) => item.type === "EffectOutcomeRecorded")) {
+          failed = true;
+          throw new Error("simulated atomic append crash");
+        }
+        return append(events);
+      },
+    });
+    try {
+      await expect(supervisor.executeCell(sessionId, branchId, `
+        await tools.shell("bun -e 'process.stdout.write(\\"x\\".repeat(30000))'");
+        return "unreachable";
+      `)).rejects.toThrow(/atomic append crash/);
+      const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+      expect(events.some((item) => item.type === "ArtifactRegistered")).toBe(false);
+      expect(events.some((item) => item.type === "EffectOutcomeRecorded")).toBe(false);
+      expect(events.some((item) => item.type === "CellCommitted")).toBe(false);
+      expect(events.some((item) => item.type === "CellFailed")).toBe(true);
+      expect((await filesBelow(temp.artifactDirectory)).length).toBeGreaterThan(0);
+    } finally {
+      Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: append });
+      await supervisor.close();
+    }
+  });
+
+  test("keeps an oversized staged cell result atomic when its commit fails", async () => {
+    const { temp, supervisor, sessionId, branchId } = await open(true);
+    const append = supervisor.storage.appendEvents.bind(supervisor.storage);
+    let failed = false;
+    Object.defineProperty(supervisor.storage, "appendEvents", {
+      configurable: true,
+      value: async (events: Parameters<typeof append>[0]) => {
+        if (!failed && events.some((item) => item.type === "ArtifactRegistered") &&
+            events.some((item) => item.type === "CellCommitted")) {
+          failed = true;
+          throw new Error("simulated staged-cell commit crash");
+        }
+        return append(events);
+      },
+    });
+    try {
+      await expect(supervisor.executeCell(
+        sessionId,
+        branchId,
+        `return { data: "x".repeat(200000) };`,
+      )).rejects.toThrow(/staged-cell commit crash/);
+      const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+      expect(events.some((item) => item.type === "ArtifactRegistered")).toBe(false);
+      expect(events.some((item) => item.type === "CellCommitted")).toBe(false);
+      expect(events.some((item) => item.type === "CellFailed")).toBe(true);
+      expect((await filesBelow(temp.artifactDirectory)).length).toBeGreaterThan(0);
+    } finally {
+      Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: append });
+      await supervisor.close();
+    }
+  });
+
+  test("cleans incomplete cell staging and commits only failure when placement fails", async () => {
+    const { temp, supervisor, sessionId, branchId } = await open(true);
+    const putStaged = supervisor.artifacts.putStaged.bind(supervisor.artifacts);
+    Object.defineProperty(supervisor.artifacts, "putStaged", {
+      configurable: true,
+      value: async () => {
+        throw new Error("simulated staged placement failure");
+      },
+    });
+    try {
+      await expect(supervisor.executeCell(
+        sessionId,
+        branchId,
+        `return { data: "x".repeat(200000) };`,
+      )).rejects.toThrow(/staged placement failure/);
+      const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+      expect(events.some((item) => item.type === "ArtifactRegistered")).toBe(false);
+      expect(events.some((item) => item.type === "CellCommitted")).toBe(false);
+      expect(events.some((item) => item.type === "CellFailed")).toBe(true);
+      expect(await filesBelow(temp.artifactDirectory)).toHaveLength(0);
+    } finally {
+      Object.defineProperty(supervisor.artifacts, "putStaged", {
+        configurable: true,
+        value: putStaged,
+      });
+      await supervisor.close();
+    }
   });
 
   test("lists durable state and prior cells with exact event provenance without replay", async () => {
@@ -407,9 +669,9 @@ describe("disposable TypeScript console process", () => {
       logs: ["history-log"],
       durationMs: expect.any(Number),
       provenance: {
-        proposed: { type: "CellProposed", eventId: expect.any(String), schemaVersion: 4 },
-        starts: [{ type: "CellStarted", eventId: expect.any(String), schemaVersion: 4 }],
-        terminal: { type: "CellCommitted", eventId: expect.any(String), schemaVersion: 4 },
+        proposed: { type: "CellProposed", eventId: expect.any(String), schemaVersion: EVENT_SCHEMA_VERSION },
+        starts: [{ type: "CellStarted", eventId: expect.any(String), schemaVersion: EVENT_SCHEMA_VERSION }],
+        terminal: { type: "CellCommitted", eventId: expect.any(String), schemaVersion: EVENT_SCHEMA_VERSION },
       },
     });
 

@@ -357,7 +357,7 @@ describe("managed workspace service", () => {
       const bundleTypes = bundleEvents.map(event => event.type);
       for (const requiredType of [
         "SessionCreated", "AgentProfileVersionCreated", "AgentProfileActivated",
-        "AgentRunRequested", "RecursiveModelStarted", "ContextMaterialized", "ModelCallRequested",
+        "AgentRunRequested", "RecursiveModelStarted", "ContextMaterialized", "ModelCallRequested", "EffectRequested",
         "GovernedRefinementProposed", "RefinementGovernanceReviewRequested",
         "RefinementGovernanceReviewChildLinked", "RefinementGovernanceReviewDecided",
         "GovernedRefinementApplied", "RefinementProposalTerminalNoticeDelivered",
@@ -367,6 +367,8 @@ describe("managed workspace service", () => {
       expect(bundleEvents.some(event => event.type === "AgentRunRequested" && event.payload.profilePin.profileVersionId === revisedVersionId)).toBe(true);
       expect(bundleEvents.some(event => event.type === "AgentRunRequested" && event.payload.profilePin.profileVersionId === rollback.restorationVersionId)).toBe(true);
       expect(bundleEvents.some(event => event.type === "ModelCallRequested" && typeof event.payload.promptProvenance.effectiveSystemPromptDigest === "string")).toBe(true);
+      expect(bundleEvents.filter(event => event.type === "EffectRequested").every(event =>
+        typeof event.payload.origin?.kind === "string")).toBe(true);
       const audit = JSON.parse(await Bun.file(join(destination, "export-audit.json")).text());
       expect(audit).toMatchObject({ complete: true, governedProposalCount: 1, decisionCount: 1 });
       expect(audit.profileVersionCount).toBeGreaterThanOrEqual(4);
@@ -502,7 +504,7 @@ describe("managed workspace service", () => {
       const effectId = "crash-non-idempotent";
       await raw.appendEvents([{
         sessionId: session.sessionId, branchId: session.branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "crash:effect",
-        payload: { effectId, executor: "shell", operation: "run", input: { command: "printf crash-test" }, idempotencyKey: "crash:effect", idempotent: false },
+        payload: { effectId, executor: "shell", operation: "run", input: { command: "printf crash-test" }, origin: { kind: "runtime", requestId: "crash:effect" }, idempotencyKey: "crash:effect", idempotent: false },
       }], fence);
       expect((await raw.claimEffect(effectId, "dead-service", undefined, fence))?.status).toBe("running");
       process.kill(first.manifest.pidHint, "SIGKILL");

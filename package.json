@@ -32,6 +32,7 @@
     "check:architecture": "bun run scripts/check-architecture.ts",
     "test:turso-official": "bun test --timeout 90000 test/slice4/official-server-conformance.test.ts",
     "dev": "bun run src/cli.ts",
+    "benchmark:context-efficiency": "bun run scripts/agent-context-efficiency-benchmark.ts",
     "test:core": "bun test --timeout 30000 --parallel=4 test/unit test/integration test/slice2 test/slice3 test/slice3-adversarial test/slice4 test/placement && bun run test:e2e",
     "test:acceptance": "bun test --timeout 120000 --parallel=4 test/acceptance",
     "test:acceptance:external": "AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 bun test --timeout 120000 test/acceptance/external-provider.test.ts",

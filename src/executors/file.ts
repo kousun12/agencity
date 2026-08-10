@@ -1,7 +1,11 @@
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { lstat, mkdir, realpath, rename, rm } from "node:fs/promises";
-import type { JsonValue } from "../domain/json.ts";
-import { ValidationError } from "../domain/index.ts";
+import {
+  BOUNDED_OUTPUT_PROTOCOL,
+  OUTPUT_LIMITS,
+  ValidationError,
+  type JsonValue,
+} from "../domain/index.ts";
 import type { EffectExecutor, ExecutionResult } from "./contract.ts";
 import { result } from "./contract.ts";
 
@@ -55,8 +59,48 @@ export class FileExecutor implements EffectExecutor {
         await this.#assertResolvedInside(path);
         const file = Bun.file(path);
         if (!await file.exists()) return result("failed", undefined, "File does not exist");
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        return result("succeeded", { content: new TextDecoder().decode(bytes), sha256: digest(bytes), size: bytes.length });
+        const startLine = input.startLine === undefined ? 1 : input.startLine;
+        const endLine = input.endLine === undefined
+          ? Number(startLine) + OUTPUT_LIMITS.filePageLines - 1
+          : input.endLine;
+        if (!Number.isSafeInteger(startLine) || Number(startLine) < 1 ||
+            !Number.isSafeInteger(endLine) || Number(endLine) < Number(startLine)) {
+          return result("succeeded", refusedFilePage("File line windows require positive one-based startLine and endLine values."));
+        }
+        if (Number(endLine) - Number(startLine) + 1 > OUTPUT_LIMITS.filePageLines) {
+          return result("succeeded", refusedFilePage(`File pages may contain at most ${OUTPUT_LIMITS.filePageLines} lines.`));
+        }
+        if (input.expectedSha256 !== undefined && typeof input.expectedSha256 !== "string") {
+          return result("failed", undefined, "File continuation expectedSha256 must be a string");
+        }
+        const before = await lstat(path);
+        if (!before.isFile()) return result("failed", undefined, "File read requires a regular file");
+        const page = await readTextPage(file, Number(startLine), Number(endLine), context.signal);
+        if (context.signal.aborted) return result("cancelled");
+        const after = await lstat(path);
+        if (before.dev !== after.dev || before.ino !== after.ino ||
+            before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+          return result("failed", undefined, "File changed while the requested line window was being read");
+        }
+        if (typeof input.expectedSha256 === "string" && input.expectedSha256 !== page.sha256) {
+          return result("failed", undefined, "File continuation precondition failed: digest mismatch");
+        }
+        if (page.refusal) return result("succeeded", refusedFilePage(page.refusal));
+        const value: JsonValue = {
+          content: page.content,
+          startLine: page.startLine,
+          endLine: page.endLine,
+          totalLines: page.totalLines,
+          nextLine: page.nextLine,
+          sha256: page.sha256,
+          size: before.size,
+        };
+        return result("succeeded", {
+          protocol: BOUNDED_OUTPUT_PROTOCOL,
+          completeness: "inline",
+          byteLength: new TextEncoder().encode(page.content).byteLength,
+          value,
+        });
       }
       if (request.operation === "write") {
         if (typeof input.content !== "string") throw new ValidationError("file.write requires string content");
@@ -117,4 +161,112 @@ export class FileExecutor implements EffectExecutor {
       );
     }
   }
+}
+
+function refusedFilePage(reason: string): JsonValue {
+  return {
+    protocol: BOUNDED_OUTPUT_PROTOCOL,
+    completeness: "refused",
+    byteLength: 0,
+    reason,
+    guidance: `Request a one-based line window of at most ${OUTPUT_LIMITS.filePageLines} lines, ${OUTPUT_LIMITS.fileLineBytes} bytes per line, and ${OUTPUT_LIMITS.filePageBytes} bytes total.`,
+  };
+}
+
+interface TextPage {
+  readonly content: string;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly totalLines: number;
+  readonly nextLine: number | null;
+  readonly sha256: string;
+  readonly refusal?: string;
+}
+
+async function readTextPage(
+  file: ReturnType<typeof Bun.file>,
+  requestedStart: number,
+  requestedEnd: number,
+  signal: AbortSignal,
+): Promise<TextPage> {
+  const hasher = new Bun.CryptoHasher("sha256");
+  const selected: string[] = [];
+  let selectedBytes = 0;
+  let lineNumber = 1;
+  let lineBytes: number[] = [];
+  let lineTooLarge = false;
+  let sawAnyByte = false;
+  let endedWithNewline = false;
+  let refusal: string | undefined;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const finishLine = (): void => {
+    if (lineNumber >= requestedStart && lineNumber <= requestedEnd) {
+      if (lineTooLarge) {
+        refusal ??= `Line ${lineNumber} exceeds the ${OUTPUT_LIMITS.fileLineBytes}-byte line limit.`;
+      } else {
+        const text = decoder.decode(Uint8Array.from(lineBytes));
+        const additional = lineBytes.length + (selected.length > 0 ? 1 : 0);
+        if (selectedBytes + additional > OUTPUT_LIMITS.filePageBytes) {
+          refusal ??= `Requested page exceeds the ${OUTPUT_LIMITS.filePageBytes}-byte page limit.`;
+        } else {
+          selected.push(text);
+          selectedBytes += additional;
+        }
+      }
+    }
+    lineNumber++;
+    lineBytes = [];
+    lineTooLarge = false;
+  };
+  const reader = file.stream().getReader();
+  let chunkCount = 0;
+  try {
+    while (true) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      hasher.update(chunk.value);
+      for (const byte of chunk.value) {
+        sawAnyByte = true;
+        endedWithNewline = byte === 0x0a;
+        if (byte === 0x0a) {
+          finishLine();
+        } else if (lineBytes.length < OUTPUT_LIMITS.fileLineBytes + 1) {
+          lineBytes.push(byte);
+          if (lineBytes.length > OUTPUT_LIMITS.fileLineBytes) lineTooLarge = true;
+        } else {
+          lineTooLarge = true;
+        }
+      }
+      chunkCount++;
+      if (chunkCount % 16 === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  if (sawAnyByte && !endedWithNewline) finishLine();
+  const totalLines = sawAnyByte ? lineNumber - 1 : 0;
+  const actualStart = requestedStart;
+  const actualEnd = Math.min(requestedEnd, totalLines);
+  let content = selected.join("\n");
+  if (selected.length > 0 && endedWithNewline && actualEnd === totalLines) {
+    if (selectedBytes + 1 > OUTPUT_LIMITS.filePageBytes) {
+      refusal ??= `Requested page exceeds the ${OUTPUT_LIMITS.filePageBytes}-byte page limit.`;
+    } else {
+      content += "\n";
+    }
+  }
+  return {
+    content,
+    startLine: actualStart,
+    endLine: Math.max(0, actualEnd),
+    totalLines,
+    nextLine: actualEnd < totalLines ? actualEnd + 1 : null,
+    sha256: hasher.digest("hex"),
+    ...(refusal === undefined ? {} : { refusal }),
+  };
 }

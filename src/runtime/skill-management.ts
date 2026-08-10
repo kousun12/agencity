@@ -5,6 +5,7 @@ import {
   isSkillContextEligible,
   isValidSkillName,
   resolveSkillCatalog,
+  type EffectOrigin,
   type HarnessVersionRecord,
   type JsonValue,
   type SkillAvailability,
@@ -107,12 +108,12 @@ export class SkillManagementService implements ExecutableSkillCatalog {
     throw new SkillResolutionError("NOT_FOUND", "Skill was not found");
   }
 
-  async test(sessionId: string, branchId: string, reference: string): Promise<SkillTestReport> {
+  async test(sessionId: string, branchId: string, reference: string, effectOrigin?: EffectOrigin): Promise<SkillTestReport> {
     const item = await this.#managementResolve(sessionId,branchId,reference);
     if (!item) throw new SkillResolutionError("NOT_FOUND","Skill was not found");
     if (item.quarantinedReason) throw new ValidationError(item.quarantinedReason);
-    if (item.record.availability === "candidate") return this.skills.testModelVisible(sessionId,branchId,item.record.entryId,item.record.versionId,`skill-management-test:${item.record.source}:${item.record.versionId}:${Date.now()}`);
-    return this.skills.testDefinition(sessionId,branchId,item.record.entryId,item.record.versionId,item.definition,`skill-management-test:${item.record.source}:${item.record.versionId}:${Date.now()}`);
+    if (item.record.availability === "candidate") return this.skills.testModelVisible(sessionId,branchId,item.record.entryId,item.record.versionId,`skill-management-test:${item.record.source}:${item.record.versionId}:${Date.now()}`,effectOrigin);
+    return this.skills.testDefinition(sessionId,branchId,item.record.entryId,item.record.versionId,item.definition,`skill-management-test:${item.record.source}:${item.record.versionId}:${Date.now()}`,effectOrigin);
   }
 
   async enable(sessionId:string,branchId:string,reference:string):Promise<SkillManagementView>{return this.#availability(sessionId,branchId,reference,"enabled");}

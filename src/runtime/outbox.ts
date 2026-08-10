@@ -1,4 +1,13 @@
-import { ValidationError, newId, projectEvents, type EffectOutcome } from "../domain/index.ts";
+import {
+  ValidationError,
+  assertArtifactReference,
+  assertBoundedOutputs,
+  boundedOutputArtifactReferences,
+  newId,
+  projectEvents,
+  type EffectOrigin,
+  type EffectOutcome,
+} from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { EffectExecutionProgress, EffectExecutor, ExecutionResult } from "../executors/contract.ts";
 import { result } from "../executors/contract.ts";
@@ -11,6 +20,7 @@ export interface EffectRequest {
   readonly executor: string;
   readonly operation: string;
   readonly input: JsonValue;
+  readonly origin: EffectOrigin;
   readonly idempotencyKey: string;
   readonly idempotent: boolean;
 }
@@ -72,6 +82,7 @@ export class OutboxRunner {
         executor: request.executor,
         operation: request.operation,
         input: request.input,
+        origin: request.origin,
         idempotencyKey: request.idempotencyKey,
         idempotent: request.idempotent,
       },
@@ -320,6 +331,29 @@ export class OutboxRunner {
     if (record.executor === "model" && execution.output !== undefined && containsBrokeredSecret(execution.output)) {
       execution = result("failed", undefined, "Model output contained brokered credential material", "stream-failed");
     }
+    if (record.executor !== "model") {
+      try {
+        for (const artifact of execution.artifacts ?? []) assertArtifactReference(artifact);
+        if (execution.output !== undefined) assertBoundedOutputs(execution.output);
+        const declared = new Map(
+          (execution.artifacts ?? []).map((artifact) => [artifact.artifactId, artifact]),
+        );
+        for (const reference of execution.output === undefined
+          ? []
+          : boundedOutputArtifactReferences(execution.output)) {
+          const artifact = declared.get(reference.artifactId);
+          if (!artifact || !Bun.deepEquals(artifact, reference)) {
+            throw new ValidationError("Spilled output does not exactly match a declared executor artifact");
+          }
+        }
+      } catch {
+        execution = result(
+          "failed",
+          undefined,
+          "Executor returned an invalid bounded-output or artifact completeness claim",
+        );
+      }
+    }
     const safeExecution = result(
       execution.outcome,
       execution.output === undefined
@@ -327,23 +361,34 @@ export class OutboxRunner {
         : record.executor === "model" ? execution.output : scrubJson(execution.output),
       execution.error === undefined ? undefined : scrubText(execution.error),
       execution.modelFailure,
+      execution.artifacts,
     );
-    await this.storage.appendEvents([{
-      sessionId: record.sessionId,
-      branchId: record.branchId,
-      type: "EffectOutcomeRecorded",
-      producer: "executor",
-      idempotencyKey: `effect-outcome:${record.effectId}:${attempt}`,
-      payload: {
-        effectId: record.effectId,
-        attempt,
-        outcome: safeExecution.outcome,
-        ...(safeExecution.output === undefined ? {} : { output: safeExecution.output }),
-        ...(safeExecution.error === undefined ? {} : { error: safeExecution.error }),
-        ...(safeExecution.modelFailure === undefined ? {} : { modelFailure: { code: safeExecution.modelFailure } }),
-        observedAt: new Date().toISOString(),
+    await this.storage.appendEvents([
+      ...(safeExecution.artifacts ?? []).map((artifact) => ({
+        sessionId: record.sessionId,
+        branchId: record.branchId,
+        type: "ArtifactRegistered" as const,
+        producer: "executor",
+        idempotencyKey: `effect-artifact:${record.effectId}:${attempt}:${artifact.artifactId}`,
+        payload: artifact,
+      })),
+      {
+        sessionId: record.sessionId,
+        branchId: record.branchId,
+        type: "EffectOutcomeRecorded",
+        producer: "executor",
+        idempotencyKey: `effect-outcome:${record.effectId}:${attempt}`,
+        payload: {
+          effectId: record.effectId,
+          attempt,
+          outcome: safeExecution.outcome,
+          ...(safeExecution.output === undefined ? {} : { output: safeExecution.output }),
+          ...(safeExecution.error === undefined ? {} : { error: safeExecution.error }),
+          ...(safeExecution.modelFailure === undefined ? {} : { modelFailure: { code: safeExecution.modelFailure } }),
+          observedAt: new Date().toISOString(),
+        },
       },
-    }]);
+    ]);
     return safeExecution;
   }
 

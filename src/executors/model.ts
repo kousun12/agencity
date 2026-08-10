@@ -9,12 +9,17 @@ import {
   ModelResponseContractUnavailableError,
   STANDARD_UNVERIFIED_REASONING_LEVELS,
   TEXT_MODEL_RESPONSE_CONTRACT,
+  PROVIDER_INPUT_ESTIMATOR_ID,
   ValidationError,
   assertNoReservedModelDispatchInputFields,
+  assertProviderInputWithinProductLimit,
   assertReasoningSelection,
+  buildProviderInputCandidate,
   createModelEffectOutputV2,
   normalizeReasoningEffort,
+  normalizeProviderMessages,
   resolveModelDispatch,
+  validateProviderInputCandidate,
   validateModelDispatch,
   validateModelEffectOutputV2,
   type AgentAction,
@@ -27,6 +32,8 @@ import {
   type ProviderNeutralModelOutputDelta as ResponseContractOutputDelta,
   type ModelReasoningCapability,
   type ModelWarning,
+  type ProviderInputCandidate,
+  type ProviderInputCapacityProvenance,
   type RequiredToolSetCapability,
   type ResolvedModelExecutionDescriptor,
   type Usage,
@@ -383,11 +390,28 @@ class AiSdkModelProvider implements ModelProvider {
       );
     }
     const guard = new ModelResponseGuard(signal);
+    const retainedCandidate = validateProviderInputCandidate(context);
+    const candidate = validateProviderInputCandidate(retainedCandidate, {
+      context: {
+        messages: retainedCandidate.messages as unknown as JsonValue,
+      },
+      modelDispatch: dispatch,
+      capacity: retainedCandidate.provenance.capacity,
+    });
+    if (candidate.policy.toolChoice !== "required") {
+      throw new ValidationError(
+        "Structured provider input requires one required tool choice",
+      );
+    }
     try {
       const sdk = streamText({
         ...this.#callOptions(context, dispatch.configuration, guard.signal),
-        ...requiredToolGenerationOptions(dispatch.responseContract),
-        ...this.#formalProviderOptions(),
+        ...requiredToolGenerationOptions(
+          dispatch.responseContract,
+          candidate.tools,
+          candidate.policy.toolChoice,
+        ),
+        ...this.#formalProviderOptions(candidate),
         model: this.#model(dispatch.configuration),
         onError: () => {},
       });
@@ -424,18 +448,32 @@ class AiSdkModelProvider implements ModelProvider {
   }
 
   #callOptions(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal) {
+    const candidate = isProviderInputCandidate(context)
+      ? validateProviderInputCandidate(context)
+      : undefined;
     return {
-      messages: modelMessages(context),
+      messages: (candidate?.messages ??
+        normalizeProviderMessages(context)) as ModelMessage[],
       allowSystemInMessages: true,
       maxRetries: 0,
       abortSignal: signal,
-      ...(configuration.temperature === undefined ? {} : { temperature: configuration.temperature }),
-      ...(configuration.maxOutputTokens === undefined ? {} : { maxOutputTokens: configuration.maxOutputTokens }),
-      ...(configuration.reasoningEffort === "provider-default" ? {} : { reasoning: configuration.reasoningEffort }),
+      ...((candidate?.options.temperature ?? configuration.temperature) === undefined
+        ? {}
+        : { temperature: candidate?.options.temperature ?? configuration.temperature }),
+      ...((candidate?.options.maxOutputTokens ?? configuration.maxOutputTokens) === undefined
+        ? {}
+        : { maxOutputTokens: candidate?.options.maxOutputTokens ?? configuration.maxOutputTokens }),
+      ...((candidate?.options.reasoningEffort ??
+            (configuration.reasoningEffort === "provider-default"
+              ? undefined
+              : configuration.reasoningEffort)) === undefined
+        ? {}
+        : { reasoning: candidate?.options.reasoningEffort ?? configuration.reasoningEffort }),
     };
   }
 
-  #formalProviderOptions() {
+  #formalProviderOptions(candidate: ProviderInputCandidate) {
+    if (candidate.policy.parallelCalls !== "provider-disabled") return {};
     if (this.name === "openai") {
       return {
         providerOptions: {
@@ -538,21 +576,6 @@ function executionBaseUrl(transport: AiSdkTransport, value: string): string {
   return `${normalizeExecutionOrigin(value, `${transport.toUpperCase()}_BASE_URL`)}/v1`;
 }
 
-function modelMessages(context: JsonValue): ModelMessage[] {
-  const record = context && typeof context === "object" && !Array.isArray(context) ? context : {};
-  const raw = Array.isArray(record.messages) ? record.messages : [];
-  const messages: ModelMessage[] = [];
-  for (const value of raw) {
-    if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.content !== "string") continue;
-    if (value.role === "system") messages.push({ role: "system", content: value.content });
-    else if (value.role === "assistant") messages.push({ role: "assistant", content: value.content });
-    else if (value.role === "tool") messages.push({ role: "user", content: `[tool observation]\n${value.content}` });
-    else messages.push({ role: "user", content: value.content });
-  }
-  if (!messages.length) messages.push({ role: "user", content: JSON.stringify(context) });
-  return messages;
-}
-
 function normalizeUsage(value: unknown, costUsd: number): Usage {
   const usage = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   return {
@@ -618,20 +641,66 @@ function boundedText(value: string, maximum: number): string {
   return bounded;
 }
 
-function parse(input: JsonValue): { context: JsonValue; modelDispatch: ModelDispatch; callId?: string; compactionId?: string } {
+function parse(input: JsonValue): { providerInput: ProviderInputCandidate; modelDispatch: ModelDispatch; callId?: string; compactionId?: string } {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("Model input must be an object");
-  const context = input.context;
+  const providerInput = input.providerInput;
   const rawDispatch = input.modelDispatch;
-  if (context === undefined || !rawDispatch || typeof rawDispatch !== "object" || Array.isArray(rawDispatch)) {
-    throw new ValidationError("Model input requires context and a complete model dispatch");
+  if (providerInput === undefined || !rawDispatch || typeof rawDispatch !== "object" || Array.isArray(rawDispatch)) {
+    throw new ValidationError("Model input requires providerInput and a complete model dispatch");
   }
   const modelDispatch = rawDispatch as unknown as ModelDispatch;
   validateModelDispatch(modelDispatch);
   return {
-    context,
+    providerInput: validateProviderInputCandidate(providerInput),
     modelDispatch,
     ...(typeof input.callId === "string" ? { callId: input.callId } : {}),
     ...(typeof input.compactionId === "string" ? { compactionId: input.compactionId } : {}),
+  };
+}
+
+function isProviderInputCandidate(value: JsonValue): boolean {
+  return Boolean(
+    value && typeof value === "object" && !Array.isArray(value) &&
+      value.version === "agencity.provider-input.v1",
+  );
+}
+
+/**
+ * Custom trusted-local providers keep their historical inspection shape.
+ * Product transports consume the candidate directly and serialize only its
+ * normalized request fields.
+ */
+function providerContext(candidate: ProviderInputCandidate): JsonValue {
+  const last = [...candidate.messages].reverse().find((message) =>
+    message.role === "user" &&
+    message.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
+  let step: Record<string, JsonValue> | undefined;
+  if (last) {
+    try {
+      const parsed = JSON.parse(
+        last.content.slice("AGENCITY DURABLE RUN STEP\n".length),
+      ) as JsonValue;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        step = parsed;
+      }
+    } catch {
+      // The exact message remains available even if it is not a run envelope.
+    }
+  }
+  const durable = step?.durableContext &&
+      typeof step.durableContext === "object" &&
+      !Array.isArray(step.durableContext)
+    ? step.durableContext
+    : {};
+  return {
+    ...durable,
+    messages: candidate.messages as unknown as JsonValue,
+    ...(step?.run === undefined ? {} : { run: step.run }),
+    responseContract: {
+      ...candidate.provenance.responseContract,
+      schemaEnforcement: candidate.policy.schemaEnforcement,
+      selection: candidate.policy.selection,
+    } as unknown as JsonValue,
   };
 }
 
@@ -849,12 +918,27 @@ export class ModelExecutor implements EffectExecutor {
    * dispatch has been durably admitted.
    */
   async executeResponseAware(
-    context: JsonValue,
+    input: JsonValue,
     dispatch: ModelDispatch,
     signal: AbortSignal,
     onDelta?: (delta: ResponseContractOutputDelta) => void,
   ): Promise<ModelEffectOutputV2> {
     validateModelDispatch(dispatch);
+    const retainedCandidate = isProviderInputCandidate(input)
+      ? input as unknown as ProviderInputCandidate
+      : undefined;
+    const candidate = retainedCandidate
+      ? validateProviderInputCandidate(retainedCandidate, {
+          context: { messages: retainedCandidate.messages as unknown as JsonValue },
+          modelDispatch: dispatch,
+          capacity: retainedCandidate.provenance.capacity,
+        })
+      : buildProviderInputCandidate({
+          context: input,
+          modelDispatch: dispatch,
+          capacity: this.#providerInputCapacity(dispatch),
+        });
+    assertProviderInputWithinProductLimit(candidate);
     const provider = this.#providers.get(dispatch.configuration.provider);
     if (!provider) {
       throw new ValidationError(
@@ -880,7 +964,9 @@ export class ModelExecutor implements EffectExecutor {
           );
         }
         const output = await provider.streamResponse(
-          context,
+          provider.productTransport
+            ? candidate as unknown as JsonValue
+            : providerContext(candidate),
           dispatch,
           signal,
           onDelta ?? (() => {}),
@@ -895,14 +981,18 @@ export class ModelExecutor implements EffectExecutor {
       }
       const textResponse = provider.capabilities?.streaming === true
         ? await provider.stream!(
-            context,
+            provider.productTransport
+              ? candidate as unknown as JsonValue
+              : providerContext(candidate),
             dispatch.configuration,
             signal,
             (delta) =>
               onDelta?.({ kind: "text", text: delta.text }),
           )
         : await provider.complete(
-            context,
+            provider.productTransport
+              ? candidate as unknown as JsonValue
+              : providerContext(candidate),
             dispatch.configuration,
             signal,
           );
@@ -967,12 +1057,33 @@ export class ModelExecutor implements EffectExecutor {
     });
   }
 
+  #providerInputCapacity(dispatch: ModelDispatch): ProviderInputCapacityProvenance {
+    const resolved = this.contextCapacity(dispatch.configuration);
+    const outputReserveTokens = resolved.contextWindowTokens === null
+      ? Math.max(0, dispatch.configuration.maxOutputTokens ?? 0)
+      : Math.min(
+          resolved.contextWindowTokens - 1,
+          Math.max(
+            1,
+            dispatch.configuration.maxOutputTokens ??
+              Math.min(4_096, Math.floor(resolved.contextWindowTokens * 0.1)),
+          ),
+        );
+    return {
+      ...resolved,
+      outputReserveTokens,
+      estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+      triggerRatio: 0.8,
+      targetRatio: 0.6,
+    };
+  }
+
   async execute(request: Parameters<EffectExecutor["execute"]>[0], context: Parameters<EffectExecutor["execute"]>[1]): Promise<ExecutionResult> {
     if (request.operation !== "complete") return result("failed", undefined, `Unsupported model operation: ${request.operation}`, "provider-request-failed");
     try {
-      const { context: modelContext, modelDispatch, callId } = parse(request.input);
+      const { providerInput, modelDispatch, callId } = parse(request.input);
       const output = await this.executeResponseAware(
-        modelContext,
+        providerInput as unknown as JsonValue,
         modelDispatch,
         context.signal,
         (delta) => {

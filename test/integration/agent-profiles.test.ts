@@ -8,7 +8,10 @@ import {
   ProtocolServer,
   ScriptedAgentActionProvider,
   Supervisor,
+  PROVIDER_INPUT_ESTIMATOR_ID,
   agentProfilePin,
+  buildProviderInputCandidate,
+  estimateProviderInputCandidate,
   registerBrokeredSecret,
   renderExactAgentPrompt,
   sha256,
@@ -364,6 +367,19 @@ describe("durable agent profiles", () => {
       }]);
       const childState = await supervisor.projections.getSnapshot(handle.childSessionId, handle.childBranchId);
       const modelDispatch = supervisor.modelExecutor.resolveDispatch(childState.state.model);
+      const resolvedCapacity = supervisor.modelExecutor.contextCapacity(childState.state.model);
+      const contextWindow = {
+        ...resolvedCapacity,
+        outputReserveTokens: childState.state.model.maxOutputTokens ?? 0,
+        estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+        triggerRatio: 0.8,
+        targetRatio: 0.6,
+      };
+      const providerInput = buildProviderInputCandidate({
+        context: { messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] },
+        modelDispatch,
+        capacity: contextWindow,
+      });
       await expect(supervisor.storage.appendEvents([{
         sessionId: handle.childSessionId,
         branchId: handle.childBranchId,
@@ -375,8 +391,10 @@ describe("durable agent profiles", () => {
           contextId: "forged-recursive-context",
           effectId: "forged-recursive-effect",
           modelDispatch,
-          estimatedInputTokens: 0,
+          providerInput,
+          estimatedInputTokens: estimateProviderInputCandidate(providerInput).estimatedTokens,
           promptProvenance,
+          contextWindow,
         },
       }])).rejects.toThrow("does not match its retained handle invocation pin");
     } finally {
@@ -627,6 +645,11 @@ describe("durable agent profiles", () => {
       }]);
       const retainedCall = call.payload as EventPayloads["ModelCallRequested"];
       const { retryOfCallId: _retryOfCallId, ...retainedInitialCall } = retainedCall;
+      const laterProviderInput = buildProviderInputCandidate({
+        context: { messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] },
+        modelDispatch: retainedCall.modelDispatch,
+        capacity: retainedCall.contextWindow!,
+      });
       await expect(supervisor.storage.appendEvents([{
         sessionId: handle.childSessionId,
         branchId: handle.childBranchId,
@@ -639,6 +662,9 @@ describe("durable agent profiles", () => {
           contextId: "recursive-later-profile-context",
           effectId: "recursive-later-profile-effect",
           promptProvenance: wrongHandleProvenance,
+          providerInput: laterProviderInput,
+          estimatedInputTokens:
+            estimateProviderInputCandidate(laterProviderInput).estimatedTokens,
           attempt: 1,
         },
       }])).rejects.toThrow("does not match its retained handle invocation pin");

@@ -94,7 +94,7 @@ Object keys derive only from content:
 <prefix>/sha256/<first two hex digits>/<64-character sha256 digest>
 ```
 
-The durable ID remains `sha256:<digest>` across local and remote placement. Conditional PUT uses `If-None-Match: *` and checksum metadata. Every resolve verifies byte length and digest. Range reads download and verify the whole object before returning a slice because the artifact ID authenticates the complete object.
+The durable ID remains `sha256:<digest>` across local and remote placement. Conditional PUT uses `If-None-Match: *` and checksum metadata. Every resolve verifies byte length and digest. Range reads are exact zero-based half-open slices limited to 64 KiB. Both adapters download/read and verify the whole object before returning a slice because the artifact ID authenticates the complete object.
 
 Missing, inaccessible, malformed, or corrupt content is `DEPENDENCY_FAILURE`.
 
@@ -135,6 +135,8 @@ Requests outside the advertised operation set fail with `CAPABILITY_UNAVAILABLE`
 - a valid server terminal result is `succeeded`, `failed`, or `cancelled`;
 - timeout, disconnect, missing terminal response, or malformed terminal response becomes `unknown`;
 - no automatic local fallback occurs.
+
+`agencity-executor-rpc-v1` does not transfer or register remote artifact bytes. A remote terminal result that contains a `spilled` bounded-output artifact reference is rejected as invalid and becomes `unknown` at the client boundary rather than advertising an unreachable recovery path. Remote executors must return inline/truncated/refused bounded output or a future negotiated canonical artifact-transfer capability must be added.
 
 The included executor RPC handler does not provide authentication, TLS, resource quotas, network policy, sandbox provisioning, or remote attestation.
 

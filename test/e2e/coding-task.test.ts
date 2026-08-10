@@ -109,14 +109,14 @@ describe("representative autonomous coding task", () => {
           outcome: baseline.outcome,
           error: baseline.error ?? null,
           output: baseline.output ?? null,
-          sourceSha256: source.sha256,
+          sourceSha256: source.value.sha256,
         });
         (globalThis as any).__codingHeap = "not durable";
-        return { pid: process.pid, baseline, sourceSha256: source.sha256 };
+        return { pid: process.pid, baseline, sourceSha256: source.value.sha256 };
       ` }),
       typedAction({ type: "typescript", code: `
         const current = await tools.readFile("src/slug.ts");
-        const write = await tools.writeFile("src/slug.ts", ${JSON.stringify(IMPLEMENTATION)}, current.sha256);
+        const write = await tools.writeFile("src/slug.ts", ${JSON.stringify(IMPLEMENTATION)}, current.value.sha256);
         await state.set("codingTask", {
           requirement: "implement slugify",
           gate: "bun test ./test/slug.test.ts",
@@ -127,12 +127,13 @@ describe("representative autonomous coding task", () => {
       ` }),
       typedAction({ type: "typescript", code: `
         const gate = await tools.shell("bun test ./test/slug.test.ts");
+        if (gate.completeness !== "inline") throw new Error(gate.guidance);
         await state.set("completion", {
           status: "complete",
           gate: "bun test ./test/slug.test.ts",
-          exitCode: gate.exitCode,
-          stdout: gate.stdout,
-          stderr: gate.stderr,
+          exitCode: gate.value.exitCode,
+          stdout: gate.value.stdout,
+          stderr: gate.value.stderr,
         });
         return { pid: process.pid, gate };
       ` }),

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createClient } from "@libsql/client";
 import {
   ConflictError,
   OutboxRunner,
@@ -62,6 +63,7 @@ function requestInput(sessionId: string, branchId: string, key: string, idempote
     executor: "deterministic",
     operation: "run",
     input: { task: "one" },
+    origin: { kind: "runtime", requestId: key },
     idempotencyKey: key,
     idempotent,
   } as const;
@@ -81,6 +83,88 @@ describe("durable outbox idempotency", () => {
     await expect(runner.request({ ...request, input: { task: "changed" } }))
       .rejects.toBeInstanceOf(ConflictError);
     storage.close();
+  });
+
+  test("requires a valid explicit origin before execution and retains valid cell ownership after terminalization", async () => {
+    const { storage, sessionId, branchId } = await setup();
+    const runner = new OutboxRunner(storage, [new DeterministicExecutor()]);
+    await expect(runner.request({
+      ...requestInput(sessionId, branchId, "missing-origin"),
+      origin: undefined,
+    } as any)).rejects.toThrow("not JSON serializable");
+    await expect(runner.request({
+      ...requestInput(sessionId, branchId, "wrong-runtime-origin"),
+      origin: { kind: "runtime", requestId: "different-intent" },
+    })).rejects.toThrow("Runtime effect origin must bind the exact durable request intent");
+
+    await storage.appendEvents([{
+      sessionId, branchId, type: "CellProposed", producer: "console",
+      idempotencyKey: "cell-proposed:origin-cell",
+      payload: { cellId: "origin-cell", code: "await tools.request()", dependencies: [] },
+    }]);
+    await expect(runner.request({
+      ...requestInput(sessionId, branchId, "proposed-cell-effect"),
+      origin: { kind: "cell", cellId: "origin-cell" },
+    })).rejects.toThrow("currently running cell");
+    await storage.appendEvents([{
+      sessionId, branchId, type: "CellStarted", producer: "console",
+      idempotencyKey: "cell-started:origin-cell:1",
+      payload: { cellId: "origin-cell", attempt: 1 },
+    }]);
+    const effectId = await runner.request({
+      ...requestInput(sessionId, branchId, "terminalized-cell-effect"),
+      origin: { kind: "cell", cellId: "origin-cell" },
+    });
+    await storage.appendEvents([{
+      sessionId, branchId, type: "CellCommitted", producer: "console",
+      idempotencyKey: "cell-committed:origin-cell",
+      payload: { cellId: "origin-cell", result: null, logs: [], durationMs: 1, exports: [] },
+    }]);
+    expect(await runner.run(effectId)).toMatchObject({ outcome: "succeeded" });
+    expect((await storage.getOutbox(effectId))?.origin).toEqual({
+      kind: "cell",
+      cellId: "origin-cell",
+    });
+    storage.close();
+  });
+
+  test("migration 019 retains required outbox origins across idempotent reopen", async () => {
+    const { temp, storage, sessionId, branchId } = await setup();
+    const runner = new OutboxRunner(storage, [new DeterministicExecutor()]);
+    const effectId = await runner.request(requestInput(sessionId, branchId, "migration-origin"));
+    expect((await storage.getOutbox(effectId))?.origin).toEqual({
+      kind: "runtime",
+      requestId: "migration-origin",
+    });
+    storage.close();
+
+    const reopened = await openTempStorage(temp);
+    await reopened.migrate();
+    expect((await reopened.getOutbox(effectId))?.origin).toEqual({
+      kind: "runtime",
+      requestId: "migration-origin",
+    });
+    reopened.close();
+
+    const client = createClient({ url: temp.databaseUrl });
+    const columns = await client.execute("PRAGMA table_info(outbox)");
+    expect(columns.rows.find((row) => row.name === "origin_json")).toMatchObject({
+      notnull: 1,
+    });
+    const migration = await client.execute(
+      "SELECT count(*) AS count FROM schema_migrations WHERE version=19",
+    );
+    expect(Number(migration.rows[0]?.count)).toBe(1);
+    await client.execute({
+      sql: "UPDATE outbox SET origin_json='null' WHERE effect_id=?",
+      args: [effectId],
+    });
+    client.close();
+    const malformed = await openTempStorage(temp);
+    await expect(malformed.getOutbox(effectId)).rejects.toThrow(
+      "Invalid projected effect origin",
+    );
+    malformed.close();
   });
 
   test("coalesces concurrent execution and terminal re-reads without invoking the executor twice", async () => {

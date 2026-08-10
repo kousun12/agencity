@@ -1,7 +1,9 @@
 import {
   CapabilityUnavailableError,
   NotFoundError,
+  PROVIDER_INPUT_ESTIMATOR_ID,
   ValidationError,
+  buildProviderInputCandidate,
   newId,
   projectEvents,
   type AgentEvent,
@@ -309,9 +311,19 @@ export class CompactionService {
         const prompt = summaryPrompt(request, level, index, groups[index]!);
         if (!current.effects[effectId]) {
           if (!request.modelDispatch) throw new ValidationError("Model-summary compaction is missing its pinned model dispatch");
+          const providerInput = buildProviderInputCandidate({
+            context: prompt,
+            modelDispatch: request.modelDispatch,
+            capacity: providerInputCapacity(
+              request.modelDispatch,
+              request.capacity,
+              this.capacities,
+            ),
+          });
           const requested = await this.outbox.request({
             sessionId: requestEvent.sessionId, branchId: requestEvent.branchId, executor: "model", operation: "complete",
-            input: { compactionId: request.compactionId, context: prompt, modelDispatch: request.modelDispatch as unknown as JsonValue },
+            input: { compactionId: request.compactionId, providerInput: providerInput as unknown as JsonValue, modelDispatch: request.modelDispatch as unknown as JsonValue },
+            origin: { kind: "context-compaction", compactionId: request.compactionId },
             idempotencyKey: key, idempotent: false,
           });
           if (requested !== effectId) throw new ValidationError("Compaction model effect identity is not stable");
@@ -516,3 +528,38 @@ function validatedJson(value: unknown): JsonValue { return JSON.parse(JSON.strin
 function sha256(value: string): string { const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex"); }
 function boundedUtf8(value: string, maximum: number): string { const bytes = new TextEncoder().encode(value); return bytes.byteLength <= maximum ? value : new TextDecoder().decode(bytes.slice(0, maximum)); }
 function brokeredSecrets(): string[] { return Object.entries(process.env).filter(([key, value]) => /(?:key|token|secret|password|credential|auth)/i.test(key) && typeof value === "string" && value.length >= 4).map(([, value]) => value!); }
+function providerInputCapacity(
+  dispatch: ModelDispatch,
+  retained: ContextCapacityProvenance | undefined,
+  executor: ModelExecutor | undefined,
+): ContextCapacityProvenance {
+  if (retained) {
+    return {
+      ...retained,
+      estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+    };
+  }
+  const resolved = executor?.contextCapacity(dispatch.configuration) ?? {
+    provider: dispatch.configuration.provider,
+    model: dispatch.configuration.model,
+    source: "unknown" as const,
+    contextWindowTokens: null,
+  };
+  const outputReserveTokens = resolved.contextWindowTokens === null
+    ? Math.max(0, dispatch.configuration.maxOutputTokens ?? 0)
+    : Math.min(
+        resolved.contextWindowTokens - 1,
+        Math.max(
+          1,
+          dispatch.configuration.maxOutputTokens ??
+            Math.min(4_096, Math.floor(resolved.contextWindowTokens * 0.1)),
+        ),
+      );
+  return {
+    ...resolved,
+    outputReserveTokens,
+    estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+    triggerRatio: 0.8,
+    targetRatio: 0.6,
+  };
+}

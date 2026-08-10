@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalArtifactStore } from "../artifacts/index.ts";
@@ -11,11 +11,14 @@ import {
   type CellListOptions,
   type EventProvenance,
 } from "../console/index.ts";
+import { StreamingJsonStager } from "../console/json-staging.ts";
 import {
   CapabilityUnavailableError,
+  BOUNDED_OUTPUT_PROTOCOL,
   SEALED_ROOT_AGENT_PROFILE,
   assertNoReservedModelDispatchInputFields,
   assertJsonValue,
+  assertBoundedOutputV1,
   jsonBytes,
   MAX_WORKING_JSON_BYTES,
   newId,
@@ -495,6 +498,7 @@ export class Supervisor {
       throw error;
     }
     const artifacts = new LocalArtifactStore(options.artifactDirectory);
+    await artifacts.cleanupStaging();
     const providers: ModelProvider[] = [new EchoModelProvider(), ...(options.modelProviders ?? [])];
     const configuredNames = new Set(providers.map(provider => provider.name));
     const availability = (provider: SupportedModelProviderName) => {
@@ -522,7 +526,7 @@ export class Supervisor {
     }));
     const modelExecutor = new ModelExecutor(providers, options.providerConcurrency ?? 1, modelCatalog);
     const executors = [
-      new ShellExecutor(workspaceRoot),
+      new ShellExecutor(workspaceRoot, artifacts),
       new FileExecutor(workspaceRoot),
       new SkillExecutor(),
       modelExecutor,
@@ -890,6 +894,10 @@ export class Supervisor {
 
     const stagedValues = new Map<string, WorkingValue>();
     const stagedArtifacts = new Map<string, ArtifactReference>();
+    let stagedObservationExpected: number | null = null;
+    let stagedObservationBytes = 0;
+    let stagedObservationPath: string | null = null;
+    let stagedObservationWriter: StreamingJsonStager | null = null;
     const restored = Object.fromEntries(
       Object.entries(state.workingValues).map(([name, value]) => [name, value.value]),
     );
@@ -900,6 +908,72 @@ export class Supervisor {
       return `cell:${cellId}:${method}:${ordinal}`;
     };
     const handler = async (method: string, args: unknown[]): Promise<unknown> => {
+      if (method === "observation.stage.begin") {
+        if (stagedObservationExpected !== null) throw new ValidationError("An oversized cell observation is already being staged");
+        if (!Number.isSafeInteger(args[0]) || Number(args[0]) <= MAX_CELL_OBSERVATION_JSON_BYTES) {
+          throw new ValidationError("Oversized cell observation staging requires a declared size above the IPC limit");
+        }
+        stagedObservationExpected = Number(args[0]);
+        stagedObservationBytes = 0;
+        stagedObservationPath = await this.artifacts.createStagingPath(`${cellId}-observation`);
+        stagedObservationWriter = await StreamingJsonStager.open(stagedObservationPath);
+        return { accepted: true };
+      }
+      if (method === "observation.stage.chunk") {
+        if (stagedObservationExpected === null || typeof args[0] !== "string") {
+          throw new ValidationError("Oversized cell observation staging was not initialized");
+        }
+        const bytes = Uint8Array.from(Buffer.from(args[0], "base64"));
+        if (bytes.byteLength === 0 || bytes.byteLength > 64 * 1024 ||
+            Buffer.from(bytes).toString("base64") !== args[0]) {
+          throw new ValidationError("Oversized cell observation chunk is invalid");
+        }
+        stagedObservationBytes += bytes.byteLength;
+        if (stagedObservationBytes > stagedObservationExpected) {
+          throw new ValidationError("Oversized cell observation exceeded its declared size");
+        }
+        await stagedObservationWriter!.push(bytes);
+        return { received: stagedObservationBytes };
+      }
+      if (method === "observation.stage.finish") {
+        if (stagedObservationExpected === null || stagedObservationBytes !== stagedObservationExpected) {
+          throw new ValidationError("Oversized cell observation staging is incomplete");
+        }
+        const rawPreview = JSON.parse(JSON.stringify(args[0])) as unknown;
+        assertJsonValue(rawPreview);
+        const preview = scrubJson(rawPreview);
+        const writer = stagedObservationWriter;
+        const path = stagedObservationPath;
+        if (!writer || !path) throw new ValidationError("Oversized cell observation staging is unavailable");
+        try {
+          const byteLength = await writer.finish();
+          const reference = await this.artifacts.putStaged(path, { mediaType: "application/json" });
+          if (reference.size !== byteLength) {
+            throw new ValidationError("Staged cell observation size changed during CAS placement");
+          }
+          stagedArtifacts.set(reference.artifactId, reference);
+          const result = {
+            protocol: BOUNDED_OUTPUT_PROTOCOL,
+            completeness: "spilled",
+            byteLength,
+            preview,
+            artifact: reference,
+            guidance: "Use artifacts.readRange(artifactId, start, end) to retrieve exact JSON bytes in bounded ranges and parse them inside a cell.",
+          } as const;
+          assertBoundedOutputV1(result);
+          stagedObservationExpected = null;
+          stagedObservationPath = null;
+          stagedObservationWriter = null;
+          return result;
+        } catch (error) {
+          await writer.abort();
+          await rm(path, { force: true }).catch(() => {});
+          stagedObservationExpected = null;
+          stagedObservationPath = null;
+          stagedObservationWriter = null;
+          throw error;
+        }
+      }
       if (method === "state.get") {
         const name = String(args[0]);
         return stagedValues.get(name) ?? state.workingValues[name]?.value ?? null;
@@ -969,11 +1043,29 @@ export class Supervisor {
         stagedArtifacts.set(reference.artifactId, reference);
         return reference;
       }
-      if (method === "artifacts.get") {
+      if (method === "artifacts.readRange") {
         const artifactId = String(args[0]);
         const reference = stagedArtifacts.get(artifactId) ?? state.artifacts[artifactId];
         if (!reference) throw new ValidationError(`Artifact not found: ${artifactId}`);
-        return new TextDecoder().decode(await this.artifacts.resolve(reference));
+        const start = args[1];
+        const end = args[2];
+        if (!Number.isSafeInteger(start) || Number(start) < 0 ||
+            !Number.isSafeInteger(end) || Number(end) < Number(start)) {
+          throw new ValidationError("Artifact ranges require zero-based integer start and end values");
+        }
+        const bytes = await this.artifacts.readRange(reference, Number(start), Number(end));
+        return {
+          protocol: BOUNDED_OUTPUT_PROTOCOL,
+          completeness: "inline",
+          byteLength: bytes.byteLength,
+          value: {
+            bytesBase64: Buffer.from(bytes).toString("base64"),
+            start: Number(start),
+            end: Number(end),
+            size: reference.size,
+            nextStart: Number(end) < reference.size ? Number(end) : null,
+          },
+        };
       }
       if (method === "sql") {
         const sql = String(args[0]);
@@ -1025,9 +1117,9 @@ export class Supervisor {
       if (method === "skills.propose") return this.skillManagement.propose(sessionId,branchId,String(args[0] ?? ""),(args[1] === "local" ? "local" : "workspace"));
       if (method === "skills.invoke") {
         const options = (args[2] ?? {}) as Record<string, unknown>;
-        return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: typeof options.idempotencyKey === "string" ? options.idempotencyKey : nextRpcKey(method) } as any);
+        return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: typeof options.idempotencyKey === "string" ? options.idempotencyKey : nextRpcKey(method), effectOrigin: { kind: "cell", cellId } } as any);
       }
-      if (method === "skills.test") return this.skillManagement.test(sessionId,branchId,String(args[0]));
+      if (method === "skills.test") return this.skillManagement.test(sessionId,branchId,String(args[0]),{ kind: "cell", cellId });
       if (method === "agents.spawn") {
         const raw = args[0]; const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.spawn requires a task string or object");
@@ -1185,6 +1277,7 @@ export class Supervisor {
           executor,
           operation,
           input,
+          origin: { kind: "cell", cellId },
           idempotencyKey,
           idempotent,
         });
@@ -1200,28 +1293,25 @@ export class Supervisor {
       const preview = scrubJson(rawPreview);
       let result: JsonValue;
       if (execution.observation.kind === "json") {
+        const receivedBytes = new TextEncoder().encode(execution.observation.json).byteLength;
+        if (receivedBytes !== execution.observation.byteLength ||
+            receivedBytes > MAX_CELL_OBSERVATION_JSON_BYTES) {
+          throw new ValidationError("Console worker returned an invalid or oversized inline observation");
+        }
         const parsed = JSON.parse(execution.observation.json) as unknown;
         assertJsonValue(parsed);
         const scrubbed = scrubJson(parsed);
         const serialized = JSON.stringify(scrubbed);
         const byteLength = new TextEncoder().encode(serialized).byteLength;
         if (byteLength > MAX_CELL_OBSERVATION_JSON_BYTES) {
-          const reference = await this.artifacts.put(serialized, { mediaType: "application/json" });
-          stagedArtifacts.set(reference.artifactId, reference);
-          result = {
-            kind: "oversized-json",
-            artifact: {
-              artifactId: reference.artifactId,
-              digest: reference.digest,
-              mediaType: reference.mediaType,
-              size: reference.size,
-            },
-            byteLength,
-            preview,
-          };
+          throw new ValidationError("Scrubbed inline observation exceeds the cell IPC limit");
         } else {
           result = scrubbed;
         }
+      } else if (execution.observation.kind === "staged") {
+        assertJsonValue(execution.observation.result);
+        assertBoundedOutputV1(execution.observation.result);
+        result = scrubJson(execution.observation.result);
       } else {
         result = {
           kind: "unsupported",
@@ -1290,6 +1380,9 @@ export class Supervisor {
       }]);
       throw error;
     } finally {
+      const unfinishedWriter = stagedObservationWriter as StreamingJsonStager | null;
+      await unfinishedWriter?.abort();
+      if (stagedObservationPath) await rm(stagedObservationPath, { force: true }).catch(() => {});
       if (this.restartConsoleAfterCell) await this.console.stop();
     }
   }

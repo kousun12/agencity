@@ -3,6 +3,7 @@ import {
   AGENT_ACTION_PROTOCOL,
   AGENT_ACTION_VERSION,
   AGENT_TOOL_CONTRACT_ID,
+  PROVIDER_INPUT_ESTIMATOR_ID,
   MAX_AGENT_TOOL_INPUT_BYTES,
   AgentClient,
   ProtocolServer,
@@ -10,8 +11,11 @@ import {
   ModelEffectAdmissionService,
   Supervisor,
   agentProfilePin,
+  buildProviderInputCandidate,
+  estimateProviderInputCandidate,
   newId,
   projectEvents,
+  providerInputAdmission,
   stableEffectId,
   type AgentAction,
   type EventPayloads,
@@ -167,7 +171,7 @@ function fixtureContextWindow(provider: string, model: string) {
   return {
     provider, model, source: "model-catalog" as const,
     contextWindowTokens: 128_000, outputReserveTokens: 4_096,
-    estimatorId: "utf8-bytes-per-token-v1", triggerRatio: 0.8, targetRatio: 0.6,
+    estimatorId: PROVIDER_INPUT_ESTIMATOR_ID, triggerRatio: 0.8, targetRatio: 0.6,
   };
 }
 
@@ -334,14 +338,66 @@ describe("autonomous durable agent runs", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("stops an unknown-capacity oversized candidate before provider execution", async () => {
+    const temp = await makeTempRuntime("agencity-agent-product-limit-");
+    temps.push(temp);
+    const provider = new GuardAbortActions();
+    Object.defineProperty(provider, "capabilities", {
+      value: {
+        streaming: false,
+        requiredToolSet: {
+          status: "runtime-validated",
+          requiredChoice: "provider-enforced",
+          parallelCalls: "runtime-rejected",
+          streaming: true,
+          adapter: "agencity.product-limit.fixture.v1",
+        },
+      },
+    });
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    try {
+      const session = await supervisor.createSession({
+        workspaceId: "product-limit",
+        model: { provider: provider.name, model: "unknown-capacity" },
+      });
+      const result = await supervisor.runs.start(
+        session.sessionId,
+        session.branchId,
+        `Oversized protected task ${"x".repeat(530 * 1024)}`,
+      );
+      expect(result).toMatchObject({
+        status: "failed",
+        reason: expect.stringContaining("provider-input-product-limit"),
+      });
+      expect(provider.calls).toBe(0);
+      const events = await supervisor.storage.loadEvents(session.sessionId, {
+        branchId: session.branchId,
+      });
+      expect(events.some((event) =>
+        event.type === "EffectRequested" &&
+        (event.payload as any).executor === "model")).toBe(false);
+      expect(events.find((event) => event.type === "ContextCompactionRequested"))
+        .toMatchObject({ payload: { capacity: { source: "unknown", contextWindowTokens: null } } });
+    } finally {
+      await supervisor.close();
+    }
+  });
+
   test("executes typed TypeScript actions and delivers every cell observation once to the dependent context", async () => {
     const value = await fixture([
       action({ type: "typescript", code: `
         const write = await tools.writeFile("answer.txt", "durable-agent-run");
         const gate = await tools.shell("test -f answer.txt && cat answer.txt");
-        await state.set("verified", { exitCode: gate.exitCode, sha256: write.sha256 });
-        console.log("verified", gate.stdout);
-        return { gate, write, workerPid: process.pid };
+        if (gate.completeness !== "inline") throw new Error(gate.guidance);
+        await state.set("verified", { exitCode: gate.value.exitCode, sha256: write.sha256 });
+        console.log("verified", gate.value.stdout);
+        return { exitCode: gate.value.exitCode, content: gate.value.stdout.trim(), sha256: write.sha256 };
       ` }),
       action({ type: "final", content: "Created answer.txt and verified its contents." }),
     ]);
@@ -353,21 +409,35 @@ describe("autonomous durable agent runs", () => {
       expect(await Bun.file(`${value.temp.workspaceRoot}/answer.txt`).text()).toBe("durable-agent-run");
       expect(value.provider.calls).toBe(2);
       const firstContext = JSON.stringify(value.provider.contexts[0]);
-      expect(firstContext).toContain("readFile returns { content, sha256, size }");
+      expect(firstContext).toContain("complete one-based line pages");
       expect(firstContext).toContain("the option is timeoutMs, not timeout");
-      expect(firstContext).toContain("shell returns { exitCode, stdout, stderr, truncated }");
+      expect(firstContext).toContain("agencity.bounded-output.v1");
+      expect(firstContext).toContain("artifacts.readRange");
+      expect(firstContext).toContain("Keep large read, search, and tool results in local variables");
+      expect(firstContext).toContain("Return the smallest useful observation");
+      expect(JSON.stringify(value.provider.contexts[1]))
+        .not.toContain("const write = await tools.writeFile");
 
       const observations = value.provider.contexts.flatMap(providerObservations);
       const cells = observations.filter(item => item.type === "CellCommitted");
       expect(cells).toHaveLength(1);
-      expect(cells[0]!.payload).toMatchObject({ logs: ["verified durable-agent-run"], exports: ["verified"] });
+      expect(cells[0]!.payload).toMatchObject({
+        logs: ["verified durable-agent-run"],
+        exports: ["verified"],
+        effectManifest: [
+          { executor: "file", operation: "write", terminalStatus: "succeeded", attemptCount: 1 },
+          { executor: "shell", operation: "run", terminalStatus: "succeeded", attemptCount: 1 },
+        ],
+      });
       expect(observations.filter(item => item.eventId === cells[0]!.eventId)).toHaveLength(1);
       expect(providerObservations(value.provider.contexts[0]!)).toEqual([]);
-      expect(providerObservations(value.provider.contexts[1]!).some(item => item.type === "EffectOutcomeRecorded")).toBe(true);
+      expect(providerObservations(value.provider.contexts[1]!).some(item => item.type === "EffectOutcomeRecorded")).toBe(false);
 
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
       expect(Object.values(state.cells)).toHaveLength(1);
       expect(Object.values(state.cells)[0]).toMatchObject({ status: "committed" });
+      expect(Object.values(state.effects).filter(effect => effect.executor !== "model").every(effect =>
+        effect.origin.kind === "cell" && effect.origin.cellId === Object.values(state.cells)[0]!.id)).toBe(true);
       expect(state.workingValues.verified?.version).toBe(1);
       expect(state.agentRuns[result.runId]?.steps[1]?.observationEventIds).toContain(cells[0]!.eventId);
       expect(state.messages.map(message => ({ role: message.role, content: message.content }))).toEqual([
@@ -890,6 +960,7 @@ describe("autonomous durable agent runs", () => {
     const unrelatedId = await supervisor.outbox.request({
       sessionId: session.sessionId, branchId: session.branchId,
       executor: "shell", operation: "run", input: { command: "printf unrelated" },
+      origin: { kind: "runtime", requestId: "unrelated-before-run" },
       idempotencyKey: "unrelated-before-run", idempotent: true,
     });
     try {
@@ -1071,6 +1142,96 @@ describe("autonomous durable agent runs", () => {
     } finally { restore(); await supervisor.close(); }
   });
 
+  test("recovers context-bound provider admission without consulting changed live capability state", async () => {
+    const temp = await makeTempRuntime("agencity-agent-context-admission-");
+    temps.push(temp);
+    const provider = new RecordingActions([
+      action({ type: "final", content: "Recovered retained admission." }),
+    ], "context-admission-actions");
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "context-admission",
+      model: { provider: provider.name, model: "v1" },
+    });
+    const append = supervisor.storage.appendEvents.bind(supervisor.storage);
+    let interrupted = false;
+    (supervisor.storage as any).appendEvents =
+      async (events: any[], ...rest: any[]) => {
+        if (!interrupted &&
+            events.some((event) =>
+              event.type === "AgentRunModelAttemptStarted")) {
+          interrupted = true;
+          throw new Error("crash after context admission");
+        }
+        return (append as any)(events, ...rest);
+      };
+    try {
+      await expect(supervisor.runs.start(
+        session.sessionId,
+        session.branchId,
+        "Recover the exact context admission",
+      )).rejects.toThrow("crash after context admission");
+      (supervisor.storage as any).appendEvents = append;
+      const interruptedEvents = await supervisor.storage.loadEvents(
+        session.sessionId,
+        { branchId: session.branchId },
+      );
+      const contextEvent = interruptedEvents.find((event) =>
+        event.type === "ContextMaterialized") as
+        | import("../../src/index.ts").AgentEvent<"ContextMaterialized">
+        | undefined;
+      expect(contextEvent?.payload.providerInputAdmission).toBeDefined();
+      expect(interruptedEvents.some((event) =>
+        event.type === "AgentRunModelAttemptStarted")).toBe(false);
+
+      Object.defineProperty(provider, "capabilities", {
+        configurable: true,
+        value: {
+          ...provider.capabilities,
+          requiredToolSet: {
+            ...provider.capabilities.requiredToolSet,
+            status: "runtime-validated",
+            requiredChoice: "unknown",
+            parallelCalls: "runtime-rejected",
+          },
+        },
+      });
+      const interruptedState = projectEvents(interruptedEvents);
+      const run = Object.values(interruptedState.agentRuns)[0]!;
+      expect(await supervisor.runs.advance(
+        session.sessionId,
+        session.branchId,
+        run.id,
+      )).toMatchObject({
+        status: "succeeded",
+        final: "Recovered retained admission.",
+      });
+      expect(provider.calls).toBe(1);
+      const recoveredEvents = await supervisor.storage.loadEvents(
+        session.sessionId,
+        { branchId: session.branchId },
+      );
+      const call = recoveredEvents.find((event) =>
+        event.type === "ModelCallRequested") as
+        | import("../../src/index.ts").AgentEvent<"ModelCallRequested">
+        | undefined;
+      expect(call?.payload.modelDispatch.responseContract).toMatchObject({
+        schemaEnforcement: "provider-strict",
+      });
+      expect(call?.payload.providerInput.digest)
+        .toBe(contextEvent?.payload.providerInputAdmission?.digest);
+    } finally {
+      (supervisor.storage as any).appendEvents = append;
+      await supervisor.close();
+    }
+  });
+
   test("marks a stable cell interrupted after action commit as unknown and never replays it or calls the provider", async () => {
     const temp = await makeTempRuntime("agencity-agent-cell-interruption-"); temps.push(temp);
     const code = `return await tools.writeFile("must-not-replay.txt", "unsafe");`;
@@ -1125,6 +1286,10 @@ describe("autonomous durable agent runs", () => {
       .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, { provider: provider.name, model: "v1", reasoningEffort: "provider-default" }).modelDispatch;
     const pin = await currentProfilePin(supervisor, session.sessionId);
     const promptProvenance = fixturePromptProvenanceForPin(pin, runId, "agent-run");
+    const retainedContext = { run: { stepOrdinal: 1 }, messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] };
+    const contextWindow = fixtureContextWindow(provider.name, "v1");
+    const providerInput = buildProviderInputCandidate({ context: retainedContext, modelDispatch, capacity: contextWindow });
+    const estimatedInputTokens = estimateProviderInputCandidate(providerInput).estimatedTokens;
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
       payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Recover this run" },
@@ -1136,15 +1301,15 @@ describe("autonomous durable agent runs", () => {
       payload: { runId, stepId, ordinal: 1, contextId, callId, effectId, actionId, observationEventIds: [] },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: `agent-run-context:${runId}:1`,
-      payload: { contextId, records: [], contentHash: "a".repeat(64), context: { run: { stepOrdinal: 1 }, messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] }, promptProvenance },
+      payload: { contextId, records: [], contentHash: "a".repeat(64), context: retainedContext, promptProvenance, providerInputAdmission: providerInputAdmission(providerInput, modelDispatch) },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor", idempotencyKey: `agent-run-model-attempt:${runId}:1:1`,
-      payload: { runId, stepId, ordinal: 1, attempt: 1, contextId, callId, effectId, reason: "initial", estimatedInputTokens: 0, contextWindow: fixtureContextWindow(provider.name, "v1") },
+      payload: { runId, stepId, ordinal: 1, attempt: 1, contextId, callId, effectId, reason: "initial", providerInputVersion: providerInput.version, providerInputDigest: providerInput.digest, estimatedInputTokens, contextWindow },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
-      payload: { callId, contextId, effectId, modelDispatch, estimatedInputTokens: 0, promptProvenance, attempt: 1, contextWindow: fixtureContextWindow(provider.name, "v1") },
+      payload: { callId, contextId, effectId, modelDispatch, providerInput, estimatedInputTokens, promptProvenance, attempt: 1, contextWindow },
     }]);
-    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context: { run: { stepOrdinal: 1 }, messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] }, modelDispatch, promptProvenance } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
+    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, providerInput, modelDispatch, promptProvenance } as unknown as JsonValue, origin: { kind: "model-call", callId }, idempotencyKey: effectKey, idempotent: false });
     expect((await supervisor.outbox.run(effectId)).outcome).toBe("succeeded");
     expect(provider.calls).toBe(1);
     const rawAction = JSON.stringify(action({ type: "final", content: "Recovered exactly once." }));
@@ -1254,6 +1419,9 @@ describe("autonomous durable agent runs", () => {
     const context = { run: { stepOrdinal: 1 }, messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] };
     const pin = await currentProfilePin(supervisor, session.sessionId);
     const promptProvenance = fixturePromptProvenanceForPin(pin, runId, "agent-run");
+    const contextWindow = fixtureContextWindow(provider.name, "v1");
+    const providerInput = buildProviderInputCandidate({ context, modelDispatch, capacity: contextWindow });
+    const estimatedInputTokens = estimateProviderInputCandidate(providerInput).estimatedTokens;
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
       payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Recover pending request" },
@@ -1265,15 +1433,15 @@ describe("autonomous durable agent runs", () => {
       payload: { runId, stepId, ordinal: 1, contextId, callId, effectId, actionId, observationEventIds: [] },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: `agent-run-context:${runId}:1`,
-      payload: { contextId, records: [], contentHash: "b".repeat(64), context, promptProvenance },
+      payload: { contextId, records: [], contentHash: "b".repeat(64), context, promptProvenance, providerInputAdmission: providerInputAdmission(providerInput, modelDispatch) },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor", idempotencyKey: `agent-run-model-attempt:${runId}:1:1`,
-      payload: { runId, stepId, ordinal: 1, attempt: 1, contextId, callId, effectId, reason: "initial", estimatedInputTokens: 0, contextWindow: fixtureContextWindow(provider.name, "v1") },
+      payload: { runId, stepId, ordinal: 1, attempt: 1, contextId, callId, effectId, reason: "initial", providerInputVersion: providerInput.version, providerInputDigest: providerInput.digest, estimatedInputTokens, contextWindow },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
-      payload: { callId, contextId, effectId, modelDispatch, estimatedInputTokens: 0, promptProvenance, attempt: 1, contextWindow: fixtureContextWindow(provider.name, "v1") },
+      payload: { callId, contextId, effectId, modelDispatch, providerInput, estimatedInputTokens, promptProvenance, attempt: 1, contextWindow },
     }]);
-    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context, modelDispatch, promptProvenance } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
+    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, providerInput, modelDispatch, promptProvenance } as unknown as JsonValue, origin: { kind: "model-call", callId }, idempotencyKey: effectKey, idempotent: false });
     expect(provider.calls).toBe(0);
     await supervisor.close();
 
@@ -1300,7 +1468,7 @@ describe("autonomous durable agent runs", () => {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
       payload: { runId, task: "Unknown must block", requestKey: "unknown-request", profilePin: await currentProfilePin(supervisor, session.sessionId) },
     }]);
-    const effectId = await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, idempotencyKey: "ambiguous-side-effect", idempotent: false });
+    const effectId = await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, origin: { kind: "runtime", requestId: "ambiguous-side-effect" }, idempotencyKey: "ambiguous-side-effect", idempotent: false });
     expect(await supervisor.storage.claimEffect(effectId, "dead-owner")).not.toBeNull();
     await supervisor.close();
 

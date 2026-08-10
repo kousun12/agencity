@@ -1,4 +1,12 @@
-import { AgentRuntimeError, DependencyFailureError, ValidationError } from "../domain/index.ts";
+import {
+  AgentRuntimeError,
+  DependencyFailureError,
+  ValidationError,
+  assertArtifactReference,
+  assertBoundedOutputs,
+  boundedOutputArtifactReferences,
+  type ArtifactReference,
+} from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { EffectExecutionContext, EffectExecutionRequest, EffectExecutor, ExecutionResult } from "../executors/index.ts";
 import { result } from "../executors/index.ts";
@@ -116,7 +124,7 @@ export function createExecutorRpcHandler(
       requireCapability(descriptor.name, `operation:${effect.operation}`, descriptor.capabilities.operations.includes(effect.operation));
       try {
         const execution = await executor.execute(effect, { signal: request.signal });
-        return jsonResponse({ execution: normalizeExecution(execution) });
+        return jsonResponse({ execution: normalizeExecution(execution, true) });
       } catch (error) {
         // The server observed the executor throw, so this is a definitive failed
         // outcome rather than an ambiguous network result.
@@ -204,14 +212,14 @@ export class RemoteSandboxExecutor implements EffectExecutor {
     if (!body || typeof body !== "object" || Array.isArray(body) || !("execution" in body)) {
       return result("unknown", undefined, "Remote executor returned a malformed authoritative outcome");
     }
-    try { return normalizeExecution((body as { execution: unknown }).execution); }
+    try { return normalizeExecution((body as { execution: unknown }).execution, false); }
     catch (error) {
       return result("unknown", undefined, `Remote executor returned an invalid authoritative outcome: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }
 
-function normalizeExecution(value: unknown): ExecutionResult {
+function normalizeExecution(value: unknown, allowArtifactReferences: boolean): ExecutionResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ValidationError("Execution result must be an object");
   const item = value as Record<string, unknown>;
   if (item.outcome !== "succeeded" && item.outcome !== "failed" && item.outcome !== "cancelled" && item.outcome !== "unknown") {
@@ -219,7 +227,35 @@ function normalizeExecution(value: unknown): ExecutionResult {
   }
   if (item.error !== undefined && typeof item.error !== "string") throw new ValidationError("Execution result error must be a string");
   if (item.output !== undefined && !isJsonValue(item.output)) throw new ValidationError("Execution result output must be JSON");
-  return result(item.outcome, item.output as JsonValue | undefined, item.error as string | undefined);
+  if (item.output !== undefined) assertBoundedOutputs(item.output);
+  const artifacts = item.artifacts;
+  if (artifacts !== undefined && !Array.isArray(artifacts)) {
+    throw new ValidationError("Execution result artifacts are invalid");
+  }
+  for (const artifact of artifacts ?? []) assertArtifactReference(artifact);
+  const outputArtifactIds = item.output === undefined
+    ? []
+    : boundedOutputArtifactReferences(item.output as JsonValue).map((artifact) => artifact.artifactId);
+  const declaredArtifactIds = new Set(
+    Array.isArray(artifacts)
+      ? (artifacts as ArtifactReference[]).map((artifact) => artifact.artifactId)
+      : [],
+  );
+  if (outputArtifactIds.some((artifactId) => !declaredArtifactIds.has(artifactId))) {
+    throw new ValidationError("Spilled execution output must declare its referenced artifact");
+  }
+  if (!allowArtifactReferences && (declaredArtifactIds.size > 0 || outputArtifactIds.length > 0)) {
+    throw new ValidationError(
+      "Remote executor artifact references are unavailable without a canonical artifact-transfer capability",
+    );
+  }
+  return result(
+    item.outcome,
+    item.output as JsonValue | undefined,
+    item.error as string | undefined,
+    undefined,
+    artifacts as ArtifactReference[] | undefined,
+  );
 }
 
 function isJsonValue(value: unknown): value is JsonValue {

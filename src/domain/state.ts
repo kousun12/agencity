@@ -1,24 +1,25 @@
 import type {
-  AgentRunActionSource, AgentRunGoalMode, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
+  AgentRunActionSource, AgentRunGoalMode, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOrigin, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
   CellLogStream, FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
   RefinementReviewLifecycleStatus, ScheduleStatus, SessionStatus, TaskStatus, ModelCallResult, ModelCallTermination, ModelUsageSource, Usage, WakeStatus, WorkingValue,
 } from "./events.ts";
 import type { ModelConfiguration, ModelDispatch, ModelWarning, RecursiveResponseAdmission } from "./model.ts";
 import type { ModelEffectFailureCode } from "./model-response.ts";
+import type { ProviderInputAdmission, ProviderInputCandidate } from "./provider-input.ts";
 import type { AgentAction } from "./agent-action.ts";
 import type { AgentInvocationProfilePin, AgentProfileVersion, InvocationPromptProvenance } from "./agent-profile.ts";
 import type { JsonValue } from "./json.ts";
 
-export const REDUCER_VERSION = 13 as const;
+export const REDUCER_VERSION = 15 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
 export interface CellState { readonly id: string; readonly code: string; readonly status: "proposed" | "running" | "committed" | "failed" | "abandoned"; readonly attempts: number; readonly result?: JsonValue; readonly logs: string[]; readonly logStreams: CellLogStream[]; readonly error?: string; readonly eventId: string; }
 export interface WorkingValueState { readonly name: string; readonly version: number; readonly value: WorkingValue; readonly eventId: string; }
-export interface EffectState { readonly id: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotencyKey: string; readonly idempotent: boolean; readonly attempts: number; readonly status: "requested" | "started" | EffectOutcome; readonly output?: JsonValue; readonly error?: string; readonly modelFailure?: ModelEffectFailureCode; readonly eventId: string; }
+export interface EffectState { readonly id: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly origin: EffectOrigin; readonly idempotencyKey: string; readonly idempotent: boolean; readonly attempts: number; readonly status: "requested" | "started" | EffectOutcome; readonly output?: JsonValue; readonly error?: string; readonly modelFailure?: ModelEffectFailureCode; readonly eventId: string; }
 export interface EffectReconciliationState { readonly id: string; readonly effectId: string; readonly assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; readonly summary: string; readonly evidence?: JsonValue; readonly recordedBy: string; readonly recordedAt: string; readonly eventId: string; }
-export interface ModelCallState { readonly id: string; readonly contextId: string; readonly effectId: string; readonly modelDispatch: ModelDispatch; readonly estimatedInputTokens: number; readonly promptProvenance: InvocationPromptProvenance; readonly attempt: number; readonly retryOfCallId?: string; readonly contextWindow?: ContextCapacityProvenance; readonly chunks: string[]; readonly status: "requested" | EffectOutcome; readonly responseMessageId?: string; readonly result?: ModelCallResult; readonly resultDigest?: string; readonly termination?: ModelCallTermination; readonly usage?: Usage | null; readonly usageSource?: ModelUsageSource; readonly warnings?: ModelWarning[]; readonly budgetDebited?: { readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number; readonly usageSource: ModelUsageSource; readonly eventId: string }; readonly failureCode?: ModelEffectFailureCode; readonly error?: string; readonly eventId: string; }
-export interface ContextState { readonly id: string; readonly records: ContextRecordReference[]; readonly contentHash: string; readonly promptProvenance?: InvocationPromptProvenance; readonly derivation?: ContextCompactionDerivation; readonly eventId: string; }
+export interface ModelCallState { readonly id: string; readonly contextId: string; readonly effectId: string; readonly modelDispatch: ModelDispatch; readonly providerInput: ProviderInputCandidate; readonly estimatedInputTokens: number; readonly promptProvenance: InvocationPromptProvenance; readonly attempt: number; readonly retryOfCallId?: string; readonly contextWindow?: ContextCapacityProvenance; readonly chunks: string[]; readonly status: "requested" | EffectOutcome; readonly responseMessageId?: string; readonly result?: ModelCallResult; readonly resultDigest?: string; readonly termination?: ModelCallTermination; readonly usage?: Usage | null; readonly usageSource?: ModelUsageSource; readonly warnings?: ModelWarning[]; readonly budgetDebited?: { readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number; readonly usageSource: ModelUsageSource; readonly eventId: string }; readonly failureCode?: ModelEffectFailureCode; readonly error?: string; readonly eventId: string; }
+export interface ContextState { readonly id: string; readonly records: ContextRecordReference[]; readonly contentHash: string; readonly promptProvenance?: InvocationPromptProvenance; readonly providerInputAdmission?: ProviderInputAdmission; readonly derivation?: ContextCompactionDerivation; readonly eventId: string; }
 export interface ContextCompactionState {
   readonly id: string; readonly strategy: ContextCompactionStrategy; readonly reason: ContextCompactionReason;
   readonly requestedBy: ContextCompactionRequester; readonly instructions?: string; readonly throughCursor: string;
@@ -82,6 +83,7 @@ export interface RefinementTriggerConsumptionState { readonly triggerKey: string
 export interface AgentRunModelAttemptState {
   readonly attempt: number; readonly contextId: string; readonly callId: string; readonly effectId: string;
   readonly reason: "initial" | "proactive-compaction" | "provider-overflow"; readonly estimatedInputTokens: number;
+  readonly providerInputVersion: string; readonly providerInputDigest: string;
   readonly contextWindow: ContextCapacityProvenance; readonly retryOfCallId?: string; readonly eventId: string;
 }
 export interface AgentRunStepState {

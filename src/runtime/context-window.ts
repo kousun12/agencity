@@ -2,6 +2,11 @@ import {
   computeCompactionThresholds,
   type CompactionThresholds,
 } from "./compaction-core.ts";
+import {
+  ProviderInputProductLimitError,
+  UNKNOWN_CAPACITY_PROVIDER_INPUT_HARD_BYTES,
+  UNKNOWN_CAPACITY_PROVIDER_INPUT_TARGET_BYTES,
+} from "../domain/provider-input.ts";
 
 /**
  * Pure context-window admission policy for FU-019.
@@ -62,7 +67,10 @@ export interface ContextWindowCompactionRequest<TCandidate> {
   readonly iteration: number;
   /** Callers must compact the oldest eligible prefix, never live protected state. */
   readonly selection: typeof OLDEST_ELIGIBLE_PREFIX;
-  readonly reason: "proactive-threshold" | "explicit-request";
+  readonly reason:
+    | "proactive-threshold"
+    | "explicit-request"
+    | "product-byte-ceiling";
   readonly capacity: ModelContextWindowConfiguration;
 }
 
@@ -84,6 +92,8 @@ export interface ContextWindowAdmissionCallbacks<TCandidate, TCompactionProvenan
     candidate: TCandidate,
     request: ContextWindowEstimateRequest,
   ) => number | Promise<number>;
+  /** Exact complete provider-input candidate bytes when the candidate has one. */
+  readonly measureUtf8Bytes?: (candidate: TCandidate) => number;
   /**
    * Applies one derived-view compaction. The callback is responsible for the
    * requested oldest-prefix selection and returns its exact provenance. It must
@@ -98,7 +108,10 @@ export interface ContextWindowAdmissionCallbacks<TCandidate, TCompactionProvenan
 export interface ContextWindowCompactionRecord<TProvenance> {
   readonly iteration: number;
   readonly selection: typeof OLDEST_ELIGIBLE_PREFIX;
-  readonly reason: "proactive-threshold" | "explicit-request";
+  readonly reason:
+    | "proactive-threshold"
+    | "explicit-request"
+    | "product-byte-ceiling";
   readonly estimatorId: string;
   readonly capacityProvenance: ModelContextCapacityProvenance;
   readonly beforeEstimatedInputTokens: number;
@@ -232,8 +245,9 @@ export class ContextWindowController {
  * Builds and estimates the exact provider candidate before admission. Known
  * capacities compact inclusively at the trigger and continue toward the lower
  * target. Every pass rebuilds and re-estimates; a pass which fails to strictly
- * reduce the estimate is blocked. Unknown capacities skip proactive work but
- * still support one explicitly requested compaction pass.
+ * reduce the estimate is blocked. Unknown capacities retain that uncertainty
+ * while enforcing the fixed provider-input byte ceiling when exact bytes are
+ * supplied, and still support explicit compaction.
  */
 export async function admitContextWindow<TCandidate, TCompactionProvenance>(
   configuration: ModelContextWindowConfiguration,
@@ -263,6 +277,90 @@ export async function admitContextWindow<TCandidate, TCompactionProvenance>(
   const compactions: ContextWindowCompactionRecord<TCompactionProvenance>[] = [];
 
   if (mode === "proactive" && thresholds === null) {
+    if (callbacks.measureUtf8Bytes) {
+      let candidateBytes = checkedCandidateBytes(
+        callbacks.measureUtf8Bytes(candidate),
+      );
+      if (candidateBytes <= UNKNOWN_CAPACITY_PROVIDER_INPUT_HARD_BYTES) {
+        return admissionResult(
+          candidate,
+          checked,
+          thresholds,
+          mode,
+          "unknown-capacity",
+          initialEstimatedInputTokens,
+          estimatedInputTokens,
+          compactions,
+        );
+      }
+      while (candidateBytes > UNKNOWN_CAPACITY_PROVIDER_INPUT_TARGET_BYTES) {
+        if (compactions.length >= MAX_CONTEXT_WINDOW_COMPACTION_ITERATIONS) {
+          if (candidateBytes > UNKNOWN_CAPACITY_PROVIDER_INPUT_HARD_BYTES) {
+            throw new ProviderInputProductLimitError(candidateBytes);
+          }
+          break;
+        }
+        const iteration = compactions.length + 1;
+        const priorEstimate = estimatedInputTokens;
+        const priorBytes = candidateBytes;
+        const compacted = await callbacks.compact({
+          candidate,
+          estimatedInputTokens,
+          targetInputTokens: null,
+          iteration,
+          selection: OLDEST_ELIGIBLE_PREFIX,
+          reason: "product-byte-ceiling",
+          capacity: checked,
+        });
+        if (compacted.outcome === "protected-only") {
+          if (candidateBytes > UNKNOWN_CAPACITY_PROVIDER_INPUT_HARD_BYTES) {
+            throw new ProviderInputProductLimitError(candidateBytes);
+          }
+          break;
+        }
+        candidate = await callbacks.buildCandidate({
+          phase: "after-compaction",
+          completedCompactions: iteration,
+        });
+        estimatedInputTokens = checkedEstimate(await callbacks.estimate(candidate, {
+          estimatorId: checked.estimatorId,
+          completedCompactions: iteration,
+        }));
+        candidateBytes = checkedCandidateBytes(
+          callbacks.measureUtf8Bytes(candidate),
+        );
+        compactions.push(Object.freeze({
+          iteration,
+          selection: OLDEST_ELIGIBLE_PREFIX,
+          reason: "product-byte-ceiling" as const,
+          estimatorId: checked.estimatorId,
+          capacityProvenance: checked.provenance,
+          beforeEstimatedInputTokens: priorEstimate,
+          afterEstimatedInputTokens: estimatedInputTokens,
+          reclaimedEstimatedTokens: priorEstimate - estimatedInputTokens,
+          provenance: compacted.provenance,
+        }));
+        if (candidateBytes >= priorBytes) {
+          if (candidateBytes > UNKNOWN_CAPACITY_PROVIDER_INPUT_HARD_BYTES) {
+            throw new ProviderInputProductLimitError(candidateBytes);
+          }
+          break;
+        }
+      }
+      if (candidateBytes > UNKNOWN_CAPACITY_PROVIDER_INPUT_HARD_BYTES) {
+        throw new ProviderInputProductLimitError(candidateBytes);
+      }
+      return admissionResult(
+        candidate,
+        checked,
+        thresholds,
+        mode,
+        "unknown-capacity",
+        initialEstimatedInputTokens,
+        estimatedInputTokens,
+        compactions,
+      );
+    }
     return admissionResult(
       candidate,
       checked,
@@ -504,6 +602,15 @@ function validateProviderClassification(
 
 function checkedEstimate(value: number): number {
   validateNonnegativeInteger(value, "estimatedInputTokens");
+  return value;
+}
+
+function checkedCandidateBytes(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ContextWindowConfigurationError(
+      "provider-input candidate bytes must be a nonnegative safe integer",
+    );
+  }
   return value;
 }
 

@@ -49,6 +49,7 @@ export interface InspectPreview {
 
 export type EncodedObservation =
   | { readonly kind: "json"; readonly json: string; readonly byteLength: number; readonly preview: InspectPreview }
+  | { readonly kind: "staged"; readonly result: JsonValue; readonly byteLength: number; readonly preview: InspectPreview }
   | { readonly kind: "unsupported"; readonly reason: string; readonly preview: InspectPreview };
 
 interface PreviewBudget {

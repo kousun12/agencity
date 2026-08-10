@@ -18,7 +18,7 @@ async function fixture(prefix = "agencity-protocol-conformance-") {
 async function appendUnknown(supervisor: Supervisor, sessionId: string, branchId: string, effectId: string): Promise<void> {
   await supervisor.storage.appendEvents([{
     sessionId, branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: `request:${effectId}`,
-    payload: { effectId, executor: "shell", operation: "run", input: { command: "ambiguous" }, idempotencyKey: `logical:${effectId}`, idempotent: false },
+    payload: { effectId, executor: "shell", operation: "run", input: { command: "ambiguous" }, origin: { kind: "runtime", requestId: `logical:${effectId}` }, idempotencyKey: `logical:${effectId}`, idempotent: false },
   }, {
     sessionId, branchId, type: "EffectAttemptStarted", producer: "supervisor", idempotencyKey: `attempt:${effectId}`,
     payload: { effectId, attempt: 1 },
@@ -271,7 +271,7 @@ describe("FU-006 append-only unknown-effect reconciliation", () => {
     const effectId = "effect-failed";
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "failed-request",
-      payload: { effectId, executor: "shell", operation: "run", input: {}, idempotencyKey: "failed-logical", idempotent: false },
+      payload: { effectId, executor: "shell", operation: "run", input: {}, origin: { kind: "runtime", requestId: "failed-logical" }, idempotencyKey: "failed-logical", idempotent: false },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "EffectOutcomeRecorded", producer: "supervisor", idempotencyKey: "failed-outcome",
       payload: { effectId, attempt: 1, outcome: "failed", error: "known failure", observedAt: new Date().toISOString() },

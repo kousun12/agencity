@@ -4,10 +4,13 @@ import {
   ModelLoop,
   OutboxRunner,
   Supervisor,
+  PROVIDER_INPUT_ESTIMATOR_ID,
   TEXT_MODEL_RESPONSE_CONTRACT,
   ValidationError,
+  buildProviderInputCandidate,
   canonicalJsonDigest,
   createModelEffectOutputV2,
+  estimateProviderInputCandidate,
   projectEvents,
   resolveModelDispatch,
   type JsonValue,
@@ -124,7 +127,10 @@ describe("context provenance and model loop", () => {
     expect((callEvent!.payload as { contextId: string }).contextId).toBe(contextPayload.contextId);
     expect((modelEffect!.payload as unknown as { input: { modelDispatch: unknown } }).input.modelDispatch)
       .toEqual((callEvent!.payload as { modelDispatch: unknown }).modelDispatch);
-    expect(provider.contexts[0]).toEqual(contextPayload.context);
+    const retainedProviderInput = (callEvent!.payload as any).providerInput;
+    expect((provider.contexts[0] as any).messages)
+      .toEqual(retainedProviderInput.messages);
+    expect(provider.contexts[0]).not.toHaveProperty("basePolicy");
     expect(contextPayload.contentHash).toBe(sha256(JSON.stringify(contextPayload.context)));
     expect(contextPayload.records.length).toBeGreaterThanOrEqual(5);
     expect(contextPayload.records.map((record) => record.eventId)).toContain(userEvent.id);
@@ -281,6 +287,14 @@ describe("context provenance and model loop", () => {
       configuredProvider: "not-installed",
     });
     const promptProvenance = fixturePromptProvenance(sessionId, "recovery");
+    const contextWindow = fixtureUnknownCapacity(modelDispatch);
+    const providerInput = buildProviderInputCandidate({
+      context,
+      modelDispatch,
+      capacity: contextWindow,
+    });
+    const estimatedInputTokens =
+      estimateProviderInputCandidate(providerInput).estimatedTokens;
     await storage.appendEvents([{
       sessionId, branchId, type: "ContextMaterialized", producer: "supervisor",
       idempotencyKey: "context:recovery", payload: {
@@ -289,13 +303,14 @@ describe("context provenance and model loop", () => {
     }, {
       sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
       idempotencyKey: "model-call:recovery", payload: {
-        callId: "call-recovery", contextId: "context-recovery", effectId: "effect-recovery", modelDispatch, estimatedInputTokens: 0, promptProvenance,
+        callId: "call-recovery", contextId: "context-recovery", effectId: "effect-recovery", modelDispatch, providerInput, estimatedInputTokens, promptProvenance, contextWindow,
       },
     }, {
       sessionId, branchId, type: "EffectRequested", producer: "supervisor",
       idempotencyKey: "model:recovery", payload: {
         effectId: "effect-recovery", executor: "model", operation: "complete",
-        input: { context, callId: "call-recovery", modelDispatch, promptProvenance } as unknown as JsonValue,
+        input: { providerInput, callId: "call-recovery", modelDispatch, promptProvenance } as unknown as JsonValue,
+        origin: { kind: "model-call", callId: "call-recovery" },
         idempotencyKey: "model:recovery", idempotent: false,
       },
     }, {
@@ -338,6 +353,14 @@ describe("context provenance and model loop", () => {
       responseCapability: { kind: "text" },
     });
     const promptProvenance = fixturePromptProvenance(sessionId, "shared-effect");
+    const contextWindow = fixtureUnknownCapacity(modelDispatch);
+    const providerInput = buildProviderInputCandidate({
+      context,
+      modelDispatch,
+      capacity: contextWindow,
+    });
+    const estimatedInputTokens =
+      estimateProviderInputCandidate(providerInput).estimatedTokens;
     await storage.appendEvents([{
       sessionId,
       branchId,
@@ -351,7 +374,7 @@ describe("context provenance and model loop", () => {
       type: "ModelCallRequested",
       producer: "supervisor",
       idempotencyKey: "model-call:first-shared-effect",
-      payload: { callId: "call-first", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, estimatedInputTokens: 0, promptProvenance },
+      payload: { callId: "call-first", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, providerInput, estimatedInputTokens, promptProvenance, contextWindow },
     }]);
     await expect(storage.appendEvents([{
       sessionId,
@@ -359,8 +382,21 @@ describe("context provenance and model loop", () => {
       type: "ModelCallRequested",
       producer: "supervisor",
       idempotencyKey: "model-call:second-shared-effect",
-      payload: { callId: "call-second", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, estimatedInputTokens: 0, promptProvenance },
+      payload: { callId: "call-second", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, providerInput, estimatedInputTokens, promptProvenance, contextWindow },
     }])).rejects.toThrow("only one model call");
     storage.close();
   });
 });
+
+function fixtureUnknownCapacity(modelDispatch: import("../../src/index.ts").ModelDispatch) {
+  return {
+    provider: modelDispatch.configuration.provider,
+    model: modelDispatch.configuration.model,
+    source: "unknown" as const,
+    contextWindowTokens: null,
+    outputReserveTokens: modelDispatch.configuration.maxOutputTokens ?? 0,
+    estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+    triggerRatio: 0.8,
+    targetRatio: 0.6,
+  };
+}

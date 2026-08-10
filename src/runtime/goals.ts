@@ -176,6 +176,7 @@ export class GoalService {
         const key = `goal-gate-effect:${goalId}:${gate.gateId}:${requestId}`;
         effectId = await this.outbox.request({
           sessionId, branchId, executor: gate.executor, operation: gate.operation, input: gate.input,
+          origin: { kind: "goal-gate", goalId, gateId: gate.gateId, requestId },
           idempotencyKey: key, idempotent: gate.idempotent,
         });
         await this.storage.appendEvents([{

@@ -1,5 +1,5 @@
 import type {
-  AgentEvent, AgentInvocationProfilePin, AgentRunGoalMode, AgentState, AutonomyOwner, BudgetLimits, EffectOutcome, GoalGateStatus, GoalStatus,
+  AgentEvent, AgentInvocationProfilePin, AgentRunGoalMode, AgentState, AutonomyOwner, BudgetLimits, EffectOrigin, EffectOutcome, GoalGateStatus, GoalStatus,
   HeartbeatStatus, MailboxMessageKind, ModelConfiguration, NewAgentEvent,
   RecursiveModelOutcome, RecursiveModelStatus, RecursiveResponseAdmission, ScheduleStatus, TaskStatus, WakeStatus,
 } from "../domain/index.ts";
@@ -14,7 +14,7 @@ export interface StorageCapabilities {
   readonly notifications: boolean;
 }
 export interface EventQuery { readonly branchId?: string; readonly afterCursor?: string; readonly untilCursor?: string; }
-export interface OutboxRecord { readonly effectId: string; readonly sessionId: string; readonly branchId: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotencyKey: string; readonly idempotent: boolean; readonly status: "pending"|"running"|EffectOutcome; readonly attempt: number; readonly owner: string | null; readonly leaseExpiresAt: string | null; }
+export interface OutboxRecord { readonly effectId: string; readonly sessionId: string; readonly branchId: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly origin: EffectOrigin; readonly idempotencyKey: string; readonly idempotent: boolean; readonly status: "pending"|"running"|EffectOutcome; readonly attempt: number; readonly owner: string | null; readonly leaseExpiresAt: string | null; }
 
 export type ProcessExecutionLeaseScope =
   | { readonly kind: "workspace"; readonly workspaceId: string }

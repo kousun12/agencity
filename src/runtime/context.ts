@@ -1,6 +1,10 @@
 import {
-  newId, NotFoundError, projectEvents, type AgentEvent, type ContextRecordReference, type EventPayloads, type EventType,
-  type HarnessRecord, type InvocationPromptProvenance, type JsonValue,
+  BOUNDED_OUTPUT_PROTOCOL, OUTPUT_LIMITS,
+  buildProviderInputCandidate, newId, NotFoundError, projectEvents,
+  providerInputAdmission as createProviderInputAdmission,
+  type AgentEvent, type ContextRecordReference, type EventPayloads, type EventType,
+  type AgentRunState, type HarnessRecord, type InvocationPromptProvenance, type JsonValue,
+  type ModelDispatch, type ProviderInputCapacityProvenance,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { MemoryService } from "./memory.ts";
@@ -27,6 +31,14 @@ export interface ContextMaterializeOptions {
   readonly promptProvenance?: InvocationPromptProvenance;
   /** Exact profile selected by the invocation pin; never re-resolved to current. */
   readonly agentProfileVersionId?: string;
+  /**
+   * Pins dispatch and capacity at the same durable boundary as the exact
+   * provider-facing messages so recovery never consults a later catalog.
+   */
+  readonly providerInput?: {
+    readonly modelDispatch: ModelDispatch;
+    readonly capacity: ProviderInputCapacityProvenance;
+  };
 }
 
 export class ContextMaterializer {
@@ -141,15 +153,25 @@ export class ContextMaterializer {
       ],
       candidateRetirements: [...retiredByCandidate].sort(),
     })) as JsonValue;
-    const profilePreferences = this.profile ? await this.profile.listPreferences() : [];
+    const profilePreferences = this.profile
+      ? (await this.profile.listPreferences()).filter(modelFacingPreference)
+      : [];
     // Compatibility rows are retained in profile history and management views,
     // but never enter ordinary executable context until reinstalled and tested.
     const profileSkills = profileSkillSelections.map(publicManagedSkill);
-    const providerConfigurations = this.profile ? (await this.profile.listCredentialReferences()).map(({reference,provider,label,metadata})=>({reference,provider,label,metadata})) : [];
     const baseContext: JsonValue = JSON.parse(JSON.stringify({
       basePolicy: BASE_POLICY,
       basePolicyRecord: { id: IMMUTABLE_BASE_POLICY.id, version: IMMUTABLE_BASE_POLICY.version, digest: hash(BASE_POLICY), mutable: false },
-      runtime: { mode:"trusted-local",workerIsSecuritySandbox:false,rawSql:{readOnly:true,scope:"shared-non-confidential-diagnostics",candidateIsolationIsConfidentialityBoundary:false} },
+      runtime: {
+        mode:"trusted-local",
+        workerIsSecuritySandbox:false,
+        rawSql:{readOnly:true,scope:"shared-non-confidential-diagnostics",candidateIsolationIsConfidentialityBoundary:false},
+        boundedOutput:{
+          protocol:BOUNDED_OUTPUT_PROTOCOL,
+          fileLineWindows:{available:true,maxLines:OUTPUT_LIMITS.filePageLines,maxLineBytes:OUTPUT_LIMITS.fileLineBytes,maxPageBytes:OUTPUT_LIMITS.filePageBytes},
+          artifactByteRanges:{available:true,semantics:"zero-based-half-open",maxBytes:OUTPUT_LIMITS.artifactRangeBytes},
+        },
+      },
       agentProfile: {
         profileVersionId: agentProfile.profileVersionId,
         revision: agentProfile.revision,
@@ -160,7 +182,7 @@ export class ContextMaterializer {
         sourceSpecEntryId: agentProfile.sourceSpecEntryId,
         sourceSpecVersionId: agentProfile.sourceSpecVersionId,
       },
-      userProfile: { preferences: profilePreferences, globalSkills: profileSkills, providerConfigurations },
+      userProfile: { preferences: profilePreferences, globalSkills: profileSkills },
       session: { id:sessionId,branchId,status:state.status,model:state.model,parentSessionId:state.parentSessionId,parentBranchId:state.parentBranchId,rootSessionId:state.rootSessionId,depth:state.depth,taskId:state.taskId },
       budget: state.budget,
       goal: Object.values(state.goals).find((goal) => !["completed","failed","cancelled"].includes(goal.status)) ?? null,
@@ -168,7 +190,9 @@ export class ContextMaterializer {
       unknownEffectReconciliations:Object.values(state.effectReconciliations),
       documents:Object.values(state.documents).map((document)=>({id:document.id,name:document.name,mediaType:document.mediaType,size:document.size,digest:document.digest,chunkCount:document.chunkCount})),
       inputSets:Object.values(state.inputSets),heartbeats:Object.values(state.heartbeats),schedules:Object.values(state.schedules),wakes:Object.values(state.wakes),
-      activeRuns:Object.values(state.agentRuns).filter((run)=>!["succeeded","blocked","failed","cancelled","budget_exceeded","unknown"].includes(run.status)),
+      activeRuns:Object.values(state.agentRuns)
+        .filter((run)=>!["succeeded","blocked","failed","cancelled","budget_exceeded","unknown"].includes(run.status))
+        .map(boundedActiveRunProjection),
       harness: {
         promptNotes: promptNotes.map(publicHarness),
         memories: memories.map(publicHarness),
@@ -179,10 +203,20 @@ export class ContextMaterializer {
       messages:messages.map((message)=>({role:message.role,content:message.content,eventId:message.eventId,...(message.mailbox === undefined ? {} : { mailbox: message.mailbox })})),
       workingValues:Object.values(state.workingValues).map((value)=>({name:value.name,version:value.version,value:value.value,eventId:value.eventId})),artifacts:Object.values(state.artifacts),
       recentActivity:activity.map((event)=>({eventId:event.id,type:event.type,payload:event.payload})),
-      queryHints:{history:"SELECT type, committed_at, payload_json FROM events WHERE session_id = ? ORDER BY sequence",largeRecords:"Resolve artifact references through sdk.artifacts.get",documents:"SELECT chunk_id, ordinal, content FROM document_chunks WHERE document_id = ? ORDER BY ordinal",mailbox:"SELECT * FROM mailbox_messages WHERE to_session_id = ? ORDER BY sent_at",memory:"Use Supervisor.memory.search; candidate generation is FTS5 and scope/status policy remains authoritative"},
+      queryHints:{history:"SELECT type, committed_at, payload_json FROM events WHERE session_id = ? ORDER BY sequence",largeRecords:"Resolve exact bounded bytes through sdk.artifacts.readRange(artifactId, start, end)",documents:"SELECT chunk_id, ordinal, content FROM document_chunks WHERE document_id = ? ORDER BY ordinal",mailbox:"SELECT * FROM mailbox_messages WHERE to_session_id = ? ORDER BY sent_at",memory:"Use Supervisor.memory.search; candidate generation is FTS5 and scope/status policy remains authoritative"},
     })) as JsonValue;
     const context = options.transform ? options.transform(baseContext) : baseContext;
-    const contextId=options.contextId ?? newId(); const [event]=await this.storage.appendEvents([{sessionId,branchId,type:"ContextMaterialized",producer:"supervisor",idempotencyKey:options.idempotencyKey ?? `context:${contextId}`,payload:{contextId,records:references,contentHash:hash(JSON.stringify(context)),context,harnessProvenance,...(options.promptProvenance === undefined ? {} : { promptProvenance: options.promptProvenance })}}]);
+    const admission = options.providerInput
+      ? createProviderInputAdmission(
+          buildProviderInputCandidate({
+            context,
+            modelDispatch: options.providerInput.modelDispatch,
+            capacity: options.providerInput.capacity,
+          }),
+          options.providerInput.modelDispatch,
+        )
+      : undefined;
+    const contextId=options.contextId ?? newId(); const [event]=await this.storage.appendEvents([{sessionId,branchId,type:"ContextMaterialized",producer:"supervisor",idempotencyKey:options.idempotencyKey ?? `context:${contextId}`,payload:{contextId,records:references,contentHash:hash(JSON.stringify(context)),context,harnessProvenance,...(options.promptProvenance === undefined ? {} : { promptProvenance: options.promptProvenance }),...(admission === undefined ? {} : { providerInputAdmission: admission })}}]);
     if (!event) throw new Error("Context was not committed"); return {contextId,context,event:event as AgentEvent<"ContextMaterialized">};
   }
 
@@ -205,3 +239,25 @@ function publicHarness(record:HarnessRecord) { return {entryId:record.entryId,ve
 function publicSkill(record:HarnessRecord) { const content=record.current.content.kind==="skill" ? record.current.content : null; return {entryId:record.entryId,versionId:record.current.versionId,name:record.name,scope:record.scope,status:record.current.status,confidence:record.current.confidence,tags:record.current.tags,description:content?.description ?? "",inputSchema:content?.inputSchema ?? null,permissions:content?.permissions ?? [],runtime:content?.runtime ?? "bun"}; }
 function publicManagedSkill(record:SkillManagementView) { return {entryId:record.entryId,versionId:record.versionId,name:record.name,scope:record.scope,status:record.availability,source:record.source,digest:record.digest,description:record.description,inputSchema:record.inputSchema,permissions:record.permissions,provenance:record.provenance,runtime:record.runtime}; }
 function publicSpec(record:HarnessRecord) { const content=record.current.content.kind==="subagent_spec" ? record.current.content : null; return {entryId:record.entryId,versionId:record.current.versionId,name:record.name,scope:record.scope,status:record.current.status,confidence:record.current.confidence,tags:record.current.tags,role:content?.role ?? "",invocationCriteria:content?.invocationCriteria ?? "",expectedArtifact:content?.expectedArtifact ?? ""}; }
+
+const MODEL_FACING_PROFILE_PREFERENCE_KEYS = new Set([
+  "response.style",
+  "response.language",
+  "response.detail",
+]);
+function modelFacingPreference(preference:{readonly key:string}):boolean {
+  return MODEL_FACING_PROFILE_PREFERENCE_KEYS.has(preference.key);
+}
+
+export function boundedActiveRunProjection(run:AgentRunState):JsonValue {
+  return {
+    id:run.id,task:run.task,status:run.status,
+    currentOrdinal:run.steps.at(-1)?.ordinal ?? 0,
+    goalId:run.goalId,goalMode:run.goalMode,
+    cancellationRequested:run.cancellationRequested,
+    ...(run.cancellationReason === undefined ? {} : { cancellationReason:run.cancellationReason }),
+    terminalSummaries:Object.values(run.goalChecks).slice(-4).map((check)=>({
+      actionId:check.actionId,status:check.status,summary:check.summary,
+    })),
+  };
+}

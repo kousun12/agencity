@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   LibSqlStorage,
   ShellExecutor,
+  StreamingTextScrubber,
   assertReadonlySql,
   containsBrokeredSecret,
   environmentWithoutSecrets,
@@ -129,12 +130,14 @@ describe("brokered secret handling", () => {
       apiKey: "ordinary-provider-label",
       token: "pagination-cursor",
       auth: { mode: "oauth" },
+      [`key-${secret}`]: "sensitive-key",
       nested: { note: `contains ${secret}` },
       okay: 1,
     })).toEqual({
       apiKey: "ordinary-provider-label",
       token: "pagination-cursor",
       auth: { mode: "oauth" },
+      "key-[REDACTED]": "sensitive-key",
       nested: { note: "contains [REDACTED]" },
       okay: 1,
     });
@@ -163,6 +166,76 @@ describe("brokered secret handling", () => {
     storage.close();
   });
 
+  test("redacts a private key whose END marker is split across chunks", () => {
+    const scrubber = new StreamingTextScrubber();
+    const encode = (value: string) => new TextEncoder().encode(value);
+    const output = [
+      scrubber.push(encode("before -----BEGIN PRIVATE KEY-----private-material-----EN")),
+      scrubber.push(encode("D PRIVATE")),
+      scrubber.push(encode(" KEY----- after")),
+      scrubber.finish(),
+    ].join("");
+    expect(output).toBe("before [REDACTED] after");
+    expect(output).not.toContain("private-material");
+  });
+
+  test("bounds retained state for uninterrupted credential-shaped streams", () => {
+    const prefixes = [
+      "Bearer ",
+      "Basic ",
+      "sk-live-",
+      "api_key=",
+      "https://example.test/path?access_token=",
+    ];
+    const encode = new TextEncoder();
+    for (const prefix of prefixes) {
+      const scrubber = new StreamingTextScrubber();
+      const source = `${prefix}${"A".repeat(2 * 1024 * 1024)} end`;
+      let output = "";
+      let maximumBuffered = 0;
+      for (let offset = 0; offset < source.length; offset += 257) {
+        output += scrubber.push(encode.encode(source.slice(offset, offset + 257)));
+        maximumBuffered = Math.max(maximumBuffered, scrubber.bufferedCharacterCount);
+      }
+      output += scrubber.finish();
+      expect(maximumBuffered).toBeLessThanOrEqual(8 * 1024);
+      expect(output).toContain("[REDACTED]");
+      expect(output).toEndWith(" end");
+      expect(output.length).toBeLessThan(128);
+    }
+  });
+
+  test("preserves ordinary uninterrupted large output", () => {
+    const scrubber = new StreamingTextScrubber();
+    const source = "x".repeat(30_000);
+    const encoder = new TextEncoder();
+    let output = "";
+    for (let offset = 0; offset < source.length; offset += 113) {
+      output += scrubber.push(encoder.encode(source.slice(offset, offset + 113)));
+    }
+    output += scrubber.finish();
+    expect(output).toBe(source);
+  });
+
+  test("preserves long non-sensitive URLs and redacts late sensitive parameters", () => {
+    const encode = new TextEncoder();
+    const stream = (source: string): string => {
+      const scrubber = new StreamingTextScrubber();
+      let output = "";
+      for (let offset = 0; offset < source.length; offset += 113) {
+        output += scrubber.push(encode.encode(source.slice(offset, offset + 113)));
+      }
+      return output + scrubber.finish();
+    };
+    const benign = `https://example.test/path/${"segment".repeat(2_000)}?page=1`;
+    expect(stream(benign)).toBe(benign);
+
+    const sensitive = `https://example.test/path/${"segment".repeat(2_000)}?access_token=${"A".repeat(20_000)} end`;
+    const scrubbed = stream(sensitive);
+    expect(scrubbed).toBe(`https://example.test/path/${"segment".repeat(2_000)}?[REDACTED] end`);
+    expect(scrubbed).not.toContain("A".repeat(1_024));
+  });
+
 });
 
 
@@ -188,6 +261,13 @@ describe("shell environment", () => {
       idempotent: false,
       attempt: 1,
     }, { signal: new AbortController().signal });
-    expect(execution).toMatchObject({ outcome: "succeeded", output: { stdout: "absent" } });
+    expect(execution).toMatchObject({
+      outcome: "succeeded",
+      output: {
+        protocol: "agencity.bounded-output.v1",
+        completeness: "inline",
+        value: { stdout: "absent" },
+      },
+    });
   });
 });

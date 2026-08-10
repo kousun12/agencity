@@ -1,6 +1,6 @@
 import { environmentWithoutSecrets } from "../security/index.ts";
-import type { CellLogStream } from "../domain/index.ts";
-import type { EncodedObservation } from "./inspect.ts";
+import { assertBoundedOutputV1, type CellLogStream } from "../domain/index.ts";
+import { MAX_CELL_OBSERVATION_JSON_BYTES, type EncodedObservation } from "./inspect.ts";
 
 export interface ConsoleExecution {
   readonly observation: EncodedObservation;
@@ -156,7 +156,17 @@ function validObservation(value: unknown): value is EncodedObservation {
       typeof (preview as Record<string, unknown>).preview !== "string") return false;
   if (observation.kind === "json") {
     return typeof observation.json === "string" &&
-      Number.isSafeInteger(observation.byteLength) && Number(observation.byteLength) >= 0;
+      Number.isSafeInteger(observation.byteLength) && Number(observation.byteLength) >= 0 &&
+      Number(observation.byteLength) <= MAX_CELL_OBSERVATION_JSON_BYTES;
+  }
+  if (observation.kind === "staged") {
+    try {
+      assertBoundedOutputV1(observation.result);
+      return observation.result.completeness === "spilled" &&
+        Number.isSafeInteger(observation.byteLength) && Number(observation.byteLength) >= 0;
+    } catch {
+      return false;
+    }
   }
   return observation.kind === "unsupported" && typeof observation.reason === "string";
 }

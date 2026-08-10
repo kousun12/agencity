@@ -3,7 +3,9 @@ import {
   AGENT_TOOL_CONTRACT_ID,
   ModelEffectAdmissionService,
   ModelExecutor,
+  PROVIDER_INPUT_ESTIMATOR_ID,
   assertNoReservedPublicModelDispatchFields,
+  buildProviderInputCandidate,
   canonicalJsonByteLength,
   canonicalJsonDigest,
   createModelEffectOutputV2,
@@ -341,6 +343,18 @@ describe("model effect response-contract admission", () => {
       kind: "tool-submission",
       submission: { name: "finish", input: { outcome: { message: "Done." } } },
     });
+    const resolvedCapacity = executor.contextCapacity(dispatch.configuration);
+    const providerInput = buildProviderInputCandidate({
+      context: {},
+      modelDispatch: dispatch,
+      capacity: {
+        ...resolvedCapacity,
+        outputReserveTokens: 0,
+        estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+        triggerRatio: 0.8,
+        targetRatio: 0.6,
+      },
+    });
     const progress: Array<{ kind: string; value: unknown }> = [];
     const executed = await executor.execute({
       effectId: "formal-progress",
@@ -348,7 +362,7 @@ describe("model effect response-contract admission", () => {
       branchId: "branch",
       executor: "model",
       operation: "complete",
-      input: { context: {}, modelDispatch: dispatch } as any,
+      input: { providerInput, modelDispatch: dispatch } as any,
       idempotencyKey: "formal-progress",
       idempotent: false,
       attempt: 1,

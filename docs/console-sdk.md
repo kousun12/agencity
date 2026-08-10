@@ -38,7 +38,7 @@ Every cell receives:
 | `session` | `{ id, branchId }` for the executing branch. |
 | `state` | Durable typed working values: `restored`, `get`, `set`, and `list`. |
 | `cells` | Retained cell history: `list` and `get`. |
-| `artifacts` | Scoped content-addressed text artifacts: `put` and `get`. |
+| `artifacts` | Scoped content-addressed artifacts: `put` and bounded `readRange`. |
 | `tools` | Outbox-backed generic effects plus shell and file helpers. |
 | `sql` | Parameterized read-only tagged template. |
 | `inspect` | Bounded, getter-free, redacting preview function. |
@@ -139,17 +139,12 @@ Cell observations must be safe JSON. `undefined` becomes `null`. Finite primitiv
 }
 ```
 
-JSON observations at or below 128 KiB commit directly. Larger serializable observations place the complete JSON in the content-addressed store and commit:
+JSON observations at or below 128 KiB cross worker IPC and commit directly. Larger serializable observations are incrementally validated, scrubbed, staged in owner-only storage, placed in the content-addressed store, and committed as `agencity.bounded-output.v1`:
 
 ```json
 {
-  "kind": "oversized-json",
-  "artifact": {
-    "artifactId": "sha256:...",
-    "digest": "...",
-    "mediaType": "application/json",
-    "size": 200000
-  },
+  "protocol": "agencity.bounded-output.v1",
+  "completeness": "spilled",
   "byteLength": 200000,
   "preview": {
     "kind": "inspect",
@@ -164,11 +159,18 @@ JSON observations at or below 128 KiB commit directly. Larger serializable obser
       "bytes": 8192,
       "getters": 0
     }
-  }
+  },
+  "artifact": {
+    "artifactId": "sha256:...",
+    "digest": "...",
+    "mediaType": "application/json",
+    "size": 200000
+  },
+  "guidance": "Use artifacts.readRange(artifactId, start, end) to retrieve exact JSON bytes in bounded ranges and parse them inside a cell."
 }
 ```
 
-Byte-identical content deduplicates by digest.
+Each staging chunk is at most 64 KiB. Registration of the staged artifact and `CellCommitted` is one canonical append batch. A failed or abandoned cell exposes no staged reference; unreachable CAS bytes may remain because general artifact garbage collection is unavailable. Byte-identical content deduplicates by digest.
 
 `console.log` and `process.stdout.write` become stdout cell logs. `console.warn`, `console.error`, and `process.stderr.write` become stderr cell logs. The retained terminal event keeps aligned stream metadata so clients can distinguish the two without changing the public `logs: string[]` result. Older events without this optional metadata project their logs as stdout. Logs are capped at 64 KiB and 1,000 entries. They are not protocol messages and cannot spoof worker RPC.
 
@@ -195,12 +197,18 @@ const reference = await artifacts.put(
   "large body",
   "text/plain",
 );
-const body = await artifacts.get(reference.artifactId);
+const first = await artifacts.readRange(
+  reference.artifactId,
+  0,
+  Math.min(reference.size, 64 * 1024),
+);
+if (first.completeness !== "inline") throw new Error("range unavailable");
+const text = new TextDecoder().decode(first.value.bytes);
 ```
 
-`put(content, mediaType?)` accepts strings, rejects known brokered secret values, and returns an immutable `ArtifactReference`. `get(artifactId)` can resolve only artifacts already registered in the branch or staged by the current cell. Reads verify digest and size through the configured artifact store.
+`put(content, mediaType?)` accepts strings, rejects known brokered secret values, and returns an immutable `ArtifactReference`. `readRange(artifactId, start, end)` can read only artifacts already registered in the branch or staged by the current cell. Ranges are zero-based, half-open `[start, end)`, and limited to 64 KiB. The inline envelope's `value` contains exact `Uint8Array` bytes plus `start`, `end`, immutable `size`, and `nextStart`. Decode or parse `value.bytes` inside the cell. Reads verify the complete object's digest and size before returning the requested bytes.
 
-The default product uses a local CAS. A remote S3-compatible placement adapter also implements the artifact contract, but artifact replication and garbage collection are not automatic.
+Whole-object `resolve` remains an operator/internal artifact-store operation and is not exposed to generated cells. The default product uses a local CAS. A remote S3-compatible placement adapter also implements range reads, but artifact replication and garbage collection are not automatic.
 
 ## `tools`
 
@@ -209,12 +217,25 @@ const shell = await tools.shell("bun test", {
   timeoutMs: 120_000,
   idempotencyKey: "test-v1",
 });
+if (shell.completeness === "inline") {
+  if (shell.value.exitCode !== 0) throw new Error("tests failed");
+} else {
+  return {
+    completeness: shell.completeness,
+    preview: shell.preview,
+    artifact: shell.completeness === "spilled" ? shell.artifact : null,
+  };
+}
 
-const file = await tools.readFile("package.json");
+const file = await tools.readFile("package.json", {
+  startLine: 1,
+  endLine: 200,
+});
+if (file.completeness !== "inline") return file;
 await tools.writeFile(
   "notes/result.txt",
-  `${file.content}\nreviewed\n`,
-  file.sha256,
+  `${file.value.content}\nreviewed\n`,
+  file.value.sha256,
 );
 
 const outcome = await tools.request(
@@ -230,11 +251,18 @@ const outcome = await tools.request(
 
 `tools.request(executor, operation, input, options?)` commits `EffectRequested` before execution and returns `{ outcome, output?, error? }`, where outcome is `succeeded`, `failed`, `cancelled`, or `unknown`.
 
+`tools.shell` and `tools.readFile` return `agencity.bounded-output.v1`. Inspect `completeness` before reading `.value`:
+
+- `inline` has the complete `.value`;
+- `spilled` has a bounded `.preview`, immutable `.artifact`, exact `byteLength`, and recovery guidance;
+- `truncated` has a bounded `.preview`, exact observed `byteLength`, reason, and guidance, but no complete artifact; and
+- `refused` means a declared preflight limit prevented retrieval.
+
 The convenience helpers return structured output:
 
-- `tools.readFile(path)` returns `{ content, sha256, size }`. Read or edit `content`; the result itself is not a string.
+- `tools.readFile(path, { startLine?, endLine?, expectedSha256? })` returns an inline envelope whose value is `{ content, startLine, endLine, totalLines, nextLine, sha256, size }`, or a refused envelope. Pages use one-based inclusive line windows, default to at most 2,000 lines, and are limited to 2 KiB per line and 48 KiB total. Supply the prior page's `sha256` as `expectedSha256` so continuation fails visibly if the mutable file changed.
 - `tools.writeFile(path, content, expectedSha256?)` returns `{ path, sha256, size, unchanged? }`. Pass the digest from a prior read when replacing that exact version.
-- `tools.shell(command, options?)` returns `{ exitCode, stdout, stderr, truncated }`. Supported execution options include `timeoutMs` and `cwd`; the timeout key is not `timeout`.
+- `tools.shell(command, options?)` returns an inline envelope with `{ exitCode, stdout, stderr }` when each stream fits 24 KiB. Larger output keeps a Unicode-safe 12 KiB head and 12 KiB tail per stream and, when local staging is available and total output is at most 32 MiB, returns `spilled` with exact combined scrubbed bytes and stdout/stderr byte layout. Spill limit, failure, or unavailable staging returns explicit `truncated` without an artifact. Supported execution options include `timeoutMs` and `cwd`; the timeout key is not `timeout`.
 
 `tools.shell`, `tools.readFile`, and `tools.writeFile` throw unless the outcome is `succeeded`. Use `tools.request` when an expected failed outcome must be inspected without failing the cell. Shell defaults to non-idempotent. File operations default to idempotent except exact-text replace. The flag is a caller assertion about logical effect semantics, not proof that an external system is safe to retry.
 

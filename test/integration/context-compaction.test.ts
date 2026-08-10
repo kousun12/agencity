@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { makeTempRuntime, openTempStorage, removeTempRuntime, seedSession } from "../helpers.ts";
 import { ContextMaterializer, CompactionService, OutboxRunner, ProjectionService, Supervisor, stableEffectId } from "../../src/runtime/index.ts";
 import { EchoModelProvider, ModelExecutor, ModelProviderContextWindowOverflowError, ScriptedAgentActionProvider, type ModelProvider } from "../../src/executors/index.ts";
-import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, TEXT_MODEL_RESPONSE_CONTRACT, projectEvents, resolveModelDispatch, type AgentEvent, type JsonValue } from "../../src/domain/index.ts";
+import { AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, PROVIDER_INPUT_ESTIMATOR_ID, TEXT_MODEL_RESPONSE_CONTRACT, buildProviderInputCandidate, projectEvents, resolveModelDispatch, type AgentEvent, type JsonValue, type ModelDispatch } from "../../src/domain/index.ts";
 import { AgentClient, ProtocolServer } from "../../src/protocol/index.ts";
 import { createExactSourceManifest, planCompactionSources } from "../../src/runtime/compaction-core.ts";
 
@@ -15,7 +15,7 @@ async function fixture(provider: ModelProvider = new EchoModelProvider()) {
   const root = await seedSession(storage, { model: { provider: provider.name, model: "test", reasoningEffort: "provider-default" } });
   const executor = new ModelExecutor([provider]);
   const outbox = new OutboxRunner(storage, [executor]);
-  return { temp, storage, root, outbox, service: new CompactionService(storage, outbox, executor) };
+  return { temp, storage, root, outbox, executor, service: new CompactionService(storage, outbox, executor) };
 }
 
 async function messages(storage: any, sessionId: string, branchId: string, count = 28) {
@@ -257,12 +257,53 @@ describe("FU-019 durable context compaction", () => {
     expect(await first.service.recoverIncomplete()).toBe(0);
     first.storage.close();
 
+    const mismatch = await fixture(provider);
+    await messages(mismatch.storage, mismatch.root.sessionId, mismatch.root.branchId, 26);
+    const mismatchRequest = await appendPendingModelRequest(
+      mismatch.storage,
+      mismatch.root.sessionId,
+      mismatch.root.branchId,
+      "input-compaction",
+    );
+    await appendPendingModelRequest(
+      mismatch.storage,
+      mismatch.root.sessionId,
+      mismatch.root.branchId,
+      "origin-compaction",
+    );
+    const mismatchCapacity = candidateCapacity(
+      mismatch.executor,
+      mismatchRequest.payload.modelDispatch,
+    );
+    const mismatchProviderInput = buildProviderInputCandidate({
+      context: { messages: [] },
+      modelDispatch: mismatchRequest.payload.modelDispatch!,
+      capacity: mismatchCapacity,
+    });
+    await expect(mismatch.outbox.request({
+      sessionId: mismatch.root.sessionId,
+      branchId: mismatch.root.branchId,
+      executor: "model",
+      operation: "complete",
+      input: {
+        providerInput: mismatchProviderInput,
+        compactionId: "input-compaction",
+        modelDispatch: mismatchRequest.payload.modelDispatch,
+      } as unknown as JsonValue,
+      origin: { kind: "context-compaction", compactionId: "origin-compaction" },
+      idempotencyKey: "mismatched-compaction-origin",
+      idempotent: false,
+    })).rejects.toThrow("does not agree with its retained request");
+    mismatch.storage.close();
+
     calls = 0;
     const second = await fixture(provider);
     await messages(second.storage, second.root.sessionId, second.root.branchId, 26);
     const secondRequest = await appendPendingModelRequest(second.storage, second.root.sessionId, second.root.branchId, "crash-after-effect");
     const effectKey = "context-compaction-model:crash-after-effect:level:0:chunk:0";
-    const effectId = await second.outbox.request({ sessionId: second.root.sessionId, branchId: second.root.branchId, executor: "model", operation: "complete", input: { context: { messages: [] }, compactionId: "crash-after-effect", modelDispatch: secondRequest.payload.modelDispatch } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
+    const secondCapacity = candidateCapacity(second.executor, secondRequest.payload.modelDispatch);
+    const secondProviderInput = buildProviderInputCandidate({ context: { messages: [] }, modelDispatch: secondRequest.payload.modelDispatch!, capacity: secondCapacity });
+    const effectId = await second.outbox.request({ sessionId: second.root.sessionId, branchId: second.root.branchId, executor: "model", operation: "complete", input: { providerInput: secondProviderInput, compactionId: "crash-after-effect", modelDispatch: secondRequest.payload.modelDispatch } as unknown as JsonValue, origin: { kind: "context-compaction", compactionId: "crash-after-effect" }, idempotencyKey: effectKey, idempotent: false });
     expect(await second.outbox.run(effectId)).toMatchObject({ outcome: "succeeded" });
     expect(calls).toBe(1);
     expect(await second.service.recoverIncomplete()).toBe(1);
@@ -274,7 +315,9 @@ describe("FU-019 durable context compaction", () => {
     await messages(third.storage, third.root.sessionId, third.root.branchId, 26);
     const request = await appendPendingModelRequest(third.storage, third.root.sessionId, third.root.branchId, "crash-unknown");
     const unknownKey = "context-compaction-model:crash-unknown:level:0:chunk:0";
-    const unknownEffectId = await third.outbox.request({ sessionId: third.root.sessionId, branchId: third.root.branchId, executor: "model", operation: "complete", input: { context: { messages: [] }, compactionId: "crash-unknown", modelDispatch: request.payload.modelDispatch } as unknown as JsonValue, idempotencyKey: unknownKey, idempotent: false });
+    const unknownCapacity = candidateCapacity(third.executor, request.payload.modelDispatch);
+    const unknownProviderInput = buildProviderInputCandidate({ context: { messages: [] }, modelDispatch: request.payload.modelDispatch!, capacity: unknownCapacity });
+    const unknownEffectId = await third.outbox.request({ sessionId: third.root.sessionId, branchId: third.root.branchId, executor: "model", operation: "complete", input: { providerInput: unknownProviderInput, compactionId: "crash-unknown", modelDispatch: request.payload.modelDispatch } as unknown as JsonValue, origin: { kind: "context-compaction", compactionId: "crash-unknown" }, idempotencyKey: unknownKey, idempotent: false });
     expect(unknownEffectId).toBe(stableEffectId(third.root.sessionId, unknownKey));
     await third.storage.appendEvents([{ sessionId: third.root.sessionId, branchId: third.root.branchId, type: "EffectAttemptStarted", producer: "executor", idempotencyKey: `effect-attempt:${unknownEffectId}:1`, payload: { effectId: unknownEffectId, attempt: 1 } }]);
     const recovered = await third.outbox.recover();
@@ -319,3 +362,15 @@ describe("FU-019 durable context compaction", () => {
   });
 
 });
+
+function candidateCapacity(executor: ModelExecutor, dispatch: ModelDispatch | undefined) {
+  if (!dispatch) throw new Error("missing model-summary dispatch");
+  const resolved = executor.contextCapacity(dispatch.configuration);
+  return {
+    ...resolved,
+    outputReserveTokens: dispatch.configuration.maxOutputTokens ?? 0,
+    estimatorId: PROVIDER_INPUT_ESTIMATOR_ID,
+    triggerRatio: 0.8,
+    targetRatio: 0.6,
+  };
+}

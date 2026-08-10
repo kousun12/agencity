@@ -103,7 +103,31 @@ class ObjectProtocolServer {
     }
     if (request.method === "GET") {
       const bytes = this.objects.get(pathname);
-      return bytes ? new Response(new Uint8Array(bytes).buffer as ArrayBuffer, { status: 200 }) : new Response("missing", { status: 404 });
+      if (!bytes) return new Response("missing", { status: 404 });
+      const metadata = {
+        "x-amz-meta-sha256": pathname.split("/").at(-1)!,
+      };
+      const range = request.headers.get("range")?.match(/^bytes=(\d+)-(\d+)$/);
+      if (range) {
+        const start = Number(range[1]), end = Number(range[2]) + 1;
+        if (bytes.byteLength === 0) {
+          return new Response(null, {
+            status: 416,
+            headers: { ...metadata, "content-range": "bytes */0" },
+          });
+        }
+        return new Response(bytes.slice(start, end), {
+          status: 206,
+          headers: {
+            "content-range": `bytes ${start}-${end - 1}/${bytes.byteLength}`,
+            ...metadata,
+          },
+        });
+      }
+      return new Response(new Uint8Array(bytes).buffer as ArrayBuffer, {
+        status: 200,
+        headers: { ...metadata, "content-length": String(bytes.byteLength) },
+      });
     }
     if (request.method === "DELETE") { this.objects.delete(pathname); return new Response(null, { status: 204 }); }
     return new Response("unsupported", { status: 405 });
@@ -130,6 +154,10 @@ describe("content-addressed artifact placement conformance", () => {
     expect(objectServer.requests.find((request) => request.method === "PUT")?.checksum).toMatch(/^[A-Za-z0-9+/]{43}=$/);
     expect(new Set(objectServer.requests.map((request) => request.method)).has("GET")).toBe(true);
     expect(new Set(objectServer.requests.map((request) => request.method)).has("DELETE")).toBe(true);
+
+    const large = Uint8Array.from({ length: 70_000 }, (_, index) => index % 251);
+    const largeReference = await remote.put(large);
+    expect(await remote.readRange(largeReference, 65_000, 65_100)).toEqual(large.slice(65_000, 65_100));
   });
 
   test("remote corruption, missing content, and transport loss are dependency failures", async () => {
@@ -143,6 +171,57 @@ describe("content-addressed artifact placement conformance", () => {
     const healthy = await remote.put("transport will disappear");
     await running.server.stop(true); servers.splice(servers.indexOf(running.server), 1);
     await expect(remote.resolve(healthy)).rejects.toMatchObject({ code: "DEPENDENCY_FAILURE" });
+  });
+
+  test("remote empty ranges verify object existence and bytes without whole-object buffering", async () => {
+    const objectServer = new ObjectProtocolServer();
+    const { endpoint } = serve(objectServer.handler);
+    const remote = new S3CompatibleArtifactStore({ endpoint, bucket: "empty-range-bucket" });
+
+    const nonempty = await remote.put(Uint8Array.from({ length: 70_000 }, (_, index) => index % 251));
+    expect(await remote.readRange(nonempty, 40_000, 40_000)).toEqual(new Uint8Array());
+    const zero = await remote.put(new Uint8Array());
+    expect(await remote.readRange(zero, 0, 0)).toEqual(new Uint8Array());
+
+    objectServer.corrupt(nonempty);
+    await expect(remote.readRange(nonempty, 10, 10)).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILURE",
+    });
+    objectServer.corrupt(zero);
+    await expect(remote.readRange(zero, 0, 0)).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILURE",
+    });
+
+    const missing = await remote.put("delete-before-empty-range");
+    await remote.delete(missing);
+    await expect(remote.readRange(missing, 0, 0)).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILURE",
+    });
+  });
+
+  test("bounds remote object error diagnostics before constructing dependency failures", async () => {
+    const oversized = `diagnostic-${"x".repeat(2 * 1024 * 1024)}`;
+    const { endpoint } = serve(() => new Response(oversized, { status: 500 }));
+    const remote = new S3CompatibleArtifactStore({ endpoint, bucket: "error-bound-bucket" });
+    const digest = "0".repeat(64);
+    const reference: ArtifactReference = {
+      artifactId: `sha256:${digest}`,
+      digest,
+      mediaType: "application/octet-stream",
+      size: 0,
+    };
+    let failure: any;
+    try {
+      await remote.readRange(reference, 0, 0);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: "DEPENDENCY_FAILURE",
+      details: { status: 500 },
+    });
+    expect(failure.details.response).toHaveLength(512);
+    expect(JSON.stringify(failure.details).length).toBeLessThan(1_024);
   });
 });
 
@@ -197,5 +276,55 @@ describe("executor placement conformance", () => {
     const unknown = await remote.execute({ effectId: "lost", sessionId: "s", branchId: "main", executor: remote.name, operation: "run", input: { command: "true" }, idempotencyKey: "lost", idempotent: false, attempt: 1 }, { signal: new AbortController().signal });
     expect(unknown).toMatchObject({ outcome: "unknown" });
     expect(unknown.error).toContain("transport failure");
+  });
+
+  test("does not register remote artifact references without a transfer capability", async () => {
+    const digest = "a".repeat(64);
+    const reference: ArtifactReference = {
+      artifactId: `sha256:${digest}`,
+      digest,
+      mediaType: "text/plain",
+      size: 30_000,
+    };
+    const executor = {
+      name: "remote-spill",
+      async execute() {
+        return {
+          outcome: "succeeded" as const,
+          output: {
+            protocol: "agencity.bounded-output.v1",
+            completeness: "spilled",
+            byteLength: reference.size,
+            preview: { head: "bounded", tail: "bounded" },
+            artifact: reference,
+            guidance: "fixture",
+          },
+          artifacts: [reference],
+        };
+      },
+    };
+    const running = serve(createExecutorRpcHandler(executor as any, {
+      isolatedFromHost: true,
+      operations: ["run"],
+      filesystem: "sandbox",
+      network: "none",
+    }));
+    const remote = await RemoteSandboxExecutor.connect({ endpoint: running.endpoint });
+    const execution = await remote.execute({
+      effectId: "remote-spill",
+      sessionId: "session",
+      branchId: "main",
+      executor: remote.name,
+      operation: "run",
+      input: {},
+      idempotencyKey: "remote-spill",
+      idempotent: true,
+      attempt: 1,
+    }, { signal: new AbortController().signal });
+    expect(execution).toMatchObject({
+      outcome: "unknown",
+      error: expect.stringContaining("artifact"),
+    });
+    expect(execution.artifacts).toBeUndefined();
   });
 });

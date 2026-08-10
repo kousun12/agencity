@@ -54,6 +54,7 @@ export async function objectiveEvidence(
     executor: "shell",
     operation: "run",
     input: { command: "true" },
+    origin: { kind: "runtime", requestId: `adversarial-objective:${key}` },
     idempotencyKey: `adversarial-objective:${key}`,
     idempotent: true,
   });
