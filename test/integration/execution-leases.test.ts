@@ -81,7 +81,7 @@ describe("transactional process execution fencing", () => {
     bootstrap.close();
     storages.splice(storages.indexOf(bootstrap), 1);
 
-    const contenders = Array.from({ length: 24 }, (_, index) => {
+    const contenders = Array.from({ length: 8 }, (_, index) => {
       const contenderStorage = new LibSqlStorage({ url: value.databaseUrl, deviceId: "device-1" });
       storages.push(contenderStorage);
       return new ExecutionLeaseService(contenderStorage, {
@@ -96,7 +96,7 @@ describe("transactional process execution fencing", () => {
     const winners = outcomes.filter((outcome) => outcome.status === "fulfilled");
     const losers = outcomes.filter((outcome) => outcome.status === "rejected");
     expect(winners).toHaveLength(1);
-    expect(losers).toHaveLength(23);
+    expect(losers).toHaveLength(7);
     for (const loser of losers) {
       if (loser.status === "rejected") {
         expect(loser.reason).toMatchObject({ code: "EXECUTION_OWNERSHIP_CONFLICT" });

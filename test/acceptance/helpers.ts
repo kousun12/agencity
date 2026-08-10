@@ -21,17 +21,18 @@ export class AcceptanceWorld {
     readonly directory: string,
     readonly home: string,
     readonly repository: string,
+    private readonly baseEnvironment: Readonly<Record<string, string>>,
   ) {
     this.binary = join(home, ".bun", "bin", "agencity");
   }
 
-  static async create(label: string): Promise<AcceptanceWorld> {
+  static async create(label: string, baseEnvironment: Readonly<Record<string, string>> = {}): Promise<AcceptanceWorld> {
     const directory = await mkdtemp(join(tmpdir(), `agencity-acceptance-${label}-`));
     const home = join(directory, "home");
     const repository = join(directory, "repository");
     await mkdir(home, { recursive: true });
     await mkdir(join(repository, ".git"), { recursive: true });
-    const world = new AcceptanceWorld(directory, home, repository);
+    const world = new AcceptanceWorld(directory, home, repository, baseEnvironment);
     const linked = await world.spawn(["bun", "link"], checkout, {});
     if (linked.code !== 0) {
       await rm(directory, { recursive: true, force: true });
@@ -110,12 +111,13 @@ export class AcceptanceWorld {
 
   private environment(extra: Readonly<Record<string, string>>): Record<string, string> {
     const clean = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
-    for (const key of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "AGENCITY_PROFILE", "AGENCITY_ACCEPTANCE", "AGENCITY_ACCEPTANCE_FAILPOINT", "AGENCITY_ACCEPTANCE_MAX_RUN_STEPS"]) delete clean[key];
+    for (const key of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "AGENCITY_PROFILE", "AGENCITY_ACCEPTANCE", "AGENCITY_ACCEPTANCE_FAILPOINT", "AGENCITY_ACCEPTANCE_MAX_RUN_STEPS", "AGENCITY_ACCEPTANCE_LEASE_MS"]) delete clean[key];
     return {
       ...clean,
       HOME: this.home,
       BUN_INSTALL: join(this.home, ".bun"),
       PATH: `${join(this.home, ".bun", "bin")}:${clean.PATH ?? ""}`,
+      ...this.baseEnvironment,
       ...extra,
     };
   }

@@ -1,6 +1,6 @@
 # Installation
 
-Agencity requires Bun 1.2 or newer. `agencity --version` reports the application version and active Bun runtime. Ordinary commands refuse to open state when the Bun version is unsupported.
+Agencity requires Bun 1.3.13 or newer. `agencity --version` reports the application version and active Bun runtime. Ordinary commands refuse to open state when the Bun version is unsupported.
 
 The package is private. It is not published to a package registry and has no supported standalone binary channel. The supported installation paths are a source checkout and a Bun link to that checkout.
 

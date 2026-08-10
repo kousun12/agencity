@@ -454,7 +454,7 @@ describe("product CLI", () => {
     const [code, stdout, stderr] = await Promise.all([version.exited, new Response(version.stdout).text(), new Response(version.stderr).text()]);
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
     expect(stdout).toContain("agencity 0.1.0");
-    expect(stdout).toContain("supported: >=1.2.0");
+    expect(stdout).toContain("supported: >=1.3.13");
     const development = Bun.spawn([process.execPath, "run", "dev", "--", "--version"], { cwd: root, stdout: "pipe", stderr: "pipe" });
     const [developmentCode, developmentStdout, developmentStderr] = await Promise.all([development.exited, new Response(development.stdout).text(), new Response(development.stderr).text()]);
     expect(developmentCode, developmentStderr).toBe(0);

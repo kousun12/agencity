@@ -5,15 +5,23 @@ import { StrictActionFixture, action } from "./strict-action-fixture.ts";
 
 const worlds: AcceptanceWorld[] = [];
 const fixtures: StrictActionFixture[] = [];
+const FAST_RECOVERY_ENVIRONMENT = {
+  AGENCITY_ACCEPTANCE: "1",
+  AGENCITY_ACCEPTANCE_LEASE_MS: "250",
+} as const;
 
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) fixture.close();
   for (const world of worlds.splice(0)) await world.dispose();
 });
 
-async function setup(label: string, extra: Readonly<Record<string, string>> = {}): Promise<{ world: AcceptanceWorld; fixture: StrictActionFixture; environment: Record<string, string> }> {
+async function setup(
+  label: string,
+  extra: Readonly<Record<string, string>> = {},
+  baseEnvironment: Readonly<Record<string, string>> = {},
+): Promise<{ world: AcceptanceWorld; fixture: StrictActionFixture; environment: Record<string, string> }> {
   const fixture = new StrictActionFixture(); fixtures.push(fixture);
-  const world = await AcceptanceWorld.create(label); worlds.push(world);
+  const world = await AcceptanceWorld.create(label, baseEnvironment); worlds.push(world);
   const environment = { ...fixture.environment(), ...extra };
   const configured = await world.command(["config", "set-model", "openai:openai/fixture-v1", "--json"], environment);
   expect(configured.code).toBe(0);
@@ -163,8 +171,11 @@ describe("FU-009 external outcome and interruption matrix", () => {
   }, 120_000);
 
   test.each(["agent-action-committed:1", "cell-committed"])("the %s boundary survives service loss without repeating its model step or cell", async failpoint => {
-    const acceptance = { AGENCITY_ACCEPTANCE: "1", AGENCITY_ACCEPTANCE_FAILPOINT: failpoint };
-    const { world, fixture, environment } = await setup(`action-recovery-${failpoint.replaceAll(":", "-")}`, acceptance);
+    const { world, fixture, environment } = await setup(
+      `action-recovery-${failpoint.replaceAll(":", "-")}`,
+      { AGENCITY_ACCEPTANCE_FAILPOINT: failpoint },
+      FAST_RECOVERY_ENVIRONMENT,
+    );
     const task = "fixture committed action recovery";
     fixture.script(task, [
       action("typescript", `await tools.writeFile("action-recovery.txt", "committed-once"); return { repaired: true };`),
@@ -185,8 +196,11 @@ describe("FU-009 external outcome and interruption matrix", () => {
   }, 120_000);
 
   test("post-commit model ownership loss becomes unknown and is never sent or retried", async () => {
-    const acceptance = { AGENCITY_ACCEPTANCE: "1", AGENCITY_ACCEPTANCE_FAILPOINT: "outbox-started:model" };
-    const { world, fixture, environment } = await setup("model-unknown", acceptance);
+    const { world, fixture, environment } = await setup(
+      "model-unknown",
+      { AGENCITY_ACCEPTANCE_FAILPOINT: "outbox-started:model" },
+      FAST_RECOVERY_ENVIRONMENT,
+    );
     const task = "fixture model ownership loss";
     fixture.script(task, [action("final", "must never be requested")]);
     const crashed = await world.command(["run", "--json", task], environment);
@@ -202,8 +216,11 @@ describe("FU-009 external outcome and interruption matrix", () => {
   }, 120_000);
 
   test("post-commit non-idempotent cell effect ownership loss is unknown, not retried, and accepts evidence-only reconciliation", async () => {
-    const acceptance = { AGENCITY_ACCEPTANCE: "1", AGENCITY_ACCEPTANCE_FAILPOINT: "outbox-started:shell" };
-    const { world, fixture, environment } = await setup("cell-unknown", acceptance);
+    const { world, fixture, environment } = await setup(
+      "cell-unknown",
+      { AGENCITY_ACCEPTANCE_FAILPOINT: "outbox-started:shell" },
+      FAST_RECOVERY_ENVIRONMENT,
+    );
     const task = "fixture cell ownership loss";
     fixture.script(task, [action("typescript", `
       await tools.shell("printf should-not-run > acceptance-effect.txt");

@@ -52,6 +52,7 @@ import {
 import { TerminalUI } from "./tui/index.ts";
 import { OpenTerminalUI } from "./tui/opentui.ts";
 
+const REQUIRED_BUN_VERSION = "1.3.13";
 const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact"]);
 
 let activeParsed: ParsedCliArgs | null = null;
@@ -531,15 +532,28 @@ async function manageSkillsClient(client:AgentClient,sessionId:string,branchId:s
   throw new ValidationError("skills action must be list, show, install, propose, test, enable, disable, or remove");
 }
 
+function acceptanceLeaseMs(): number | undefined {
+  if (process.env.AGENCITY_ACCEPTANCE !== "1") return undefined;
+  const raw = process.env.AGENCITY_ACCEPTANCE_LEASE_MS;
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 100 || value > 5_000) {
+    throw new ValidationError("AGENCITY_ACCEPTANCE_LEASE_MS must be an integer from 100 to 5000");
+  }
+  return value;
+}
+
 function managedConfiguration(parsed: ParsedCliArgs, workspace: ResolvedWorkspace): ManagedServiceConfiguration {
   const option = (name: string): string | undefined => parsed.values.get(name);
   const syncUrl = option("sync-url") ?? process.env.TURSO_DATABASE_URL;
+  const leaseMs = acceptanceLeaseMs();
   return {
     workspace,
     databasePath: resolve(option("db") ?? `${workspace.stateDirectory}/agent.db`),
     artifactDirectory: resolve(option("artifacts") ?? `${workspace.stateDirectory}/artifacts`),
     profileDatabasePath: option("profile") ? resolve(option("profile")!) : defaultProfilePath(),
     restartConsoleAfterCell: parsed.flags.has("restart-console-after-cell"),
+    ...(leaseMs === undefined ? {} : { leaseMs }),
     sync: {
       ...(syncUrl ? { syncUrl } : {}),
       ...(option("replica") ? { replicaPath: resolve(option("replica")!) } : {}),
@@ -613,7 +627,7 @@ async function doctorProviderStatuses(profileDatabasePath: string): Promise<Arra
 async function doctorUninitialized(workspace: { root: string; workspaceId: string | null; name: string; stateDirectory: string }, json: boolean): Promise<void> {
   const report = {
     application: await applicationVersion(),
-    bun: { version: Bun.version, required: ">=1.2.0", compatible: runtimeCompatible() },
+    bun: { version: Bun.version, required: `>=${REQUIRED_BUN_VERSION}`, compatible: runtimeCompatible() },
     mode: "trusted-local (not a hostile-code sandbox)",
     observer: "read-only (no workspace initialization, recovery, wake ticks, migrations, or canonical writes)",
     workspace,
@@ -629,7 +643,7 @@ async function doctorObserver(configuration: ManagedServiceConfiguration, json: 
   const providers = await doctorProviderStatuses(configuration.profileDatabasePath);
   const report = {
     application: await applicationVersion(),
-    bun: { version: Bun.version, required: ">=1.2.0", compatible: runtimeCompatible() },
+    bun: { version: Bun.version, required: `>=${REQUIRED_BUN_VERSION}`, compatible: runtimeCompatible() },
     mode: "trusted-local (not a hostile-code sandbox)",
     observer: "read-only (no recovery, wake ticks, migrations, or canonical writes)",
     workspace: { id: configuration.workspace.workspaceId, name: configuration.workspace.name, root: configuration.workspace.root, stateDirectory: configuration.workspace.stateDirectory },
@@ -1179,7 +1193,7 @@ async function doctor(supervisor: Supervisor, workspace: ResolvedWorkspace, json
   const sync = await supervisor.sync.status();
   const report = {
     application: await applicationVersion(),
-    bun: { version: Bun.version, required: ">=1.2.0", compatible: runtimeCompatible() },
+    bun: { version: Bun.version, required: `>=${REQUIRED_BUN_VERSION}`, compatible: runtimeCompatible() },
     mode: "trusted-local (not a hostile-code sandbox)",
     workspace: { id: workspace.workspaceId, name: workspace.name, root: workspace.root, stateDirectory: workspace.stateDirectory },
     providers: providerStatuses(supervisor),
@@ -1453,11 +1467,19 @@ class ProductPrompter {
 }
 
 function required<T>(value: T | undefined, name: string): T { if (value === undefined) throw new ValidationError(`--${name} is required`); return value; }
-function runtimeCompatible(): boolean { const [major = 0, minor = 0] = Bun.version.split(".").map(Number); return major > 1 || major === 1 && minor >= 2; }
-function assertRuntimeCompatibility(): void { if (!runtimeCompatible()) throw new ValidationError(`Bun ${Bun.version} is unsupported; Agencity requires Bun >=1.2.0`); }
+function runtimeCompatible(): boolean {
+  const current = Bun.version.split(".").map(Number);
+  const required = REQUIRED_BUN_VERSION.split(".").map(Number);
+  for (let index = 0; index < required.length; index++) {
+    const difference = (current[index] ?? 0) - (required[index] ?? 0);
+    if (difference !== 0) return difference > 0;
+  }
+  return true;
+}
+function assertRuntimeCompatibility(): void { if (!runtimeCompatible()) throw new ValidationError(`Bun ${Bun.version} is unsupported; Agencity requires Bun >=${REQUIRED_BUN_VERSION}`); }
 async function applicationVersion(): Promise<string> { const pkg = await Bun.file(new URL("../package.json", import.meta.url)).json() as { version: string }; return pkg.version; }
 async function printVersion(): Promise<void> { console.log(`agencity ${await applicationVersion()}
-Bun ${Bun.version} (supported: >=1.2.0)`); }
+Bun ${Bun.version} (supported: >=${REQUIRED_BUN_VERSION})`); }
 
 function printHelp(): void {
   process.stdout.write(`${renderCliHelp({

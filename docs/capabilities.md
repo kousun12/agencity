@@ -109,7 +109,7 @@ Deletion is fail-closed. `planned`, `blocked`, or `partial` receipts are not pro
 
 | Capability | Status | Current behavior |
 |---|---|---|
-| Source checkout | Supported | Bun 1.2 or newer with `bun install --frozen-lockfile`; `bun run dev` enters the product. |
+| Source checkout | Supported | Bun 1.3.13 or newer with `bun install --frozen-lockfile`; `bun run dev` enters the product. |
 | Local `bun link` executable | Supported | `bun link` exposes `agencity` from the checkout and is covered by isolated linked-executable acceptance tests. |
 | Package registry release | Unavailable | The package is private and not published. |
 | Standalone binary/download channel | Unavailable | No supported standalone artifact is published or tested. |

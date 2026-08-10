@@ -192,7 +192,7 @@ The initial terminal product is complete only when all of these are reproducible
 
 ## Runtime and development requirements
 
-- Bun 1.2 or newer, as declared by the package engine.
+- Bun 1.3.13 or newer, as declared by the package engine. The default verification suite uses Bun's isolated file-level test workers.
 - TypeScript is executed directly by Bun. There is currently no emitted production build step.
 - The runtime is trusted-local unless the entire process is placed in an external sandbox.
 

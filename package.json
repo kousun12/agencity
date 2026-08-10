@@ -22,9 +22,9 @@
     "./placement": "./src/placement/index.ts"
   },
   "scripts": {
-    "test": "bun test --timeout 30000",
-    "test:unit": "bun test test/unit",
-    "test:integration": "bun test test/integration",
+    "test": "bun run test:core && bun run test:acceptance",
+    "test:unit": "bun test --parallel=4 test/unit",
+    "test:integration": "bun test --parallel=4 test/integration",
     "test:e2e": "bun test test/e2e",
     "typecheck": "tsc --noEmit",
     "verify": "bun run typecheck && bun run check:architecture && bun run test:core && bun run test:acceptance",
@@ -32,8 +32,8 @@
     "check:architecture": "bun run scripts/check-architecture.ts",
     "test:turso-official": "bun test --timeout 90000 test/slice4/official-server-conformance.test.ts",
     "dev": "bun run src/cli.ts",
-    "test:core": "bun test --timeout 30000 test/unit test/integration test/e2e test/slice2 test/slice3 test/slice3-adversarial test/slice4 test/placement",
-    "test:acceptance": "bun test --timeout 120000 test/acceptance",
+    "test:core": "bun test --timeout 30000 --parallel=4 test/unit test/integration test/slice2 test/slice3 test/slice3-adversarial test/slice4 test/placement && bun run test:e2e",
+    "test:acceptance": "bun test --timeout 120000 --parallel=4 test/acceptance",
     "test:acceptance:external": "AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 bun test --timeout 120000 test/acceptance/external-provider.test.ts",
     "test:acceptance:matrix": "bun run scripts/release-acceptance-matrix.ts"
   },
@@ -53,6 +53,6 @@
     "@types/bun": "latest"
   },
   "engines": {
-    "bun": ">=1.2.0"
+    "bun": ">=1.3.13"
   }
 }
