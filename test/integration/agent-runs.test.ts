@@ -392,6 +392,7 @@ describe("autonomous durable agent runs", () => {
   test("executes typed TypeScript actions and delivers every cell observation once to the dependent context", async () => {
     const value = await fixture([
       action({ type: "typescript", code: `
+        // Purpose: create and verify the requested answer file.
         const write = await tools.writeFile("answer.txt", "durable-agent-run");
         const gate = await tools.shell("test -f answer.txt && cat answer.txt");
         if (gate.completeness !== "inline") throw new Error(gate.guidance);
@@ -417,6 +418,8 @@ describe("autonomous durable agent runs", () => {
       expect(firstContext).toContain("Return the smallest useful observation");
       expect(firstContext).toContain("Treat every model step as a decision boundary");
       expect(firstContext).toContain("do not query notebook history to reconstruct the active run");
+      expect(firstContext).toContain("about 20 lines on each side");
+      expect(firstContext).toContain("do not reread the whole file");
       expect(firstContext).not.toContain("Use cells.list/get for retained notebook history");
       const secondContext = value.provider.contexts[1] as any;
       expect(secondContext.run.instruction).toContain("If the evidence is sufficient, call finish now");
@@ -426,9 +429,13 @@ describe("autonomous durable agent runs", () => {
         ordinal: 1,
         action: {
           type: "bun_console",
-          source: {
-            text: expect.stringContaining("const write = await tools.writeFile"),
+          declaredPurpose: {
+            text: "create and verify the requested answer file.",
             truncated: false,
+          },
+          source: {
+            originalByteLength: expect.any(Number),
+            sha256: expect.any(String),
           },
         },
         outcome: {

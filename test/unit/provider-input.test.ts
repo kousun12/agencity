@@ -246,7 +246,7 @@ describe("versioned provider input", () => {
         protocol: "agencity.agent-action",
         version: 1,
         type: "typescript",
-        code: `// step ${index + 1}\n${"x".repeat(4_000)}`,
+        code: `// Purpose: complete step ${index + 1}\n${"x".repeat(4_000)}`,
       },
       eventId: `event-${index + 1}`,
     }));
@@ -259,6 +259,22 @@ describe("versioned provider input", () => {
           payload: {
             cellId: "agent-run-cell-action-12",
             result: { content: "r".repeat(8_000) },
+            effectManifest: [
+              {
+                effectId: "read-1",
+                executor: "file",
+                operation: "read",
+                terminalStatus: "succeeded",
+                attemptCount: 1,
+              },
+              {
+                effectId: "read-2",
+                executor: "file",
+                operation: "read",
+                terminalStatus: "succeeded",
+                attemptCount: 2,
+              },
+            ],
           },
         }],
       },
@@ -278,20 +294,88 @@ describe("versioned provider input", () => {
     expect(context.run.recentTrajectory.map((item: any) => item.ordinal))
       .toEqual([5, 6, 7, 8, 9, 10, 11, 12]);
     expect(context.run.recentTrajectory.every((item: any) =>
-      item.action.source.truncated === true &&
+      item.action.source.text === undefined &&
       item.action.source.originalByteLength > 2_048 &&
-      item.action.source.text.length < 4_100)).toBe(true);
+      typeof item.action.source.sha256 === "string" &&
+      item.action.declaredPurpose.text.startsWith("complete step "))).toBe(true);
     expect(context.run.recentTrajectory.at(-1).outcome).toMatchObject({
       status: "committed",
       eventId: "cell-terminal-12",
       result: {
-        completeness: "truncated",
         originalByteLength: expect.any(Number),
         sha256: expect.any(String),
       },
+      effects: [{
+        executor: "file",
+        operation: "read",
+        terminalStatus: "succeeded",
+        count: 2,
+        maxAttemptCount: 2,
+      }],
     });
+    expect(JSON.stringify(context.run.recentTrajectory)).not.toContain("rrrrrrrr");
     expect(context.run.instruction).toContain("If the evidence is sufficient, call finish now");
     expect(context.run.instruction).not.toContain("Continue from these");
+  });
+
+  test("retains detailed source only for the latest failed action and gives focused recovery guidance", () => {
+    const modelDispatch = dispatch();
+    const source = `// Purpose: repair the reported syntax error\n${"x".repeat(4_000)}`;
+    const context = agentProviderContext(
+      { messages: [{ role: "user", content: "Repair the file." }] },
+      {
+        id: "run",
+        task: "Repair the file.",
+        status: "running",
+        steps: [{
+          id: "step-1",
+          ordinal: 1,
+          contextId: "context-1",
+          callId: "call-1",
+          effectId: "effect-1",
+          actionId: "action-1",
+          observationEventIds: [],
+          modelAttempts: [],
+          action: {
+            protocol: "agencity.agent-action",
+            version: 1,
+            type: "typescript",
+            code: source,
+          },
+          eventId: "event-1",
+        }],
+        goalChecks: {},
+      } as any,
+      2,
+      [{
+        eventId: "cell-failed-1",
+        type: "CellFailed",
+        payload: {
+          cellId: "agent-run-cell-action-1",
+          error: "SyntaxError: unexpected token at index.html:42:7",
+        },
+      }],
+      modelDispatch,
+      "system prompt",
+    ) as any;
+
+    expect(context.run.recentTrajectory[0]).toMatchObject({
+      action: {
+        type: "bun_console",
+        declaredPurpose: { text: "repair the reported syntax error" },
+        source: {
+          text: expect.stringContaining("// Purpose: repair the reported syntax error"),
+          truncated: true,
+        },
+      },
+      outcome: {
+        status: "failed",
+        eventId: "cell-failed-1",
+        details: "run.observations",
+      },
+    });
+    expect(context.run.instruction).toContain("about 20 lines on each side");
+    expect(context.run.instruction).toContain("Do not reread the whole file");
   });
 
   test("reduces the deterministic five-step serialized-message benchmark by at least 30 percent", () => {
