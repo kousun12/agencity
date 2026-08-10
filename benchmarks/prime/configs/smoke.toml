@@ -1,0 +1,40 @@
+model = "openai/gpt-5.6-luna"
+num_tasks = 1
+num_rollouts = 1
+max_concurrent = 1
+push = false
+rich = false
+
+[sampling]
+temperature = 0
+max_tokens = 2048
+
+[env.taskset]
+id = "agencity-verifiers"
+
+[env.agent]
+max_turns = 4
+max_total_tokens = 12000
+
+[env.agent.timeout]
+setup = 300
+rollout = 300
+finalize = 60
+scoring = 60
+
+[env.agent.retries]
+max_retries = 0
+
+[env.agent.harness]
+id = "agencity-verifiers"
+source_repo = "https://github.com/kousun12/agencity.git"
+source_ref = "dbe1606fdf2ed390fa0815098c1014438fc740bf"
+
+[env.agent.runtime]
+type = "docker"
+image = "oven/bun:1.3.14"
+allow = []
+block = ["*"]
+cpu = 2
+memory = 4
+disk = 4

@@ -8,3 +8,7 @@ coverage/
 .DS_Store
 .claude
 .idea/
+benchmarks/prime/.venv/
+benchmarks/prime/outputs/
+benchmarks/prime/**/__pycache__/
+benchmarks/prime/**/*.pyc
