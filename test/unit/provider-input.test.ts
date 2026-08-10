@@ -231,6 +231,69 @@ describe("versioned provider input", () => {
       .toThrow("missing or unknown fields");
   });
 
+  test("retains only a bounded recent action trajectory for the next decision", () => {
+    const modelDispatch = dispatch();
+    const steps = Array.from({ length: 12 }, (_, index) => ({
+      id: `step-${index + 1}`,
+      ordinal: index + 1,
+      contextId: `context-${index + 1}`,
+      callId: `call-${index + 1}`,
+      effectId: `effect-${index + 1}`,
+      actionId: `action-${index + 1}`,
+      observationEventIds: [],
+      modelAttempts: [],
+      action: {
+        protocol: "agencity.agent-action",
+        version: 1,
+        type: "typescript",
+        code: `// step ${index + 1}\n${"x".repeat(4_000)}`,
+      },
+      eventId: `event-${index + 1}`,
+    }));
+    const context = agentProviderContext(
+      {
+        messages: [{ role: "user", content: "Complete the task." }],
+        recentActivity: [{
+          eventId: "cell-terminal-12",
+          type: "CellCommitted",
+          payload: {
+            cellId: "agent-run-cell-action-12",
+            result: { content: "r".repeat(8_000) },
+          },
+        }],
+      },
+      {
+        id: "run",
+        task: "Complete the task.",
+        status: "running",
+        steps,
+        goalChecks: {},
+      } as any,
+      13,
+      [],
+      modelDispatch,
+      "system prompt",
+    ) as any;
+
+    expect(context.run.recentTrajectory.map((item: any) => item.ordinal))
+      .toEqual([5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(context.run.recentTrajectory.every((item: any) =>
+      item.action.source.truncated === true &&
+      item.action.source.originalByteLength > 2_048 &&
+      item.action.source.text.length < 4_100)).toBe(true);
+    expect(context.run.recentTrajectory.at(-1).outcome).toMatchObject({
+      status: "committed",
+      eventId: "cell-terminal-12",
+      result: {
+        completeness: "truncated",
+        originalByteLength: expect.any(Number),
+        sha256: expect.any(String),
+      },
+    });
+    expect(context.run.instruction).toContain("If the evidence is sufficient, call finish now");
+    expect(context.run.instruction).not.toContain("Continue from these");
+  });
+
   test("reduces the deterministic five-step serialized-message benchmark by at least 30 percent", () => {
     const modelDispatch = dispatch();
     const oldBytes: number[] = [];

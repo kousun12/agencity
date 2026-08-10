@@ -87,8 +87,86 @@ export function withProviderSystemPrompt(context: unknown, systemPrompt: string)
           : [message];
       })
     : [];
+  const repositoryInstructions = durable.repositoryInstructions &&
+    typeof durable.repositoryInstructions === "object" &&
+    !Array.isArray(durable.repositoryInstructions)
+    ? durable.repositoryInstructions as Record<string, import("../domain/index.ts").JsonValue>
+    : null;
+  const repositoryMessages: { role: "user"; content: string }[] = [];
+  if (repositoryInstructions?.root) {
+    repositoryMessages.push({
+      role: "user",
+      content: `WORKSPACE ROOT INSTRUCTIONS\n${JSON.stringify({
+        protocol: repositoryInstructions.protocol,
+        precedence: repositoryInstructions.precedence,
+        rule: repositoryInstructions.rule,
+        root: repositoryInstructions.root,
+      })}`,
+    });
+  }
+  if (Array.isArray(repositoryInstructions?.discovered) &&
+      (repositoryInstructions.discovered.length > 0 ||
+        repositoryInstructions.omittedDiscoveredCount !== undefined ||
+        repositoryInstructions.pendingInstructionCount !== undefined ||
+        repositoryInstructions.omittedReadTargetCount !== undefined ||
+        repositoryInstructions.unscannedAncestorDirectoryCount !== undefined ||
+        repositoryInstructions.unidentifiedInstructionOmissionOccurrences !== undefined ||
+        repositoryInstructions.unidentifiedReadTargetOmissionOccurrences !== undefined ||
+        repositoryInstructions.unidentifiedAncestorScanOmissionOccurrences !== undefined)) {
+    repositoryMessages.push({
+      role: "user",
+      content: `DISCOVERED DIRECTORY INSTRUCTIONS\n${JSON.stringify({
+        protocol: repositoryInstructions.protocol,
+        precedence: repositoryInstructions.precedence,
+        rule: repositoryInstructions.rule,
+        discovered: repositoryInstructions.discovered,
+        ...(repositoryInstructions.omittedDiscoveredCount === undefined
+          ? {}
+          : { omittedDiscoveredCount: repositoryInstructions.omittedDiscoveredCount }),
+        ...(repositoryInstructions.pendingInstructionCount === undefined
+          ? {}
+          : {
+              pendingInstructionPaths: repositoryInstructions.pendingInstructionPaths,
+              pendingInstructionCount: repositoryInstructions.pendingInstructionCount,
+            }),
+        ...(repositoryInstructions.omittedReadTargetCount === undefined
+          ? {}
+          : {
+              omittedReadTargetPaths: repositoryInstructions.omittedReadTargetPaths,
+              omittedReadTargetCount: repositoryInstructions.omittedReadTargetCount,
+            }),
+        ...(repositoryInstructions.unscannedAncestorDirectoryCount === undefined
+          ? {}
+          : {
+              unscannedAncestorDirectoryPaths:
+                repositoryInstructions.unscannedAncestorDirectoryPaths,
+              unscannedAncestorDirectoryCount:
+                repositoryInstructions.unscannedAncestorDirectoryCount,
+            }),
+        ...(repositoryInstructions.unidentifiedInstructionOmissionOccurrences === undefined
+          ? {}
+          : {
+              unidentifiedInstructionOmissionOccurrences:
+                repositoryInstructions.unidentifiedInstructionOmissionOccurrences,
+            }),
+        ...(repositoryInstructions.unidentifiedReadTargetOmissionOccurrences === undefined
+          ? {}
+          : {
+              unidentifiedReadTargetOmissionOccurrences:
+                repositoryInstructions.unidentifiedReadTargetOmissionOccurrences,
+            }),
+        ...(repositoryInstructions.unidentifiedAncestorScanOmissionOccurrences === undefined
+          ? {}
+          : {
+              unidentifiedAncestorScanOmissionOccurrences:
+                repositoryInstructions.unidentifiedAncestorScanOmissionOccurrences,
+            }),
+      })}`,
+    });
+  }
+  const { repositoryInstructions: _repositoryInstructions, ...providerDurable } = durable;
   return JSON.parse(JSON.stringify({
-    ...durable,
-    messages: [{ role: "system", content: systemPrompt }, ...messages],
+    ...providerDurable,
+    messages: [{ role: "system", content: systemPrompt }, ...repositoryMessages, ...messages],
   })) as import("../domain/index.ts").JsonValue;
 }

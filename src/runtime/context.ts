@@ -14,6 +14,7 @@ import { rowToHarness } from "./harness.ts";
 import type { SkillManagementService, SkillManagementView } from "./skill-management.ts";
 import { effectiveCompaction } from "./context-compaction.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
+import type { RepositoryInstructionService } from "./repository-instructions.ts";
 
 export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. Persist every value needed after a cell boundary. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
 export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 1, text: BASE_POLICY });
@@ -31,6 +32,8 @@ export interface ContextMaterializeOptions {
   readonly promptProvenance?: InvocationPromptProvenance;
   /** Exact profile selected by the invocation pin; never re-resolved to current. */
   readonly agentProfileVersionId?: string;
+  /** Sealed internal reviewers exclude repository-authored behavioral guidance. */
+  readonly includeRepositoryInstructions?: boolean;
   /**
    * Pins dispatch and capacity at the same durable boundary as the exact
    * provider-facing messages so recovery never consults a later catalog.
@@ -43,7 +46,15 @@ export interface ContextMaterializeOptions {
 
 export class ContextMaterializer {
   #skillCatalog: SkillManagementService | null = null;
-  constructor(readonly storage: AgentStorage, readonly memory?: MemoryService, readonly harness?: HarnessService, readonly maxRecentRecords = 30, readonly userScopeKey = "default-user", readonly profile?: ProfileDatabase) {}
+  constructor(
+    readonly storage: AgentStorage,
+    readonly memory?: MemoryService,
+    readonly harness?: HarnessService,
+    readonly maxRecentRecords = 30,
+    readonly userScopeKey = "default-user",
+    readonly profile?: ProfileDatabase,
+    readonly repositoryInstructionService?: RepositoryInstructionService,
+  ) {}
   attachSkillCatalog(catalog: SkillManagementService): void { this.#skillCatalog = catalog; }
 
   async materialize(sessionId: string, branchId: string, options: ContextMaterializeOptions = {}): Promise<{ contextId: string; context: JsonValue; event: AgentEvent<"ContextMaterialized"> }> {
@@ -159,6 +170,10 @@ export class ContextMaterializer {
     // Compatibility rows are retained in profile history and management views,
     // but never enter ordinary executable context until reinstalled and tested.
     const profileSkills = profileSkillSelections.map(publicManagedSkill);
+    const repositoryInstructions = this.repositoryInstructionService &&
+      options.includeRepositoryInstructions !== false
+      ? await this.repositoryInstructionService.context(events)
+      : undefined;
     const baseContext: JsonValue = JSON.parse(JSON.stringify({
       basePolicy: BASE_POLICY,
       basePolicyRecord: { id: IMMUTABLE_BASE_POLICY.id, version: IMMUTABLE_BASE_POLICY.version, digest: hash(BASE_POLICY), mutable: false },
@@ -183,6 +198,7 @@ export class ContextMaterializer {
         sourceSpecVersionId: agentProfile.sourceSpecVersionId,
       },
       userProfile: { preferences: profilePreferences, globalSkills: profileSkills },
+      ...(repositoryInstructions === undefined ? {} : { repositoryInstructions }),
       session: { id:sessionId,branchId,status:state.status,model:state.model,parentSessionId:state.parentSessionId,parentBranchId:state.parentBranchId,rootSessionId:state.rootSessionId,depth:state.depth,taskId:state.taskId },
       budget: state.budget,
       goal: Object.values(state.goals).find((goal) => !["completed","failed","cancelled"].includes(goal.status)) ?? null,

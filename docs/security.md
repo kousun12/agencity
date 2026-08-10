@@ -61,6 +61,12 @@ Owner-only artifact staging uses process-specific directories and mode `0700`/`0
 
 Typed reads are bounded to one-based pages of at most 2,000 lines, 2 KiB per line, and 48 KiB. Artifact reads exposed to generated cells are zero-based half-open ranges of at most 64 KiB. These limits reduce accidental data amplification; they are not confidentiality boundaries because generated code retains ambient filesystem authority.
 
+### Repository instruction loading
+
+The root `AGENTS.md` and directory files discovered by successful typed reads are sent to the configured model as behavioral guidance. Automatic loading accepts regular UTF-8 files inside the resolved workspace, rejects symlink content, records exact source digests and sizes, scrubs known brokered secret values, and replaces oversized or unavailable content with explicit metadata and bounded recovery guidance. Per-file digest scans stop at 256 KiB, post-redaction content is rechecked against its byte limit, and ancestor/cell omissions remain explicit. This is best-effort leakage reduction, not a confidentiality boundary; repository authors must not put secrets in instruction files.
+
+Repository instructions cannot widen SDK methods, filesystem/network authority, credentials, models, budgets, completion gates, publication rights, or refinement-review authority. Repository fields and dedicated provider messages are removed from trajectory snapshots before sealed refinement, and they are not imported into governance review as workspace-charter or user-constraint policy. Direct Bun or shell reads remain ambient trusted-local access and do not participate in instruction discovery.
+
 ### Replica writer trust and cross-device effects
 
 The envelope digest detects corruption; it is not a signature or writer authorization mechanism. A device that can write the shared envelope database is inside the same trusted single-user authority boundary. In particular, a canonical `EffectRequested` authored on one trusted device for a session owned by another is a command to that execution owner: after ingestion, only the owner may materialize and run the outbox row, while every non-owner retains history but must not execute it. Do not grant an untrusted party write access to the envelope database; use a separately authenticated authorization/tenancy layer before treating replica writers as mutually untrusted.

@@ -3,6 +3,8 @@ import {
   NotFoundError,
   ProviderInputProductLimitError,
   PROVIDER_INPUT_ESTIMATOR_ID,
+  REFINEMENT_GOVERNANCE_CONTRACT_ID,
+  REFINEMENT_REVIEW_CONTRACT_ID,
   ValidationError,
   TEXT_MODEL_RESPONSE_CONTRACT,
   agentProfilePin,
@@ -326,6 +328,12 @@ export class ModelLoop {
     const turnId = newId();
     const modelDispatch = new ModelEffectAdmissionService(this.modelExecutor)
       .requestRetained(responseAdmission, state.model).modelDispatch;
+    if (modelDispatch.responseContract.kind !== "required-tool-set") {
+      throw new ValidationError("Structured recursive model dispatch requires a retained required-tool-set contract");
+    }
+    const includeRepositoryInstructions =
+      modelDispatch.responseContract.contractId !== REFINEMENT_REVIEW_CONTRACT_ID &&
+      modelDispatch.responseContract.contractId !== REFINEMENT_GOVERNANCE_CONTRACT_ID;
     const profile = await this.profiles.getVersion(sessionId, invocation.profilePin.profileVersionId);
     const pin = invocation.profilePin;
     const prompt = composeAgentSystemPrompt({
@@ -359,6 +367,7 @@ export class ModelLoop {
             idempotencyKey: `structured-turn-context:${turnId}:${completedCompactions}`,
             promptProvenance: prompt.provenance,
             agentProfileVersionId: pin.profileVersionId,
+            includeRepositoryInstructions,
             transform: (context) => withProviderSystemPrompt(context, prompt.content),
           });
           return {
@@ -409,6 +418,7 @@ export class ModelLoop {
       const retained = await this.contexts.materialize(sessionId, branchId, {
         promptProvenance: prompt.provenance,
         agentProfileVersionId: pin.profileVersionId,
+        includeRepositoryInstructions,
         transform: (context) => withProviderSystemPrompt(context, prompt.content),
       });
       materialized = {
@@ -535,6 +545,7 @@ export class ModelLoop {
         idempotencyKey: `structured-turn-overflow-context:${turnId}:${attempt}`,
         promptProvenance: prompt.provenance,
         agentProfileVersionId: pin.profileVersionId,
+        includeRepositoryInstructions,
         transform: (context) => withProviderSystemPrompt(context, prompt.content),
       });
       const nextProviderInput = buildProviderInputCandidate({

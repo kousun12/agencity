@@ -15,6 +15,12 @@ agencity "inspect this repository and explain the test failures"
 
 Agencity discovers the nearest repository root, creates or resumes durable work, and opens the terminal interface. Normal use does not require session IDs, branch IDs, or database paths.
 
+If the repository root contains a regular `AGENTS.md`, Agencity includes its bounded content and exact path/digest metadata in model input. Successful `tools.readFile` calls also discover `AGENTS.md` files between the root and the target file's directory. Instructions apply from root to nearest directory, so the nearest file wins a conflict.
+
+Nested discoveries are retained with the committing cell and remain available after restart or branch replay. The same path and digest is recorded once per branch lineage; changed, removed, and restored files are delivered again. Automatic loading is bounded to 64 KiB for the root, 16 KiB per nested file, a 256 KiB digest scan per file, 64 ancestor files examined per read, four changed nested files delivered per read, 16 discovery-bearing reads per cell, 40 KiB of active nested content, and 64 active nested records. Work beyond a bound becomes explicit pending/omission metadata; stale pending content is not kept inline. Larger, invalid UTF-8, non-regular, or symlinked files remain visible as references or unavailable records with guidance to inspect them explicitly. Direct Bun or shell filesystem access does not trigger nested discovery; use `tools.readFile` before editing a new directory.
+
+Repository instructions guide model behavior only. They cannot grant file, network, credential, budget, model, publication, reviewer, or other runtime authority, and they are never imported as governance-review policy. Do not put secrets in `AGENTS.md`; its loaded content is sent to the configured model provider.
+
 Use a non-interactive run when a script needs a terminal result:
 
 ```sh
@@ -79,6 +85,8 @@ Every autonomous response must contain exactly one valid call from the fixed set
 If information is missing, `finish` returns a blocked response containing the question. Your later message starts an ordinary new run on the same branch; there is no separate input-response lifecycle.
 
 Agencity records a requested external effect before executing it. A dependent model step starts only after the result is committed. A final answer may also be checked by a completion gate:
+
+Each dependent step receives a bounded `recentTrajectory` containing the recent committed actions and their outcomes, plus the newly delivered exact-once observations. This preserves enough continuity for the model to understand what it already tried without replaying the complete notebook. The step prompt asks the model to decide whether the request is complete before executing anything else. Retained cell-history APIs remain available for deliberate historical inspection, but ordinary active-run continuation does not require the model to reconstruct its own work from them.
 
 ```sh
 agencity run --completion-gate "bun test" \

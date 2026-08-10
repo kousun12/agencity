@@ -268,6 +268,14 @@ The convenience helpers return structured output:
 
 The file executor constrains typed file operations to its configured root and checks symlink escapes. The shell executor constrains only its initial working directory. Generated TypeScript and shell commands retain ambient OS authority.
 
+### Repository instructions
+
+The workspace-root `AGENTS.md` is loaded independently of a cell. A successful typed file read discovers regular `AGENTS.md` files in the target's ancestor directories. The runtime retains up to four changed files per read in root-to-nearest order and records their path, directory, precedence, exact source digest, size, completeness, and bounded content with `CellCommitted`. The active context keeps the latest discovered version per path; unchanged path/digest pairs are not recorded again after restart or branch replay. Changed or removed ancestors outside the four-file delivery window become pending references until a later read delivers them.
+
+Root content is capped at 64 KiB. Nested files are capped at 16 KiB each, each automatic digest scan stops at 256 KiB, and one read scans at most 64 ancestor files. A cell retains at most 16 discovery groups; further groups commit counted, bounded omission metadata instead of disappearing. Active nested inline content is capped at 40 KiB across at most 64 records. Content beyond a limit becomes a reference or unavailable record with explicit `tools.readFile` guidance. Symlinks, non-regular files, invalid UTF-8, and files that change during loading are not executed or silently accepted. Direct Bun and shell reads do not trigger nested discovery.
+
+These files are model-facing behavioral guidance, not runtime policy. They cannot widen permissions, budgets, provider access, completion rules, or refinement-review authority.
+
 ## `sql`
 
 ```ts

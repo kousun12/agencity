@@ -415,8 +415,27 @@ describe("autonomous durable agent runs", () => {
       expect(firstContext).toContain("artifacts.readRange");
       expect(firstContext).toContain("Keep large read, search, and tool results in local variables");
       expect(firstContext).toContain("Return the smallest useful observation");
-      expect(JSON.stringify(value.provider.contexts[1]))
-        .not.toContain("const write = await tools.writeFile");
+      expect(firstContext).toContain("Treat every model step as a decision boundary");
+      expect(firstContext).toContain("do not query notebook history to reconstruct the active run");
+      expect(firstContext).not.toContain("Use cells.list/get for retained notebook history");
+      const secondContext = value.provider.contexts[1] as any;
+      expect(secondContext.run.instruction).toContain("If the evidence is sufficient, call finish now");
+      expect(secondContext.run.instruction).not.toContain("Continue from these");
+      expect(secondContext.run.recentTrajectory).toHaveLength(1);
+      expect(secondContext.run.recentTrajectory[0]).toMatchObject({
+        ordinal: 1,
+        action: {
+          type: "bun_console",
+          source: {
+            text: expect.stringContaining("const write = await tools.writeFile"),
+            truncated: false,
+          },
+        },
+        outcome: {
+          status: "committed",
+          details: "run.observations",
+        },
+      });
 
       const observations = value.provider.contexts.flatMap(providerObservations);
       const cells = observations.filter(item => item.type === "CellCommitted");

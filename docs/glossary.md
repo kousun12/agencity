@@ -12,7 +12,7 @@ A terminal-first autonomous agent runtime in which generated TypeScript programs
 
 ### Repository guide (`AGENTS.md`)
 
-The canonical source for Agencity's product direction, design constitution, supported behavior, invariants, security boundary, and implementation rules. It governs development of Agencity itself. A target repository's own `AGENTS.md` is project guidance, not automatically a governance charter for Agencity.
+The canonical source for Agencity's product direction, design constitution, supported behavior, invariants, security boundary, and implementation rules. It governs development of Agencity itself. During a run, a target repository's bounded root and discovered directory `AGENTS.md` files become attributable model-facing project guidance. They are not a governance charter, authority source, or permission mechanism for Agencity.
 
 ### Product or design constitution
 

@@ -118,11 +118,17 @@ export function deriveAgentProviderObservations(
     if (ownedSuccessfulOutcomeIds.has(event.id)) return [];
     if (CELL_TERMINAL_TYPES.has(event.type)) {
       const cellId = (event.payload as { cellId: string }).cellId;
+      const {
+        repositoryInstructions: _repositoryInstructions,
+        repositoryInstructionOmission: _repositoryInstructionOmission,
+        ...providerPayload
+      } =
+        event.payload as EventPayloads["CellCommitted"] & Record<string, JsonValue>;
       return [{
         eventId: event.id,
         type: event.type,
         payload: cloneJson({
-          ...(event.payload as unknown as Record<string, JsonValue>),
+          ...providerPayload,
           effectManifest: (manifestByCellId.get(cellId) ?? []) as unknown as JsonValue,
         }),
       }];

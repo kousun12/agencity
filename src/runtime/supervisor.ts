@@ -15,6 +15,8 @@ import { StreamingJsonStager } from "../console/json-staging.ts";
 import {
   CapabilityUnavailableError,
   BOUNDED_OUTPUT_PROTOCOL,
+  REPOSITORY_INSTRUCTION_LIMITS,
+  REPOSITORY_INSTRUCTIONS_PROTOCOL,
   SEALED_ROOT_AGENT_PROFILE,
   assertNoReservedModelDispatchInputFields,
   assertJsonValue,
@@ -33,6 +35,8 @@ import {
   type JsonValue,
   type ModelConfiguration,
   type ModelConfigurationInput,
+  type RepositoryInstructionDiscovery,
+  type RepositoryInstructionOmission,
   type WorkingValue,
 } from "../domain/index.ts";
 import {
@@ -89,6 +93,7 @@ import { SkillManagementService } from "./skill-management.ts";
 import { CompactionService, type CompactContextInput, type ContextCompactionView, type ContextInspection } from "./context-compaction.ts";
 import { ModelCatalog, type ModelCatalogOptions } from "./model-catalog.ts";
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
+import { RepositoryInstructionService } from "./repository-instructions.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -315,6 +320,7 @@ export class Supervisor {
   readonly modelExecutor: ModelExecutor;
   readonly modelEffectAdmission: ModelEffectAdmissionService;
   readonly modelCatalog: ModelCatalog;
+  readonly repositoryInstructions: RepositoryInstructionService;
   readonly restartConsoleAfterCell: boolean;
   readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
   readonly #cells = new BranchQueue();
@@ -337,6 +343,7 @@ export class Supervisor {
     skillPermissionAllowlist: readonly string[],
     modelExecutor: ModelExecutor,
     modelCatalog: ModelCatalog,
+    workspaceRoot: string,
     executionLeases: ManagedExecutionLeaseCoordinator | null,
   ) {
     this.storage = storage;
@@ -367,8 +374,17 @@ export class Supervisor {
     this.modelExecutor = modelExecutor;
     this.modelEffectAdmission = new ModelEffectAdmissionService(modelExecutor);
     this.modelCatalog = modelCatalog;
+    this.repositoryInstructions = new RepositoryInstructionService(workspaceRoot);
     this.executionLeases = executionLeases;
-    this.contexts = new ContextMaterializer(storage, this.memory, this.harness, 30, userScopeKey, profile);
+    this.contexts = new ContextMaterializer(
+      storage,
+      this.memory,
+      this.harness,
+      30,
+      userScopeKey,
+      profile,
+      this.repositoryInstructions,
+    );
     this.compactions = new CompactionService(storage, outbox, modelExecutor);
     this.modelLoop = new ModelLoop(storage, this.contexts, outbox, this.compactions, modelExecutor, this.agentProfiles);
     this.documents = new DocumentService(storage);
@@ -547,6 +563,7 @@ export class Supervisor {
       options.skillPermissionAllowlist ?? [],
       modelExecutor,
       modelCatalog,
+      workspaceRoot,
       executionLeases,
     );
     if (options.recover !== false) await supervisor.recoverExecution({ drainPending: executionLeases === null });
@@ -894,6 +911,16 @@ export class Supervisor {
 
     const stagedValues = new Map<string, WorkingValue>();
     const stagedArtifacts = new Map<string, ArtifactReference>();
+    const stagedRepositoryInstructions: RepositoryInstructionDiscovery[] = [];
+    const omittedRepositoryInstructionPaths = new Set<string>();
+    const omittedRepositoryInstructionTargets = new Set<string>();
+    let omittedRepositoryInstructionCount = 0;
+    let omittedRepositoryInstructionReadCount = 0;
+    let unidentifiedRepositoryInstructionOmissionOccurrences = 0;
+    let unidentifiedRepositoryInstructionReadTargetOmissionOccurrences = 0;
+    let unidentifiedRepositoryInstructionAncestorScanOmissionOccurrences = 0;
+    const deliveredRepositoryInstructions = this.repositoryInstructions.deliveredInstructions(history);
+    let repositoryInstructionDiscoveryQueue: Promise<void> = Promise.resolve();
     let stagedObservationExpected: number | null = null;
     let stagedObservationBytes = 0;
     let stagedObservationPath: string | null = null;
@@ -1281,7 +1308,65 @@ export class Supervisor {
           idempotencyKey,
           idempotent,
         });
-        return this.outbox.run(effectId);
+        const execution = await this.outbox.run(effectId);
+        if (execution.outcome === "succeeded" && executor === "file" && operation === "read" &&
+            input !== null && typeof input === "object" && !Array.isArray(input) &&
+            typeof input.path === "string") {
+          const readPath = input.path;
+          const discover = repositoryInstructionDiscoveryQueue.then(async () => {
+            const discovery = await this.repositoryInstructions.discoverForRead(
+              readPath,
+              deliveredRepositoryInstructions,
+            );
+            if (!discovery) return;
+            if (stagedRepositoryInstructions.length <
+                REPOSITORY_INSTRUCTION_LIMITS.discoveriesPerCell) {
+              stagedRepositoryInstructions.push(discovery);
+              for (const instruction of discovery.instructions) {
+                deliveredRepositoryInstructions.set(instruction.path, instruction);
+              }
+              return;
+            }
+            omittedRepositoryInstructionReadCount++;
+            omittedRepositoryInstructionCount += discovery.instructions.length +
+              (discovery.omittedInstructionCount ?? 0);
+            let omittedTargetRecorded = omittedRepositoryInstructionTargets.has(
+              discovery.targetPath,
+            );
+            if (!omittedTargetRecorded &&
+                omittedRepositoryInstructionTargets.size <
+                  REPOSITORY_INSTRUCTION_LIMITS.omittedPaths) {
+              omittedRepositoryInstructionTargets.add(discovery.targetPath);
+              omittedTargetRecorded = true;
+            }
+            if (!omittedTargetRecorded) {
+              unidentifiedRepositoryInstructionReadTargetOmissionOccurrences++;
+            }
+            let unidentifiedInstructionPath = false;
+            for (const path of [
+              ...discovery.instructions.map((instruction) => instruction.path),
+              ...(discovery.omittedInstructionPaths ?? []),
+            ]) {
+              if (omittedRepositoryInstructionPaths.has(path)) continue;
+              if (omittedRepositoryInstructionPaths.size <
+                  REPOSITORY_INSTRUCTION_LIMITS.omittedPaths) {
+                omittedRepositoryInstructionPaths.add(path);
+              } else {
+                unidentifiedInstructionPath = true;
+              }
+            }
+            if (unidentifiedInstructionPath) {
+              unidentifiedRepositoryInstructionOmissionOccurrences++;
+            }
+            unidentifiedRepositoryInstructionOmissionOccurrences +=
+              discovery.unidentifiedInstructionOmissionOccurrences ?? 0;
+            unidentifiedRepositoryInstructionAncestorScanOmissionOccurrences +=
+              discovery.unidentifiedAncestorScanOmissionOccurrences ?? 0;
+          });
+          repositoryInstructionDiscoveryQueue = discover.catch(() => undefined);
+          await discover;
+        }
+        return execution;
       }
       throw new ValidationError(`Unknown console RPC method: ${method}`);
     };
@@ -1356,6 +1441,38 @@ export class Supervisor {
           logStreams,
           durationMs: Math.round(performance.now() - started),
           exports: [...stagedValues.keys()],
+          ...(stagedRepositoryInstructions.length
+            ? { repositoryInstructions: stagedRepositoryInstructions }
+            : {}),
+          ...(omittedRepositoryInstructionReadCount
+            ? {
+                repositoryInstructionOmission: {
+                  protocol: REPOSITORY_INSTRUCTIONS_PROTOCOL,
+                  targetPaths: [...omittedRepositoryInstructionTargets],
+                  instructionPaths: [...omittedRepositoryInstructionPaths],
+                  omittedInstructionCount: omittedRepositoryInstructionCount,
+                  omittedReadTargetCount: omittedRepositoryInstructionReadCount,
+                  ...(unidentifiedRepositoryInstructionOmissionOccurrences
+                    ? {
+                        unidentifiedInstructionOmissionOccurrences:
+                          unidentifiedRepositoryInstructionOmissionOccurrences,
+                      }
+                    : {}),
+                  ...(unidentifiedRepositoryInstructionReadTargetOmissionOccurrences
+                    ? {
+                        unidentifiedReadTargetOmissionOccurrences:
+                          unidentifiedRepositoryInstructionReadTargetOmissionOccurrences,
+                      }
+                    : {}),
+                  ...(unidentifiedRepositoryInstructionAncestorScanOmissionOccurrences
+                    ? {
+                        unidentifiedAncestorScanOmissionOccurrences:
+                          unidentifiedRepositoryInstructionAncestorScanOmissionOccurrences,
+                      }
+                    : {}),
+                } satisfies RepositoryInstructionOmission,
+              }
+            : {}),
         },
       });
       await this.storage.appendEvents(events);

@@ -518,10 +518,85 @@ export class RefinerService {
     }));
     return buildRefinementTrajectorySnapshot({
       workspaceId, sessionId, branchId, throughCursor, userScopeKey: this.userScopeKey,
-      events: events.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: event.cursor, type: event.type, payload: event.payload })),
+      events: events.map((event) => ({
+        id: event.id,
+        sessionId: event.sessionId,
+        branchId: event.branchId,
+        cursor: event.cursor,
+        type: event.type,
+        payload: refinementVisibleEventPayload(
+          event.type,
+          event.payload as unknown as JsonValue,
+        ),
+      })),
       trigger, visibleHarnessVersions, memory, evaluationHistory, requestedScope, requestedScopeKey, allowedKinds,
     }, { brokeredCredentialValues: knownSecretValues() });
   }
+}
+
+function refinementVisibleEventPayload(type: string, value: JsonValue): JsonValue {
+  const cleaned = stripRepositoryInstructionFields(value);
+  if (cleaned === null || Array.isArray(cleaned) || typeof cleaned !== "object") return cleaned;
+  const payload = cleaned as Record<string, JsonValue>;
+  if (type === "ContextMaterialized") {
+    return {
+      ...payload,
+      context: withoutRepositoryInstructionMessages(payload.context ?? null),
+    };
+  }
+  if (type === "ModelCallRequested") {
+    return {
+      ...payload,
+      providerInput: withoutRepositoryInstructionMessages(payload.providerInput ?? null),
+    };
+  }
+  if (type === "EffectRequested" && payload.executor === "model") {
+    const input = jsonRecord(payload.input ?? null);
+    return input
+      ? {
+          ...payload,
+          input: {
+            ...input,
+            providerInput: withoutRepositoryInstructionMessages(input.providerInput ?? null),
+          },
+        }
+      : payload;
+  }
+  return payload;
+}
+
+function stripRepositoryInstructionFields(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map(stripRepositoryInstructionFields);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) =>
+        key !== "repositoryInstructions" &&
+        key !== "repositoryInstructionOmission")
+      .map(([key, item]) => [key, stripRepositoryInstructionFields(item)]),
+  ) as JsonValue;
+}
+
+function withoutRepositoryInstructionMessages(value: JsonValue): JsonValue {
+  const record = jsonRecord(value);
+  if (!record || !Array.isArray(record.messages)) return value;
+  return {
+    ...record,
+    messages: record.messages.filter((message) => !repositoryInstructionMessage(message)),
+  };
+}
+
+function repositoryInstructionMessage(value: JsonValue): boolean {
+  if (value === null || Array.isArray(value) || typeof value !== "object") return false;
+  return value.role === "user" && typeof value.content === "string" &&
+    (value.content.startsWith("WORKSPACE ROOT INSTRUCTIONS\n") ||
+      value.content.startsWith("DISCOVERED DIRECTORY INSTRUCTIONS\n"));
+}
+
+function jsonRecord(value: JsonValue): Record<string, JsonValue> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, JsonValue>
+    : null;
 }
 
 function normalizeReviewInput(input: StartRefinementReviewInput): StartRefinementReviewInput {

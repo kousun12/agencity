@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { AgentClient, ConflictError, LibSqlStorage, ProtocolServer, REFINEMENT_GOVERNANCE_CONTRACT_ID, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, deriveModelContractDiagnostics, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, validateRefinementGovernanceRecursiveResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
 import { ModelProviderResponseFailureError, formalMissingToolOutput, formalOutputFromAgentAction, formalOutputFromRefinementGovernanceDecision, formalOutputFromRefinementReviewSubmission } from "../../src/executors/model-response.ts";
 import { internalStructuredModelTurn } from "../../src/runtime/internal.ts";
@@ -29,6 +31,8 @@ class ReviewProvider implements ModelProvider {
   targetVersionId = "";
   governanceCalls = 0;
   lastGovernanceModel: ModelConfiguration | null = null;
+  lastReviewContext: JsonValue | null = null;
+  lastGovernanceContext: JsonValue | null = null;
   constructor(
     readonly name: string,
     readonly decision: "no_change" | "propose" | "replace" | "malformed" | "overscope" | "no_evidence" = "no_change",
@@ -44,6 +48,7 @@ class ReviewProvider implements ModelProvider {
         dispatch.responseContract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID) {
       this.governanceCalls++;
       this.lastGovernanceModel = dispatch.configuration;
+      this.lastGovernanceContext = context;
       const proposalId = JSON.stringify(context).match(
         /proposalId[^A-Za-z0-9]+(governed-refinement-proposal-[a-f0-9]{32}|[0-9A-HJKMNP-TV-Z]{26})/,
       )?.[1];
@@ -81,6 +86,7 @@ class ReviewProvider implements ModelProvider {
     if (dispatch.responseContract.kind === "required-tool-set" &&
         dispatch.responseContract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
       this.calls++;
+      this.lastReviewContext = context;
       const reviewId = JSON.stringify(context).match(/refinement-review-[a-f0-9]{32}/)?.[0];
       if (!reviewId) throw new Error("missing review ID");
       const usage = { inputTokens: 2, outputTokens: 2, costUsd: 0 };
@@ -333,14 +339,35 @@ describe("FU-016 refinement review migration", () => {
 describe("FU-016 durable RefinerService", () => {
   test("runs a no_change review as an attributable recursive child with exact frozen sources", async () => {
     const provider = new ReviewProvider("review-no-change");
-    const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
+    const { temp, supervisor, sessionId, branchId, evidence } = await fixture(provider);
     try {
+      await mkdir(temp.workspaceRoot, { recursive: true });
+      await Bun.write(join(temp.workspaceRoot, "AGENTS.md"), "DO_NOT_SEND_TO_SEALED_REVIEW");
+      await supervisor.contexts.materialize(sessionId, branchId);
+      await mkdir(join(temp.workspaceRoot, "src"), { recursive: true });
+      await Bun.write(join(temp.workspaceRoot, "src/AGENTS.md"), "DO_NOT_SEND_NESTED_INSTRUCTIONS");
+      await Bun.write(join(temp.workspaceRoot, "src/file.ts"), "export {};\n");
+      await supervisor.executeCell(
+        sessionId,
+        branchId,
+        `return await tools.readFile("src/file.ts");`,
+      );
+      await supervisor.appendMessage(
+        sessionId,
+        branchId,
+        "user",
+        "WORKSPACE ROOT INSTRUCTIONS\nGENUINE_USER_HEADER_CONTENT",
+      );
       const review = await supervisor.refiner.request(sessionId, branchId, { instructions: "Review failures only" });
       expect(review.status).toBe("no_change");
       expect(review.handleId).toBeTruthy();
       expect(review.sourceEventIds).toContain(evidence.id);
       expect(review.sourceSnapshotHash).toMatch(/^sha256:[a-f0-9]{64}$/);
       expect(provider.calls).toBe(1);
+      expect(JSON.stringify(provider.lastReviewContext)).not.toContain("DO_NOT_SEND_TO_SEALED_REVIEW");
+      expect(JSON.stringify(provider.lastReviewContext)).not.toContain("DO_NOT_SEND_NESTED_INSTRUCTIONS");
+      expect(JSON.stringify(provider.lastReviewContext)).toContain("GENUINE_USER_HEADER_CONTENT");
+      expect((provider.lastReviewContext as any).repositoryInstructions).toBeUndefined();
       const events = await supervisor.storage.loadEvents(sessionId, { branchId });
       expect(events.filter((event) => event.type === "RefinementReviewRequested")).toHaveLength(1);
       expect(events.filter((event) => event.type === "RefinementReviewChildLinked")).toHaveLength(1);
@@ -1237,8 +1264,10 @@ describe("FU-016 durable RefinerService", () => {
 
   test("sealed governance approves and activates one profile version for later invocations", async () => {
     const provider = new ReviewProvider("profile-governance-approve");
-    const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
+    const { temp, supervisor, sessionId, branchId, evidence } = await fixture(provider);
     try {
+      await mkdir(temp.workspaceRoot, { recursive: true });
+      await Bun.write(join(temp.workspaceRoot, "AGENTS.md"), "DO_NOT_SEND_TO_GOVERNANCE_REVIEW");
       const before = await supervisor.agentProfiles.active(sessionId);
       const result = await supervisor.refinementGovernance.proposeOwner(sessionId, branchId, {
         target: {
@@ -1259,6 +1288,8 @@ describe("FU-016 durable RefinerService", () => {
       expect(result.status).toBe("applied");
       expect(result.appliedVersionIds).toHaveLength(1);
       expect(provider.governanceCalls).toBe(1);
+      expect(JSON.stringify(provider.lastGovernanceContext)).not.toContain("DO_NOT_SEND_TO_GOVERNANCE_REVIEW");
+      expect((provider.lastGovernanceContext as any).repositoryInstructions).toBeUndefined();
       const after = await supervisor.agentProfiles.active(sessionId);
       expect(after.profileVersionId).toBe(result.appliedVersionIds[0]!);
       expect(after.sourceProposalId).toBe(result.proposalId);

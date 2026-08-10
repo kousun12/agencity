@@ -36,6 +36,12 @@ import {
   type ProviderInputCandidate,
 } from "./provider-input.ts";
 import { assertBoundedOutputs } from "./bounded-output.ts";
+import {
+  REPOSITORY_INSTRUCTION_LIMITS,
+  REPOSITORY_INSTRUCTIONS_PROTOCOL,
+  type RepositoryInstructionDiscovery,
+  type RepositoryInstructionOmission,
+} from "./repository-instructions.ts";
 
 export const EVENT_SCHEMA_VERSION = 5 as const;
 export const eventTypes = [
@@ -149,7 +155,7 @@ export interface EventPayloads {
   MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string; mailbox?: { mailboxMessageId: string; fromSessionId: string; relationship: FamilyRelationship; taskId?: string; artifactIds?: string[]; receiptEventId: string } };
   CellProposed: { cellId: string; code: string; dependencies: string[] };
   CellStarted: { cellId: string; attempt: number };
-  CellCommitted: { cellId: string; result: JsonValue; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; exports: string[] };
+  CellCommitted: { cellId: string; result: JsonValue; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; exports: string[]; repositoryInstructions?: RepositoryInstructionDiscovery[]; repositoryInstructionOmission?: RepositoryInstructionOmission };
   CellFailed: { cellId: string; error: string; logs: string[]; logStreams?: CellLogStream[]; durationMs: number };
   CellAbandoned: { cellId: string; reason: string };
   WorkingValueSet: { name: string; version: number; value: WorkingValue };
@@ -471,6 +477,90 @@ const compactionDerivationSchema = z.object({
   leafEventIds: z.array(id).min(1), leafDigest: digest, generation: positiveInteger, summary: z.string().min(1).max(1048576),
   effectIds: z.array(id).optional(), usage: usageSchema.optional(), capacity: capacityProvenanceSchema.optional(), rematerializedFromContextId: id.optional(),
 }).strict();
+const repositoryPathSchema = z.string().min(1).max(4096).refine((value) =>
+  !value.startsWith("/") && !value.includes("\\") &&
+  !value.split("/").some((part) => part === ".." || part === ""), "repository path must be normalized and workspace-relative");
+const repositoryInstructionRecordSchema = z.object({
+  protocol: z.literal(REPOSITORY_INSTRUCTIONS_PROTOCOL),
+  path: repositoryPathSchema,
+  directory: repositoryPathSchema,
+  scope: z.enum(["workspace", "directory"]),
+  precedence: z.number().int().nonnegative(),
+  sha256: digest.nullable(),
+  size: nonnegative.nullable(),
+  completeness: z.enum(["inline", "reference", "unavailable"]),
+  content: z.string().optional(),
+  redacted: z.boolean().optional(),
+  reason: z.string().min(1).max(1024).optional(),
+  guidance: z.string().min(1).max(4096).optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.scope === "workspace") !== (value.precedence === 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "workspace instructions must have precedence zero and directory instructions must be deeper" });
+  }
+  if (value.completeness === "inline") {
+    if (value.sha256 === null || value.size === null || value.content === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "inline repository instructions require digest, size, and content" });
+    } else if (new TextEncoder().encode(value.content).byteLength > REPOSITORY_INSTRUCTION_LIMITS.nestedFileBytes) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "inline repository instructions exceed the byte limit" });
+    }
+  } else if (value.content !== undefined || value.redacted !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "non-inline repository instructions must omit content and redaction metadata" });
+  }
+  if (value.completeness === "reference" && (value.sha256 === null || value.size === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "referenced repository instructions require digest and size" });
+  }
+});
+const repositoryInstructionDiscoverySchema = z.object({
+  protocol: z.literal(REPOSITORY_INSTRUCTIONS_PROTOCOL),
+  targetPath: repositoryPathSchema,
+  precedence: z.literal("root-to-nearest-directory"),
+  instructions: z.array(repositoryInstructionRecordSchema).max(REPOSITORY_INSTRUCTION_LIMITS.nestedFilesPerRead),
+  omittedInstructionPaths: z.array(repositoryPathSchema).max(REPOSITORY_INSTRUCTION_LIMITS.omittedPaths).optional(),
+  omittedInstructionCount: z.number().int().positive().optional(),
+  unscannedAncestorDirectoryPaths: z.array(repositoryPathSchema).max(REPOSITORY_INSTRUCTION_LIMITS.omittedPaths).optional(),
+  unscannedAncestorDirectoryCount: z.number().int().positive().optional(),
+  unidentifiedInstructionOmissionOccurrences: z.number().int().positive().optional(),
+  unidentifiedAncestorScanOmissionOccurrences: z.number().int().positive().optional(),
+}).strict().superRefine((value, context) => {
+  const paths = value.instructions.map((item) => item.path);
+  if (new Set(paths).size !== paths.length ||
+      value.instructions.some((item) => item.scope !== "directory") ||
+      value.instructions.some((item, index) => index > 0 && item.precedence < value.instructions[index - 1]!.precedence)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "nested repository instructions must be unique directory records in root-to-nearest order" });
+  }
+  const omittedCount = value.omittedInstructionCount ?? 0;
+  const omittedPaths = value.omittedInstructionPaths ?? [];
+  const unscannedCount = value.unscannedAncestorDirectoryCount ?? 0;
+  const unscannedPaths = value.unscannedAncestorDirectoryPaths ?? [];
+  if (value.instructions.length === 0 && omittedCount === 0 && unscannedCount === 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "repository instruction discovery must retain content or an explicit omission" });
+  }
+  if (omittedCount < omittedPaths.length ||
+      (omittedCount === 0) !== (value.omittedInstructionPaths === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "repository instruction omission count must cover every retained omitted path" });
+  }
+  if (unscannedCount < unscannedPaths.length ||
+      (unscannedCount === 0) !== (value.unscannedAncestorDirectoryPaths === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "unscanned ancestor count must cover every retained directory path" });
+  }
+});
+const repositoryInstructionOmissionSchema = z.object({
+  protocol: z.literal(REPOSITORY_INSTRUCTIONS_PROTOCOL),
+  targetPaths: z.array(repositoryPathSchema).max(REPOSITORY_INSTRUCTION_LIMITS.omittedPaths),
+  instructionPaths: z.array(repositoryPathSchema).max(REPOSITORY_INSTRUCTION_LIMITS.omittedPaths),
+  omittedInstructionCount: z.number().int().nonnegative(),
+  omittedReadTargetCount: z.number().int().positive(),
+  unidentifiedInstructionOmissionOccurrences: z.number().int().positive().optional(),
+  unidentifiedReadTargetOmissionOccurrences: z.number().int().positive().optional(),
+  unidentifiedAncestorScanOmissionOccurrences: z.number().int().positive().optional(),
+}).strict().superRefine((value, context) => {
+  if (value.omittedInstructionCount < value.instructionPaths.length ||
+      value.omittedReadTargetCount < value.targetPaths.length ||
+      new Set(value.targetPaths).size !== value.targetPaths.length ||
+      new Set(value.instructionPaths).size !== value.instructionPaths.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "cell repository instruction omissions must be bounded, unique, and counted" });
+  }
+});
 const payloadSchemas: Record<EventType, z.ZodType> = {
   SessionCreated: z.object({ workspaceId: id, initialBranchId: id, model: modelSchema, budget: budgetSchema, agentProfile: agentProfileSchema, sessionName: z.string().min(1).optional(), initialBranchName: z.string().min(1).optional(), parentSessionId: id.optional(), parentBranchId: id.optional(), rootSessionId: id.optional(), depth: z.number().int().nonnegative().optional(), taskId: id.optional() }).strict(),
   AgentProfileVersionCreated: z.object({ agentProfile: agentProfileSchema, expectedActiveProfileVersionId: id }).strict(),
@@ -490,6 +580,8 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     logStreams: z.array(z.enum(["stdout", "stderr"])).optional(),
     durationMs: nonnegative,
     exports: z.array(z.string()),
+    repositoryInstructions: z.array(repositoryInstructionDiscoverySchema).max(REPOSITORY_INSTRUCTION_LIMITS.discoveriesPerCell).optional(),
+    repositoryInstructionOmission: repositoryInstructionOmissionSchema.optional(),
   }).superRefine((payload, context) => {
     if (payload.logStreams && payload.logStreams.length !== payload.logs.length) {
       context.addIssue({ code: "custom", message: "Cell log stream metadata must align with logs", path: ["logStreams"] });
