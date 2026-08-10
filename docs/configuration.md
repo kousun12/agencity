@@ -57,7 +57,13 @@ The profile default is intentionally not derived from the workspace database. Th
 
 An agent profile is session-owned workspace state, not a profile-database preference. Ordinary product root creation uses the sealed repository-agent profile. The public TypeScript and HTTP APIs may instead supply a complete `{ role, purpose, instructions }` value when creating a root. Delegated and recursive spawn inputs may supply the same explicit shape and otherwise use the sealed task-specialist profile; specification spawn derives it from the exact specification version.
 
-There is no environment variable, profile-database preference, or TUI control that changes these defaults. Existing sessions retain the exact initial profile committed in workspace history. Public profile revision and automated-governance configuration are not available.
+There is no environment variable or profile-database preference that changes initial-profile templates. Existing sessions retain the exact initial profile committed in workspace history. Route-relative `agencity profile` and `/profile` operations inspect and propose later immutable revisions or restore an exact earlier revision; they do not rewrite the initial version.
+
+### Refinement governance
+
+Governed profile and harness proposals wait for their terminal result by default. Proposal JSON may set `"wait": false` to detach after durable admission and receive a later route notice. Automatic trajectory refinement is off by default and is controlled by `agencity refine auto on|off` or `/refine auto on|off`. It is profile-scoped, local-only, and currently recognizes only repeated typed effect failures, distinct-pin gate failures, and explicit `UserCorrection` events at committed run boundaries.
+
+The reviewer is not configurable by the caller. The supervisor uses the origin route's current model configuration and freezes that dispatch before review. The product constitution and review policy are packaged immutable components. Workspace-charter and user-constraint configuration is unavailable; both fields are retained as `null` rather than inferred from repository files, prompts, or profile preferences. There is no environment variable or CLI option for reviewer identity, governance charter, review policy, reproposal bound, or per-proposal human approval.
 
 ## Provider credentials and models
 

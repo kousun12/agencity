@@ -86,6 +86,19 @@ agencity doctor
 agencity service status
 ```
 
+Each session has one immutable-versioned behavioral profile. Inspect or govern the selected route without copying internal IDs:
+
+```sh
+agencity profile show
+agencity profile history
+agencity profile proposals
+agencity profile propose '{"role":"Repository maintainer","purpose":"Maintain this repository","instructions":"Preserve attributable evidence.","reason":"Clarify standing responsibility","predictedEffect":"More consistent repository work","wait":true}'
+agencity profile repropose latest '{"role":"Repository maintainer","purpose":"Maintain this repository","instructions":"Preserve attributable evidence and report unresolved risks.","reason":"Address the retained rejection","predictedEffect":"More complete risk reporting"}'
+agencity profile rollback 1 '{"reason":"Restore the earlier approved behavior"}'
+```
+
+The TUI exposes the same route-relative flow through `/profile`. Proposals are validated deterministically, reviewed by one separate sealed reviewer using the current route model, revalidated, and applied automatically only when approved. Rejections, failures, unknown outcomes, conflicts, reasons, and revision guidance remain visible; detached proposals deliver one durable terminal notice. Profile and non-skill changes apply atomically, while skills must also compile and pass declared runtime tests before activation. Approval establishes consistency with the pinned governance policy, not proof that outcomes improved.
+
 The default workspace database is `<repository>/.agencity/agent.db`. Large or byte-oriented results are stored separately in `<repository>/.agencity/artifacts/` and referenced by a SHA-256 content fingerprint. The product profile defaults to `~/.agencity/profile.db`.
 
 Closing a client detaches; it does not prove that durable or external work stopped. Use `/stop` in the terminal interface or `agencity stop TARGET` for explicit cancellation.
@@ -111,6 +124,7 @@ Reconciliation appends evidence without rewriting the unknown outcome or trigger
 - Optional Turso synchronization exchanges never-rewritten event envelopes; it does not replace the authoritative local workspace database or replicate artifact bytes.
 - The shipped CLI has no production Turso Cloud administrative-deletion adapter.
 - PostgreSQL coordination, embedding retrieval, browser execution, artifact garbage collection, and hostile-code isolation are unavailable.
+- Workspace-charter and user-constraint governance configuration, caller-selected reviewers, and an organization control plane are unavailable.
 - Export bundles do not have a general import or supported round-trip restore command.
 - Installation is limited to the tested source-checkout and local-link workflows.
 

@@ -81,9 +81,9 @@ The product's remembered root selection determines which root receives an ordina
 
 No new coordinator role, pointer, system prompt, authority, or routing pass is required. Opening another root for inspection or explicitly selecting another root changes the product's remembered route through existing selection behavior.
 
-## Verified current foundation
+## Implemented foundation
 
-The runtime already provides:
+The runtime provides:
 
 - `Session` as a durable actor with model configuration, budget, goals, conversation, branches, tasks, runs, and event history;
 - atomic child admission with parent and child identity, task intent, model, budget, initial prompt, and admission;
@@ -92,16 +92,13 @@ The runtime already provides:
 - append-only canonical history and rebuildable projections;
 - attributable materialized model context;
 - immutable versioned prompt notes, memories, skills, and subagent specifications;
-- governed harness refinement with proposals, validation, versioned decisions, and rollback;
+- governed profile and harness refinement with deterministic validation, separate sealed review, application-time revalidation, automatic application, terminal delivery, and rollback;
 - typed goals, gates, outbox effects, unknown outcomes, cancellation, schedules, wakes, and recovery;
 - product branch discovery, human-readable selection, and remembered root routes.
 
-The runtime does not currently provide:
+The runtime also provides required per-session agent-specific system instructions, exact profile/effective-prompt pins, profile proposals, sealed governance review, automatic application, durable terminal delivery, route-relative CLI/TUI controls, protocol/`AgentClient` operations, and Console SDK self/direct-child operations.
 
-- required per-session agent-specific system instructions;
-- exact profile-version pinning on every autonomous run and recursive-model invocation;
-- profile proposals and automated charter review;
-- automatic terminal notification for profile proposal approval or rejection.
+The remaining delivery evidence is the linked-executable process-loss governance journey and final post-hardening aggregate verification. Live providers, official Turso Sync, and Turso Cloud remain gated and unverified.
 
 Reusable subagent specifications remain templates. They may produce an initial agent profile, but they are not the resulting session's durable identity and do not silently update an existing session.
 
@@ -348,13 +345,13 @@ No API, context record, or projection uses the unqualified name `profile` when a
 
 Session admission atomically records a complete initial profile. A newly runnable session cannot exist without one.
 
-The initial profile may be carried by `SessionCreated` or by an agent-profile event in the same transaction. Domain review should choose the event shape that produces the smallest clear invariant.
+The initial profile is complete inside `SessionCreated`, preserving atomic runnable-session admission.
 
 ### Profile revisions
 
 Profile identity is session-wide, not branch-local. Approved revisions therefore require canonical ownership independent of any conversation branch.
 
-The preferred end state is a narrow workspace agent-control stream that owns only:
+The implemented control model owns only:
 
 - immutable profile versions;
 - each session's active profile pointer.
@@ -371,41 +368,36 @@ It does not own:
 - harness artifacts;
 - proposal review execution, which remains owned by the refinement service and proposing route.
 
-All events remain in the existing globally ordered `events` table. Stream addressing distinguishes workspace profile control from ordinary agent-route history:
+All events remain in the existing globally ordered `events` table. Profile control events use the session's initial branch as their canonical address; storage enforces that rule and session-wide compare-and-swap. This avoids a broader event-stream addressing cutover while preserving session-wide identity.
 
-```ts
-type EventStreamAddress =
-  | { kind: "workspace-agents"; workspaceId: string }
-  | { kind: "agent-route"; workspaceId: string; sessionId: string; branchId: string };
-```
+Schema version 4 is a pre-release cutover. Version-1, -2, and -3 workspaces fail closed before decode, projection, sync ingestion, or recovery. Retained events are never silently reinterpreted.
 
-This is a pre-release schema cutover. Older workspaces fail closed before decode, projection, sync ingestion, or recovery unless a separately reviewed importer exists. Retained events are never silently reinterpreted.
+### Canonical events
 
-### Proposed canonical events
-
-- `RefinementProposed`;
-- `RefinementValidated`;
+- `GovernedRefinementProposed`;
+- `GovernedRefinementValidated`;
 - `RefinementGovernanceReviewRequested`;
 - `RefinementGovernanceReviewChildLinked`;
 - `RefinementGovernanceReviewDecided`;
+- `GovernedRefinementApplied`;
 - `RefinementProposalTerminalNoticeDelivered`;
+- `RefinementRollbackApplied`;
 - `AgentProfileVersionCreated`;
 - `AgentProfileActivated`.
 
-The initial profile may instead be complete inside `SessionCreated` if the reducers preserve the same atomic admission invariant.
-
-An approved profile decision, version creation, and active-pointer change commit atomically. A rejected decision commits no profile event. Events may be consolidated when one immutable transition carries complete durable meaning. Names are not accepted until reducers, idempotency, recovery, and projection ownership are reviewed.
+An approved profile decision, version creation, and active-pointer change commit atomically. A rejected decision commits no profile event. Skill application is staged because compile and declared runtime tests are durable effects; only a passing retained report permits activation.
 
 ### Projections
 
-New rebuildable projections are limited to:
+Rebuildable projections are:
 
 - `workspace_agent_profiles`;
 - `agent_profile_versions`;
-- the existing refinement proposal projection extended with target kind and terminal review state;
-- `refinement_governance_reviews`.
+- `governed_refinement_proposals`;
+- `refinement_restorations`;
+- existing harness, skill-execution, and trajectory-review projections.
 
-The implementation should reuse existing session, branch, task, run, activity, and product-selection projections.
+The implementation reuses existing session, branch, task, run, activity, and product-selection projections. Migration 016 adds profile projections and prompt-pin columns; migration 017 adds governance wait state, governed proposal projection, and restoration projection.
 
 All new tables require classification in `docs/mutable-tables.md`, architecture checks, replay tests, and idempotent rebuild behavior.
 
@@ -474,7 +466,7 @@ The governance reviewer receives one bounded, frozen input:
 - the proposer identity and relationship to the target;
 - the immutable Agencity base policy;
 - the exact product constitution and refinement-review policy;
-- the workspace charter and user-declared constraints when configured;
+- workspace-charter and user-constraint slots, currently pinned as `null` because no public configuration exists;
 - the target scope and runtime capability boundaries;
 - relevant active harness versions and known conflicts selected through attributable context rules.
 
@@ -488,10 +480,10 @@ The reviewer does not read ambient repository guidance at decision time. The gov
 
 - a packaged immutable Agencity base constitution with ID, version, and digest;
 - a versioned refinement-review rubric derived from the constitution;
-- an optional durable workspace charter selected under owner-controlled configuration;
-- the target agent's active profile and applicable user-declared constraints.
+- a workspace-charter slot, currently `null`;
+- the target agent's active profile and a user-constraints slot, currently `null`.
 
-`AGENTS.md` documents the product constitution for maintainers but is not silently imported from an arbitrary target repository as reviewer authority. A workspace may deliberately register its own charter through a typed, versioned configuration path.
+`AGENTS.md` documents the product constitution for maintainers but is not silently imported from an arbitrary target repository as reviewer authority. The runtime packages a frozen product constitution and review policy. Workspace-charter and user-constraint registration is unavailable; the frozen reviewer input records both as `null`.
 
 The supervisor selects the reviewer model and pins its provider, model, reasoning configuration, response contract, and context digest. The reviewer is always a separate model invocation from the proposal-producing invocation. It may use the same underlying model family, but never the same completion or mutable context.
 
@@ -622,7 +614,7 @@ proposed
             -> apply_conflict | apply_failed | applied
 ```
 
-The current harness refinement implementation already supplies durable proposals, validation, immutable artifact versions, decisions, and rollback. This plan reuses its proposal identity, validation, recovery, and versioning foundations while changing the ordinary decision path:
+The implemented ordinary decision path reuses durable proposal identity, validation, recovery, and immutable versioning while applying these rules:
 
 - a separate LLM reviewer replaces per-proposal human approval;
 - reviewer approval precedes activation;
@@ -633,19 +625,19 @@ The current harness refinement implementation already supplies durable proposals
 
 Skills retain mandatory compile and declared runtime tests before activation. A reviewer cannot approve a failing skill. Other artifact kinds rely on deterministic validation plus charter review before activation.
 
-This changes the repository's current refinement constitution, which treats pre-activation observed success as the normal authority for activation. Shipping the change requires an explicit constitutional amendment in `AGENTS.md` and a new ADR for durable agent profiles and automated refinement governance. The new ADR supersedes ADR 0002's promotion and activation rules while preserving its unaffected memory, retrieval, immutable-version, provenance, generated-skill test, and rollback decisions. It extends ADR 0006's durable-session model and ADR 0008's agent-profile versus user/device-profile boundary. Accepted ADR text is not rewritten to express the new decision; supersession and extension metadata, backlinks, statuses, and the decision index are updated according to the repository ADR policy.
+ADR 0012 supersedes ADR 0002's mandatory pre-activation exposure and promotion rules while preserving its unaffected memory, retrieval, immutable-version, provenance, generated-skill test, evaluation, and rollback decisions. It extends ADR 0006's durable-session model and ADR 0008's agent-profile versus user/device-profile boundary. The retained ADR-0002 candidate/evaluation APIs remain advanced and legacy-compatible rather than the ordinary activation path.
 
 ## Documentation and decision-record obligations
 
 Documentation is part of each shipping phase rather than a final cleanup task. A phase is not complete until its implemented behavior, public contract, operational consequences, and remaining limitations are reflected in the authoritative documents affected by that phase.
 
-Before implementation begins:
+The accepted decision-record foundation includes:
 
-- create the new ADR for durable agent profiles and automated refinement governance;
+- ADR 0012 for durable agent profiles and automated refinement governance;
 - record exactly which ADR 0002 rules it supersedes and which rules remain in force;
 - record that it extends ADRs 0006 and 0008 without replacing their durable relationship or ownership boundaries;
 - update `docs/decisions/README.md`, the affected ADR metadata and backlinks, and the decision list in `docs/README.md`;
-- update `AGENTS.md` only after the constitutional decision is accepted, while keeping proposed behavior distinct from shipped capability.
+- an `AGENTS.md` amendment that distinguishes accepted direction, implemented runtime behavior, and remaining installed-product evidence.
 
 As behavior ships, update every affected public reference:
 
@@ -696,19 +688,17 @@ External model, shell, file, and skill work continues through the outbox. Record
 
 ## Protocol and SDK
 
-The public contract should expose capabilities rather than mirror every internal event.
+The public contract exposes capabilities rather than requiring callers to mirror internal events.
 
-Illustrative product operations:
+Implemented product operations:
 
 ```http
-GET  /product/agents/:session
-GET  /product/agents/:session/profiles
-POST /product/agents/:session/profile-proposals
-GET  /product/refinements/:proposal
-POST /product/agents/:session/profiles/rollback
+GET  /sessions/:session/agent-profile
+GET  /sessions/:session/agent-profiles
+POST /sessions/:session/profile-proposals?branch=:branch
+GET  /governed-refinements/:proposal
+POST /sessions/:session/profiles/rollback?branch=:branch
 ```
-
-Exact paths may be consolidated.
 
 The contract preserves:
 
@@ -724,7 +714,7 @@ The contract preserves:
 Generated TypeScript receives capability-scoped operations:
 
 ```ts
-sdk.agents.get(target, options?)
+sdk.agents.get(target?)
 sdk.agents.proposeProfileUpdate(target, input, { wait?: boolean })
 sdk.agents.rollbackProfile(target, input)
 
@@ -738,13 +728,13 @@ With `wait: true`, the call resolves only after review and application reach a t
 
 Generated code cannot invoke the reviewer directly, choose the reviewer model, supply the governing charter, approve a proposal, or activate a profile version.
 
-Existing `rlm.start` and `rlm.startMany` may accept an explicit profile or use the sealed task-specialist helper. The retained child always has exact profile and prompt provenance.
+Existing `rlm.start` and `rlm.startMany` accept an explicit profile or use the sealed task-specialist helper. The retained child always has exact profile and prompt provenance.
 
 ## Terminal product
 
 The existing workspace root selector, route view, and family navigation remain authoritative.
 
-Agent detail adds:
+Agent detail provides:
 
 - current profile and exact agent prompt;
 - profile history and diffs;
@@ -1098,4 +1088,11 @@ The plan is complete when:
 - Completed: added managed-service recovery and deduplication coverage for governed review and terminal delivery; fail-closed offline profile-revision divergence with retained competing histories; workspace export auditing for profile, invocation-pin, proposal, frozen-review, decision, notice, restoration, and artifact provenance; governance-aware deletion planning and refusal; complete workspace erasure; and migration/rebuild reopen coverage.
 - Validation: 106 focused lifecycle, migration, profile, and governance tests passed with 0 skips and 0 failures. Typecheck, architecture checks, lints, and `git diff --check` passed.
 - Plan notes: exported bundles now include `export-audit.json`; missing required provenance or artifact dependencies make the manifest partial rather than successful. Concurrent offline profile claims remain explicit conflicts, and runnable profile lookup fails instead of inventing an active winner.
-- Remaining: a linked-executable process-loss journey must cover the governance child-link/model-wait boundary together with approval, rejection, reproposal, rollback, notice deduplication, and resume.
+- Remaining: hard process-loss behavior at committed governance boundaries is covered by lower-level lifecycle tests; the installed-product journey uses graceful managed-service shutdown and restart.
+
+### 2026-08-09 — Phase 4: installed governance acceptance
+
+- Completed: added an isolated `bun link` journey using only the documented executable and public product paths. It proves exact root and child profiles, retained old/new invocation pins, blocking independent approval, exact reviewer rejection and guidance, bounded reproposal, immutable rollback, detached managed-service restart, deduplicated proposer/reviewer/application/notice behavior, and route-relative no-ID inspection.
+- Validation: the focused journey reported 1 pass, 0 skips, and 0 failures; deterministic installed acceptance reported 15 passes, 1 credential-gated skip, and 0 failures; the release matrix reported 1 deterministic pass, 3 external skips, and 0 failures. Typecheck, architecture checks, and `git diff --check` passed.
+- Plan notes: installed recovery uses graceful service shutdown and restart. Lower-level lifecycle tests supply hard process-loss evidence at committed boundaries.
+- Remaining: final documentation reconciliation, independent review, aggregate `bun run verify`, and externally gated live-provider, official Turso Sync, and Turso Cloud checks.

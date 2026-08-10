@@ -16,7 +16,7 @@ The canonical source for Agencity's product direction, design constitution, supp
 
 ### Product or design constitution
 
-Agencity's highest-level design principles: durable identity, attributable context, bounded autonomy, visible uncertainty, governed adaptation, user authority, and placement-preserving semantics. They are maintained in [`AGENTS.md`](../AGENTS.md), not stored as user-editable workspace state and not treated as runtime permission. The accepted automated-governance design will materialize an immutable versioned constitution component for its reviewer, but that public review path is not yet supported.
+Agencity's highest-level design principles: durable identity, attributable context, bounded autonomy, visible uncertainty, governed adaptation, user authority, and placement-preserving semantics. Maintainer guidance lives in [`AGENTS.md`](../AGENTS.md). Runtime governance supplies a packaged immutable product-constitution component with ID, version, digest, and frozen text; it is not user-editable workspace state or runtime permission.
 
 ### Base runtime policy
 
@@ -24,7 +24,7 @@ The immutable Agencity system-policy component included in model calls. It defin
 
 ### Workspace charter
 
-An optional, owner-controlled, versioned statement of workspace-specific purpose, constraints, and review policy. It is subordinate to the product constitution and runtime boundaries. Registering and using a workspace charter in automated governance is accepted direction, not currently a supported public workflow.
+An optional future owner-controlled statement of workspace-specific purpose and constraints subordinate to product policy and runtime boundaries. No public workspace-charter configuration exists. Governed reviews retain this component as `null` and do not infer it from repository files.
 
 ### User-declared constraint
 
@@ -70,7 +70,7 @@ The immutable-versioned standing role, purpose, and agent-specific behavioral in
 
 ### Agent-profile version
 
-One immutable revision of an agent profile, including its exact rendered agent prompt, digest, creator, source, reason, and provenance. New sessions have an initial version. Accepted architecture permits later approved versions and rollback; public profile revision and governance commands are not yet supported.
+One immutable revision of an agent profile, including its exact rendered agent prompt, digest, creator, source, reason, and provenance. New sessions have an initial version. Approved governed proposals and exact rollback create later immutable versions for future invocations.
 
 ### Active profile
 
@@ -234,7 +234,7 @@ A bounded, attributable sequence of events from completed work used as evidence 
 
 ### Refinement
 
-The governed process for changing behavioral content such as memories, prompt notes, skills, subagent specifications, and, under accepted architecture, agent profiles. Refinement preserves scope, evidence, immutable versions, decisions, conflicts, and rollback.
+The governed process for changing agent profiles, memories, prompt notes, skills, and subagent specifications. The ordinary path is immutable proposal, deterministic validation, one separate sealed review, application-time revalidation, automatic application or rejection, terminal delivery, attributable later evidence, and exact rollback.
 
 ### Refinement proposal
 
@@ -246,7 +246,11 @@ Non-model checks applied to a proposal, including schema and size bounds, author
 
 ### Refinement reviewer
 
-Under the accepted automated-governance design, a separate sealed model invocation that may only approve or reject a valid proposal against frozen constitution, policy, charter, target, and evidence inputs. It cannot edit the proposal, widen authority, or activate content. This sealed governance reviewer is not yet a supported public capability.
+A separate sealed model invocation that may only approve or reject one valid proposal against frozen product constitution, review policy, target, evidence, proposer relationship, runtime boundaries, and current-model dispatch. Workspace charter and user constraints are currently `null`. It cannot edit the proposal, widen authority, select another target, or activate content, and the caller cannot choose it.
+
+### Governed refinement status
+
+The retained lifecycle state of a governed proposal: `proposed`, `deterministically_rejected`, `validated`, `reviewing`, `reviewed_rejected`, `review_failed`, `review_unknown`, `reviewed_approved`, `apply_conflict`, `apply_failed`, or `applied`. Only `applied` changes active content.
 
 ### Evaluation
 

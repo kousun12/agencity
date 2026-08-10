@@ -92,6 +92,8 @@ Selected capability query values must be nonblank UTF-8 strings. Provider is lim
 | `POST /sessions` | `{ workspaceId?, model?, budget?, agentProfile?: { role, purpose, instructions }, sessionName?, branchName? }` → `{ sessionId, branchId }`; omitted `agentProfile` uses the sealed root profile and product model configuration includes `reasoningEffort`. |
 | `GET /sessions/:session/agent-profile` | Bounded active profile summary. Add `?detail=full` to include instructions, exact rendered prompt, evidence IDs, and revision provenance. |
 | `GET /sessions/:session/agent-profiles` | Newest-first bounded history with `{ activeProfileVersionId, items }`. Optional `detail=full`; `limit` defaults to 20 and must be 1–100. |
+| `POST /sessions/:session/profile-proposals?branch=:branch` | Owner route for an agent-profile replacement: expected version, replacement, reason, predicted effect, evidence, optional revised-proposal/client request IDs, and `wait` (default `true`) → `GovernedRefinementRecord`. |
+| `POST /sessions/:session/profiles/rollback?branch=:branch` | Exact-content profile or harness rollback with target kind/ID, expected current version, earlier approved version, reason, and evidence → `RefinementRollbackResult`. |
 | `POST /sessions/:session/model?branch=:branch` | `{ model: { provider, model, reasoningEffort? } }` → explicit idle-branch model or effort change. |
 | `GET /sessions/:session/snapshot?branch=:branch` | `{ cursor, state }`. |
 | `GET /sessions/:session/model-contract-diagnostics?branch=:branch` | Projection-derived fixed-cardinality formal submission and violation diagnostics for the branch. |
@@ -116,7 +118,7 @@ Selected capability query values must be nonblank UTF-8 strings. Provider is lim
 
 Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start`. Missing information becomes a blocked `finish`; a later user message starts an ordinary new run. There is no separate run-input route or retained input-request state.
 
-Profile summaries include version/session IDs, revision, role, purpose, prompt contract and digest, creator, optional specification source IDs, reason, creation time, and active status. Full detail additionally returns `instructions`, `exactAgentPrompt`, evidence IDs, supersession/restoration IDs, and proposal/review IDs. Normal reads omit the prompt-bearing fields to keep agent lists and inspection bounded. These routes are observational; profile proposal, activation, rollback, and automated-governance routes are not implemented.
+Profile summaries include version/session IDs, revision, role, purpose, prompt contract and digest, creator, optional specification source IDs, reason, creation time, and active status. Full detail additionally returns `instructions`, `exactAgentPrompt`, evidence IDs, supersession/restoration IDs, and proposal/review IDs. Normal reads omit prompt-bearing fields to keep lists bounded. Reads are observational. Proposal and rollback are explicit mutations and require a live route.
 
 Model-contract diagnostics always return three submission counters—`bun_console`, `finish`, and sealed refinement review—nine violation counters, an unclassified-submission count, and at most 32 recent bounded outcomes plus an omitted count. They derive from canonical projections and retained structured recursive results. They add no mutable table and never expose rejected argument bodies.
 
@@ -181,6 +183,11 @@ Family targets are URL-decoded and restricted to the caller's parent, direct chi
 | `POST /sessions/:session/user-corrections?branch=:branch` | Append a typed correction citing earlier branch event IDs. |
 | `GET /refinement-policy` | Read the profile-owned automatic-trigger policy. |
 | `PUT /refinement-policy` | `{ enabled: boolean }`. |
+| `GET /refinement-capabilities` | Reports sealed automatic governance, supported target kinds, wait/detach/rollback, and `reviewerSelectableByCaller: false`. |
+| `GET /governed-refinements?status=...&limit=...` | Bounded workspace governance records. |
+| `GET /governed-refinements/:proposal` | One exact governed proposal, validation, frozen input, reviewer link/decision, terminal reason, versions, and notice state. |
+| `POST /sessions/:session/governed-refinements?branch=:branch` | Owner proposal for an agent-profile or harness target. `wait` defaults to `true`; `false` returns after durable admission and later delivers a terminal notice. |
+| `GET /sessions/:session/governed-refinements?branch=:branch&status=...&limit=...` | Route-scoped governed proposal records. |
 | `POST /sessions/:session/refinements?branch=:branch` | Submit a governed raw proposal. |
 | `POST .../refinements/:proposal/validate` | Validate shape, evidence, authority, conflicts, and compare-and-swap targets. |
 | `POST .../refinements/:proposal/activate` | Create/test candidates and set bounded exposure. |
@@ -204,6 +211,10 @@ Family targets are URL-decoded and restricted to the caller's parent, direct chi
 | `POST /sessions/:session/specs/:entry/spawn?branch=:branch` | Admit a version-pinned reusable subagent specification. |
 
 Skill installation and enable/disable/remove are client/user management operations. Generated cells receive only list, get, propose, test, and invoke surfaces.
+
+The `.../refinements/:proposal/{validate,activate,allocate,observations,approve,decide,approve-rollback,rollback}` routes retain ADR-0002 candidate/evaluation behavior for advanced and legacy-compatible integrations. They are not the ordinary activation path. Ordinary profile and harness revisions use governed proposals, one separate sealed reviewer, application-time revalidation, automatic application, terminal delivery, and exact-content rollback.
+
+Governed statuses are `proposed`, `deterministically_rejected`, `validated`, `reviewing`, `reviewed_rejected`, `review_failed`, `review_unknown`, `reviewed_approved`, `apply_conflict`, `apply_failed`, and `applied`. The reviewer uses the origin route's current model. Its frozen input includes immutable product constitution and review policy; unsupported workspace-charter and user-constraint components are explicitly `null`. No request field selects a reviewer. Approval states policy consistency, not outcome proof.
 
 ### Synchronization, export, and deletion
 
@@ -249,13 +260,13 @@ The client exposes typed methods for all route groups:
 
 - discovery and service: `health`, `capabilities`, `serviceStatus`, `shutdownService`, `serviceAgents`;
 - product catalog/configuration: `productSessions`, `productSelect`, `productRename`, `productConfig`, `productSetModel`, `productSetReasoningEffort`, `productSetProviderKey`, `productCredentialReference`, `modelProviders`, `modelCatalog`;
-- session lifecycle and profile inspection: `createSession`, `agentProfile`, `agentProfiles`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
+- session lifecycle and profile governance: `createSession`, `agentProfile`, `agentProfiles`, `proposeProfileUpdate`, `governedRefinement`, `proposeGovernedRefinement`, `governedRefinements`, `rollbackRefinement`, `refinementCapabilities`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
 - autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`, `agentToolCapability`, and `modelContractDiagnostics`;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
 - agents and recursive work: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mailbox methods, follow-up/cancel methods, documents, input sets, recursive model methods;
 - goals and wakes: goal, heartbeat, schedule, and wake methods;
-- memory and refinement: memory, review, policy, proposal, approval, decision, and rollback methods;
+- memory and refinement: memory, trajectory review, automatic policy, governed proposal/wait/detach/inspection/rollback, and advanced legacy-compatible candidate/evaluation methods;
 - skill management: `listSkills`, `getSkill`, `previewSkillImport`, `installSkill`, `proposeSkill`, `enableSkill`, `disableSkill`, `removeSkill`, `testSkill`, `invokeSkill`, and `spawnSpec`;
 - synchronization and data control: status/cycle/conflict/workspace methods plus `dataManifest`, `exportData`, and `deleteOwnedData`.
 

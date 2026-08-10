@@ -26,7 +26,7 @@ The default workspace database is:
 <workspace-root>/.agencity/agent.db
 ```
 
-Its append-only event history is the canonical record of sessions, immutable session-owned agent profiles, invocation prompt pins, branches, tasks, cells, effects, goals, messages, memory and harness decisions, recovery, and other durable agent meaning. The initial profile is embedded in `SessionCreated`; later profile version and activation events, when present, retain session-wide control history.
+Its append-only event history is the canonical record of sessions, immutable session-owned agent profiles, invocation prompt pins, governed proposals, frozen reviews, decisions, notices, restorations, branches, tasks, cells, effects, goals, messages, memory and harness decisions, recovery, and other durable agent meaning. The initial profile is embedded in `SessionCreated`; later profile version and activation events retain session-wide control history.
 
 The same database contains rebuildable projections and operational rows such as snapshots, routing indexes, the effect outbox, process leases, and synchronization status. Those rows accelerate or coordinate the runtime; they do not replace canonical events.
 
@@ -202,6 +202,7 @@ A filesystem or administration failure produces a partial result. Workspace owne
 - Opening incompatible state fails before applying product migrations to its retained rows and reports reset guidance. The runtime does not delete the old database.
 - Before using this revision, back up or move aside each affected workspace's `.agencity` directory. Starting again creates a fresh version-4 workspace whose new sessions include complete initial profiles. The separate profile directory (normally `~/.agencity`) does not need to be reset unless startup reports a profile-specific incompatibility; resetting a workspace removes session-owned agent-profile history but not user/device profile state, and resetting the profile store does not remove workspace agent profiles.
 - Migration 016 creates rebuildable `agent_profile_versions` and `workspace_agent_profiles` projections, adds `profile_pin_json` to recursive handles, and adds `prompt_provenance_json` to immutable context records. Canonical `SessionCreated`, profile-control, invocation, context, and model-call events remain authoritative.
+- Migration 017 adds the `governance_wait` trajectory-review field plus rebuildable `governed_refinement_proposals` and `refinement_restorations` tables. Canonical proposal, validation, frozen-review, child-link, decision, application, notice, and restoration events remain authoritative.
 - Back up databases, sidecars, artifacts, profile data, and replicas before changing to a source revision with new migrations.
 - Run only one runtime version against a given writable workspace at a time.
 - Do not downgrade a migrated database unless that repository revision explicitly supports it.

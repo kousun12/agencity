@@ -31,7 +31,7 @@ Before this sequence, storage admission verifies that every retained event uses 
 10. **Heartbeat recovery.** Due active schedules append one aligned tick plus wake message; paused/cancelled schedules are ignored.
 11. **Goal recovery.** Running gate effects are reconciled to passed/failed/cancelled/unknown, the canonical gate-definition/workspace-material pin is re-checked before recovered success can pass, matching terminal evaluations are reused, and ambiguous or stale required gates block completion. An active goal without a typed run association is attached to a stable `AgentRun`; recovery does not route autonomous work through the diagnostic text loop.
 12. **Recursive-handle recovery.** Running terminal child calls finalize their durable task/model handle and atomically attribute direct usage to ancestors; safe pending handles re-enter the shared provider limiter. A committed handle resolves after console-worker or supervisor restart without repeating admission. Its retained profile pin fixes the child profile version, prompt digest, and prompt contract used by every recovered model call. Terminal `succeeded`, `failed`, `cancelled`, `budget-exceeded`, and `unknown` outcomes are retained separately; non-idempotent ambiguous calls are unknown and are never generated twice. Large completed values resolve through their registered content-addressed result artifact.
-13. **Refinement-review recovery.** Every nonterminal review is relaunched in the background from its canonical request and frozen trajectory snapshot. A retained child link reuses the same recursive-model handle and its exact structured `responseAdmission`. A successful child result is reconstructed from the authoritative model effect and bound to the child completion without creating an assistant message. A retained decision reuses the stable proposal identity and resumes validation, candidate activation, or exact allocation without duplication. A child `unknown` outcome becomes terminal `unknown` and is never retried. Deterministic malformed/over-scoped output becomes visible `failed`; infrastructure failure leaves the last committed boundary for later recovery rather than inventing success.
+13. **Refinement-review recovery.** Every nonterminal trajectory proposer or governance reviewer resumes from its canonical request and frozen input. A retained child link reuses the same recursive-model handle and exact structured `responseAdmission`. A successful child result is reconstructed from the authoritative model effect and bound to the child completion without creating an assistant message. Governed proposals resume deterministic validation, one sealed review, application-time revalidation, staged skill tests when required, and terminal delivery with stable identities. A child `unknown` outcome becomes terminal `unknown` and is never retried. Deterministic malformed/over-scoped output becomes visible failure; infrastructure failure leaves the last committed boundary for later recovery rather than inventing success.
 14. **Family-delivery recovery.** A committed send missing its recipient-delivery event completes that prefix (or records failed if the target became unavailable). Accepted queued messages enter context once; a context-delivered retained follow-up whose stable run request is missing schedules that same run ID. Acknowledged rows are left terminal.
 15. **Agent-run recovery.** Queued/running typed runs reconcile retained formal submissions or violations, cells, gate evidence, cancellation, and unknown effects before another model call. Recovery resolves the immutable profile version named by `AgentRunRequested.profilePin`; it does not substitute a later active profile. Context, call, and effect prompt provenance must agree with that invocation pin before dependent work continues. An accepted action is applied from its digest-linked committed source rather than resubmitted. Blocked and failed finishes use one atomic message/status batch; successful finishes materialize a message only after gates pass. Family follow-up terminal replies use the same retained run/message IDs and are not regenerated on repeated startup.
 
@@ -46,6 +46,24 @@ An active profile pointer is used only when admitting a new autonomous run or re
 Projection rebuild never creates a profile revision or activation. Governed proposal recovery resumes the same stable review request, reviewer child, decision, application, and terminal notice. Repeated recovery cannot duplicate the reviewer call, activated version, restoration, or notice.
 
 Offline replicas may commit different profile versions or rollbacks against the same expected active version. Synchronization preserves each immutable claim on its deterministic derived branch and records an unresolved conflict. Alternate claims are not projected as a last-writer active pointer, and runnable profile lookup fails with a conflict until the divergence is explicitly reconciled.
+
+## Governed-refinement recovery boundaries
+
+The ordinary proposal path has durable boundaries for:
+
+1. `GovernedRefinementProposed`;
+2. deterministic validation or terminal deterministic rejection;
+3. frozen `RefinementGovernanceReviewRequested`;
+4. durable reviewer-child link;
+5. typed reviewer decision;
+6. application-time revalidation;
+7. atomic profile/non-skill application, or staged skill candidate/tests/activation;
+8. terminal notice delivery; and
+9. exact-content restoration when rollback is requested.
+
+Recovery always continues the same proposal, reviewer handle, decision, version IDs, skill effects, notice ID, or rollback ID. A crash before proposal commit leaves no proposal. A crash after request but before reviewer link creates or resolves the stable reviewer once. A committed reviewer effect is consumed without another model call. A committed approval without application resumes final validation; stale state becomes `apply_conflict` and activates nothing. A skill approval resumes its retained compile/test effects and activates only after a passing report. A committed application is returned rather than repeated. An undelivered terminal notice is delivered once; a delivered notice is not duplicated.
+
+The reviewer dispatch is frozen from the origin route's current model. Recovery never substitutes a newly selected model, ambient repository charter, or caller choice. Product constitution and policy are pinned; unsupported workspace charter and user constraints remain `null`. A malformed, failed, timed-out, budget-exceeded, cancelled, or unknown reviewer outcome never implies approval.
 
 ## Refinement review boundaries
 
@@ -97,6 +115,12 @@ File write helps make retry safe by writing atomically, accepting an expected pr
 | Model effect terminal, model-call finalization missing | Requested call plus terminal effect. | Finalize once without another provider call. |
 | Profile activation commits after a run or recursive invocation was admitted | New active pointer plus older invocation profile pin. | Continue the admitted invocation with its older pinned profile; use the activation only for later invocations. |
 | Profile/context/recursive projections are missing or stale | Canonical session, profile-control, invocation, and prompt-provenance events remain. | Rebuild projections in global cursor order; do not execute a model or render replacement profile content. |
+| Governed proposal commits before reviewer-child link | Stable proposal, validation, and frozen reviewer request. | Reuse or create the deterministic reviewer handle once; never start an unrelated review. |
+| Reviewer model effect commits before decision/application | Exact frozen input, child completion, and terminal effect. | Finalize the typed decision and resume application without another provider call. |
+| Approved non-skill application crashes mid-transition | Either no application batch or one complete decision/version/activation batch. | Revalidate and apply once, or return the retained terminal result. |
+| Approved skill crashes during compile/tests | Retained candidate and outbox effects identify completed and pending stages. | Resume only missing safe stages; activation requires all retained tests to pass. |
+| Terminal decision commits before notice delivery | Terminal record exists with no delivered-notice event. | Deliver the stable notice once to the exact origin route. |
+| Exact rollback crashes before/after commit | Either no restoration or one complete restoration/version/activation batch. | Reuse the rollback identity; never rewrite or duplicate versions. |
 | Formal action committed, application incomplete | Digest-linked action plus authoritative model effect. | Apply the same action once; do not call the provider again. |
 | Blocked/failed finish terminal batch interrupted | Either no message/status batch or the complete atomic batch. | Reapply the same stable message/status identities without duplication. |
 | Status set running, crash before/after model request finalization | Branch remains `running` without live ownership. | Finish any terminal call, then append recovery-to-idle once. |

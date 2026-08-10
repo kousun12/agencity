@@ -1,10 +1,10 @@
 # Dynamic typed connectors and managed RPC resources plan
 
-**Status:** Proposed and gated  
-**Date:** August 9, 2026  
-**Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
-**Related planning:** [Formal model-tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md) is authoritative; [Durable agent profiles and automated refinement review](./2026-08-08-adaptive-agent-city-plan.md) is exploratory; [Lossless context-reference storage](./2026-08-07-lossless-context-references-plan.md) is deferred and is not a dependency of this plan.  
-**Governing decisions:** [Durable local runtime foundations](../docs/decisions/0001-durable-local-runtime-foundations.md), [Relational memory and governed refinement](../docs/decisions/0002-relational-memory-refinement.md), [Managed workspace execution](../docs/decisions/0007-managed-workspace-execution.md), [Formal model-tool contracts](../docs/decisions/0010-formal-model-tool-contracts.md), and [Capability-preserving placement](../docs/decisions/0011-capability-preserving-placement-contracts.md)
+**Status:** Proposed and gated
+**Date:** August 9, 2026
+**Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)
+**Related planning:** [Formal model-tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md) and [Durable agent profiles and automated refinement review](./2026-08-08-adaptive-agent-city-plan.md) are authoritative; [Lossless context-reference storage](./2026-08-07-lossless-context-references-plan.md) is deferred and is not a dependency of this plan.
+**Governing decisions:** [Durable local runtime foundations](../docs/decisions/0001-durable-local-runtime-foundations.md), [Relational memory and governed refinement](../docs/decisions/0002-relational-memory-refinement.md), [Managed workspace execution](../docs/decisions/0007-managed-workspace-execution.md), [Formal model-tool contracts](../docs/decisions/0010-formal-model-tool-contracts.md), [Capability-preserving placement](../docs/decisions/0011-capability-preserving-placement-contracts.md), and [Durable agent profiles and automated refinement governance](../docs/decisions/0012-durable-agent-profiles-automated-refinement-governance.md)
 
 ## Summary
 
@@ -529,7 +529,7 @@ Every context record retains the exact connector summaries, included declaration
 
 Connector contracts are pinned per **AgentRun action step**, not once for the entire run.
 
-This differs intentionally from the invocation-level profile pinning proposed by the related exploratory profile plan:
+This differs intentionally from the implemented invocation-level profile pinning contract:
 
 - an agent profile defines identity and remains stable for the invocation;
 - a connector catalog is external capability state that an agent may legitimately extend during the task.

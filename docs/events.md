@@ -92,7 +92,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | Event type | Version 4 payload | Projection/semantic effect |
 |---|---|---|
 | `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, agentProfile, sessionName?, initialBranchName?, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Atomically initializes a root or normal child session and its complete revision-1 profile. Child creation requires the complete parent/root/depth/task tuple. The embedded profile retains exact rendered prompt, digest, creator, reason, and optional specification source; initial proposal/review/rollback provenance is null. |
-| `AgentProfileVersionCreated` | `{ agentProfile, expectedActiveProfileVersionId }` | Retains a later immutable version after compare-and-swap against the session-wide active pointer. The event must use the session's initial branch. Public revision and governance commands are not implemented. |
+| `AgentProfileVersionCreated` | `{ agentProfile, expectedActiveProfileVersionId }` | Retains a later immutable governed or restoration version after compare-and-swap against the session-wide active pointer. The event must use the session's initial branch. |
 | `AgentProfileActivated` | `{ profileVersionId, expectedActiveProfileVersionId, reason }` | Moves the session-wide active pointer to an existing retained version after compare-and-swap. The event must use the session's initial branch; later invocations on any branch use the new pointer. |
 | `BranchCreated` | `{ branchId, parentBranchId, forkCursor: decimal string, name?: string }` | Selects the new active branch projection. Storage records ancestry through the exact parent cursor. |
 | `SessionNamed` | `{ name }` | Changes the human session label without changing durable identity or retained task text. Product listing resolves the latest attributable rename across retained branches. |
@@ -155,6 +155,8 @@ Mailbox intent, artifact, follow-up, and receipt-link fields are optional by sch
 The initial profile is part of `SessionCreated`; a runnable session never exists without it. Profile version and activation events are session-wide control records carried on the existing event header using the session's initial branch. This is an addressing compromise rather than branch-local identity: storage checks the active-version compare-and-swap against `workspace_agent_profiles`, profile lookup replays all events for the session, and projection rebuild applies profile events in global cursor order. Conversation branches do not receive independent active-profile pointers.
 
 `AgentRunRequested.profilePin` and `RecursiveModelStarted.profilePin` freeze one version for an invocation. Each associated `ContextMaterialized.promptProvenance` and `ModelCallRequested.promptProvenance` must agree with that pin. Retries and later steps in the same invocation retain it even if a later profile activation changes the session-wide active pointer.
+
+Profile revisions use the governed-refinement events below. Approved profile creation and activation commit with `GovernedRefinementApplied`; exact rollback commits `RefinementRollbackApplied` with its profile creation and activation. Waiting callers receive the resulting retained record. Detached and automatic origins receive one idempotent `RefinementProposalTerminalNoticeDelivered`.
 
 ### Console cell
 
@@ -267,6 +269,14 @@ Embedded harness and refinement content retains its own versioned formats and st
 | `RefinementTriggerConsumed` | Exact automatic trigger key and greatest consumed evidence cursor; appended atomically with the review terminal transition so the same tranche cannot refire. |
 | `RefinementProposed` | Typed create/replace/retire edit set, trigger, predicted effect, evidence, objective evaluation, and proposing authority. Refiner-produced proposals also retain `sourceReviewId` and a stable proposal fingerprint. |
 | `RefinementValidated` | Validation result and complete CAS/evidence/authority diagnostics against the `proposed` status. |
+| `GovernedRefinementProposed` | Immutable profile or harness proposal, proposer/origin, expected target, replacement, reason, predicted effect, evidence, optional revised-proposal link, and stable fingerprint. |
+| `GovernedRefinementValidated` | Deterministic valid/rejected result with complete scope, authority, bounds, secret, evidence, compatibility, and compare-and-swap diagnostics. Invalid proposals become terminal without a reviewer call. |
+| `RefinementGovernanceReviewRequested` | Exact frozen reviewer input and digest: proposal, current target, evidence, proposer relationship, runtime boundaries, visible harness context, product constitution, review policy, current-model dispatch, and `null` workspace-charter/user-constraint slots. |
+| `RefinementGovernanceReviewChildLinked` | Stable durable recursive handle and separate sealed reviewer session/branch. Recovery reuses this link rather than starting another reviewer. |
+| `RefinementGovernanceReviewDecided` | One typed `reviewed_approved`, `reviewed_rejected`, `review_failed`, or `review_unknown` terminal reviewer result with stable decision identity and reason. |
+| `GovernedRefinementApplied` | Application-time revalidation result: `applied`, `apply_conflict`, or `apply_failed`, with exact applied version IDs. Profile/non-skill activation is atomic; skill activation follows retained compile/runtime tests before this terminal result. |
+| `RefinementProposalTerminalNoticeDelivered` | One idempotent terminal result delivered to the exact origin route, including rejection reason and revision guidance when present. |
+| `RefinementRollbackApplied` | Exact prior approved profile or harness content restored as a new immutable version, with previous/source/restoration IDs, actor, reason, and evidence. It never rewrites intervening history. |
 | `RefinementCandidateActivated` | Candidate ID, exact candidate version IDs, and bounded allocation/exposure limits. |
 | `RefinementCandidateAllocated` | One numbered target session/branch/task allocation within the candidate bound. |
 | `RefinementCandidateExposed` | Proof that a specific allocation actually entered materialized context, including exact exposed versions. |

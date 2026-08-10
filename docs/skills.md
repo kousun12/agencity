@@ -57,13 +57,21 @@ re-reads the bundle when installing, so a change after preview changes the
 required digest. Directory, manifest, and source provenance plus both byte
 digests are retained.
 
-Workspace installation uses the ordinary governed harness lifecycle: proposal,
-validation, pre-exposure test, bounded allocations, exact-branch exposure,
-post-exposure same-version retests, objective observations, and promotion.
-Workspace promotion requires two distinct allocations and distinct
-durable evidence. Profile installation tests the staged immutable definition
-through the same skill outbox before `ProfileStore.stageGlobalSkill`; a failed
-test can only produce a disabled row.
+Inspected local-directory installation is an explicit owner management path.
+Workspace installation retains the ADR-0002 candidate, test, allocation,
+observation, and promotion lifecycle for compatibility. Profile installation
+tests the staged immutable definition through the same skill outbox before
+`ProfileStore.stageGlobalSkill`; a failed test can only produce a disabled row.
+
+Agent-generated `skills propose` changes use the ordinary ADR-0012 governance
+path: a trajectory proposer emits one typed candidate, deterministic validation
+runs, one separate sealed reviewer approves or rejects it, and application-time
+validation runs again. Approval stages the immutable skill but does not activate
+it. Bun compilation and every declared runtime test execute through durable
+outbox effects; only a passing retained report permits activation. Rejection,
+review failure or unknown, stale state, compile failure, or test failure
+activates nothing. Reviewer approval establishes policy consistency, not proof
+that the skill improves later outcomes.
 
 ## Manifest schema version 1
 
@@ -128,10 +136,16 @@ does not delete history. Workspace actions are canonical
 table projection is rebuilt during recovery. Profile actions and versions
 remain append-only in profile rowid sequence.
 
-Install requests derive stable identities from the session, scope, inspected
+Install and governed proposal requests derive stable identities from the session, scope, inspected
 manifest/source digests, and installer. Retrying after a durable boundary
 resumes the same proposal, tests, observations, promotion, and import rather
 than creating a duplicate governed lifecycle.
+
+The caller cannot select the governance reviewer or supply its charter. The
+reviewer uses the proposing route's current model, frozen product constitution
+and policy, and `null` workspace-charter/user-constraint components. Skill
+permissions remain runtime policy and cannot be widened by either proposer or
+reviewer.
 
 Native skill names use bounded lower-kebab-case at the initial harness proposal
 boundary and are checked again during validation/activation. Retained harness

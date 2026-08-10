@@ -70,7 +70,11 @@ Each runnable session has an immutable initial agent profile containing role, pu
 
 Root, child, recursive, and specification-derived profile admission runs through the supervisor. Role, purpose, and instructions are normalized and bounded, and any registered brokered secret value in those fields rejects the entire admission before `SessionCreated` commits. The error does not echo the matched credential. Exact profile text and its digest are retained for provenance, so profile content must never be used as a secret store.
 
-Invocation prompt pins and fixed prompt-component ordering provide attribution and recovery consistency; they are not isolation or authorization controls. Public profile revision, sealed governance review, automatic activation, and rollback are not implemented, so the current profile inspection routes are read-only.
+Invocation prompt pins and fixed prompt-component ordering provide attribution and recovery consistency; they are not isolation or authorization controls.
+
+Profile and harness proposals are untrusted data. Deterministic validation checks scope, relationship authority, bounds, known secrets, compatibility, evidence, rendering, and expected-version state before a reviewer call. The separate reviewer receives a sealed profile and response contract plus frozen product constitution, review policy, target, evidence, proposer relationship, runtime boundaries, and current-model dispatch. Proposal text cannot replace those instructions. Workspace-charter and user-constraint configuration is unavailable and pinned as `null`; repository `AGENTS.md` content is not silently imported as reviewer authority. Callers cannot select the reviewer, invoke it directly, edit its proposal, widen authority, or activate content.
+
+Approval is revalidated before application. Profile and non-skill content applies atomically; skills must compile and pass declared tests through the outbox first. Malformed output, rejection, timeout, failure, cancellation, unknown outcome, stale state, or conflict activates nothing. Exact rollback introduces no new content and restores an earlier approved version through a new immutable version. Reviewer approval establishes policy consistency, not empirical improvement or safe code.
 
 ### Generated skills
 

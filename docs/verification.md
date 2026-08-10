@@ -68,7 +68,8 @@ The suite uses a local OpenAI API fixture reached through the Vercel AI SDK tran
 - distinct non-interactive run outcomes and interruption behavior;
 - committed-action and effect crash recovery without duplicate execution;
 - unknown effects, no automatic retry, and evidence-only reconciliation; and
-- refinement review, installed skills, context compaction, streaming, and scheduled wakes.
+- refinement review, installed skills, context compaction, streaming, and scheduled wakes; and
+- governed root and child profiles, old/new invocation pins, blocking approval, rejection, bounded reproposal, exact rollback, detached managed-service restart, deduplication, and route-relative no-ID inspection.
 
 This acceptance suite is intentionally non-interactive. The `test:core` groups separately cover deterministic full-screen renderer frames, stable reconciled Markdown and code identities, user-task/run interleaving, durable cell joining and bounded output, line-preserving composer paste, `Shift-Enter` multiline input, follow-until-scrolled timeline behavior, idle and active inspectors, width-prioritized footer content, normal/compact/minimum height modes, draft-safe family focus, parent/child input, workspace-root search and selection, stale catalog races, and exact route switching. `bun run test:e2e` adds a linked-executable pseudo-terminal journey that expands a retained TypeScript cell; opens a root, child, and grandchild; climbs back through retained parents; creates a second root; opens the workspace Agents view; selects the other root; detaches; and resumes the remembered selection without exposing credentials. The same journey verifies that the original cell and child were not duplicated or cancelled.
 
@@ -80,16 +81,30 @@ It records a focused family-projection benchmark with 25 relatives and branch hi
 
 The package is private. This verifies the documented source and `bun link` workflow; it is not evidence of a package-registry or standalone-binary release.
 
-### Durable-profile implementation evidence
+### Adaptive-profile governance evidence
 
-The schema-version-4 durable-profile and prompt-pin implementation was verified on August 9, 2026 with:
+The core profile/governance implementation was verified on August 9, 2026:
 
-- `bun run verify`: passed;
-- deterministic core suite: 856 passed, 2 skipped, 0 failed;
-- deterministic installed acceptance: 14 passed, 1 skipped, 0 failed;
-- aggregate tests: 870 passed, 3 skipped, 0 failed.
+- deterministic full suite: 887 passed, 3 gated skips, 0 failed;
+- focused governance: 43 passed, 0 failed;
+- contract/profile/harness regression groups: 60 passed, 0 failed; and
+- typecheck, architecture checks, and `git diff --check`: passed.
 
-The skipped rows were gated and remain unverified. This evidence does not establish that any live model provider, official Turso Sync server, or Turso Cloud integration passed. The installed linked-product journey for profile proposal, sealed governance review, approval/rejection, activation, rollback, detach, and recovery is absent. Automated profile refinement governance and the complete installed profile-governance journey therefore remain unverified and unavailable.
+Lifecycle hardening was then verified separately:
+
+- focused lifecycle, migration, profile, and governance tests: 106 passed, 0 skipped, 0 failed; and
+- typecheck, architecture checks, lints, and `git diff --check`: passed.
+
+Installed governance acceptance then passed:
+
+- focused linked-executable governance journey: 1 passed, 0 skipped, 0 failed;
+- complete deterministic acceptance: 15 passed, 1 credential-gated skip, 0 failed;
+- release matrix: 1 deterministic row passed, 3 external rows skipped, 0 failed; and
+- typecheck, architecture checks, and `git diff --check`: passed.
+
+This evidence covers deterministic validation, proposer/reviewer separation, authority, frozen inputs, current-model dispatch, automatic application, staged tested-skill activation, terminal delivery, rollback, managed-service recovery, fail-closed profile sync divergence, export audit, deletion refusal, migration/rebuild reopening, and the installed no-ID governance journey. The installed journey uses graceful service shutdown and restart; lower-level lifecycle tests cover committed hard process-loss boundaries.
+
+The final post-hardening `bun run verify` remains pending. The three externally gated rows—live provider, official Turso Sync server, and Turso Cloud—remain skipped and unverified.
 
 ### Previous recorded baseline
 

@@ -125,7 +125,7 @@ A successful finish publishes its exact message only after required gates pass. 
 
 `modelLoop.turn` and `modelLoop.run` remain low-level diagnostic paths. They are not substitutes for `runs` in a product task integration.
 
-### Agent-profile inspection
+### Agent-profile inspection and governance
 
 `Supervisor.agentProfiles` exposes session-wide, read-only profile inspection:
 
@@ -140,7 +140,35 @@ const history = await supervisor.agentProfiles.list(sessionId, {
 });
 ```
 
-The default summary omits instructions and exact prompt text. Full detail includes the exact rendered prompt and revision provenance. History is newest-first, defaults to 20 records, and accepts a limit from 1 through 100. The corresponding `AgentClient.agentProfile` and `AgentClient.agentProfiles` methods use the public protocol. Public profile proposal, activation, and rollback methods are not available; automated profile-refinement governance remains unimplemented.
+The default summary omits instructions and exact prompt text. Full detail includes the exact rendered prompt and revision provenance. History is newest-first, defaults to 20 records, and accepts a limit from 1 through 100.
+
+`Supervisor.refinementGovernance` exposes `proposeOwner`, `proposeAgent`, `proposeAutomatic`, `get`, `list`, `rollbackOwner`, `rollbackAgent`, and recovery. Public clients normally use:
+
+```ts
+const proposal = await client.proposeProfileUpdate(sessionId, branchId, {
+  expectedProfileVersionId: summary.profileVersionId,
+  replacement: {
+    role: "Repository reviewer",
+    purpose: "Review this repository.",
+    instructions: "Preserve attributable evidence.",
+  },
+  reason: "Clarify standing behavior",
+  predictedEffect: "More consistent reviews",
+  evidenceEventIds: [],
+  wait: true,
+});
+
+const detached = await client.proposeGovernedRefinement(
+  sessionId,
+  branchId,
+  { /* typed target, reason, predictedEffect, evidenceEventIds, wait: false */ },
+);
+const terminal = await client.governedRefinement(detached.proposalId);
+```
+
+An agent may target itself or its direct creation-family child; the workspace owner may target workspace agents; the automatic refiner is local-only and uses its configured scope. The reviewer is a separate sealed invocation selected by the supervisor from the origin route's current model. Its frozen inputs pin the product constitution and policy. Workspace-charter and user-constraint configuration is unavailable and is represented as `null`; callers cannot select a reviewer.
+
+Profiles and non-skill harness content apply atomically after approval and application-time revalidation. Skills activate only after durable compile and declared runtime tests pass. `wait: true` returns at a terminal status. `wait: false` returns after durable admission and delivers one idempotent route notice later. Rejected proposals may be revised only through a new bounded proposal linked by `revisesProposalId`. `rollbackRefinement` restores exact earlier approved content through a new immutable version. Reviewer approval proves policy consistency, not improved outcomes.
 
 ## Durable recursive work
 
@@ -246,9 +274,9 @@ The database-driven coordinators create durable wakes. Missed intervals coalesce
 
 `memory.create/search/list` operate on scoped, attributable records. Search returns both ranked records and provenance for candidates, policy rejections, and selections. FTS5 is a candidate generator; scope, status, tags, conflicts, exposure, and limits remain authoritative service decisions.
 
-`refiner.request` freezes a bounded trajectory and runs a durable recursive child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Public recursive calls remain text operations, and no assistant JSON parser or prose fallback exists. Valid output enters proposal validation and bounded candidate exposure. Promotion, broad scope, approval, and rollback are governed separately; model prose is not evidence.
+`refiner.request` freezes a bounded trajectory and runs a durable proposer child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Public recursive calls remain text operations, and no assistant JSON parser or prose fallback exists. A proposed change then enters the separate sealed governance reviewer, application-time validation, automatic application or rejection, and terminal delivery path.
 
-`harness` exposes proposal, validation, activation, allocation, observation, decision, approval, history, and rollback operations. `skills` compiles, tests, and invokes immutable skill versions through the outbox. `specs.spawn` admits a version-pinned subagent through the normal task/session model. Skill permissions are an exact runtime allowlist and are not an OS sandbox.
+`harness` still exposes ADR-0002 proposal, validation, activation, allocation, observation, decision, approval, history, and rollback operations for advanced and legacy-compatible candidate evaluation. They are not the ordinary activation path under ADR 0012. `skills` compiles, tests, and invokes immutable skill versions through the outbox. `specs.spawn` admits a version-pinned subagent through the normal task/session model. Skill permissions are an exact runtime allowlist and are not an OS sandbox.
 
 The generated-cell facades are narrower than the supervisor API. In particular, evaluator and user authority is not delegated to generated code. See [Generated TypeScript console SDK](./console-sdk.md).
 

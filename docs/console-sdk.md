@@ -296,7 +296,7 @@ The model view includes active entries authorized for the local/workspace/user/g
 
 `review()` uses a supervisor-selected sealed recursive response contract with exactly one fully typed `agencity_submit_refinement_review` provider tool. The structured child result is retained without an assistant result message and is bound to the exact child model completion. This internal path does not change the public `rlm` methods below, which remain text-result calls.
 
-Generated code cannot validate, activate, allocate, record evaluator observations, approve promotion, decide promotion, approve rollback, or perform rollback. Those operations remain evaluator/user-owned through the supervisor or public client.
+`review()` is the ordinary trajectory-to-governance entrypoint: a durable proposer may return no change or one typed candidate, which then enters deterministic validation, a separate sealed reviewer, application-time revalidation, automatic application, and exact terminal delivery. `propose(input)` retains the ADR-0002 direct candidate API for advanced and legacy-compatible use; it is not the ordinary activation path. Generated code cannot choose either reviewer, approve its own content, widen scope, record owner authority, or use legacy evaluator operations as a shortcut around governance.
 
 ## `sdk.skills`
 
@@ -338,11 +338,28 @@ await sdk.agents.send({
 
 const family = await sdk.agents.list();
 const page = await sdk.agents.messages({ limit: 20 });
+
+const current = await sdk.agents.get();
+const proposal = await sdk.agents.proposeProfileUpdate(undefined, {
+  expectedProfileVersionId: current.profileVersionId,
+  replacement: {
+    role: "Repository investigator",
+    purpose: "Investigate repository failures.",
+    instructions: "Preserve attributable evidence.",
+  },
+  reason: "Clarify standing behavior",
+  predictedEffect: "More consistent investigations",
+  evidenceEventIds: [],
+}, { wait: true });
 ```
 
 Methods:
 
 - `spawn(input | taskString)`
+- `spawnMany(inputs)`
+- `get(target?)`
+- `proposeProfileUpdate(target, input, { wait? })`
+- `rollbackProfile(target, { expectedCurrentVersionId, restoreVersionId, reason, evidenceEventIds })`
 - `list()`
 - `send(input)` or `send(target, content)`
 - `messages(options?)`
@@ -358,7 +375,11 @@ Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one author
 
 `spawn` runs the child by default; `{ run: false }` admits without immediate runnable execution. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile. The profile is committed atomically with child admission and participates in idempotency checks. `followUp` reuses an idle or stopped retained child session and schedules a normal durable run.
 
-The generated agent facade does not expose profile inspection, proposal, activation, or rollback methods. Profile revision governance is not implemented.
+`get()` without a target returns the executing agent's full active profile; a permitted direct-child target returns that child's profile. Proposal targets are limited to self or a direct creation-family child. The executing session and branch supply proposer identity, so generated code cannot spoof owner authority, another relationship, or evidence origin.
+
+`proposeProfileUpdate` records the expected version, replacement, reason, predicted effect, evidence, and optional `revisesProposalId`. With `wait: true` it resolves at a terminal governance status. With `wait: false` it returns after durable admission and the exact result is later delivered to the origin route. The separate reviewer uses the route's current model and frozen product constitution/policy; workspace charter and user constraints are unavailable and pinned as `null`. The caller cannot choose the reviewer. Approval establishes policy consistency, not outcome proof.
+
+`rollbackProfile` accepts only an exact earlier approved version of the same target and current-version compare-and-swap. It creates a new immutable restoration version; any content change requires a new reviewed proposal. Siblings, unrelated agents, and cross-root targets are rejected.
 
 ## `rlm` and `sdk.rlm`
 
