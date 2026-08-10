@@ -47,7 +47,7 @@ export function containsCredentialMaterial(text: string, environment: NodeJS.Pro
   // opaque reference scheme. Raw credential assignments use concrete secret
   // field names, while reference descriptors are checked structurally by the
   // profile store.
-  if (/(?:password|passwd|secret|credential|authorization|auth|(?:[A-Za-z0-9]+[_-])?token|api[_-]?key)\s*[:=]\s*[^\s,;]+/i.test(text)) return true;
+  if (/(?:password|passwd|secret|authorization|token|(?:access|refresh|auth|id)[_-]?token|api[_-]?key)\s*[:=]\s*[^\s,;]+/i.test(text)) return true;
   for (const match of text.matchAll(/(?:https?|libsql):\/\/[^\s]+/gi)) {
     try {
       const url = new URL(match[0]);
@@ -93,7 +93,7 @@ export function scrubCredentialText(text: string): string {
     .replace(/(?:Bearer|Basic)\s+[A-Za-z0-9+/_.=-]{8,}/gi, REDACTED)
     .replace(/(?:sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9_-]{8,}/g, REDACTED)
     .replace(/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED)
-    .replace(/((?:password|passwd|secret|credential|authorization|auth|(?:[A-Za-z0-9]+[_-])?token|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, `$1${REDACTED}`);
+    .replace(/((?:password|passwd|secret|authorization|token|(?:access|refresh|auth|id)[_-]?token|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, `$1${REDACTED}`);
 }
 
 /**
@@ -168,7 +168,7 @@ export class StreamingTextScrubber {
       }
     }
     const credentialPrefix = this.#pending.slice(0, safeEnd).match(
-      /(?:Bearer\s+|Basic\s+|sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9+/_.=-]*$|(?:password|passwd|secret|credential|authorization|auth|(?:[A-Za-z0-9]+[_-])?token|api[_-]?key)\s*[:=]\s*[^\s,;]*$|(?:https?|libsql):\/\/[^\s/?#]*$/i,
+      /(?:Bearer\s+|Basic\s+|sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9+/_.=-]*$|(?:password|passwd|secret|authorization|token|(?:access|refresh|auth|id)[_-]?token|api[_-]?key)\s*[:=]\s*[^\s,;]*$|(?:https?|libsql):\/\/[^\s/?#]*$/i,
     );
     if (credentialPrefix) {
       const matchStart = safeEnd - credentialPrefix[0].length;
@@ -176,7 +176,7 @@ export class StreamingTextScrubber {
       if (retainedCredentialLength > this.#holdCharacters + 4_096) {
         const mode = /^(?:https?|libsql):\/\//i.test(credentialPrefix[0])
           ? "url"
-          : /^(?:password|passwd|secret|credential|authorization|auth|(?:[A-Za-z0-9]+[_-])?token|api[_-]?key)\s*[:=]/i.test(credentialPrefix[0])
+          : /^(?:password|passwd|secret|authorization|token|(?:access|refresh|auth|id)[_-]?token|api[_-]?key)\s*[:=]/i.test(credentialPrefix[0])
             ? "assignment"
             : "token";
         const before = this.#pending.slice(0, matchStart);
