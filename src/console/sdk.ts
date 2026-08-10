@@ -1,4 +1,4 @@
-import type { AgentProfileInput, ArtifactReference, BudgetLimits, ContextCompactionStrategy, ModelConfiguration, WorkingValue } from "../domain/index.ts";
+import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, ModelConfiguration, WorkingValue } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { InspectOptions, InspectPreview } from "./inspect.ts";
 
@@ -81,14 +81,50 @@ export interface ArtifactsSdk {
     };
   }>;
 }
+export type ShellOutputValue = {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+};
+export type ShellOutputPreview = {
+  readonly exitCode: number;
+  readonly stdout: {
+    readonly head: string;
+    readonly tail: string;
+    readonly byteLength: number;
+    readonly retainedByteLength: number;
+  };
+  readonly stderr: {
+    readonly head: string;
+    readonly tail: string;
+    readonly byteLength: number;
+    readonly retainedByteLength: number;
+  };
+};
+export type ShellBoundedOutput = BoundedOutputV1<ShellOutputValue, ShellOutputPreview> & {
+  readonly layout?: {
+    readonly stdout: { readonly start: number; readonly end: number };
+    readonly stderr: { readonly start: number; readonly end: number };
+  };
+};
+export type FilePageValue = {
+  readonly content: string;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly totalLines: number;
+  readonly nextLine: number | null;
+  readonly sha256: string;
+  readonly size: number;
+};
+export type FilePageBoundedOutput = BoundedOutputV1<FilePageValue>;
 export interface ToolsSdk {
   request(executor: string, operation: string, input: JsonValue, options?: { idempotencyKey?: string; idempotent?: boolean }): Promise<{ outcome: "succeeded" | "failed" | "cancelled" | "unknown"; output?: JsonValue; error?: string }>;
-  shell(command: string, options?: { cwd?: string; timeoutMs?: number; idempotencyKey?: string }): Promise<JsonValue>;
+  shell(command: string, options?: { cwd?: string; timeoutMs?: number; idempotencyKey?: string }): Promise<ShellBoundedOutput>;
   readFile(path: string, options?: {
     readonly startLine?: number;
     readonly endLine?: number;
     readonly expectedSha256?: string;
-  }): Promise<JsonValue>;
+  }): Promise<FilePageBoundedOutput>;
   writeFile(path: string, content: string, expectedSha256?: string): Promise<JsonValue>;
 }
 export interface MemorySdk { search(query: string, options?: JsonValue): Promise<JsonValue>; create(input: JsonValue | string): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue> }

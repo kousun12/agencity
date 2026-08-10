@@ -190,6 +190,14 @@ Agent-profile control events are session-wide but use the session's initial bran
 
 See [Recovery](./recovery.md) for the complete state machine.
 
+### Bounded output and provider input
+
+Shell and file helpers return `agencity.bounded-output.v1`. Shell retains complete inline output only while each stream fits 24 KiB. Larger local output uses 12 KiB head and tail previews per stream and spills at most 32 MiB of complete scrubbed stdout/stderr to CAS. `truncated` means no complete retained value exists; do not treat command success as output completeness. File reads use one-based pages capped at 2,000 lines, 2 KiB per line, and 48 KiB total. Artifact recovery uses zero-based half-open ranges capped at 64 KiB.
+
+The runtime also limits automatic provider observations to 56 KiB per item and 64 KiB per dependent step. The complete `AgentRunStepStarted.observationEventIds` ledger remains canonical; the bounded provider projection is not evidence deletion. Use retained file-page or artifact-range guidance rather than re-running a non-idempotent effect solely to obtain omitted output.
+
+Model admission records the exact `agencity.provider-input.v1` candidate used by both estimation and execution. `/context` reports capacity and compaction provenance. Unknown provider capacity remains unknown; complete candidates above 512 KiB must compact toward 384 KiB or stop before provider dispatch. The UTF-8-bytes-per-four estimator is conservative admission evidence, not provider-reported token usage.
+
 ## Completion gates and blocked runs
 
 A model's successful `finish` submission is provisional until required completion gates pass. Failed or stale evidence returns to the run as a bounded repair observation. An unknown gate effect remains visible and blocks completion.
@@ -318,7 +326,7 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
 
-The current workspace format accepts only event schema version 4. Workspace histories containing schema version 1, 2, or 3 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-4 sessions with complete initial profiles; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
+The current workspace format accepts only event schema version 5 and reducer version 15. Workspace histories containing schema version 1, 2, 3, or 4 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-5 sessions with complete initial profiles, typed effect origins, and exact provider-input admission; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

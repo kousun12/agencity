@@ -89,6 +89,10 @@ The completion command runs through the same durable effect path as other shell 
 
 A successful finish is provisional until every required gate passes. Failed gates return repair evidence to the agent without publishing its proposed success message. An unknown required gate ends the run as unknown without publishing that message. Blocked and failed finishes commit their exact submitted messages atomically with terminal status. A failed finish after unresolved required-gate failure is reported as goal-derived blocked.
 
+Unexpected large output does not become an unbounded next prompt. Shell and file helpers report `inline`, `spilled`, `truncated`, or `refused` completeness. Complete inline results are under `.value`. Local shell output above the inline limit keeps bounded head/tail previews and spills complete scrubbed bytes up to 32 MiB when artifact staging is available. File reads use one-based line pages with digest-pinned continuation. Artifact recovery uses exact zero-based half-open ranges of at most 64 KiB. `truncated` means the complete output is unavailable even if the command itself succeeded.
+
+Automatic observations are also capped per step. The complete canonical event-ID ledger remains retained for inspection; the model receives a bounded derived view that avoids repeating a successful cell effect both as an effect outcome and as the cell result. Failed, cancelled, and unknown effects remain visible and actionable.
+
 ## Sessions and branches
 
 A session is a durable agent identity with its conversation, model, budget, goals, and child work. A branch is one retained line of that session's history.

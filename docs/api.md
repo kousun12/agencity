@@ -99,7 +99,7 @@ The Echo provider exists inside the low-level runtime as a deterministic test fi
 
 `ModelExecutor.providers()` and `Supervisor.modelProviders` return secret-free descriptors with names, display labels, capabilities, usability, credential source, and remediation. `ModelExecutor.contextCapacity()` reports exact provider/operator metadata or an explicit unknown value; it does not guess model capacity.
 
-Structured requests use response-aware `agencity.model-dispatch.v2` and return `agencity.model-effect-output.v2`. The built-in product transports declare formal tools without execute callbacks and perform no provider-side execution or tool-result continuation. A custom provider's complete structured output is credential-checked across all fields and fails closed before return or persistence.
+Structured requests use response-aware `agencity.model-dispatch.v2`, immutable `agencity.provider-input.v1`, and `agencity.model-effect-output.v2`. `buildProviderInputCandidate` produces the exact normalized messages, formal tool declarations/schemas, policy, token-relevant options, and dispatch/endpoint/capacity provenance used by both `estimateProviderInputCandidate` and execution. Recovery reconstructs and digest-checks that candidate. Unknown capacity remains explicit and imposes a 512 KiB complete-candidate ceiling with a 384 KiB compaction target. The built-in product transports declare formal tools without execute callbacks and perform no provider-side execution or tool-result continuation. A custom provider's complete structured output is credential-checked across all fields and fails closed before return or persistence.
 
 ## Sessions, branches, and autonomous runs
 
@@ -118,6 +118,8 @@ Product tasks use the strict autonomous-run service:
 - `runs.cancel` commits cancellation intent before aborting admitted work.
 
 An exact `requestKey` retry returns the same run; reuse with changed durable meaning conflicts. `unknown`, `cancelled`, `budget_exceeded`, `blocked`, and `failed` are distinct outcomes.
+
+Each step's `observationEventIds` is the complete canonical exact-once ledger. `deriveAgentProviderObservations` creates the bounded provider view: a terminal cell owns successful linked effect presentation, duplicate successful outcome payloads are omitted, and failed/cancelled/unknown outcomes remain actionable. Automatic observations are limited to 56 KiB per item and 64 KiB total without changing the raw ledger.
 
 Autonomous calls declare exactly two fixed provider tools: `bun_console` and `finish`. They are response declarations, not executable provider callbacks. Only a validated and durably committed `bun_console` submission can execute generated work. Shell, file, SQL, model, subagent, memory, skill, state, and artifact operations are injected APIs inside that later disposable cell. `finish` ends the run as successful, blocked, or failed. Supplemental narration is diagnostic-only, and the supervisor never searches prose for JSON or code. See [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) and [Generated TypeScript console SDK](./console-sdk.md).
 
@@ -297,7 +299,7 @@ interface AgentStorage {
 
 Canonical writes go through validated event and service commands. `readonlyQuery({ sql, args })` is a bounded LibSQL-oriented analytical surface, not a portable mutation interface. The local adapter advertises offline writes, analytical SQL, in-process notifications, and same-device process fencing. It does not advertise distributed leases.
 
-Snapshots and operational tables are projections. `agent_profile_versions` and `workspace_agent_profiles` are rebuilt from schema-version-4 session/profile events; recursive-handle and context projections rebuild their retained profile and effective-prompt provenance. Historical rebuild is deterministic and never re-executes effects.
+Snapshots and operational tables are projections. `agent_profile_versions`, `workspace_agent_profiles`, and migration-019 outbox origins rebuild from schema-version-5 events; recursive-handle and context projections rebuild their retained profile, effective-prompt, and provider-input provenance. Historical rebuild is deterministic and never re-executes effects.
 
 ```ts
 const { cursor, state } =
@@ -326,6 +328,8 @@ await store.export(reference, destination);
 ```
 
 `LocalArtifactStore` stores bytes in a local filesystem CAS. `S3CompatibleArtifactStore` is an implemented remote S3/R2-style HTTP adapter available from the placement entrypoint. Neither adapter supplies automatic replication or garbage collection. Physical `delete` can invalidate retained references; ownership and retention policy belong above the store contract.
+
+`readRange` uses exact zero-based half-open ranges of at most 64 KiB. Whole-object `resolve` is an operator/internal store method; generated cells expose only `artifacts.readRange`, whose inline bounded envelope contains exact bytes and continuation metadata. Generated `tools.shell` and `tools.readFile` return `BoundedOutputV1`; callers inspect `completeness` before `.value`. Shell spills complete scrubbed output up to 32 MiB when local staging is available. File pages use one-based inclusive windows capped at 2,000 lines, 2 KiB per line, and 48 KiB. See [Console SDK](./console-sdk.md).
 
 HTTP adapters also exist for relational state, memory candidate generation, and remote executor transport. These are client/handler implementations and conformance-tested contracts, not a hosted Agencity deployment. See [Placement adapters](./placement.md) and [Capability matrix](./capabilities.md).
 

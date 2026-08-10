@@ -25,7 +25,11 @@ describe("FU-009 installed no-ID release transcript", () => {
         await tools.writeFile("answer.txt", "41\n");
         const check = await tools.shell("test -f answer.txt && grep -q '^41$' answer.txt");
         await state.set("acceptance-first-pass", { before, check });
-        return { wrote: 41, verifiedFirstPass: check.exitCode === 0 };
+        return {
+          wrote: 41,
+          verifiedFirstPass:
+            check.completeness === "inline" && check.value.exitCode === 0,
+        };
       `),
       action("typescript", String.raw`
         const recursive = await rlm.start({ task: "acceptance recursive review", input: { expected: 42 }, idempotencyKey: "acceptance-recursive" });
@@ -73,7 +77,7 @@ describe("FU-009 installed no-ID release transcript", () => {
     ], fixture.environment());
     expect(completed.stderr).toBe("");
     const outcome = parseSingleJson(completed);
-    expect(completed.code).toBe(0);
+    expect(completed.code, `${completed.stdout}\n${completed.stderr}`).toBe(0);
     expect(outcome).toMatchObject({ protocol: "agencity.run-result", version: 1, status: "succeeded", exitCode: 0, steps: 5 });
     expect(outcome.final).toContain("answer repaired to 42");
     expect(await readFile(join(world.repository, "answer.txt"), "utf8")).toBe("42\n");
@@ -134,5 +138,77 @@ describe("FU-009 installed no-ID release transcript", () => {
       return value.status === "succeeded" && value.final?.includes("detached work completed") ? value : undefined;
     });
     expect(fixture.count(detachedTask)).toBe(1);
+  }, 120_000);
+
+  test("bounds unexpected shell output and completes after focused artifact-range verification", async () => {
+    const fixture = new StrictActionFixture(); fixtures.push(fixture);
+    const world = await AcceptanceWorld.create("large-shell"); worlds.push(world);
+    const task = "verify an unexpected large shell result";
+
+    fixture.script(task, [
+      action("typescript", String.raw`
+        const output = await tools.shell(
+          "awk 'BEGIN { for (i = 0; i < 30000; i++) printf \"x\"; printf \"TAIL-MARKER\\\\n\" }'"
+        );
+        return output;
+      `),
+      probe => {
+        expect(probe.lastUserText).toContain('"completeness":"spilled"');
+        expect(probe.lastUserText).toContain("artifacts.readRange(artifactId, start, end)");
+        expect(probe.lastUserText).toContain('"head":"');
+        expect(probe.lastUserText).toContain('"tail":"');
+        const artifactId = probe.lastUserText.match(/sha256:[a-f0-9]{64}/)?.[0];
+        const stdoutEnd = probe.lastUserText.match(
+          /"layout":\{"stdout":\{"start":0,"end":([0-9]+)/,
+        )?.[1];
+        if (!artifactId || !stdoutEnd) {
+          throw new Error("bounded shell observation omitted artifact range metadata");
+        }
+        const end = Number(stdoutEnd);
+        return action("typescript", `
+          const range = await artifacts.readRange(
+            ${JSON.stringify(artifactId)},
+            ${Math.max(0, end - 64)},
+            ${end}
+          );
+          const tail = new TextDecoder().decode(range.value.bytes);
+          return {
+            completeness: range.completeness,
+            start: range.value.start,
+            end: range.value.end,
+            size: range.value.size,
+            nextStart: range.value.nextStart,
+            recoveredTail: tail.includes("TAIL-MARKER"),
+          };
+        `);
+      },
+      probe => {
+        expect(probe.lastUserText).toContain('"completeness":"inline"');
+        expect(probe.lastUserText).toContain('"recoveredTail":true');
+        return action("final", "large shell output was bounded and its exact tail was verified");
+      },
+    ]);
+
+    const configured = await world.command(
+      ["config", "set-model", "openai:openai/fixture-v1", "--json"],
+      fixture.environment(),
+    );
+    expect(configured.code).toBe(0);
+
+    const completed = await world.command(
+      ["run", "--json", task],
+      fixture.environment(),
+    );
+    expect(completed.stderr).toBe("");
+    expect(completed.code, `${completed.stdout}\n${completed.stderr}`).toBe(0);
+    expect(parseSingleJson(completed)).toMatchObject({
+      protocol: "agencity.run-result",
+      version: 1,
+      status: "succeeded",
+      exitCode: 0,
+      steps: 3,
+      final: "large shell output was bounded and its exact tail was verified",
+    });
+    expect(fixture.count(task)).toBe(3);
   }, 120_000);
 });

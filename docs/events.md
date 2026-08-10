@@ -1,6 +1,6 @@
-# Event schemas (version 4)
+# Event schemas (version 5)
 
-`events` is the canonical append-only history. The runtime accepts schema version 4 only. Workspaces containing schema version 1, 2, or 3 reject with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. After release, payload evolution requires a new schema version and an explicit tested projection path.
+`events` is the canonical append-only history. The runtime accepts schema version 5 only. Workspaces containing schema version 1, 2, 3, or 4 reject with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. After release, payload evolution requires a new schema version and an explicit tested projection path.
 
 ## Header
 
@@ -15,7 +15,7 @@ Every stored event has:
 | `causationId` | string or `null` | Direct causal event when supplied. |
 | `correlationId` | string or `null` | Cross-event operation correlation when supplied. |
 | `type` | `EventType` | Payload discriminator listed below. |
-| `schemaVersion` | positive integer | Payload/header version; exactly `4`. |
+| `schemaVersion` | positive integer | Payload/header version; exactly `5`. |
 | `committedAt` | string (normally ISO datetime) | Commit timestamp supplied or generated at the storage boundary. |
 | `producer` | non-empty string | Usually `supervisor`, `console`, `model`, `executor`, `client`, or `recovery`. |
 | `idempotencyKey` | string or `null` | Unique within `(sessionId, type)` when present. Same payload/branch deduplicates; changed meaning conflicts. |
@@ -42,6 +42,18 @@ type ArtifactReference = {
   artifactId: string; digest: string /* 64 lowercase hex */;
   mediaType: string; size: number /* nonnegative */;
 };
+
+type BoundedOutputV1<T, P = T> =
+  | { protocol: "agencity.bounded-output.v1"; completeness: "inline";
+      byteLength: number; value: T }
+  | { protocol: "agencity.bounded-output.v1"; completeness: "spilled";
+      byteLength: number; preview: P; artifact: ArtifactReference; guidance: string }
+  | { protocol: "agencity.bounded-output.v1"; completeness: "truncated";
+      byteLength: number; preview: P;
+      reason: "spill-unavailable" | "spill-failed" | "spill-limit" | "observation-budget";
+      guidance: string }
+  | { protocol: "agencity.bounded-output.v1"; completeness: "refused";
+      byteLength: 0; reason: string; guidance: string };
 
 type Usage = {
   inputTokens: number; outputTokens: number; costUsd: number;
@@ -89,7 +101,7 @@ A model configuration has required non-empty `provider`, canonical `creator/mode
 
 Optional fields are marked `?`. All IDs/names required by schema are non-empty strings unless a stricter note is shown.
 
-| Event type | Version 4 payload | Projection/semantic effect |
+| Event type | Version 5 payload | Projection/semantic effect |
 |---|---|---|
 | `SessionCreated` | `{ workspaceId, initialBranchId, model, budget, agentProfile, sessionName?, initialBranchName?, parentSessionId?, parentBranchId?, rootSessionId?, depth?, taskId? }` | Atomically initializes a root or normal child session and its complete revision-1 profile. Child creation requires the complete parent/root/depth/task tuple. The embedded profile retains exact rendered prompt, digest, creator, reason, and optional specification source; initial proposal/review/rollback provenance is null. |
 | `AgentProfileVersionCreated` | `{ agentProfile, expectedActiveProfileVersionId }` | Retains a later immutable governed or restoration version after compare-and-swap against the session-wide active pointer. The event must use the session's initial branch. |
@@ -107,14 +119,14 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `CellAbandoned` | `{ cellId, reason: string }` | Recovery terminal for proposed/running cell; never implies its effects did not happen. |
 | `WorkingValueSet` | `{ name, version: positive integer, value: WorkingValue }` | Replaces active named value only when version increases. |
 | `ArtifactRegistered` | `{ artifactId, digest, mediaType, size, sourceEventId?: string }` | Registers integrity metadata; bytes remain in the artifact store. |
-| `EffectRequested` | `{ effectId, executor, operation, input: JsonValue, idempotencyKey, idempotent: boolean }` | Canonical intent and source of a pending outbox projection. Commits before execution. |
+| `EffectRequested` | `{ effectId, executor, operation, input: JsonValue, origin: EffectOrigin, idempotencyKey, idempotent: boolean }` | Canonical intent and source of a pending outbox projection. The closed origin union identifies a cell, model call, compaction, goal gate, skill invocation/test, or runtime request before execution. Migration 019 stores the same origin in the outbox projection. |
 | `EffectAttemptStarted` | `{ effectId, attempt: positive integer }` | Records an execution attempt and projects running status. |
 | `EffectOutcomeRecorded` | `{ effectId, attempt: positive integer, outcome: EffectOutcome, output?: JsonValue, error?: string, modelFailure?: { code: ModelEffectFailureCode }, observedAt: ISO datetime }` | Canonical terminal observation. Unknown remains visibly distinct. A failed model effect retains the same closed failure code as `ModelCallTerminated.failureCode`. |
 | `EffectReconciliationRecorded` | `{ reconciliationId, effectId, assessment: "succeeded" | "failed" | "no_effect" | "still_unknown", summary, evidence?: JsonValue, recordedBy, recordedAt }` | Append-only operator evidence for an already-unknown effect. It never changes effect/outbox status and never retries work. |
 | `ContextCompactionRequested` | `{ compactionId, strategy, reason, requestedBy, instructions?, throughCursor, sourceEventIds, sourceDigest, frozenSources, capacity?, modelDispatch?, ancestorContextId?, rematerializedFromContextId? }` | Freezes the exact ordered narrative source envelopes, cursors, payloads, digest, and model dispatch before any model-summary effect. Requests never delete or rewrite their sources. |
 | `ContextCompactionFailed` | `{ compactionId, requestEventId, strategy, outcome, error, effectId? }` | Makes failed, unknown, protected-only, and non-shrinking compaction terminal states explicit. Unknown model effects are not retried. |
-| `ContextMaterialized` | `{ contextId, records, contentHash, context, harnessProvenance?, promptProvenance?, derivation? }` | Records exact model context and provenance. Autonomous and recursive calls retain invocation kind/ID, profile version and prompt digest, effective-system-prompt digest, prompt contract, and immutable base/profile/response/guidance component references. An optional typed compaction derivation names strategy, request, leaf/source digests, generation, capacity, effects, and usage. Also inserts immutable `context_records`. |
-| `ModelCallRequested` | `{ callId, contextId, effectId, modelDispatch, estimatedInputTokens, promptProvenance, attempt?, retryOfCallId?, contextWindow? }` | Links a logical model call or attributed overflow retry to exact context, immutable `agencity.model-dispatch.v2` configuration/capability/endpoint dispatch, input estimate, capacity provenance, durable effect, and the invocation's exact profile/effective-prompt provenance. The matching model `EffectRequested` input must contain the same dispatch and prompt provenance. |
+| `ContextMaterialized` | `{ contextId, records, contentHash, context, harnessProvenance?, promptProvenance?, providerInputAdmission?, derivation? }` | Records exact retained context and provenance. Autonomous and recursive calls retain invocation kind/ID, profile version and prompt digest, effective-system-prompt digest, prompt contract, and immutable base/profile/response/guidance component references. `providerInputAdmission` pins the exact provider-input candidate version/digest, dispatch, and capacity so recovery can reconstruct and verify it. An optional typed compaction derivation names strategy, request, leaf/source digests, generation, capacity, effects, and usage. Also inserts immutable `context_records`. |
+| `ModelCallRequested` | `{ callId, contextId, effectId, modelDispatch, providerInput, estimatedInputTokens, promptProvenance, attempt?, retryOfCallId?, contextWindow? }` | Links a logical model call or attributed overflow retry to exact context, immutable `agencity.model-dispatch.v2`, complete `agencity.provider-input.v1` candidate, estimate, capacity provenance, durable effect, and invocation prompt provenance. The candidate is the exact normalized messages, tool declarations, policies, token-relevant options, and provenance consumed by both estimation and execution. |
 | `ModelOutputChunk` | `{ callId, sequence: nonnegative integer, text: string }` | Appends authoritative projected output for a text-result call. Text paths commit one sequence-0 chunk in the terminal success batch; live provider deltas and formal arguments are deliberately not this event. |
 | `ModelCallCompleted` | `{ callId, responseMessageId?, result, resultDigest, termination, usage, warnings, usageSource }` | Marks model success and binds the response summary to the authoritative `agencity.model-effect-output.v2`. Text results may link an assistant message; formal submissions and violations retain only digest-linked summaries. |
 | `ModelCallTerminated` | `{ callId, outcome: "failed" | "cancelled" | "unknown", error?, failureCode? }` | Visible non-success terminal state with a closed model-failure classification; no fabricated response. |
@@ -137,7 +149,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 | `RecursiveModelStarted` / `RecursiveModelStatusChanged` | Durable handle/task/parent/child/model/input-set IDs, exact `responseAdmission`, immutable `profilePin`, bounded materialized input plus identity provenance/hash, lifecycle status, distinct terminal outcome, and bounded result/artifact reference. | Public recursive calls retain text admission. The profile pin fixes the child profile version, prompt digest, and prompt contract for the whole invocation. Sealed structured children retain their exact response contract/capability seed and may complete with a typed message-free result bound to the child model completion. |
 | `AgentRunRequested` | `{ runId, task, requestKey, profilePin, goalId?, goalMode?, wakeId? }` | Commits stable autonomous-run intent and the exact active profile version, prompt digest, and profile prompt contract used by every call in the run. One branch has at most one nonterminal run and an exact request-key retry cannot change durable meaning. |
 | `AgentRunStepStarted` | `{ runId, stepId, ordinal, contextId, callId, effectId, actionId, observationEventIds }` | Starts the next deterministic step and freezes the exact not-previously-delivered execution/input observation IDs for its dependent context. |
-| `AgentRunModelAttemptStarted` | `{ runId, stepId, ordinal, attempt, contextId, callId, effectId, reason, estimatedInputTokens, contextWindow, retryOfCallId? }` | Attributes the exact initial or provider-overflow model attempt. Only typed provider-confirmed overflow may create a later attempt over a strictly smaller candidate. |
+| `AgentRunModelAttemptStarted` | `{ runId, stepId, ordinal, attempt, contextId, callId, effectId, reason, providerInputVersion, providerInputDigest, estimatedInputTokens, contextWindow, retryOfCallId? }` | Attributes the exact initial or provider-overflow model attempt to its retained provider candidate. Only typed provider-confirmed overflow may create a later attempt over a strictly smaller candidate. |
 | `AgentRunActionCommitted` | `{ runId, stepId, ordinal, actionId, source: { kind: "tool-submission", modelCallId, providerToolCallId, resultDigest }, action }` | Retains one validated canonical `agencity.agent-action` derived from the accepted `bun_console` or `finish` formal call. The full accepted input remains only in the model effect output. |
 | `AgentRunActionRejected` | `{ runId, stepId, ordinal, actionId, source: { kind: "contract-violation", modelCallId, providerToolCallId?, resultDigest }, error }` | Retains a bounded typed violation without copying rejected raw arguments. One bounded correction step may follow; another consecutive rejection terminates the run. |
 | `AgentRunGoalCheckRecorded` | `{ runId, actionId, goalId, requestId, status: "passed" | "failed" | "unknown", summary, gateEvaluationEventIds }` | Binds one successful `finish` attempt to exact required-gate evidence. Failed/unknown checks do not publish the proposed success message. |
@@ -229,7 +241,7 @@ stateDiagram-v2
     Unknown --> [*]
 ```
 
-Every step context records its source events and an exact-once `run.observations` list. Formal submissions remain internal. A successful `finish` publishes its exact assistant message only after required gates pass; failed or unknown gate evidence does not publish it. Blocked and failed finishes atomically append their exact messages with terminal status. A failed finish after unresolved gate failure becomes goal-derived blocked. Later user text starts a new ordinary run. Recovery owns agent-run calls separately from diagnostic text-turn finalization, so a crash after the model effect commits cannot publish provisional data or call the provider again.
+Every step context records its source events and a complete exact-once `observationEventIds` ledger. The provider-facing `run.observations` is a deterministic bounded projection of that ledger: a selected terminal cell owns successful cell-effect presentation and receives a compact effect manifest, while duplicate successful `EffectOutcomeRecorded` payloads are omitted. Failed, cancelled, and unknown outcomes remain actionable. One item is limited to 56 KiB and one dependent step to 64 KiB; required terminal/uncertainty status is preserved even when previews or informational events are reduced. Canonical history and the raw ledger are unchanged. Formal submissions remain internal. A successful `finish` publishes its exact assistant message only after required gates pass; failed or unknown gate evidence does not publish it.
 
 ### Goal gate and heartbeat
 
@@ -243,7 +255,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. Synchronized envelopes use a separate ingestion path that quarantines invalid remote rows rather than weakening local validation.
-- Snapshots include `reducerVersion: 13`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 15`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 
@@ -251,12 +263,12 @@ Events are made visible to subscribers only after database commit. Durable commi
 
 ## Current evolution limitations
 
-The runtime validates one uniform `EVENT_SCHEMA_VERSION = 4`. Workspaces containing version 1, 2, or 3 reject before product migration, decoding, projection, synchronization, and recovery. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
+The runtime validates one uniform `EVENT_SCHEMA_VERSION = 5`. Workspaces containing version 1, 2, 3, or 4 reject before product migration, decoding, projection, synchronization, and recovery. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
 
 
 ## Harness, evaluation, and exact-version events
 
-Embedded harness and refinement content retains its own versioned formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-4 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
+Embedded harness and refinement content retains its own versioned formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-5 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
 
 | Event | Durable meaning |
 |---|---|
@@ -293,11 +305,11 @@ Embedded harness and refinement content retains its own versioned formats and st
 
 `ContextMaterialized.harnessProvenance` records the immutable base-policy ID/version/digest separately from editable harness state, complete FTS query/candidate/rejection/selection provenance, candidate allocation/exposure provenance, and every selected entry/version/source event. Its `records` array also references selected `HarnessVersionCreated` event IDs.
 
-Governance event payloads are strict schema-4 meanings rather than generic JSON envelopes. Storage checks proposal/origin/fingerprint agreement, frozen-input identity and digest, every lifecycle compare-and-swap row count, the sealed reviewer child relationship, typed decision proposal identity, exact application decision/version identity, and terminal notice status/result equality. A nonterminal proposal cannot be marked delivered. Local profile creation and activation must share one transaction with the exact governed application or rollback event.
+Governance event payloads are strict schema-5 meanings rather than generic JSON envelopes. Storage checks proposal/origin/fingerprint agreement, frozen-input identity and digest, every lifecycle compare-and-swap row count, the sealed reviewer child relationship, typed decision proposal identity, exact application decision/version identity, and terminal notice status/result equality. A nonterminal proposal cannot be marked delivered. Local profile creation and activation must share one transaction with the exact governed application or rollback event.
 
 ## Synchronization conflict resolution
 
-| Event type | Version 4 payload | Projection/semantic effect |
+| Event type | Version 5 payload | Projection/semantic effect |
 |---|---|---|
 | `SyncConflictResolved` | `{ conflictId, action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge", resolvedBy, chosenEventId?, note?, resolvedAt }` | Records explicit authority over a surfaced reconciliation. It updates the local reconciliation projection and replicates as ordinary canonical history; it never rewrites either claim or branch. |
 

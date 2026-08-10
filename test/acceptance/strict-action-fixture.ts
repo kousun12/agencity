@@ -252,8 +252,16 @@ export class StrictActionFixture {
     const offset = text.indexOf(marker);
     if (offset < 0) return null;
     try {
-      const value = JSON.parse(text.slice(offset + marker.length)) as { task?: unknown; stepOrdinal?: unknown };
-      return typeof value.task === "string" && typeof value.stepOrdinal === "number" ? { task: value.task, stepOrdinal: value.stepOrdinal } : null;
+      const value = JSON.parse(text.slice(offset + marker.length)) as {
+        task?: unknown;
+        stepOrdinal?: unknown;
+        run?: { task?: unknown; stepOrdinal?: unknown };
+      };
+      const durableRun = value.run ?? value;
+      return typeof durableRun.task === "string" &&
+          typeof durableRun.stepOrdinal === "number"
+        ? { task: durableRun.task, stepOrdinal: durableRun.stepOrdinal }
+        : null;
     } catch { return null; }
   }
 

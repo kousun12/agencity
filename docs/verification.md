@@ -41,7 +41,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 
 These are static constraints. They do not replace replay, recovery, protocol, security, or product behavior tests.
 
-`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-4 event replay and rebuild, durable initial agent profiles and prompt pins, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
+`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-5 event replay and reducer-15 rebuild, typed effect origins, exact provider-input admission, bounded observation ownership, bounded shell/file/artifact/cell output, durable initial agent profiles and prompt pins, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
 
 Those tests use local fixtures, temporary databases, deterministic providers, and in-process or loopback test services where appropriate. A pass supports the behaviors exercised by those tests. It does not establish hostile-code isolation, exactly-once external effects, automatic cross-device failover, or correctness at every possible machine-instruction crash boundary.
 
@@ -60,6 +60,7 @@ The suite uses a local OpenAI API fixture reached through the Vercel AI SDK tran
 - truthful missing-provider behavior and explicit provider/model selection;
 - canonical catalog model IDs and durable reasoning-effort selection;
 - autonomous TypeScript cells and typed file or shell effects;
+- unexpected large shell output, bounded spill delivery, and focused exact artifact-range recovery before completion;
 - exact root and child provider tool sets, single-call cardinality, narration-plus-call acceptance, and no text-JSON fallback;
 - durable recursive calls, child agents, messages, and retained follow-up;
 - sealed structured refinement submission with a message-free typed child result;
@@ -75,7 +76,7 @@ This acceptance suite is intentionally non-interactive. The `test:core` groups s
 
 The agent-run integration suite verifies zero, duplicate, malformed, truncated, oversized, and unknown formal calls execute nothing; a text-JSON response does not become an action; a typed rejection is delivered once to one correction step; a second consecutive rejection terminates the run; and recovery after committed response or action boundaries does not duplicate the model call, cell, message, or observation.
 
-The integration suite also verifies declaration-only AI SDK tools for OpenAI, Anthropic, and Gateway; direct-transport parallel-call suppression; normalized reasoning mapping; structured and text streaming; bounded warnings and errors; model-catalog normalization, endpoint-keyed cache isolation, stale fallback, and malformed-record rejection; dispatch equality; custom-provider credential failure across complete structured output; schema-1/schema-2 rejection without deletion; and structured result recovery across rebuild, reopen, and divergent synchronization.
+The integration suite also verifies declaration-only AI SDK tools for OpenAI, Anthropic, and Gateway; direct-transport parallel-call suppression; normalized reasoning mapping; structured and text streaming; bounded warnings and errors; model-catalog normalization, endpoint-keyed cache isolation, stale fallback, and malformed-record rejection; dispatch equality; custom-provider credential failure across complete structured output; schema-1 through schema-4 rejection without deletion; and structured result recovery across rebuild, reopen, and divergent synchronization.
 
 It records a focused family-projection benchmark with 25 relatives and branch histories expanded to 5,000 canonical event records at the storage boundary. It proves that a cold read projects each route once and that a warm refresh reuses current snapshots without replaying the 130,000 retained events. Controller tests separately prove that periodic family refresh requests are coalesced, never overlap, do not accumulate a timer backlog, and stop when the browser is closed and no child is actively working. Workspace Agents catalog tests cover explicit one-shot refresh, stale-row retention, superseded-response rejection, and exact product selection without adding a polling loop.
 
@@ -114,6 +115,28 @@ Final post-hardening verification then passed:
 
 The externally gated rows—live provider, official Turso Sync server, and Turso Cloud—remain skipped and unverified.
 
+### Agent-context-efficiency benchmark
+
+Run the deterministic production-builder benchmark with:
+
+```sh
+bun run benchmark:context-efficiency
+```
+
+The benchmark uses the shipped `agentProviderContext`, bounded active-run projection, observation derivation, `buildProviderInputCandidate`, estimator, formal tool registry, local shell executor, and local artifact store. Its documented pre-change baseline shape accumulates completed TypeScript source under the active run and delivers the same successful shell result through both effect and cell observations. The optimized side is not a handcrafted request shape.
+
+The August 10, 2026 deterministic run produced:
+
+- step 1: complete candidate 3,527 bytes; provider messages 698 bytes; serialized request 2,563 bytes; estimated input 641 tokens; baseline messages 517 bytes;
+- steps 2-5 each: complete candidate 29,205 bytes; provider messages 26,375 bytes; serialized request 28,240 bytes; estimated input 7,060 tokens;
+- baseline provider messages for steps 2-5: 60,714; 69,818; 78,922; and 88,026 bytes;
+- automatic observations for steps 2-5: cell-owned `CellCommitted` 25,548 bytes; production observation selection excludes request/attempt events, and the selected duplicate successful `EffectOutcomeRecorded` contributes zero automatic bytes;
+- shell fixture: 30,013 artifact bytes and 24,737 serialized preview bytes, with `spilled` completeness and 64 KiB artifact-range support;
+- capacity provenance: fixture provider metadata, 128,000-token context, 2,048-token output reserve, estimator `provider-input-utf8-bytes-per-4-tokens-v1`; compaction was not required; and
+- cumulative provider messages: 297,997 baseline bytes versus 106,198 shipped bytes, a 64.36% reduction. The required minimum is 30%.
+
+Provider-reported input tokens were skipped because no live credential-gated provider run was enabled. Live-provider, official Turso Sync server, and Turso Cloud results remain unverified; the deterministic estimate is not presented as provider-reported usage.
+
 ### Previous recorded baseline
 
 The preceding schema-version-3 baseline was produced on August 9, 2026 against runtime commit `1ec7114` plus documentation-only working-tree changes:
@@ -137,6 +160,7 @@ Use the narrowest relevant command while developing:
 ```sh
 bun run typecheck
 bun run check:architecture
+bun run benchmark:context-efficiency
 bun run test:unit
 bun run test:integration
 bun run test:e2e

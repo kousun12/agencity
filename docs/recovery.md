@@ -17,9 +17,9 @@ Only a committed terminal event and its committed exports become later state. Th
 
 Unless `recover: false`, `Supervisor.open` performs:
 
-Before this sequence, storage admission verifies that every retained event uses schema version 4. A workspace containing schema version 1, 2, or 3 fails closed with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. The runtime does not upcast, rewrite, or delete that history. Back up or move aside the incompatible workspace state before creating a fresh schema-version-4 workspace.
+Before this sequence, storage admission verifies that every retained event uses schema version 5. A workspace containing schema version 1, 2, 3, or 4 fails closed with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. The runtime does not upcast, rewrite, or delete that history. Back up or move aside the incompatible workspace state before creating a fresh schema-version-5 workspace.
 
-1. **Outbox reconciliation.** Each mutable `running` row whose owner disappeared is inspected.
+1. **Staging cleanup and outbox reconciliation.** Dead-process owner-only artifact staging directories are removed. Each mutable `running` row whose owner disappeared is inspected. Unreachable CAS objects are not treated as registered evidence.
 2. **Safe requeue.** An effect declared idempotent returns to `pending` with its attempt count retained.
 3. **Visible uncertainty.** A non-idempotent running effect gets a canonical `EffectOutcomeRecorded { outcome: "unknown" }`; it is not requeued. An anomalous pending non-idempotent row with a retained prior attempt is treated the same way; a normal pending first attempt remains safe to drain because it was never claimed.
 4. **Cell abandonment.** Every branch projection with a `proposed`/`running` cell gets a branch-scoped idempotent `CellAbandoned` event. This includes a child fork that inherited an incomplete ancestor cell, without reusing the ancestor's idempotency key.
@@ -87,7 +87,7 @@ The request commits before execution. A terminal event is authoritative even if 
 
 Provider stream deltas do not alter this lifecycle. They are process-local progress emitted only after `EffectRequested` and `EffectAttemptStarted`, have no cursor, and are never recovered or replayed. If a stream fails or is cancelled before the terminal success batch, no `ModelOutputChunk` or assistant `MessageAppended` commits. If the process disappears while the non-idempotent model effect is running, startup records `unknown`; it never promotes the observed prefix to a response and never retries the generation.
 
-Structured model requests commit their exact response-aware dispatch in `ModelCallRequested` and the matching model effect input before provider execution. Provisional formal arguments never execute from stream callbacks. A successful effect retains one complete accepted input in `agencity.model-effect-output.v2`; completion and action events use digests and call identities. Contract-violation output retains bounded evidence but not rejected argument bodies. Guard-aborted responses debit a conservative token estimate with zero provider cost, so invalid output does not evade budget accounting.
+Structured model requests commit `agencity.provider-input.v1` in `ModelCallRequested` and its compact admission identity with the exact context before provider execution. It contains the normalized messages, sealed tool declarations and schemas, selection/parallel policy, token-relevant options, dispatch/endpoint/capacity provenance, digest, and exact byte count used by both estimation and execution. Recovery rebuilds this candidate from retained context, dispatch, capacity, and the response-contract registry, then rejects a version or digest mismatch instead of consulting a later catalog. Provisional formal arguments never execute from stream callbacks. A successful effect retains one complete accepted input in `agencity.model-effect-output.v2`; completion and action events use digests and call identities. Contract-violation output retains bounded evidence but not rejected argument bodies. Guard-aborted responses debit a conservative token estimate with zero provider cost, so invalid output does not evade budget accounting.
 
 ## Retry rule
 
@@ -112,6 +112,10 @@ File write helps make retry safe by writing atomically, accepting an expected pr
 | After external action or streamed prefix, before terminal commit | Same as above; this is the ambiguity window. Cursorless progress is absent from history. | Same conservative rule; never infer success or commit the partial model text. |
 | After terminal outcome commit, before caller receives it | Canonical terminal event. | Return/reconstruct it; do not call executor again. |
 | Cell proposed/started, worker dies before terminal cell event | Incomplete cell plus any separately durable effect events. | Append `CellAbandoned`; reconcile effects independently. |
+| Shell spill staged before CAS placement | No artifact reference or terminal effect. | Remove stale owner staging at startup; apply ordinary idempotent/unknown effect recovery. |
+| Shell spill placed in CAS before atomic artifact/outcome append | Unreachable CAS bytes, no canonical success evidence. | Do not expose or infer success; unreferenced bytes may remain until a future garbage collector. |
+| Shell spill artifact registration and effect outcome append succeeds | Both canonical records are visible in one batch. | Reconstruct the bounded `spilled` envelope; do not rerun the command. |
+| Oversized cell JSON staged or placed before cell commit | No `ArtifactRegistered`/`CellCommitted` event. | Remove stale staging and do not expose it. Unreferenced CAS bytes may remain. |
 | Staged state/artifact reference before cell commit | No `WorkingValueSet`/`ArtifactRegistered` event. | Do not expose it. Unreferenced CAS bytes may remain. |
 | Cell commit succeeds, process dies before notification | Complete canonical batch. | Snapshot/subscriber catch-up reads it from storage. |
 | Model effect terminal, model-call finalization missing | Requested call plus terminal effect. | Finalize once without another provider call. |
@@ -150,7 +154,7 @@ Guaranteed by implemented paths:
 
 - canonical appends and their operational projection writes share one local transaction;
 - exact duplicate event idempotency keys return the original event; changed meaning conflicts;
-- profile versions, active pointers, invocation pins, and effective-system-prompt provenance rebuild from canonical schema-version-4 events;
+- profile versions, active pointers, invocation pins, effect origins, provider-input admission, and effective-system-prompt provenance rebuild from canonical schema-version-5 events;
 - non-idempotent lost ownership becomes unknown;
 - projection replay never invokes effects;
 - post-commit notification loss is repaired by cursor catch-up.
@@ -161,7 +165,7 @@ Not guaranteed:
 - recovery of heap objects or uncheckpointed cell variables;
 - reconstruction of independently changed workspace/services;
 - cross-device automatic execution-owner failover or distributed leases; local same-device managed-service takeover waits for the retained process lease to expire;
-- crash-atomicity across database and artifact/filesystem placement;
+- crash-atomicity across database and artifact/filesystem placement before the canonical registration/outcome append; the registration and referencing outcome themselves are one local database transaction;
 - cleanup of unreferenced CAS bytes;
 - complete operating-system kill tests for every crash instruction boundary (tests simulate the durable boundary states).
 

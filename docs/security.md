@@ -47,14 +47,19 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 - TUI-stored model keys live in a profile-owned `auth.json` written with mode `0600`, separate from canonical events and profile preferences.
 - Inputs containing an actual known environment or stored model secret value are rejected before durable append.
 - Known secret byte strings are redacted from executor outputs, logs, and errors before they become durable.
+- Shell stdout/stderr and oversized JSON string tokens use streaming scrubbing across chunk boundaries before owner-only staging or CAS placement. Raw unsanitized overflow is not intentionally written to events, artifacts, logs, previews, or errors.
 - Benign domain fields named `token`, `auth`, `password`, and similar are preserved; key names alone never trigger data mutation.
 - Model-visible refinement context and review content are scrubbed of known secret values only. Retained history that merely looks credential-shaped (for example `api_key=...` in a captured error) is not heuristically blocked, so a secret unknown to the supervisor can reach the refinement model through retained trajectory data.
 
 This is best-effort accidental-leak prevention. Names outside the heuristic, short secret values, credentials in other files/agents/keychains, encoded values, or alternate process channels may still be visible to trusted code. Generated code has the same OS-user authority and can read the profile credential file through ambient filesystem APIs. The model credential store is a narrow supervisor broker, not a general secret vault or hostile-code boundary; opaque references remain available for externally managed credentials.
 
+Owner-only artifact staging uses process-specific directories and mode `0700`/`0600` where supported. Startup removes stale staging owned by dead processes. A CAS object can become unreachable if placement succeeds before its canonical registration batch; no general garbage collector currently removes these orphans. This does not expose raw pre-scrubbed content, but operators must include the artifact directory in sensitive-data handling and disk-retention policy.
+
 ### Typed file adapter
 
 `FileExecutor` requires paths beneath its root lexically and checks resolved existing ancestors to resist symlink escape. It refuses to overwrite a symlink or delete a directory. Writes use temporary files and rename. These checks apply only to calls through `tools.readFile`/`writeFile`/`request("file", ...)`; they are not a filesystem sandbox for generated code or shell commands.
+
+Typed reads are bounded to one-based pages of at most 2,000 lines, 2 KiB per line, and 48 KiB. Artifact reads exposed to generated cells are zero-based half-open ranges of at most 64 KiB. These limits reduce accidental data amplification; they are not confidentiality boundaries because generated code retains ambient filesystem authority.
 
 ### Replica writer trust and cross-device effects
 

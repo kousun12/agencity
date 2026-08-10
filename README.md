@@ -14,7 +14,7 @@ Run Agencity with a minimally privileged OS account or place the entire runtime 
 
 Requirements:
 
-- [Bun](https://bun.sh/) 1.2 or newer
+- [Bun](https://bun.sh/) 1.3.13 or newer
 - a trusted local repository or an external sandbox around the whole runtime
 
 The package is private and is not published to a registry or standalone binary channel. Supported use is from a source checkout:
@@ -60,6 +60,7 @@ Agencity:
 - uses one fixed formal model-tool set: `bun_console` for a validated TypeScript cell and `finish` for a successful, blocked, or failed result;
 - runs file, shell, SQL, model, subagent, memory, skill, and artifact operations through durable runtime APIs;
 - commits each action and observation before a dependent model step;
+- keeps automatic observations bounded, spills recoverable large local output to immutable artifacts, and exposes file pages and artifact byte ranges for focused continuation;
 - retains child agents, messages, goals, completion checks, budgets, and unresolved outcomes;
 - opens a full-screen terminal client on interactive terminals and a readable transcript for non-interactive use; and
 - starts an authenticated local-machine-only workspace service on demand so detached work can continue independently of the client.
@@ -101,6 +102,8 @@ The TUI exposes the same route-relative flow through `/profile`. Proposals are v
 
 The default workspace database is `<repository>/.agencity/agent.db`. Large or byte-oriented results are stored separately in `<repository>/.agencity/artifacts/` and referenced by a SHA-256 content fingerprint. The product profile defaults to `~/.agencity/profile.db`.
 
+Shell and file helpers return an explicit completeness envelope. Complete inline values are under `.value`; larger shell output has a bounded head/tail preview and, when local spill succeeds, an artifact with exact range guidance. File continuation uses one-based line pages and a digest precondition. Artifact continuation uses zero-based half-open ranges up to 64 KiB. A successful command with `truncated` output does not claim that complete output was retained.
+
 Closing a client detaches; it does not prove that durable or external work stopped. Use `/stop` in the terminal interface or `agencity stop TARGET` for explicit cancellation.
 
 ## Recovery and uncertainty
@@ -136,6 +139,7 @@ The default deterministic gate is:
 
 ```sh
 bun install --frozen-lockfile
+bun run benchmark:context-efficiency
 bun run verify
 ```
 
