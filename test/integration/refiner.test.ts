@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
-import { AgentClient, LibSqlStorage, ProtocolServer, REFINEMENT_GOVERNANCE_CONTRACT_ID, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, deriveModelContractDiagnostics, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, validateRefinementGovernanceRecursiveResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
+import { AgentClient, ConflictError, LibSqlStorage, ProtocolServer, REFINEMENT_GOVERNANCE_CONTRACT_ID, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, deriveModelContractDiagnostics, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, validateRefinementGovernanceRecursiveResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
 import { ModelProviderResponseFailureError, formalMissingToolOutput, formalOutputFromAgentAction, formalOutputFromRefinementGovernanceDecision, formalOutputFromRefinementReviewSubmission } from "../../src/executors/model-response.ts";
 import { internalStructuredModelTurn } from "../../src/runtime/internal.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
@@ -2217,7 +2217,8 @@ describe("FU-016 durable RefinerService", () => {
   test("application errors distinguish compare-and-swap conflicts from deterministic failures", async () => {
     const provider = new ReviewProvider("governance-application-classification");
     const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
-    const originalPrepare = supervisor.agentProfiles.prepareApproved.bind(supervisor.agentProfiles);
+    const storage = supervisor.storage as any;
+    const originalAppend = storage.appendEvents.bind(storage);
     try {
       const active = await supervisor.agentProfiles.active(sessionId);
       const base = {
@@ -2235,8 +2236,11 @@ describe("FU-016 durable RefinerService", () => {
         evidenceEventIds: [evidence.id],
         wait: true,
       };
-      (supervisor.agentProfiles as any).prepareApproved = async () => {
-        throw new ValidationError("Agent profile application compare-and-swap failed");
+      storage.appendEvents = async (events: any[], options?: any) => {
+        if (events.some((event) => event.type === "AgentProfileVersionCreated")) {
+          throw new ConflictError("Agent profile application compare-and-swap failed");
+        }
+        return originalAppend(events, options);
       };
       const conflict = await supervisor.refinementGovernance.proposeOwner(sessionId, branchId, {
         ...base,
@@ -2245,8 +2249,11 @@ describe("FU-016 durable RefinerService", () => {
       });
       expect(conflict.status).toBe("apply_conflict");
 
-      (supervisor.agentProfiles as any).prepareApproved = async () => {
-        throw new ValidationError("Agent profile renderer produced invalid internal output");
+      storage.appendEvents = async (events: any[], options?: any) => {
+        if (events.some((event) => event.type === "AgentProfileVersionCreated")) {
+          throw new ValidationError("Agent profile renderer produced invalid internal output");
+        }
+        return originalAppend(events, options);
       };
       const failed = await supervisor.refinementGovernance.proposeOwner(sessionId, branchId, {
         ...base,
@@ -2257,7 +2264,7 @@ describe("FU-016 durable RefinerService", () => {
       expect((await supervisor.agentProfiles.active(sessionId)).profileVersionId)
         .toBe(active.profileVersionId);
     } finally {
-      (supervisor.agentProfiles as any).prepareApproved = originalPrepare;
+      storage.appendEvents = originalAppend;
       await supervisor.close();
     }
   });

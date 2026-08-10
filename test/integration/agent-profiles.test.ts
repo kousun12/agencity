@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  AGENT_ACTION_PROTOCOL,
-  AGENT_ACTION_VERSION,
   AGENT_PROFILE_BOUNDS,
   AGENT_TOOL_SELECTION_POLICY,
   AgentClient,
@@ -14,9 +12,10 @@ import {
   registerBrokeredSecret,
   renderExactAgentPrompt,
   sha256,
-  type AgentProfileVersion,
   type EventPayloads,
   type JsonValue,
+  type ModelProvider,
+  type AgentProfileVersion,
 } from "../../src/index.ts";
 import {
   FIXTURE_EFFECTIVE_SYSTEM_PROMPT,
@@ -25,11 +24,15 @@ import {
   removeTempRuntime,
   type TempRuntime,
 } from "../helpers.ts";
+import {
+  ApprovingGovernanceProvider,
+  approveProfileRevision,
+} from "../governance-provider.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
 
-async function open(prefix: string, provider?: ScriptedAgentActionProvider): Promise<Supervisor> {
+async function open(prefix: string, provider?: ModelProvider): Promise<Supervisor> {
   const temp = await makeTempRuntime(prefix);
   temps.push(temp);
   return Supervisor.open({
@@ -182,6 +185,66 @@ describe("durable agent profiles", () => {
     }
   });
 
+  test("rejects direct-service and forged-event profile activation bypasses", async () => {
+    const supervisor = await open("agencity-agent-profile-bypass-");
+    try {
+      const root = await supervisor.createSession({ workspaceId: "profile-bypass" });
+      const active = await supervisor.agentProfiles.active(root.sessionId);
+      expect((supervisor.agentProfiles as any).prepareApproved).toBeUndefined();
+      const input = {
+        role: active.role,
+        purpose: active.purpose,
+        instructions: "Invented governance must not activate.",
+      };
+      const exactAgentPrompt = renderExactAgentPrompt(input);
+      const forged: AgentProfileVersion = {
+        ...input,
+        profileVersionId: "forged-profile-version",
+        agentSessionId: root.sessionId,
+        revision: 2,
+        exactAgentPrompt,
+        promptContractId: "agencity.agent-profile.v1",
+        promptDigest: sha256(exactAgentPrompt),
+        createdBy: { kind: "user", profileId: supervisor.device.profileId },
+        sourceSpecEntryId: null,
+        sourceSpecVersionId: null,
+        reason: "Invented reviewed proposal.",
+        evidenceEventIds: [],
+        supersedesProfileVersionId: active.profileVersionId,
+        restoresProfileVersionId: null,
+        sourceProposalId: "missing-proposal",
+        reviewDecisionId: "missing-decision",
+        createdAt: new Date().toISOString(),
+      };
+      await expect(supervisor.storage.appendEvents([{
+        sessionId: root.sessionId,
+        branchId: root.branchId,
+        type: "AgentProfileVersionCreated",
+        producer: "supervisor",
+        idempotencyKey: "forged-profile-version",
+        payload: {
+          agentProfile: forged,
+          expectedActiveProfileVersionId: active.profileVersionId,
+        },
+      }, {
+        sessionId: root.sessionId,
+        branchId: root.branchId,
+        type: "AgentProfileActivated",
+        producer: "supervisor",
+        idempotencyKey: "forged-profile-activation",
+        payload: {
+          profileVersionId: forged.profileVersionId,
+          expectedActiveProfileVersionId: active.profileVersionId,
+          reason: forged.reason,
+        },
+      }])).rejects.toThrow(/reviewed_approved governed proposal/i);
+      expect((await supervisor.agentProfiles.active(root.sessionId)).profileVersionId)
+        .toBe(active.profileVersionId);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
   test("materializes sealed and explicit child profiles and compares them during idempotent admission", async () => {
     const supervisor = await open("agencity-agent-profile-child-");
     try {
@@ -322,12 +385,7 @@ describe("durable agent profiles", () => {
   });
 
   test("pins one profile and effective prompt across context, call, effect, and recovery boundaries", async () => {
-    const provider = new ScriptedAgentActionProvider([{
-      protocol: AGENT_ACTION_PROTOCOL,
-      version: AGENT_ACTION_VERSION,
-      type: "final",
-      content: "done",
-    }], "profile-prompt-provider");
+    const provider = new ApprovingGovernanceProvider("profile-prompt-provider");
     const supervisor = await open("agencity-agent-profile-prompt-", provider);
     try {
       const session = await supervisor.createSession({
@@ -343,45 +401,13 @@ describe("durable agent profiles", () => {
       expect((await supervisor.runs.get(session.sessionId, session.branchId, admitted.runId)).status).toBe("queued");
 
       const replacementInput = { role: "Later reviewer", purpose: "Review later tasks.", instructions: "- Use the later profile." };
-      const exactAgentPrompt = renderExactAgentPrompt(replacementInput);
-      const replacement: AgentProfileVersion = {
-        ...replacementInput,
-        profileVersionId: "agent-profile-profile-root-v2",
-        agentSessionId: session.sessionId,
-        revision: 2,
-        exactAgentPrompt,
-        promptContractId: "agencity.agent-profile.v1",
-        promptDigest: sha256(exactAgentPrompt),
-        createdBy: { kind: "system", componentId: "agencity.profile-test", version: 1 },
-        sourceSpecEntryId: null,
-        sourceSpecVersionId: null,
-        reason: "Test later-invocation activation",
-        evidenceEventIds: [],
-        supersedesProfileVersionId: firstProfile.profileVersionId,
-        restoresProfileVersionId: null,
-        sourceProposalId: null,
-        reviewDecisionId: null,
-        createdAt: "2026-08-09T00:00:00.000Z",
-      };
-      await supervisor.storage.appendEvents([{
-        sessionId: session.sessionId,
-        branchId: session.branchId,
-        type: "AgentProfileVersionCreated",
-        producer: "supervisor",
-        idempotencyKey: "profile-version:test-v2",
-        payload: { agentProfile: replacement, expectedActiveProfileVersionId: firstProfile.profileVersionId },
-      }, {
-        sessionId: session.sessionId,
-        branchId: session.branchId,
-        type: "AgentProfileActivated",
-        producer: "supervisor",
-        idempotencyKey: "profile-activation:test-v2",
-        payload: {
-          profileVersionId: replacement.profileVersionId,
-          expectedActiveProfileVersionId: firstProfile.profileVersionId,
-          reason: "Test later invocation behavior",
-        },
-      }]);
+      const replacement = await approveProfileRevision(
+        supervisor,
+        session.sessionId,
+        session.branchId,
+        replacementInput,
+        "profile-prompt-v2",
+      );
       expect((await supervisor.agentProfiles.active(session.sessionId)).profileVersionId).toBe(replacement.profileVersionId);
 
       await supervisor.runs.advance(session.sessionId, session.branchId, admitted.runId);
@@ -478,9 +504,10 @@ describe("durable agent profiles", () => {
   });
 
   test("projects session-wide profile activation into forks and branch subscriptions", async () => {
-    const supervisor = await open("agencity-agent-profile-fork-");
+    const provider = new ApprovingGovernanceProvider("profile-fork-provider");
+    const supervisor = await open("agencity-agent-profile-fork-", provider);
     try {
-      const root = await supervisor.createSession({ workspaceId: "profile-fork" });
+      const root = await supervisor.createSession({ workspaceId: "profile-fork", model: { provider: provider.name, model: "v1" } });
       await supervisor.appendMessage(root.sessionId, root.branchId, "user", "fork before activation");
       const rootHistory = await supervisor.storage.loadEvents(root.sessionId, { branchId: root.branchId });
       const forkBranchId = await supervisor.fork(root.sessionId, root.branchId, rootHistory.at(-1)!.cursor);
@@ -493,52 +520,27 @@ describe("durable agent profiles", () => {
         root.sessionId,
         forkBranchId,
         before.cursor,
-        (event) => observed.push(event.id),
+        (event) => {
+          if (event.type === "AgentProfileVersionCreated" ||
+              event.type === "AgentProfileActivated") observed.push(event.id);
+        },
       );
       const input = {
         role: "Fork-visible reviewer",
         purpose: "Provide standing behavior to every branch.",
         instructions: "- Keep profile identity session-wide.",
       };
-      const exactAgentPrompt = renderExactAgentPrompt(input);
-      const replacement: AgentProfileVersion = {
-        ...input,
-        profileVersionId: "agent-profile-fork-visible-v2",
-        agentSessionId: root.sessionId,
-        revision: 2,
-        exactAgentPrompt,
-        promptContractId: "agencity.agent-profile.v1",
-        promptDigest: sha256(exactAgentPrompt),
-        createdBy: { kind: "system", componentId: "agencity.profile-test", version: 1 },
-        sourceSpecEntryId: null,
-        sourceSpecVersionId: null,
-        reason: "Verify session-wide fork projection",
-        evidenceEventIds: [],
-        supersedesProfileVersionId: initial.profileVersionId,
-        restoresProfileVersionId: null,
-        sourceProposalId: null,
-        reviewDecisionId: null,
-        createdAt: "2026-08-09T00:00:00.000Z",
-      };
-      const committed = await supervisor.storage.appendEvents([{
-        sessionId: root.sessionId,
-        branchId: root.branchId,
-        type: "AgentProfileVersionCreated",
-        producer: "supervisor",
-        idempotencyKey: "fork-profile-version:v2",
-        payload: { agentProfile: replacement, expectedActiveProfileVersionId: initial.profileVersionId },
-      }, {
-        sessionId: root.sessionId,
-        branchId: root.branchId,
-        type: "AgentProfileActivated",
-        producer: "supervisor",
-        idempotencyKey: "fork-profile-activation:v2",
-        payload: {
-          profileVersionId: replacement.profileVersionId,
-          expectedActiveProfileVersionId: initial.profileVersionId,
-          reason: "Verify fork projection",
-        },
-      }]);
+      const beforeIds = new Set((await supervisor.storage.loadEvents(root.sessionId)).map((event) => event.id));
+      const replacement = await approveProfileRevision(
+        supervisor,
+        root.sessionId,
+        root.branchId,
+        input,
+        "fork-profile-v2",
+      );
+      const committed = (await supervisor.storage.loadEvents(root.sessionId))
+        .filter((event) => !beforeIds.has(event.id) &&
+          (event.type === "AgentProfileVersionCreated" || event.type === "AgentProfileActivated"));
       const deadline = Date.now() + 2_000;
       while (observed.length < 2 && Date.now() < deadline) await Bun.sleep(5);
       unsubscribe();
@@ -559,7 +561,7 @@ describe("durable agent profiles", () => {
   });
 
   test("pins explicit recursive helper profiles to the handle and every child call", async () => {
-    const provider = new ScriptedAgentActionProvider([], "unused-profile-recursive");
+    const provider = new ApprovingGovernanceProvider("unused-profile-recursive");
     const supervisor = await open("agencity-agent-profile-recursive-", provider);
     try {
       const root = await supervisor.createSession({ workspaceId: "recursive", model: { provider: provider.name, model: "v1" } });
@@ -594,45 +596,13 @@ describe("durable agent profiles", () => {
         purpose: "Inspect later recursive work.",
         instructions: "- Use the later standing behavior.",
       };
-      const laterPrompt = renderExactAgentPrompt(laterInput);
-      const later: AgentProfileVersion = {
-        ...laterInput,
-        profileVersionId: "agent-profile-recursive-later",
-        agentSessionId: handle.childSessionId,
-        revision: 2,
-        exactAgentPrompt: laterPrompt,
-        promptContractId: "agencity.agent-profile.v1",
-        promptDigest: sha256(laterPrompt),
-        createdBy: { kind: "system", componentId: "agencity.profile-test", version: 1 },
-        sourceSpecEntryId: null,
-        sourceSpecVersionId: null,
-        reason: "Verify invocation identity remains stable after activation",
-        evidenceEventIds: [],
-        supersedesProfileVersionId: child.profileVersionId,
-        restoresProfileVersionId: null,
-        sourceProposalId: null,
-        reviewDecisionId: null,
-        createdAt: "2026-08-09T00:00:00.000Z",
-      };
-      await supervisor.storage.appendEvents([{
-        sessionId: handle.childSessionId,
-        branchId: handle.childBranchId,
-        type: "AgentProfileVersionCreated",
-        producer: "supervisor",
-        idempotencyKey: "recursive-profile-version:later",
-        payload: { agentProfile: later, expectedActiveProfileVersionId: child.profileVersionId },
-      }, {
-        sessionId: handle.childSessionId,
-        branchId: handle.childBranchId,
-        type: "AgentProfileActivated",
-        producer: "supervisor",
-        idempotencyKey: "recursive-profile-activation:later",
-        payload: {
-          profileVersionId: later.profileVersionId,
-          expectedActiveProfileVersionId: child.profileVersionId,
-          reason: "Verify retained recursive invocation identity",
-        },
-      }]);
+      const later = await approveProfileRevision(
+        supervisor,
+        handle.childSessionId,
+        handle.childBranchId,
+        laterInput,
+        "recursive-profile-later",
+      );
       const wrongHandleProvenance = fixturePromptProvenanceForPin(
         {
           profileVersionId: later.profileVersionId,

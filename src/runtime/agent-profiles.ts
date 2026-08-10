@@ -17,6 +17,7 @@ import {
 } from "../domain/index.ts";
 import { containsBrokeredSecret } from "../security/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
+import { registerGovernedAgentProfilePreparer } from "./internal.ts";
 
 export interface AgentProfileSummary {
   readonly profileVersionId: string;
@@ -45,7 +46,9 @@ export interface AgentProfileDetail extends AgentProfileSummary {
 }
 
 export class AgentProfileService {
-  constructor(readonly storage: AgentStorage) {}
+  constructor(readonly storage: AgentStorage) {
+    registerGovernedAgentProfilePreparer(this, (input) => this.#prepareApproved(input));
+  }
 
   materializeInitial(input: AgentProfileInput, metadata: AgentProfileAdmissionMetadata): AgentProfileVersion {
     if (containsBrokeredSecret({
@@ -92,9 +95,11 @@ export class AgentProfileService {
     return { activeProfileVersionId: projected.activeProfileVersionId, items: profiles };
   }
 
-  async prepareApproved(input: {
+  async #prepareApproved(input: {
     readonly targetSessionId: string;
     readonly eventBranchId: string;
+    readonly originSessionId: string;
+    readonly originBranchId: string;
     readonly expectedActiveProfileVersionId: string;
     readonly replacement: AgentProfileInput;
     readonly createdBy: AgentPrincipalReference;
@@ -116,8 +121,8 @@ export class AgentProfileService {
       throw new ValidationError("Agent profile reproposal must make a substantive change");
     }
     await this.#assertEvidenceVisible(
-      input.targetSessionId,
-      input.eventBranchId,
+      input.originSessionId,
+      input.originBranchId,
       input.evidenceEventIds,
     );
     const createdAt = new Date().toISOString();
@@ -173,6 +178,9 @@ export class AgentProfileService {
   async prepareRestore(input: {
     readonly targetSessionId: string;
     readonly eventBranchId: string;
+    readonly originSessionId: string;
+    readonly originBranchId: string;
+    readonly evidenceAuthority: "origin_lineage" | "workspace_owner";
     readonly expectedCurrentVersionId: string;
     readonly restoreVersionId: string;
     readonly createdBy: AgentPrincipalReference;
@@ -189,9 +197,10 @@ export class AgentProfileService {
       throw new ValidationError("Agent profile rollback requires an earlier version");
     }
     await this.#assertEvidenceVisible(
-      input.targetSessionId,
-      input.eventBranchId,
+      input.originSessionId,
+      input.originBranchId,
       input.evidenceEventIds,
+      input.evidenceAuthority,
     );
     const profileVersionId = stableId(
       "agent-profile-restoration",
@@ -278,24 +287,30 @@ export class AgentProfileService {
 
   async #assertEvidenceVisible(
     sessionId: string,
-    _branchId: string,
+    branchId: string,
     evidenceEventIds: readonly string[],
+    authority: "origin_lineage" | "workspace_owner" = "origin_lineage",
   ): Promise<void> {
     if (evidenceEventIds.length > 32 || new Set(evidenceEventIds).size !== evidenceEventIds.length) {
       throw new ValidationError("Agent profile evidence must contain at most 32 distinct events");
     }
-    const targetRows = await this.storage.readonlyQuery({
+    const originRows = await this.storage.readonlyQuery({
       sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
       args: [sessionId],
     });
-    const workspaceId = String((targetRows[0] as any)?.workspace_id ?? "");
+    const workspaceId = String((originRows[0] as any)?.workspace_id ?? "");
+    const visible = authority === "origin_lineage"
+      ? new Set((await this.storage.loadEvents(sessionId, { branchId })).map((event) => event.id))
+      : null;
     for (const eventId of evidenceEventIds) {
       const event = await this.storage.getEvent(eventId);
       const sourceRows = event ? await this.storage.readonlyQuery({
         sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
         args: [event.sessionId],
       }) : [];
-      if (!event || String((sourceRows[0] as any)?.workspace_id ?? "") !== workspaceId) {
+      if (!event ||
+          String((sourceRows[0] as any)?.workspace_id ?? "") !== workspaceId ||
+          (visible !== null && !visible.has(eventId))) {
         throw new ValidationError("Agent profile evidence is outside the authorized route");
       }
     }

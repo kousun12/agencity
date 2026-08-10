@@ -58,6 +58,15 @@ export const SEALED_GOVERNANCE_REVIEWER_PROFILE: Readonly<AgentProfileInput> =
     ].join("\n"),
   });
 
+export const SEALED_GOVERNANCE_REVIEWER_LIMITS = Object.freeze({
+  tokenLimit: 16_384,
+  costLimitUsd: 1,
+  turnLimit: 2,
+  wallTimeLimitMs: 120_000,
+});
+export const SEALED_GOVERNANCE_REVIEW_WAIT_TIMEOUT_MS =
+  SEALED_GOVERNANCE_REVIEWER_LIMITS.wallTimeLimitMs + 5_000;
+
 export type RefinementTarget =
   | {
       readonly kind: "agent_profile";
@@ -153,6 +162,7 @@ export interface FrozenRefinementGovernanceInput {
   readonly constitution: typeof PRODUCT_CONSTITUTION_REFERENCE & { readonly text: string };
   readonly reviewPolicy: typeof REFINEMENT_GOVERNANCE_POLICY_REFERENCE & { readonly text: string };
   readonly reviewerDispatch: JsonValue;
+  readonly reviewerLimits: typeof SEALED_GOVERNANCE_REVIEWER_LIMITS;
   readonly canonicalDigest: Sha256Digest;
 }
 

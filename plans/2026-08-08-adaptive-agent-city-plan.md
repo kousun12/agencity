@@ -98,7 +98,7 @@ The runtime provides:
 
 The runtime also provides required per-session agent-specific system instructions, exact profile/effective-prompt pins, profile proposals, sealed governance review, automatic application, durable terminal delivery, route-relative CLI/TUI controls, protocol/`AgentClient` operations, and Console SDK self/direct-child operations.
 
-The remaining delivery evidence is the linked-executable process-loss governance journey and final post-hardening aggregate verification. Live providers, official Turso Sync, and Turso Cloud remain gated and unverified.
+The linked-executable governance journey is implemented and has passed its focused deterministic acceptance. Final post-hardening aggregate verification remains pending. Live providers, official Turso Sync, and Turso Cloud remain gated and unverified.
 
 Reusable subagent specifications remain templates. They may produce an initial agent profile, but they are not the resulting session's durable identity and do not silently update an existing session.
 
@@ -1096,3 +1096,12 @@ The plan is complete when:
 - Validation: the focused journey reported 1 pass, 0 skips, and 0 failures; deterministic installed acceptance reported 15 passes, 1 credential-gated skip, and 0 failures; the release matrix reported 1 deterministic pass, 3 external skips, and 0 failures. Typecheck, architecture checks, and `git diff --check` passed.
 - Plan notes: installed recovery uses graceful service shutdown and restart. Lower-level lifecycle tests supply hard process-loss evidence at committed boundaries.
 - Remaining: final documentation reconciliation, independent review, aggregate `bun run verify`, and externally gated live-provider, official Turso Sync, and Turso Cloud checks.
+
+### 2026-08-10 — Independent final-review focused fixes
+
+- Completed: removed the public profile-approval preparation method and replaced it with a supervisor-internal capability. The storage transaction boundary now binds every local later profile version and activation to either the exact reviewed-approved proposal, decision, target, expected version, replacement content, principal, evidence, and atomic application event, or an exact atomic rollback event. Strict governed-proposal and frozen-input schemas, lifecycle cross-field checks, reviewer-child linkage, decision/application identity checks, terminal-notice equality, and missing row-count checks reject forged canonical transitions.
+- Completed: made definitive freeze and reviewer-admission failures from `validated` terminal `review_failed` outcomes with one durable result. Unknown reviewer execution remains `review_unknown`. The reviewer now receives frozen limits of 16,384 tokens, USD 1, two runtime turn slots for one structured decision, and 120 seconds wall time; smaller parent budgets continue to refuse admission rather than being widened.
+- Completed: bound revisions to one original rejected chain with the same principal, origin/trigger, target kind, scope, expected version, and intended target. Revisions require new immutable identity and substantive change, cannot revise another revision, and automatic chains permit at most one descendant. Rollback evidence for agents is checked against the caller's branch lineage; workspace-owner rollback may cite same-workspace evidence.
+- Completed: replaced the newest-200 recovery scan with deterministic oldest-first pages of 200 that continue until all nonterminal proposals and terminal undelivered notices have been considered. Focused coverage includes more than 200 old proposals/notices, direct-service and forged-event activation bypasses, malformed lifecycle events, rebuild, maximum reviewer depth, each parent-budget dimension, freeze failure, reproposal-chain crossing, fork/ancestor/sibling evidence, owner evidence, and exact-once terminal delivery.
+- Validation: the focused event/profile/refiner/recovery/storage/synchronization suite reported 94 passes, 0 skips, and 0 failures. `bun run typecheck`, `bun run check:architecture`, and `git diff --check` passed. Final aggregate `bun run verify` remains deliberately pending.
+- Remaining risks: external live-provider behavior, official Turso Sync, Turso Cloud, and final post-hardening aggregate verification remain unverified. Workspace-charter and user-constraint registration remains unavailable and frozen as `null`.

@@ -1,4 +1,13 @@
-import { ValidationError, type AgentInvocationProfilePin, type RecursiveResponseAdmission } from "../domain/index.ts";
+import {
+  ValidationError,
+  type AgentInvocationProfilePin,
+  type AgentPrincipalReference,
+  type AgentProfileInput,
+  type AgentProfileVersion,
+  type NewAgentEvent,
+  type RecursiveResponseAdmission,
+} from "../domain/index.ts";
+import type { AgentProfileService } from "./agent-profiles.ts";
 import type { ModelLoop, StructuredModelTurnResult } from "./model-loop.ts";
 import type {
   RecursiveModelHandle,
@@ -31,6 +40,22 @@ export type StructuredRefinementReviewStarter = (
 ) => Promise<RecursiveModelHandle>;
 export type StructuredRefinementGovernanceStarter =
   StructuredRefinementReviewStarter;
+export type GovernedAgentProfilePreparer = (input: {
+  readonly targetSessionId: string;
+  readonly eventBranchId: string;
+  readonly originSessionId: string;
+  readonly originBranchId: string;
+  readonly expectedActiveProfileVersionId: string;
+  readonly replacement: AgentProfileInput;
+  readonly createdBy: AgentPrincipalReference;
+  readonly reason: string;
+  readonly evidenceEventIds: readonly string[];
+  readonly proposalId: string;
+  readonly reviewDecisionId: string;
+}) => Promise<{
+  readonly profile: AgentProfileVersion;
+  readonly events: readonly NewAgentEvent[];
+}>;
 
 const STRUCTURED_TURN_RUNNERS = new WeakMap<ModelLoop, StructuredModelTurnRunner>();
 const REFINEMENT_REVIEW_STARTERS = new WeakMap<
@@ -40,6 +65,10 @@ const REFINEMENT_REVIEW_STARTERS = new WeakMap<
 const REFINEMENT_GOVERNANCE_STARTERS = new WeakMap<
   RecursiveModelService,
   StructuredRefinementGovernanceStarter
+>();
+const GOVERNED_AGENT_PROFILE_PREPARERS = new WeakMap<
+  AgentProfileService,
+  GovernedAgentProfilePreparer
 >();
 
 /** @internal Called once by the `ModelLoop` constructor. */
@@ -114,4 +143,30 @@ export function internalRefinementGovernanceStarter(
     );
   }
   return starter;
+}
+
+/** @internal Called once by the `AgentProfileService` constructor. */
+export function registerGovernedAgentProfilePreparer(
+  service: AgentProfileService,
+  preparer: GovernedAgentProfilePreparer,
+): void {
+  if (GOVERNED_AGENT_PROFILE_PREPARERS.has(service)) {
+    throw new ValidationError(
+      "Agent profile service already registered its governed preparation capability",
+    );
+  }
+  GOVERNED_AGENT_PROFILE_PREPARERS.set(service, preparer);
+}
+
+/** @internal Supervisor-only accessor for governed profile preparation. */
+export function internalGovernedAgentProfilePreparer(
+  service: AgentProfileService,
+): GovernedAgentProfilePreparer {
+  const preparer = GOVERNED_AGENT_PROFILE_PREPARERS.get(service);
+  if (!preparer) {
+    throw new ValidationError(
+      "Agent profile service has no governed preparation capability",
+    );
+  }
+  return preparer;
 }

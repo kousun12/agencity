@@ -5,6 +5,8 @@ import {
   REFINEMENT_GOVERNANCE_POLICY,
   REFINEMENT_GOVERNANCE_POLICY_REFERENCE,
   SEALED_GOVERNANCE_REVIEWER_PROFILE,
+  SEALED_GOVERNANCE_REVIEWER_LIMITS,
+  SEALED_GOVERNANCE_REVIEW_WAIT_TIMEOUT_MS,
   ConflictError,
   ValidationError,
   canonicalJsonByteLength,
@@ -29,7 +31,11 @@ import { containsBrokeredSecret, scrubJson, scrubText } from "../security/index.
 import type { AgentStorage } from "../storage/index.ts";
 import type { AgentProfileService } from "./agent-profiles.ts";
 import type { HarnessService } from "./harness.ts";
-import type { StructuredRefinementGovernanceStarter } from "./internal.ts";
+import {
+  internalGovernedAgentProfilePreparer,
+  type GovernedAgentProfilePreparer,
+  type StructuredRefinementGovernanceStarter,
+} from "./internal.ts";
 import type { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import type { PublicRecursiveModelService } from "./models.ts";
 
@@ -41,6 +47,7 @@ const MAX_REASON_BYTES = 4 * 1024;
 const MAX_EVIDENCE = 32;
 const MAX_PENDING_PER_SESSION = 4;
 const MAX_PROPOSALS_PER_HOUR = 12;
+const RECOVERY_PAGE_SIZE = 200;
 
 export interface SubmitGovernedRefinementInput {
   readonly target: RefinementTarget;
@@ -75,6 +82,7 @@ class GovernanceQueue {
 export class RefinementGovernanceService {
   readonly #queue = new GovernanceQueue();
   readonly #jobs = new Map<string, Promise<void>>();
+  readonly #prepareApprovedProfile: GovernedAgentProfilePreparer;
 
   constructor(
     readonly storage: AgentStorage,
@@ -84,7 +92,9 @@ export class RefinementGovernanceService {
     readonly harness: HarnessService,
     readonly modelAdmission: ModelEffectAdmissionService,
     readonly ownerProfileId: string,
-  ) {}
+  ) {
+    this.#prepareApprovedProfile = internalGovernedAgentProfilePreparer(profiles);
+  }
 
   proposeOwner(
     originSessionId: string,
@@ -166,15 +176,36 @@ export class RefinementGovernanceService {
   }
 
   async recoverIncomplete(): Promise<number> {
-    const records = await this.list({ limit: 200 });
     let count = 0;
-    for (const record of records) {
-      if (!TERMINAL.has(record.status)) {
-        this.#launch(record.proposalId);
-        count++;
-      } else if (!record.noticeDelivered) {
-        await this.#deliver(record);
+    let afterCreatedAt = "";
+    let afterProposalId = "";
+    while (true) {
+      const rows = await this.storage.readonlyQuery({
+        sql: `SELECT * FROM governed_refinement_proposals
+          WHERE (
+            status IN ('proposed','validated','reviewing','reviewed_approved')
+            OR (terminal_notice_event_id IS NULL AND status IN (
+              'deterministically_rejected','reviewed_rejected','review_failed',
+              'review_unknown','apply_conflict','apply_failed','applied'
+            ))
+          )
+          AND (created_at>? OR (created_at=? AND proposal_id>?))
+          ORDER BY created_at,proposal_id LIMIT ?`,
+        args: [afterCreatedAt, afterCreatedAt, afterProposalId, RECOVERY_PAGE_SIZE],
+      });
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const record = rowToRecord(row as Record<string, unknown>);
+        if (!TERMINAL.has(record.status)) {
+          this.#launch(record.proposalId);
+          count++;
+        } else if (!record.noticeDelivered) {
+          await this.#deliver(record);
+        }
+        afterCreatedAt = record.createdAt;
+        afterProposalId = record.proposalId;
       }
+      if (rows.length < RECOVERY_PAGE_SIZE) break;
     }
     return count;
   }
@@ -415,13 +446,25 @@ export class RefinementGovernanceService {
       if (!["deterministically_rejected", "reviewed_rejected"].includes(previous.status)) {
         throw new ValidationError("A revised proposal must reference a rejected proposal");
       }
+      if (previous.proposal.revisesProposalId !== undefined) {
+        throw new ValidationError("A revised proposal must reference the original rejected proposal");
+      }
+      if (!Bun.deepEquals(previous.proposal.principal, proposal.principal) ||
+          !sameRevisionOrigin(previous.proposal, proposal) ||
+          !Bun.deepEquals(refinementTargetIdentity(previous.proposal.target), refinementTargetIdentity(proposal.target))) {
+        throw new ValidationError("A revised proposal must remain in the original principal, trigger, and target chain");
+      }
       const priorComparable = {
         target: previous.proposal.target,
         evidenceEventIds: previous.proposal.evidenceEventIds,
+        reason: previous.proposal.reason,
+        predictedEffect: previous.proposal.predictedEffect,
       };
       const nextComparable = {
         target: proposal.target,
         evidenceEventIds: proposal.evidenceEventIds,
+        reason: proposal.reason,
+        predictedEffect: proposal.predictedEffect,
       };
       if (canonicalJsonDigest(priorComparable as unknown as JsonValue) ===
           canonicalJsonDigest(nextComparable as unknown as JsonValue)) {
@@ -504,14 +547,26 @@ export class RefinementGovernanceService {
           record = await this.get(proposalId);
         }
         if (record.reviewHandleId === null) {
-          const handle = await this.startGovernanceModel(record.sessionId, record.branchId, {
-            prompt: governancePrompt(record.proposalId),
-            input: record.frozenInput as unknown as JsonValue,
-            model: (record.frozenInput!.reviewerDispatch as any).configuration,
-            profile: SEALED_GOVERNANCE_REVIEWER_PROFILE,
-            idempotencyKey: `refinement-governance:${proposalId}`,
-            run: true,
-          });
+          let handle;
+          try {
+            handle = await this.startGovernanceModel(record.sessionId, record.branchId, {
+              prompt: governancePrompt(record.proposalId),
+              input: record.frozenInput as unknown as JsonValue,
+              model: (record.frozenInput!.reviewerDispatch as any).configuration,
+              profile: SEALED_GOVERNANCE_REVIEWER_PROFILE,
+              budget: SEALED_GOVERNANCE_REVIEWER_LIMITS,
+              idempotencyKey: `refinement-governance:${proposalId}`,
+              run: true,
+            });
+          } catch (error) {
+            await this.#decideFailure(
+              record,
+              "review_failed",
+              scrubText(error instanceof Error ? error.message : String(error)),
+            );
+            await this.#deliver(await this.get(proposalId));
+            return;
+          }
           await this.storage.appendEvents([{
             sessionId: record.sessionId,
             branchId: record.branchId,
@@ -531,8 +586,17 @@ export class RefinementGovernanceService {
         }
       }
       if (record.status !== "reviewing" || record.reviewHandleId === null) return;
-      const result = await this.models.result(record.reviewHandleId, { wait: true });
-      if (result.status === "pending" || result.status === "running") return;
+      let result = await this.models.result(record.reviewHandleId, {
+        wait: true,
+        timeoutMs: SEALED_GOVERNANCE_REVIEW_WAIT_TIMEOUT_MS,
+      });
+      if (result.status === "pending" || result.status === "running") {
+        await this.models.cancel(
+          record.reviewHandleId,
+          `Sealed governance reviewer exceeded ${SEALED_GOVERNANCE_REVIEW_WAIT_TIMEOUT_MS}ms`,
+        );
+        result = await this.models.result(record.reviewHandleId, { wait: false });
+      }
       if (result.outcome !== "succeeded") {
         const status = result.outcome === "unknown" ? "review_unknown" : "review_failed";
         await this.#decideFailure(record, status, result.error ?? `Reviewer ended ${result.outcome}`);
@@ -585,9 +649,11 @@ export class RefinementGovernanceService {
         try {
           await this.#validate(record.proposal);
           const targetSessionId = record.proposal.target.agentSessionId;
-          prepared = await this.profiles.prepareApproved({
+          prepared = await this.#prepareApprovedProfile({
             targetSessionId,
             eventBranchId: await this.#initialBranch(targetSessionId),
+            originSessionId: record.proposal.origin.sessionId,
+            originBranchId: record.proposal.origin.branchId,
             expectedActiveProfileVersionId: record.proposal.target.expectedProfileVersionId,
             replacement: record.proposal.target.replacement,
             createdBy: refinementPrincipalToAgentPrincipal(record.proposal.principal),
@@ -673,6 +739,16 @@ export class RefinementGovernanceService {
         return;
       }
       if (record.status === "reviewing") {
+        await this.#decideFailure(
+          record,
+          "review_failed",
+          scrubText(error instanceof Error ? error.message : String(error)),
+        );
+        await this.#deliver(await this.get(proposalId));
+        return;
+      }
+      if (record.status === "validated") {
+        if (record.frozenInput !== null) throw error;
         await this.#decideFailure(
           record,
           "review_failed",
@@ -865,7 +941,7 @@ export class RefinementGovernanceService {
         decisionId,
         status,
         reason: bounded(reason, 16 * 1024),
-        expectedStatus: "reviewing",
+        expectedStatus: record.status === "validated" ? "validated" : "reviewing",
       },
     }]);
   }
@@ -989,6 +1065,7 @@ export class RefinementGovernanceService {
       constitution: { ...PRODUCT_CONSTITUTION_REFERENCE, text: PRODUCT_CONSTITUTION.text },
       reviewPolicy: { ...REFINEMENT_GOVERNANCE_POLICY_REFERENCE, text: REFINEMENT_GOVERNANCE_POLICY.text },
       reviewerDispatch: reviewerDispatch as unknown as JsonValue,
+      reviewerLimits: SEALED_GOVERNANCE_REVIEWER_LIMITS,
     };
     if (canonicalJsonByteLength(body as unknown as JsonValue) > 256 * 1024) {
       throw new ValidationError("Frozen governance reviewer input exceeds 262144 bytes");
@@ -1134,6 +1211,9 @@ export class RefinementGovernanceService {
       const prepared = await this.profiles.prepareRestore({
         targetSessionId: input.targetId,
         eventBranchId: await this.#initialBranch(input.targetId),
+        originSessionId,
+        originBranchId,
+        evidenceAuthority: principal.kind === "owner" ? "workspace_owner" : "origin_lineage",
         expectedCurrentVersionId: input.expectedCurrentVersionId,
         restoreVersionId: input.restoreVersionId,
         createdBy: refinementPrincipalToAgentPrincipal(principal),
@@ -1152,6 +1232,7 @@ export class RefinementGovernanceService {
         reason: normalizedReason,
         evidenceEventIds: normalizedEvidence,
         createdBy: principalLabel(principal),
+        evidenceAuthority: principal.kind === "owner" ? "workspace_owner" : "origin_lineage",
       });
       if (prepared.version.kind !== input.targetKind) {
         throw new ValidationError("Rollback target kind does not match the harness entry");
@@ -1271,6 +1352,47 @@ function principalLabel(principal: RefinementProposalPrincipal): string {
     : principal.kind === "agent"
       ? `agent:${principal.sessionId}`
       : `${principal.componentId}:v${principal.version}`;
+}
+
+function sameRevisionOrigin(
+  previous: GovernedRefinementProposal,
+  next: GovernedRefinementProposal,
+): boolean {
+  const comparable = (proposal: GovernedRefinementProposal) => ({
+    sessionId: proposal.origin.sessionId,
+    branchId: proposal.origin.branchId,
+    runId: proposal.origin.runId ?? null,
+    taskId: proposal.origin.taskId ?? null,
+    triggerId: proposal.origin.triggerId ?? null,
+  });
+  return Bun.deepEquals(comparable(previous), comparable(next));
+}
+
+function refinementTargetIdentity(target: RefinementTarget): JsonValue {
+  if (target.kind === "agent_profile") {
+    return {
+      kind: target.kind,
+      agentSessionId: target.agentSessionId,
+      expectedProfileVersionId: target.expectedProfileVersionId,
+    };
+  }
+  return {
+    kind: target.kind,
+    harnessKind: target.harnessKind,
+    edits: target.edits.map((edit) => edit.operation === "create"
+      ? {
+          operation: edit.operation,
+          kind: edit.kind,
+          scope: edit.scope,
+          scopeKey: edit.scopeKey ?? null,
+          name: edit.name,
+        }
+      : {
+          operation: edit.operation,
+          entryId: edit.entryId,
+          expectedVersionId: edit.expectedVersionId,
+        }),
+  } as unknown as JsonValue;
 }
 
 function applicationFailureStatus(error: unknown): "apply_conflict" | "apply_failed" {

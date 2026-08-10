@@ -659,6 +659,7 @@ export class HarnessService {
       readonly reason: string;
       readonly evidenceEventIds: readonly string[];
       readonly createdBy: string;
+      readonly evidenceAuthority: "origin_lineage" | "workspace_owner";
     },
   ): Promise<{ readonly version: HarnessVersionRecord; readonly events: readonly NewAgentEvent[] }> {
     const entry = await this.get(input.targetId);
@@ -672,8 +673,25 @@ export class HarnessService {
         source.status === "candidate" || source.status === "rejected") {
       throw new ValidationError("Harness rollback requires an exact earlier approved version of the same target");
     }
-    const visible = new Set((await this.storage.loadEvents(sessionId, { branchId })).map((event) => event.id));
-    if (input.evidenceEventIds.some((id) => !visible.has(id))) throw new ValidationError("Rollback evidence is outside the authorized route");
+    const visible = input.evidenceAuthority === "origin_lineage"
+      ? new Set((await this.storage.loadEvents(sessionId, { branchId })).map((event) => event.id))
+      : null;
+    const originRows = await this.storage.readonlyQuery({
+      sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
+      args: [sessionId],
+    });
+    const workspaceId = String((originRows[0] as any)?.workspace_id ?? "");
+    for (const evidenceId of input.evidenceEventIds) {
+      const event = await this.storage.getEvent(evidenceId);
+      const sourceRows = event ? await this.storage.readonlyQuery({
+        sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
+        args: [event.sessionId],
+      }) : [];
+      if (!event || String((sourceRows[0] as any)?.workspace_id ?? "") !== workspaceId ||
+          (visible !== null && !visible.has(evidenceId))) {
+        throw new ValidationError("Rollback evidence is outside the authorized route");
+      }
+    }
     const versionId = `version-${stableId(`restore:${input.rollbackId}:${entry.entryId}`)}`;
     const event: NewAgentEvent = {
       sessionId, branchId, type: "HarnessVersionCreated", producer: "supervisor",

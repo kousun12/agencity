@@ -271,9 +271,9 @@ Embedded harness and refinement content retains its own versioned formats and st
 | `RefinementValidated` | Validation result and complete CAS/evidence/authority diagnostics against the `proposed` status. |
 | `GovernedRefinementProposed` | Immutable profile or harness proposal, proposer/origin, expected target, replacement, reason, predicted effect, evidence, optional revised-proposal link, and stable fingerprint. |
 | `GovernedRefinementValidated` | Deterministic valid/rejected result with complete scope, authority, bounds, secret, evidence, compatibility, and compare-and-swap diagnostics. Invalid proposals become terminal without a reviewer call. |
-| `RefinementGovernanceReviewRequested` | Exact frozen reviewer input and digest: proposal, current target, evidence, proposer relationship, runtime boundaries, visible harness context, product constitution, review policy, current-model dispatch, and `null` workspace-charter/user-constraint slots. |
+| `RefinementGovernanceReviewRequested` | Exact frozen reviewer input and digest: proposal, current target, evidence, proposer relationship, runtime boundaries, visible harness context, product constitution, review policy, current-model dispatch, explicit token/cost/turn/wall-time limits, and `null` workspace-charter/user-constraint slots. |
 | `RefinementGovernanceReviewChildLinked` | Stable durable recursive handle and separate sealed reviewer session/branch. Recovery reuses this link rather than starting another reviewer. |
-| `RefinementGovernanceReviewDecided` | One typed `reviewed_approved`, `reviewed_rejected`, `review_failed`, or `review_unknown` terminal reviewer result with stable decision identity and reason. |
+| `RefinementGovernanceReviewDecided` | One typed `reviewed_approved`, `reviewed_rejected`, `review_failed`, or `review_unknown` terminal reviewer result with stable decision identity and reason. Definitive freeze or reviewer-child admission failure may transition directly from `validated` to `review_failed`; unknown external execution ownership is retained only as `review_unknown`. |
 | `GovernedRefinementApplied` | Application-time revalidation result: `applied`, `apply_conflict`, or `apply_failed`, with exact applied version IDs. Profile/non-skill activation is atomic; skill activation follows retained compile/runtime tests before this terminal result. |
 | `RefinementProposalTerminalNoticeDelivered` | One idempotent terminal result delivered to the exact origin route, including rejection reason and revision guidance when present. |
 | `RefinementRollbackApplied` | Exact prior approved profile or harness content restored as a new immutable version, with previous/source/restoration IDs, actor, reason, and evidence. It never rewrites intervening history. |
@@ -292,6 +292,8 @@ Embedded harness and refinement content retains its own versioned formats and st
 | `SubagentSpecInvoked` | Exact spec entry/version pinned to a normally admitted durable task and child session/branch. |
 
 `ContextMaterialized.harnessProvenance` records the immutable base-policy ID/version/digest separately from editable harness state, complete FTS query/candidate/rejection/selection provenance, candidate allocation/exposure provenance, and every selected entry/version/source event. Its `records` array also references selected `HarnessVersionCreated` event IDs.
+
+Governance event payloads are strict schema-4 meanings rather than generic JSON envelopes. Storage checks proposal/origin/fingerprint agreement, frozen-input identity and digest, every lifecycle compare-and-swap row count, the sealed reviewer child relationship, typed decision proposal identity, exact application decision/version identity, and terminal notice status/result equality. A nonterminal proposal cannot be marked delivered. Local profile creation and activation must share one transaction with the exact governed application or rollback event.
 
 ## Synchronization conflict resolution
 

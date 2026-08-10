@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   CapabilityUnavailableError,
   DeterministicSyncHub,
+  REFINEMENT_GOVERNANCE_CONTRACT_ID,
   REFINEMENT_REVIEW_CONTRACT_ID,
   encodeRefinementReviewTransportValue,
   projectEvents,
@@ -12,7 +13,10 @@ import {
   type ModelProvider,
   type TextModelResponse,
 } from "../../src/index.ts";
-import { formalOutputFromRefinementReviewSubmission } from "../../src/executors/model-response.ts";
+import {
+  formalOutputFromRefinementGovernanceDecision,
+  formalOutputFromRefinementReviewSubmission,
+} from "../../src/executors/model-response.ts";
 import { closeAll, makeRoot, openReplica, seedBoth, type Replica } from "./helpers.ts";
 import { waitFor } from "../helpers.ts";
 let root:string;let a:Replica|undefined,b:Replica|undefined;
@@ -46,6 +50,27 @@ class SyncReviewProvider implements ModelProvider {
     dispatch: ModelDispatch,
     _signal: AbortSignal,
   ): Promise<ModelEffectOutputV2> {
+    if (dispatch.responseContract.kind === "required-tool-set" &&
+        dispatch.responseContract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+      const proposalId = JSON.stringify(context).match(
+        /proposalId[^A-Za-z0-9]+(governed-refinement-proposal-[a-f0-9]{32}|[0-9A-HJKMNP-TV-Z]{26})/,
+      )?.[1];
+      if (!proposalId) throw new Error("missing governed proposal ID");
+      return formalOutputFromRefinementGovernanceDecision({
+        decision: {
+          decision: "approve",
+          proposalId,
+          reason: "The synchronized proposal is bounded.",
+          satisfiedCriteria: ["scope", "evidence"],
+          residualRisks: ["Outcome remains unproven."],
+        },
+        dispatch,
+        providerToolCallId: `sync-governance-${proposalId}`,
+        provider: this.name,
+        adapter: this.capabilities.requiredToolSet.adapter,
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+      });
+    }
     if (dispatch.responseContract.kind !== "required-tool-set" ||
         dispatch.responseContract.contractId !== REFINEMENT_REVIEW_CONTRACT_ID) {
       throw new Error("unexpected contract");
@@ -93,33 +118,34 @@ class GatedSyncReviewProvider extends SyncReviewProvider {
 describe("Slice 4 offline-first synchronization lifecycle",()=>{
  test("keeps working offline, reports failure honestly, and catches up on reconnect",async()=>{root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);b.transport.setOnline(false);await b.supervisor.appendMessage(session.sessionId,session.branchId,"user","offline B");await expect(b.supervisor.sync.sync()).rejects.toThrow("offline");const failed=await b.supervisor.sync.status();expect(failed.replica.lifecycle).toBe("error");expect(failed.replica.lastSuccessAt).not.toBeNull();expect(failed.replica.lastError).toContain("offline");expect((await b.supervisor.storage.loadEvents(session.sessionId,{branchId:session.branchId})).some(e=>(e.payload as any).content==="offline B")).toBe(true);b.transport.setOnline(true);await b.supervisor.sync.reconnect();await a.supervisor.sync.sync();expect((await a.supervisor.storage.loadEvents(session.sessionId)).some(e=>(e.payload as any).content==="offline B")).toBe(true);});
  test("preserves concurrent offline advancement as derived branches without losing either writer",async()=>{root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);await a.supervisor.appendMessage(session.sessionId,session.branchId,"user","from A");await b.supervisor.appendMessage(session.sessionId,session.branchId,"user","from B");await a.supervisor.sync.sync();await b.supervisor.sync.sync();await a.supervisor.sync.sync();const branches=await a.supervisor.storage.listBranches();expect(branches.length).toBe(2);const histories=await Promise.all(branches.map(x=>a!.supervisor.storage.loadEvents(x.sessionId,{branchId:x.branchId})));const texts=histories.flatMap(events=>events.filter(e=>e.type==="MessageAppended").map(e=>(e.payload as any).content));expect(new Set(texts)).toEqual(new Set(["from A","from B"]));expect(histories.some(events=>events.some(e=>e.type==="BranchCreated"&&e.producer==="sync-derived"))).toBe(true);expect((await a.supervisor.sync.conflicts("unresolved")).some(x=>x.kind==="divergent_session")).toBe(true);});
- test("preserves concurrent offline profile revisions and refuses to invent an active winner after rebuild and reopen",async()=>{
-  root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);
+ test("synchronizes one complete governed owner profile revision without quarantine",async()=>{
+  root=await makeRoot();const hub=new DeterministicSyncHub();const providerA=new SyncReviewProvider();const providerB=new SyncReviewProvider();a=await openReplica(root,"a",hub,{modelProviders:[providerA]});b=await openReplica(root,"b",hub,{modelProviders:[providerB]});const session=await seedBoth(a,b,{provider:providerA.name,model:"fixture"});
   const initial=await a.supervisor.agentProfiles.active(session.sessionId);
-  const preparedA=await a.supervisor.agentProfiles.prepareApproved({targetSessionId:session.sessionId,eventBranchId:session.branchId,expectedActiveProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"Prefer replica A evidence."},createdBy:{kind:"user",profileId:a.supervisor.device.profileId},reason:"Offline A revision",evidenceEventIds:[],proposalId:"offline-proposal-a",reviewDecisionId:"offline-decision-a"});
-  const preparedB=await b.supervisor.agentProfiles.prepareApproved({targetSessionId:session.sessionId,eventBranchId:session.branchId,expectedActiveProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"Prefer replica B evidence."},createdBy:{kind:"user",profileId:b.supervisor.device.profileId},reason:"Offline B revision",evidenceEventIds:[],proposalId:"offline-proposal-b",reviewDecisionId:"offline-decision-b"});
-  await a.supervisor.storage.appendEvents(preparedA.events);await b.supervisor.storage.appendEvents(preparedB.events);
+  const evidenceA=await a.supervisor.appendMessage(session.sessionId,session.branchId,"user","Replica A profile evidence");
+  const appliedA=await a.supervisor.refinementGovernance.proposeOwner(session.sessionId,session.branchId,{clientRequestId:"offline-profile-a",target:{kind:"agent_profile",agentSessionId:session.sessionId,expectedProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"Prefer replica A evidence."}},reason:"Offline A revision",predictedEffect:"Exercise A divergence.",evidenceEventIds:[evidenceA.id],wait:true});
+  expect(appliedA.status).toBe("applied");const profileA=appliedA.appliedVersionIds[0]!;
   await a.supervisor.sync.sync();await b.supervisor.sync.sync();await a.supervisor.sync.sync();
   const events=await a.supervisor.storage.loadEvents(session.sessionId);
-  expect(events.filter(event=>event.type==="AgentProfileVersionCreated")).toHaveLength(2);
-  expect(new Set(events.filter(event=>event.type==="AgentProfileVersionCreated").map(event=>(event.payload as any).agentProfile.profileVersionId))).toEqual(new Set([preparedA.profile.profileVersionId,preparedB.profile.profileVersionId]));
-  const conflicts=await a.supervisor.sync.conflicts("unresolved");
-  expect(conflicts.some(conflict=>conflict.kind==="divergent_session"&&(conflict.details as any).profileControl===true)).toBe(true);
+  expect(events.filter(event=>event.type==="AgentProfileVersionCreated")).toHaveLength(1);
+  expect((events.find(event=>event.type==="AgentProfileVersionCreated")!.payload as any).agentProfile.profileVersionId).toBe(profileA);
   expect((await a.supervisor.sync.status()).quarantineCount).toBe(0);
-  await expect(a.supervisor.agentProfiles.active(session.sessionId)).rejects.toMatchObject({code:"CONFLICT"});
+  expect((await a.supervisor.agentProfiles.active(session.sessionId)).profileVersionId).toBe(profileA);
   await a.supervisor.storage.rebuildOperationalProjections?.();await a.supervisor.storage.rebuildOperationalProjections?.();
-  await expect(a.supervisor.agentProfiles.active(session.sessionId)).rejects.toMatchObject({code:"CONFLICT"});
+  expect((await a.supervisor.agentProfiles.active(session.sessionId)).profileVersionId).toBe(profileA);
   await a.supervisor.close();a=await openReplica(root,"a",hub);await a.supervisor.sync.sync();
-  await expect(a.supervisor.agentProfiles.active(session.sessionId)).rejects.toMatchObject({code:"CONFLICT"});
-  expect((await a.supervisor.storage.loadEvents(session.sessionId)).filter(event=>event.type==="AgentProfileVersionCreated")).toHaveLength(2);
+  expect((await a.supervisor.agentProfiles.active(session.sessionId)).profileVersionId).toBe(profileA);
+  expect((await a.supervisor.storage.loadEvents(session.sessionId)).filter(event=>event.type==="AgentProfileVersionCreated")).toHaveLength(1);
  });
  test("preserves concurrent offline rollback claims without selecting either restoration",async()=>{
-  root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);
+  root=await makeRoot();const hub=new DeterministicSyncHub();const providerA=new SyncReviewProvider();const providerB=new SyncReviewProvider();a=await openReplica(root,"a",hub,{modelProviders:[providerA]});b=await openReplica(root,"b",hub,{modelProviders:[providerB]});const session=await seedBoth(a,b,{provider:providerA.name,model:"fixture"});
   const initial=await a.supervisor.agentProfiles.active(session.sessionId);
-  const revised=await a.supervisor.agentProfiles.prepareApproved({targetSessionId:session.sessionId,eventBranchId:session.branchId,expectedActiveProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"Shared approved revision."},createdBy:{kind:"user",profileId:a.supervisor.device.profileId},reason:"Shared revision",evidenceEventIds:[],proposalId:"shared-proposal",reviewDecisionId:"shared-decision"});
-  await a.supervisor.storage.appendEvents(revised.events);await a.supervisor.sync.sync();await b.supervisor.sync.sync();
-  const rollbackA=await a.supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revised.profile.profileVersionId,restoreVersionId:initial.profileVersionId,reason:"Replica A rollback",evidenceEventIds:[]});
-  const rollbackB=await b.supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revised.profile.profileVersionId,restoreVersionId:initial.profileVersionId,reason:"Replica B rollback",evidenceEventIds:[]});
+  const evidence=await a.supervisor.appendMessage(session.sessionId,session.branchId,"user","Shared profile revision evidence");const revised=await a.supervisor.refinementGovernance.proposeOwner(session.sessionId,session.branchId,{clientRequestId:"shared-profile-revision",target:{kind:"agent_profile",agentSessionId:session.sessionId,expectedProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"Shared approved revision."}},reason:"Shared revision",predictedEffect:"Exercise rollback divergence.",evidenceEventIds:[evidence.id],wait:true});expect(revised.status).toBe("applied");const revisedVersionId=revised.appliedVersionIds[0]!;
+  await a.supervisor.sync.sync();await b.supervisor.sync.sync();
+  expect((await b.supervisor.sync.status()).quarantineCount).toBe(0);
+  expect((await a.supervisor.agentProfiles.active(session.sessionId)).profileVersionId).toBe(revisedVersionId);
+  expect((await b.supervisor.agentProfiles.active(session.sessionId)).profileVersionId).toBe(revisedVersionId);
+  const rollbackA=await a.supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revisedVersionId,restoreVersionId:initial.profileVersionId,reason:"Replica A rollback",evidenceEventIds:[]});
+  const rollbackB=await b.supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revisedVersionId,restoreVersionId:initial.profileVersionId,reason:"Replica B rollback",evidenceEventIds:[]});
   expect(rollbackA.restorationVersionId).not.toBe(rollbackB.restorationVersionId);
   await a.supervisor.sync.sync();await b.supervisor.sync.sync();await a.supervisor.sync.sync();
   const events=await a.supervisor.storage.loadEvents(session.sessionId);

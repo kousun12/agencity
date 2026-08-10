@@ -4,6 +4,10 @@ import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DeterministicSyncHub, ProfileStore, Supervisor } from "../../src/index.ts";
+import {
+  ApprovingGovernanceProvider,
+  approveProfileRevision,
+} from "../governance-provider.ts";
 
 async function exists(path:string):Promise<boolean>{return Bun.file(path).exists();}
 
@@ -12,14 +16,15 @@ function options(directory:string,workspaceId="workspace"){
 }
 
 describe("ownership-aware physical data control",()=>{
-  test("marks workspace export partial when required governance records and artifact bytes are missing",async()=>{
+  test("exports complete governed profile provenance and marks missing artifact bytes partial",async()=>{
     const directory=await mkdtemp(join(tmpdir(),"agencity-export-incomplete-"));let supervisor:Supervisor|undefined;
     try{
-      supervisor=await Supervisor.open(options(directory));
-      const session=await supervisor.createSession({workspaceId:"workspace"});const initial=await supervisor.agentProfiles.active(session.sessionId);
-      const prepared=await supervisor.agentProfiles.prepareApproved({targetSessionId:session.sessionId,eventBranchId:session.branchId,expectedActiveProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"Retain incomplete export evidence."},createdBy:{kind:"user",profileId:supervisor.device.profileId},reason:"Create an intentionally incomplete provenance fixture",evidenceEventIds:[],proposalId:"missing-export-proposal",reviewDecisionId:"missing-export-decision"});
+      const provider=new ApprovingGovernanceProvider("export-governance");
+      supervisor=await Supervisor.open({...options(directory),modelProviders:[provider]});
+      const session=await supervisor.createSession({workspaceId:"workspace",model:{provider:provider.name,model:"fixture"}});
+      await approveProfileRevision(supervisor,session.sessionId,session.branchId,"Retain complete governed export evidence.","export-profile");
       const artifact=await supervisor.artifacts.put("missing export bytes",{mediaType:"text/plain"});
-      await supervisor.storage.appendEvents([...prepared.events,{sessionId:session.sessionId,branchId:session.branchId,type:"ArtifactRegistered",producer:"supervisor",idempotencyKey:"missing-export-artifact",payload:artifact}]);
+      await supervisor.storage.appendEvents([{sessionId:session.sessionId,branchId:session.branchId,type:"ArtifactRegistered",producer:"supervisor",idempotencyKey:"missing-export-artifact",payload:artifact}]);
       await rm(join(directory,"artifacts",artifact.digest.slice(0,2),artifact.digest.slice(2)));
       const destination=join(directory,"export");
       const exported=await supervisor.sync.exportBundle(destination,"workspace","workspace","owner");
@@ -28,8 +33,8 @@ describe("ownership-aware physical data control",()=>{
       expect(events.filter(event=>event.type==="AgentProfileVersionCreated")).toHaveLength(1);
       const audit=JSON.parse(await Bun.file(join(destination,"export-audit.json")).text());
       expect(audit.complete).toBe(false);
-      expect(audit.missing).toContain("governed-proposal:missing-export-proposal");
-      expect(audit.missing).toContain("governance-decision:missing-export-decision");
+      expect(audit.missing.some((item:string)=>item.startsWith("governed-proposal:"))).toBe(false);
+      expect(audit.missing.some((item:string)=>item.startsWith("governance-decision:"))).toBe(false);
       expect(audit.missing).toContain(`artifact:${artifact.artifactId}`);
       expect(JSON.parse(await Bun.file(join(destination,"manifest.json")).text())).toMatchObject({status:"partial",resources:{exportAudit:{complete:false}}});
     }finally{await supervisor?.close();await rm(directory,{recursive:true,force:true});}
@@ -66,22 +71,14 @@ describe("ownership-aware physical data control",()=>{
   test("plans governance retention and refuses session erasure that would dangle review, restoration, family, notice, or invocation provenance",async()=>{
     const directory=await mkdtemp(join(tmpdir(),"agencity-delete-governance-"));let supervisor:Supervisor|undefined;
     try{
-      supervisor=await Supervisor.open(options(directory));const session=await supervisor.createSession({workspaceId:"workspace"});const initial=await supervisor.agentProfiles.active(session.sessionId);
+      const provider=new ApprovingGovernanceProvider("deletion-governance");
+      supervisor=await Supervisor.open({...options(directory),modelProviders:[provider]});const session=await supervisor.createSession({workspaceId:"workspace",model:{provider:provider.name,model:"fixture"}});const initial=await supervisor.agentProfiles.active(session.sessionId);
       const evidence=await supervisor.appendMessage(session.sessionId,session.branchId,"user","Retain governance deletion evidence");
-      const revised=await supervisor.agentProfiles.prepareApproved({targetSessionId:session.sessionId,eventBranchId:session.branchId,expectedActiveProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"Temporary deletion-plan revision."},createdBy:{kind:"user",profileId:supervisor.device.profileId},reason:"Create deletion-plan profile history",evidenceEventIds:[evidence.id],proposalId:"deletion-profile-proposal",reviewDecisionId:"deletion-profile-decision"});
-      await supervisor.storage.appendEvents(revised.events);
-      await supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revised.profile.profileVersionId,restoreVersionId:initial.profileVersionId,reason:"Create deletion-plan restoration provenance",evidenceEventIds:[evidence.id]});
+      const revised=await approveProfileRevision(supervisor,session.sessionId,session.branchId,"Temporary deletion-plan revision.","deletion-profile");
+      await supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revised.profileVersionId,restoreVersionId:initial.profileVersionId,reason:"Create deletion-plan restoration provenance",evidenceEventIds:[evidence.id]});
       expect((await supervisor.runs.start(session.sessionId,session.branchId,{task:"Pin the restored profile before deletion planning",goalMode:"none"})).status).toBe("succeeded");
-      const reviewer=await supervisor.models.start(session.sessionId,session.branchId,{prompt:"Retain a reviewer child for deletion planning",idempotencyKey:"deletion-reviewer-child",run:false});
-      const proposalId="deletion-governed-proposal",reviewId="deletion-governance-review",decisionId="deletion-governance-decision";
-      await supervisor.storage.appendEvents([
-        {sessionId:session.sessionId,branchId:session.branchId,type:"GovernedRefinementProposed",producer:"client",idempotencyKey:"deletion-governed-proposed",payload:{proposalId,proposalFingerprint:`sha256:${"a".repeat(64)}`,proposal:{kind:"deletion-plan-fixture"}}},
-        {sessionId:session.sessionId,branchId:session.branchId,type:"GovernedRefinementValidated",producer:"supervisor",idempotencyKey:"deletion-governed-validated",payload:{proposalId,valid:true,validation:{valid:true,reason:"fixture"},expectedStatus:"proposed"}},
-        {sessionId:session.sessionId,branchId:session.branchId,type:"RefinementGovernanceReviewRequested",producer:"supervisor",idempotencyKey:"deletion-governed-requested",payload:{proposalId,reviewId,frozenInput:{reviewerDispatch:{configuration:{provider:"echo",model:"echo-1"}}},frozenInputDigest:`sha256:${"b".repeat(64)}`,expectedStatus:"validated"}},
-        {sessionId:session.sessionId,branchId:session.branchId,type:"RefinementGovernanceReviewChildLinked",producer:"supervisor",idempotencyKey:"deletion-governed-linked",payload:{proposalId,reviewId,handleId:reviewer.handleId,childSessionId:reviewer.childSessionId,childBranchId:reviewer.childBranchId,expectedStatus:"validated"}},
-        {sessionId:session.sessionId,branchId:session.branchId,type:"RefinementGovernanceReviewDecided",producer:"supervisor",idempotencyKey:"deletion-governed-decided",payload:{proposalId,reviewId,decisionId,status:"reviewed_rejected",decision:{decision:"reject",proposalId,reason:"fixture rejection",violatedCriteria:["fixture"]},reason:"fixture rejection",expectedStatus:"reviewing"}},
-        {sessionId:session.sessionId,branchId:session.branchId,type:"RefinementProposalTerminalNoticeDelivered",producer:"supervisor",idempotencyKey:"deletion-governed-notice",payload:{proposalId,noticeId:"deletion-governance-notice",originSessionId:session.sessionId,originBranchId:session.branchId,status:"reviewed_rejected",result:{proposalId,status:"reviewed_rejected",reviewDecisionId:decisionId}}},
-      ]);
+      const [governed]=await supervisor.refinementGovernance.list({sessionId:session.sessionId,branchId:session.branchId,limit:1});
+      const proposalId=governed!.proposalId;
       const manifest=await supervisor.sync.createManifest("delete","session",session.sessionId,"owner");
       expect((manifest.resources as any).retainedGovernance).toEqual([
         "initial and historical agent profiles","invocation profile and effective-prompt pins",
@@ -102,16 +99,11 @@ describe("ownership-aware physical data control",()=>{
     const directory=await mkdtemp(join(tmpdir(),"agencity-delete-workspace-"));let supervisor:Supervisor|undefined;
     const replica=join(directory,"replica.db"),receiptDirectory=join(directory,"receipts");
     try{
-      supervisor=await Supervisor.open({...options(directory),artifactDirectoryOwnership:"exclusive",sync:{workspaceId:"workspace",replicaUrl:`file:${replica}`,startup:false,intervalMs:0}});
-      const session=await supervisor.createSession({workspaceId:"workspace"});const evidence=await supervisor.appendMessage(session.sessionId,session.branchId,"user","Workspace deletion owns all governance history");const initial=await supervisor.agentProfiles.active(session.sessionId);
-      const revised=await supervisor.agentProfiles.prepareApproved({targetSessionId:session.sessionId,eventBranchId:session.branchId,expectedActiveProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"Temporary whole-workspace deletion revision."},createdBy:{kind:"user",profileId:supervisor.device.profileId},reason:"Exercise whole-workspace governance deletion",evidenceEventIds:[evidence.id],proposalId:"workspace-delete-profile-proposal",reviewDecisionId:"workspace-delete-profile-decision"});
-      await supervisor.storage.appendEvents(revised.events);await supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revised.profile.profileVersionId,restoreVersionId:initial.profileVersionId,reason:"Exercise whole-workspace restoration deletion",evidenceEventIds:[evidence.id]});
-      const proposalId="workspace-delete-governed-proposal";
-      await supervisor.storage.appendEvents([
-        {sessionId:session.sessionId,branchId:session.branchId,type:"GovernedRefinementProposed",producer:"client",idempotencyKey:"workspace-delete-governed-proposed",payload:{proposalId,proposalFingerprint:`sha256:${"c".repeat(64)}`,proposal:{kind:"workspace-delete-fixture"}}},
-        {sessionId:session.sessionId,branchId:session.branchId,type:"GovernedRefinementValidated",producer:"supervisor",idempotencyKey:"workspace-delete-governed-rejected",payload:{proposalId,valid:false,validation:{valid:false,reason:"fixture rejection"},expectedStatus:"proposed"}},
-        {sessionId:session.sessionId,branchId:session.branchId,type:"RefinementProposalTerminalNoticeDelivered",producer:"supervisor",idempotencyKey:"workspace-delete-governed-notice",payload:{proposalId,noticeId:"workspace-delete-governance-notice",originSessionId:session.sessionId,originBranchId:session.branchId,status:"deterministically_rejected",result:{proposalId,status:"deterministically_rejected"}}},
-      ]);
+      const provider=new ApprovingGovernanceProvider("workspace-delete-governance");
+      supervisor=await Supervisor.open({...options(directory),modelProviders:[provider],artifactDirectoryOwnership:"exclusive",sync:{workspaceId:"workspace",replicaUrl:`file:${replica}`,startup:false,intervalMs:0}});
+      const session=await supervisor.createSession({workspaceId:"workspace",model:{provider:provider.name,model:"fixture"}});const evidence=await supervisor.appendMessage(session.sessionId,session.branchId,"user","Workspace deletion owns all governance history");const initial=await supervisor.agentProfiles.active(session.sessionId);
+      const revised=await approveProfileRevision(supervisor,session.sessionId,session.branchId,"Temporary whole-workspace deletion revision.","workspace-delete-profile");
+      await supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revised.profileVersionId,restoreVersionId:initial.profileVersionId,reason:"Exercise whole-workspace restoration deletion",evidenceEventIds:[evidence.id]});
       const artifact=await supervisor.artifacts.put("owned",{mediaType:"text/plain"});await supervisor.storage.appendEvents([{sessionId:session.sessionId,branchId:session.branchId,type:"ArtifactRegistered",producer:"supervisor",idempotencyKey:"owned-artifact",payload:artifact}]);
       for(const suffix of ["","-wal","-wal-revert","-changes","-info","-replace-base-apply","-replace-base-apply-main-db.backup"])await Bun.write(`${replica}${suffix}`,suffix||"replica");
       const engineLog=join(directory,"replica.db-log");await Bun.write(engineLog,"official engine log");
