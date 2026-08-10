@@ -2,6 +2,7 @@ import type { JsonValue } from "../domain/json.ts";
 
 const SENSITIVE_KEY = /(?:^|_)(?:api_?key|token|secret|password|passwd|credential|authorization|auth)(?:_|$)/i;
 const REDACTED = "[REDACTED]";
+const STREAMING_PREFIX_GUARD_CHARACTERS = 128;
 const brokeredSecrets = new Map<string, number>();
 
 function knownSecrets(environment: NodeJS.ProcessEnv = process.env): string[] {
@@ -104,14 +105,32 @@ export class StreamingTextScrubber {
   readonly #holdCharacters: number;
   #pending = "";
   #insidePrivateKey = false;
+  #credentialRun: "token" | "assignment" | "url" | null = null;
 
   constructor() {
     const longestKnownSecret = knownSecrets().reduce((maximum, secret) => Math.max(maximum, secret.length), 0);
     this.#holdCharacters = Math.max(1_024, longestKnownSecret + 32);
   }
 
+  /** Exposes retained streaming state for bounded-memory tests. */
+  get bufferedCharacterCount(): number {
+    return this.#pending.length;
+  }
+
   push(chunk: Uint8Array): string {
-    this.#pending += this.#decoder.decode(chunk, { stream: true });
+    return this.#pushText(this.#decoder.decode(chunk, { stream: true }));
+  }
+
+  #pushText(decoded: string): string {
+    let incoming = decoded;
+    if (this.#credentialRun) {
+      let end = 0;
+      while (end < incoming.length && this.#continuesCredential(incoming[end]!)) end++;
+      if (end === incoming.length) return "";
+      incoming = incoming.slice(end);
+      this.#credentialRun = null;
+    }
+    this.#pending += incoming;
     let privateKeyRedactions = "";
     while (true) {
       if (this.#insidePrivateKey) {
@@ -134,8 +153,10 @@ export class StreamingTextScrubber {
       this.#pending = this.#pending.slice(begin.index + begin[0].length);
       this.#insidePrivateKey = true;
     }
-    if (this.#pending.length <= this.#holdCharacters) return privateKeyRedactions;
-    let safeEnd = this.#pending.length - this.#holdCharacters;
+    if (this.#pending.length <= this.#holdCharacters + STREAMING_PREFIX_GUARD_CHARACTERS) {
+      return privateKeyRedactions;
+    }
+    let safeEnd = this.#pending.length - this.#holdCharacters - STREAMING_PREFIX_GUARD_CHARACTERS;
     const candidate = this.#pending.slice(0, safeEnd);
     for (const secret of knownSecrets()) {
       const maximum = Math.min(secret.length - 1, candidate.length);
@@ -147,22 +168,56 @@ export class StreamingTextScrubber {
       }
     }
     const credentialPrefix = this.#pending.slice(0, safeEnd).match(
-      /(?:Bearer\s+|Basic\s+|sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza|(?:password|passwd|secret|auth[_-]?token|api[_-]?key)\s*[:=]\s*)[A-Za-z0-9+/_.=-]*$/i,
+      /(?:Bearer\s+|Basic\s+|sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9+/_.=-]*$|(?:password|passwd|secret|auth[_-]?token|api[_-]?key)\s*[:=]\s*[^\s,;]*$|(?:https?|libsql):\/\/[^\s]*$/i,
     );
-    if (credentialPrefix) safeEnd -= credentialPrefix[0].length;
+    if (credentialPrefix) {
+      const matchStart = safeEnd - credentialPrefix[0].length;
+      const retainedCredentialLength = this.#pending.length - matchStart;
+      if (retainedCredentialLength > this.#holdCharacters + 4_096) {
+        const mode = /^(?:https?|libsql):\/\//i.test(credentialPrefix[0])
+          ? "url"
+          : /^(?:password|passwd|secret|auth[_-]?token|api[_-]?key)\s*[:=]/i.test(credentialPrefix[0])
+            ? "assignment"
+            : "token";
+        const before = this.#pending.slice(0, matchStart);
+        const continuation = this.#pending.slice(safeEnd);
+        this.#pending = "";
+        this.#credentialRun = mode;
+        let end = 0;
+        while (end < continuation.length && this.#continuesCredential(continuation[end]!)) end++;
+        if (end < continuation.length) {
+          this.#credentialRun = null;
+          this.#pending = continuation.slice(end);
+        }
+        return privateKeyRedactions + scrubCredentialText(before) + REDACTED;
+      }
+      safeEnd = matchStart;
+    }
     const emitted = this.#pending.slice(0, safeEnd);
     this.#pending = this.#pending.slice(safeEnd);
     return privateKeyRedactions + scrubCredentialText(emitted);
   }
 
+  #continuesCredential(character: string): boolean {
+    if (this.#credentialRun === "assignment") return !/[\s,;]/.test(character);
+    if (this.#credentialRun === "url") return !/\s/.test(character);
+    return /[A-Za-z0-9+/_.=-]/.test(character);
+  }
+
   finish(): string {
-    this.#pending += this.#decoder.decode();
+    const streamed = this.#pushText(this.#decoder.decode());
+    if (this.#credentialRun) {
+      this.#credentialRun = null;
+      this.#pending = "";
+      this.#insidePrivateKey = false;
+      return streamed;
+    }
     const emitted = this.#insidePrivateKey
       ? ""
       : scrubCredentialText(this.#pending.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*$/g, REDACTED));
     this.#pending = "";
     this.#insidePrivateKey = false;
-    return emitted;
+    return streamed + emitted;
   }
 }
 

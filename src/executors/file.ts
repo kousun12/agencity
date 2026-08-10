@@ -75,7 +75,8 @@ export class FileExecutor implements EffectExecutor {
         }
         const before = await lstat(path);
         if (!before.isFile()) return result("failed", undefined, "File read requires a regular file");
-        const page = await readTextPage(file, Number(startLine), Number(endLine));
+        const page = await readTextPage(file, Number(startLine), Number(endLine), context.signal);
+        if (context.signal.aborted) return result("cancelled");
         const after = await lstat(path);
         if (before.dev !== after.dev || before.ino !== after.ino ||
             before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
@@ -182,7 +183,12 @@ interface TextPage {
   readonly refusal?: string;
 }
 
-async function readTextPage(file: ReturnType<typeof Bun.file>, requestedStart: number, requestedEnd: number): Promise<TextPage> {
+async function readTextPage(
+  file: ReturnType<typeof Bun.file>,
+  requestedStart: number,
+  requestedEnd: number,
+  signal: AbortSignal,
+): Promise<TextPage> {
   const hasher = new Bun.CryptoHasher("sha256");
   const selected: string[] = [];
   let selectedBytes = 0;
@@ -213,10 +219,13 @@ async function readTextPage(file: ReturnType<typeof Bun.file>, requestedStart: n
     lineTooLarge = false;
   };
   const reader = file.stream().getReader();
+  let chunkCount = 0;
   try {
     while (true) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
       const chunk = await reader.read();
       if (chunk.done) break;
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
       hasher.update(chunk.value);
       for (const byte of chunk.value) {
         sawAnyByte = true;
@@ -230,10 +239,15 @@ async function readTextPage(file: ReturnType<typeof Bun.file>, requestedStart: n
           lineTooLarge = true;
         }
       }
+      chunkCount++;
+      if (chunkCount % 16 === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
     }
   } finally {
     reader.releaseLock();
   }
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
   if (sawAnyByte && !endedWithNewline) finishLine();
   const totalLines = sawAnyByte ? lineNumber - 1 : 0;
   const actualStart = requestedStart;

@@ -196,6 +196,53 @@ export class S3CompatibleArtifactStore implements ArtifactStore {
     catch { return false; }
   }
 
+  #hasMatchingDigestMetadata(response: Response, reference: ArtifactReference): boolean {
+    const metadataDigest = response.headers.get("x-amz-meta-sha256");
+    const checksum = response.headers.get("x-amz-checksum-sha256");
+    return metadataDigest === reference.digest ||
+      checksum === Buffer.from(reference.digest, "hex").toString("base64");
+  }
+
+  async #verifyEmptyRange(reference: ArtifactReference): Promise<Uint8Array> {
+    const response = await this.#fetch("GET", this.#key(reference.digest), reference.digest);
+    if (response.status === 404) await this.#httpFailure(response, "empty range missing content", reference);
+    if (!response.ok) await this.#httpFailure(response, "empty range verification", reference);
+    const hasher = new Bun.CryptoHasher("sha256");
+    let size = 0;
+    const reader = response.body?.getReader();
+    try {
+      if (reader) {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          size += chunk.value.byteLength;
+          if (size > reference.size) {
+            await reader.cancel("Remote object exceeded immutable reference size").catch(() => {});
+            throw new DependencyFailureError("Artifact integrity check failed", {
+              artifactId: reference.artifactId,
+              expectedSize: reference.size,
+              actualSizeAtLeast: size,
+            });
+          }
+          hasher.update(chunk.value);
+        }
+      }
+    } finally {
+      reader?.releaseLock();
+    }
+    const actualDigest = hasher.digest("hex");
+    if (size !== reference.size || actualDigest !== reference.digest) {
+      throw new DependencyFailureError("Artifact integrity check failed", {
+        artifactId: reference.artifactId,
+        expectedDigest: reference.digest,
+        actualDigest,
+        expectedSize: reference.size,
+        actualSize: size,
+      });
+    }
+    return new Uint8Array();
+  }
+
   async readRange(reference: ArtifactReference, start: number, end: number): Promise<Uint8Array> {
     if (!Number.isInteger(start) || start < 0 || !Number.isInteger(end) || end < start) {
       throw new ValidationError("Invalid artifact range");
@@ -205,7 +252,7 @@ export class S3CompatibleArtifactStore implements ArtifactStore {
     if (end - start > OUTPUT_LIMITS.artifactRangeBytes) {
       throw new ValidationError(`Artifact range exceeds ${OUTPUT_LIMITS.artifactRangeBytes} bytes`);
     }
-    if (end === start) return new Uint8Array();
+    if (end === start) return this.#verifyEmptyRange(reference);
     if (reference.size <= OUTPUT_LIMITS.artifactRangeBytes) {
       return (await this.resolve(reference)).slice(start, end);
     }
@@ -231,15 +278,13 @@ export class S3CompatibleArtifactStore implements ArtifactStore {
         actualContentRange: response.headers.get("content-range"),
       });
     }
-    const metadataDigest = response.headers.get("x-amz-meta-sha256");
-    const checksum = response.headers.get("x-amz-checksum-sha256");
-    if (metadataDigest !== reference.digest && checksum !== Buffer.from(reference.digest, "hex").toString("base64")) {
+    if (!this.#hasMatchingDigestMetadata(response, reference)) {
       await response.body?.cancel().catch(() => {});
       throw new DependencyFailureError("Remote object CAS range lacks matching immutable digest metadata", {
         artifactId: reference.artifactId,
       });
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = await boundedResponseBytes(response, end - start);
     if (bytes.byteLength !== end - start) {
       throw new DependencyFailureError("Remote object CAS returned an incomplete byte range", {
         artifactId: reference.artifactId,
@@ -262,4 +307,35 @@ export class S3CompatibleArtifactStore implements ArtifactStore {
     const response = await this.#fetch("DELETE", this.#key(reference.digest), reference.digest);
     if (!response.ok && response.status !== 404) await this.#httpFailure(response, "delete", reference);
   }
+}
+
+async function boundedResponseBytes(response: Response, maximum: number): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > maximum) {
+        await reader.cancel("Remote object response exceeded expected bounded size").catch(() => {});
+        throw new DependencyFailureError("Remote object CAS response exceeded expected bounded size", {
+          maximum,
+          observed: size,
+        });
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }

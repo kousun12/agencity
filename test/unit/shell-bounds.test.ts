@@ -74,6 +74,20 @@ describe("bounded streaming shell output", () => {
     expect(serialized).toContain("[REDACTED]");
   });
 
+  test("never stages or previews a long uninterrupted credential-shaped value", async () => {
+    const { local, execute } = await setup();
+    const execution = await execute(
+      `bun -e 'process.stdout.write("P".repeat(15000)+" Bearer "+"A".repeat(30000)+" "+"Q".repeat(15000))'`,
+    );
+    const output = execution.output as any;
+    expect(output.completeness).toBe("spilled");
+    const retained = new TextDecoder().decode(await local.resolve(output.artifact));
+    expect(retained).toContain("[REDACTED]");
+    expect(retained).not.toContain("Bearer ");
+    expect(retained).not.toContain("A".repeat(1_024));
+    expect(JSON.stringify(output.preview)).not.toContain("A".repeat(1_024));
+  });
+
   test("reports unavailable, failed, and over-limit spill without false artifact pointers", async () => {
     const unavailable = await (await setup("none")).execute(`bun -e 'process.stdout.write("x".repeat(30000))'`);
     expect(unavailable.output).toMatchObject({ completeness: "truncated", reason: "spill-unavailable" });

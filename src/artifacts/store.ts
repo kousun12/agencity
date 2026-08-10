@@ -65,13 +65,14 @@ export class LocalArtifactStore implements ArtifactStore {
     const artifactId = `sha256:${digest}`;
     const target = this.#path(digest);
     await mkdir(dirname(target), { recursive: true });
-    try {
-      await stat(target);
-    } catch {
+    if (!await fileMatches(target, bytes.byteLength, digest)) {
       const temporary = `${target}.${crypto.randomUUID()}.tmp`;
       await Bun.write(temporary, bytes);
       try { await rename(temporary, target); }
       finally { await rm(temporary, { force: true }); }
+    }
+    if (!await fileMatches(target, bytes.byteLength, digest)) {
+      throw new DependencyFailureError("Artifact placement integrity check failed", { artifactId });
     }
     return {
       artifactId,
@@ -124,11 +125,13 @@ export class LocalArtifactStore implements ArtifactStore {
     const artifactId = `sha256:${digest}`;
     const target = this.#path(digest);
     await mkdir(dirname(target), { recursive: true });
-    try {
-      await stat(target);
+    if (await fileMatches(target, size, digest)) {
       await rm(staged, { force: true });
-    } catch {
+    } else {
       await rename(staged, target);
+    }
+    if (!await fileMatches(target, size, digest)) {
+      throw new DependencyFailureError("Artifact placement integrity check failed", { artifactId });
     }
     return {
       artifactId,
@@ -198,6 +201,29 @@ export class LocalArtifactStore implements ArtifactStore {
   async delete(reference: ArtifactReference): Promise<void> {
     this.#validate(reference);
     await rm(this.#path(reference.digest), { force: true });
+  }
+}
+
+async function fileMatches(path: string, expectedSize: number, expectedDigest: string): Promise<boolean> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size !== expectedSize) return false;
+    const hasher = new Bun.CryptoHasher("sha256");
+    let size = 0;
+    const reader = Bun.file(path).stream().getReader();
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        hasher.update(chunk.value);
+        size += chunk.value.byteLength;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return size === expectedSize && hasher.digest("hex") === expectedDigest;
+  } catch {
+    return false;
   }
 }
 

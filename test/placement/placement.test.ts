@@ -104,18 +104,30 @@ class ObjectProtocolServer {
     if (request.method === "GET") {
       const bytes = this.objects.get(pathname);
       if (!bytes) return new Response("missing", { status: 404 });
+      const metadata = {
+        "x-amz-meta-sha256": pathname.split("/").at(-1)!,
+      };
       const range = request.headers.get("range")?.match(/^bytes=(\d+)-(\d+)$/);
       if (range) {
         const start = Number(range[1]), end = Number(range[2]) + 1;
+        if (bytes.byteLength === 0) {
+          return new Response(null, {
+            status: 416,
+            headers: { ...metadata, "content-range": "bytes */0" },
+          });
+        }
         return new Response(bytes.slice(start, end), {
           status: 206,
           headers: {
             "content-range": `bytes ${start}-${end - 1}/${bytes.byteLength}`,
-            "x-amz-meta-sha256": pathname.split("/").at(-1)!,
+            ...metadata,
           },
         });
       }
-      return new Response(new Uint8Array(bytes).buffer as ArrayBuffer, { status: 200 });
+      return new Response(new Uint8Array(bytes).buffer as ArrayBuffer, {
+        status: 200,
+        headers: { ...metadata, "content-length": String(bytes.byteLength) },
+      });
     }
     if (request.method === "DELETE") { this.objects.delete(pathname); return new Response(null, { status: 204 }); }
     return new Response("unsupported", { status: 405 });
@@ -159,6 +171,32 @@ describe("content-addressed artifact placement conformance", () => {
     const healthy = await remote.put("transport will disappear");
     await running.server.stop(true); servers.splice(servers.indexOf(running.server), 1);
     await expect(remote.resolve(healthy)).rejects.toMatchObject({ code: "DEPENDENCY_FAILURE" });
+  });
+
+  test("remote empty ranges verify object existence and bytes without whole-object buffering", async () => {
+    const objectServer = new ObjectProtocolServer();
+    const { endpoint } = serve(objectServer.handler);
+    const remote = new S3CompatibleArtifactStore({ endpoint, bucket: "empty-range-bucket" });
+
+    const nonempty = await remote.put(Uint8Array.from({ length: 70_000 }, (_, index) => index % 251));
+    expect(await remote.readRange(nonempty, 40_000, 40_000)).toEqual(new Uint8Array());
+    const zero = await remote.put(new Uint8Array());
+    expect(await remote.readRange(zero, 0, 0)).toEqual(new Uint8Array());
+
+    objectServer.corrupt(nonempty);
+    await expect(remote.readRange(nonempty, 10, 10)).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILURE",
+    });
+    objectServer.corrupt(zero);
+    await expect(remote.readRange(zero, 0, 0)).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILURE",
+    });
+
+    const missing = await remote.put("delete-before-empty-range");
+    await remote.delete(missing);
+    await expect(remote.readRange(missing, 0, 0)).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILURE",
+    });
   });
 });
 

@@ -26,6 +26,8 @@ interface EffectManifestItem {
 const CELL_TERMINAL_TYPES = new Set(["CellCommitted", "CellFailed", "CellAbandoned"]);
 const MAX_ACTIONABLE_ERROR_BYTES = 4_096;
 const MAX_ACTIONABLE_OUTPUT_PREVIEW_BYTES = 4_096;
+const MAX_RETAINED_IDENTITY_BYTES = 256;
+const MAX_RETAINED_STATUS_BYTES = 128;
 
 /**
  * Derives the provider-facing view of one exact canonical observation ledger.
@@ -204,6 +206,52 @@ function observationsBytes(observations: readonly AgentProviderObservation[]): n
   return new TextEncoder().encode(JSON.stringify(observations)).byteLength;
 }
 
+function sha256Text(value: string): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(value);
+  return hasher.digest("hex");
+}
+
+function retainedString(value: string, maxBytes: number): boolean {
+  return new TextEncoder().encode(value).byteLength <= maxBytes;
+}
+
+function reducedIdentity(eventId: string): {
+  readonly eventId: string;
+  readonly metadata: Record<string, JsonValue>;
+} {
+  if (retainedString(eventId, MAX_RETAINED_IDENTITY_BYTES)) {
+    return { eventId, metadata: {} };
+  }
+  const digest = sha256Text(eventId);
+  return {
+    eventId: `synthetic:observation:${digest}`,
+    metadata: {
+      sourceEventIdentity: {
+        completeness: "digest",
+        sha256: digest,
+        exactIdentityInCanonicalLedger: true,
+      },
+    },
+  };
+}
+
+function reducedType(type: string): {
+  readonly type: string;
+  readonly metadata: Record<string, JsonValue>;
+} {
+  if (retainedString(type, MAX_RETAINED_IDENTITY_BYTES)) return { type, metadata: {} };
+  return {
+    type: "AgentObservationReduced",
+    metadata: {
+      sourceType: {
+        completeness: "digest",
+        sha256: sha256Text(type),
+      },
+    },
+  };
+}
+
 function requiredObservation(observation: AgentProviderObservation): boolean {
   if (CELL_TERMINAL_TYPES.has(observation.type)) return true;
   if (observation.type.endsWith("Failed") || observation.type.endsWith("Unknown") ||
@@ -224,19 +272,54 @@ function observationPriority(observation: AgentProviderObservation): number {
   return 3;
 }
 
+function terminalFact(observation: AgentProviderObservation): string {
+  if (observation.payload && typeof observation.payload === "object" && !Array.isArray(observation.payload)) {
+    const payload = observation.payload as Record<string, JsonValue>;
+    const value = String(payload.status ?? payload.outcome ?? payload.terminalStatus ?? "");
+    if (["unknown", "failed", "cancelled", "blocked", "budget_exceeded", "succeeded", "completed"]
+      .includes(value)) {
+      return value;
+    }
+  }
+  if (observation.type.endsWith("Unknown")) return "unknown";
+  if (observation.type.endsWith("Failed") || observation.type === "AgentRunActionRejected") return "failed";
+  return "terminal";
+}
+
 function statusMetadata(payload: JsonValue): JsonValue {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
   const source = payload as Record<string, JsonValue>;
-  const keys = [
-    "effectId", "cellId", "taskId", "runId", "attempt", "status", "outcome",
-    "terminalStatus", "unknown", "error", "reason",
-  ];
   const result: Record<string, JsonValue> = {};
-  for (const key of keys) {
-    if (source[key] === undefined) continue;
-    result[key] = typeof source[key] === "string" && (key === "error" || key === "reason")
-      ? boundedUtf8(source[key], MAX_ACTIONABLE_ERROR_BYTES).value
-      : source[key]!;
+  for (const key of ["effectId", "cellId", "taskId", "runId"]) {
+    const value = source[key];
+    if (typeof value !== "string") continue;
+    if (retainedString(value, MAX_RETAINED_IDENTITY_BYTES)) {
+      result[key] = value;
+    } else {
+      result[`${key}Digest`] = sha256Text(value);
+      result[`${key}Exact`] = false;
+    }
+  }
+  for (const key of ["status", "outcome", "terminalStatus"]) {
+    const value = source[key];
+    if (typeof value !== "string") continue;
+    if (retainedString(value, MAX_RETAINED_STATUS_BYTES)) {
+      result[key] = value;
+    } else {
+      result[key] = "terminal";
+      result[`${key}Digest`] = sha256Text(value);
+      result[`${key}Exact`] = false;
+    }
+  }
+  if (typeof source.attempt === "number" && Number.isFinite(source.attempt)) {
+    result.attempt = source.attempt;
+  }
+  if (typeof source.unknown === "boolean") result.unknown = source.unknown;
+  for (const key of ["error", "reason"]) {
+    const value = source[key];
+    if (typeof value === "string") {
+      result[key] = boundedUtf8(value, MAX_ACTIONABLE_ERROR_BYTES).value;
+    }
   }
   return result;
 }
@@ -250,10 +333,14 @@ function reducedObservation(
   const capture = new Utf8HeadTailCapture(headBytes, tailBytes);
   capture.push(serialized);
   const preview = capture.value();
+  const identity = reducedIdentity(observation.eventId);
+  const sourceType = reducedType(observation.type);
   return {
-    eventId: observation.eventId,
-    type: observation.type,
+    eventId: identity.eventId,
+    type: sourceType.type,
     payload: {
+      ...identity.metadata,
+      ...sourceType.metadata,
       ...(statusMetadata(observation.payload) as Record<string, JsonValue>),
       output: {
         protocol: BOUNDED_OUTPUT_PROTOCOL,
@@ -316,8 +403,9 @@ export function enforceObservationBudget(
     const hasher = new Bun.CryptoHasher("sha256");
     const eventIds = omitted.map((item) => item.eventId).sort();
     hasher.update(JSON.stringify(eventIds));
+    const eventIdsDigest = hasher.digest("hex");
     bounded.push({
-      eventId: eventIds[0]!,
+      eventId: `synthetic:observation-set:${eventIdsDigest}`,
       type: "AgentObservationBudgetApplied",
       payload: {
         protocol: BOUNDED_OUTPUT_PROTOCOL,
@@ -325,9 +413,8 @@ export function enforceObservationBudget(
         byteLength: observationsBytes(omitted),
         preview: {
           omittedCount: omitted.length,
-          firstEventId: eventIds[0]!,
-          lastEventId: eventIds.at(-1)!,
-          eventIdsDigest: hasher.digest("hex"),
+          eventIdsDigest,
+          exactEventIdentitiesInCanonicalLedger: true,
         },
         reason: "observation-budget",
         guidance: "The AgentRunStepStarted observationEventIds ledger remains complete. Use source-specific bounded retrieval only for retained file or artifact references.",
@@ -343,32 +430,58 @@ export function enforceObservationBudget(
     : observation);
   if (observationsBytes(bounded) <= OUTPUT_LIMITS.agentObservationBytes) return bounded;
 
-  const required = bounded.filter(requiredObservation);
+  const required = observations.filter(requiredObservation);
   const statuses = new Map<string, number>();
+  const terminalFacts = new Map<string, number>();
   for (const observation of required) {
     const metadata = statusMetadata(observation.payload) as Record<string, JsonValue>;
-    const key = `${observation.type}:${String(metadata.status ?? metadata.outcome ?? metadata.terminalStatus ?? "terminal")}`;
+    const type = retainedString(observation.type, MAX_RETAINED_STATUS_BYTES)
+      ? observation.type
+      : `type-sha256:${sha256Text(observation.type)}`;
+    const status = String(metadata.status ?? metadata.outcome ?? metadata.terminalStatus ?? "terminal");
+    const key = `${type}:${retainedString(status, MAX_RETAINED_STATUS_BYTES) ? status : "terminal"}`;
     statuses.set(key, (statuses.get(key) ?? 0) + 1);
+    const fact = terminalFact(observation);
+    terminalFacts.set(fact, (terminalFacts.get(fact) ?? 0) + 1);
   }
   const eventIds = required.map((item) => item.eventId).sort();
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(JSON.stringify(eventIds));
-  return [{
-    eventId: eventIds[0] ?? observations[0]?.eventId ?? "observation-budget",
+  const terminalEventIdsDigest = hasher.digest("hex");
+  const summary: AgentProviderObservation[] = [{
+    eventId: `synthetic:terminal-observation-set:${terminalEventIdsDigest}`,
     type: "AgentObservationBudgetApplied",
     payload: {
       terminalStatusSummary: [...statuses].sort(([left], [right]) => left.localeCompare(right))
         .map(([status, count]) => ({ status, count })),
+      terminalFactCounts: [...terminalFacts].sort(([left], [right]) => left.localeCompare(right))
+        .map(([status, count]) => ({ status, count })),
       terminalEventCount: required.length,
-      terminalEventIdsDigest: hasher.digest("hex"),
+      terminalEventIdsDigest,
       output: {
         protocol: BOUNDED_OUTPUT_PROTOCOL,
         completeness: "truncated",
         byteLength: observationsBytes(observations),
-        preview: { firstEventId: eventIds[0] ?? null, lastEventId: eventIds.at(-1) ?? null },
+        preview: { exactEventIdentitiesInCanonicalLedger: true },
         reason: "observation-budget",
         guidance: "Terminal and uncertainty status counts are preserved. Inspect the complete AgentRunStepStarted observationEventIds ledger for exact retained event identities and evidence.",
       },
+    },
+  }];
+  if (observationBytes(summary[0]!) <= OUTPUT_LIMITS.agentObservationItemBytes &&
+      observationsBytes(summary) <= OUTPUT_LIMITS.agentObservationBytes) {
+    return summary;
+  }
+  // This constant-size last resort preserves the terminal/unknown count and
+  // exact-ledger digest without copying any adversarial source string.
+  return [{
+    eventId: `synthetic:terminal-observation-set:${terminalEventIdsDigest}`,
+    type: "AgentObservationBudgetApplied",
+    payload: {
+      terminalEventCount: required.length,
+      terminalEventIdsDigest,
+      terminalFactCounts: [...terminalFacts].sort(([left], [right]) => left.localeCompare(right))
+        .map(([status, count]) => ({ status, count })),
     },
   }];
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import {
   DependencyFailureError,
   LocalArtifactStore,
@@ -37,6 +37,12 @@ async function filesBelow(path: string): Promise<string[]> {
   return result;
 }
 
+function digest(bytes: Uint8Array): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(bytes);
+  return hasher.digest("hex");
+}
+
 describe("local content-addressed artifacts", () => {
   test("deduplicates concurrent identical writes by content rather than source or media type", async () => {
     const { temp, store } = await setup();
@@ -48,6 +54,29 @@ describe("local content-addressed artifacts", () => {
     expect(new Set(references.map((reference) => reference.size)).size).toBe(1);
     expect(await filesBelow(temp.artifactDirectory)).toHaveLength(1);
     expect(new TextDecoder().decode(await store.resolve(references[0]!))).toBe(content);
+  });
+
+  test("repairs corrupt digest-named targets for direct and staged puts", async () => {
+    const { temp, store } = await setup();
+    const directBytes = new TextEncoder().encode("valid direct bytes");
+    const directDigest = digest(directBytes);
+    const directTarget = join(temp.artifactDirectory, directDigest.slice(0, 2), directDigest.slice(2));
+    await mkdir(dirname(directTarget), { recursive: true });
+    await Bun.write(directTarget, "corrupt");
+    const direct = await store.put(directBytes);
+    expect(await store.resolve(direct)).toEqual(directBytes);
+
+    await store.cleanupStaging();
+    const stagedBytes = new TextEncoder().encode("valid staged bytes");
+    const stagedDigest = digest(stagedBytes);
+    const stagedTarget = join(temp.artifactDirectory, stagedDigest.slice(0, 2), stagedDigest.slice(2));
+    await mkdir(dirname(stagedTarget), { recursive: true });
+    await Bun.write(stagedTarget, "digest-named but invalid");
+    const stagedPath = await store.createStagingPath("repair");
+    await Bun.write(stagedPath, stagedBytes);
+    const staged = await store.putStaged(stagedPath);
+    expect(await Bun.file(stagedPath).exists()).toBe(false);
+    expect(await store.resolve(staged)).toEqual(stagedBytes);
   });
 
   test("checks size and digest on every resolve, range-read, and export", async () => {

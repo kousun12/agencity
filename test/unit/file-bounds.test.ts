@@ -13,7 +13,10 @@ async function fixture(content: string) {
   temps.push(temp);
   await Bun.write(join(temp.workspaceRoot, "source.txt"), content);
   const executor = new FileExecutor(temp.workspaceRoot);
-  const execute = (input: Record<string, unknown>) => executor.execute({
+  const execute = (
+    input: Record<string, unknown>,
+    signal: AbortSignal = new AbortController().signal,
+  ) => executor.execute({
     effectId: crypto.randomUUID(),
     sessionId: "session",
     branchId: "branch",
@@ -23,7 +26,7 @@ async function fixture(content: string) {
     idempotencyKey: crypto.randomUUID(),
     idempotent: true,
     attempt: 1,
-  }, { signal: new AbortController().signal });
+  }, { signal });
   return { temp, execute };
 }
 
@@ -119,4 +122,16 @@ describe("bounded file text pages", () => {
       error: expect.stringContaining("must be a string"),
     });
   });
+
+  test("stops a large file-page scan promptly when cancelled", async () => {
+    const { execute } = await fixture("line\n".repeat(8 * 1024 * 1024));
+    const controller = new AbortController();
+    const started = performance.now();
+    const pending = execute({ startLine: 1, endLine: 1 }, controller.signal);
+    const timer = setTimeout(() => controller.abort(), 10);
+    const execution = await pending;
+    clearTimeout(timer);
+    expect(execution).toMatchObject({ outcome: "cancelled" });
+    expect(performance.now() - started).toBeLessThan(3_000);
+  }, 10_000);
 });

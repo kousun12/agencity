@@ -179,6 +179,44 @@ describe("brokered secret handling", () => {
     expect(output).not.toContain("private-material");
   });
 
+  test("bounds retained state for uninterrupted credential-shaped streams", () => {
+    const prefixes = [
+      "Bearer ",
+      "Basic ",
+      "sk-live-",
+      "api_key=",
+      "https://example.test/path?access_token=",
+    ];
+    const encode = new TextEncoder();
+    for (const prefix of prefixes) {
+      const scrubber = new StreamingTextScrubber();
+      const source = `${prefix}${"A".repeat(2 * 1024 * 1024)} end`;
+      let output = "";
+      let maximumBuffered = 0;
+      for (let offset = 0; offset < source.length; offset += 257) {
+        output += scrubber.push(encode.encode(source.slice(offset, offset + 257)));
+        maximumBuffered = Math.max(maximumBuffered, scrubber.bufferedCharacterCount);
+      }
+      output += scrubber.finish();
+      expect(maximumBuffered).toBeLessThanOrEqual(8 * 1024);
+      expect(output).toContain("[REDACTED]");
+      expect(output).toEndWith(" end");
+      expect(output.length).toBeLessThan(128);
+    }
+  });
+
+  test("preserves ordinary uninterrupted large output", () => {
+    const scrubber = new StreamingTextScrubber();
+    const source = "x".repeat(30_000);
+    const encoder = new TextEncoder();
+    let output = "";
+    for (let offset = 0; offset < source.length; offset += 113) {
+      output += scrubber.push(encoder.encode(source.slice(offset, offset + 113)));
+    }
+    output += scrubber.finish();
+    expect(output).toBe(source);
+  });
+
 });
 
 

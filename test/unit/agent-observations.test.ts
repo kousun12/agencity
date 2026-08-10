@@ -302,4 +302,57 @@ describe("derived agent provider observations", () => {
     expect((budget!.payload as any).byteLength)
       .toBe(new TextEncoder().encode(JSON.stringify(omittedExact)).byteLength);
   });
+
+  test("uses bounded synthetic identities for adversarial terminal ledgers and metadata", () => {
+    const hugeEffectId = `effect-${"e".repeat(80_000)}`;
+    const hugeCellId = `cell-${"c".repeat(80_000)}`;
+    const unknownEventId = `unknown-${"u".repeat(80_000)}`;
+    const failedEventId = `failed-${"f".repeat(80_000)}`;
+    const events: AgentEvent[] = [
+      event("1", "EffectRequested", {
+        effectId: hugeEffectId,
+        executor: "shell",
+        operation: "run",
+        input: { command: "publish" },
+        origin: { kind: "cell", cellId: hugeCellId },
+        idempotencyKey: "adversarial-effect",
+        idempotent: false,
+      }),
+      event(unknownEventId, "EffectOutcomeRecorded", {
+        effectId: hugeEffectId,
+        attempt: 1,
+        outcome: "unknown",
+        error: `uncertain-${"x".repeat(100_000)}`,
+        observedAt: "2026-08-10T00:00:00.000Z",
+      }),
+      event(failedEventId, "CellFailed", {
+        cellId: hugeCellId,
+        error: `terminal-${"y".repeat(100_000)}`,
+        logs: ["z".repeat(100_000)],
+        durationMs: 1,
+      }),
+    ];
+    const ledger = [unknownEventId, failedEventId];
+
+    const first = deriveAgentProviderObservations(events, ledger);
+    const replay = deriveAgentProviderObservations(events, ledger);
+    const serialized = JSON.stringify(first);
+
+    expect(first).toEqual(replay);
+    expect(ledger).toEqual([unknownEventId, failedEventId]);
+    expect(new TextEncoder().encode(serialized).byteLength)
+      .toBeLessThanOrEqual(OUTPUT_LIMITS.agentObservationBytes);
+    for (const item of first) {
+      expect(new TextEncoder().encode(JSON.stringify(item)).byteLength)
+        .toBeLessThanOrEqual(OUTPUT_LIMITS.agentObservationItemBytes);
+      expect(item.eventId).toStartWith("synthetic:");
+    }
+    expect(serialized).not.toContain(hugeEffectId);
+    expect(serialized).not.toContain(hugeCellId);
+    expect(serialized).not.toContain(unknownEventId);
+    expect(serialized).not.toContain(failedEventId);
+    expect(serialized).toContain('"outcome":"unknown"');
+    expect(serialized).toContain("sourceEventIdentity");
+    expect(serialized).toContain("Digest");
+  });
 });
