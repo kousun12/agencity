@@ -253,6 +253,13 @@ Real Turso Cloud smoke testing is credential-gated and must use a disposable dat
 AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=...   bun test test/slice4/cloud-smoke.test.ts
 ```
 
+The isolated `benchmarks/prime/` project provides a custom Prime Verifiers v1
+harness and a pinned Prime-style file-offloaded OOLONG-synth taskset. Its local
+contract and 1K OOLONG integration smokes have passed. Yahoo 128K development
+probes reached explicit turn or token ceilings and are retained as zero-score
+configuration evidence; no full OOLONG score, hosted run, or exact Prime Agent
+reproduction is verified.
+
 Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified.
 
 ## Architectural map

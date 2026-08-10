@@ -1,0 +1,49 @@
+model = "openai/gpt-5.6-sol"
+num_tasks = 1
+num_rollouts = 1
+shuffle = false
+max_concurrent = 1
+push = false
+rich = false
+
+[sampling]
+temperature = 0
+reasoning_effort = "high"
+max_tokens = 4096
+
+[env.taskset]
+id = "agencity-oolong-synth"
+split = "test"
+dataset_name = "yahoo"
+context_len = 131072
+with_labels = false
+filter_numerical = false
+expected_tasks = 50
+dataset_revision = "f0d59eaf0febf130664cfceb710436c8e3216b2b"
+
+[env.agent]
+max_turns = 64
+max_total_tokens = 500000
+
+[env.agent.timeout]
+setup = 300
+rollout = 1800
+finalize = 60
+scoring = 60
+
+[env.agent.retries]
+max_retries = 0
+
+[env.agent.harness]
+id = "agencity-verifiers"
+source_repo = "https://github.com/kousun12/agencity.git"
+source_ref = "dbe1606fdf2ed390fa0815098c1014438fc740bf"
+
+[env.agent.runtime]
+type = "docker"
+image = "oven/bun@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4"
+allow = []
+block = ["*"]
+cpu = 2
+memory = 4
+disk = 4

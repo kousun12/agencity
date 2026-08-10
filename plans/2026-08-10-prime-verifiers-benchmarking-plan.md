@@ -1,6 +1,6 @@
 # Prime Verifiers benchmarking
 
-**Status:** In progress; local contract smoke verified  
+**Status:** In progress; contract and OOLONG integration probes verified
 **Date:** August 10, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), [Reasoning effort and model capabilities](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md), and [Dynamic typed connectors](./2026-08-09-dynamic-typed-connectors-plan.md)
@@ -512,6 +512,35 @@ On August 10, 2026, the initial adapter was exercised locally with Verifiers
   46 completion tokens, and 16 reasoning tokens.
 - Both development runs used an uncommitted adapter checkout and are therefore
   integration evidence only, not comparable benchmark baselines.
+
+## OOLONG development evidence
+
+On August 10, 2026, the adapter added a pinned Prime-style file-offloaded
+OOLONG-synth taskset and configs for a 1K smoke, one-case Yahoo 128K probes, and
+the full 50-case Yahoo 128K slice.
+
+- Dataset revision `f0d59eaf0febf130664cfceb710436c8e3216b2b` resolved the
+  Yahoo 128K selection to exactly 50 tasks over two context windows. A generated
+  manifest retains every row ID and context digest without retaining the
+  benchmark answers.
+- The taskset writes context into the Agencity workspace, scores the bounded
+  answer file or terminal `final` value with the official deterministic synth
+  rules, and keeps recognized Agencity terminal failures distinct from
+  infrastructure failures.
+- One Luna 1K rollout completed in seven turns and scored `1.0`.
+- One Luna Yahoo 128K rollout reached its 12-turn development limit while
+  beginning recursive batch classification. It scored `0`.
+- One Sol-high Yahoo 128K rollout launched 21 recursive classification shards
+  and reached the 300,000-token development limit before terminal aggregation.
+  It scored `0`, took about 22 minutes, and consumed $9.91 of Prime inference
+  credit.
+
+The 128K probes establish that the route and recursive work operate, but they do
+not establish benchmark capability. The full config is retained but must not run
+until one target-model sample completes under an operator-approved cost ceiling.
+At observed probe cost, a 50-case run can cost hundreds of dollars. The prompt
+now directs recursive result aggregation to remain inside TypeScript so bulk
+child output does not inflate the next provider input.
 
 ## Verification and reporting rules
 

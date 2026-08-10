@@ -1,0 +1,377 @@
+{
+  "contextLength": 131072,
+  "contextWindowCount": 2,
+  "contexts": [
+    {
+      "bytes": 280690,
+      "contextWindowId": 50021,
+      "sha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033"
+    },
+    {
+      "bytes": 292898,
+      "contextWindowId": 50022,
+      "sha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67"
+    }
+  ],
+  "dataset": "oolongbench/oolong-synth",
+  "datasetName": "yahoo",
+  "filterNumerical": false,
+  "protocol": "agencity.oolong-selection",
+  "revision": "f0d59eaf0febf130664cfceb710436c8e3216b2b",
+  "split": "test",
+  "taskCount": 50,
+  "tasks": [
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050021
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050022
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050023
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050024
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050025
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050026
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050027
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050028
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050029
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050030
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050031
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050032
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050033
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050034
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050035
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050036
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050037
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050038
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050039
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050040
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050041
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050042
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050043
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050044
+    },
+    {
+      "answerType": "",
+      "contextBytes": 280690,
+      "contextSha256": "920a242da89e7cee86bf3e330fc18ce694cc9b14c7598a0a7fdf45606c7a7033",
+      "contextWindowId": 50021,
+      "rowId": 517050045
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050046
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050047
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050048
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050049
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050050
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050051
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050052
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050053
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050054
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050055
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050056
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050057
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050058
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050059
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050060
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050061
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050062
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050063
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050064
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050065
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050066
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050067
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050068
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050069
+    },
+    {
+      "answerType": "",
+      "contextBytes": 292898,
+      "contextSha256": "b5b380e767eda44a9b65d33e3bb061380afa74c451775eb1f45aab84d4121a67",
+      "contextWindowId": 50022,
+      "rowId": 517050070
+    }
+  ],
+  "version": 1,
+  "withLabels": false
+}

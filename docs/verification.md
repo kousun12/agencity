@@ -208,6 +208,30 @@ Focused test files may be run with `bun test <path>`. A focused pass is iteratio
 
 External rows require explicit prerequisites and are not part of the deterministic claim.
 
+### Prime Verifiers and OOLONG
+
+The isolated Python project under `benchmarks/prime/` runs Agencity as a custom
+Prime Verifiers v1 harness. Model-free checks and config validation are:
+
+```sh
+cd benchmarks/prime
+uv sync --locked
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked eval @ configs/oolong-yahoo-128k-full.toml --dry-run
+```
+
+The pinned OOLONG preflight downloads no model inference:
+
+```sh
+uv run --locked python scripts/preflight_oolong.py \
+  --output manifests/oolong-yahoo-128k.json
+```
+
+Paid OOLONG commands, exact treatment, evidence requirements, and current scale
+blockers are documented in [`benchmarks/prime/README.md`](../benchmarks/prime/README.md).
+The development probes are integration evidence only. No full OOLONG score,
+hosted Prime execution, or exact Prime Agent reproduction is verified.
+
 ### Real OpenAI-compatible provider
 
 ```sh
