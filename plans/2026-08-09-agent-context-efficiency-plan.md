@@ -3,7 +3,7 @@
 **Status:** Implemented and verified
 **Date:** August 9, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
-**Related plans:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md) and [Lossless context-reference storage](./2026-08-07-lossless-context-references-plan.md)
+**Related plans:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), [Lossless context-reference storage](./2026-08-07-lossless-context-references-plan.md), and [Best-effort TypeScript console scratch](./2026-08-10-best-effort-console-scratch-plan.md)
 
 ## Summary
 
@@ -12,9 +12,9 @@ Agencity's autonomous loop is durable and attributable, but its provider-facing 
 1. construct, version, execute, and estimate one exact provider-input candidate instead of estimating a larger duplicated retained context;
 2. make the cell terminal event the model-facing owner of successful cell execution instead of also delivering complete successful effect outputs;
 3. define one small output-management contract and apply it first to shell output, file reads, artifact retrieval, and the final model-observation guard;
-4. teach the model to keep intermediate data inside a cell or durable scratch storage and return only the smallest useful next-step observation.
+4. teach the model to keep one-cell intermediates local, use best-effort scratch only for replaceable cross-cell data, reserve state and artifacts for recoverable values, and return only the smallest useful next-step observation.
 
-The plan deliberately excludes a persistent TypeScript heap. Agencity retains its disposable-console model and recovers the context-efficiency benefit through explicit observation ownership, durable artifacts, bounded projections, and selective retrieval.
+The plan deliberately excludes a durable or replayable TypeScript heap. The related scratch plan may retain arbitrary values in a warm disposable worker and restore bounded local JSON opportunistically, but correctness remains restartable from canonical state without that cache.
 
 ## Evidence
 
@@ -51,7 +51,7 @@ Existing local bounds do not form one end-to-end model-context guarantee:
 
 ## Non-goals
 
-- Adding a persistent TypeScript or IPython-style heap.
+- Adding a durable or replayable TypeScript or IPython-style heap.
 - Making closures, module instances, subprocesses, sockets, or lexical bindings durable.
 - Replacing canonical events with an opaque transcript summary.
 - Applying the deferred lossless-reference format to every event or document.
@@ -128,17 +128,20 @@ Acceptance conditions:
 **Implementation effort:** 1/5  
 **Priority:** Ship with priority 1
 
-Agencity already permits one TypeScript cell to hold, inspect, transform, and aggregate large intermediate values without returning or logging them. Across cells, intentional state belongs in `state` or artifacts. The autonomous prompt describes those APIs but does not instruct the model to minimize observations.
+Agencity already permits one TypeScript cell to hold, inspect, transform, and aggregate large intermediate values without returning or logging them. The related scratch plan defines replaceable cross-cell cache data without making it canonical. Recoverable values belong in `state` or artifacts. The autonomous prompt must explain the boundaries of the surfaces available in the shipped runtime while minimizing observations.
 
 Add stable guidance that:
 
 - assigns large read/search/tool results to local variables before processing;
 - avoids `console.log` and raw `return` of complete tool objects unless the complete value is required for the next model decision;
 - returns a compact summary, selected slice, counts, digests, errors, or artifact reference;
+- when the scratch API ships, uses it only for replaceable cross-cell intermediates and checks or rebuilds them after worker loss;
 - uses `state` for small durable JSON and artifacts for large durable content;
+- treats every state write and artifact as retained storage, avoids transient or repetitive durable writes, and reuses a small stable set of state keys;
 - uses only retrieval APIs that are available in the same shipped runtime.
 
 Range-retrieval guidance is added in Phase C in the same change that exposes the range APIs. Earlier prompt changes must not tell the model to call unavailable methods.
+Scratch guidance follows the same rule and activates only in the change that exposes the scratch cell global and SDK status surface.
 
 Tests and examples must stop teaching `return r` after shell/file calls unless the raw result is the behavior under test.
 
