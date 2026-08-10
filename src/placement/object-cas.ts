@@ -1,7 +1,13 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { ArtifactPutOptions, ArtifactStore } from "../artifacts/index.ts";
-import { DependencyFailureError, ValidationError, type ArtifactReference } from "../domain/index.ts";
+import {
+  CapabilityUnavailableError,
+  DependencyFailureError,
+  OUTPUT_LIMITS,
+  ValidationError,
+  type ArtifactReference,
+} from "../domain/index.ts";
 import { type PlacementDescriptor } from "./capabilities.ts";
 import { normalizedEndpoint } from "./http-wire.ts";
 
@@ -190,13 +196,58 @@ export class S3CompatibleArtifactStore implements ArtifactStore {
     catch { return false; }
   }
 
-  async readRange(reference: ArtifactReference, start: number, end?: number): Promise<Uint8Array> {
-    if (!Number.isInteger(start) || start < 0 || (end !== undefined && (!Number.isInteger(end) || end < start))) {
+  async readRange(reference: ArtifactReference, start: number, end: number): Promise<Uint8Array> {
+    if (!Number.isInteger(start) || start < 0 || !Number.isInteger(end) || end < start) {
       throw new ValidationError("Invalid artifact range");
     }
-    // A sha256 object ID authenticates the whole object, not an arbitrary byte
-    // range. Fetch and verify the complete object before returning the range.
-    return (await this.resolve(reference)).slice(start, end);
+    this.#validate(reference);
+    if (start > reference.size || end > reference.size) throw new ValidationError("Artifact range exceeds immutable content size");
+    if (end - start > OUTPUT_LIMITS.artifactRangeBytes) {
+      throw new ValidationError(`Artifact range exceeds ${OUTPUT_LIMITS.artifactRangeBytes} bytes`);
+    }
+    if (end === start) return new Uint8Array();
+    if (reference.size <= OUTPUT_LIMITS.artifactRangeBytes) {
+      return (await this.resolve(reference)).slice(start, end);
+    }
+    const response = await this.#fetch("GET", this.#key(reference.digest), reference.digest, {
+      headers: { range: `bytes=${start}-${end - 1}` },
+    });
+    if (response.status !== 206) {
+      if (!response.ok) await this.#httpFailure(response, "range read", reference);
+      // Never buffer a large whole-object response from a placement that
+      // ignored Range. Its advertised capability is not usable.
+      await response.body?.cancel().catch(() => {});
+      throw new CapabilityUnavailableError(
+        "remote artifact range reads",
+        `${this.name} did not honor the required HTTP Range request`,
+      );
+    }
+    const expectedContentRange = `bytes ${start}-${end - 1}/${reference.size}`;
+    if (response.headers.get("content-range") !== expectedContentRange) {
+      await response.body?.cancel().catch(() => {});
+      throw new DependencyFailureError("Remote object CAS returned an invalid content range", {
+        artifactId: reference.artifactId,
+        expectedContentRange,
+        actualContentRange: response.headers.get("content-range"),
+      });
+    }
+    const metadataDigest = response.headers.get("x-amz-meta-sha256");
+    const checksum = response.headers.get("x-amz-checksum-sha256");
+    if (metadataDigest !== reference.digest && checksum !== Buffer.from(reference.digest, "hex").toString("base64")) {
+      await response.body?.cancel().catch(() => {});
+      throw new DependencyFailureError("Remote object CAS range lacks matching immutable digest metadata", {
+        artifactId: reference.artifactId,
+      });
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength !== end - start) {
+      throw new DependencyFailureError("Remote object CAS returned an incomplete byte range", {
+        artifactId: reference.artifactId,
+        expectedSize: end - start,
+        actualSize: bytes.byteLength,
+      });
+    }
+    return bytes;
   }
 
   async export(reference: ArtifactReference, destination: string): Promise<void> {

@@ -18,6 +18,7 @@ import {
   REFINEMENT_GOVERNANCE_CONTRACT_ID,
   validateRefinementGovernanceRecursiveResult,
 } from "./refinement-governance.ts";
+import { assertBoundedOutputs } from "./bounded-output.ts";
 
 function withBase(state: AgentState, event: AgentEvent): AgentState {
   return { ...state, cursor: event.cursor, appliedEventIds: [...state.appliedEventIds, event.id] };
@@ -93,7 +94,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "MessageAppended": { const p = event.payload as EventPayloads["MessageAppended"]; return { ...next, messages: [...state.messages, { id: p.messageId, role: p.role, content: p.content, eventId: event.id, eventCursor: event.cursor, schemaVersion: event.schemaVersion, modelCallId: p.modelCallId ?? null, ...(p.mailbox === undefined ? {} : { mailbox: { ...p.mailbox, ...(p.mailbox.artifactIds === undefined ? {} : { artifactIds: [...p.mailbox.artifactIds] }) } }) }] }; }
     case "CellProposed": { const p = event.payload as EventPayloads["CellProposed"]; if (state.cells[p.cellId]) throw new InvalidTransitionError("cell", state.cells[p.cellId]!.status, "proposed"); const cell: CellState = { id: p.cellId, code: p.code, status: "proposed", attempts: 0, logs: [], logStreams: [], eventId: event.id }; return { ...next, cells: { ...state.cells, [p.cellId]: cell } }; }
     case "CellStarted": { const p = event.payload as EventPayloads["CellStarted"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("cell", old?.status ?? "missing", "running"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "running", attempts: p.attempt, eventId: event.id } } }; }
-    case "CellCommitted": { const p = event.payload as EventPayloads["CellCommitted"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "committed"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "committed", result: p.result, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
+    case "CellCommitted": { const p = event.payload as EventPayloads["CellCommitted"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "committed"); assertBoundedOutputs(p.result); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "committed", result: p.result, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
     case "CellFailed": { const p = event.payload as EventPayloads["CellFailed"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "failed"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "failed", error: p.error, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
     case "CellAbandoned": { const p = event.payload as EventPayloads["CellAbandoned"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status)) throw new InvalidTransitionError("cell", old?.status ?? "missing", "abandoned"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "abandoned", error: p.reason, eventId: event.id } } }; }
     case "WorkingValueSet": { const p = event.payload as EventPayloads["WorkingValueSet"]; const old = state.workingValues[p.name]; if (old && p.version <= old.version) throw new ValidationError(`Working value version must increase for ${p.name}`); return { ...next, workingValues: { ...state.workingValues, [p.name]: { name: p.name, version: p.version, value: p.value, eventId: event.id } } }; }
@@ -119,6 +120,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       if (!old || !["requested", "started"].includes(old.status) || p.attempt < Math.max(1, old.attempts)) {
         throw new InvalidTransitionError("effect", old?.status ?? "missing", p.outcome);
       }
+      if (p.output !== undefined) assertBoundedOutputs(p.output);
       if (old.executor === "model") {
         if (p.outcome === "succeeded") {
           if (p.output === undefined || p.modelFailure !== undefined) {

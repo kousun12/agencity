@@ -35,6 +35,7 @@ import {
   type ProviderInputAdmission,
   type ProviderInputCandidate,
 } from "./provider-input.ts";
+import { assertBoundedOutputs } from "./bounded-output.ts";
 
 export const EVENT_SCHEMA_VERSION = 5 as const;
 export const eventTypes = [
@@ -683,6 +684,10 @@ export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): 
     if (effect.modelFailure !== undefined && effect.outcome !== "failed") {
       throw new ValidationError("Only failed model effects may retain modelFailure");
     }
+    if (effect.output !== undefined) assertBoundedOutputs(effect.output);
+  }
+  if (event.type === "CellCommitted") {
+    assertBoundedOutputs((event.payload as unknown as EventPayloads["CellCommitted"]).result);
   }
 }
 

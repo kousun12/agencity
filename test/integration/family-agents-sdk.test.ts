@@ -283,7 +283,10 @@ describe("FU-012 retained family messaging", () => {
       const childState = projectEvents(await value.supervisor.storage.loadEvents(child.sessionId, { branchId: child.branchId }));
       expect(childState.artifacts[artifact.artifactId]).toBeDefined();
       expect(childState.messages.find(message => message.mailbox?.mailboxMessageId === receipt.mailboxMessageId)?.mailbox).toMatchObject({ relationship: "parent", taskId: child.taskId, artifactIds: [artifact.artifactId] });
-      const resolved = await value.supervisor.executeCell(child.sessionId, child.branchId, `return artifacts.get("${artifact.artifactId}");`, [], "fresh-worker-artifact-read");
+      const resolved = await value.supervisor.executeCell(child.sessionId, child.branchId, `
+        const range = await artifacts.readRange("${artifact.artifactId}", 0, 22);
+        return new TextDecoder().decode(range.value.bytes);
+      `, [], "fresh-worker-artifact-read");
       expect(resolved.result).toBe("linked family evidence");
       const other = await value.supervisor.createSession({ workspaceId: "family-sdk" });
       const unrelated = await value.supervisor.agents.spawn(other.sessionId, other.branchId, "other task");

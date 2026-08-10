@@ -1,4 +1,7 @@
 import {
+  BOUNDED_OUTPUT_PROTOCOL,
+  OUTPUT_LIMITS,
+  Utf8HeadTailCapture,
   ValidationError,
   type AgentEvent,
   type EffectOutcome,
@@ -109,7 +112,7 @@ export function deriveAgentProviderObservations(
     manifestByCellId.set(cellId, manifest);
   }
 
-  return selected.flatMap((event) => {
+  const derived = selected.flatMap((event) => {
     if (ownedSuccessfulOutcomeIds.has(event.id)) return [];
     if (CELL_TERMINAL_TYPES.has(event.type)) {
       const cellId = (event.payload as { cellId: string }).cellId;
@@ -160,6 +163,7 @@ export function deriveAgentProviderObservations(
       payload: cloneJson(event.payload as unknown as JsonValue),
     }];
   });
+  return enforceObservationBudget(derived);
 }
 
 function outcomeGuidance(outcome: Exclude<EffectOutcome, "succeeded">): string {
@@ -190,4 +194,181 @@ function boundedUtf8(
 
 function cloneJson(value: JsonValue): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
+}
+
+function observationBytes(observation: AgentProviderObservation): number {
+  return new TextEncoder().encode(JSON.stringify(observation)).byteLength;
+}
+
+function observationsBytes(observations: readonly AgentProviderObservation[]): number {
+  return new TextEncoder().encode(JSON.stringify(observations)).byteLength;
+}
+
+function requiredObservation(observation: AgentProviderObservation): boolean {
+  if (CELL_TERMINAL_TYPES.has(observation.type)) return true;
+  if (observation.type.endsWith("Failed") || observation.type.endsWith("Unknown") ||
+      observation.type === "AgentRunActionRejected") return true;
+  if (!observation.payload || typeof observation.payload !== "object" || Array.isArray(observation.payload)) return false;
+  const payload = observation.payload as Record<string, JsonValue>;
+  if (payload.outcome === "unknown") return true;
+  return ["failed", "cancelled", "unknown", "blocked", "budget_exceeded", "succeeded", "completed"]
+    .includes(String(payload.status ?? payload.outcome ?? ""));
+}
+
+function observationPriority(observation: AgentProviderObservation): number {
+  if (requiredObservation(observation)) return 0;
+  if (observation.payload && typeof observation.payload === "object" && !Array.isArray(observation.payload)) {
+    const payload = observation.payload as Record<string, JsonValue>;
+    if (payload.error !== undefined || payload.reason !== undefined) return 1;
+  }
+  return 3;
+}
+
+function statusMetadata(payload: JsonValue): JsonValue {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  const source = payload as Record<string, JsonValue>;
+  const keys = [
+    "effectId", "cellId", "taskId", "runId", "attempt", "status", "outcome",
+    "terminalStatus", "unknown", "error", "reason",
+  ];
+  const result: Record<string, JsonValue> = {};
+  for (const key of keys) {
+    if (source[key] === undefined) continue;
+    result[key] = typeof source[key] === "string" && (key === "error" || key === "reason")
+      ? boundedUtf8(source[key], MAX_ACTIONABLE_ERROR_BYTES).value
+      : source[key]!;
+  }
+  return result;
+}
+
+function reducedObservation(
+  observation: AgentProviderObservation,
+  headBytes: number,
+  tailBytes: number,
+): AgentProviderObservation {
+  const serialized = JSON.stringify(observation.payload);
+  const capture = new Utf8HeadTailCapture(headBytes, tailBytes);
+  capture.push(serialized);
+  const preview = capture.value();
+  return {
+    eventId: observation.eventId,
+    type: observation.type,
+    payload: {
+      ...(statusMetadata(observation.payload) as Record<string, JsonValue>),
+      output: {
+        protocol: BOUNDED_OUTPUT_PROTOCOL,
+        completeness: "truncated",
+        byteLength: preview.byteLength,
+        preview: { head: preview.head, tail: preview.tail },
+        reason: "observation-budget",
+        guidance: "The exact event remains in the AgentRunStepStarted observationEventIds ledger. Use a source-specific file page or artifact range only when this event contains that reference.",
+      },
+    },
+  };
+}
+
+function fittedReducedObservation(
+  observation: AgentProviderObservation,
+  initialHeadBytes: number,
+  initialTailBytes: number,
+): AgentProviderObservation {
+  let headBytes = initialHeadBytes;
+  let tailBytes = initialTailBytes;
+  let reduced = reducedObservation(observation, headBytes, tailBytes);
+  while (observationBytes(reduced) > OUTPUT_LIMITS.agentObservationItemBytes &&
+         (headBytes > 0 || tailBytes > 0)) {
+    headBytes = Math.floor(headBytes / 2);
+    tailBytes = Math.floor(tailBytes / 2);
+    reduced = reducedObservation(observation, headBytes, tailBytes);
+  }
+  return reduced;
+}
+
+/** Final deterministic dependent-step guard; the canonical exact-once ledger is unchanged. */
+export function enforceObservationBudget(
+  observations: readonly AgentProviderObservation[],
+): AgentProviderObservation[] {
+  let bounded = observations.map((observation) =>
+    observationBytes(observation) <= OUTPUT_LIMITS.agentObservationItemBytes
+      ? observation
+      : fittedReducedObservation(observation, 20 * 1024, 28 * 1024));
+  if (observationsBytes(bounded) <= OUTPUT_LIMITS.agentObservationBytes) return bounded;
+
+  const candidates = bounded
+    .map((observation, index) => ({ observation, index, priority: observationPriority(observation) }))
+    .sort((left, right) => right.priority - left.priority || right.index - left.index);
+  for (const candidate of candidates) {
+    bounded = bounded.map((observation, index) =>
+      index === candidate.index ? fittedReducedObservation(observation, 512, 2_048) : observation);
+    if (observationsBytes(bounded) <= OUTPUT_LIMITS.agentObservationBytes) return bounded;
+  }
+
+  const omitted: AgentProviderObservation[] = [];
+  for (const candidate of candidates.filter(({ observation }) => !requiredObservation(observation))) {
+    const index = bounded.findIndex((item) =>
+      item.eventId === candidate.observation.eventId && item.type === candidate.observation.type);
+    if (index < 0) continue;
+    omitted.push(observations[candidate.index]!);
+    bounded = bounded.filter((_, current) => current !== index);
+    if (observationsBytes(bounded) <= OUTPUT_LIMITS.agentObservationBytes - 1_024) break;
+  }
+  if (omitted.length) {
+    const hasher = new Bun.CryptoHasher("sha256");
+    const eventIds = omitted.map((item) => item.eventId).sort();
+    hasher.update(JSON.stringify(eventIds));
+    bounded.push({
+      eventId: eventIds[0]!,
+      type: "AgentObservationBudgetApplied",
+      payload: {
+        protocol: BOUNDED_OUTPUT_PROTOCOL,
+        completeness: "truncated",
+        byteLength: observationsBytes(omitted),
+        preview: {
+          omittedCount: omitted.length,
+          firstEventId: eventIds[0]!,
+          lastEventId: eventIds.at(-1)!,
+          eventIdsDigest: hasher.digest("hex"),
+        },
+        reason: "observation-budget",
+        guidance: "The AgentRunStepStarted observationEventIds ledger remains complete. Use source-specific bounded retrieval only for retained file or artifact references.",
+      },
+    });
+  }
+  if (observationsBytes(bounded) <= OUTPUT_LIMITS.agentObservationBytes) return bounded;
+
+  // Required terminal and uncertainty facts are never dropped. Remove previews
+  // before status metadata if an unusually large terminal-only ledger remains.
+  bounded = bounded.map((observation) => requiredObservation(observation)
+    ? fittedReducedObservation(observation, 0, 0)
+    : observation);
+  if (observationsBytes(bounded) <= OUTPUT_LIMITS.agentObservationBytes) return bounded;
+
+  const required = bounded.filter(requiredObservation);
+  const statuses = new Map<string, number>();
+  for (const observation of required) {
+    const metadata = statusMetadata(observation.payload) as Record<string, JsonValue>;
+    const key = `${observation.type}:${String(metadata.status ?? metadata.outcome ?? metadata.terminalStatus ?? "terminal")}`;
+    statuses.set(key, (statuses.get(key) ?? 0) + 1);
+  }
+  const eventIds = required.map((item) => item.eventId).sort();
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(JSON.stringify(eventIds));
+  return [{
+    eventId: eventIds[0] ?? observations[0]?.eventId ?? "observation-budget",
+    type: "AgentObservationBudgetApplied",
+    payload: {
+      terminalStatusSummary: [...statuses].sort(([left], [right]) => left.localeCompare(right))
+        .map(([status, count]) => ({ status, count })),
+      terminalEventCount: required.length,
+      terminalEventIdsDigest: hasher.digest("hex"),
+      output: {
+        protocol: BOUNDED_OUTPUT_PROTOCOL,
+        completeness: "truncated",
+        byteLength: observationsBytes(observations),
+        preview: { firstEventId: eventIds[0] ?? null, lastEventId: eventIds.at(-1) ?? null },
+        reason: "observation-budget",
+        guidance: "Terminal and uncertainty status counts are preserved. Inspect the complete AgentRunStepStarted observationEventIds ledger for exact retained event identities and evidence.",
+      },
+    },
+  }];
 }

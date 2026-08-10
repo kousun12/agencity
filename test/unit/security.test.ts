@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   LibSqlStorage,
   ShellExecutor,
+  StreamingTextScrubber,
   assertReadonlySql,
   containsBrokeredSecret,
   environmentWithoutSecrets,
@@ -129,12 +130,14 @@ describe("brokered secret handling", () => {
       apiKey: "ordinary-provider-label",
       token: "pagination-cursor",
       auth: { mode: "oauth" },
+      [`key-${secret}`]: "sensitive-key",
       nested: { note: `contains ${secret}` },
       okay: 1,
     })).toEqual({
       apiKey: "ordinary-provider-label",
       token: "pagination-cursor",
       auth: { mode: "oauth" },
+      "key-[REDACTED]": "sensitive-key",
       nested: { note: "contains [REDACTED]" },
       okay: 1,
     });
@@ -163,6 +166,19 @@ describe("brokered secret handling", () => {
     storage.close();
   });
 
+  test("redacts a private key whose END marker is split across chunks", () => {
+    const scrubber = new StreamingTextScrubber();
+    const encode = (value: string) => new TextEncoder().encode(value);
+    const output = [
+      scrubber.push(encode("before -----BEGIN PRIVATE KEY-----private-material-----EN")),
+      scrubber.push(encode("D PRIVATE")),
+      scrubber.push(encode(" KEY----- after")),
+      scrubber.finish(),
+    ].join("");
+    expect(output).toBe("before [REDACTED] after");
+    expect(output).not.toContain("private-material");
+  });
+
 });
 
 
@@ -188,6 +204,13 @@ describe("shell environment", () => {
       idempotent: false,
       attempt: 1,
     }, { signal: new AbortController().signal });
-    expect(execution).toMatchObject({ outcome: "succeeded", output: { stdout: "absent" } });
+    expect(execution).toMatchObject({
+      outcome: "succeeded",
+      output: {
+        protocol: "agencity.bounded-output.v1",
+        completeness: "inline",
+        value: { stdout: "absent" },
+      },
+    });
   });
 });

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   DependencyFailureError,
   LocalArtifactStore,
+  OUTPUT_LIMITS,
   type ArtifactReference,
 } from "../../src/index.ts";
 import {
@@ -60,7 +61,7 @@ describe("local content-addressed artifacts", () => {
     await Bun.write(objectPath, "tampered!");
     expect(await store.verify(reference)).toBe(false);
     await expect(store.resolve(reference)).rejects.toBeInstanceOf(DependencyFailureError);
-    await expect(store.readRange(reference, 0)).rejects.toBeInstanceOf(DependencyFailureError);
+    await expect(store.readRange(reference, 0, reference.size)).rejects.toBeInstanceOf(DependencyFailureError);
     await expect(store.export(reference, join(temp.directory, "must-not-exist")))
       .rejects.toBeInstanceOf(DependencyFailureError);
   });
@@ -85,5 +86,28 @@ describe("local content-addressed artifacts", () => {
       code: "DEPENDENCY_FAILURE",
       details: { artifactId: reference.artifactId },
     });
+  });
+
+  test("returns exact bounded half-open byte ranges and refuses oversized windows", async () => {
+    const { store } = await setup();
+    const bytes = Uint8Array.from({ length: OUTPUT_LIMITS.artifactRangeBytes + 1 }, (_, index) => index % 251);
+    const reference = await store.put(bytes);
+    expect(await store.readRange(reference, 17, 23)).toEqual(bytes.slice(17, 23));
+    await expect(store.readRange(reference, 0, OUTPUT_LIMITS.artifactRangeBytes + 1))
+      .rejects.toThrow(/exceeds/);
+    await expect(store.readRange(reference, reference.size, reference.size + 1))
+      .rejects.toThrow(/size/);
+  });
+
+  test("startup cleanup preserves staging owned by another live store", async () => {
+    const { temp, store: first } = await setup();
+    await first.cleanupStaging();
+    const live = await first.createStagingPath("live");
+    await Bun.write(live, "in-flight scrubbed bytes");
+    const second = new LocalArtifactStore(temp.artifactDirectory);
+    await second.cleanupStaging();
+    expect(await Bun.file(live).exists()).toBe(true);
+    await first.cleanupStaging();
+    expect(await Bun.file(live).exists()).toBe(false);
   });
 });

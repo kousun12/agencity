@@ -1,8 +1,16 @@
 import { realpath } from "node:fs/promises";
+import { open, rm } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { JsonValue } from "../domain/json.ts";
-import { ValidationError } from "../domain/index.ts";
-import { environmentWithoutSecrets, scrubText } from "../security/index.ts";
+import type { ArtifactStore } from "../artifacts/index.ts";
+import {
+  BOUNDED_OUTPUT_PROTOCOL,
+  OUTPUT_LIMITS,
+  Utf8HeadTailCapture,
+  ValidationError,
+  utf8Bytes,
+  type JsonValue,
+} from "../domain/index.ts";
+import { environmentWithoutSecrets, StreamingTextScrubber } from "../security/index.ts";
 import type { EffectExecutor, ExecutionResult } from "./contract.ts";
 import { result } from "./contract.ts";
 
@@ -15,7 +23,7 @@ export class ShellExecutor implements EffectExecutor {
   readonly name = "shell";
   readonly defaultCwd: string;
 
-  constructor(defaultCwd = process.cwd(), readonly maxOutputBytes = 1024 * 1024) {
+  constructor(defaultCwd = process.cwd(), readonly artifacts?: ArtifactStore) {
     this.defaultCwd = resolve(defaultCwd);
   }
 
@@ -45,25 +53,122 @@ export class ShellExecutor implements EffectExecutor {
     }, timeout);
     const abort = () => child.kill();
     context.signal.addEventListener("abort", abort, { once: true });
+    const canSpill = Boolean(
+      this.artifacts?.createStagingPath &&
+      this.artifacts.putStaged,
+    );
+    let stdoutStage: string | undefined;
+    let stderrStage: string | undefined;
+    let stagingSetupFailed = false;
+    if (canSpill) {
+      try {
+        stdoutStage = await this.artifacts!.createStagingPath!(`${request.effectId}-stdout`);
+        stderrStage = await this.artifacts!.createStagingPath!(`${request.effectId}-stderr`);
+      } catch {
+        stagingSetupFailed = true;
+        await cleanup([stdoutStage, stderrStage]);
+        stdoutStage = undefined;
+        stderrStage = undefined;
+      }
+    }
+    const spillBudget = { observedBytes: 0, exceeded: false };
     try {
       const [exitCode, stdout, stderr] = await Promise.all([
         child.exited,
-        new Response(child.stdout).arrayBuffer(),
-        new Response(child.stderr).arrayBuffer(),
+        captureStream(child.stdout, stdoutStage, spillBudget),
+        captureStream(child.stderr, stderrStage, spillBudget),
       ]);
-      const decode = (bytes: ArrayBuffer) => scrubText(new TextDecoder().decode(bytes.slice(0, this.maxOutputBytes)));
-      const output: JsonValue = {
-        exitCode,
-        stdout: decode(stdout),
-        stderr: decode(stderr),
-        truncated: stdout.byteLength > this.maxOutputBytes || stderr.byteLength > this.maxOutputBytes,
-      };
-      if (context.signal.aborted) return result("cancelled", output, "Shell command cancelled");
-      if (timedOut) return result("failed", output, `Shell command timed out after ${timeout}ms`);
-      return exitCode === 0 ? result("succeeded", output) : result("failed", output, `Shell command exited ${exitCode}`);
+      const totalBytes = stdout.byteLength + stderr.byteLength;
+      const totalObservedBytes = stdout.observedByteLength + stderr.observedByteLength;
+      const inline = stdout.complete !== undefined && stderr.complete !== undefined;
+      let output: JsonValue;
+      let artifacts: ExecutionResult["artifacts"];
+      if (spillBudget.exceeded) {
+        output = shellOverflow(
+          exitCode,
+          stdout,
+          stderr,
+          totalObservedBytes,
+          "spill-limit",
+          "Complete output exceeded the 32 MiB spill limit. Re-run a narrower command or redirect focused output to a file.",
+        );
+        await cleanup([stdoutStage, stderrStage]);
+      } else if (inline) {
+        output = {
+          protocol: BOUNDED_OUTPUT_PROTOCOL,
+          completeness: "inline",
+          byteLength: totalBytes,
+          value: { exitCode, stdout: stdout.complete!, stderr: stderr.complete! },
+        };
+        await cleanup([stdoutStage, stderrStage]);
+      } else if (!canSpill) {
+        output = shellOverflow(
+          exitCode,
+          stdout,
+          stderr,
+          totalBytes,
+          "spill-unavailable",
+          "Complete output could not be retained because local artifact staging is unavailable. Re-run a narrower command.",
+        );
+      } else if (stagingSetupFailed || !stdoutStage || !stderrStage ||
+                 stdout.stagingFailed || stderr.stagingFailed) {
+        output = shellOverflow(
+          exitCode,
+          stdout,
+          stderr,
+          totalBytes,
+          "spill-failed",
+          "Complete output staging failed. Re-run a narrower command; no complete retained value is available.",
+        );
+        await cleanup([stdoutStage, stderrStage]);
+      } else {
+        let combined: string | undefined;
+        try {
+          combined = await this.artifacts!.createStagingPath!(`${request.effectId}-combined`);
+          const stdoutEnd = await concatenateStages(combined, [stdoutStage, stderrStage]);
+          const reference = await this.artifacts!.putStaged!(combined, {
+            mediaType: "application/vnd.agencity.shell-output.v1",
+          });
+          output = {
+            protocol: BOUNDED_OUTPUT_PROTOCOL,
+            completeness: "spilled",
+            byteLength: totalBytes,
+            preview: shellPreview(exitCode, stdout, stderr),
+            artifact: {
+              artifactId: reference.artifactId,
+              digest: reference.digest,
+              mediaType: reference.mediaType,
+              size: reference.size,
+            },
+            layout: {
+              stdout: { start: 0, end: stdoutEnd },
+              stderr: { start: stdoutEnd, end: totalBytes },
+            },
+            guidance: "Use artifacts.readRange(artifactId, start, end) with the retained layout to retrieve exact scrubbed stdout or stderr bytes.",
+          };
+          artifacts = [reference];
+        } catch {
+          output = shellOverflow(
+            exitCode,
+            stdout,
+            stderr,
+            totalBytes,
+            "spill-failed",
+            "Complete output placement failed. Re-run a narrower command; no complete retained value is available.",
+          );
+        } finally {
+          await cleanup([combined, stdoutStage, stderrStage]);
+        }
+      }
+      if (context.signal.aborted) return result("cancelled", output, "Shell command cancelled", undefined, artifacts);
+      if (timedOut) return result("failed", output, `Shell command timed out after ${timeout}ms`, undefined, artifacts);
+      return exitCode === 0
+        ? result("succeeded", output, undefined, undefined, artifacts)
+        : result("failed", output, `Shell command exited ${exitCode}`, undefined, artifacts);
     } finally {
       clearTimeout(timer);
       context.signal.removeEventListener("abort", abort);
+      await cleanup([stdoutStage, stderrStage]);
     }
   }
 
@@ -83,4 +188,140 @@ export class ShellExecutor implements EffectExecutor {
     }
     return cwd;
   }
+}
+
+interface CapturedStream {
+  readonly byteLength: number;
+  readonly observedByteLength: number;
+  readonly head: string;
+  readonly tail: string;
+  readonly complete?: string;
+  readonly stagingFailed: boolean;
+}
+
+async function captureStream(
+  stream: ReadableStream<Uint8Array>,
+  stagingPath?: string,
+  spillBudget: { observedBytes: number; exceeded: boolean } = { observedBytes: 0, exceeded: false },
+): Promise<CapturedStream> {
+  const preview = new Utf8HeadTailCapture(
+    OUTPUT_LIMITS.shellPreviewHeadBytes,
+    OUTPUT_LIMITS.shellPreviewTailBytes,
+  );
+  const scrubber = new StreamingTextScrubber();
+  let inline = "";
+  let inlineAvailable = true;
+  let stagingFailed = false;
+  let observedByteLength = 0;
+  const handle = stagingPath
+    ? await open(stagingPath, "wx", 0o600).catch(() => {
+        stagingFailed = true;
+        return undefined;
+      })
+    : undefined;
+  const retain = async (value: string): Promise<void> => {
+    if (!value) return;
+    preview.push(value);
+    if (inlineAvailable) {
+      if (utf8Bytes(inline) + utf8Bytes(value) <= OUTPUT_LIMITS.shellPreviewBytesPerStream) inline += value;
+      else {
+        inline = "";
+        inlineAvailable = false;
+      }
+    }
+    const bytes = new TextEncoder().encode(value);
+    if (handle && !stagingFailed && !spillBudget.exceeded) {
+      try { await handle.write(bytes); }
+      catch { stagingFailed = true; }
+    }
+  };
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      observedByteLength += chunk.value.byteLength;
+      spillBudget.observedBytes += chunk.value.byteLength;
+      if (spillBudget.observedBytes > OUTPUT_LIMITS.shellSpillBytes) {
+        spillBudget.exceeded = true;
+      }
+      await retain(scrubber.push(chunk.value));
+    }
+    await retain(scrubber.finish());
+  } finally {
+    reader.releaseLock();
+    await handle?.close().catch(() => { stagingFailed = true; });
+  }
+  const value = preview.value();
+  return {
+    ...value,
+    observedByteLength,
+    ...(inlineAvailable ? { complete: inline } : {}),
+    stagingFailed,
+  };
+}
+
+function shellPreview(exitCode: number, stdout: CapturedStream, stderr: CapturedStream): JsonValue {
+  return {
+    exitCode,
+    stdout: {
+      head: stdout.head,
+      tail: stdout.tail,
+      byteLength: stdout.observedByteLength,
+      retainedByteLength: stdout.byteLength,
+    },
+    stderr: {
+      head: stderr.head,
+      tail: stderr.tail,
+      byteLength: stderr.observedByteLength,
+      retainedByteLength: stderr.byteLength,
+    },
+  };
+}
+
+function shellOverflow(
+  exitCode: number,
+  stdout: CapturedStream,
+  stderr: CapturedStream,
+  byteLength: number,
+  reason: "spill-unavailable" | "spill-failed" | "spill-limit",
+  guidance: string,
+): JsonValue {
+  return {
+    protocol: BOUNDED_OUTPUT_PROTOCOL,
+    completeness: "truncated",
+    byteLength,
+    preview: shellPreview(exitCode, stdout, stderr),
+    reason,
+    guidance,
+  };
+}
+
+async function concatenateStages(target: string, sources: readonly string[]): Promise<number> {
+  const output = await open(target, "wx", 0o600);
+  let offset = 0;
+  let firstSize = 0;
+  try {
+    for (let index = 0; index < sources.length; index++) {
+      const reader = Bun.file(sources[index]!).stream().getReader();
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          await output.write(chunk.value);
+          offset += chunk.value.byteLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      if (index === 0) firstSize = offset;
+    }
+  } finally {
+    await output.close();
+  }
+  return firstSize;
+}
+
+async function cleanup(paths: readonly (string | undefined)[]): Promise<void> {
+  await Promise.all(paths.flatMap((path) => path ? [rm(path, { force: true }).catch(() => {})] : []));
 }

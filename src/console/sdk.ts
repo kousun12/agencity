@@ -68,12 +68,27 @@ export interface CellsSdk {
 
 export interface ArtifactsSdk {
   put(content: string, mediaType?: string): Promise<ArtifactReference>;
-  get(artifactId: string): Promise<string>;
+  readRange(artifactId: string, start: number, end: number): Promise<{
+    readonly protocol: "agencity.bounded-output.v1";
+    readonly completeness: "inline";
+    readonly byteLength: number;
+    readonly value: {
+      readonly bytes: Uint8Array;
+      readonly start: number;
+      readonly end: number;
+      readonly size: number;
+      readonly nextStart: number | null;
+    };
+  }>;
 }
 export interface ToolsSdk {
   request(executor: string, operation: string, input: JsonValue, options?: { idempotencyKey?: string; idempotent?: boolean }): Promise<{ outcome: "succeeded" | "failed" | "cancelled" | "unknown"; output?: JsonValue; error?: string }>;
   shell(command: string, options?: { cwd?: string; timeoutMs?: number; idempotencyKey?: string }): Promise<JsonValue>;
-  readFile(path: string): Promise<JsonValue>;
+  readFile(path: string, options?: {
+    readonly startLine?: number;
+    readonly endLine?: number;
+    readonly expectedSha256?: string;
+  }): Promise<JsonValue>;
   writeFile(path: string, content: string, expectedSha256?: string): Promise<JsonValue>;
 }
 export interface MemorySdk { search(query: string, options?: JsonValue): Promise<JsonValue>; create(input: JsonValue | string): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue> }

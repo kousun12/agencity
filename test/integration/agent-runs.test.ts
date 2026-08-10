@@ -394,9 +394,10 @@ describe("autonomous durable agent runs", () => {
       action({ type: "typescript", code: `
         const write = await tools.writeFile("answer.txt", "durable-agent-run");
         const gate = await tools.shell("test -f answer.txt && cat answer.txt");
-        await state.set("verified", { exitCode: gate.exitCode, sha256: write.sha256 });
-        console.log("verified", gate.stdout);
-        return { exitCode: gate.exitCode, content: gate.stdout.trim(), sha256: write.sha256 };
+        if (gate.completeness !== "inline") throw new Error(gate.guidance);
+        await state.set("verified", { exitCode: gate.value.exitCode, sha256: write.sha256 });
+        console.log("verified", gate.value.stdout);
+        return { exitCode: gate.value.exitCode, content: gate.value.stdout.trim(), sha256: write.sha256 };
       ` }),
       action({ type: "final", content: "Created answer.txt and verified its contents." }),
     ]);
@@ -408,9 +409,10 @@ describe("autonomous durable agent runs", () => {
       expect(await Bun.file(`${value.temp.workspaceRoot}/answer.txt`).text()).toBe("durable-agent-run");
       expect(value.provider.calls).toBe(2);
       const firstContext = JSON.stringify(value.provider.contexts[0]);
-      expect(firstContext).toContain("readFile returns { content, sha256, size }");
+      expect(firstContext).toContain("complete one-based line pages");
       expect(firstContext).toContain("the option is timeoutMs, not timeout");
-      expect(firstContext).toContain("shell returns { exitCode, stdout, stderr, truncated }");
+      expect(firstContext).toContain("agencity.bounded-output.v1");
+      expect(firstContext).toContain("artifacts.readRange");
       expect(firstContext).toContain("Keep large read, search, and tool results in local variables");
       expect(firstContext).toContain("Return the smallest useful observation");
       expect(JSON.stringify(value.provider.contexts[1]))

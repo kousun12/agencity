@@ -74,6 +74,98 @@ export function scrubText(text: string): string {
   return scrubbed;
 }
 
+/** Output-only redaction for recognizable raw credential shapes. */
+export function scrubCredentialText(text: string): string {
+  const scrubbedUrls = text.replace(/(?:https?|libsql):\/\/[^\s]+/gi, (candidate) => {
+    try {
+      const url = new URL(candidate);
+      if (!url.username && !url.password && ![...url.searchParams.keys()].some((key) => SENSITIVE_KEY.test(key))) {
+        return candidate;
+      }
+      return REDACTED;
+    } catch {
+      return candidate;
+    }
+  });
+  return scrubText(scrubbedUrls)
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, REDACTED)
+    .replace(/(?:Bearer|Basic)\s+[A-Za-z0-9+/_.=-]{8,}/gi, REDACTED)
+    .replace(/(?:sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9_-]{8,}/g, REDACTED)
+    .replace(/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED)
+    .replace(/((?:password|passwd|secret|auth[_-]?token|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, `$1${REDACTED}`);
+}
+
+/**
+ * Scrubs streaming UTF-8 text while retaining enough suffix to recognize
+ * known secrets and credential-shaped values split across source chunks.
+ */
+export class StreamingTextScrubber {
+  readonly #decoder = new TextDecoder();
+  readonly #holdCharacters: number;
+  #pending = "";
+  #insidePrivateKey = false;
+
+  constructor() {
+    const longestKnownSecret = knownSecrets().reduce((maximum, secret) => Math.max(maximum, secret.length), 0);
+    this.#holdCharacters = Math.max(1_024, longestKnownSecret + 32);
+  }
+
+  push(chunk: Uint8Array): string {
+    this.#pending += this.#decoder.decode(chunk, { stream: true });
+    let privateKeyRedactions = "";
+    while (true) {
+      if (this.#insidePrivateKey) {
+        const end = /-----END [A-Z ]*PRIVATE KEY-----/.exec(this.#pending);
+        if (!end) {
+          // Private-key bodies are discarded, but retain a bounded suffix so an
+          // END marker split across source chunks can terminate the redaction.
+          const marker = this.#pending.lastIndexOf("-----");
+          this.#pending = (marker >= 0 ? this.#pending.slice(marker) : this.#pending.slice(-32))
+            .slice(-256);
+          return privateKeyRedactions;
+        }
+        this.#pending = this.#pending.slice(end.index + end[0].length);
+        this.#insidePrivateKey = false;
+        continue;
+      }
+      const begin = /-----BEGIN [A-Z ]*PRIVATE KEY-----/.exec(this.#pending);
+      if (!begin) break;
+      privateKeyRedactions += scrubCredentialText(this.#pending.slice(0, begin.index)) + REDACTED;
+      this.#pending = this.#pending.slice(begin.index + begin[0].length);
+      this.#insidePrivateKey = true;
+    }
+    if (this.#pending.length <= this.#holdCharacters) return privateKeyRedactions;
+    let safeEnd = this.#pending.length - this.#holdCharacters;
+    const candidate = this.#pending.slice(0, safeEnd);
+    for (const secret of knownSecrets()) {
+      const maximum = Math.min(secret.length - 1, candidate.length);
+      for (let length = maximum; length > 0; length--) {
+        if (candidate.endsWith(secret.slice(0, length))) {
+          safeEnd -= length;
+          break;
+        }
+      }
+    }
+    const credentialPrefix = this.#pending.slice(0, safeEnd).match(
+      /(?:Bearer\s+|Basic\s+|sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza|(?:password|passwd|secret|auth[_-]?token|api[_-]?key)\s*[:=]\s*)[A-Za-z0-9+/_.=-]*$/i,
+    );
+    if (credentialPrefix) safeEnd -= credentialPrefix[0].length;
+    const emitted = this.#pending.slice(0, safeEnd);
+    this.#pending = this.#pending.slice(safeEnd);
+    return privateKeyRedactions + scrubCredentialText(emitted);
+  }
+
+  finish(): string {
+    this.#pending += this.#decoder.decode();
+    const emitted = this.#insidePrivateKey
+      ? ""
+      : scrubCredentialText(this.#pending.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*$/g, REDACTED));
+    this.#pending = "";
+    this.#insidePrivateKey = false;
+    return emitted;
+  }
+}
+
 /**
  * Redacts occurrences of actual credential values known to the supervisor.
  *
@@ -88,7 +180,7 @@ export function scrubJson(value: JsonValue): JsonValue {
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
   if (Array.isArray(value)) return value.map(scrubJson);
   const result: Record<string, JsonValue> = {};
-  for (const [key, item] of Object.entries(value)) result[key] = scrubJson(item);
+  for (const [key, item] of Object.entries(value)) result[scrubText(key)] = scrubJson(item);
   return result;
 }
 

@@ -10,6 +10,7 @@ export * from "./refinement-review.ts";
 export * from "./refinement-review-contract.ts";
 export * from "./refinement-governance.ts";
 export * from "./json.ts";
+export * from "./bounded-output.ts";
 export * from "./state.ts";
 export * from "./reducer.ts";
 

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   EVENT_SCHEMA_VERSION,
+  OUTPUT_LIMITS,
+  assertBoundedOutputV1,
   type AgentEvent,
   type EventType,
   type JsonValue,
@@ -32,6 +34,36 @@ function event<T extends EventType>(
 }
 
 describe("derived agent provider observations", () => {
+  test("rejects malformed bounded-output completeness claims", () => {
+    expect(() => assertBoundedOutputV1({
+      protocol: "agencity.bounded-output.v1",
+      completeness: "spilled",
+      byteLength: 10,
+      preview: "partial",
+      artifact: {
+        artifactId: `sha256:${"a".repeat(64)}`,
+        digest: "a".repeat(64),
+        mediaType: "text/plain",
+        size: 9,
+      },
+      guidance: "read it",
+    })).toThrow(/byteLength/);
+    expect(() => assertBoundedOutputV1({
+      protocol: "agencity.bounded-output.v1",
+      completeness: "truncated",
+      byteLength: 10,
+      preview: "partial",
+      artifact: {
+        artifactId: `sha256:${"a".repeat(64)}`,
+        digest: "a".repeat(64),
+        mediaType: "text/plain",
+        size: 10,
+      },
+      reason: "spill-failed",
+      guidance: "retry",
+    })).toThrow(/completeness/);
+  });
+
   test("lets a null-result terminal cell own successful effect payloads through a compact manifest", () => {
     const events: AgentEvent[] = [
       event("1", "EffectRequested", {
@@ -211,5 +243,63 @@ describe("derived agent provider observations", () => {
       type: "EffectOutcomeRecorded",
       payload: outcome.payload,
     }]);
+  });
+
+  test("deterministically enforces per-item and aggregate budgets without dropping terminal status", () => {
+    const events: AgentEvent[] = [];
+    const ledger: string[] = [];
+    for (let index = 0; index < 8; index++) {
+      const id = String(index + 1);
+      ledger.push(id);
+      events.push(event(id, "CellFailed", {
+        cellId: `cell-${index}`,
+        error: `terminal-${index}:${"🧪".repeat(20_000)}`,
+        logs: [`head-${index}`, "\\\"".repeat(20_000), `tail-${index}`],
+        durationMs: 1,
+      }));
+    }
+    for (let index = 0; index < 20; index++) {
+      const id = String(index + 9);
+      ledger.push(id);
+      events.push(event(id, "WorkingValueSet", {
+        name: `value-${index}`,
+        version: 1,
+        value: { kind: "json", value: { data: "i".repeat(8_000) } },
+      }));
+    }
+    ledger.push("29");
+    events.push(event("29", "MailboxMessageDeliveryFailed", {
+      mailboxMessageId: "mailbox-terminal",
+      failedAt: "2026-08-10T00:00:00.000Z",
+      error: `delivery-terminal:${"x".repeat(20_000)}`,
+    }));
+
+    const first = deriveAgentProviderObservations(events, ledger);
+    const replay = deriveAgentProviderObservations(events, ledger);
+    expect(first).toEqual(replay);
+    expect(ledger).toHaveLength(29);
+    expect(new TextEncoder().encode(JSON.stringify(first)).byteLength)
+      .toBeLessThanOrEqual(OUTPUT_LIMITS.agentObservationBytes);
+    for (const item of first) {
+      expect(new TextEncoder().encode(JSON.stringify(item)).byteLength)
+        .toBeLessThanOrEqual(OUTPUT_LIMITS.agentObservationItemBytes);
+    }
+    for (let index = 0; index < 8; index++) {
+      const terminal = first.find((item) => item.eventId === String(index + 1));
+      expect(terminal).toBeDefined();
+      expect((terminal!.payload as any).cellId).toBe(`cell-${index}`);
+      expect(JSON.stringify(terminal)).toContain("observation-budget");
+    }
+    expect(first.find((item) => item.eventId === "29")).toBeDefined();
+    const budget = first.find((item) => item.type === "AgentObservationBudgetApplied");
+    expect(budget).toBeDefined();
+    const retainedIds = new Set(
+      first.filter((item) => item.type !== "AgentObservationBudgetApplied").map((item) => item.eventId),
+    );
+    const omittedExact = events
+      .filter((item) => item.type === "WorkingValueSet" && !retainedIds.has(item.id))
+      .map((item) => ({ eventId: item.id, type: item.type, payload: item.payload }));
+    expect((budget!.payload as any).byteLength)
+      .toBe(new TextEncoder().encode(JSON.stringify(omittedExact)).byteLength);
   });
 });

@@ -1,7 +1,13 @@
 import type { JsonValue } from "../domain/json.ts";
 import type { CellLogStream } from "../domain/events.ts";
 import type { ConsoleSdk, SqlTag } from "./sdk.ts";
-import { encodeObservation, inspectValue, type InspectOptions } from "./inspect.ts";
+import {
+  MAX_CELL_OBSERVATION_JSON_BYTES,
+  encodeObservation,
+  inspectValue,
+  type EncodedObservation,
+  type InspectOptions,
+} from "./inspect.ts";
 import { notebookCellBody } from "./notebook.ts";
 
 type Incoming =
@@ -12,6 +18,7 @@ type Incoming =
 const MAX_LOG_BYTES = 64 * 1024;
 const MAX_LOG_LINES = 1_000;
 const LOG_TRUNCATED = "[console output truncated]";
+const MAX_TERMINAL_IPC_BYTES = 128 * 1024;
 
 class BoundedLogs {
   readonly values: string[] = [];
@@ -133,7 +140,20 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   const inspect = (value: unknown, options: InspectOptions = {}) => inspectValue(value, options);
   const artifacts = {
     put: (content: string, mediaType?: string) => call("artifacts.put", [content, mediaType]),
-    get: (artifactId: string) => call("artifacts.get", [artifactId]),
+    readRange: async (artifactId: string, start: number, end: number) => {
+      const envelope = await call("artifacts.readRange", [artifactId, start, end]) as any;
+      if (envelope?.completeness !== "inline" || typeof envelope.value?.bytesBase64 !== "string") {
+        throw new Error("Artifact range response is invalid");
+      }
+      const { bytesBase64, ...metadata } = envelope.value;
+      return {
+        ...envelope,
+        value: {
+          ...metadata,
+          bytes: Uint8Array.from(Buffer.from(bytesBase64, "base64")),
+        },
+      };
+    },
   };
   const request = async (executor: string, operation: string, input: JsonValue, options?: unknown) =>
     call("tools.request", [executor, operation, input, options]) as Promise<any>;
@@ -144,8 +164,8 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       if (response.outcome !== "succeeded") throw new Error(response.error ?? `shell: ${response.outcome}`);
       return response.output;
     },
-    readFile: async (path: string) => {
-      const response = await request("file", "read", { path }, { idempotent: true });
+    readFile: async (path: string, options: Record<string, unknown> = {}) => {
+      const response = await request("file", "read", { path, ...options }, { idempotent: true });
       if (response.outcome !== "succeeded") throw new Error(response.error ?? `readFile: ${response.outcome}`);
       return response.output;
     },
@@ -270,7 +290,21 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     ) => Promise<unknown>;
     const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, rlm, inspect } as unknown as ConsoleSdk;
     const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm);
-    response = { type: "result", executionId: message.executionId, ok: true, observation: encodeObservation(value) };
+    const encoded = encodeObservation(value);
+    const inlineTerminal = {
+      type: "result",
+      executionId: message.executionId,
+      ok: true,
+      observation: encoded,
+      logs: logs.values,
+      logStreams: logs.streams,
+    };
+    const observation = encoded.kind === "json" &&
+      (encoded.byteLength > MAX_CELL_OBSERVATION_JSON_BYTES ||
+       ipcBytes(inlineTerminal) > MAX_TERMINAL_IPC_BYTES)
+      ? await stageObservation(message.executionId, encoded)
+      : encoded;
+    response = { type: "result", executionId: message.executionId, ok: true, observation };
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
     response = {
@@ -283,5 +317,72 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     stdout.write = originalStdout;
     stderr.write = originalStderr;
   }
-  send({ ...response, logs: logs.values, logStreams: logs.streams });
+  send(fitTerminalIpc({ ...response, logs: logs.values, logStreams: logs.streams }));
+}
+
+async function stageObservation(
+  executionId: string,
+  observation: Extract<EncodedObservation, { kind: "json" }>,
+): Promise<EncodedObservation> {
+  const bytes = new TextEncoder().encode(observation.json);
+  await rpc(executionId, "observation.stage.begin", [bytes.byteLength]);
+  const chunkBytes = 64 * 1024;
+  for (let start = 0; start < bytes.byteLength; start += chunkBytes) {
+    await rpc(executionId, "observation.stage.chunk", [
+      Buffer.from(bytes.subarray(start, Math.min(bytes.byteLength, start + chunkBytes))).toString("base64"),
+    ]);
+  }
+  const result = await rpc(executionId, "observation.stage.finish", [observation.preview]) as JsonValue;
+  return {
+    kind: "staged",
+    result,
+    byteLength: bytes.byteLength,
+    preview: observation.preview,
+  };
+}
+
+function ipcBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+function fitTerminalIpc<T extends Record<string, unknown> & {
+  readonly logs: string[];
+  readonly logStreams: CellLogStream[];
+  readonly error?: string;
+}>(input: T): T {
+  if (ipcBytes(input) <= MAX_TERMINAL_IPC_BYTES) return input;
+  const logs = [...input.logs];
+  const logStreams = [...input.logStreams];
+  let output = { ...input, logs, logStreams };
+  while (logs.length && ipcBytes(output) > MAX_TERMINAL_IPC_BYTES) {
+    logs.pop();
+    logStreams.pop();
+  }
+  if (logs.length < input.logs.length) {
+    logs.push(LOG_TRUNCATED);
+    logStreams.push(input.logStreams[0] ?? "stdout");
+    if (ipcBytes(output) > MAX_TERMINAL_IPC_BYTES) {
+      logs.pop();
+      logStreams.pop();
+    }
+  }
+  if (ipcBytes(output) <= MAX_TERMINAL_IPC_BYTES) return output;
+  if (typeof output.error === "string") {
+    let error = output.error;
+    while (error && ipcBytes({ ...output, error }) > MAX_TERMINAL_IPC_BYTES) {
+      error = error.slice(0, Math.floor(error.length / 2));
+    }
+    output = { ...output, error: error ? `${error}…` : "Console cell failed" };
+  }
+  if (ipcBytes(output) > MAX_TERMINAL_IPC_BYTES) {
+    return {
+      type: input.type,
+      executionId: input.executionId,
+      ok: false,
+      error: "Console terminal IPC response exceeded the 128 KiB product limit",
+      logs: [],
+      logStreams: [],
+    } as unknown as T;
+  }
+  return output;
 }

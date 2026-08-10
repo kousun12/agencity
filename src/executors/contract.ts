@@ -1,4 +1,4 @@
-import type { EffectOutcome, ModelEffectFailureCode } from "../domain/index.ts";
+import type { ArtifactReference, EffectOutcome, ModelEffectFailureCode } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 
 /** Executor-facing request shape; no storage-adapter type crosses this boundary. */
@@ -18,6 +18,8 @@ export interface ExecutionResult {
   readonly output?: JsonValue;
   readonly error?: string;
   readonly modelFailure?: ModelEffectFailureCode;
+  /** CAS objects that must be registered atomically with this outcome. */
+  readonly artifacts?: readonly ArtifactReference[];
 }
 /**
  * Non-authoritative, process-local progress from a running effect. Progress is
@@ -36,6 +38,18 @@ export interface EffectExecutor {
   readonly name: string;
   execute(request: EffectExecutionRequest, context: EffectExecutionContext): Promise<ExecutionResult>;
 }
-export function result(outcome: EffectOutcome, output?: JsonValue, error?: string, modelFailure?: ModelEffectFailureCode): ExecutionResult {
-  return { outcome, ...(output === undefined ? {} : { output }), ...(error === undefined ? {} : { error }), ...(modelFailure === undefined ? {} : { modelFailure }) };
+export function result(
+  outcome: EffectOutcome,
+  output?: JsonValue,
+  error?: string,
+  modelFailure?: ModelEffectFailureCode,
+  artifacts?: readonly ArtifactReference[],
+): ExecutionResult {
+  return {
+    outcome,
+    ...(output === undefined ? {} : { output }),
+    ...(error === undefined ? {} : { error }),
+    ...(modelFailure === undefined ? {} : { modelFailure }),
+    ...(artifacts === undefined || artifacts.length === 0 ? {} : { artifacts }),
+  };
 }
