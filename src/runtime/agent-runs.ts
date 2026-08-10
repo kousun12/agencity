@@ -47,6 +47,7 @@ import {
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
 import { composeAgentSystemPrompt } from "./agent-system-prompt.ts";
+import { deriveAgentProviderObservations } from "./agent-observations.ts";
 
 export interface StartAgentRunInput {
   readonly task: string;
@@ -426,11 +427,7 @@ export class AgentRunService {
     run: AgentRunState,
     step: AgentRunState["steps"][number],
   ): Promise<void> {
-    const observations = step.observationEventIds.map((eventId) => {
-      const event = events.find((candidate) => candidate.id === eventId);
-      if (!event) throw new ValidationError(`Agent run observation event is missing: ${eventId}`);
-      return { eventId: event.id, type: event.type, payload: JSON.parse(JSON.stringify(event.payload)) as JsonValue };
-    });
+    const observations = deriveAgentProviderObservations(events, step.observationEventIds);
     let attempt = step.modelAttempts.at(-1);
     if (!attempt && state.contexts[step.contextId]) {
       const retainedContextEvent = events.find((event) => event.type === "ContextMaterialized" && (event.payload as EventPayloads["ContextMaterialized"]).contextId === step.contextId) as AgentEvent<"ContextMaterialized"> | undefined;
@@ -582,6 +579,7 @@ export class AgentRunService {
       const requestedEffectId = await this.outbox.request({
         sessionId, branchId, executor: "model", operation: "complete",
         input: { callId: attempt.callId, providerInput: retainedProviderInput as unknown as JsonValue, modelDispatch: retainedDispatch as unknown as JsonValue, promptProvenance: admittedCall.promptProvenance as unknown as JsonValue },
+        origin: { kind: "model-call", callId: attempt.callId },
         idempotencyKey: effectKey, idempotent: false,
       });
       if (requestedEffectId !== attempt.effectId) throw new ValidationError("Agent run model effect identity is not stable");

@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ConsoleCellError,
+  EVENT_SCHEMA_VERSION,
   MAX_WORKING_JSON_BYTES,
   Supervisor,
   jsonBytes,
@@ -407,9 +408,9 @@ describe("disposable TypeScript console process", () => {
       logs: ["history-log"],
       durationMs: expect.any(Number),
       provenance: {
-        proposed: { type: "CellProposed", eventId: expect.any(String), schemaVersion: 5 },
-        starts: [{ type: "CellStarted", eventId: expect.any(String), schemaVersion: 5 }],
-        terminal: { type: "CellCommitted", eventId: expect.any(String), schemaVersion: 5 },
+        proposed: { type: "CellProposed", eventId: expect.any(String), schemaVersion: EVENT_SCHEMA_VERSION },
+        starts: [{ type: "CellStarted", eventId: expect.any(String), schemaVersion: EVENT_SCHEMA_VERSION }],
+        terminal: { type: "CellCommitted", eventId: expect.any(String), schemaVersion: EVENT_SCHEMA_VERSION },
       },
     });
 

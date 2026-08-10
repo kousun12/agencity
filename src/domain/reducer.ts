@@ -101,11 +101,18 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "EffectRequested": {
       const p = event.payload as EventPayloads["EffectRequested"];
       if (state.effects[p.effectId]) throw new InvalidTransitionError("effect", state.effects[p.effectId]!.status, "requested");
+      validateEffectOrigin(state, p, true);
       if (p.executor === "model") validateModelEffectRelation(state, p);
-      const effect: EffectState = { id: p.effectId, executor: p.executor, operation: p.operation, input: p.input, idempotencyKey: p.idempotencyKey, idempotent: p.idempotent, attempts: 0, status: "requested", eventId: event.id };
+      const effect: EffectState = { id: p.effectId, executor: p.executor, operation: p.operation, input: p.input, origin: p.origin, idempotencyKey: p.idempotencyKey, idempotent: p.idempotent, attempts: 0, status: "requested", eventId: event.id };
       return { ...next, effects: { ...state.effects, [p.effectId]: effect } };
     }
-    case "EffectAttemptStarted": { const p = event.payload as EventPayloads["EffectAttemptStarted"]; const old = state.effects[p.effectId]; if (!old || !["requested", "started"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("effect", old?.status ?? "missing", "started"); return { ...next, effects: { ...state.effects, [p.effectId]: { ...old, status: "started", attempts: p.attempt, eventId: event.id } } }; }
+    case "EffectAttemptStarted": {
+      const p = event.payload as EventPayloads["EffectAttemptStarted"];
+      const old = state.effects[p.effectId];
+      if (!old || !["requested", "started"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("effect", old?.status ?? "missing", "started");
+      validateEffectOrigin(state, { ...old, effectId: old.id }, false);
+      return { ...next, effects: { ...state.effects, [p.effectId]: { ...old, status: "started", attempts: p.attempt, eventId: event.id } } };
+    }
     case "EffectOutcomeRecorded": {
       const p = event.payload as EventPayloads["EffectOutcomeRecorded"];
       const old = state.effects[p.effectId];
@@ -829,6 +836,93 @@ function validateModelEffectRelation(
     modelDispatch: compaction.modelDispatch,
     capacity: candidate.provenance.capacity,
   });
+}
+
+function validateEffectOrigin(
+  state: AgentState,
+  effect: Pick<EventPayloads["EffectRequested"], "effectId" | "executor" | "operation" | "input" | "origin" | "idempotencyKey">,
+  requestTime: boolean,
+): void {
+  const origin = effect.origin;
+  if (!origin || typeof origin !== "object") {
+    throw new ValidationError("Effect origin is required before execution");
+  }
+  if (effect.executor === "model" &&
+      origin.kind !== "model-call" &&
+      origin.kind !== "context-compaction") {
+    throw new ValidationError("Model effects require a model-call or context-compaction origin");
+  }
+  if (effect.executor === "skill" &&
+      origin.kind !== "cell" &&
+      origin.kind !== "skill-invocation" &&
+      origin.kind !== "skill-test") {
+    throw new ValidationError("Skill effects require a cell or typed skill lifecycle origin");
+  }
+  if (origin.kind === "cell") {
+    const cell = state.cells[origin.cellId];
+    const allowed = requestTime
+      ? cell?.status === "running"
+      : cell !== undefined && cell.status !== "proposed";
+    if (!allowed) {
+      throw new ValidationError(
+        requestTime
+          ? "Cell effect origin must identify the currently running cell"
+          : "Effect attempt has no valid retained cell origin",
+      );
+    }
+    return;
+  }
+  if (origin.kind === "model-call") {
+    const call = state.modelCalls[origin.callId];
+    const inputCallId = effect.input && typeof effect.input === "object" &&
+      !Array.isArray(effect.input) && typeof effect.input.callId === "string"
+      ? effect.input.callId
+      : undefined;
+    if (effect.executor !== "model" || effect.operation !== "complete" ||
+        !call || call.effectId !== effect.effectId || inputCallId !== origin.callId) {
+      throw new ValidationError("Model-call effect origin does not agree with its retained call");
+    }
+    return;
+  }
+  if (origin.kind === "context-compaction") {
+    const compaction = state.compactions[origin.compactionId];
+    const inputCompactionId = effect.input && typeof effect.input === "object" &&
+      !Array.isArray(effect.input) && typeof effect.input.compactionId === "string"
+      ? effect.input.compactionId
+      : undefined;
+    if (effect.executor !== "model" || effect.operation !== "complete" ||
+        !compaction || compaction.strategy !== "model-summary-v1" ||
+        inputCompactionId !== origin.compactionId) {
+      throw new ValidationError("Context-compaction effect origin does not agree with its retained request");
+    }
+    return;
+  }
+  if (origin.kind === "goal-gate") {
+    const goal = state.goals[origin.goalId];
+    const gate = goal?.gates[origin.gateId];
+    if (!goal || !gate || goal.completionRequestId !== origin.requestId ||
+        effect.executor !== gate.executor || effect.operation !== gate.operation ||
+        !Bun.deepEquals(effect.input, gate.input)) {
+      throw new ValidationError("Goal-gate effect origin does not agree with its retained gate evaluation");
+    }
+    return;
+  }
+  if (origin.kind === "runtime") {
+    if (origin.requestId !== effect.idempotencyKey) {
+      throw new ValidationError("Runtime effect origin must bind the exact durable request intent");
+    }
+    return;
+  }
+  const input = effect.input;
+  const inputEntryId = input && typeof input === "object" && !Array.isArray(input) &&
+    typeof input.entryId === "string" ? input.entryId : undefined;
+  const inputVersionId = input && typeof input === "object" && !Array.isArray(input) &&
+    typeof input.versionId === "string" ? input.versionId : undefined;
+  if (effect.executor !== "skill" ||
+      effect.operation !== (origin.kind === "skill-invocation" ? "invoke" : "test") ||
+      origin.entryId !== inputEntryId || origin.versionId !== inputVersionId) {
+    throw new ValidationError("Skill effect origin does not agree with its retained immutable input");
+  }
 }
 
 function modelDispatchFromEffectInput(input: import("./json.ts").JsonValue): ModelDispatch {

@@ -1,4 +1,4 @@
-import { ValidationError, newId, projectEvents, type EffectOutcome } from "../domain/index.ts";
+import { ValidationError, newId, projectEvents, type EffectOrigin, type EffectOutcome } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { EffectExecutionProgress, EffectExecutor, ExecutionResult } from "../executors/contract.ts";
 import { result } from "../executors/contract.ts";
@@ -11,6 +11,7 @@ export interface EffectRequest {
   readonly executor: string;
   readonly operation: string;
   readonly input: JsonValue;
+  readonly origin: EffectOrigin;
   readonly idempotencyKey: string;
   readonly idempotent: boolean;
 }
@@ -72,6 +73,7 @@ export class OutboxRunner {
         executor: request.executor,
         operation: request.operation,
         input: request.input,
+        origin: request.origin,
         idempotencyKey: request.idempotencyKey,
         idempotent: request.idempotent,
       },

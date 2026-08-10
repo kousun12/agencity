@@ -354,7 +354,7 @@ describe("FU-012 retained family messaging", () => {
       sessionId: child.sessionId, branchId: child.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
       payload: { runId, task: "ambiguous work", requestKey: "family-unknown-request", profilePin: agentProfilePin(await value.supervisor.agentProfiles.active(child.sessionId)) },
     }]);
-    const effectId = await value.supervisor.outbox.request({ sessionId: child.sessionId, branchId: child.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, idempotencyKey: "family-ambiguous-effect", idempotent: false });
+    const effectId = await value.supervisor.outbox.request({ sessionId: child.sessionId, branchId: child.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, origin: { kind: "runtime", requestId: "family-ambiguous-effect" }, idempotencyKey: "family-ambiguous-effect", idempotent: false });
     expect(await value.supervisor.storage.claimEffect(effectId, "dead-family-owner")).not.toBeNull();
     await value.supervisor.close();
     try {

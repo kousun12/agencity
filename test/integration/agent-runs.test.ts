@@ -419,14 +419,23 @@ describe("autonomous durable agent runs", () => {
       const observations = value.provider.contexts.flatMap(providerObservations);
       const cells = observations.filter(item => item.type === "CellCommitted");
       expect(cells).toHaveLength(1);
-      expect(cells[0]!.payload).toMatchObject({ logs: ["verified durable-agent-run"], exports: ["verified"] });
+      expect(cells[0]!.payload).toMatchObject({
+        logs: ["verified durable-agent-run"],
+        exports: ["verified"],
+        effectManifest: [
+          { executor: "file", operation: "write", terminalStatus: "succeeded", attemptCount: 1 },
+          { executor: "shell", operation: "run", terminalStatus: "succeeded", attemptCount: 1 },
+        ],
+      });
       expect(observations.filter(item => item.eventId === cells[0]!.eventId)).toHaveLength(1);
       expect(providerObservations(value.provider.contexts[0]!)).toEqual([]);
-      expect(providerObservations(value.provider.contexts[1]!).some(item => item.type === "EffectOutcomeRecorded")).toBe(true);
+      expect(providerObservations(value.provider.contexts[1]!).some(item => item.type === "EffectOutcomeRecorded")).toBe(false);
 
       const state = projectEvents(await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }));
       expect(Object.values(state.cells)).toHaveLength(1);
       expect(Object.values(state.cells)[0]).toMatchObject({ status: "committed" });
+      expect(Object.values(state.effects).filter(effect => effect.executor !== "model").every(effect =>
+        effect.origin.kind === "cell" && effect.origin.cellId === Object.values(state.cells)[0]!.id)).toBe(true);
       expect(state.workingValues.verified?.version).toBe(1);
       expect(state.agentRuns[result.runId]?.steps[1]?.observationEventIds).toContain(cells[0]!.eventId);
       expect(state.messages.map(message => ({ role: message.role, content: message.content }))).toEqual([
@@ -949,6 +958,7 @@ describe("autonomous durable agent runs", () => {
     const unrelatedId = await supervisor.outbox.request({
       sessionId: session.sessionId, branchId: session.branchId,
       executor: "shell", operation: "run", input: { command: "printf unrelated" },
+      origin: { kind: "runtime", requestId: "unrelated-before-run" },
       idempotencyKey: "unrelated-before-run", idempotent: true,
     });
     try {
@@ -1297,7 +1307,7 @@ describe("autonomous durable agent runs", () => {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
       payload: { callId, contextId, effectId, modelDispatch, providerInput, estimatedInputTokens, promptProvenance, attempt: 1, contextWindow },
     }]);
-    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, providerInput, modelDispatch, promptProvenance } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
+    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, providerInput, modelDispatch, promptProvenance } as unknown as JsonValue, origin: { kind: "model-call", callId }, idempotencyKey: effectKey, idempotent: false });
     expect((await supervisor.outbox.run(effectId)).outcome).toBe("succeeded");
     expect(provider.calls).toBe(1);
     const rawAction = JSON.stringify(action({ type: "final", content: "Recovered exactly once." }));
@@ -1429,7 +1439,7 @@ describe("autonomous durable agent runs", () => {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
       payload: { callId, contextId, effectId, modelDispatch, providerInput, estimatedInputTokens, promptProvenance, attempt: 1, contextWindow },
     }]);
-    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, providerInput, modelDispatch, promptProvenance } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
+    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, providerInput, modelDispatch, promptProvenance } as unknown as JsonValue, origin: { kind: "model-call", callId }, idempotencyKey: effectKey, idempotent: false });
     expect(provider.calls).toBe(0);
     await supervisor.close();
 
@@ -1456,7 +1466,7 @@ describe("autonomous durable agent runs", () => {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
       payload: { runId, task: "Unknown must block", requestKey: "unknown-request", profilePin: await currentProfilePin(supervisor, session.sessionId) },
     }]);
-    const effectId = await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, idempotencyKey: "ambiguous-side-effect", idempotent: false });
+    const effectId = await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, origin: { kind: "runtime", requestId: "ambiguous-side-effect" }, idempotencyKey: "ambiguous-side-effect", idempotent: false });
     expect(await supervisor.storage.claimEffect(effectId, "dead-owner")).not.toBeNull();
     await supervisor.close();
 

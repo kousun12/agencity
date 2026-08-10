@@ -277,7 +277,7 @@ describe("ownership-aware physical data control",()=>{
   test("refuses deletion while an outbox effect is running",async()=>{
     const directory=await mkdtemp(join(tmpdir(),"agencity-delete-outbox-"));let supervisor:Supervisor|undefined;
     try{
-      supervisor=await Supervisor.open(options(directory));const session=await supervisor.createSession({workspaceId:"workspace"});const effectId=await supervisor.outbox.request({sessionId:session.sessionId,branchId:session.branchId,executor:"shell",operation:"run",input:{command:"sleep 0.4"},idempotencyKey:"slow-delete-race",idempotent:true});const running=supervisor.outbox.run(effectId);
+      supervisor=await Supervisor.open(options(directory));const session=await supervisor.createSession({workspaceId:"workspace"});const effectId=await supervisor.outbox.request({sessionId:session.sessionId,branchId:session.branchId,executor:"shell",operation:"run",input:{command:"sleep 0.4"},origin:{kind:"runtime",requestId:"slow-delete-race"},idempotencyKey:"slow-delete-race",idempotent:true});const running=supervisor.outbox.run(effectId);
       for(let attempt=0;attempt<100&&(await supervisor.storage.getOutbox(effectId))?.status!=="running";attempt++)await Bun.sleep(5);
       await expect(supervisor.deleteOwnedData({scopeKind:"session",scopeId:session.sessionId,requestedBy:"owner",confirmation:`DELETE session ${session.sessionId}`})).rejects.toThrow("outbox effects are running");
       await running;const receipt=await supervisor.deleteOwnedData({scopeKind:"session",scopeId:session.sessionId,requestedBy:"owner",confirmation:`DELETE session ${session.sessionId}`});supervisor=undefined;expect(receipt.status).toBe("completed");

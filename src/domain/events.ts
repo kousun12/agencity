@@ -71,6 +71,14 @@ export type CellLogStream = "stdout" | "stderr";
 export type SessionStatus = "idle" | "running" | "stopped" | "failed" | "archived";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 export type EffectOutcome = "succeeded" | "failed" | "cancelled" | "unknown";
+export type EffectOrigin =
+  | { readonly kind: "cell"; readonly cellId: string }
+  | { readonly kind: "model-call"; readonly callId: string }
+  | { readonly kind: "context-compaction"; readonly compactionId: string }
+  | { readonly kind: "goal-gate"; readonly goalId: string; readonly gateId: string; readonly requestId: string }
+  | { readonly kind: "skill-invocation"; readonly entryId: string; readonly versionId: string }
+  | { readonly kind: "skill-test"; readonly entryId: string; readonly versionId: string }
+  | { readonly kind: "runtime"; readonly requestId: string };
 export type TaskStatus = "pending" | "admitted" | "running" | "completed" | "failed" | "cancelled";
 export type MailboxMessageKind = "message" | "task_completed" | "task_failed" | "task_cancelled";
 export type MailboxReceiptStatus = "queued" | "delivered_to_context" | "acknowledged" | "rejected" | "failed";
@@ -145,7 +153,7 @@ export interface EventPayloads {
   CellAbandoned: { cellId: string; reason: string };
   WorkingValueSet: { name: string; version: number; value: WorkingValue };
   ArtifactRegistered: ArtifactReference & { sourceEventId?: string };
-  EffectRequested: { effectId: string; executor: string; operation: string; input: JsonValue; idempotencyKey: string; idempotent: boolean };
+  EffectRequested: { effectId: string; executor: string; operation: string; input: JsonValue; origin: EffectOrigin; idempotencyKey: string; idempotent: boolean };
   EffectAttemptStarted: { effectId: string; attempt: number };
   EffectOutcomeRecorded: { effectId: string; attempt: number; outcome: EffectOutcome; output?: JsonValue; error?: string; modelFailure?: { code: ModelEffectFailureCode }; observedAt: string };
   EffectReconciliationRecorded: { reconciliationId: string; effectId: string; assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; summary: string; evidence?: JsonValue; recordedBy: string; recordedAt: string };
@@ -422,6 +430,24 @@ const promptProvenanceSchema = z.object({
 }).strict();
 const artifactSchema = z.object({ artifactId: id, digest, mediaType: id, size: nonnegative });
 const workingValueSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("json"), value: jsonValueSchema }), z.object({ kind: z.literal("artifact"), artifactId: id })]);
+const effectOriginSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("cell"), cellId: id }).strict(),
+  z.object({ kind: z.literal("model-call"), callId: id }).strict(),
+  z.object({ kind: z.literal("context-compaction"), compactionId: id }).strict(),
+  z.object({ kind: z.literal("goal-gate"), goalId: id, gateId: id, requestId: id }).strict(),
+  z.object({ kind: z.literal("skill-invocation"), entryId: id, versionId: id }).strict(),
+  z.object({ kind: z.literal("skill-test"), entryId: id, versionId: id }).strict(),
+  z.object({ kind: z.literal("runtime"), requestId: id }).strict(),
+]);
+export function validateEffectOrigin(value: unknown): EffectOrigin {
+  const parsed = effectOriginSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid projected effect origin", {
+      issues: parsed.error.issues,
+    });
+  }
+  return parsed.data;
+}
 const taskTerminalSchema = z.object({ noticeId: id, taskId: id, parentSessionId: id, childSessionId: id, status: z.enum(["completed", "failed", "cancelled"]), result: jsonValueSchema.optional(), artifactIds: z.array(id).optional(), error: z.string().optional(), reason: z.string().optional() });
 const mailboxBaseSchema = z.object({ mailboxMessageId: id, fromSessionId: id, fromBranchId: id, toSessionId: id, toBranchId: id, kind: z.enum(["message", "task_completed", "task_failed", "task_cancelled"]), content: z.string(), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), intentKey: id.optional(), followUp: z.boolean().optional(), replyToMessageId: id.optional() });
 const compactionStrategySchema = z.enum(["deterministic-extractive-v1", "model-summary-v1"]);
@@ -482,7 +508,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   CellAbandoned: z.object({ cellId: id, reason: z.string() }),
   WorkingValueSet: z.object({ name: id, version: positiveInteger, value: workingValueSchema }),
   ArtifactRegistered: artifactSchema.extend({ sourceEventId: id.optional() }),
-  EffectRequested: z.object({ effectId: id, executor: id, operation: id, input: jsonValueSchema, idempotencyKey: id, idempotent: z.boolean() }),
+  EffectRequested: z.object({ effectId: id, executor: id, operation: id, input: jsonValueSchema, origin: effectOriginSchema, idempotencyKey: id, idempotent: z.boolean() }).strict(),
   EffectAttemptStarted: z.object({ effectId: id, attempt: positiveInteger }),
   EffectOutcomeRecorded: z.object({ effectId: id, attempt: positiveInteger, outcome: z.enum(["succeeded", "failed", "cancelled", "unknown"]), output: jsonValueSchema.optional(), error: z.string().optional(), modelFailure: z.object({ code: modelFailureCodeSchema }).strict().optional(), observedAt: dateTime }).strict(),
   EffectReconciliationRecorded: z.object({ reconciliationId: id, effectId: id, assessment: z.enum(["succeeded", "failed", "no_effect", "still_unknown"]), summary: z.string().min(1).max(16384), evidence: jsonValueSchema.optional(), recordedBy: id, recordedAt: dateTime }).strict(),

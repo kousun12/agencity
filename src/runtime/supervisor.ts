@@ -1025,9 +1025,9 @@ export class Supervisor {
       if (method === "skills.propose") return this.skillManagement.propose(sessionId,branchId,String(args[0] ?? ""),(args[1] === "local" ? "local" : "workspace"));
       if (method === "skills.invoke") {
         const options = (args[2] ?? {}) as Record<string, unknown>;
-        return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: typeof options.idempotencyKey === "string" ? options.idempotencyKey : nextRpcKey(method) } as any);
+        return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: typeof options.idempotencyKey === "string" ? options.idempotencyKey : nextRpcKey(method), effectOrigin: { kind: "cell", cellId } } as any);
       }
-      if (method === "skills.test") return this.skillManagement.test(sessionId,branchId,String(args[0]));
+      if (method === "skills.test") return this.skillManagement.test(sessionId,branchId,String(args[0]),{ kind: "cell", cellId });
       if (method === "agents.spawn") {
         const raw = args[0]; const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.spawn requires a task string or object");
@@ -1185,6 +1185,7 @@ export class Supervisor {
           executor,
           operation,
           input,
+          origin: { kind: "cell", cellId },
           idempotencyKey,
           idempotent,
         });

@@ -108,6 +108,7 @@ describe("Slice 2 recursive model concurrency, cancellation, and recovery", () =
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor",
       idempotencyKey: `test-effect:${effectId}`, payload: {
         effectId, executor: "model", operation: "complete", input: { providerInput, callId, modelDispatch, promptProvenance } as any,
+        origin: { kind: "model-call", callId },
         idempotencyKey: `test-effect:${effectId}`, idempotent: false,
       },
     }, {

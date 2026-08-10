@@ -76,6 +76,7 @@ describe("Slice 2 current-version goal gates and autonomous recovery", () => {
       sessionId: root.sessionId, branchId: root.branchId, type: "EffectRequested", producer: "supervisor",
       idempotencyKey: `test-goal-effect:${effectId}`, payload: {
         effectId, executor: "shell", operation: "run", input: { command: "echo publish" },
+        origin: { kind: "goal-gate", goalId: goal.goalId, gateId: gate.gateId, requestId: "ambiguous-request" },
         idempotencyKey: `test-goal-effect:${effectId}`, idempotent: false,
       },
     }, {

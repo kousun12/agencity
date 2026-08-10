@@ -323,6 +323,7 @@ export class CompactionService {
           const requested = await this.outbox.request({
             sessionId: requestEvent.sessionId, branchId: requestEvent.branchId, executor: "model", operation: "complete",
             input: { compactionId: request.compactionId, providerInput: providerInput as unknown as JsonValue, modelDispatch: request.modelDispatch as unknown as JsonValue },
+            origin: { kind: "context-compaction", compactionId: request.compactionId },
             idempotencyKey: key, idempotent: false,
           });
           if (requested !== effectId) throw new ValidationError("Compaction model effect identity is not stable");

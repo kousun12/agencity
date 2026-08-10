@@ -39,6 +39,7 @@ async function effect(
     executor: "shell",
     operation: "run",
     input: { command },
+    origin: { kind: "runtime", requestId: `independent-review:${key}` },
     idempotencyKey: `independent-review:${key}`,
     idempotent: true,
   });

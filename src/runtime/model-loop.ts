@@ -244,7 +244,7 @@ export class ModelLoop {
       }, {
         sessionId, branchId, type: "EffectRequested", producer: "supervisor",
         idempotencyKey: effectKey,
-        payload: { effectId, executor: "model", operation: "complete", input: { callId, providerInput: materialized.providerInput as unknown as JsonValue, modelDispatch: modelDispatch as unknown as JsonValue, promptProvenance: prompt.provenance as unknown as JsonValue }, idempotencyKey: effectKey, idempotent: false },
+        payload: { effectId, executor: "model", operation: "complete", input: { callId, providerInput: materialized.providerInput as unknown as JsonValue, modelDispatch: modelDispatch as unknown as JsonValue, promptProvenance: prompt.provenance as unknown as JsonValue }, origin: { kind: "model-call", callId }, idempotencyKey: effectKey, idempotent: false },
       }]);
       const execution = await this.outbox.run(effectId);
       if (execution.outcome === "succeeded") {
@@ -463,6 +463,7 @@ export class ModelLoop {
             modelDispatch: modelDispatch as unknown as JsonValue,
             promptProvenance: prompt.provenance as unknown as JsonValue,
           },
+          origin: { kind: "model-call", callId },
           idempotencyKey: effectKey,
           idempotent: false,
         },

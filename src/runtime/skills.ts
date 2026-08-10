@@ -1,13 +1,13 @@
 import {
   newId, NotFoundError, ValidationError, type HarnessContent, type HarnessVersionRecord,
-  type JsonValue, type SkillInvocationResult, type SkillTestReport, type TypeScriptSkillDefinition,
+  type EffectOrigin, type JsonValue, type SkillInvocationResult, type SkillTestReport, type TypeScriptSkillDefinition,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
 import { rowToVersion } from "./harness.ts";
 
-export interface InvokeSkillOptions { readonly versionId?: string; readonly idempotencyKey?: string; }
-export interface TestSkillOptions { readonly idempotencyKey?: string; readonly requireExposedCandidate?: boolean; }
+export interface InvokeSkillOptions { readonly versionId?: string; readonly idempotencyKey?: string; readonly effectOrigin?: EffectOrigin; }
+export interface TestSkillOptions { readonly idempotencyKey?: string; readonly requireExposedCandidate?: boolean; readonly effectOrigin?: EffectOrigin; }
 export interface ResolvedExecutableSkill {
   readonly entryId: string;
   readonly versionId: string;
@@ -42,7 +42,7 @@ export class SkillService {
     this.assertPermissionsAllowed(content.permissions);
     validateJsonSchema(input, content.inputSchema);
     const key = options.idempotencyKey ?? `skill-invoke:${skill.versionId}:${newId()}`;
-    const effectId = await this.outbox.request({ sessionId, branchId, executor: "skill", operation: "invoke", input: { entryId: skill.entryId, versionId: skill.versionId, source: content.source, input }, idempotencyKey: key, idempotent: false });
+    const effectId = await this.outbox.request({ sessionId, branchId, executor: "skill", operation: "invoke", input: { entryId: skill.entryId, versionId: skill.versionId, source: content.source, input }, origin: options.effectOrigin ?? { kind: "skill-invocation", entryId: skill.entryId, versionId: skill.versionId }, idempotencyKey: key, idempotent: false });
     await this.storage.appendEvents([{
       sessionId, branchId, type: "SkillInvocationRecorded", producer: "supervisor", idempotencyKey: `skill-invocation:${effectId}`,
       payload: { entryId: skill.entryId, versionId: skill.versionId, effectId, input },
@@ -56,13 +56,13 @@ export class SkillService {
       ? await this.#catalog.resolveExecutable(sessionId, branchId, reference, { ...(versionId ? { versionId } : {}), allowCandidate: true })
       : await this.#legacyResolve(sessionId, branchId, reference, versionId, true, requireExposedCandidate);
     if (requireExposedCandidate && !skill.candidate) throw new ValidationError("Model-visible candidate testing requires an exposed candidate version");
-    return this.testDefinition(sessionId, branchId, skill.entryId, skill.versionId, skill.definition, options.idempotencyKey);
+    return this.testDefinition(sessionId, branchId, skill.entryId, skill.versionId, skill.definition, options.idempotencyKey, options.effectOrigin);
   }
 
-  async testDefinition(sessionId: string, branchId: string, entryId: string, versionId: string, definition: TypeScriptSkillDefinition, idempotencyKey?: string): Promise<SkillTestReport> {
+  async testDefinition(sessionId: string, branchId: string, entryId: string, versionId: string, definition: TypeScriptSkillDefinition, idempotencyKey?: string, effectOrigin?: EffectOrigin): Promise<SkillTestReport> {
     this.assertPermissionsAllowed(definition.permissions);
     if (!definition.tests.length) throw new ValidationError("Generated skills require runtime tests");
-    const effectId = await this.outbox.request({ sessionId, branchId, executor: "skill", operation: "test", input: { entryId, versionId, source: definition.source, tests: definition.tests as unknown as JsonValue }, idempotencyKey: idempotencyKey ?? `skill-test:${versionId}:${newId()}`, idempotent: false });
+    const effectId = await this.outbox.request({ sessionId, branchId, executor: "skill", operation: "test", input: { entryId, versionId, source: definition.source, tests: definition.tests as unknown as JsonValue }, origin: effectOrigin ?? { kind: "skill-test", entryId, versionId }, idempotencyKey: idempotencyKey ?? `skill-test:${versionId}:${newId()}`, idempotent: false });
     const execution = await this.outbox.run(effectId);
     const report = execution.output && typeof execution.output === "object" && !Array.isArray(execution.output) ? execution.output as Record<string,JsonValue> : {};
     const value: SkillTestReport = { effectId, entryId, versionId, outcome: execution.outcome, compiled: report.compiled === true, passed: typeof report.passed === "number" ? report.passed : 0, failed: typeof report.failed === "number" ? report.failed : definition.tests.length, tests: Array.isArray(report.tests) ? report.tests : [], ...(execution.output === undefined ? {} : { output: execution.output }), ...(execution.error === undefined ? {} : { error: execution.error }) };
@@ -73,8 +73,8 @@ export class SkillService {
     return value;
   }
 
-  async testModelVisible(sessionId: string, branchId: string, reference: string, versionId?: string, idempotencyKey?: string): Promise<SkillTestReport> {
-    return this.test(sessionId, branchId, reference, versionId, true, idempotencyKey === undefined ? {} : { idempotencyKey });
+  async testModelVisible(sessionId: string, branchId: string, reference: string, versionId?: string, idempotencyKey?: string, effectOrigin?: EffectOrigin): Promise<SkillTestReport> {
+    return this.test(sessionId, branchId, reference, versionId, true, { ...(idempotencyKey === undefined ? {} : { idempotencyKey }), ...(effectOrigin === undefined ? {} : { effectOrigin }) });
   }
 
   async #legacyResolve(sessionId: string, branchId: string, entryId: string, explicit: string | undefined, allowCandidate: boolean, requireExposedCandidate = false): Promise<ResolvedExecutableSkill> {

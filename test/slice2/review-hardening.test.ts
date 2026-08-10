@@ -82,7 +82,7 @@ describe("Slice 2 independent-review hardening", () => {
       payload: { goalId: goal.goalId, requestId: "review-request", workspaceId: "pinned-workspace", workspaceCursor: cursor },
     }, {
       sessionId: root.sessionId, branchId: root.branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "review-gate-effect",
-      payload: { effectId, executor: "shell", operation: "run", input: { command: "true" }, idempotencyKey: "review-gate-effect", idempotent: false },
+      payload: { effectId, executor: "shell", operation: "run", input: { command: "true" }, origin: { kind: "goal-gate", goalId: goal.goalId, gateId: gate.gateId, requestId: "review-request" }, idempotencyKey: "review-gate-effect", idempotent: false },
     }, {
       sessionId: root.sessionId, branchId: root.branchId, type: "GoalGateStatusChanged", producer: "supervisor", idempotencyKey: "review-gate-running",
       payload: { goalId: goal.goalId, gateId: gate.gateId, status: "running", effectId },
@@ -151,7 +151,7 @@ describe("Slice 2 independent-review hardening", () => {
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: "unknown-budget-call", payload: { callId, contextId: "unknown-budget-context", effectId, modelDispatch, providerInput, estimatedInputTokens, promptProvenance, contextWindow },
     }, {
-      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "unknown-budget-effect", payload: { effectId, executor: "model", operation: "complete", input: { providerInput, callId, modelDispatch, promptProvenance } as any, idempotencyKey: "unknown-budget-effect", idempotent: false },
+      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "unknown-budget-effect", payload: { effectId, executor: "model", operation: "complete", input: { providerInput, callId, modelDispatch, promptProvenance } as any, origin: { kind: "model-call", callId }, idempotencyKey: "unknown-budget-effect", idempotent: false },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectAttemptStarted", producer: "executor", idempotencyKey: "unknown-budget-attempt", payload: { effectId, attempt: 1 },
     }]);

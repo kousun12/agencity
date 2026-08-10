@@ -310,6 +310,7 @@ describe("context provenance and model loop", () => {
       idempotencyKey: "model:recovery", payload: {
         effectId: "effect-recovery", executor: "model", operation: "complete",
         input: { providerInput, callId: "call-recovery", modelDispatch, promptProvenance } as unknown as JsonValue,
+        origin: { kind: "model-call", callId: "call-recovery" },
         idempotencyKey: "model:recovery", idempotent: false,
       },
     }, {

@@ -375,6 +375,7 @@ describe("Slice 3 generated skill security and durable execution", () => {
       executor: "skill",
       operation: "invoke",
       input: ambiguousInput,
+      origin: { kind: "skill-invocation", entryId: entry.entryId, versionId: entry.current.versionId },
       idempotencyKey: ambiguousKey,
       idempotent: false,
     });
@@ -413,6 +414,7 @@ describe("Slice 3 generated skill security and durable execution", () => {
       executor: "skill",
       operation: "invoke",
       input: ambiguousInput,
+      origin: { kind: "skill-invocation", entryId: entry.entryId, versionId: entry.current.versionId },
       idempotencyKey: ambiguousKey,
       idempotent: false,
     });

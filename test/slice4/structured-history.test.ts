@@ -30,6 +30,10 @@ describe("Slice 4 structured version-5 history boundaries", () => {
     expect(call.result).toMatchObject({ kind: "tool-submission", name: "finish" });
     expect(call.usageSource).toBe("provider-reported");
     expect(run.steps[0]?.actionSource).toMatchObject({ kind: "tool-submission", modelCallId: call.id });
+    expect(source.effects[call.effectId]?.origin).toEqual({
+      kind: "model-call",
+      callId: call.id,
+    });
     expect((source.effects[call.effectId]?.output as { kind?: string } | undefined)?.kind)
       .toBe("agencity.model-effect-output.v2");
 
@@ -38,19 +42,21 @@ describe("Slice 4 structured version-5 history boundaries", () => {
     const forked = projectEvents(await a.supervisor.storage.loadEvents(session.sessionId, { branchId: forkedBranchId }));
     expect(forked.modelCalls).toEqual(source.modelCalls);
     expect(forked.agentRuns[run.id]?.steps).toEqual(run.steps);
+    expect(forked.effects[call.effectId]).toEqual(source.effects[call.effectId]);
 
     // A deleted-snapshot rebuild reproduces the same structured state deterministically.
     const rebuilt = await a.supervisor.projections.rebuild(session.sessionId, session.branchId);
     expect(rebuilt.modelCalls).toEqual(source.modelCalls);
     expect(rebuilt.agentRuns[run.id]?.steps).toEqual(run.steps);
     expect(rebuilt.agentRuns[run.id]?.finalMessageId).toBe(run.finalMessageId!);
+    expect(rebuilt.effects[call.effectId]).toEqual(source.effects[call.effectId]);
 
-    // Actual sync ingestion on another replica preserves every schema-3 structured field.
+    // Actual sync ingestion on another replica preserves every version-5 structured field.
     await a.supervisor.sync.sync();
     await b.supervisor.sync.sync();
     const replicated = projectEvents(await b.supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
     expect(replicated.modelCalls).toEqual(source.modelCalls);
-    expect(replicated.effects[call.effectId]?.output).toEqual(source.effects[call.effectId]?.output);
+    expect(replicated.effects[call.effectId]).toEqual(source.effects[call.effectId]);
     expect(replicated.agentRuns[run.id]?.steps).toEqual(run.steps);
     expect(replicated.agentRuns[run.id]).toMatchObject({ status: "succeeded", finalMessageId: run.finalMessageId! });
     expect((await b.supervisor.sync.status()).quarantineCount).toBe(0);

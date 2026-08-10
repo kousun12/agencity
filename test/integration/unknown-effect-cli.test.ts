@@ -30,7 +30,7 @@ describe("FU-006 no-ID unknown-effect CLI", () => {
     const effectId = "cli-unknown-effect";
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "cli-unknown-request",
-      payload: { effectId, executor: "shell", operation: "run", input: { command: "ambiguous" }, idempotencyKey: "cli-unknown-logical", idempotent: false },
+      payload: { effectId, executor: "shell", operation: "run", input: { command: "ambiguous" }, origin: { kind: "runtime", requestId: "cli-unknown-logical" }, idempotencyKey: "cli-unknown-logical", idempotent: false },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "EffectOutcomeRecorded", producer: "recovery", idempotencyKey: "cli-unknown-outcome",
       payload: { effectId, attempt: 1, outcome: "unknown", error: "lost owner", observedAt: new Date().toISOString() },

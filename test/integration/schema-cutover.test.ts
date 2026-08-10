@@ -13,7 +13,7 @@ afterEach(async () => {
   directory = undefined;
 });
 
-describe("provider-input schema cutover", () => {
+describe("current event schema cutover", () => {
   test.each([1, 2, 3, 4])("rejects version-%d workspace events before applying migrations or deleting data", async (schemaVersion) => {
     directory = await mkdtemp(join(tmpdir(), "ag-schema-cutover-"));
     const url = `file:${directory}/agent.db`;
