@@ -136,7 +136,7 @@ export class S3CompatibleArtifactStore implements ArtifactStore {
     }
   }
   async #httpFailure(response: Response, operation: string, reference?: ArtifactReference): Promise<never> {
-    const responseText = await response.text().catch(() => "");
+    const responseText = await boundedResponseText(response, 2_048).catch(() => "");
     throw new DependencyFailureError(`Remote object CAS ${operation} failed with HTTP ${response.status}`, {
       adapter: this.name,
       status: response.status,
@@ -338,4 +338,32 @@ async function boundedResponseBytes(response: Response, maximum: number): Promis
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+async function boundedResponseText(response: Response, maximumBytes: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  let observed = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) return output + decoder.decode();
+      const remaining = maximumBytes - observed;
+      if (remaining <= 0) {
+        await reader.cancel("Remote object error response exceeded diagnostic limit").catch(() => {});
+        return output + decoder.decode();
+      }
+      const retained = chunk.value.subarray(0, remaining);
+      observed += retained.byteLength;
+      output += decoder.decode(retained, { stream: true });
+      if (retained.byteLength !== chunk.value.byteLength) {
+        await reader.cancel("Remote object error response exceeded diagnostic limit").catch(() => {});
+        return output + decoder.decode();
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }

@@ -198,6 +198,31 @@ describe("content-addressed artifact placement conformance", () => {
       code: "DEPENDENCY_FAILURE",
     });
   });
+
+  test("bounds remote object error diagnostics before constructing dependency failures", async () => {
+    const oversized = `diagnostic-${"x".repeat(2 * 1024 * 1024)}`;
+    const { endpoint } = serve(() => new Response(oversized, { status: 500 }));
+    const remote = new S3CompatibleArtifactStore({ endpoint, bucket: "error-bound-bucket" });
+    const digest = "0".repeat(64);
+    const reference: ArtifactReference = {
+      artifactId: `sha256:${digest}`,
+      digest,
+      mediaType: "application/octet-stream",
+      size: 0,
+    };
+    let failure: any;
+    try {
+      await remote.readRange(reference, 0, 0);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: "DEPENDENCY_FAILURE",
+      details: { status: 500 },
+    });
+    expect(failure.details.response).toHaveLength(512);
+    expect(JSON.stringify(failure.details).length).toBeLessThan(1_024);
+  });
 });
 
 describe("candidate-index placement conformance", () => {

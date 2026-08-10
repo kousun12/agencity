@@ -217,6 +217,25 @@ describe("brokered secret handling", () => {
     expect(output).toBe(source);
   });
 
+  test("preserves long non-sensitive URLs and redacts late sensitive parameters", () => {
+    const encode = new TextEncoder();
+    const stream = (source: string): string => {
+      const scrubber = new StreamingTextScrubber();
+      let output = "";
+      for (let offset = 0; offset < source.length; offset += 113) {
+        output += scrubber.push(encode.encode(source.slice(offset, offset + 113)));
+      }
+      return output + scrubber.finish();
+    };
+    const benign = `https://example.test/path/${"segment".repeat(2_000)}?page=1`;
+    expect(stream(benign)).toBe(benign);
+
+    const sensitive = `https://example.test/path/${"segment".repeat(2_000)}?access_token=${"A".repeat(20_000)} end`;
+    const scrubbed = stream(sensitive);
+    expect(scrubbed).toBe(`https://example.test/path/${"segment".repeat(2_000)}?[REDACTED] end`);
+    expect(scrubbed).not.toContain("A".repeat(1_024));
+  });
+
 });
 
 
