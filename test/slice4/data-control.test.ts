@@ -4,6 +4,10 @@ import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DeterministicSyncHub, ProfileStore, Supervisor } from "../../src/index.ts";
+import {
+  ApprovingGovernanceProvider,
+  approveProfileRevision,
+} from "../governance-provider.ts";
 
 async function exists(path:string):Promise<boolean>{return Bun.file(path).exists();}
 
@@ -12,6 +16,30 @@ function options(directory:string,workspaceId="workspace"){
 }
 
 describe("ownership-aware physical data control",()=>{
+  test("exports complete governed profile provenance and marks missing artifact bytes partial",async()=>{
+    const directory=await mkdtemp(join(tmpdir(),"agencity-export-incomplete-"));let supervisor:Supervisor|undefined;
+    try{
+      const provider=new ApprovingGovernanceProvider("export-governance");
+      supervisor=await Supervisor.open({...options(directory),modelProviders:[provider]});
+      const session=await supervisor.createSession({workspaceId:"workspace",model:{provider:provider.name,model:"fixture"}});
+      await approveProfileRevision(supervisor,session.sessionId,session.branchId,"Retain complete governed export evidence.","export-profile");
+      const artifact=await supervisor.artifacts.put("missing export bytes",{mediaType:"text/plain"});
+      await supervisor.storage.appendEvents([{sessionId:session.sessionId,branchId:session.branchId,type:"ArtifactRegistered",producer:"supervisor",idempotencyKey:"missing-export-artifact",payload:artifact}]);
+      await rm(join(directory,"artifacts",artifact.digest.slice(0,2),artifact.digest.slice(2)));
+      const destination=join(directory,"export");
+      const exported=await supervisor.sync.exportBundle(destination,"workspace","workspace","owner");
+      expect(exported.status).toBe("partial");
+      const events=(await Bun.file(join(destination,"events.jsonl")).text()).trim().split("\n").map(line=>JSON.parse(line));
+      expect(events.filter(event=>event.type==="AgentProfileVersionCreated")).toHaveLength(1);
+      const audit=JSON.parse(await Bun.file(join(destination,"export-audit.json")).text());
+      expect(audit.complete).toBe(false);
+      expect(audit.missing.some((item:string)=>item.startsWith("governed-proposal:"))).toBe(false);
+      expect(audit.missing.some((item:string)=>item.startsWith("governance-decision:"))).toBe(false);
+      expect(audit.missing).toContain(`artifact:${artifact.artifactId}`);
+      expect(JSON.parse(await Bun.file(join(destination,"manifest.json")).text())).toMatchObject({status:"partial",resources:{exportAudit:{complete:false}}});
+    }finally{await supervisor?.close();await rm(directory,{recursive:true,force:true});}
+  });
+
   test("physically erases an independent session and its derived rows without deleting shared CAS content",async()=>{
     const directory=await mkdtemp(join(tmpdir(),"agencity-delete-session-"));let supervisor:Supervisor|undefined;
     try{
@@ -40,12 +68,43 @@ describe("ownership-aware physical data control",()=>{
     }finally{await supervisor?.close();await rm(directory,{recursive:true,force:true});}
   });
 
+  test("plans governance retention and refuses session erasure that would dangle review, restoration, family, notice, or invocation provenance",async()=>{
+    const directory=await mkdtemp(join(tmpdir(),"agencity-delete-governance-"));let supervisor:Supervisor|undefined;
+    try{
+      const provider=new ApprovingGovernanceProvider("deletion-governance");
+      supervisor=await Supervisor.open({...options(directory),modelProviders:[provider]});const session=await supervisor.createSession({workspaceId:"workspace",model:{provider:provider.name,model:"fixture"}});const initial=await supervisor.agentProfiles.active(session.sessionId);
+      const evidence=await supervisor.appendMessage(session.sessionId,session.branchId,"user","Retain governance deletion evidence");
+      const revised=await approveProfileRevision(supervisor,session.sessionId,session.branchId,"Temporary deletion-plan revision.","deletion-profile");
+      await supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revised.profileVersionId,restoreVersionId:initial.profileVersionId,reason:"Create deletion-plan restoration provenance",evidenceEventIds:[evidence.id]});
+      expect((await supervisor.runs.start(session.sessionId,session.branchId,{task:"Pin the restored profile before deletion planning",goalMode:"none"})).status).toBe("succeeded");
+      const [governed]=await supervisor.refinementGovernance.list({sessionId:session.sessionId,branchId:session.branchId,limit:1});
+      const proposalId=governed!.proposalId;
+      const manifest=await supervisor.sync.createManifest("delete","session",session.sessionId,"owner");
+      expect((manifest.resources as any).retainedGovernance).toEqual([
+        "initial and historical agent profiles","invocation profile and effective-prompt pins",
+        "governed proposals and frozen review inputs","reviewer child and model dispatch",
+        "review decisions and terminal notices","restoration provenance and evidence links",
+      ]);
+      await expect(supervisor.deleteOwnedData({scopeKind:"session",scopeId:session.sessionId,requestedBy:"owner",confirmation:`DELETE session ${session.sessionId}`})).rejects.toMatchObject({code:"CAPABILITY_UNAVAILABLE"});supervisor=undefined;
+      const client=createClient({url:`file:${directory}/workspace.db`});try{
+        expect(Number((await client.execute({sql:"SELECT count(*) AS n FROM events WHERE session_id=?",args:[session.sessionId]})).rows[0]!.n)).toBeGreaterThan(0);
+        expect(Number((await client.execute({sql:"SELECT count(*) AS n FROM agent_profile_versions WHERE agent_session_id=?",args:[session.sessionId]})).rows[0]!.n)).toBe(3);
+        expect(Number((await client.execute({sql:"SELECT count(*) AS n FROM governed_refinement_proposals WHERE proposal_id=?",args:[proposalId]})).rows[0]!.n)).toBe(1);
+        expect(Number((await client.execute({sql:"SELECT count(*) AS n FROM refinement_restorations WHERE target_id=?",args:[session.sessionId]})).rows[0]!.n)).toBe(1);
+      }finally{client.close();}
+    }finally{await supervisor?.close();await rm(directory,{recursive:true,force:true});}
+  });
+
   test("removes owned workspace database, modern replica sidecars, and owned artifacts with an external receipt",async()=>{
     const directory=await mkdtemp(join(tmpdir(),"agencity-delete-workspace-"));let supervisor:Supervisor|undefined;
     const replica=join(directory,"replica.db"),receiptDirectory=join(directory,"receipts");
     try{
-      supervisor=await Supervisor.open({...options(directory),artifactDirectoryOwnership:"exclusive",sync:{workspaceId:"workspace",replicaUrl:`file:${replica}`,startup:false,intervalMs:0}});
-      const session=await supervisor.createSession({workspaceId:"workspace"});const artifact=await supervisor.artifacts.put("owned",{mediaType:"text/plain"});await supervisor.storage.appendEvents([{sessionId:session.sessionId,branchId:session.branchId,type:"ArtifactRegistered",producer:"supervisor",idempotencyKey:"owned-artifact",payload:artifact}]);
+      const provider=new ApprovingGovernanceProvider("workspace-delete-governance");
+      supervisor=await Supervisor.open({...options(directory),modelProviders:[provider],artifactDirectoryOwnership:"exclusive",sync:{workspaceId:"workspace",replicaUrl:`file:${replica}`,startup:false,intervalMs:0}});
+      const session=await supervisor.createSession({workspaceId:"workspace",model:{provider:provider.name,model:"fixture"}});const evidence=await supervisor.appendMessage(session.sessionId,session.branchId,"user","Workspace deletion owns all governance history");const initial=await supervisor.agentProfiles.active(session.sessionId);
+      const revised=await approveProfileRevision(supervisor,session.sessionId,session.branchId,"Temporary whole-workspace deletion revision.","workspace-delete-profile");
+      await supervisor.refinementGovernance.rollbackOwner(session.sessionId,session.branchId,{targetKind:"agent_profile",targetId:session.sessionId,expectedCurrentVersionId:revised.profileVersionId,restoreVersionId:initial.profileVersionId,reason:"Exercise whole-workspace restoration deletion",evidenceEventIds:[evidence.id]});
+      const artifact=await supervisor.artifacts.put("owned",{mediaType:"text/plain"});await supervisor.storage.appendEvents([{sessionId:session.sessionId,branchId:session.branchId,type:"ArtifactRegistered",producer:"supervisor",idempotencyKey:"owned-artifact",payload:artifact}]);
       for(const suffix of ["","-wal","-wal-revert","-changes","-info","-replace-base-apply","-replace-base-apply-main-db.backup"])await Bun.write(`${replica}${suffix}`,suffix||"replica");
       const engineLog=join(directory,"replica.db-log");await Bun.write(engineLog,"official engine log");
       await Bun.write(`${replica}-notes`,`unrelated sentinel`);await Bun.write(`${replica}-replace-base-apply-user.txt`,`unrelated patterned sentinel`);await Bun.write(`${replica}-replace-base-apply-generation.backup`,`unrelated backup sentinel`);await Bun.write(join(directory,"artifacts","unregistered-garbage"),"also owned by the exclusive CAS root");

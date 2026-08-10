@@ -1,6 +1,6 @@
 import {
   newId, NotFoundError, projectEvents, type AgentEvent, type ContextRecordReference, type EventPayloads, type EventType,
-  type HarnessRecord, type JsonValue,
+  type HarnessRecord, type InvocationPromptProvenance, type JsonValue,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { MemoryService } from "./memory.ts";
@@ -9,6 +9,7 @@ import type { ProfileDatabase } from "../sync/index.ts";
 import { rowToHarness } from "./harness.ts";
 import type { SkillManagementService, SkillManagementView } from "./skill-management.ts";
 import { effectiveCompaction } from "./context-compaction.ts";
+import { AgentProfileService } from "./agent-profiles.ts";
 
 export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. Persist every value needed after a cell boundary. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
 export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 1, text: BASE_POLICY });
@@ -22,6 +23,10 @@ export interface ContextMaterializeOptions {
   readonly additionalRecordIds?: readonly string[];
   /** Builds the exact provider-facing context while preserving normal harness selection/provenance. */
   readonly transform?: (context: JsonValue) => JsonValue;
+  /** Exact immutable prompt composition used by this invocation context. */
+  readonly promptProvenance?: InvocationPromptProvenance;
+  /** Exact profile selected by the invocation pin; never re-resolved to current. */
+  readonly agentProfileVersionId?: string;
 }
 
 export class ContextMaterializer {
@@ -33,6 +38,10 @@ export class ContextMaterializer {
     let events = await this.storage.loadEvents(sessionId, { branchId });
     if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
     let state = projectEvents(events);
+    const profiles = new AgentProfileService(this.storage);
+    const agentProfile = options.agentProfileVersionId
+      ? await profiles.getVersion(sessionId, options.agentProfileVersionId)
+      : await profiles.active(sessionId);
 
     // Allocation and actual exposure are distinct durable facts. Materializing
     // an allocated candidate consumes its bounded exposure exactly once.
@@ -65,6 +74,12 @@ export class ContextMaterializer {
     const selected = new Map<string, { event: AgentEvent; reason: string }>();
     const add = (event: AgentEvent | undefined | null, reason: string) => { if (event) selected.set(event.id,{event,reason}); };
     add(events.find((event) => event.type === "SessionCreated"), "session model, workspace, and budget policy");
+    const profileEvent = (await this.storage.loadEvents(sessionId)).find((event) =>
+      event.type === "SessionCreated"
+        ? (event.payload as EventPayloads["SessionCreated"]).agentProfile.profileVersionId === agentProfile.profileVersionId
+        : event.type === "AgentProfileVersionCreated" &&
+          (event.payload as EventPayloads["AgentProfileVersionCreated"]).agentProfile.profileVersionId === agentProfile.profileVersionId);
+    add(profileEvent, "active immutable agent profile");
     add([...events].reverse().find((event) => event.type === "BranchCreated"), "active branch ancestry");
     add([...events].reverse().find((event) => event.type === "SessionStatusChanged"), "current session status");
     if (effective && effectiveContext?.derivation) {
@@ -135,7 +150,17 @@ export class ContextMaterializer {
       basePolicy: BASE_POLICY,
       basePolicyRecord: { id: IMMUTABLE_BASE_POLICY.id, version: IMMUTABLE_BASE_POLICY.version, digest: hash(BASE_POLICY), mutable: false },
       runtime: { mode:"trusted-local",workerIsSecuritySandbox:false,rawSql:{readOnly:true,scope:"shared-non-confidential-diagnostics",candidateIsolationIsConfidentialityBoundary:false} },
-      profile: { preferences: profilePreferences, globalSkills: profileSkills, providerConfigurations },
+      agentProfile: {
+        profileVersionId: agentProfile.profileVersionId,
+        revision: agentProfile.revision,
+        role: agentProfile.role,
+        purpose: agentProfile.purpose,
+        promptContractId: agentProfile.promptContractId,
+        promptDigest: agentProfile.promptDigest,
+        sourceSpecEntryId: agentProfile.sourceSpecEntryId,
+        sourceSpecVersionId: agentProfile.sourceSpecVersionId,
+      },
+      userProfile: { preferences: profilePreferences, globalSkills: profileSkills, providerConfigurations },
       session: { id:sessionId,branchId,status:state.status,model:state.model,parentSessionId:state.parentSessionId,parentBranchId:state.parentBranchId,rootSessionId:state.rootSessionId,depth:state.depth,taskId:state.taskId },
       budget: state.budget,
       goal: Object.values(state.goals).find((goal) => !["completed","failed","cancelled"].includes(goal.status)) ?? null,
@@ -157,7 +182,7 @@ export class ContextMaterializer {
       queryHints:{history:"SELECT type, committed_at, payload_json FROM events WHERE session_id = ? ORDER BY sequence",largeRecords:"Resolve artifact references through sdk.artifacts.get",documents:"SELECT chunk_id, ordinal, content FROM document_chunks WHERE document_id = ? ORDER BY ordinal",mailbox:"SELECT * FROM mailbox_messages WHERE to_session_id = ? ORDER BY sent_at",memory:"Use Supervisor.memory.search; candidate generation is FTS5 and scope/status policy remains authoritative"},
     })) as JsonValue;
     const context = options.transform ? options.transform(baseContext) : baseContext;
-    const contextId=options.contextId ?? newId(); const [event]=await this.storage.appendEvents([{sessionId,branchId,type:"ContextMaterialized",producer:"supervisor",idempotencyKey:options.idempotencyKey ?? `context:${contextId}`,payload:{contextId,records:references,contentHash:hash(JSON.stringify(context)),context,harnessProvenance}}]);
+    const contextId=options.contextId ?? newId(); const [event]=await this.storage.appendEvents([{sessionId,branchId,type:"ContextMaterialized",producer:"supervisor",idempotencyKey:options.idempotencyKey ?? `context:${contextId}`,payload:{contextId,records:references,contentHash:hash(JSON.stringify(context)),context,harnessProvenance,...(options.promptProvenance === undefined ? {} : { promptProvenance: options.promptProvenance })}}]);
     if (!event) throw new Error("Context was not committed"); return {contextId,context,event:event as AgentEvent<"ContextMaterialized">};
   }
 

@@ -22,6 +22,9 @@ import {
   normalizeRefinementReviewTransportValue,
   REFINEMENT_REVIEW_CONTRACT_ID,
   REFINEMENT_REVIEW_TOOL_NAME,
+  REFINEMENT_GOVERNANCE_CONTRACT_ID,
+  REFINEMENT_GOVERNANCE_TOOL_NAME,
+  validateRefinementGovernanceDecision,
   validateAgentToolSubmissionValue,
   type AgentAction,
   type CompleteModelResponse,
@@ -273,6 +276,32 @@ export function formalOutputFromRefinementReviewSubmission(input: {
     callId: input.providerToolCallId,
     name: REFINEMENT_REVIEW_TOOL_NAME,
     value: input.transportInput,
+    usage: input.usage,
+    warnings: [],
+  });
+}
+
+/** Deterministic provider-fixture helper for the sealed governance contract. */
+export function formalOutputFromRefinementGovernanceDecision(input: {
+  readonly decision: JsonValue;
+  readonly dispatch: ModelDispatch;
+  readonly providerToolCallId: string;
+  readonly provider: string;
+  readonly adapter: string;
+  readonly usage: Usage;
+}): ModelEffectOutputV2 {
+  const contract = requiredContract(input.dispatch);
+  if (contract.contractId !== REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+    throw new Error("Refinement governance output requires its sealed response contract");
+  }
+  return acceptedSubmissionOutput({
+    dispatch: input.dispatch,
+    contract,
+    provider: input.provider,
+    adapter: input.adapter,
+    callId: input.providerToolCallId,
+    name: REFINEMENT_GOVERNANCE_TOOL_NAME,
+    value: input.decision,
     usage: input.usage,
     warnings: [],
   });
@@ -863,6 +892,10 @@ function validateToolInputValue(
   }
   if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
     normalizeRefinementReviewTransportValue(value, { encodedBytes: inputBytes });
+    return value;
+  }
+  if (contract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+    validateRefinementGovernanceDecision(value);
     return value;
   }
   throw new Error(`No runtime validator for ${contract.contractId}`);

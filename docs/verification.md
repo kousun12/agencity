@@ -41,7 +41,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 
 These are static constraints. They do not replace replay, recovery, protocol, security, or product behavior tests.
 
-`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Together, their current coverage includes schema-3 event replay and rebuild, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
+`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Together, their current coverage includes schema-4 event replay and rebuild, durable initial agent profiles and prompt pins, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
 
 Those tests use local fixtures, temporary databases, deterministic providers, and in-process or loopback test services where appropriate. A pass supports the behaviors exercised by those tests. It does not establish hostile-code isolation, exactly-once external effects, automatic cross-device failover, or correctness at every possible machine-instruction crash boundary.
 
@@ -68,7 +68,8 @@ The suite uses a local OpenAI API fixture reached through the Vercel AI SDK tran
 - distinct non-interactive run outcomes and interruption behavior;
 - committed-action and effect crash recovery without duplicate execution;
 - unknown effects, no automatic retry, and evidence-only reconciliation; and
-- refinement review, installed skills, context compaction, streaming, and scheduled wakes.
+- refinement review, installed skills, context compaction, streaming, and scheduled wakes; and
+- governed root and child profiles, old/new invocation pins, blocking approval, rejection, bounded reproposal, exact rollback, detached managed-service restart, deduplication, and route-relative no-ID inspection.
 
 This acceptance suite is intentionally non-interactive. The `test:core` groups separately cover deterministic full-screen renderer frames, stable reconciled Markdown and code identities, user-task/run interleaving, durable cell joining and bounded output, line-preserving composer paste, `Shift-Enter` multiline input, follow-until-scrolled timeline behavior, idle and active inspectors, width-prioritized footer content, normal/compact/minimum height modes, draft-safe family focus, parent/child input, workspace-root search and selection, stale catalog races, and exact route switching. `bun run test:e2e` adds a linked-executable pseudo-terminal journey that expands a retained TypeScript cell; opens a root, child, and grandchild; climbs back through retained parents; creates a second root; opens the workspace Agents view; selects the other root; detaches; and resumes the remembered selection without exposing credentials. The same journey verifies that the original cell and child were not duplicated or cancelled.
 
@@ -80,9 +81,42 @@ It records a focused family-projection benchmark with 25 relatives and branch hi
 
 The package is private. This verifies the documented source and `bun link` workflow; it is not evidence of a package-registry or standalone-binary release.
 
-### Recorded baseline
+### Adaptive-profile governance evidence
 
-The current recorded local evidence was produced on August 9, 2026 against runtime commit `1ec7114` plus documentation-only working-tree changes:
+The core profile/governance implementation was verified on August 9, 2026:
+
+- deterministic full suite: 887 passed, 3 gated skips, 0 failed;
+- focused governance: 43 passed, 0 failed;
+- contract/profile/harness regression groups: 60 passed, 0 failed; and
+- typecheck, architecture checks, and `git diff --check`: passed.
+
+Lifecycle hardening was then verified separately:
+
+- focused lifecycle, migration, profile, and governance tests: 106 passed, 0 skipped, 0 failed; and
+- typecheck, architecture checks, lints, and `git diff --check`: passed.
+
+Installed governance acceptance then passed:
+
+- focused linked-executable governance journey: 1 passed, 0 skipped, 0 failed;
+- complete deterministic acceptance: 15 passed, 1 credential-gated skip, 0 failed;
+- release matrix: 1 deterministic row passed, 3 external rows skipped, 0 failed; and
+- typecheck, architecture checks, and `git diff --check`: passed.
+
+This evidence covers deterministic validation, proposer/reviewer separation, authority, frozen inputs, current-model dispatch, automatic application, staged tested-skill activation, terminal delivery, rollback, managed-service recovery, fail-closed profile sync divergence, export audit, deletion refusal, migration/rebuild reopening, and the installed no-ID governance journey. The installed journey uses graceful service shutdown and restart; lower-level lifecycle tests cover committed hard process-loss boundaries.
+
+Final post-hardening verification then passed:
+
+- `bun run verify`: passed;
+- deterministic core suite: 893 passed, 2 externally gated skips, 0 failed;
+- deterministic installed acceptance within the gate: 15 passed, 1 credential-gated skip, 0 failed;
+- aggregate test evidence within the gate: 908 passed, 3 skips, 0 failed; and
+- `bun run test:acceptance:matrix`: 1 deterministic row passed, 3 external rows skipped, 0 failed.
+
+The externally gated rows—live provider, official Turso Sync server, and Turso Cloud—remain skipped and unverified.
+
+### Previous recorded baseline
+
+The preceding schema-version-3 baseline was produced on August 9, 2026 against runtime commit `1ec7114` plus documentation-only working-tree changes:
 
 - `bun run verify`: passed;
 - `bun run test:core` within that gate: 845 passes and 2 documented external skips;

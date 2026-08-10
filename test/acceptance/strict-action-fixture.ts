@@ -1,6 +1,8 @@
 export interface FixtureProbe {
   readonly task: string | null;
   readonly step: number | null;
+  readonly governanceStep: number | null;
+  readonly proposalId: string | null;
   readonly streaming: boolean;
   readonly model: string;
   readonly lastUserText: string;
@@ -26,6 +28,7 @@ export class StrictActionFixture {
   readonly requests: RequestLog[] = [];
   readonly server: ReturnType<typeof Bun.serve>;
   readonly scripts = new Map<string, readonly (Reply | ReplyFactory)[]>();
+  governanceScripts: readonly (Reply | ReplyFactory)[] = [];
   readonly gates = new Map<string, Gate>();
 
   constructor() {
@@ -47,6 +50,10 @@ export class StrictActionFixture {
     this.scripts.set(task, replies);
   }
 
+  scriptGovernance(replies: readonly (Reply | ReplyFactory)[]): void {
+    this.governanceScripts = replies;
+  }
+
   hold(task: string, step = 1): void {
     let release!: () => void;
     const promise = new Promise<void>(resolve => { release = resolve; });
@@ -55,6 +62,16 @@ export class StrictActionFixture {
 
   release(task: string, step = 1): void {
     this.gates.get(this.key(task, step))?.release();
+  }
+
+  holdGovernance(step = 1): void {
+    let release!: () => void;
+    const promise = new Promise<void>(resolve => { release = resolve; });
+    this.gates.set(this.governanceKey(step), { promise, release });
+  }
+
+  releaseGovernance(step = 1): void {
+    this.gates.get(this.governanceKey(step))?.release();
   }
 
   async waitFor(task: string, step = 1, timeoutMs = 10_000): Promise<RequestLog> {
@@ -67,7 +84,18 @@ export class StrictActionFixture {
     throw new Error(`fixture did not receive ${task} step ${step}`);
   }
 
+  async waitForGovernance(step = 1, timeoutMs = 10_000): Promise<RequestLog> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const found = this.requests.find(item => item.governanceStep === step);
+      if (found) return found;
+      await Bun.sleep(25);
+    }
+    throw new Error(`fixture did not receive governance step ${step}`);
+  }
+
   count(task: string): number { return this.requests.filter(item => item.task === task).length; }
+  countGovernance(): number { return this.requests.filter(item => item.governanceStep !== null).length; }
 
   close(): void {
     for (const gate of this.gates.values()) gate.release();
@@ -105,27 +133,48 @@ export class StrictActionFixture {
     const lastUser = [...body.messages].reverse().find(item => item.role === "user");
     const lastUserText = messageText(lastUser?.content);
     const durable = this.readDurableStep(lastUserText);
+    const toolNames = Array.isArray(body.tools)
+      ? body.tools.flatMap(tool =>
+          typeof tool.function?.name === "string" ? [tool.function.name] : [])
+      : [];
+    const governance = toolNames.length === 1 &&
+      toolNames[0] === "agencity_submit_refinement_governance_decision";
+    const governanceStep = governance
+      ? this.requests.filter(item => item.governanceStep !== null).length + 1
+      : null;
+    const proposalId = governance
+      ? JSON.stringify(body.messages).match(
+          /proposalId[^A-Za-z0-9]+(governed-refinement-proposal-[a-f0-9]{32}|[0-9A-HJKMNP-TV-Z]{26})/,
+        )?.[1] ?? null
+      : null;
     const probe: FixtureProbe = {
       task: durable?.task ?? null,
       step: durable?.stepOrdinal ?? null,
+      governanceStep,
+      proposalId,
       streaming: body.stream === true,
       model: body.model,
       lastUserText,
-      toolNames: Array.isArray(body.tools)
-        ? body.tools.flatMap(tool =>
-            typeof tool.function?.name === "string" ? [tool.function.name] : [])
-        : [],
+      toolNames,
       toolChoice: typeof body.tool_choice === "string" ? body.tool_choice : null,
       parallelToolCalls: typeof body.parallel_tool_calls === "boolean"
         ? body.parallel_tool_calls
         : null,
     };
     this.requests.push({ ...probe, receivedAt: new Date().toISOString(), authorization });
-    const gate = durable ? this.gates.get(this.key(durable.task, durable.stepOrdinal)) : undefined;
+    const gate = durable
+      ? this.gates.get(this.key(durable.task, durable.stepOrdinal))
+      : governanceStep === null
+        ? undefined
+        : this.gates.get(this.governanceKey(governanceStep));
     if (gate) await Promise.race([gate.promise, new Promise<void>(resolve => request.signal.addEventListener("abort", () => resolve(), { once: true }))]);
     if (request.signal.aborted) return new Response(null, { status: 499 });
 
-    const selected = durable ? this.scripts.get(durable.task)?.[durable.stepOrdinal - 1] : undefined;
+    const selected = durable
+      ? this.scripts.get(durable.task)?.[durable.stepOrdinal - 1]
+      : governanceStep === null
+        ? undefined
+        : this.governanceScripts[governanceStep - 1];
     const reviewId = JSON.stringify(body.messages).match(/refinement-review-[a-f0-9]{32}/)?.[0];
     const fallback: Reply = durable
       ? action("final", `fixture completed: ${durable.task}`)
@@ -209,6 +258,7 @@ export class StrictActionFixture {
   }
 
   private key(task: string, step: number): string { return `${task}\0${step}`; }
+  private governanceKey(step: number): string { return `governance\0${step}`; }
 }
 
 function messageText(value: unknown): string {
@@ -232,7 +282,8 @@ function split(text: string, parts: number): string[] {
 
 function formalToolCall(reply: Record<string, unknown>): { name: string; arguments: string } | null {
   if ((reply.name === "bun_console" || reply.name === "finish" ||
-      reply.name === "agencity_submit_refinement_review") &&
+      reply.name === "agencity_submit_refinement_review" ||
+      reply.name === "agencity_submit_refinement_governance_decision") &&
       reply.input && typeof reply.input === "object" && !Array.isArray(reply.input)) {
     return { name: reply.name, arguments: JSON.stringify(reply.input) };
   }
@@ -243,4 +294,38 @@ export function action(type: "final" | "failed" | "blocked" | "typescript", valu
   if (type === "typescript") return { name: "bun_console", input: { source: value } };
   if (type === "final") return { name: "finish", input: { outcome: { message: value } } };
   return { name: "finish", input: { outcome: { status: type, message: value } } };
+}
+
+export function governanceDecision(
+  decision: "approve" | "reject",
+  input: {
+    readonly reason: string;
+    readonly criteria: readonly string[];
+    readonly residualRisks?: readonly string[];
+    readonly revisionGuidance?: string;
+  },
+): ReplyFactory {
+  return probe => {
+    if (!probe.proposalId) throw new Error("Governance fixture reply requires a frozen proposal ID");
+    return {
+      name: "agencity_submit_refinement_governance_decision",
+      input: decision === "approve"
+        ? {
+            decision,
+            proposalId: probe.proposalId,
+            reason: input.reason,
+            satisfiedCriteria: input.criteria,
+            residualRisks: input.residualRisks ?? [],
+          }
+        : {
+            decision,
+            proposalId: probe.proposalId,
+            reason: input.reason,
+            violatedCriteria: input.criteria,
+            ...(input.revisionGuidance === undefined ? {} : {
+              revisionGuidance: input.revisionGuidance,
+            }),
+          },
+    };
+  };
 }

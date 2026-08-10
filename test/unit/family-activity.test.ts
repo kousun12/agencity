@@ -8,8 +8,10 @@ import {
   type AgentState,
   type TaskRecord,
 } from "../../src/index.ts";
+import { fixtureAgentProfile } from "../helpers.ts";
 
 const model = { provider: "fixture", model: "test", reasoningEffort: "provider-default" as const };
+const profile = fixtureAgentProfile("child");
 
 function state(overrides: Partial<AgentState> = {}): AgentState {
   const created: AgentEvent = {
@@ -32,6 +34,7 @@ function state(overrides: Partial<AgentState> = {}): AgentState {
       initialBranchId: "child-main",
       model,
       budget: {},
+      agentProfile: profile,
       parentSessionId: "parent",
       parentBranchId: "parent-main",
       rootSessionId: "parent",
@@ -67,6 +70,11 @@ function run(status: AgentRunState["status"], overrides: Partial<AgentRunState> 
     id: "run",
     task: "Do retained work",
     requestKey: "request",
+    profilePin: {
+      profileVersionId: profile.profileVersionId,
+      agentPromptDigest: profile.promptDigest,
+      promptContractId: profile.promptContractId,
+    },
     goalId: null,
     goalMode: "none",
     wakeId: null,

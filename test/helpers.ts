@@ -3,12 +3,62 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   LibSqlStorage,
+  materializeInitialAgentProfile,
   type AgentEvent,
   type AgentStorage,
   type BudgetLimits,
   type ModelConfiguration,
   type NewAgentEvent,
 } from "../src/index.ts";
+
+export function fixtureAgentProfile(sessionId: string) {
+  return materializeInitialAgentProfile({
+    role: "Test agent",
+    purpose: "Exercise deterministic runtime behavior.",
+    instructions: "- Follow the admitted test scenario.",
+  }, {
+    profileVersionId: `agent-profile-${sessionId}-v1`,
+    agentSessionId: sessionId,
+    createdBy: { kind: "system", componentId: "agencity.test-fixture", version: 1 },
+    reason: "Deterministic test profile",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+}
+
+export function fixturePromptProvenance(sessionId: string, invocationId = "test-invocation") {
+  const profile = fixtureAgentProfile(sessionId);
+  return fixturePromptProvenanceForPin({
+    profileVersionId: profile.profileVersionId,
+    agentPromptDigest: profile.promptDigest,
+  }, invocationId);
+}
+
+export const FIXTURE_EFFECTIVE_SYSTEM_PROMPT = "Test effective system prompt.";
+
+export function fixturePromptProvenanceForPin(
+  pin: { readonly profileVersionId: string; readonly agentPromptDigest: string },
+  invocationId = "test-invocation",
+  invocationKind: "agent-run" | "recursive-model" = "recursive-model",
+) {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(FIXTURE_EFFECTIVE_SYSTEM_PROMPT);
+  const effectiveDigest = hasher.digest("hex");
+  const componentDigest = "a".repeat(64);
+  return {
+    invocationKind,
+    invocationId,
+    profileVersionId: pin.profileVersionId,
+    agentPromptDigest: pin.agentPromptDigest,
+    effectiveSystemPromptDigest: effectiveDigest,
+    systemPromptContractId: "agencity.system-prompt.v1" as const,
+    components: {
+      basePolicy: { componentId: "agencity-base-policy", version: 1, digest: componentDigest },
+      agentProfile: { componentId: pin.profileVersionId, version: 1, digest: pin.agentPromptDigest },
+      responseContract: { componentId: "test-response", version: 1, digest: componentDigest },
+      executionGuidance: { componentId: "test-guidance", version: 1, digest: componentDigest },
+    },
+  };
+}
 
 export interface TempRuntime {
   readonly directory: string;
@@ -64,6 +114,7 @@ export async function seedSession(
       initialBranchId: branchId,
       model: options.model ?? { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" },
       budget: options.budget ?? {},
+      agentProfile: fixtureAgentProfile(sessionId),
     },
   }]);
   if (!created) throw new Error("Session seed was not committed");

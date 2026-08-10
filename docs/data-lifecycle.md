@@ -26,11 +26,11 @@ The default workspace database is:
 <workspace-root>/.agencity/agent.db
 ```
 
-Its append-only event history is the canonical record of sessions, branches, tasks, cells, effects, goals, messages, memory and harness decisions, recovery, and other durable agent meaning.
+Its append-only event history is the canonical record of sessions, immutable session-owned agent profiles, invocation prompt pins, governed proposals, frozen reviews, decisions, notices, restorations, branches, tasks, cells, effects, goals, messages, memory and harness decisions, recovery, and other durable agent meaning. The initial profile is embedded in `SessionCreated`; later profile version and activation events retain session-wide control history.
 
 The same database contains rebuildable projections and operational rows such as snapshots, routing indexes, the effect outbox, process leases, and synchronization status. Those rows accelerate or coordinate the runtime; they do not replace canonical events.
 
-Structured model effects retain one complete accepted formal input. Model completion, action, diagnostics, and progress records use bounded digests, identities, counts, and summaries rather than copying accepted input or retaining rejected argument bodies. Treat the workspace database as sensitive trajectory data even when artifacts are stored elsewhere.
+Structured model effects retain one complete accepted formal input. Model completion, action, diagnostics, and progress records use bounded digests, identities, counts, and summaries rather than copying accepted input or retaining rejected argument bodies. Context and model-call provenance retain the exact profile version, agent-prompt digest, effective-system-prompt digest, and immutable prompt-component references used by an autonomous or recursive invocation. Treat the workspace database as sensitive trajectory data even when artifacts are stored elsewhere.
 
 Opening a database applies the repository's numbered migrations. Retained event meanings are not rewritten during ordinary projection rebuild.
 
@@ -54,7 +54,7 @@ The product profile database defaults to:
 ~/.agencity/profile.db
 ```
 
-It contains device/profile identity, cross-workspace preferences, workspace catalog entries, globally installed skills, and opaque credential references.
+It contains device/profile identity, cross-workspace preferences, workspace catalog entries, globally installed skills, and opaque credential references. This profile/device-store state is `userProfile`; it is separate from each session's workspace-canonical `agentProfile`.
 
 Provider key values are not stored in that database. Keys saved during onboarding or `/model login` live in the owner-only sibling file:
 
@@ -116,12 +116,17 @@ Export first records an ownership-checked manifest. For an owned scope it writes
 - `events.jsonl` for selected workspace or session event history;
 - `profile.json` with device, preferences, profile skills, opaque credential references, and workspace catalog metadata;
 - `replica-envelopes.jsonl` when a configured transport can enumerate envelopes;
-- selected verified artifact bytes under `artifacts/`; and
-- `manifest.json` with counts, resources, status, and missing-artifact IDs.
+- selected verified artifact bytes under `artifacts/`;
+- `export-audit.json` with profile, invocation-pin, governance, review, decision, restoration, evidence, and artifact completeness checks; and
+- `manifest.json` with counts, resources, status, missing-artifact IDs, and the same completeness audit.
 
 Raw provider key values are not exported from `auth.json`. Workspace source files and external service state are also not included.
 
-An export with a missing or corrupt referenced artifact is marked `partial`. Treat that as incomplete evidence, not a successful backup.
+For schema-version-4 workspaces, `events.jsonl` carries initial and historical agent profiles, invocation profile pins, context/model-call effective-prompt provenance, governed proposals, frozen reviewer inputs and dispatch, reviewer-child links, decisions, terminal notices, and restoration provenance because those values are canonical event payloads. The rebuildable profile and governance projection tables are not separate authority that must be exported beside their source events.
+
+The completeness audit checks that profile versions and digests referenced by invocations are present, governance and reviewer records form an attributable chain, applied/restored versions and evidence records exist, and registered artifact bytes verify by digest and size. A missing required record, missing artifact, or corrupt artifact marks the export `partial`.
+
+Treat every `partial` export as incomplete evidence, not a successful backup. A completed audit does not turn export into a supported round-trip restore format.
 
 ### Export is not restore
 
@@ -152,7 +157,7 @@ Deletion is separate from append-only domain history. Ordinary runtime transitio
 
 ### Session deletion
 
-Session deletion is available only for an independently erasable local session. The runtime refuses when retained relationships or evidence make narrow erasure unsafe, including recursive links, replication, harness/refinement references, cross-session artifact references, or protected quarantine records.
+Session deletion is available only for an independently erasable local session. The runtime refuses when retained relationships or evidence make narrow erasure unsafe, including governed proposals and reviewer children, terminal notices, restorations, family or reconciliation provenance, recursive links, replication, harness/refinement references, cross-session artifact references, or protected quarantine records. Initial and historical profile rows are removed only when the complete independent session is otherwise erasable.
 
 The runtime preflights references before deleting artifact bytes, rechecks inside the relational erasure transaction, and retains shared artifact content that other sessions still reference.
 
@@ -192,11 +197,12 @@ A filesystem or administration failure produces a partial result. Workspace owne
 
 ## Upgrades and migrations
 
-- The current workspace format accepts event schema version 3, reducer version 12, model dispatch version 2, and model effect output version 2.
-- Version-1 and version-2 workspaces are rejected with reset guidance and are not decoded, upcast, synchronized, projected, or recovered. Profile model-catalog caches may be discarded and rebuilt.
+- The current workspace format accepts event schema version 4, reducer version 13, model dispatch version 2, and model effect output version 2.
+- Workspaces containing event schema version 1, 2, or 3 are rejected with reset guidance and are not decoded, upcast, synchronized, projected, or recovered. Profile model-catalog caches may be discarded and rebuilt.
 - Opening incompatible state fails before applying product migrations to its retained rows and reports reset guidance. The runtime does not delete the old database.
-- Before using this revision, back up or move aside each affected workspace's `.agencity` directory. Starting again creates a fresh version-3 workspace. The separate profile directory (normally `~/.agencity`) does not need to be reset unless startup reports a profile-specific incompatibility; resetting a workspace does not remove profile state, and resetting a profile does not remove workspace state.
-- Migration 015 adds `response_admission_json` to the mutable `recursive_model_handles` projection. It preserves the exact contract/capability seed needed to recover structured recursive work and is rebuilt from `RecursiveModelStarted`; canonical event history remains authoritative.
+- Before using this revision, back up or move aside each affected workspace's `.agencity` directory. Starting again creates a fresh version-4 workspace whose new sessions include complete initial profiles. The separate profile directory (normally `~/.agencity`) does not need to be reset unless startup reports a profile-specific incompatibility; resetting a workspace removes session-owned agent-profile history but not user/device profile state, and resetting the profile store does not remove workspace agent profiles.
+- Migration 016 creates rebuildable `agent_profile_versions` and `workspace_agent_profiles` projections, adds `profile_pin_json` to recursive handles, and adds `prompt_provenance_json` to immutable context records. Canonical `SessionCreated`, profile-control, invocation, context, and model-call events remain authoritative.
+- Migration 017 adds the `governance_wait` trajectory-review field plus rebuildable `governed_refinement_proposals` and `refinement_restorations` tables. Canonical proposal, validation, frozen-review, child-link, decision, application, notice, and restoration events remain authoritative.
 - Back up databases, sidecars, artifacts, profile data, and replicas before changing to a source revision with new migrations.
 - Run only one runtime version against a given writable workspace at a time.
 - Do not downgrade a migrated database unless that repository revision explicitly supports it.

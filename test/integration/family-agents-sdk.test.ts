@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, AgentClient, ProtocolServer, ScriptedAgentActionProvider, Supervisor,
-  projectEvents, type AgentAction, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse,
+  agentProfilePin, projectEvents, type AgentAction, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse,
 } from "../../src/index.ts";
 import { formalOutputFromAgentAction } from "../../src/executors/model-response.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
@@ -352,7 +352,7 @@ describe("FU-012 retained family messaging", () => {
     await value.supervisor.agents.deliverQueuedAtBoundary(child.sessionId, child.branchId, runId);
     await value.supervisor.storage.appendEvents([{
       sessionId: child.sessionId, branchId: child.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
-      payload: { runId, task: "ambiguous work", requestKey: "family-unknown-request" },
+      payload: { runId, task: "ambiguous work", requestKey: "family-unknown-request", profilePin: agentProfilePin(await value.supervisor.agentProfiles.active(child.sessionId)) },
     }]);
     const effectId = await value.supervisor.outbox.request({ sessionId: child.sessionId, branchId: child.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, idempotencyKey: "family-ambiguous-effect", idempotent: false });
     expect(await value.supervisor.storage.claimEffect(effectId, "dead-family-owner")).not.toBeNull();

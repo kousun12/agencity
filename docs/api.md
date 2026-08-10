@@ -53,6 +53,11 @@ async function usingRuntime() {
         reasoningEffort: "high",
       },
       budget: { tokenLimit: 10_000, turnLimit: 20 },
+      agentProfile: {
+        role: "Repository reviewer",
+        purpose: "Advance the requested repository review.",
+        instructions: "- Use attributable evidence.\n- Preserve unresolved risks.",
+      },
     });
 
     const result = await supervisor.runs.start(sessionId, branchId, {
@@ -98,7 +103,7 @@ Structured requests use response-aware `agencity.model-dispatch.v2` and return `
 
 ## Sessions, branches, and autonomous runs
 
-- `createSession` appends `SessionCreated`; optional caller IDs and names support deterministic provisioning.
+- `createSession` appends `SessionCreated` with a complete immutable initial agent profile; optional caller IDs, names, and `agentProfile: { role, purpose, instructions }` support deterministic provisioning. Omission uses the sealed root profile.
 - `selectModel` normalizes provider shorthand, checks availability, requires an idle model boundary, and appends `SessionModelChanged`.
 - `appendMessage` scrubs known credentials and appends a message event.
 - `fork` creates a durable branch from a validated lineage cursor without changing the parent.
@@ -120,6 +125,51 @@ A successful finish publishes its exact message only after required gates pass. 
 
 `modelLoop.turn` and `modelLoop.run` remain low-level diagnostic paths. They are not substitutes for `runs` in a product task integration.
 
+### Agent-profile inspection and governance
+
+`Supervisor.agentProfiles` exposes session-wide, read-only profile inspection:
+
+```ts
+const summary = await supervisor.agentProfiles.get(sessionId);
+const detail = await supervisor.agentProfiles.get(sessionId, {
+  includePrompt: true,
+});
+const history = await supervisor.agentProfiles.list(sessionId, {
+  includePrompt: false,
+  limit: 20,
+});
+```
+
+The default summary omits instructions and exact prompt text. Full detail includes the exact rendered prompt and revision provenance. History is newest-first, defaults to 20 records, and accepts a limit from 1 through 100.
+
+`Supervisor.refinementGovernance` exposes `proposeOwner`, `proposeAgent`, `proposeAutomatic`, `get`, `list`, `rollbackOwner`, `rollbackAgent`, and recovery. Public clients normally use:
+
+```ts
+const proposal = await client.proposeProfileUpdate(sessionId, branchId, {
+  expectedProfileVersionId: summary.profileVersionId,
+  replacement: {
+    role: "Repository reviewer",
+    purpose: "Review this repository.",
+    instructions: "Preserve attributable evidence.",
+  },
+  reason: "Clarify standing behavior",
+  predictedEffect: "More consistent reviews",
+  evidenceEventIds: [],
+  wait: true,
+});
+
+const detached = await client.proposeGovernedRefinement(
+  sessionId,
+  branchId,
+  { /* typed target, reason, predictedEffect, evidenceEventIds, wait: false */ },
+);
+const terminal = await client.governedRefinement(detached.proposalId);
+```
+
+An agent may target itself or its direct creation-family child; the workspace owner may target workspace agents; the automatic refiner is local-only and uses its configured scope. The reviewer is a separate sealed invocation selected by the supervisor from the origin route's current model. Its frozen inputs pin the product constitution and policy. Workspace-charter and user-constraint configuration is unavailable and is represented as `null`; callers cannot select a reviewer.
+
+Profiles and non-skill harness content apply atomically after approval and application-time revalidation. Skills activate only after durable compile and declared runtime tests pass. `wait: true` returns at a terminal status. `wait: false` returns after durable admission and delivers one idempotent route notice later. Rejected proposals may be revised only through a new bounded proposal linked by `revisesProposalId`. `rollbackRefinement` restores exact earlier approved content through a new immutable version. Reviewer approval proves policy consistency, not improved outcomes.
+
 ## Durable recursive work
 
 Root agents, delegated agents, and recursive model calls use retained sessions, tasks, budgets, mailboxes, and JSON handles.
@@ -128,6 +178,11 @@ Root agents, delegated agents, and recursive model calls use retained sessions, 
 const child = await supervisor.agents.spawn(parentSessionId, parentBranchId, {
   task: "Investigate the failing tests",
   completionCriteria: "Return root cause and verified evidence",
+  profile: {
+    role: "Test investigator",
+    purpose: "Investigate the admitted test failure.",
+    instructions: "- Stay within the admitted task.\n- Return attributable evidence.",
+  },
   idempotencyKey: "investigate-tests-v1",
 });
 
@@ -143,6 +198,11 @@ const family = await supervisor.agents.listFamily(parentSessionId, parentBranchI
 const call = await supervisor.models.start(parentSessionId, parentBranchId, {
   prompt: "Summarize the selected log ranges",
   inputSetId,
+  profile: {
+    role: "Log summarizer",
+    purpose: "Summarize one bounded recursive input.",
+    instructions: "- Distinguish observations from inference.",
+  },
   idempotencyKey: "summarize-log-v1",
 });
 
@@ -151,7 +211,9 @@ const terminal = await supervisor.models.result(call.handleId, {
 });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
+`agents.spawnMany` validates and admits the complete batch atomically. Each input may supply `profile`; omission uses the sealed task-specialist profile. Recursive `models.start/startMany` use the same explicit-or-default rule and retain the resulting profile pin on the handle. Specification spawn materializes a profile from the exact active specification version and records those source IDs. Profile meaning participates in idempotent admission, so reusing an idempotency key with changed standing behavior is rejected.
+
+`agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 
 Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
 
@@ -212,9 +274,9 @@ The database-driven coordinators create durable wakes. Missed intervals coalesce
 
 `memory.create/search/list` operate on scoped, attributable records. Search returns both ranked records and provenance for candidates, policy rejections, and selections. FTS5 is a candidate generator; scope, status, tags, conflicts, exposure, and limits remain authoritative service decisions.
 
-`refiner.request` freezes a bounded trajectory and runs a durable recursive child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Public recursive calls remain text operations, and no assistant JSON parser or prose fallback exists. Valid output enters proposal validation and bounded candidate exposure. Promotion, broad scope, approval, and rollback are governed separately; model prose is not evidence.
+`refiner.request` freezes a bounded trajectory and runs a durable proposer child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Public recursive calls remain text operations, and no assistant JSON parser or prose fallback exists. A proposed change then enters the separate sealed governance reviewer, application-time validation, automatic application or rejection, and terminal delivery path.
 
-`harness` exposes proposal, validation, activation, allocation, observation, decision, approval, history, and rollback operations. `skills` compiles, tests, and invokes immutable skill versions through the outbox. `specs.spawn` admits a version-pinned subagent through the normal task/session model. Skill permissions are an exact runtime allowlist and are not an OS sandbox.
+`harness` still exposes ADR-0002 proposal, validation, activation, allocation, observation, decision, approval, history, and rollback operations for advanced and legacy-compatible candidate evaluation. They are not the ordinary activation path under ADR 0012. `skills` compiles, tests, and invokes immutable skill versions through the outbox. `specs.spawn` admits a version-pinned subagent through the normal task/session model. Skill permissions are an exact runtime allowlist and are not an OS sandbox.
 
 The generated-cell facades are narrower than the supervisor API. In particular, evaluator and user authority is not delegated to generated code. See [Generated TypeScript console SDK](./console-sdk.md).
 
@@ -235,7 +297,7 @@ interface AgentStorage {
 
 Canonical writes go through validated event and service commands. `readonlyQuery({ sql, args })` is a bounded LibSQL-oriented analytical surface, not a portable mutation interface. The local adapter advertises offline writes, analytical SQL, in-process notifications, and same-device process fencing. It does not advertise distributed leases.
 
-Snapshots and operational tables are projections. Historical rebuild is deterministic and never re-executes effects.
+Snapshots and operational tables are projections. `agent_profile_versions` and `workspace_agent_profiles` are rebuilt from schema-version-4 session/profile events; recursive-handle and context projections rebuild their retained profile and effective-prompt provenance. Historical rebuild is deterministic and never re-executes effects.
 
 ```ts
 const { cursor, state } =

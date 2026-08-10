@@ -140,6 +140,8 @@ describe("product CLI", () => {
     expect(parseCliArgs(["branch", "head", "named-fork"])).toMatchObject({ command: "branch", positionals: ["head", "named-fork"] });
     expect(parseCliArgs(["new", "write", "docs"])).toMatchObject({ command: "new", positionals: ["write", "docs"] });
     expect(parseCliArgs(["skills", "install", "./bundle", "--scope", "profile", "--confirmation", "abc"])).toMatchObject({ command: "skills", positionals: ["install", "./bundle"] });
+    expect(parseCliArgs(["profile", "history", "--json"])).toMatchObject({ command: "profile", positionals: ["history"] });
+    expect(parseCliArgs(["profile", "repropose", "latest", "{}"])).toMatchObject({ command: "profile", positionals: ["repropose", "latest", "{}"] });
     expect(parseCliArgs(["--", "run", "the", "benchmark"])).toMatchObject({ command: "product", positionals: ["run", "the", "benchmark"] });
     expect(parseCliArgs(["run the benchmark"])).toMatchObject({ command: "product", positionals: ["run the benchmark"] });
 
@@ -291,6 +293,22 @@ describe("product CLI", () => {
     const rows = JSON.parse(listed.stdout) as Array<{ sessionId: string; branchId: string; sessionName: string; taskSummary: string; model: { provider: string; reasoningEffort: string } }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ sessionName: "inspect this repository", taskSummary: "inspect this repository", model: { provider: "openai", reasoningEffort: "high" } });
+
+    const activeProfile = await cli(["profile", "show", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(activeProfile).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(activeProfile.stdout)).toMatchObject({
+      revision: 1,
+      active: true,
+      promptContractId: "agencity.agent-profile.v1",
+    });
+    expect(JSON.parse(activeProfile.stdout).exactAgentPrompt).toContain("Role:");
+    const profileHistory = await cli(["profile", "history", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(profileHistory).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(profileHistory.stdout)).toMatchObject({
+      activeProfileVersionId: JSON.parse(activeProfile.stdout).profileVersionId,
+      items: [{ revision: 1, active: true }],
+      proposals: [],
+    });
 
     const renamed = await cli(["sessions", "--workspace", value.workspace, "--session", rows[0]!.sessionId, "--name", "Repository inspection", "--json"], { home: value.home });
     expect(renamed.code).toBe(0);

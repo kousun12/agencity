@@ -14,6 +14,7 @@ describe("CLI help", () => {
     expect(positions).toEqual([...positions].sort((left, right) => left - right));
     expect(help).toContain('agencity "find and fix the flaky test"');
     expect(help).toContain("agencity debug history");
+    expect(help).toContain("agencity profile [show|history|proposals|propose|repropose|rollback]");
     expect(help).toContain("(legacy: history)");
     expect(help).toContain("DESTRUCTIVE: exact confirmation required");
     expect(help).toContain("--model PROVIDER:CREATOR/MODEL");

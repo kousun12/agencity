@@ -33,7 +33,7 @@ import type { ProductBranchSummary } from "../../src/product/index.ts";
 import { TerminalTranscript } from "../../src/tui/transcript.ts";
 import { createTerminalSyntaxStyle } from "../../src/tui/theme.ts";
 import { buildTerminalScreen, type TerminalScreenView } from "../../src/tui/view-model.ts";
-import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
+import { fixtureAgentProfile, makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
@@ -151,6 +151,7 @@ describe("OpenTUI interactive terminal", () => {
       onDetail: detail => app?.showDetail(detail),
     });
     await controller.attach(session.sessionId, session.branchId, false);
+    const displayProfile = fixtureAgentProfile(session.sessionId);
     const proposedFinal = buildTerminalScreen({
       ...controller.presentation,
       state: {
@@ -160,6 +161,7 @@ describe("OpenTUI interactive terminal", () => {
             id: "gated-run",
             task: "Try gated completion",
             requestKey: "gated-run",
+            profilePin: { profileVersionId: displayProfile.profileVersionId, agentPromptDigest: displayProfile.promptDigest, promptContractId: displayProfile.promptContractId },
             goalId: "goal",
             goalMode: "current",
             wakeId: null,
@@ -197,6 +199,7 @@ describe("OpenTUI interactive terminal", () => {
       id: "typescript-run",
       task: "Inspect with TypeScript",
       requestKey: "typescript-run",
+      profilePin: { profileVersionId: displayProfile.profileVersionId, agentPromptDigest: displayProfile.promptDigest, promptContractId: displayProfile.promptContractId },
       goalId: null,
       goalMode: "none",
       wakeId: null,
@@ -445,6 +448,27 @@ describe("OpenTUI interactive terminal", () => {
       expect(frame).toContain("WORKSPACE STATUS · RAW");
       setup.mockInput.pressKey("r", { shift: true });
       frame = await setup.waitForFrame(value => value.includes("WORKSPACE STATUS") && !value.includes('"snapshotCursorResume"'));
+
+      setup.mockInput.pressEscape();
+      await setup.mockInput.typeText("/profile");
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value =>
+        value.includes("AGENT PROFILE") && value.includes("Behavioral instructions only"));
+      expect(frame).toContain("Behavioral instructions only");
+      expect(frame).toContain("TRUSTED-LOCAL");
+      setup.mockInput.pressKey("\u001b[6~");
+      frame = await setup.waitForFrame(value => value.includes("Exact active agent prompt"));
+      expect(frame).toContain("Role: Repository agent");
+      setup.resize(78, 22);
+      frame = await setup.waitForFrame(value =>
+        value.includes("AGENT PROFILE") && value.includes("Behavioral instructions only"));
+      expect(frame).toContain("not sandboxed");
+      setup.resize(112, 30);
+      await setup.waitForFrame(value => value.includes("AGENT PROFILE"));
+      setup.mockInput.pressEscape();
+      await setup.mockInput.typeText("/info");
+      setup.mockInput.pressEnter();
+      await setup.waitForFrame(value => value.includes("WORKSPACE STATUS"));
 
       await Bun.sleep(20);
       setup.mockInput.pressKey("\u001b[6~");

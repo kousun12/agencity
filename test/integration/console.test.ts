@@ -407,9 +407,9 @@ describe("disposable TypeScript console process", () => {
       logs: ["history-log"],
       durationMs: expect.any(Number),
       provenance: {
-        proposed: { type: "CellProposed", eventId: expect.any(String), schemaVersion: 3 },
-        starts: [{ type: "CellStarted", eventId: expect.any(String), schemaVersion: 3 }],
-        terminal: { type: "CellCommitted", eventId: expect.any(String), schemaVersion: 3 },
+        proposed: { type: "CellProposed", eventId: expect.any(String), schemaVersion: 4 },
+        starts: [{ type: "CellStarted", eventId: expect.any(String), schemaVersion: 4 }],
+        terminal: { type: "CellCommitted", eventId: expect.any(String), schemaVersion: 4 },
       },
     });
 

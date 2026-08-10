@@ -9,10 +9,12 @@ import {
   ScriptedAgentActionProvider,
   ModelEffectAdmissionService,
   Supervisor,
+  agentProfilePin,
   newId,
   projectEvents,
   stableEffectId,
   type AgentAction,
+  type EventPayloads,
   type JsonValue,
   type ModelConfiguration,
   type ModelDispatch,
@@ -21,7 +23,7 @@ import {
   type TextModelResponse,
 } from "../../src/index.ts";
 import { consumeRequiredToolStream, ModelProviderResponseFailureError, ModelResponseGuard } from "../../src/executors/model-response.ts";
-import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
+import { FIXTURE_EFFECTIVE_SYSTEM_PROMPT, fixturePromptProvenanceForPin, makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
@@ -31,6 +33,9 @@ const action = <T extends Omit<AgentAction, "protocol" | "version">>(value: T): 
   version: AGENT_ACTION_VERSION,
   ...value,
 } as unknown as AgentAction);
+
+const currentProfilePin = async (supervisor: Supervisor, sessionId: string) =>
+  agentProfilePin(await supervisor.agentProfiles.active(sessionId));
 
 class RecordingActions extends ScriptedAgentActionProvider {
   readonly contexts: JsonValue[] = [];
@@ -1013,7 +1018,7 @@ describe("autonomous durable agent runs", () => {
       payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Use the prior observation" },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
-      payload: { runId, task: "Use the prior observation", requestKey: "observed-action-recovery" },
+      payload: { runId, task: "Use the prior observation", requestKey: "observed-action-recovery", profilePin: await currentProfilePin(supervisor, session.sessionId) },
     }]);
     const priorCell = await supervisor.executeCell(session.sessionId, session.branchId, `return { retained: true };`, [], "prior-observation-cell");
     const before = await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId });
@@ -1118,26 +1123,28 @@ describe("autonomous durable agent runs", () => {
     const effectKey = `agent-run-model:${runId}:1`; const effectId = stableEffectId(session.sessionId, effectKey);
     const modelDispatch = new ModelEffectAdmissionService(supervisor.modelExecutor)
       .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, { provider: provider.name, model: "v1", reasoningEffort: "provider-default" }).modelDispatch;
+    const pin = await currentProfilePin(supervisor, session.sessionId);
+    const promptProvenance = fixturePromptProvenanceForPin(pin, runId, "agent-run");
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
       payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Recover this run" },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
-      payload: { runId, task: "Recover this run", requestKey: "recover-request" },
+      payload: { runId, task: "Recover this run", requestKey: "recover-request", profilePin: pin },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunStepStarted", producer: "supervisor", idempotencyKey: `agent-run-step:${runId}:1`,
       payload: { runId, stepId, ordinal: 1, contextId, callId, effectId, actionId, observationEventIds: [] },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: `agent-run-context:${runId}:1`,
-      payload: { contextId, records: [], contentHash: "a".repeat(64), context: { run: { stepOrdinal: 1 }, messages: [] } },
+      payload: { contextId, records: [], contentHash: "a".repeat(64), context: { run: { stepOrdinal: 1 }, messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] }, promptProvenance },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor", idempotencyKey: `agent-run-model-attempt:${runId}:1:1`,
       payload: { runId, stepId, ordinal: 1, attempt: 1, contextId, callId, effectId, reason: "initial", estimatedInputTokens: 0, contextWindow: fixtureContextWindow(provider.name, "v1") },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
-      payload: { callId, contextId, effectId, modelDispatch, estimatedInputTokens: 0, attempt: 1, contextWindow: fixtureContextWindow(provider.name, "v1") },
+      payload: { callId, contextId, effectId, modelDispatch, estimatedInputTokens: 0, promptProvenance, attempt: 1, contextWindow: fixtureContextWindow(provider.name, "v1") },
     }]);
-    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context: { run: { stepOrdinal: 1 }, messages: [] }, modelDispatch } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
+    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context: { run: { stepOrdinal: 1 }, messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] }, modelDispatch, promptProvenance } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
     expect((await supervisor.outbox.run(effectId)).outcome).toBe("succeeded");
     expect(provider.calls).toBe(1);
     const rawAction = JSON.stringify(action({ type: "final", content: "Recovered exactly once." }));
@@ -1244,27 +1251,29 @@ describe("autonomous durable agent runs", () => {
     const effectKey = `agent-run-model:${runId}:1`; const effectId = stableEffectId(session.sessionId, effectKey);
     const modelDispatch = new ModelEffectAdmissionService(supervisor.modelExecutor)
       .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, { provider: provider.name, model: "v1", reasoningEffort: "provider-default" }).modelDispatch;
-    const context = { run: { stepOrdinal: 1 }, messages: [] };
+    const context = { run: { stepOrdinal: 1 }, messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] };
+    const pin = await currentProfilePin(supervisor, session.sessionId);
+    const promptProvenance = fixturePromptProvenanceForPin(pin, runId, "agent-run");
     await supervisor.storage.appendEvents([{
       sessionId: session.sessionId, branchId: session.branchId, type: "MessageAppended", producer: "client", idempotencyKey: `agent-run-task-message:${runId}`,
       payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Recover pending request" },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
-      payload: { runId, task: "Recover pending request", requestKey: "pending-recover-request" },
+      payload: { runId, task: "Recover pending request", requestKey: "pending-recover-request", profilePin: pin },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunStepStarted", producer: "supervisor", idempotencyKey: `agent-run-step:${runId}:1`,
       payload: { runId, stepId, ordinal: 1, contextId, callId, effectId, actionId, observationEventIds: [] },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: `agent-run-context:${runId}:1`,
-      payload: { contextId, records: [], contentHash: "b".repeat(64), context },
+      payload: { contextId, records: [], contentHash: "b".repeat(64), context, promptProvenance },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor", idempotencyKey: `agent-run-model-attempt:${runId}:1:1`,
       payload: { runId, stepId, ordinal: 1, attempt: 1, contextId, callId, effectId, reason: "initial", estimatedInputTokens: 0, contextWindow: fixtureContextWindow(provider.name, "v1") },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: `agent-run-model-call:${callId}`,
-      payload: { callId, contextId, effectId, modelDispatch, estimatedInputTokens: 0, attempt: 1, contextWindow: fixtureContextWindow(provider.name, "v1") },
+      payload: { callId, contextId, effectId, modelDispatch, estimatedInputTokens: 0, promptProvenance, attempt: 1, contextWindow: fixtureContextWindow(provider.name, "v1") },
     }]);
-    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context, modelDispatch } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
+    await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "model", operation: "complete", input: { callId, context, modelDispatch, promptProvenance } as unknown as JsonValue, idempotencyKey: effectKey, idempotent: false });
     expect(provider.calls).toBe(0);
     await supervisor.close();
 
@@ -1289,7 +1298,7 @@ describe("autonomous durable agent runs", () => {
       payload: { messageId: `agent-run-task-${runId}`, role: "user", content: "Unknown must block" },
     }, {
       sessionId: session.sessionId, branchId: session.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
-      payload: { runId, task: "Unknown must block", requestKey: "unknown-request" },
+      payload: { runId, task: "Unknown must block", requestKey: "unknown-request", profilePin: await currentProfilePin(supervisor, session.sessionId) },
     }]);
     const effectId = await supervisor.outbox.request({ sessionId: session.sessionId, branchId: session.branchId, executor: "shell", operation: "run", input: { command: "printf ambiguous" }, idempotencyKey: "ambiguous-side-effect", idempotent: false });
     expect(await supervisor.storage.claimEffect(effectId, "dead-owner")).not.toBeNull();
@@ -1320,9 +1329,21 @@ describe("autonomous durable agent runs", () => {
         { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ response: "continue" }) },
       );
       expect(removedRoute.status).toBe(404);
-      // This remains callable as a separate diagnostic surface.
-      const legacy = await client.turn(value.sessionId, value.branchId) as { outcome: string };
+      // The compatibility route remains callable, but model work now passes
+      // through the same canonical invocation boundary as ordinary runs.
+      (value.provider.script as AgentAction[])[0] = action({ type: "final", content: "Diagnostic complete." });
+      const beforeDiagnostic = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
+      const legacy = await client.turn(value.sessionId, value.branchId) as { outcome: string; runId: string };
       expect(legacy.outcome).toBe("succeeded");
+      const diagnosticEvents = (await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId }))
+        .slice(beforeDiagnostic.length);
+      const requestedIndex = diagnosticEvents.findIndex((event) => event.type === "AgentRunRequested" &&
+        (event.payload as EventPayloads["AgentRunRequested"]).runId === legacy.runId);
+      const callIndex = diagnosticEvents.findIndex((event) => event.type === "ModelCallRequested");
+      expect(requestedIndex).toBeGreaterThanOrEqual(0);
+      expect(callIndex).toBeGreaterThan(requestedIndex);
+      const request = diagnosticEvents[requestedIndex]!.payload as EventPayloads["AgentRunRequested"];
+      expect(request.profilePin).toEqual(agentProfilePin(await value.supervisor.agentProfiles.active(value.sessionId)));
     } finally { protocol.stop(); await value.supervisor.close(); }
   });
 });

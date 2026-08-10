@@ -93,6 +93,29 @@ A successful finish is provisional until every required gate passes. Failed gate
 
 A session is a durable agent identity with its conversation, model, budget, goals, and child work. A branch is one retained line of that session's history.
 
+Every new session also has one durable initial agent profile: a concise role, standing purpose, and agent-specific instructions. The profile is behavioral guidance for model calls. It does not grant file, shell, credential, model, budget, publication, or other runtime authority.
+
+Ordinary root creation uses Agencity's sealed repository-agent profile. Delegated and recursive helpers use a sealed task-specialist profile unless the creating API or generated TypeScript supplies a narrower explicit profile. Reusable subagent specifications materialize their exact active specification version into the new child's profile and retain that source provenance. The current task and completion criteria remain separate from standing profile behavior.
+
+Each autonomous run and recursive-model invocation pins the exact profile version and effective system-prompt provenance before model work. A restart uses that retained pin rather than silently selecting different instructions.
+
+The public protocol, TypeScript client, CLI, and TUI can inspect and govern the selected route's profile. Terminal operations are route-relative and do not require internal IDs:
+
+```sh
+agencity profile show
+agencity profile history
+agencity profile proposals
+agencity profile propose '{"role":"Repository maintainer","purpose":"Maintain this repository","instructions":"Preserve attributable evidence.","reason":"Clarify standing behavior","predictedEffect":"More consistent maintenance","wait":true}'
+agencity profile repropose latest '{"role":"Repository maintainer","purpose":"Maintain this repository","instructions":"Preserve evidence and report unresolved risks.","reason":"Address the rejection guidance","predictedEffect":"More complete risk reporting"}'
+agencity profile rollback 1 '{"reason":"Restore the earlier approved behavior","evidenceEventIds":[]}'
+```
+
+The TUI equivalents are `/profile`, `/profile show`, `/profile history`, `/profile proposals` (or `/profile notices`), `/profile propose JSON`, `/profile repropose latest|N JSON`, and `/profile rollback REVISION JSON`. `history` shows active and historical revisions, exact prompts, adjacent diffs, proposal provenance, actors, reasons, and restoration links. `proposals` shows pending and terminal statuses, reviewer provenance, reasons, violated criteria, residual risks, and revision guidance. `latest|N` selects the newest or Nth newest rejected proposal; rollback selects an exact profile revision number.
+
+Proposals wait by default. Set `"wait": false` to detach after durable admission; the origin route later receives one durable terminal notice. A rejected proposal is immutable. Reproposal creates a new bounded proposal linked to the rejection and must change content or evidence. Rollback restores exact earlier approved content as a new revision and never rewrites history.
+
+The ordinary path is proposer, deterministic validation, one separate sealed governance reviewer, application-time revalidation, automatic application or rejection, and terminal delivery. The reviewer uses the route's current model but a separate completion and sealed profile. It receives the frozen product constitution and review policy; workspace-charter and user-constraint configuration is unavailable and pinned as `null`. Callers cannot select the reviewer. Reviewer approval establishes policy consistency, not proof of improved outcomes.
+
 Common commands:
 
 ```sh
@@ -214,7 +237,7 @@ agencity skills propose "package the repeated formatting workflow"
 
 Installing local skill code requires inspection and an exact source-digest confirmation. Skills have the same trusted-local OS authority as the runtime; their permission declarations are policy checks, not a sandbox. See [Skills](./skills.md).
 
-Refinement reviews retained work and may propose attributable memory, prompt-note, skill, or subagent-specification changes:
+Refinement reviews retained work and may propose attributable memory, prompt-note, skill, or subagent-specification changes through the same sealed governance path:
 
 ```sh
 agencity refine "look for repeated failure patterns"
@@ -222,4 +245,6 @@ agencity refine status
 agencity refine auto on
 ```
 
-Automatic refinement is off by default, profile-scoped, and local-only. Promotion and rollback remain governed by scope, evidence, and approval rules.
+Manual refinement waits for governance by default. Automatic refinement is off by default, profile-scoped, local-only, and detached. Its implemented triggers are repeated typed effect failures, distinct-pin gate failures, and explicit `UserCorrection` events at committed run boundaries. Repeated success, stale-memory, and unproductive-delegation detectors are unavailable.
+
+An approved profile or non-skill harness proposal applies atomically after final validation. An approved skill is staged, compiled, and run through its declared tests before activation. Failure, unknown review, stale application, or failed skill tests activate nothing. Later attributable outcomes may support another proposal or exact rollback.

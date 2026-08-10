@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { LibSqlStorage, Supervisor, type JsonValue, type ModelConfiguration, type ModelProvider, type TextModelResponse } from "../../src/index.ts";
-import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
+import { FIXTURE_EFFECTIVE_SYSTEM_PROMPT, fixturePromptProvenanceForPin, makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { while (temps.length) await removeTempRuntime(temps.pop()!); });
@@ -138,14 +138,15 @@ describe("Slice 2 independent-review hardening", () => {
     const handle = await supervisor.models.start(root.sessionId, root.branchId, { prompt: "ambiguous", run: false, idempotencyKey: "ambiguous", budget: { tokenLimit: 8, costLimitUsd: 0.75, turnLimit: 2, wallTimeLimitMs: 8_000 } });
     const effectId = "unknown-budget-effect"; const callId = "unknown-budget-call";
     const modelDispatch = supervisor.modelExecutor.resolveDispatch({ provider: provider.name, model: "m", reasoningEffort: "provider-default" });
+    const promptProvenance = fixturePromptProvenanceForPin(handle.profilePin, handle.handleId);
     await supervisor.storage.appendEvents([{
       sessionId: root.sessionId, branchId: root.branchId, type: "RecursiveModelStatusChanged", producer: "supervisor", idempotencyKey: "unknown-budget-running", payload: { handleId: handle.handleId, status: "running" },
     }, {
-      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: "unknown-budget-context", payload: { contextId: "unknown-budget-context", records: [], contentHash: "0".repeat(64), context: {} },
+      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ContextMaterialized", producer: "supervisor", idempotencyKey: "unknown-budget-context", payload: { contextId: "unknown-budget-context", records: [], contentHash: "0".repeat(64), context: { messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] }, promptProvenance },
     }, {
-      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: "unknown-budget-call", payload: { callId, contextId: "unknown-budget-context", effectId, modelDispatch, estimatedInputTokens: 0 },
+      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "ModelCallRequested", producer: "supervisor", idempotencyKey: "unknown-budget-call", payload: { callId, contextId: "unknown-budget-context", effectId, modelDispatch, estimatedInputTokens: 0, promptProvenance },
     }, {
-      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "unknown-budget-effect", payload: { effectId, executor: "model", operation: "complete", input: { context: {}, callId, modelDispatch } as any, idempotencyKey: "unknown-budget-effect", idempotent: false },
+      sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectRequested", producer: "supervisor", idempotencyKey: "unknown-budget-effect", payload: { effectId, executor: "model", operation: "complete", input: { context: { messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] }, callId, modelDispatch, promptProvenance } as any, idempotencyKey: "unknown-budget-effect", idempotent: false },
     }, {
       sessionId: handle.childSessionId, branchId: handle.childBranchId, type: "EffectAttemptStarted", producer: "executor", idempotencyKey: "unknown-budget-attempt", payload: { effectId, attempt: 1 },
     }]);

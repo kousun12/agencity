@@ -110,6 +110,22 @@ agencity stop TARGET
 
 `stop` commits cancellation intent and reconciles the run at a durable boundary. Closing a terminal, Ctrl-D, `/quit`, and `/exit` only detach. With an active TUI run, the first Ctrl-C requests cancellation and the second detaches.
 
+### Profile governance
+
+Profile operations are relative to the selected route:
+
+```sh
+agencity profile show
+agencity profile history
+agencity profile proposals
+```
+
+`history` includes full prompts, adjacent diffs, active/historical revisions, actors, reasons, governance decisions, and restorations. `proposals` includes pending and terminal records, exact reasons, residual risks or violated criteria, revision guidance, and notice-delivery state. Use `agencity profile repropose latest|N JSON` only after reviewing the retained rejection. Use `agencity profile rollback REVISION JSON` to restore exact earlier approved content; rollback does not edit or delete history.
+
+Profile proposal JSON accepts `role`, `purpose`, `instructions`, `reason`, `predictedEffect`, optional `evidenceEventIds`, and optional `wait`. Waiting is the default. Detached review survives client/service loss and delivers one terminal notice to the origin route. Do not manually select or substitute a reviewer: the supervisor pins the origin route's current model, frozen product constitution and policy, and `null` workspace-charter/user-constraint components. Approval means policy consistency, not measured improvement.
+
+Profile governance remains inside the trusted-local boundary. Proposal validation, a sealed reviewer prompt, and typed decisions do not sandbox the reviewer, generated TypeScript, shell commands, or skills.
+
 ## Provider and model incidents
 
 Inspect provider status without exposing keys:
@@ -148,7 +164,8 @@ Startup recovery:
 - records lost non-idempotent ownership as `unknown`;
 - abandons interrupted cells instead of replaying their code;
 - finalizes already-committed model outcomes and applies retained formal actions without another provider call;
-- recovers structured refinement from retained recursive `responseAdmission` and exact child-completion evidence;
+- restores each autonomous or recursive invocation from its retained agent-profile pin and effective-system-prompt provenance rather than selecting the currently active profile;
+- recovers trajectory proposals and governed refinement from retained recursive `responseAdmission`, frozen reviewer input, current-model dispatch, exact child-completion evidence, application boundary, and terminal notice;
 - restores branch status, cancellation, goals, schedules, child work, and typed runs from retained boundaries; and
 - never re-executes effects during projection rebuild.
 
@@ -164,6 +181,12 @@ agencity reconcile EFFECT_ID succeeded "provider audit confirms one request"
 Allowed assessments are `succeeded`, `failed`, `no_effect`, and `still_unknown`. They are evidence only. The durable effect remains unknown and is not retried. Start any successor operation only after independently deciding it is safe and give it a new logical intent.
 
 Do not edit `events` or `outbox` to manufacture an outcome.
+
+### Projection repair
+
+`agencity debug rebuild --session SESSION_ID --branch BRANCH_ID` discards and deterministically rebuilds the selected branch snapshot from canonical events. The storage-level operational rebuild also reconstructs session/branch routing, agent-profile versions and active pointers, recursive handles and their profile pins, and context prompt provenance in global cursor order. Neither form executes models, cells, tools, schedules, or other effects.
+
+Agent-profile control events are session-wide but use the session's initial branch as their canonical address. `workspace_agent_profiles`, `governed_refinement_proposals`, and `refinement_restorations` are projections, not independent authority. Do not repair them with SQL; rebuild them from canonical profile, governance, and restoration events.
 
 See [Recovery](./recovery.md) for the complete state machine.
 
@@ -243,7 +266,7 @@ agencity data export \
 
 Shut down the managed workspace service before running advanced export or deletion commands against the same database.
 
-Inspect `manifest.json`. A `partial` export, including one with missing artifacts, is not a complete backup. There is no general import or supported export round-trip restore command.
+Inspect both `manifest.json` and `export-audit.json`. Missing profile pins, governed proposal/review/decision/notice/restoration provenance, evidence, or artifacts makes the export `partial`. A partial export is not a complete backup. There is no general import or supported export round-trip restore command.
 
 See [Data lifecycle](./data-lifecycle.md) for exact bundle contents and restore limits.
 
@@ -295,7 +318,7 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
 
-The current workspace format accepts only event schema version 3. Version-1 and version-2 workspace histories are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. The rejection does not delete retained data; see [Data lifecycle](./data-lifecycle.md).
+The current workspace format accepts only event schema version 4. Workspace histories containing schema version 1, 2, or 3 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-4 sessions with complete initial profiles; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

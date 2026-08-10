@@ -7,6 +7,7 @@ import {
   validateRefinementReviewValue,
   type HarnessKind,
   type HarnessScope,
+  type GovernedRefinementStatus,
   type JsonValue,
   type RefinementReviewLifecycleStatus,
   type RefinementReviewRequest,
@@ -16,6 +17,7 @@ import { containsBrokeredSecret, isSensitiveEnvironmentKey, scrubText } from "..
 import type { AgentStorage } from "../storage/index.ts";
 import type { ProfileDatabase } from "../sync/index.ts";
 import type { HarnessService } from "./harness.ts";
+import type { RefinementGovernanceService } from "./refinement-governance.ts";
 import type { PublicRecursiveModelService } from "./models.ts";
 import type { StructuredRefinementReviewStarter } from "./internal.ts";
 import {
@@ -63,6 +65,7 @@ export interface RefinementReviewRecord {
   readonly branchId: string;
   readonly fingerprint: string;
   readonly mode: "manual" | "automatic" | "skill_creation";
+  readonly waitForGovernance: boolean;
   readonly requestedScope: HarnessScope;
   readonly requestedScopeKey: string;
   readonly allowedKinds: HarnessKind[];
@@ -84,6 +87,8 @@ export interface RefinementReviewRecord {
   readonly decisionFingerprint: string | null;
   readonly proposalId: string | null;
   readonly reason: string | null;
+  readonly governedStatus: GovernedRefinementStatus | null;
+  readonly governedResult: JsonValue | null;
   readonly createdEventId: string;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -104,6 +109,7 @@ class ReviewQueue {
 export class RefinerService {
   readonly #queue = new ReviewQueue();
   readonly #jobs = new Map<string, Promise<void>>();
+  #governance: RefinementGovernanceService | null = null;
 
   constructor(
     readonly storage: AgentStorage,
@@ -114,6 +120,13 @@ export class RefinerService {
     readonly profile: ProfileDatabase,
     readonly userScopeKey = "default-user",
   ) {}
+
+  attachGovernance(service: RefinementGovernanceService): void {
+    if (this.#governance && this.#governance !== service) {
+      throw new ValidationError("Refiner governance service is already attached");
+    }
+    this.#governance = service;
+  }
 
   async request(sessionId: string, branchId: string, rawInput: StartRefinementReviewInput = {}): Promise<RefinementReviewRecord> {
     const input = normalizeReviewInput(rawInput);
@@ -228,7 +241,7 @@ export class RefinerService {
     if (typeof reviewId !== "string" || !reviewId) throw new ValidationError("Refinement review ID is required");
     const rows = await this.storage.readonlyQuery({ sql: "SELECT * FROM refinement_reviews WHERE review_id=?", args: [reviewId] });
     if (!rows[0]) throw new ValidationError(`Refinement review not found: ${reviewId}`);
-    return rowToReview(rows[0] as Record<string, unknown>);
+    return this.#withGovernedResult(rowToReview(rows[0] as Record<string, unknown>));
   }
 
   async getForBranch(sessionId: string, branchId: string, reviewId: string): Promise<RefinementReviewRecord> {
@@ -245,7 +258,29 @@ export class RefinerService {
     if (input.branchId !== undefined) { where.push("branch_id=?"); args.push(input.branchId); }
     if (input.status !== undefined) { where.push("status=?"); args.push(input.status); }
     const rows = await this.storage.readonlyQuery({ sql: `SELECT * FROM refinement_reviews${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at,review_id`, args });
-    return rows.map((row) => rowToReview(row as Record<string, unknown>));
+    return Promise.all(rows.map((row) =>
+      this.#withGovernedResult(rowToReview(row as Record<string, unknown>))));
+  }
+
+  async #withGovernedResult(record: RefinementReviewRecord): Promise<RefinementReviewRecord> {
+    if (!record.proposalId || !this.#governance) return record;
+    try {
+      const governed = await this.#governance.get(record.proposalId);
+      return {
+        ...record,
+        governedStatus: governed.status,
+        governedResult: {
+          proposalId: governed.proposalId,
+          status: governed.status,
+          reviewDecisionId: governed.reviewDecisionId,
+          reason: governed.terminalReason,
+          appliedVersionIds: [...governed.appliedVersionIds],
+          ...(governed.decision === null ? {} : { decision: governed.decision as unknown as JsonValue }),
+        },
+      };
+    } catch {
+      return record;
+    }
   }
 
   /** Resumes exact retained boundaries in background. Unknown child outcomes are terminal and never retried. */
@@ -293,6 +328,7 @@ export class RefinerService {
       visibleSourceEventIds: snapshot.sourceEventIds, editableTargets: snapshot.editableTargets,
       trigger: input.trigger, ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
     }, { brokeredCredentialValues: knownSecretValues() });
+    const waitForGovernance = input.mode !== "automatic" && input.wait !== false;
     const existingRows = await this.storage.readonlyQuery({
       sql: `SELECT * FROM refinement_reviews WHERE review_id=?${input.nonterminalKey === undefined ? "" : " OR (session_id=? AND branch_id=? AND nonterminal_key=? AND status IN ('requested','running'))"} ORDER BY CASE WHEN review_id=? THEN 0 ELSE 1 END LIMIT 1`,
       args: input.nonterminalKey === undefined ? [request.reviewId, request.reviewId] : [request.reviewId, sessionId, branchId, input.nonterminalKey, request.reviewId],
@@ -301,7 +337,7 @@ export class RefinerService {
       sessionId, branchId, type: "RefinementReviewRequested", producer: input.mode === "manual" ? "client" : "supervisor",
       idempotencyKey: `refinement-review-requested:${request.reviewId}`,
       payload: {
-        reviewId: request.reviewId, fingerprint: request.fingerprint, mode: request.mode, requestedScope: request.requestedScope,
+        reviewId: request.reviewId, fingerprint: request.fingerprint, mode: request.mode, waitForGovernance, requestedScope: request.requestedScope,
         requestedScopeKey, allowedKinds: [...request.allowedKinds], triggerId: request.trigger.triggerId, triggerKind: request.trigger.kind,
         triggerFingerprint: request.trigger.fingerprint, ...(input.triggerKey === undefined ? {} : { triggerKey: input.triggerKey }),
         ...(input.nonterminalKey === undefined ? {} : { nonterminalKey: input.nonterminalKey }),
@@ -380,22 +416,39 @@ export class RefinerService {
       if (decision.status === "no_change") {
         await this.#terminal(record, "no_change", { decisionFingerprint: decision.decisionFingerprint, reason: decision.reason }); return;
       }
-      let proposal = await this.harness.propose(record.sessionId, record.branchId, {
-        proposalId: decision.proposalId, sourceReviewId: record.reviewId, proposalFingerprint: decision.proposalFingerprint,
-        trigger: decision.trigger, predictedEffect: decision.predictedEffect, edits: decision.edits,
-        evidenceEventIds: decision.evidenceEventIds, evaluation: decision.evaluation, authority: "agent",
-      });
-      if (proposal.status === "proposed") proposal = await this.harness.validate(record.sessionId, record.branchId, proposal.proposalId);
-      if (proposal.status === "validated") proposal = await this.harness.activate(record.sessionId, record.branchId, proposal.proposalId, { allocationLimit: 3, exposureLimit: 3 });
-      if (proposal.candidateId && ["candidate", "promoted", "rejected", "rolled_back"].includes(proposal.status)) {
-        if (proposal.status === "candidate") {
-          const allocations = await this.harness.allocations(proposal.candidateId);
-          if (!allocations.some((item) => item.sessionId === record.sessionId && item.branchId === record.branchId && item.taskId === null)) await this.harness.allocate(record.sessionId, record.branchId, proposal.proposalId);
-        }
-        await this.#terminal(record, "candidate", { proposalId: proposal.proposalId, decisionFingerprint: decision.decisionFingerprint });
-      } else {
-        await this.#terminal(record, "revision_required", { proposalId: proposal.proposalId, decisionFingerprint: decision.decisionFingerprint, reason: "Refiner proposal failed strict harness validation" });
+      if (!this.#governance) throw new ValidationError("Automated refinement governance is unavailable");
+      const targetKind = decision.edits[0]!.operation === "create"
+        ? decision.edits[0]!.kind
+        : (await this.harness.get(decision.edits[0]!.entryId))?.kind;
+      if (!targetKind || decision.edits.some((edit) =>
+        edit.operation === "create" ? edit.kind !== targetKind : false)) {
+        throw new ValidationError("Trajectory proposal must target one harness kind");
       }
+      const governanceInput = {
+        target: { kind: "harness" as const, harnessKind: targetKind, edits: decision.edits },
+        reason: decision.trigger,
+        predictedEffect: decision.predictedEffect,
+        evidenceEventIds: decision.evidenceEventIds,
+        triggerId: record.triggerId,
+        clientRequestId: record.reviewId,
+        wait: record.waitForGovernance,
+      };
+      const governed = record.mode === "automatic"
+        ? await this.#governance.proposeAutomatic(
+            record.sessionId,
+            record.branchId,
+            governanceInput,
+          )
+        : await this.#governance.proposeAgent(
+            record.sessionId,
+            record.branchId,
+            governanceInput,
+          );
+      await this.#terminal(record, "candidate", {
+        proposalId: governed.proposalId,
+        decisionFingerprint: decision.decisionFingerprint,
+        reason: `Governed proposal ${governed.status}: ${governed.terminalReason ?? "separate sealed review retained"}`,
+      });
     } catch (error) {
       record = await this.get(reviewId);
       if (TERMINAL_REVIEW.has(record.status)) return;
@@ -542,6 +595,6 @@ function refinerPrompt(request: RefinementReviewRequest): string {
 }
 function rowToReview(row: Record<string, unknown>): RefinementReviewRecord {
   return {
-    reviewId: String(row.review_id), sessionId: String(row.session_id), branchId: String(row.branch_id), fingerprint: String(row.fingerprint), mode: String(row.mode) as RefinementReviewRecord["mode"], requestedScope: String(row.requested_scope) as HarnessScope, requestedScopeKey: String(row.requested_scope_key), allowedKinds: parseJson(row.allowed_kinds_json, []), triggerId: String(row.trigger_id), triggerKind: String(row.trigger_kind), triggerFingerprint: String(row.trigger_fingerprint), triggerKey: row.trigger_key === null ? null : String(row.trigger_key), nonterminalKey: row.nonterminal_key === null ? null : String(row.nonterminal_key), triggerEvidenceThroughCursor: row.trigger_evidence_through_cursor === null ? null : String(row.trigger_evidence_through_cursor), evidenceEventIds: parseJson(row.evidence_event_ids_json, []), sourceEventIds: parseJson(row.source_event_ids_json, []), sourceSnapshotHash: String(row.source_snapshot_hash), sourceThroughCursor: String(row.source_through_cursor), instructions: row.instructions === null ? null : String(row.instructions), status: String(row.status) as RefinementReviewLifecycleStatus, handleId: row.handle_id === null ? null : String(row.handle_id), childSessionId: row.child_session_id === null ? null : String(row.child_session_id), childBranchId: row.child_branch_id === null ? null : String(row.child_branch_id), decisionFingerprint: row.decision_fingerprint === null ? null : String(row.decision_fingerprint), proposalId: row.proposal_id === null ? null : String(row.proposal_id), reason: row.reason === null ? null : String(row.reason), createdEventId: String(row.created_event_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    reviewId: String(row.review_id), sessionId: String(row.session_id), branchId: String(row.branch_id), fingerprint: String(row.fingerprint), mode: String(row.mode) as RefinementReviewRecord["mode"], waitForGovernance: Number(row.governance_wait ?? 1) === 1, requestedScope: String(row.requested_scope) as HarnessScope, requestedScopeKey: String(row.requested_scope_key), allowedKinds: parseJson(row.allowed_kinds_json, []), triggerId: String(row.trigger_id), triggerKind: String(row.trigger_kind), triggerFingerprint: String(row.trigger_fingerprint), triggerKey: row.trigger_key === null ? null : String(row.trigger_key), nonterminalKey: row.nonterminal_key === null ? null : String(row.nonterminal_key), triggerEvidenceThroughCursor: row.trigger_evidence_through_cursor === null ? null : String(row.trigger_evidence_through_cursor), evidenceEventIds: parseJson(row.evidence_event_ids_json, []), sourceEventIds: parseJson(row.source_event_ids_json, []), sourceSnapshotHash: String(row.source_snapshot_hash), sourceThroughCursor: String(row.source_through_cursor), instructions: row.instructions === null ? null : String(row.instructions), status: String(row.status) as RefinementReviewLifecycleStatus, handleId: row.handle_id === null ? null : String(row.handle_id), childSessionId: row.child_session_id === null ? null : String(row.child_session_id), childBranchId: row.child_branch_id === null ? null : String(row.child_branch_id), decisionFingerprint: row.decision_fingerprint === null ? null : String(row.decision_fingerprint), proposalId: row.proposal_id === null ? null : String(row.proposal_id), reason: row.reason === null ? null : String(row.reason), governedStatus: null, governedResult: null, createdEventId: String(row.created_event_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }

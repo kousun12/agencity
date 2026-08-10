@@ -1,9 +1,10 @@
 # ADR 0002: Event-sourced relational memory and measured refinement
 
-- **Status:** Accepted
+- **Status:** Superseded in part
 - **Date:** 2026-08-06
 - **Scope:** Relational memory, harness versions, candidate evaluation, promotion, and rollback
 - **Extends:** [ADR 0001](./0001-durable-local-runtime-foundations.md)
+- **Superseded in part by:** [ADR 0012](./0012-durable-agent-profiles-automated-refinement-governance.md), which replaces the mandatory pre-activation exposure path in Decision item 4 and all promotion thresholds and named-approval rules in Decision item 5
 
 ## Context
 

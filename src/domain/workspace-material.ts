@@ -9,6 +9,8 @@ export type WorkspaceMaterialEventClass = "material" | "file-effect" | "non-mate
  */
 export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   SessionCreated: "non-material",
+  AgentProfileVersionCreated: "non-material",
+  AgentProfileActivated: "non-material",
   BranchCreated: "non-material",
   SessionNamed: "non-material",
   BranchNamed: "non-material",
@@ -86,6 +88,14 @@ export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   RefinementApproved: "non-material",
   RefinementRollbackApproved: "non-material",
   RefinementRolledBack: "non-material",
+  GovernedRefinementProposed: "non-material",
+  GovernedRefinementValidated: "non-material",
+  RefinementGovernanceReviewRequested: "non-material",
+  RefinementGovernanceReviewChildLinked: "non-material",
+  RefinementGovernanceReviewDecided: "non-material",
+  GovernedRefinementApplied: "non-material",
+  RefinementProposalTerminalNoticeDelivered: "non-material",
+  RefinementRollbackApplied: "non-material",
   SkillImported: "non-material",
   SkillAvailabilityChanged: "non-material",
   SkillInvocationRecorded: "non-material",

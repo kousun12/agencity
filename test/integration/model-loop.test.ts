@@ -17,6 +17,8 @@ import {
 } from "../../src/index.ts";
 import {
   makeTempRuntime,
+  FIXTURE_EFFECTIVE_SYSTEM_PROMPT,
+  fixturePromptProvenance,
   openTempStorage,
   removeTempRuntime,
   seedSession,
@@ -256,7 +258,7 @@ describe("context provenance and model loop", () => {
     const { sessionId, branchId } = await seedSession(storage, {
       model: { provider: "not-installed", model: "durable-only", reasoningEffort: "provider-default" },
     });
-    const context: JsonValue = { basePolicy: "test", messages: [] };
+    const context: JsonValue = { basePolicy: "test", messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] };
     const modelDispatch = resolveModelDispatch({
       configuration: { provider: "not-installed", model: "durable-only", reasoningEffort: "provider-default" },
       capability: { status: "unverified", levels: ["none", "minimal", "low", "medium", "high", "xhigh"] },
@@ -278,21 +280,22 @@ describe("context provenance and model loop", () => {
       responseCapability: modelDispatch.responseCapability,
       configuredProvider: "not-installed",
     });
+    const promptProvenance = fixturePromptProvenance(sessionId, "recovery");
     await storage.appendEvents([{
       sessionId, branchId, type: "ContextMaterialized", producer: "supervisor",
       idempotencyKey: "context:recovery", payload: {
-        contextId: "context-recovery", records: [], contentHash: sha256(JSON.stringify(context)), context,
+        contextId: "context-recovery", records: [], contentHash: sha256(JSON.stringify(context)), context, promptProvenance,
       },
     }, {
       sessionId, branchId, type: "ModelCallRequested", producer: "supervisor",
       idempotencyKey: "model-call:recovery", payload: {
-        callId: "call-recovery", contextId: "context-recovery", effectId: "effect-recovery", modelDispatch, estimatedInputTokens: 0,
+        callId: "call-recovery", contextId: "context-recovery", effectId: "effect-recovery", modelDispatch, estimatedInputTokens: 0, promptProvenance,
       },
     }, {
       sessionId, branchId, type: "EffectRequested", producer: "supervisor",
       idempotencyKey: "model:recovery", payload: {
         effectId: "effect-recovery", executor: "model", operation: "complete",
-        input: { context, callId: "call-recovery", modelDispatch } as unknown as JsonValue,
+        input: { context, callId: "call-recovery", modelDispatch, promptProvenance } as unknown as JsonValue,
         idempotencyKey: "model:recovery", idempotent: false,
       },
     }, {
@@ -325,7 +328,7 @@ describe("context provenance and model loop", () => {
     temps.push(temp);
     const storage = await openTempStorage(temp);
     const { sessionId, branchId } = await seedSession(storage);
-    const context: JsonValue = { messages: [] };
+    const context: JsonValue = { messages: [{ role: "system", content: FIXTURE_EFFECTIVE_SYSTEM_PROMPT }] };
     const state = projectEvents(await storage.loadEvents(sessionId, { branchId }));
     const modelDispatch = resolveModelDispatch({
       configuration: state.model,
@@ -334,20 +337,21 @@ describe("context provenance and model loop", () => {
       responseContract: TEXT_MODEL_RESPONSE_CONTRACT,
       responseCapability: { kind: "text" },
     });
+    const promptProvenance = fixturePromptProvenance(sessionId, "shared-effect");
     await storage.appendEvents([{
       sessionId,
       branchId,
       type: "ContextMaterialized",
       producer: "supervisor",
       idempotencyKey: "context:shared-effect",
-      payload: { contextId: "context-shared-effect", records: [], contentHash: sha256(JSON.stringify(context)), context },
+      payload: { contextId: "context-shared-effect", records: [], contentHash: sha256(JSON.stringify(context)), context, promptProvenance },
     }, {
       sessionId,
       branchId,
       type: "ModelCallRequested",
       producer: "supervisor",
       idempotencyKey: "model-call:first-shared-effect",
-      payload: { callId: "call-first", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, estimatedInputTokens: 0 },
+      payload: { callId: "call-first", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, estimatedInputTokens: 0, promptProvenance },
     }]);
     await expect(storage.appendEvents([{
       sessionId,
@@ -355,7 +359,7 @@ describe("context provenance and model loop", () => {
       type: "ModelCallRequested",
       producer: "supervisor",
       idempotencyKey: "model-call:second-shared-effect",
-      payload: { callId: "call-second", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, estimatedInputTokens: 0 },
+      payload: { callId: "call-second", contextId: "context-shared-effect", effectId: "effect-shared", modelDispatch, estimatedInputTokens: 0, promptProvenance },
     }])).rejects.toThrow("only one model call");
     storage.close();
   });

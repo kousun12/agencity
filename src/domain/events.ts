@@ -1,7 +1,7 @@
 import { ulid } from "ulid";
 import { z } from "zod";
 import type { JsonValue, Sha256Digest } from "./json.ts";
-import { assertJsonValue } from "./json.ts";
+import { assertJsonValue, canonicalJsonDigest } from "./json.ts";
 import { ValidationError } from "./errors.ts";
 import { agentActionSchema, type AgentAction } from "./agent-action.ts";
 import {
@@ -20,10 +20,17 @@ import {
   type ModelEffectFailureCode,
   type ModelTerminationKind,
 } from "./model-response.ts";
+import {
+  validateAgentProfileVersion,
+  sha256,
+  type AgentInvocationProfilePin,
+  type AgentProfileVersion,
+  type InvocationPromptProvenance,
+} from "./agent-profile.ts";
 
-export const EVENT_SCHEMA_VERSION = 3 as const;
+export const EVENT_SCHEMA_VERSION = 4 as const;
 export const eventTypes = [
-  "SessionCreated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
+  "SessionCreated", "AgentProfileVersionCreated", "AgentProfileActivated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
   "WorkingValueSet", "ArtifactRegistered", "EffectRequested", "EffectAttemptStarted",
   "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ContextCompactionRequested", "ContextCompactionFailed",
@@ -42,6 +49,10 @@ export const eventTypes = [
   "RefinementProposed", "RefinementValidated", "RefinementCandidateActivated",
   "RefinementCandidateAllocated", "RefinementCandidateExposed", "RefinementObservationRecorded",
   "RefinementDecided", "RefinementApproved", "RefinementRollbackApproved", "RefinementRolledBack",
+  "GovernedRefinementProposed", "GovernedRefinementValidated",
+  "RefinementGovernanceReviewRequested", "RefinementGovernanceReviewChildLinked",
+  "RefinementGovernanceReviewDecided", "GovernedRefinementApplied",
+  "RefinementProposalTerminalNoticeDelivered", "RefinementRollbackApplied",
   "SkillImported", "SkillAvailabilityChanged", "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
   "AgentRunRequested", "AgentRunStepStarted", "AgentRunModelAttemptStarted", "AgentRunActionCommitted", "AgentRunActionRejected", "AgentRunGoalCheckRecorded",
   "AgentRunCancellationRequested", "AgentRunStatusChanged",
@@ -110,7 +121,9 @@ export interface ContextCompactionDerivation {
 }
 
 export interface EventPayloads {
-  SessionCreated: { workspaceId: string; initialBranchId: string; model: ModelConfiguration; budget: BudgetLimits; sessionName?: string; initialBranchName?: string; parentSessionId?: string; parentBranchId?: string; rootSessionId?: string; depth?: number; taskId?: string };
+  SessionCreated: { workspaceId: string; initialBranchId: string; model: ModelConfiguration; budget: BudgetLimits; agentProfile: AgentProfileVersion; sessionName?: string; initialBranchName?: string; parentSessionId?: string; parentBranchId?: string; rootSessionId?: string; depth?: number; taskId?: string };
+  AgentProfileVersionCreated: { agentProfile: AgentProfileVersion; expectedActiveProfileVersionId: string };
+  AgentProfileActivated: { profileVersionId: string; expectedActiveProfileVersionId: string; reason: string };
   BranchCreated: { branchId: string; parentBranchId: string; forkCursor: string; name?: string };
   SessionNamed: { name: string };
   BranchNamed: { name: string };
@@ -139,8 +152,8 @@ export interface EventPayloads {
     compactionId: string; requestEventId: string; strategy: ContextCompactionStrategy;
     outcome: "failed" | "unknown" | "protected-only" | "no-progress"; error: string; effectId?: string;
   };
-  ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue; derivation?: ContextCompactionDerivation };
-  ModelCallRequested: { callId: string; contextId: string; effectId: string; modelDispatch: ModelDispatch; estimatedInputTokens: number; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
+  ContextMaterialized: { contextId: string; records: ContextRecordReference[]; contentHash: string; context: JsonValue; harnessProvenance?: JsonValue; promptProvenance?: InvocationPromptProvenance; derivation?: ContextCompactionDerivation };
+  ModelCallRequested: { callId: string; contextId: string; effectId: string; modelDispatch: ModelDispatch; estimatedInputTokens: number; promptProvenance: InvocationPromptProvenance; attempt?: number; retryOfCallId?: string; contextWindow?: ContextCapacityProvenance };
   ModelOutputChunk: { callId: string; sequence: number; text: string };
   ModelCallCompleted: { callId: string; responseMessageId?: string; result: ModelCallResult; resultDigest: Sha256Digest; termination: ModelCallTermination; usage: Usage | null; warnings: ModelWarning[]; usageSource: ModelUsageSource };
   ModelCallTerminated: { callId: string; outcome: Exclude<EffectOutcome, "succeeded">; error?: string; failureCode?: ModelEffectFailureCode };
@@ -178,12 +191,12 @@ export interface EventPayloads {
   WakeClaimed: { wakeId: string; claimId: string; claimedAt: string };
   WakeDelivered: { wakeId: string; claimId: string; runId: string; deliveredAt: string };
   WakeDeliveryUnknown: { wakeId: string; claimId: string; reason: string; observedAt: string };
-  RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; responseAdmission: RecursiveResponseAdmission; inputSetId?: string; input?: JsonValue; inputProvenance?: JsonValue; inputHash?: string };
+  RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; responseAdmission: RecursiveResponseAdmission; profilePin: AgentInvocationProfilePin; inputSetId?: string; input?: JsonValue; inputProvenance?: JsonValue; inputHash?: string };
   RecursiveModelStatusChanged: { handleId: string; status: Exclude<RecursiveModelStatus, "pending">; outcome?: RecursiveModelOutcome; resultMessageId?: string; result?: JsonValue; resultArtifactId?: string; error?: string };
   HarnessVersionCreated: { entryId: string; versionId: string; version: number; kind: "memory" | "prompt_note" | "skill" | "subagent_spec"; scope: "local" | "workspace" | "user" | "global"; scopeKey: string; name: string; content: JsonValue; tags: string[]; confidence: number; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; evidenceEventIds: string[]; conflictEntryIds: string[]; supersedesVersionId?: string; proposalId?: string; createdBy: string; lastConfirmedAt: string };
   HarnessVersionStatusChanged: { entryId: string; versionId: string; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; reason: string; proposalId?: string };
   UserCorrection: { correctionId: string; correctedEventIds: string[]; correction: string };
-  RefinementReviewRequested: { reviewId: string; fingerprint: string; mode: "manual" | "automatic" | "skill_creation"; requestedScope: "local" | "workspace" | "user" | "global"; requestedScopeKey: string; allowedKinds: ("memory" | "prompt_note" | "skill" | "subagent_spec")[]; triggerId: string; triggerKind: "manual" | "repeated_effect_failure" | "repeated_gate_failure" | "explicit_user_correction" | "repeated_success" | "stale_memory" | "unproductive_delegation" | "skill_creation"; triggerFingerprint: string; triggerKey?: string; nonterminalKey?: string; triggerEvidenceThroughCursor?: string; evidenceEventIds: string[]; sourceEventIds: string[]; sourceSnapshotHash: string; sourceThroughCursor: string; instructions?: string; request: JsonValue; snapshot?: JsonValue };
+  RefinementReviewRequested: { reviewId: string; fingerprint: string; mode: "manual" | "automatic" | "skill_creation"; waitForGovernance: boolean; requestedScope: "local" | "workspace" | "user" | "global"; requestedScopeKey: string; allowedKinds: ("memory" | "prompt_note" | "skill" | "subagent_spec")[]; triggerId: string; triggerKind: "manual" | "repeated_effect_failure" | "repeated_gate_failure" | "explicit_user_correction" | "repeated_success" | "stale_memory" | "unproductive_delegation" | "skill_creation"; triggerFingerprint: string; triggerKey?: string; nonterminalKey?: string; triggerEvidenceThroughCursor?: string; evidenceEventIds: string[]; sourceEventIds: string[]; sourceSnapshotHash: string; sourceThroughCursor: string; instructions?: string; request: JsonValue; snapshot?: JsonValue };
   RefinementReviewChildLinked: { reviewId: string; handleId: string; childSessionId: string; childBranchId: string };
   RefinementReviewStatusChanged: { reviewId: string; status: Exclude<RefinementReviewLifecycleStatus, "requested">; expectedStatus: RefinementReviewLifecycleStatus; decisionFingerprint?: string; proposalId?: string; reason?: string };
   RefinementTriggerConsumed: { reviewId: string; triggerKey: string; evidenceThroughCursor: string };
@@ -197,13 +210,21 @@ export interface EventPayloads {
   RefinementApproved: { proposalId: string; approvedBy: string; scope: "user" | "global"; note?: string };
   RefinementRollbackApproved: { proposalId: string; approvedBy: string; role: "owner" | "admin"; note?: string };
   RefinementRolledBack: { proposalId: string; candidateId: string; rollbackId: string; versionIds: string[]; restoredVersionIds: string[]; reason: string };
+  GovernedRefinementProposed: { proposalId: string; proposalFingerprint: string; proposal: JsonValue };
+  GovernedRefinementValidated: { proposalId: string; valid: boolean; validation: JsonValue; expectedStatus: "proposed" };
+  RefinementGovernanceReviewRequested: { proposalId: string; reviewId: string; frozenInput: JsonValue; frozenInputDigest: string; expectedStatus: "validated" };
+  RefinementGovernanceReviewChildLinked: { proposalId: string; reviewId: string; handleId: string; childSessionId: string; childBranchId: string; expectedStatus: "validated" };
+  RefinementGovernanceReviewDecided: { proposalId: string; reviewId: string; decisionId: string; status: "reviewed_rejected" | "review_failed" | "review_unknown" | "reviewed_approved"; decision?: JsonValue; reason: string; expectedStatus: "validated" | "reviewing" };
+  GovernedRefinementApplied: { proposalId: string; decisionId: string; status: "applied" | "apply_conflict" | "apply_failed"; appliedVersionIds: string[]; reason: string; expectedStatus: "reviewed_approved" };
+  RefinementProposalTerminalNoticeDelivered: { proposalId: string; noticeId: string; originSessionId: string; originBranchId: string; status: "deterministically_rejected" | "reviewed_rejected" | "review_failed" | "review_unknown" | "apply_conflict" | "apply_failed" | "applied"; result: JsonValue };
+  RefinementRollbackApplied: { rollbackId: string; targetKind: "agent_profile" | "memory" | "prompt_note" | "skill" | "subagent_spec"; targetId: string; previousVersionId: string; restoreSourceVersionId: string; restorationVersionId: string; actor: JsonValue; reason: string; evidenceEventIds: string[] };
   SkillImported: { entryId: string; versionId: string; digest: string; scope: "workspace"; origin: { kind: "local-directory"; reference: string; manifestDigest: string; sourceDigest: string }; installedBy: string };
   SkillAvailabilityChanged: { entryId: string; versionId: string; digest: string; availability: "enabled" | "disabled" | "removed"; reason: string; expectedAvailability?: "enabled" | "disabled" | "removed"; expectedPreviousActionSequence?: number | null };
   SkillInvocationRecorded: { entryId: string; versionId: string; effectId: string; input: JsonValue };
   SkillTestRecorded: { entryId: string; versionId: string; effectId: string; passed: boolean; report: JsonValue };
   SubagentSpecInvoked: { entryId: string; versionId: string; taskId: string; childSessionId: string; childBranchId: string };
   SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
-  AgentRunRequested: { runId: string; task: string; requestKey: string; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
+  AgentRunRequested: { runId: string; task: string; requestKey: string; profilePin: AgentInvocationProfilePin; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
   AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; retryOfCallId?: string };
   AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; action: AgentAction };
@@ -276,6 +297,121 @@ const modelCallResultSchema = z.discriminatedUnion("kind", [
 const actionSourceSubmissionSchema = z.object({ kind: z.literal("tool-submission"), modelCallId: id, providerToolCallId: id, resultDigest: fingerprint }).strict();
 const actionSourceViolationSchema = z.object({ kind: z.literal("contract-violation"), modelCallId: id, providerToolCallId: id.optional(), resultDigest: fingerprint }).strict();
 const responseAdmissionSchema = z.object({ responseContract: jsonValueSchema, responseCapability: jsonValueSchema }).strict();
+const agentProfileSchema = z.custom<AgentProfileVersion>((value) => {
+  try {
+    validateAgentProfileVersion(value as AgentProfileVersion);
+    return true;
+  } catch {
+    return false;
+  }
+}, "Expected one valid immutable agent profile version");
+const profilePinSchema = z.object({
+  profileVersionId: id,
+  agentPromptDigest: digest,
+  promptContractId: z.literal("agencity.agent-profile.v1"),
+}).strict();
+const refinementPrincipalSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("owner"), profileId: id }).strict(),
+  z.object({ kind: z.literal("agent"), sessionId: id, branchId: id }).strict(),
+  z.object({
+    kind: z.literal("automatic_refiner"),
+    componentId: z.literal("agencity.trajectory-refiner"),
+    version: z.literal(1),
+    sessionId: id,
+    branchId: id,
+  }).strict(),
+]);
+const refinementOriginSchema = z.object({
+  sessionId: id,
+  branchId: id,
+  runId: id.optional(),
+  taskId: id.optional(),
+  triggerId: id.optional(),
+  clientRequestId: id.optional(),
+}).strict();
+const agentProfileInputSchema = z.object({
+  role: z.string().min(1),
+  purpose: z.string().min(1),
+  instructions: z.string().min(1),
+}).strict();
+const refinementTargetSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("agent_profile"),
+    agentSessionId: id,
+    expectedProfileVersionId: id,
+    replacement: agentProfileInputSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("harness"),
+    harnessKind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]),
+    edits: z.array(jsonValueSchema).min(1).max(16),
+  }).strict(),
+]);
+const governedRefinementProposalSchema = z.object({
+  proposalId: id,
+  target: refinementTargetSchema,
+  principal: refinementPrincipalSchema,
+  origin: refinementOriginSchema,
+  reason: z.string().min(1).max(16_384),
+  predictedEffect: z.string().min(1).max(16_384),
+  evidenceEventIds: z.array(id).max(32),
+  revisesProposalId: id.optional(),
+}).strict();
+const reviewerLimitsSchema = z.object({
+  tokenLimit: z.number().int().positive(),
+  costLimitUsd: z.number().finite().positive(),
+  turnLimit: z.number().int().positive(),
+  wallTimeLimitMs: z.number().int().positive(),
+}).strict();
+const frozenGovernanceInputSchema = z.object({
+  protocol: z.literal("agencity.refinement-governance-input"),
+  version: z.literal(1),
+  proposal: governedRefinementProposalSchema,
+  currentTarget: jsonValueSchema,
+  renderedReplacement: jsonValueSchema,
+  evidence: z.array(z.object({
+    eventId: id,
+    sessionId: id,
+    branchId: id,
+    cursor: z.string().regex(/^\d+$/),
+    type: id,
+    payloadDigest: fingerprint,
+  }).strict()).max(32),
+  proposerRelationship: z.enum(["self", "direct_parent", "workspace_owner", "automatic_refiner"]),
+  targetScope: jsonValueSchema,
+  runtimeBoundaries: z.array(z.string().min(1)).min(1).max(32),
+  constraints: jsonValueSchema,
+  visibleHarnessContext: jsonValueSchema,
+  constitution: z.object({ componentId: id, version: positiveInteger, digest, text: z.string().min(1) }).strict(),
+  reviewPolicy: z.object({ componentId: id, version: positiveInteger, digest, text: z.string().min(1) }).strict(),
+  reviewerDispatch: jsonValueSchema,
+  reviewerLimits: reviewerLimitsSchema,
+  canonicalDigest: fingerprint,
+}).strict().superRefine((value, context) => {
+  const { canonicalDigest, ...body } = value;
+  if (canonicalJsonDigest(body as unknown as JsonValue) !== canonicalDigest) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "frozen governance input digest does not match" });
+  }
+});
+const immutablePromptComponentSchema = z.object({
+  componentId: id,
+  version: positiveInteger,
+  digest,
+}).strict();
+const promptProvenanceSchema = z.object({
+  invocationKind: z.enum(["agent-run", "recursive-model"]),
+  invocationId: id,
+  profileVersionId: id,
+  agentPromptDigest: digest,
+  effectiveSystemPromptDigest: digest,
+  systemPromptContractId: z.literal("agencity.system-prompt.v1"),
+  components: z.object({
+    basePolicy: immutablePromptComponentSchema,
+    agentProfile: immutablePromptComponentSchema,
+    responseContract: immutablePromptComponentSchema,
+    executionGuidance: immutablePromptComponentSchema,
+  }).strict(),
+}).strict();
 const artifactSchema = z.object({ artifactId: id, digest, mediaType: id, size: nonnegative });
 const workingValueSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("json"), value: jsonValueSchema }), z.object({ kind: z.literal("artifact"), artifactId: id })]);
 const taskTerminalSchema = z.object({ noticeId: id, taskId: id, parentSessionId: id, childSessionId: id, status: z.enum(["completed", "failed", "cancelled"]), result: jsonValueSchema.optional(), artifactIds: z.array(id).optional(), error: z.string().optional(), reason: z.string().optional() });
@@ -301,7 +437,9 @@ const compactionDerivationSchema = z.object({
   effectIds: z.array(id).optional(), usage: usageSchema.optional(), capacity: capacityProvenanceSchema.optional(), rematerializedFromContextId: id.optional(),
 }).strict();
 const payloadSchemas: Record<EventType, z.ZodType> = {
-  SessionCreated: z.object({ workspaceId: id, initialBranchId: id, model: modelSchema, budget: budgetSchema, sessionName: z.string().min(1).optional(), initialBranchName: z.string().min(1).optional(), parentSessionId: id.optional(), parentBranchId: id.optional(), rootSessionId: id.optional(), depth: z.number().int().nonnegative().optional(), taskId: id.optional() }),
+  SessionCreated: z.object({ workspaceId: id, initialBranchId: id, model: modelSchema, budget: budgetSchema, agentProfile: agentProfileSchema, sessionName: z.string().min(1).optional(), initialBranchName: z.string().min(1).optional(), parentSessionId: id.optional(), parentBranchId: id.optional(), rootSessionId: id.optional(), depth: z.number().int().nonnegative().optional(), taskId: id.optional() }).strict(),
+  AgentProfileVersionCreated: z.object({ agentProfile: agentProfileSchema, expectedActiveProfileVersionId: id }).strict(),
+  AgentProfileActivated: z.object({ profileVersionId: id, expectedActiveProfileVersionId: id, reason: z.string().min(1).max(1024) }).strict(),
   BranchCreated: z.object({ branchId: id, parentBranchId: id, forkCursor: z.string().regex(/^\d+$/), name: z.string().optional() }),
   SessionNamed: z.object({ name: z.string().min(1) }),
   BranchNamed: z.object({ name: z.string().min(1) }),
@@ -359,8 +497,8 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     compactionId: id, requestEventId: id, strategy: compactionStrategySchema,
     outcome: z.enum(["failed", "unknown", "protected-only", "no-progress"]), error: z.string().min(1), effectId: id.optional(),
   }).strict(),
-  ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional(), derivation: compactionDerivationSchema.optional() }),
-  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, modelDispatch: modelDispatchSchema, estimatedInputTokens: z.number().int().nonnegative(), attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }).strict(),
+  ContextMaterialized: z.object({ contextId: id, records: z.array(z.object({ eventId: id, type: z.enum(eventTypes), schemaVersion: positiveInteger, reason: z.string().optional() })), contentHash: digest, context: jsonValueSchema, harnessProvenance: jsonValueSchema.optional(), promptProvenance: promptProvenanceSchema.optional(), derivation: compactionDerivationSchema.optional() }).strict(),
+  ModelCallRequested: z.object({ callId: id, contextId: id, effectId: id, modelDispatch: modelDispatchSchema, estimatedInputTokens: z.number().int().nonnegative(), promptProvenance: promptProvenanceSchema, attempt: positiveInteger.optional(), retryOfCallId: id.optional(), contextWindow: capacityProvenanceSchema.optional() }).strict(),
   ModelOutputChunk: z.object({ callId: id, sequence: z.number().int().nonnegative(), text: z.string() }),
   ModelCallCompleted: z.object({ callId: id, responseMessageId: id.optional(), result: modelCallResultSchema, resultDigest: fingerprint, termination: terminationSchema, usage: usageSchema.nullable(), warnings: z.array(modelWarningSchema).max(8), usageSource: usageSourceSchema }).strict(),
   ModelCallTerminated: z.object({ callId: id, outcome: z.enum(["failed", "cancelled", "unknown"]), error: z.string().optional(), failureCode: modelFailureCodeSchema.optional() }).strict().superRefine((value, context) => {
@@ -400,12 +538,12 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   WakeClaimed: z.object({ wakeId: id, claimId: id, claimedAt: dateTime }).strict(),
   WakeDelivered: z.object({ wakeId: id, claimId: id, runId: id, deliveredAt: dateTime }).strict(),
   WakeDeliveryUnknown: z.object({ wakeId: id, claimId: id, reason: z.string().min(1), observedAt: dateTime }).strict(),
-  RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, responseAdmission: responseAdmissionSchema, inputSetId: id.optional(), input: jsonValueSchema.optional(), inputProvenance: jsonValueSchema.optional(), inputHash: digest.optional() }).strict(),
+  RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, responseAdmission: responseAdmissionSchema, profilePin: profilePinSchema, inputSetId: id.optional(), input: jsonValueSchema.optional(), inputProvenance: jsonValueSchema.optional(), inputHash: digest.optional() }).strict(),
   RecursiveModelStatusChanged: z.object({ handleId: id, status: z.enum(["running", "completed", "failed", "cancelled"]), outcome: z.enum(["succeeded", "failed", "cancelled", "budget-exceeded", "unknown"]).optional(), resultMessageId: id.optional(), result: jsonValueSchema.optional(), resultArtifactId: id.optional(), error: z.string().optional() }),
   HarnessVersionCreated: z.object({ entryId: id, versionId: id, version: positiveInteger, kind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]), scope: z.enum(["local", "workspace", "user", "global"]), scopeKey: id, name: z.string().min(1), content: jsonValueSchema, tags: z.array(z.string()), confidence: z.number().finite().min(0).max(1), status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), evidenceEventIds: z.array(id), conflictEntryIds: z.array(id), supersedesVersionId: id.optional(), proposalId: id.optional(), createdBy: id, lastConfirmedAt: dateTime }),
   HarnessVersionStatusChanged: z.object({ entryId: id, versionId: id, status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), reason: z.string().min(1), proposalId: id.optional() }),
   UserCorrection: z.object({ correctionId: id, correctedEventIds: z.array(id).min(1).max(64), correction: z.string().min(1).max(8192) }).strict(),
-  RefinementReviewRequested: z.object({ reviewId: id, fingerprint, mode: z.enum(["manual", "automatic", "skill_creation"]), requestedScope: z.enum(["local", "workspace", "user", "global"]), requestedScopeKey: id, allowedKinds: z.array(z.enum(["memory", "prompt_note", "skill", "subagent_spec"])).min(1).max(4), triggerId: id, triggerKind: z.enum(["manual", "repeated_effect_failure", "repeated_gate_failure", "explicit_user_correction", "repeated_success", "stale_memory", "unproductive_delegation", "skill_creation"]), triggerFingerprint: fingerprint, triggerKey: id.optional(), nonterminalKey: id.optional(), triggerEvidenceThroughCursor: z.string().regex(/^\d+$/).optional(), evidenceEventIds: z.array(id).max(64), sourceEventIds: z.array(id).min(1).max(256), sourceSnapshotHash: fingerprint, sourceThroughCursor: z.string().regex(/^\d+$/), instructions: z.string().max(8192).optional(), request: jsonValueSchema, snapshot: jsonValueSchema.optional() }).strict(),
+  RefinementReviewRequested: z.object({ reviewId: id, fingerprint, mode: z.enum(["manual", "automatic", "skill_creation"]), waitForGovernance: z.boolean(), requestedScope: z.enum(["local", "workspace", "user", "global"]), requestedScopeKey: id, allowedKinds: z.array(z.enum(["memory", "prompt_note", "skill", "subagent_spec"])).min(1).max(4), triggerId: id, triggerKind: z.enum(["manual", "repeated_effect_failure", "repeated_gate_failure", "explicit_user_correction", "repeated_success", "stale_memory", "unproductive_delegation", "skill_creation"]), triggerFingerprint: fingerprint, triggerKey: id.optional(), nonterminalKey: id.optional(), triggerEvidenceThroughCursor: z.string().regex(/^\d+$/).optional(), evidenceEventIds: z.array(id).max(64), sourceEventIds: z.array(id).min(1).max(256), sourceSnapshotHash: fingerprint, sourceThroughCursor: z.string().regex(/^\d+$/), instructions: z.string().max(8192).optional(), request: jsonValueSchema, snapshot: jsonValueSchema.optional() }).strict(),
   RefinementReviewChildLinked: z.object({ reviewId: id, handleId: id, childSessionId: id, childBranchId: id }).strict(),
   RefinementReviewStatusChanged: z.object({ reviewId: id, status: z.enum(["running", "no_change", "candidate", "revision_required", "failed", "cancelled", "unknown"]), expectedStatus: z.enum(["requested", "running", "no_change", "candidate", "revision_required", "failed", "cancelled", "unknown"]), decisionFingerprint: fingerprint.optional(), proposalId: id.optional(), reason: z.string().max(16384).optional() }).strict(),
   RefinementTriggerConsumed: z.object({ reviewId: id, triggerKey: id, evidenceThroughCursor: z.string().regex(/^\d+$/) }).strict(),
@@ -419,13 +557,39 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   RefinementApproved: z.object({ proposalId: id, approvedBy: id, scope: z.enum(["user", "global"]), note: z.string().optional() }),
   RefinementRollbackApproved: z.object({ proposalId: id, approvedBy: id, role: z.enum(["owner", "admin"]), note: z.string().optional() }),
   RefinementRolledBack: z.object({ proposalId: id, candidateId: id, rollbackId: id, versionIds: z.array(id), restoredVersionIds: z.array(id), reason: z.string().min(1) }),
+  GovernedRefinementProposed: z.object({ proposalId: id, proposalFingerprint: fingerprint, proposal: governedRefinementProposalSchema }).strict().superRefine((value, context) => {
+    if (value.proposalId !== value.proposal.proposalId ||
+        value.proposalFingerprint !== canonicalJsonDigest(value.proposal as unknown as JsonValue)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "governed proposal identity or fingerprint does not match" });
+    }
+  }),
+  GovernedRefinementValidated: z.object({ proposalId: id, valid: z.boolean(), validation: jsonValueSchema, expectedStatus: z.literal("proposed") }).strict(),
+  RefinementGovernanceReviewRequested: z.object({ proposalId: id, reviewId: id, frozenInput: frozenGovernanceInputSchema, frozenInputDigest: fingerprint, expectedStatus: z.literal("validated") }).strict().superRefine((value, context) => {
+    if (value.frozenInput.proposal.proposalId !== value.proposalId ||
+        value.frozenInput.canonicalDigest !== value.frozenInputDigest) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "frozen governance proposal identity or digest does not match" });
+    }
+  }),
+  RefinementGovernanceReviewChildLinked: z.object({ proposalId: id, reviewId: id, handleId: id, childSessionId: id, childBranchId: id, expectedStatus: z.literal("validated") }).strict(),
+  RefinementGovernanceReviewDecided: z.object({ proposalId: id, reviewId: id, decisionId: id, status: z.enum(["reviewed_rejected", "review_failed", "review_unknown", "reviewed_approved"]), decision: jsonValueSchema.optional(), reason: z.string().min(1).max(16384), expectedStatus: z.enum(["validated", "reviewing"]) }).strict().superRefine((value, context) => {
+    const needsDecision = value.status === "reviewed_rejected" || value.status === "reviewed_approved";
+    if (needsDecision !== (value.decision !== undefined)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "governance decision presence does not match status" });
+    }
+    if (value.expectedStatus === "validated" && value.status !== "review_failed") {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "validated governance failure must terminate as review_failed" });
+    }
+  }),
+  GovernedRefinementApplied: z.object({ proposalId: id, decisionId: id, status: z.enum(["applied", "apply_conflict", "apply_failed"]), appliedVersionIds: z.array(id), reason: z.string().min(1).max(16384), expectedStatus: z.literal("reviewed_approved") }).strict(),
+  RefinementProposalTerminalNoticeDelivered: z.object({ proposalId: id, noticeId: id, originSessionId: id, originBranchId: id, status: z.enum(["deterministically_rejected", "reviewed_rejected", "review_failed", "review_unknown", "apply_conflict", "apply_failed", "applied"]), result: jsonValueSchema }).strict(),
+  RefinementRollbackApplied: z.object({ rollbackId: id, targetKind: z.enum(["agent_profile", "memory", "prompt_note", "skill", "subagent_spec"]), targetId: id, previousVersionId: id, restoreSourceVersionId: id, restorationVersionId: id, actor: jsonValueSchema, reason: z.string().min(1).max(1024), evidenceEventIds: z.array(id).max(32) }).strict(),
   SkillImported: z.object({ entryId: id, versionId: id, digest, scope: z.literal("workspace"), origin: z.object({ kind: z.literal("local-directory"), reference: z.string().min(1).max(4096), manifestDigest: digest, sourceDigest: digest }).strict(), installedBy: id }).strict(),
   SkillAvailabilityChanged: z.object({ entryId: id, versionId: id, digest, availability: z.enum(["enabled", "disabled", "removed"]), reason: z.string().min(1).max(4096), expectedAvailability: z.enum(["enabled", "disabled", "removed"]).optional(), expectedPreviousActionSequence: positiveInteger.nullable().optional() }).strict(),
   SkillInvocationRecorded: z.object({ entryId: id, versionId: id, effectId: id, input: jsonValueSchema }),
   SkillTestRecorded: z.object({ entryId: id, versionId: id, effectId: id, passed: z.boolean(), report: jsonValueSchema }),
   SubagentSpecInvoked: z.object({ entryId: id, versionId: id, taskId: id, childSessionId: id, childBranchId: id }),
   SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
-  AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
+  AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, profilePin: profilePinSchema, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
   AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
   AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, retryOfCallId: id.optional() }).strict(),
   AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceSubmissionSchema, action: agentActionSchema }).strict(),
@@ -446,6 +610,21 @@ export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): 
   assertJsonValue(event.payload);
   const payload = payloadSchemas[event.type].safeParse(event.payload);
   if (!payload.success) throw new ValidationError(`Invalid ${event.type} payload`, { issues: payload.error.issues });
+  if (event.type === "SessionCreated" &&
+      (event.payload as unknown as EventPayloads["SessionCreated"]).agentProfile.agentSessionId !== event.sessionId) {
+    throw new ValidationError("Initial agent profile must belong to the created session");
+  }
+  if (event.type === "AgentProfileVersionCreated" &&
+      (event.payload as unknown as EventPayloads["AgentProfileVersionCreated"]).agentProfile.agentSessionId !== event.sessionId) {
+    throw new ValidationError("Agent profile version must belong to its event session");
+  }
+  if (event.type === "ContextMaterialized") {
+    const context = event.payload as unknown as EventPayloads["ContextMaterialized"];
+    if (context.promptProvenance) validateContextPromptProvenance(context);
+  }
+  if (event.type === "ModelCallRequested") {
+    validatePromptProvenance((event.payload as unknown as EventPayloads["ModelCallRequested"]).promptProvenance);
+  }
   if (event.type === "ContextCompactionRequested") validateCompactionRequestIntegrity(event.payload as unknown as EventPayloads["ContextCompactionRequested"]);
   if (event.type === "RecursiveModelStarted") {
     const admission = (event.payload as unknown as EventPayloads["RecursiveModelStarted"]).responseAdmission;
@@ -457,6 +636,33 @@ export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): 
     if (effect.modelFailure !== undefined && effect.outcome !== "failed") {
       throw new ValidationError("Only failed model effects may retain modelFailure");
     }
+  }
+}
+
+function validateContextPromptProvenance(payload: EventPayloads["ContextMaterialized"]): void {
+  const provenance = payload.promptProvenance!;
+  validatePromptProvenance(provenance);
+  if (!payload.context || typeof payload.context !== "object" || Array.isArray(payload.context) ||
+      !Array.isArray(payload.context.messages)) {
+    throw new ValidationError("Invocation context must retain its provider-facing system message");
+  }
+  const systemMessages = payload.context.messages.filter((message) =>
+    message && typeof message === "object" && !Array.isArray(message) &&
+    message.role === "system" && typeof message.content === "string");
+  const first = payload.context.messages[0];
+  if (systemMessages.length !== 1 || first !== systemMessages[0]) {
+    throw new ValidationError("Invocation context must retain exactly one leading provider-facing system message");
+  }
+  const content = (systemMessages[0] as { readonly content: string }).content;
+  if (sha256(content) !== provenance.effectiveSystemPromptDigest) {
+    throw new ValidationError("Effective system prompt digest does not match retained provider-facing bytes");
+  }
+}
+
+function validatePromptProvenance(provenance: InvocationPromptProvenance): void {
+  if (provenance.profileVersionId !== provenance.components.agentProfile.componentId ||
+      provenance.agentPromptDigest !== provenance.components.agentProfile.digest) {
+    throw new ValidationError("Prompt provenance profile component does not match its invocation pin");
   }
 }
 

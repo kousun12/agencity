@@ -1,4 +1,4 @@
-import type { ArtifactReference, BudgetLimits, ContextCompactionStrategy, ModelConfiguration, WorkingValue } from "../domain/index.ts";
+import type { AgentProfileInput, ArtifactReference, BudgetLimits, ContextCompactionStrategy, ModelConfiguration, WorkingValue } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { InspectOptions, InspectPreview } from "./inspect.ts";
 
@@ -98,6 +98,22 @@ export interface ConsoleAgentSendInput {
 export interface ConsoleAgentMessageOptions { readonly direction?: "inbound" | "outbound" | "all"; readonly limit?: number; readonly before?: string; readonly pendingOnly?: boolean; }
 export interface AgentsSdk {
   spawn(input: ConsoleAgentSpawnInput | string): Promise<JsonValue>;
+  spawnMany(inputs: readonly (ConsoleAgentSpawnInput | string)[]): Promise<JsonValue>;
+  get(target?: string): Promise<JsonValue>;
+  proposeProfileUpdate(target: string | undefined, input: {
+    readonly expectedProfileVersionId: string;
+    readonly replacement: AgentProfileInput;
+    readonly reason: string;
+    readonly predictedEffect: string;
+    readonly evidenceEventIds: readonly string[];
+    readonly revisesProposalId?: string;
+  }, options?: { readonly wait?: boolean }): Promise<JsonValue>;
+  rollbackProfile(target: string | undefined, input: {
+    readonly expectedCurrentVersionId: string;
+    readonly restoreVersionId: string;
+    readonly reason: string;
+    readonly evidenceEventIds: readonly string[];
+  }): Promise<JsonValue>;
   list(): Promise<JsonValue>;
   send(input: ConsoleAgentSendInput | string, content?: string): Promise<JsonValue>;
   messages(options?: ConsoleAgentMessageOptions): Promise<JsonValue>;

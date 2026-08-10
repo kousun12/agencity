@@ -1,6 +1,7 @@
 import {
   FamilyReachError, NotFoundError, ValidationError, assertJsonValue, assertNoReservedModelDispatchInputFields, newId, projectEvents,
-  type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type ModelConfigurationInput, type NewAgentEvent, type TaskStatus,
+  SEALED_TASK_SPECIALIST_PROFILE, agentProfilePin, sameAgentProfileAdmissionMeaning,
+  type AgentProfileInput, type AgentProfileVersion, type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type ModelConfigurationInput, type NewAgentEvent, type TaskStatus,
 } from "../domain/index.ts";
 import {
   requireRecursiveStorage, type AgentStorage, type MailboxRecord, type SessionRecord, type TaskRecord,
@@ -8,12 +9,14 @@ import {
 import type { OutboxRunner } from "./outbox.ts";
 import type { AgentRunResult, AgentRunService } from "./agent-runs.ts";
 import { ProjectionService } from "./projection.ts";
+import { AgentProfileService } from "./agent-profiles.ts";
 
 export interface SpawnAgentInput {
   readonly task: string;
   readonly completionCriteria?: string;
   readonly model?: ModelConfigurationInput;
   readonly budget?: BudgetLimits;
+  readonly profile?: AgentProfileInput;
   /** Stable command identity. Reusing it with the same request returns the original handle. */
   readonly idempotencyKey?: string;
   readonly sessionId?: string;
@@ -28,7 +31,7 @@ export interface SubagentHandle {
   readonly parentSessionId: string; readonly parentBranchId: string; readonly rootSessionId: string;
   readonly depth: number; readonly status: TaskStatus; readonly name?: string;
 }
-export interface SpawnAdmissionItem { readonly input: SpawnAgentInput; readonly handle: SubagentHandle; readonly model: ModelConfiguration; readonly budget: BudgetLimits; readonly existing: boolean; }
+export interface SpawnAdmissionItem { readonly input: SpawnAgentInput; readonly handle: SubagentHandle; readonly model: ModelConfiguration; readonly budget: BudgetLimits; readonly profile: AgentProfileVersion; readonly existing: boolean; }
 export interface SendMessageInput {
   /** Model-facing target: session ID, exact family name, or the literal "parent". */
   readonly target?: string;
@@ -93,6 +96,7 @@ class AdmissionQueue {
 export class AgentService {
   readonly #recursive;
   readonly #projections: ProjectionService;
+  readonly profiles: AgentProfileService;
   readonly #admissions = new AdmissionQueue();
   readonly #deliveries = new AdmissionQueue();
   #runs: AgentRunService | null = null;
@@ -115,6 +119,7 @@ export class AgentService {
   ) {
     this.#recursive = requireRecursiveStorage(storage);
     this.#projections = new ProjectionService(storage);
+    this.profiles = new AgentProfileService(storage);
   }
 
   attachRunService(runs: AgentRunService): void {
@@ -150,6 +155,7 @@ export class AgentService {
             runId,
             task: item.input.task.trim(),
             requestKey: `agent-spawn:${item.handle.taskId}`,
+            profilePin: agentProfilePin(item.profile),
           },
         };
       }), { requireAgentToolSet: true });
@@ -172,7 +178,10 @@ export class AgentService {
     parentBranchId: string,
     rawInputs: readonly (SpawnAgentInput | string)[],
     extend: (items: readonly SpawnAdmissionItem[]) => readonly NewAgentEvent[],
-    options: { readonly requireAgentToolSet?: boolean } = {},
+    options: {
+      readonly requireAgentToolSet?: boolean;
+      readonly profileSources?: readonly ({ readonly entryId: string; readonly versionId: string } | null)[];
+    } = {},
   ): Promise<SubagentHandle[]> {
     return this.#admissions.run(`${parentSessionId}/${parentBranchId}`, async () => {
       const inputs = rawInputs.map((input): SpawnAgentInput => typeof input === "string" ? { task: input } : input);
@@ -189,6 +198,10 @@ export class AgentService {
         if (!input.task.trim()) throw new ValidationError("Subagent task cannot be empty");
         if (input.idempotencyKey !== undefined && !input.idempotencyKey.trim()) throw new ValidationError("Subagent idempotencyKey cannot be empty");
         if (input.name !== undefined && (!input.name.trim() || new TextEncoder().encode(input.name).byteLength > 128)) throw new ValidationError("Subagent name must be 1 to 128 UTF-8 bytes");
+        if (input.profile !== undefined && (!input.profile || typeof input.profile !== "object" || Array.isArray(input.profile))) throw new ValidationError("Subagent profile must be an object");
+      }
+      if (options.profileSources !== undefined && options.profileSources.length !== inputs.length) {
+        throw new ValidationError("Subagent profile source count must match admissions");
       }
       const parent = await this.#recursive.getSession(parentSessionId);
       if (!parent) throw new NotFoundError("parent session", parentSessionId);
@@ -198,14 +211,29 @@ export class AgentService {
       if (parent.depth + 1 > this.maxDepth) throw new ValidationError(`Maximum session depth ${this.maxDepth} exceeded`);
       const inheritedBudget = remainingBudget(parentState.budget.limits, parentState.budget);
 
-      const prepared = inputs.map((input) => {
+      const now = new Date().toISOString();
+      const prepared = inputs.map((input, index) => {
         const stable = input.idempotencyKey === undefined ? undefined : stableId(`${parentSessionId}/${parentBranchId}/${input.idempotencyKey}`);
         const taskId = stable === undefined ? newId() : `task-${stable}`;
         const childSessionId = input.sessionId ?? (stable === undefined ? newId() : `session-${stable}`);
         const childBranchId = input.branchId ?? (stable === undefined ? newId() : `branch-${stable}`);
         const model = parentState.model;
         const budget = input.budget ?? inheritedBudget;
-        return { input, taskId, childSessionId, childBranchId, model, budget };
+        const source = options.profileSources?.[index] ?? null;
+        const profileInput = input.profile ?? SEALED_TASK_SPECIALIST_PROFILE;
+        const profileMetadata = {
+          profileVersionId: `agent-profile-${childSessionId}-v1`,
+          agentSessionId: childSessionId,
+          createdBy: { kind: "agent" as const, sessionId: parentSessionId, branchId: parentBranchId },
+          sourceSpecEntryId: source?.entryId ?? null,
+          sourceSpecVersionId: source?.versionId ?? null,
+          reason: source ? "Materialized from an invoked subagent specification"
+            : input.profile ? "Initial profile supplied by the creating agent"
+            : "Sealed task-specialist admission profile",
+          createdAt: now,
+        };
+        const profile = this.profiles.materializeInitial(profileInput, profileMetadata);
+        return { input, taskId, childSessionId, childBranchId, model, budget, profile, profileInput, profileMetadata };
       });
       if (new Set(prepared.map((item) => item.taskId)).size !== prepared.length ||
           new Set(prepared.map((item) => item.childSessionId)).size !== prepared.length) {
@@ -245,6 +273,11 @@ export class AgentService {
         if ((originalName ?? undefined) !== (item.input.name?.trim() || undefined)) {
           throw new ValidationError("Subagent idempotency key was reused with a different name");
         }
+        const originalProfile = (created?.payload as EventPayloads["SessionCreated"] | undefined)?.agentProfile;
+        if (!originalProfile || !sameAgentProfileAdmissionMeaning(originalProfile, item.profileInput, item.profileMetadata)) {
+          throw new ValidationError("Subagent idempotency key was reused with a different agent profile");
+        }
+        item.profile = originalProfile;
       }
       const novel = prepared.filter((_item, index) => !existing[index]);
       const directTasks = await this.#recursive.listTasks(parentSessionId);
@@ -265,8 +298,8 @@ export class AgentService {
         parentSessionId, parentBranchId, rootSessionId, depth, status: existing[index]?.status ?? "admitted",
         ...(prepared[index]!.input.name === undefined ? {} : { name: prepared[index]!.input.name!.trim() }),
       }));
-      const admissionItems = prepared.map((item, index): SpawnAdmissionItem => ({ input: item.input, handle: handles[index]!, model: item.model, budget: item.budget, existing: existing[index] !== null }));
-      const now = new Date().toISOString(); const events: NewAgentEvent[] = [];
+      const admissionItems = prepared.map((item, index): SpawnAdmissionItem => ({ input: item.input, handle: handles[index]!, model: item.model, budget: item.budget, profile: item.profile, existing: existing[index] !== null }));
+      const events: NewAgentEvent[] = [];
       for (let index = 0; index < prepared.length; index++) {
         if (existing[index]) continue;
         const item = prepared[index]!;
@@ -276,7 +309,7 @@ export class AgentService {
           idempotencyKey: `task:${taskId}`, payload: { taskId, parentSessionId, parentBranchId, childSessionId, childBranchId, task: input.task, ...(input.completionCriteria === undefined ? {} : { completionCriteria: input.completionCriteria }), model, budget },
         }, {
           sessionId: childSessionId, branchId: childBranchId, type: "SessionCreated", producer: "supervisor",
-          idempotencyKey: `session:${childSessionId}`, payload: { workspaceId: parent.workspaceId, initialBranchId: childBranchId, model, budget, parentSessionId, parentBranchId, rootSessionId, depth, taskId, ...(input.name === undefined ? {} : { sessionName: input.name.trim() }) },
+          idempotencyKey: `session:${childSessionId}`, payload: { workspaceId: parent.workspaceId, initialBranchId: childBranchId, model, budget, agentProfile: item.profile, parentSessionId, parentBranchId, rootSessionId, depth, taskId, ...(input.name === undefined ? {} : { sessionName: input.name.trim() }) },
         }, {
           sessionId: childSessionId, branchId: childBranchId, type: "MessageAppended", producer: "supervisor",
           idempotencyKey: `task-prompt:${taskId}`, payload: { messageId: `prompt-${taskId}`, role: "user", content: input.task },

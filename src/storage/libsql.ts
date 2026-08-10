@@ -1,6 +1,6 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
-import type { AgentEvent, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, ValidationError, canonicalSkillDigest, createRefinementReviewRecursiveResult, newId, projectEvents, reduceAgentState, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
+import type { AgentEvent, AgentProfileVersion, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, REFINEMENT_GOVERNANCE_CONTRACT_ID, ValidationError, canonicalJsonDigest, canonicalSkillDigest, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, newId, normalizeAgentProfileInput, projectEvents, reduceAgentState, refinementPrincipalToAgentPrincipal, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateRefinementGovernanceDecision, validateRefinementGovernanceRecursiveResult, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
   AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
@@ -31,6 +31,9 @@ const cursorOf = (sequence: number) => sequence.toString().padStart(20, "0");
 const sequenceOf = (cursor: string) => { const n = Number(cursor); if (!Number.isSafeInteger(n) || n < 0) throw new ValidationError(`Invalid cursor: ${cursor}`); return n; };
 function json(value: unknown): string { return JSON.stringify(value); }
 function sha256(value: string): string { const hash = new Bun.CryptoHasher("sha256"); hash.update(value); return hash.digest("hex"); }
+function stableGovernanceId(prefix: string, value: string): string {
+  return `${prefix}-${sha256(value).slice(0, 32)}`;
+}
 function valueToJson(value: unknown): JsonValue {
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
   if (typeof value === "bigint") return value.toString();
@@ -117,11 +120,13 @@ function rowToRecursiveModel(row: Row): RecursiveModelRecord {
   const inputProvenance = optionalJson(row, "input_provenance_json");
   const result = optionalJson(row, "result_json");
   const responseAdmission = optionalJson(row, "response_admission_json");
+  const profilePin = optionalJson(row, "profile_pin_json");
   if (!responseAdmission || typeof responseAdmission !== "object" || Array.isArray(responseAdmission)) throw new ValidationError("Recursive model projection is missing its response admission");
+  if (!profilePin || typeof profilePin !== "object" || Array.isArray(profilePin)) throw new ValidationError("Recursive model projection is missing its profile pin");
   const admission = responseAdmission as unknown as RecursiveModelRecord["responseAdmission"];
   const contract = validateModelResponseContract(admission.responseContract);
   validateModelResponseContractCapability(contract, admission.responseCapability);
-  return { handleId: String(row.handle_id), taskId: String(row.task_id), parentSessionId: String(row.parent_session_id), parentBranchId: String(row.parent_branch_id), childSessionId: String(row.child_session_id), childBranchId: String(row.child_branch_id), model: JSON.parse(String(row.model_json)), responseAdmission: admission, inputSetId: row.input_set_id === null ? null : String(row.input_set_id), ...(input === undefined ? {} : { input }), ...(inputProvenance === undefined ? {} : { inputProvenance }), ...(row.input_hash === null || row.input_hash === undefined ? {} : { inputHash: String(row.input_hash) }), status: String(row.status) as RecursiveModelRecord["status"], ...(row.outcome === null || row.outcome === undefined ? {} : { outcome: String(row.outcome) as NonNullable<RecursiveModelRecord["outcome"]> }), ...(row.result_message_id === null ? {} : { resultMessageId: String(row.result_message_id) }), ...(result === undefined ? {} : { result }), ...(row.result_artifact_id === null || row.result_artifact_id === undefined ? {} : { resultArtifactId: String(row.result_artifact_id) }), ...(row.error === null ? {} : { error: String(row.error) }), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+  return { handleId: String(row.handle_id), taskId: String(row.task_id), parentSessionId: String(row.parent_session_id), parentBranchId: String(row.parent_branch_id), childSessionId: String(row.child_session_id), childBranchId: String(row.child_branch_id), model: JSON.parse(String(row.model_json)), responseAdmission: admission, profilePin: profilePin as unknown as RecursiveModelRecord["profilePin"], inputSetId: row.input_set_id === null ? null : String(row.input_set_id), ...(input === undefined ? {} : { input }), ...(inputProvenance === undefined ? {} : { inputProvenance }), ...(row.input_hash === null || row.input_hash === undefined ? {} : { inputHash: String(row.input_hash) }), status: String(row.status) as RecursiveModelRecord["status"], ...(row.outcome === null || row.outcome === undefined ? {} : { outcome: String(row.outcome) as NonNullable<RecursiveModelRecord["outcome"]> }), ...(row.result_message_id === null ? {} : { resultMessageId: String(row.result_message_id) }), ...(result === undefined ? {} : { result }), ...(row.result_artifact_id === null || row.result_artifact_id === undefined ? {} : { resultArtifactId: String(row.result_artifact_id) }), ...(row.error === null ? {} : { error: String(row.error) }), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
 }
 function rowToReplicaStatus(row: Row): WorkspaceReplicaStatusRecord { return {
   replicaId:String(row.replica_id), replicaIncarnation:row.replica_incarnation===null?null:String(row.replica_incarnation),
@@ -314,6 +319,9 @@ export class LibSqlStorage implements AgentStorage {
         { version: 13, name: "skill-management", url: new URL("./migrations/013_skill_management.sql", import.meta.url) },
         { version: 14, name: "context-compaction", url: new URL("./migrations/014_context_compaction.sql", import.meta.url) },
         { version: 15, name: "recursive-model-response-admission", url: new URL("./migrations/015_recursive_model_response_admission.sql", import.meta.url) },
+        { version: 16, name: "agent-profiles", url: new URL("./migrations/016_agent_profiles.sql", import.meta.url) },
+        { version: 17, name: "refinement-governance", url: new URL("./migrations/017_refinement_governance.sql", import.meta.url) },
+        { version: 18, name: "governance-sync-projection", url: new URL("./migrations/018_governance_sync_projection.sql", import.meta.url) },
       ];
       for (const migration of migrations) {
         const script = await Bun.file(migration.url).text();
@@ -496,12 +504,111 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         const appended: AgentEvent[] = [];
         if (fence) await this.#assertEventWriteFence(tx, rawEvents, fence);
         else await this.#assertUnfencedEventWriteAllowed(tx, rawEvents);
+        await this.#assertGovernedProfileBatch(tx, rawEvents);
         for (const candidate of rawEvents) appended.push(await this.#appendOne(tx, candidate));
         return appended;
       }, { kind: "ordinary", operation: "append events" });
       for (const listener of this.#listeners) listener(committed);
       return committed;
     });
+  }
+
+  async #assertGovernedProfileBatch(
+    tx: Transaction,
+    events: readonly NewAgentEvent[],
+  ): Promise<void> {
+    for (const event of events) {
+      if (event.type !== "AgentProfileVersionCreated") continue;
+      const profile = (event.payload as EventPayloads["AgentProfileVersionCreated"]).agentProfile;
+      if (profile.revision === 1) {
+        throw new ValidationError("Initial agent profiles must be admitted with SessionCreated");
+      }
+      const activation = events.find((candidate) =>
+        candidate.type === "AgentProfileActivated" &&
+        candidate.sessionId === event.sessionId &&
+        (candidate.payload as EventPayloads["AgentProfileActivated"]).profileVersionId === profile.profileVersionId);
+      if (event.originDeviceId === undefined && !activation) {
+        throw new ValidationError("A local revised agent profile version and activation must be atomic");
+      }
+      if (profile.sourceProposalId !== null && profile.reviewDecisionId !== null) {
+        if (profile.restoresProfileVersionId !== null) {
+          throw new ValidationError("A governed profile revision cannot also claim rollback provenance");
+        }
+        const selected = await tx.execute({
+          sql: "SELECT status,proposal_json,review_decision_id FROM governed_refinement_proposals WHERE proposal_id=?",
+          args: [profile.sourceProposalId],
+        });
+        const row = selected.rows[0];
+        const approval = events.find((candidate) =>
+          candidate.type === "RefinementGovernanceReviewDecided" &&
+          (candidate.payload as EventPayloads["RefinementGovernanceReviewDecided"]).proposalId === profile.sourceProposalId &&
+          (candidate.payload as EventPayloads["RefinementGovernanceReviewDecided"]).decisionId === profile.reviewDecisionId &&
+          (candidate.payload as EventPayloads["RefinementGovernanceReviewDecided"]).status === "reviewed_approved");
+        const approved = approval !== undefined ||
+          (row && String(row.status) === "reviewed_approved" &&
+            String(row.review_decision_id) === profile.reviewDecisionId);
+        if (!row || !approved) {
+          throw new ValidationError("Agent profile revision requires its exact reviewed_approved governed proposal");
+        }
+        const proposal = JSON.parse(String(row.proposal_json)) as any;
+        const target = proposal.target;
+        const replacement = normalizeAgentProfileInput(target?.replacement);
+        if (target?.kind !== "agent_profile" ||
+            target.agentSessionId !== event.sessionId ||
+            target.expectedProfileVersionId !== profile.supersedesProfileVersionId ||
+            profile.agentSessionId !== event.sessionId ||
+            profile.role !== replacement.role ||
+            profile.purpose !== replacement.purpose ||
+            profile.instructions !== replacement.instructions ||
+            profile.reason !== proposal.reason ||
+            !Bun.deepEquals(profile.evidenceEventIds, proposal.evidenceEventIds) ||
+            !Bun.deepEquals(profile.createdBy, refinementPrincipalToAgentPrincipal(proposal.principal))) {
+          throw new ValidationError("Agent profile revision does not exactly match its governed proposal");
+        }
+        if (approval) {
+          const decision = (approval.payload as EventPayloads["RefinementGovernanceReviewDecided"]).decision;
+          validateRefinementGovernanceDecision(decision, profile.sourceProposalId);
+        }
+        const application = events.find((candidate) =>
+          candidate.type === "GovernedRefinementApplied" &&
+          (candidate.payload as EventPayloads["GovernedRefinementApplied"]).proposalId === profile.sourceProposalId);
+        if (event.originDeviceId === undefined &&
+            (!application ||
+              (application.payload as EventPayloads["GovernedRefinementApplied"]).decisionId !== profile.reviewDecisionId ||
+              (application.payload as EventPayloads["GovernedRefinementApplied"]).status !== "applied" ||
+              !Bun.deepEquals(
+                (application.payload as EventPayloads["GovernedRefinementApplied"]).appliedVersionIds,
+                [profile.profileVersionId],
+              ))) {
+          throw new ValidationError("Governed profile revision requires its exact atomic application event");
+        }
+      } else if (profile.restoresProfileVersionId !== null) {
+        const rollback = events.find((candidate) =>
+          candidate.type === "RefinementRollbackApplied" &&
+          (candidate.payload as EventPayloads["RefinementRollbackApplied"]).targetKind === "agent_profile" &&
+          (candidate.payload as EventPayloads["RefinementRollbackApplied"]).restorationVersionId === profile.profileVersionId);
+        if (event.originDeviceId === undefined &&
+            (!rollback ||
+              (rollback.payload as EventPayloads["RefinementRollbackApplied"]).targetId !== event.sessionId ||
+              (rollback.payload as EventPayloads["RefinementRollbackApplied"]).previousVersionId !== profile.supersedesProfileVersionId ||
+              (rollback.payload as EventPayloads["RefinementRollbackApplied"]).restoreSourceVersionId !== profile.restoresProfileVersionId)) {
+          throw new ValidationError("Profile restoration requires its exact atomic rollback event");
+        }
+      } else {
+        throw new ValidationError("Later agent profile versions require governed approval or exact rollback provenance");
+      }
+    }
+    for (const event of events) {
+      if (event.type !== "AgentProfileActivated" || event.originDeviceId !== undefined) continue;
+      const profileEvent = events.find((candidate) =>
+        candidate.type === "AgentProfileVersionCreated" &&
+        candidate.sessionId === event.sessionId &&
+        (candidate.payload as EventPayloads["AgentProfileVersionCreated"]).agentProfile.profileVersionId ===
+          (event.payload as EventPayloads["AgentProfileActivated"]).profileVersionId);
+      if (!profileEvent) {
+        throw new ValidationError("A local revised agent profile activation must include its immutable version");
+      }
+    }
   }
   async #appendOne(tx: Transaction, candidate: NewAgentEvent): Promise<AgentEvent> {
     const id = candidate.id ?? newId();
@@ -649,6 +756,195 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       args: [event.sessionId, event.branchId],
     });
     if (!branch.rows.length) throw new NotFoundError("branch", `${event.sessionId}/${event.branchId}`);
+    if (event.type === "GovernedRefinementProposed") {
+      const payload = event.payload as EventPayloads["GovernedRefinementProposed"];
+      const proposal = payload.proposal as any;
+      if (proposal.proposalId !== payload.proposalId ||
+          proposal.origin?.sessionId !== event.sessionId ||
+          proposal.origin?.branchId !== event.branchId ||
+          canonicalJsonDigest(proposal) !== payload.proposalFingerprint) {
+        throw new ValidationError("Governed proposal identity, origin, target, or digest does not match");
+      }
+    }
+    if (event.type === "GovernedRefinementValidated" ||
+        event.type === "RefinementGovernanceReviewRequested" ||
+        event.type === "RefinementGovernanceReviewChildLinked" ||
+        event.type === "RefinementGovernanceReviewDecided" ||
+        event.type === "GovernedRefinementApplied" ||
+        event.type === "RefinementProposalTerminalNoticeDelivered") {
+      const payload = event.payload as { proposalId: string };
+      const selected = await tx.execute({
+        sql: "SELECT * FROM governed_refinement_proposals WHERE proposal_id=?",
+        args: [payload.proposalId],
+      });
+      const row = selected.rows[0];
+      const governanceLineage = event.originDeviceId === this.#deviceId
+        ? [event.branchId]
+        : await syncBranchLineage(tx, event.sessionId, event.branchId);
+      if (!row || String(row.session_id) !== event.sessionId ||
+          !governanceLineage.includes(String(row.branch_id))) {
+        throw new ValidationError("Governance lifecycle event does not match its proposal route");
+      }
+      const proposal = JSON.parse(String(row.proposal_json)) as any;
+      if (event.type === "RefinementGovernanceReviewRequested") {
+        const review = event.payload as EventPayloads["RefinementGovernanceReviewRequested"];
+        const frozen = review.frozenInput as any;
+        if (frozen.proposal?.proposalId !== review.proposalId ||
+            canonicalJsonDigest(frozen.proposal) !== String(row.proposal_fingerprint) ||
+            frozen.canonicalDigest !== review.frozenInputDigest) {
+          throw new ValidationError("Frozen governance input does not match its exact proposal");
+        }
+      }
+      if (event.type === "RefinementGovernanceReviewChildLinked") {
+        const link = event.payload as EventPayloads["RefinementGovernanceReviewChildLinked"];
+        if (String(row.review_id) !== link.reviewId) {
+          throw new ValidationError("Governance reviewer child link uses the wrong review identity");
+        }
+        const handles = await tx.execute({
+          sql: "SELECT session_id,branch_id,payload_json FROM events WHERE type='RecursiveModelStarted' AND json_extract(payload_json,'$.handleId')=? ORDER BY sequence DESC LIMIT 1",
+          args: [link.handleId],
+        });
+        const handle = handles.rows[0];
+        const started = handle
+          ? JSON.parse(String(handle.payload_json)) as EventPayloads["RecursiveModelStarted"]
+          : null;
+        const parentLineage = started
+          ? await syncBranchLineage(tx, event.sessionId, started.parentBranchId)
+          : [];
+        if (!handle ||
+            !started ||
+            String(handle.session_id) !== event.sessionId ||
+            !parentLineage.includes(String(handle.branch_id)) ||
+            started.parentSessionId !== event.sessionId ||
+            !parentLineage.includes(event.branchId) ||
+            started.childSessionId !== link.childSessionId ||
+            started.childBranchId !== link.childBranchId ||
+            started.responseAdmission.responseContract.kind !== "required-tool-set" ||
+            started.responseAdmission.responseContract.contractId !== REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+          throw new ValidationError("Governance reviewer child link does not match its sealed recursive handle");
+        }
+      }
+      if (event.type === "RefinementGovernanceReviewDecided") {
+        const decision = event.payload as EventPayloads["RefinementGovernanceReviewDecided"];
+        if (decision.reviewId !== stableGovernanceId("refinement-governance-review", decision.proposalId) ||
+            ((decision.status === "review_failed" || decision.status === "review_unknown") &&
+              decision.decisionId !== stableGovernanceId(
+                "refinement-governance-decision",
+                `${decision.proposalId}:${decision.status}`,
+              ))) {
+          throw new ValidationError("Governance decision identity is not deterministic");
+        }
+        if (!(String(row.review_id) === decision.reviewId ||
+            (row.review_id === null && decision.expectedStatus === "validated" &&
+              decision.status === "review_failed"))) {
+          throw new ValidationError("Governance decision uses the wrong review identity");
+        }
+        if (decision.decision !== undefined) {
+          validateRefinementGovernanceDecision(decision.decision, decision.proposalId);
+          const kind = (decision.decision as any).decision;
+          if ((decision.status === "reviewed_approved") !== (kind === "approve")) {
+            throw new ValidationError("Governance decision status does not match its typed decision");
+          }
+        }
+      }
+      if (event.type === "GovernedRefinementApplied") {
+        const application = event.payload as EventPayloads["GovernedRefinementApplied"];
+        if (String(row.review_decision_id) !== application.decisionId) {
+          throw new ValidationError("Governance application uses the wrong review decision");
+        }
+        if (proposal.target?.kind === "agent_profile") {
+          if (application.status === "applied" && application.appliedVersionIds.length !== 1) {
+            throw new ValidationError("Applied profile governance must name exactly one version");
+          }
+          for (const versionId of application.appliedVersionIds) {
+            const versions = await tx.execute({
+              sql: "SELECT agent_session_id,source_proposal_id,review_decision_id FROM agent_profile_versions WHERE profile_version_id=?",
+              args: [versionId],
+            });
+            const version = versions.rows[0];
+            if (!version ||
+                String(version.agent_session_id) !== proposal.target.agentSessionId ||
+                String(version.source_proposal_id) !== application.proposalId ||
+                String(version.review_decision_id) !== application.decisionId) {
+              throw new ValidationError("Governance application does not match its exact profile version");
+            }
+          }
+        } else {
+          for (const versionId of application.appliedVersionIds) {
+            const versions = await tx.execute({
+              sql: "SELECT proposal_id,kind FROM harness_versions WHERE version_id=?",
+              args: [versionId],
+            });
+            const version = versions.rows[0];
+            if (!version ||
+                String(version.proposal_id) !== application.proposalId ||
+                String(version.kind) !== proposal.target?.harnessKind) {
+              throw new ValidationError("Governance application does not match its exact harness version");
+            }
+          }
+        }
+      }
+      if (event.type === "RefinementProposalTerminalNoticeDelivered") {
+        const notice = event.payload as EventPayloads["RefinementProposalTerminalNoticeDelivered"];
+        const terminal = [
+          "deterministically_rejected", "reviewed_rejected", "review_failed",
+          "review_unknown", "apply_conflict", "apply_failed", "applied",
+        ];
+        if (!terminal.includes(String(row.status)) || notice.status !== String(row.status) ||
+            notice.originSessionId !== proposal.origin?.sessionId ||
+            notice.originBranchId !== proposal.origin?.branchId) {
+          throw new ValidationError("Refinement terminal notice does not match a terminal proposal");
+        }
+        const expected = {
+          proposalId: notice.proposalId,
+          status: String(row.status),
+          reviewDecisionId: row.review_decision_id === null ? null : String(row.review_decision_id),
+          reason: row.terminal_reason === null ? null : String(row.terminal_reason),
+          appliedVersionIds: JSON.parse(String(row.applied_version_ids_json)),
+          ...(row.decision_json === null ? {} : { decision: JSON.parse(String(row.decision_json)) }),
+        };
+        if (!Bun.deepEquals(notice.result, expected)) {
+          throw new ValidationError("Refinement terminal notice result does not equal canonical terminal state");
+        }
+      }
+    }
+    if (event.type === "AgentProfileVersionCreated" || event.type === "AgentProfileActivated") {
+      const sessionControl = await tx.execute({
+        sql: "SELECT initial_branch_id FROM sessions WHERE session_id=?",
+        args: [event.sessionId],
+      });
+      const initialBranchId = String(sessionControl.rows[0]?.initial_branch_id);
+      const divergentReplicatedClaim = initialBranchId !== event.branchId &&
+        event.originDeviceId !== this.#deviceId &&
+        (await tx.execute({
+          sql: "SELECT mapping_id FROM sync_branch_mappings WHERE session_id=? AND derived_branch_id=? LIMIT 1",
+          args: [event.sessionId, event.branchId],
+        })).rows.length > 0;
+      if (initialBranchId !== event.branchId && !divergentReplicatedClaim) {
+        throw new ValidationError("Session-wide agent profile control events must use the initial branch");
+      }
+      // A replicated offline claim may be preserved on a sync-derived branch.
+      // Its branch reducer validates the alternate immutable history below,
+      // while the session-wide operational pointer deliberately remains
+      // unresolved rather than selecting a last-writer winner.
+      if (!divergentReplicatedClaim) {
+        const current = await tx.execute({
+          sql: "SELECT active_profile_version_id FROM workspace_agent_profiles WHERE agent_session_id=?",
+          args: [event.sessionId],
+        });
+        const active = current.rows[0] ? String(current.rows[0].active_profile_version_id) : null;
+        const expected = event.type === "AgentProfileVersionCreated"
+          ? (event.payload as EventPayloads["AgentProfileVersionCreated"]).expectedActiveProfileVersionId
+          : (event.payload as EventPayloads["AgentProfileActivated"]).expectedActiveProfileVersionId;
+        if (active !== expected) {
+          throw new ConflictError("Agent profile active-version compare-and-swap failed", {
+            sessionId: event.sessionId,
+            expectedActiveProfileVersionId: expected,
+            activeProfileVersionId: active,
+          });
+        }
+      }
+    }
     if (event.type === "TaskCreated") {
       const payload = event.payload as EventPayloads["TaskCreated"];
       if (payload.parentSessionId !== event.sessionId || payload.parentBranchId !== event.branchId) throw new ValidationError("Task event must be appended to its parent branch");
@@ -737,6 +1033,43 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const task = await tx.execute({ sql: "SELECT task_id,child_session_id,child_branch_id,parent_branch_id,model_json FROM tasks WHERE task_id=?", args: [payload.taskId] }); const taskRow = task.rows[0];
       const inputSet = payload.inputSetId === undefined ? { rows: [{}] } : await tx.execute({ sql: "SELECT input_set_id FROM input_sets WHERE input_set_id=?", args: [payload.inputSetId] });
       if (!taskRow || String(taskRow.child_session_id) !== payload.childSessionId || String(taskRow.child_branch_id) !== payload.childBranchId || String(taskRow.parent_branch_id) !== payload.parentBranchId || payload.parentSessionId !== event.sessionId || !Bun.deepEquals(JSON.parse(String(taskRow.model_json)), payload.model) || !inputSet.rows.length) throw new ValidationError("Recursive model handle does not match its child task and input set");
+      const admitted = await tx.execute({
+        sql: "SELECT e.payload_json FROM sessions s JOIN events e ON e.id=s.created_event_id WHERE s.session_id=?",
+        args: [payload.childSessionId],
+      });
+      const childCreated = admitted.rows[0]
+        ? JSON.parse(String(admitted.rows[0].payload_json)) as EventPayloads["SessionCreated"]
+        : undefined;
+      if (!childCreated || !Bun.deepEquals(payload.profilePin, {
+        profileVersionId: childCreated.agentProfile.profileVersionId,
+        agentPromptDigest: childCreated.agentProfile.promptDigest,
+        promptContractId: childCreated.agentProfile.promptContractId,
+      })) {
+        throw new ValidationError("Recursive model profile pin does not match the child admission profile");
+      }
+    }
+    if (event.type === "ModelCallRequested") {
+      const payload = event.payload as EventPayloads["ModelCallRequested"];
+      if (payload.promptProvenance.invocationKind === "recursive-model") {
+        const sessionRow = await tx.execute({ sql: "SELECT task_id FROM sessions WHERE session_id=?", args: [event.sessionId] });
+        if (sessionRow.rows[0]?.task_id !== null && sessionRow.rows[0]?.task_id !== undefined) {
+          const retained = await tx.execute({
+            sql: "SELECT payload_json FROM events WHERE type='RecursiveModelStarted' AND json_extract(payload_json,'$.handleId')=? AND json_extract(payload_json,'$.childSessionId')=? ORDER BY sequence DESC LIMIT 1",
+            args: [payload.promptProvenance.invocationId, event.sessionId],
+          });
+          const started = retained.rows[0]
+            ? JSON.parse(String(retained.rows[0].payload_json)) as EventPayloads["RecursiveModelStarted"]
+            : undefined;
+          const childLineage = started
+            ? await syncBranchLineage(tx, event.sessionId, started.childBranchId)
+            : [];
+          if (!started || !childLineage.includes(event.branchId) ||
+              started.profilePin.profileVersionId !== payload.promptProvenance.profileVersionId ||
+              started.profilePin.agentPromptDigest !== payload.promptProvenance.agentPromptDigest) {
+            throw new ValidationError("Recursive model call does not match its retained handle invocation pin");
+          }
+        }
+      }
     }
     if (event.type === "RecursiveModelStatusChanged") {
       const payload = event.payload as EventPayloads["RecursiveModelStatusChanged"];
@@ -763,9 +1096,14 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const admission = started.responseAdmission;
       if (admission.responseContract.kind === "required-tool-set" &&
           payload.status === "completed") {
-        const result = validateRefinementReviewRecursiveResult(payload.result, {
-          contractDigest: admission.responseContract.contractDigest,
-        });
+        const result = admission.responseContract.contractId ===
+            REFINEMENT_GOVERNANCE_CONTRACT_ID
+          ? validateRefinementGovernanceRecursiveResult(payload.result, {
+              contractDigest: admission.responseContract.contractDigest,
+            })
+          : validateRefinementReviewRecursiveResult(payload.result, {
+              contractDigest: admission.responseContract.contractDigest,
+            });
         const childLineage = await syncBranchLineage(
           tx,
           started.childSessionId,
@@ -840,15 +1178,26 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
           );
         }
         const submission = output.result.submission;
-        const expected = createRefinementReviewRecursiveResult({
-          contractDigest: admission.responseContract.contractDigest,
-          modelCallId: result.modelCallId,
-          providerToolCallId: submission.providerToolCallId,
-          modelResultDigest: output.resultDigest,
-          transportInput: submission.input,
-          transportInputDigest: submission.inputDigest,
-          transportInputBytes: submission.inputBytes,
-        });
+        const expected = admission.responseContract.contractId ===
+            REFINEMENT_GOVERNANCE_CONTRACT_ID
+          ? createRefinementGovernanceRecursiveResult({
+              contractDigest: admission.responseContract.contractDigest,
+              modelCallId: result.modelCallId,
+              providerToolCallId: submission.providerToolCallId,
+              modelResultDigest: output.resultDigest,
+              transportInput: submission.input,
+              transportInputDigest: submission.inputDigest,
+              transportInputBytes: submission.inputBytes,
+            })
+          : createRefinementReviewRecursiveResult({
+              contractDigest: admission.responseContract.contractDigest,
+              modelCallId: result.modelCallId,
+              providerToolCallId: submission.providerToolCallId,
+              modelResultDigest: output.resultDigest,
+              transportInput: submission.input,
+              transportInputDigest: submission.inputDigest,
+              transportInputBytes: submission.inputBytes,
+            });
         if (!Bun.deepEquals(result, expected)) {
           throw new ValidationError(
             "Structured recursive result is not the normalized derivative of its model effect",
@@ -891,7 +1240,11 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     }
     if (event.type === "RefinementReviewStatusChanged") {
       const payload = event.payload as EventPayloads["RefinementReviewStatusChanged"];
-      if (payload.proposalId !== undefined && !(await tx.execute({ sql: "SELECT proposal_id FROM refinement_proposals WHERE proposal_id=?", args: [payload.proposalId] })).rows.length) throw new ValidationError("Refinement review status references a missing proposal");
+      if (payload.proposalId !== undefined) {
+        const legacy = await tx.execute({ sql: "SELECT proposal_id FROM refinement_proposals WHERE proposal_id=?", args: [payload.proposalId] });
+        const governed = await tx.execute({ sql: "SELECT proposal_id FROM governed_refinement_proposals WHERE proposal_id=?", args: [payload.proposalId] });
+        if (!legacy.rows.length && !governed.rows.length) throw new ValidationError("Refinement review status references a missing proposal");
+      }
     }
     if (event.type === "HarnessVersionCreated") {
       const payload = event.payload as EventPayloads["HarnessVersionCreated"];
@@ -961,15 +1314,79 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const payload = event.payload as { proposalId: string };
       if (!(await tx.execute({ sql: "SELECT proposal_id FROM refinement_proposals WHERE proposal_id=?", args: [payload.proposalId] })).rows.length) throw new ValidationError("Refinement event references a missing proposal");
     }
+    if (event.type === "RefinementRollbackApplied") {
+      const payload = event.payload as EventPayloads["RefinementRollbackApplied"];
+      if (payload.targetKind === "agent_profile") {
+        const restored = await tx.execute({
+          sql: "SELECT agent_session_id,supersedes_profile_version_id,restores_profile_version_id FROM agent_profile_versions WHERE profile_version_id=?",
+          args: [payload.restorationVersionId],
+        });
+        const row = restored.rows[0];
+        const projectedMatches = !!row && String(row.agent_session_id) === payload.targetId &&
+          String(row.supersedes_profile_version_id) === payload.previousVersionId &&
+          String(row.restores_profile_version_id) === payload.restoreSourceVersionId;
+        const canonical = projectedMatches ? null : await tx.execute({
+          sql: `SELECT session_id,payload_json FROM events
+            WHERE type='AgentProfileVersionCreated'
+              AND json_extract(payload_json,'$.agentProfile.profileVersionId')=? LIMIT 1`,
+          args: [payload.restorationVersionId],
+        });
+        const canonicalPayload = canonical?.rows[0]
+          ? JSON.parse(String(canonical.rows[0].payload_json)) as EventPayloads["AgentProfileVersionCreated"]
+          : null;
+        const canonicalMatches = event.originDeviceId !== this.#deviceId && canonicalPayload !== null &&
+          String(canonical!.rows[0]!.session_id) === payload.targetId &&
+          canonicalPayload.agentProfile.supersedesProfileVersionId === payload.previousVersionId &&
+          canonicalPayload.agentProfile.restoresProfileVersionId === payload.restoreSourceVersionId;
+        if (!projectedMatches && !canonicalMatches) {
+          throw new ValidationError("Profile rollback provenance requires its exact restoration version");
+        }
+      } else {
+        const restored = await tx.execute({
+          sql: "SELECT entry_id,kind,supersedes_version_id FROM harness_versions WHERE version_id=?",
+          args: [payload.restorationVersionId],
+        });
+        const row = restored.rows[0];
+        if (!row || String(row.entry_id) !== payload.targetId ||
+            String(row.kind) !== payload.targetKind ||
+            String(row.supersedes_version_id) !== payload.previousVersionId) {
+          throw new ValidationError("Harness rollback provenance requires its exact restoration version");
+        }
+      }
+    }
     if (event.type === "SubagentSpecInvoked") {
       const payload = event.payload as EventPayloads["SubagentSpecInvoked"];
       const version = await tx.execute({ sql: "SELECT kind FROM harness_versions WHERE version_id=? AND entry_id=?", args: [payload.versionId,payload.entryId] });
       const task = await tx.execute({ sql: "SELECT child_session_id,child_branch_id FROM tasks WHERE task_id=?", args: [payload.taskId] });
       if (String(version.rows[0]?.kind) !== "subagent_spec" || String(task.rows[0]?.child_session_id) !== payload.childSessionId || String(task.rows[0]?.child_branch_id) !== payload.childBranchId) throw new ValidationError("Subagent specification invocation is not pinned to its admitted task");
     }
-    const history = await this.#loadBranchEvents(tx, event.sessionId, event.branchId);
+    const syncDerived = event.originDeviceId !== this.#deviceId && (await tx.execute({
+      sql: "SELECT mapping_id FROM sync_branch_mappings WHERE session_id=? AND derived_branch_id=? LIMIT 1",
+      args: [event.sessionId, event.branchId],
+    })).rows.length > 0;
+    const history = await this.#loadBranchEvents(
+      tx,
+      event.sessionId,
+      event.branchId,
+      undefined,
+      undefined,
+      !syncDerived,
+    );
     if (!history.length) throw new NotFoundError("session branch", `${event.sessionId}/${event.branchId}`);
     reduceAgentState(projectEvents(history), event);
+  }
+
+  async #insertAgentProfileVersion(tx: Transaction, profile: AgentProfileVersion, event: AgentEvent): Promise<void> {
+    await tx.execute({
+      sql: "INSERT INTO agent_profile_versions(profile_version_id,agent_session_id,revision,role,purpose,instructions,exact_agent_prompt,prompt_contract_id,prompt_digest,created_by_json,source_spec_entry_id,source_spec_version_id,reason,evidence_event_ids_json,supersedes_profile_version_id,restores_profile_version_id,source_proposal_id,review_decision_id,created_event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      args: [
+        profile.profileVersionId, profile.agentSessionId, profile.revision, profile.role, profile.purpose,
+        profile.instructions, profile.exactAgentPrompt, profile.promptContractId, profile.promptDigest,
+        json(profile.createdBy), profile.sourceSpecEntryId, profile.sourceSpecVersionId, profile.reason,
+        json(profile.evidenceEventIds), profile.supersedesProfileVersionId, profile.restoresProfileVersionId,
+        profile.sourceProposalId, profile.reviewDecisionId, event.id, profile.createdAt,
+      ],
+    });
   }
 
   async #applyOperationalRows(tx: Transaction, event: AgentEvent): Promise<void> {
@@ -977,13 +1394,41 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const p = event.payload as EventPayloads["SessionCreated"];
       await tx.execute({ sql: "INSERT OR IGNORE INTO sessions(session_id,workspace_id,initial_branch_id,created_event_id,parent_session_id,parent_branch_id,root_session_id,depth,task_id,execution_owner_device_id) VALUES(?,?,?,?,?,?,?,?,?,?)", args: [event.sessionId,p.workspaceId,p.initialBranchId,event.id,p.parentSessionId ?? null,p.parentBranchId ?? null,p.rootSessionId ?? event.sessionId,p.depth ?? 0,p.taskId ?? null,event.originDeviceId] });
       await tx.execute({ sql: "INSERT OR IGNORE INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,NULL,NULL,?,?)", args: [event.sessionId,p.initialBranchId,p.initialBranchName ?? null,event.id] });
+      await this.#insertAgentProfileVersion(tx, p.agentProfile, event);
+      await tx.execute({
+        sql: "INSERT INTO workspace_agent_profiles(agent_session_id,active_profile_version_id,activated_event_id,updated_at) VALUES(?,?,?,?)",
+        args: [event.sessionId, p.agentProfile.profileVersionId, event.id, event.committedAt],
+      });
     }
     const ownerResult = await tx.execute({ sql:"SELECT execution_owner_device_id FROM sessions WHERE session_id=?", args:[event.sessionId] });
     const executionOwner = ownerResult.rows[0]?.execution_owner_device_id;
     const executionOwned = executionOwner === null || executionOwner === undefined || String(executionOwner) === "legacy" || String(executionOwner) === this.#deviceId;
     if (event.type === "BranchCreated") { const p = event.payload as EventPayloads["BranchCreated"]; await tx.execute({ sql: "INSERT INTO branches(session_id,branch_id,parent_branch_id,fork_cursor,name,created_event_id) VALUES(?,?,?,?,?,?)", args: [event.sessionId,p.branchId,p.parentBranchId,p.forkCursor,p.name ?? null,event.id] }); }
     if (event.type === "BranchNamed") { const p = event.payload as EventPayloads["BranchNamed"]; await tx.execute({ sql: "UPDATE branches SET name=? WHERE session_id=? AND branch_id=?", args: [p.name,event.sessionId,event.branchId] }); }
-    if (event.type === "ContextMaterialized") { const p = event.payload as EventPayloads["ContextMaterialized"]; await tx.execute({ sql: "INSERT INTO context_records(context_id,session_id,branch_id,event_id,content_hash,records_json,context_json,created_at,harness_provenance_json,derivation_json) VALUES(?,?,?,?,?,?,?,?,?,?)", args: [p.contextId,event.sessionId,event.branchId,event.id,p.contentHash,json(p.records),json(p.context),event.committedAt,p.harnessProvenance === undefined ? null : json(p.harnessProvenance),p.derivation === undefined ? null : json(p.derivation)] }); }
+    if (event.type === "AgentProfileVersionCreated") {
+      const session = await tx.execute({
+        sql: "SELECT initial_branch_id FROM sessions WHERE session_id=?",
+        args: [event.sessionId],
+      });
+      if (String(session.rows[0]?.initial_branch_id) === event.branchId) {
+        await this.#insertAgentProfileVersion(tx, (event.payload as EventPayloads["AgentProfileVersionCreated"]).agentProfile, event);
+      }
+    }
+    if (event.type === "AgentProfileActivated") {
+      const p = event.payload as EventPayloads["AgentProfileActivated"];
+      const session = await tx.execute({
+        sql: "SELECT initial_branch_id FROM sessions WHERE session_id=?",
+        args: [event.sessionId],
+      });
+      if (String(session.rows[0]?.initial_branch_id) === event.branchId) {
+        const changed = await tx.execute({
+          sql: "UPDATE workspace_agent_profiles SET active_profile_version_id=?,activated_event_id=?,updated_at=? WHERE agent_session_id=? AND active_profile_version_id=?",
+          args: [p.profileVersionId, event.id, event.committedAt, event.sessionId, p.expectedActiveProfileVersionId],
+        });
+        if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Agent profile activation compare-and-swap failed", { sessionId: event.sessionId });
+      }
+    }
+    if (event.type === "ContextMaterialized") { const p = event.payload as EventPayloads["ContextMaterialized"]; await tx.execute({ sql: "INSERT INTO context_records(context_id,session_id,branch_id,event_id,content_hash,records_json,context_json,created_at,harness_provenance_json,derivation_json,prompt_provenance_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)", args: [p.contextId,event.sessionId,event.branchId,event.id,p.contentHash,json(p.records),json(p.context),event.committedAt,p.harnessProvenance === undefined ? null : json(p.harnessProvenance),p.derivation === undefined ? null : json(p.derivation),p.promptProvenance === undefined ? null : json(p.promptProvenance)] }); }
     if (event.type === "EffectRequested" && executionOwned) { const p = event.payload as EventPayloads["EffectRequested"]; await tx.execute({ sql: "INSERT INTO outbox(effect_id,session_id,branch_id,executor,operation,input_json,idempotency_key,idempotent,status,requested_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", args: [p.effectId,event.sessionId,event.branchId,p.executor,p.operation,json(p.input),p.idempotencyKey,p.idempotent ? 1 : 0,"pending",event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "EffectAttemptStarted" && executionOwned) { const p = event.payload as EventPayloads["EffectAttemptStarted"]; await tx.execute({ sql: "UPDATE outbox SET status='running',attempt=?,updated_at=? WHERE effect_id=? AND status IN ('pending','running')", args: [p.attempt,event.committedAt,p.effectId] }); }
     if (event.type === "EffectOutcomeRecorded" && executionOwned) { const p = event.payload as EventPayloads["EffectOutcomeRecorded"]; await tx.execute({ sql: "UPDATE outbox SET status=?,attempt=?,owner=NULL,lease_expires_at=NULL,updated_at=? WHERE effect_id=?", args: [p.outcome,p.attempt,event.committedAt,p.effectId] }); }
@@ -1049,10 +1494,10 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         if (new TextEncoder().encode(content).byteLength !== Number(documentRow.size) || sha256(content) !== String(documentRow.digest)) throw new ValidationError("Document chunks do not match imported document integrity metadata");
       }
     }
-    if (event.type === "RecursiveModelStarted" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStarted"]; await tx.execute({ sql: "INSERT INTO recursive_model_handles(handle_id,task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,model_json,response_admission_json,input_set_id,input_json,input_provenance_json,input_hash,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", args: [p.handleId,p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,json(p.model),json(p.responseAdmission),p.inputSetId ?? null,p.input === undefined ? null : json(p.input),p.inputProvenance === undefined ? null : json(p.inputProvenance),p.inputHash ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "RecursiveModelStarted" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStarted"]; await tx.execute({ sql: "INSERT INTO recursive_model_handles(handle_id,task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,model_json,response_admission_json,profile_pin_json,input_set_id,input_json,input_provenance_json,input_hash,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", args: [p.handleId,p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,json(p.model),json(p.responseAdmission),json(p.profilePin),p.inputSetId ?? null,p.input === undefined ? null : json(p.input),p.inputProvenance === undefined ? null : json(p.inputProvenance),p.inputHash ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "RecursiveModelStatusChanged" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; await tx.execute({ sql: "UPDATE recursive_model_handles SET status=?,outcome=COALESCE(?,outcome),result_message_id=COALESCE(?,result_message_id),result_json=COALESCE(?,result_json),result_artifact_id=COALESCE(?,result_artifact_id),error=COALESCE(?,error),last_event_id=?,updated_at=? WHERE handle_id=?", args: [p.status,p.outcome ?? null,p.resultMessageId ?? null,p.result === undefined ? null : json(p.result),p.resultArtifactId ?? null,p.error ?? null,event.id,event.committedAt,p.handleId] }); }
     if (event.type === "UserCorrection") { const p = event.payload as EventPayloads["UserCorrection"]; await tx.execute({ sql: "INSERT INTO user_corrections(correction_id,session_id,branch_id,corrected_event_ids_json,correction_text,event_id,created_at) VALUES(?,?,?,?,?,?,?)", args: [p.correctionId,event.sessionId,event.branchId,json(p.correctedEventIds),p.correction,event.id,event.committedAt] }); }
-    if (event.type === "RefinementReviewRequested") { const p = event.payload as EventPayloads["RefinementReviewRequested"]; await tx.execute({ sql: "INSERT INTO refinement_reviews(review_id,session_id,branch_id,fingerprint,mode,requested_scope,requested_scope_key,allowed_kinds_json,trigger_id,trigger_kind,trigger_fingerprint,trigger_key,nonterminal_key,trigger_evidence_through_cursor,evidence_event_ids_json,source_event_ids_json,source_snapshot_hash,source_through_cursor,instructions,request_json,snapshot_json,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'requested',?,?,?,?)", args: [p.reviewId,event.sessionId,event.branchId,p.fingerprint,p.mode,p.requestedScope,p.requestedScopeKey,json(p.allowedKinds),p.triggerId,p.triggerKind,p.triggerFingerprint,p.triggerKey ?? null,p.nonterminalKey ?? null,p.triggerEvidenceThroughCursor ?? null,json(p.evidenceEventIds),json(p.sourceEventIds),p.sourceSnapshotHash,p.sourceThroughCursor,p.instructions ?? null,json(p.request),p.snapshot === undefined ? null : json(p.snapshot),event.id,event.id,event.committedAt,event.committedAt] }); }
+    if (event.type === "RefinementReviewRequested") { const p = event.payload as EventPayloads["RefinementReviewRequested"]; await tx.execute({ sql: "INSERT INTO refinement_reviews(review_id,session_id,branch_id,fingerprint,mode,governance_wait,requested_scope,requested_scope_key,allowed_kinds_json,trigger_id,trigger_kind,trigger_fingerprint,trigger_key,nonterminal_key,trigger_evidence_through_cursor,evidence_event_ids_json,source_event_ids_json,source_snapshot_hash,source_through_cursor,instructions,request_json,snapshot_json,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'requested',?,?,?,?)", args: [p.reviewId,event.sessionId,event.branchId,p.fingerprint,p.mode,p.waitForGovernance ? 1 : 0,p.requestedScope,p.requestedScopeKey,json(p.allowedKinds),p.triggerId,p.triggerKind,p.triggerFingerprint,p.triggerKey ?? null,p.nonterminalKey ?? null,p.triggerEvidenceThroughCursor ?? null,json(p.evidenceEventIds),json(p.sourceEventIds),p.sourceSnapshotHash,p.sourceThroughCursor,p.instructions ?? null,json(p.request),p.snapshot === undefined ? null : json(p.snapshot),event.id,event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "RefinementReviewChildLinked" && executionOwned) { const p = event.payload as EventPayloads["RefinementReviewChildLinked"]; await tx.execute({ sql: "UPDATE refinement_reviews SET handle_id=?,child_session_id=?,child_branch_id=?,last_event_id=?,updated_at=? WHERE review_id=? AND status='requested' AND handle_id IS NULL", args: [p.handleId,p.childSessionId,p.childBranchId,event.id,event.committedAt,p.reviewId] }); }
     if (event.type === "RefinementReviewStatusChanged") { const p = event.payload as EventPayloads["RefinementReviewStatusChanged"]; const changed = await tx.execute({ sql: "UPDATE refinement_reviews SET status=?,decision_fingerprint=COALESCE(?,decision_fingerprint),proposal_id=COALESCE(?,proposal_id),reason=COALESCE(?,reason),last_event_id=?,updated_at=? WHERE review_id=? AND status=?", args: [p.status,p.decisionFingerprint ?? null,p.proposalId ?? null,p.reason ?? null,event.id,event.committedAt,p.reviewId,p.expectedStatus] }); if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Refinement review status compare-and-swap failed", { reviewId: p.reviewId, expectedStatus: p.expectedStatus }); }
     if (event.type === "RefinementTriggerConsumed") { const p = event.payload as EventPayloads["RefinementTriggerConsumed"]; await tx.execute({ sql: "INSERT INTO refinement_trigger_consumptions(session_id,branch_id,trigger_key,last_consumed_evidence_cursor,review_id,event_id,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(session_id,branch_id,trigger_key) DO UPDATE SET last_consumed_evidence_cursor=excluded.last_consumed_evidence_cursor,review_id=excluded.review_id,event_id=excluded.event_id,updated_at=excluded.updated_at WHERE CAST(excluded.last_consumed_evidence_cursor AS INTEGER)>CAST(refinement_trigger_consumptions.last_consumed_evidence_cursor AS INTEGER)", args: [event.sessionId,event.branchId,p.triggerKey,p.evidenceThroughCursor,p.reviewId,event.id,event.committedAt] }); }
@@ -1098,6 +1543,68 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     if (event.type === "RefinementApproved") { const p = event.payload as EventPayloads["RefinementApproved"]; await tx.execute({ sql: "INSERT INTO refinement_approvals(event_id,proposal_id,approved_by,scope,note,created_at) VALUES(?,?,?,?,?,?)", args: [event.id,p.proposalId,p.approvedBy,p.scope,p.note ?? null,event.committedAt] }); const scopes = await tx.execute({ sql: "SELECT scope FROM refinement_approvals WHERE proposal_id=? ORDER BY scope", args: [p.proposalId] }); await tx.execute({ sql: "UPDATE refinement_proposals SET approved_scopes_json=?,last_event_id=?,updated_at=? WHERE proposal_id=?", args: [json(scopes.rows.map((row) => String(row.scope))),event.id,event.committedAt,p.proposalId] }); }
     if (event.type === "RefinementRollbackApproved") { const p = event.payload as EventPayloads["RefinementRollbackApproved"]; await tx.execute({ sql: "INSERT INTO refinement_rollback_approvals(event_id,proposal_id,approved_by,role,note,created_at) VALUES(?,?,?,?,?,?)", args: [event.id,p.proposalId,p.approvedBy,p.role,p.note ?? null,event.committedAt] }); }
     if (event.type === "RefinementRolledBack") { const p = event.payload as EventPayloads["RefinementRolledBack"]; await tx.execute({ sql: "INSERT INTO refinement_rollbacks(rollback_id,proposal_id,candidate_id,version_ids_json,restored_version_ids_json,reason,event_id,created_at) VALUES(?,?,?,?,?,?,?,?)", args: [p.rollbackId,p.proposalId,p.candidateId,json(p.versionIds),json(p.restoredVersionIds),p.reason,event.id,event.committedAt] }); await tx.execute({ sql: "UPDATE refinement_proposals SET status='rolled_back',last_event_id=?,updated_at=? WHERE proposal_id=?", args: [event.id,event.committedAt,p.proposalId] }); }
+    if (event.type === "GovernedRefinementProposed") {
+      const p = event.payload as EventPayloads["GovernedRefinementProposed"];
+      await tx.execute({
+        sql: "INSERT INTO governed_refinement_proposals(proposal_id,session_id,branch_id,status,proposal_fingerprint,proposal_json,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,'proposed',?,?,?,?,?,?)",
+        args: [p.proposalId,event.sessionId,event.branchId,p.proposalFingerprint,json(p.proposal),event.id,event.id,event.committedAt,event.committedAt],
+      });
+    }
+    if (event.type === "GovernedRefinementValidated") {
+      const p = event.payload as EventPayloads["GovernedRefinementValidated"];
+      const changed = await tx.execute({
+        sql: "UPDATE governed_refinement_proposals SET status=?,validation_json=?,terminal_reason=CASE WHEN ?=0 THEN json_extract(?,'$.reason') ELSE terminal_reason END,last_event_id=?,updated_at=? WHERE proposal_id=? AND status=?",
+        args: [p.valid ? "validated" : "deterministically_rejected",json(p.validation),p.valid ? 1 : 0,json(p.validation),event.id,event.committedAt,p.proposalId,p.expectedStatus],
+      });
+      if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Governed refinement validation compare-and-swap failed", { proposalId: p.proposalId });
+    }
+    if (event.type === "RefinementGovernanceReviewRequested") {
+      const p = event.payload as EventPayloads["RefinementGovernanceReviewRequested"];
+      const changed = await tx.execute({
+        sql: "UPDATE governed_refinement_proposals SET frozen_input_json=?,frozen_input_digest=?,review_id=?,last_event_id=?,updated_at=? WHERE proposal_id=? AND status=?",
+        args: [json(p.frozenInput),p.frozenInputDigest,p.reviewId,event.id,event.committedAt,p.proposalId,p.expectedStatus],
+      });
+      if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Governance review request compare-and-swap failed", { proposalId: p.proposalId });
+    }
+    if (event.type === "RefinementGovernanceReviewChildLinked") {
+      const p = event.payload as EventPayloads["RefinementGovernanceReviewChildLinked"];
+      const changed = await tx.execute({
+        sql: "UPDATE governed_refinement_proposals SET status='reviewing',review_handle_id=?,reviewer_session_id=?,reviewer_branch_id=?,last_event_id=?,updated_at=? WHERE proposal_id=? AND status=? AND review_id=?",
+        args: [p.handleId,p.childSessionId,p.childBranchId,event.id,event.committedAt,p.proposalId,p.expectedStatus,p.reviewId],
+      });
+      if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Governance reviewer link compare-and-swap failed", { proposalId: p.proposalId });
+    }
+    if (event.type === "RefinementGovernanceReviewDecided") {
+      const p = event.payload as EventPayloads["RefinementGovernanceReviewDecided"];
+      const changed = await tx.execute({
+        sql: "UPDATE governed_refinement_proposals SET status=?,review_id=COALESCE(review_id,?),review_decision_id=?,decision_json=?,terminal_reason=?,last_event_id=?,updated_at=? WHERE proposal_id=? AND status=? AND (review_id=? OR (?='validated' AND review_id IS NULL))",
+        args: [p.status,p.reviewId,p.decisionId,p.decision === undefined ? null : json(p.decision),p.reason,event.id,event.committedAt,p.proposalId,p.expectedStatus,p.reviewId,p.expectedStatus],
+      });
+      if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Governance decision compare-and-swap failed", { proposalId: p.proposalId });
+    }
+    if (event.type === "GovernedRefinementApplied") {
+      const p = event.payload as EventPayloads["GovernedRefinementApplied"];
+      const changed = await tx.execute({
+        sql: "UPDATE governed_refinement_proposals SET status=?,applied_version_ids_json=?,terminal_reason=?,last_event_id=?,updated_at=? WHERE proposal_id=? AND status=? AND review_decision_id=?",
+        args: [p.status,json(p.appliedVersionIds),p.reason,event.id,event.committedAt,p.proposalId,p.expectedStatus,p.decisionId],
+      });
+      if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Governed refinement application compare-and-swap failed", { proposalId: p.proposalId });
+    }
+    if (event.type === "RefinementProposalTerminalNoticeDelivered") {
+      const p = event.payload as EventPayloads["RefinementProposalTerminalNoticeDelivered"];
+      const changed = await tx.execute({
+        sql: "UPDATE governed_refinement_proposals SET terminal_notice_event_id=COALESCE(terminal_notice_event_id,?),last_event_id=?,updated_at=? WHERE proposal_id=? AND terminal_notice_event_id IS NULL",
+        args: [event.id,event.id,event.committedAt,p.proposalId],
+      });
+      if (Number(changed.rowsAffected) !== 1) throw new ConflictError("Refinement terminal notice was already delivered", { proposalId: p.proposalId });
+    }
+    if (event.type === "RefinementRollbackApplied") {
+      const p = event.payload as EventPayloads["RefinementRollbackApplied"];
+      await tx.execute({
+        sql: "INSERT INTO refinement_restorations(rollback_id,target_kind,target_id,previous_version_id,restore_source_version_id,restoration_version_id,actor_json,reason,evidence_event_ids_json,event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        args: [p.rollbackId,p.targetKind,p.targetId,p.previousVersionId,p.restoreSourceVersionId,p.restorationVersionId,json(p.actor),p.reason,json(p.evidenceEventIds),event.id,event.committedAt],
+      });
+    }
     if (event.type === "SkillAvailabilityChanged") { const p = event.payload as EventPayloads["SkillAvailabilityChanged"]; await tx.execute({ sql: "INSERT INTO skill_availability_actions(event_id,entry_id,version_id,digest,availability,reason,created_at) VALUES(?,?,?,?,?,?,?)", args: [event.id,p.entryId,p.versionId,p.digest,p.availability,p.reason,event.committedAt] }); }
     if (event.type === "SkillInvocationRecorded") { const p = event.payload as EventPayloads["SkillInvocationRecorded"]; await tx.execute({ sql: "INSERT INTO skill_executions(event_id,entry_id,version_id,effect_id,execution_kind,created_at) VALUES(?,?,?,?,'invoke',?)", args: [event.id,p.entryId,p.versionId,p.effectId,event.committedAt] }); }
     if (event.type === "SkillTestRecorded") { const p = event.payload as EventPayloads["SkillTestRecorded"]; await tx.execute({ sql: "INSERT INTO skill_executions(event_id,entry_id,version_id,effect_id,execution_kind,passed,report_json,created_at) VALUES(?,?,?,?,'test',?,?,?)", args: [event.id,p.entryId,p.versionId,p.effectId,p.passed ? 1 : 0,json(p.report),event.committedAt] }); }
@@ -1156,6 +1663,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     branchId: string,
     untilCursor?: string,
     afterCursor?: string,
+    includeSessionProfileControl = true,
   ): Promise<AgentEvent[]> {
     const lineage = await this.#lineage(executor, sessionId, branchId);
     const events: AgentEvent[] = [];
@@ -1169,7 +1677,18 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     }
     const until = untilCursor === undefined ? Number.MAX_SAFE_INTEGER : sequenceOf(untilCursor);
     const after = afterCursor === undefined ? -1 : sequenceOf(afterCursor);
-    return events
+    const merged = new Map(events.map((event) => [event.id, event]));
+    if (includeSessionProfileControl) {
+      const control = await executor.execute({
+        sql: "SELECT * FROM events WHERE session_id=? AND type IN ('AgentProfileVersionCreated','AgentProfileActivated') AND sequence>? AND sequence<=? ORDER BY sequence",
+        args: [sessionId, after, until],
+      });
+      for (const row of control.rows) {
+        const event = rowToEvent(row);
+        merged.set(event.id, event);
+      }
+    }
+    return [...merged.values()]
       .filter((event) => sequenceOf(event.cursor) > after && sequenceOf(event.cursor) <= until)
       .sort((left, right) => sequenceOf(left.cursor) - sequenceOf(right.cursor));
   }
@@ -1208,6 +1727,15 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
           const value = Number(sequence);
           latest = latest === null ? value : Math.max(latest, value);
         }
+      }
+      const control = await this.#client.execute({
+        sql: "SELECT MAX(sequence) AS sequence FROM events WHERE session_id=? AND type IN ('AgentProfileVersionCreated','AgentProfileActivated')",
+        args: [sessionId],
+      });
+      const controlSequence = control.rows[0]?.sequence;
+      if (controlSequence !== null && controlSequence !== undefined) {
+        const value = Number(controlSequence);
+        latest = latest === null ? value : Math.max(latest, value);
       }
       return latest === null ? null : cursorOf(latest);
     }, { kind: "ordinary", operation: "load latest branch cursor" });
@@ -1565,9 +2093,9 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
 
   async rebuildOperationalProjections(): Promise<void> {
     await this.#writes.run(() => this.#withTransaction(async (tx) => {
-      for (const table of ["refinement_trigger_consumptions","user_corrections","refinement_reviews","memory_fts","subagent_spec_invocations","skill_executions","skill_availability_actions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
+      for (const table of ["refinement_restorations","governed_refinement_proposals","refinement_trigger_consumptions","user_corrections","refinement_reviews","memory_fts","subagent_spec_invocations","skill_executions","skill_availability_actions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","workspace_agent_profiles","agent_profile_versions","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
       const rows = await tx.execute("SELECT * FROM events ORDER BY sequence");
-      const selected = new Set(["SessionCreated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","UserCorrection","RefinementReviewRequested","RefinementReviewChildLinked","RefinementReviewStatusChanged","RefinementTriggerConsumed","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","SkillAvailabilityChanged","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
+      const selected = new Set(["SessionCreated","AgentProfileVersionCreated","AgentProfileActivated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","UserCorrection","RefinementReviewRequested","RefinementReviewChildLinked","RefinementReviewStatusChanged","RefinementTriggerConsumed","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","GovernedRefinementProposed","GovernedRefinementValidated","RefinementGovernanceReviewRequested","RefinementGovernanceReviewChildLinked","RefinementGovernanceReviewDecided","GovernedRefinementApplied","RefinementProposalTerminalNoticeDelivered","RefinementRollbackApplied","SkillAvailabilityChanged","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
       for (const row of rows.rows) { const event = rowToEvent(row); if (selected.has(event.type)) await this.#applyOperationalRows(tx,event); }
     }, { kind: "ordinary", operation: "rebuild operational projections" }));
   }
@@ -1674,6 +2202,9 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       "RefinementCandidateActivated", "RefinementCandidateAllocated", "RefinementCandidateExposed",
       "RefinementObservationRecorded", "RefinementDecided", "RefinementApproved",
       "RefinementRollbackApproved", "RefinementRolledBack", "SkillImported", "SkillAvailabilityChanged", "SkillInvocationRecorded", "SkillTestRecorded",
+      "GovernedRefinementProposed", "GovernedRefinementValidated", "RefinementGovernanceReviewRequested",
+      "RefinementGovernanceReviewChildLinked", "RefinementGovernanceReviewDecided", "GovernedRefinementApplied",
+      "RefinementProposalTerminalNoticeDelivered", "RefinementRollbackApplied",
       "SubagentSpecInvoked", "SyncConflictResolved",
     ];
     const unsupported = await this.#execute({
@@ -1707,6 +2238,8 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         await remove("document_chunks", "DELETE FROM document_chunks WHERE document_id IN (SELECT document_id FROM documents WHERE session_id=?)", [sessionId]);
         await remove("sync_quarantine", "DELETE FROM sync_quarantine WHERE json_extract(envelope_json,'$.body.sessionId')=?", [sessionId]);
         await remove("process_execution_leases", "DELETE FROM process_execution_leases WHERE scope_kind='root' AND scope_id=?", [sessionId]);
+        await remove("workspace_agent_profiles", "DELETE FROM workspace_agent_profiles WHERE agent_session_id=?", [sessionId]);
+        await remove("agent_profile_versions", "DELETE FROM agent_profile_versions WHERE agent_session_id=?", [sessionId]);
         for (const table of ["wake_queue", "schedules", "heartbeats", "goals", "input_sets", "documents", "outbox", "snapshots", "context_records", "branches"]) {
           await remove(table, `DELETE FROM ${table} WHERE session_id=?`, [sessionId]);
         }

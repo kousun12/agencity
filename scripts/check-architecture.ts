@@ -231,6 +231,8 @@ const requiredClassifications: Readonly<Record<string, string>> = {
   branches: "rebuildable-projection",
   snapshots: "rebuildable-projection",
   outbox: "operational-projection",
+  agent_profile_versions: "rebuildable-projection",
+  workspace_agent_profiles: "rebuildable-projection",
   schema_migrations: "migration-metadata",
   sqlite_sequence: "engine-metadata",
 };

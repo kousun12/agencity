@@ -168,6 +168,104 @@ describe("terminal inspector view models", () => {
     expect(output).not.toContain('"catalog"');
   });
 
+  test("profile history and governance show active distinction, exact guidance, and reviewer provenance", () => {
+    const statuses = [
+      "deterministically_rejected",
+      "reviewed_rejected",
+      "review_failed",
+      "review_unknown",
+      "apply_conflict",
+      "apply_failed",
+      "applied",
+    ];
+    const proposals = statuses.map((status, index) => ({
+      proposalId: `proposal-${index}`,
+      status,
+      noticeDelivered: true,
+      terminalReason: `Exact terminal reason ${index}`,
+      reviewDecisionId: `decision-${index}`,
+      proposal: {
+        proposalId: `proposal-${index}`,
+        principal: { kind: "owner", profileId: "owner" },
+        predictedEffect: `Predicted effect ${index}`,
+      },
+      decision: status === "reviewed_rejected" ? {
+        decision: "reject",
+        reason: "Reviewer rejected this exact proposal.",
+        violatedCriteria: ["bounded authority"],
+        revisionGuidance: "Remove the authority-changing instruction.",
+      } : null,
+      frozenInput: {
+        proposerRelationship: "workspace_owner",
+        canonicalDigest: "c".repeat(64),
+        constitution: {
+          componentId: "agencity.product-constitution",
+          version: 1,
+          digest: "a".repeat(64),
+        },
+        reviewPolicy: {
+          componentId: "agencity.refinement-governance-policy",
+          version: 1,
+          digest: "b".repeat(64),
+        },
+        reviewerDispatch: {
+          model: { provider: "fixture", model: "sealed-reviewer" },
+        },
+      },
+    }));
+    const value = {
+      activeProfileVersionId: "profile-2",
+      items: [{
+        profileVersionId: "profile-2",
+        revision: 2,
+        role: "Maintainer",
+        purpose: "Maintain the repository safely.",
+        instructions: "Run checks.\nKeep uncertainty visible.",
+        exactAgentPrompt: "Role: Maintainer\nPurpose: Maintain the repository safely.\nInstructions:\nRun checks.",
+        promptContractId: "agencity.agent-profile.v1",
+        reason: "Approved revision.",
+        createdBy: { kind: "user", profileId: "owner" },
+        createdAt: "2026-08-09T12:00:00.000Z",
+        active: true,
+        sourceProposalId: "proposal-6",
+        reviewDecisionId: "decision-6",
+      }, {
+        profileVersionId: "profile-1",
+        revision: 1,
+        role: "General agent",
+        purpose: "Complete repository tasks.",
+        instructions: "Complete the task.",
+        exactAgentPrompt: "Role: General agent",
+        promptContractId: "agencity.agent-profile.v1",
+        reason: "Initial sealed profile.",
+        createdBy: { kind: "system", componentId: "agencity", version: 1 },
+        createdAt: "2026-08-09T11:00:00.000Z",
+        active: false,
+        sourceProposalId: null,
+        reviewDecisionId: null,
+      }],
+      proposals,
+    };
+    const output = formatTerminalDetail(buildTerminalDetail("/profile-history", value), { footer: false });
+    expect(output).toContain("Revision 2 · Maintainer — ACTIVE");
+    expect(output).toContain("Revision 1 · General agent — historical");
+    expect(output).toContain("Role: General agent → Maintainer");
+    expect(output).toContain("Run checks.");
+    expect(output).toContain("Exact active agent prompt");
+    expect(output).toContain("deterministically rejected");
+    expect(output).toContain("reviewer rejected");
+    expect(output).toContain("review failed");
+    expect(output).toContain("review outcome unknown");
+    expect(output).toContain("apply conflict");
+    expect(output).toContain("apply failed");
+    expect(output).toContain("applied");
+    expect(output).toContain("Remove the authority-changing instruction.");
+    expect(output).toContain("agencity.product-constitution v1");
+    expect(output).toContain("fixture:sealed-reviewer");
+    expect(output).toContain(`Frozen review input: ${"c".repeat(64)}`);
+    expect(output).toContain("not proven improvement");
+  });
+
   test("raw diagnostics require an explicit formatter and redact credential fields and known values", () => {
     const previous = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "known-secret-for-inspector";

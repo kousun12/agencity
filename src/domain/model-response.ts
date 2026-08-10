@@ -12,6 +12,13 @@ import {
   normalizeRefinementReviewTransportValue,
 } from "./refinement-review-contract.ts";
 import { MAX_REFINEMENT_REVIEW_BYTES } from "./refinement-review.ts";
+import {
+  MAX_REFINEMENT_GOVERNANCE_OUTPUT_BYTES,
+  REFINEMENT_GOVERNANCE_CONTRACT_ID,
+  REFINEMENT_GOVERNANCE_CONTRACT_VERSION,
+  REFINEMENT_GOVERNANCE_TOOL_SET,
+  validateRefinementGovernanceDecision,
+} from "./refinement-governance.ts";
 import { MAX_AGENT_ACTION_BYTES } from "./agent-action.ts";
 import { CapabilityUnavailableError, ValidationError } from "./errors.ts";
 import {
@@ -41,10 +48,12 @@ export const RESERVED_MODEL_DISPATCH_INPUT_FIELDS = Object.freeze([
 
 export type BuiltInStructuredContractId =
   | typeof AGENT_TOOL_CONTRACT_ID
-  | typeof REFINEMENT_REVIEW_CONTRACT_ID;
+  | typeof REFINEMENT_REVIEW_CONTRACT_ID
+  | typeof REFINEMENT_GOVERNANCE_CONTRACT_ID;
 export type RegisteredBuiltInStructuredContractId =
   | typeof AGENT_TOOL_CONTRACT_ID
-  | typeof REFINEMENT_REVIEW_CONTRACT_ID;
+  | typeof REFINEMENT_REVIEW_CONTRACT_ID
+  | typeof REFINEMENT_GOVERNANCE_CONTRACT_ID;
 export type ModelSchemaEnforcement = "provider-strict" | "runtime-validated";
 
 export interface TextModelResponseContract {
@@ -135,11 +144,25 @@ const REFINEMENT_STRUCTURED_CONTRACT_TEMPLATE: StructuredContractTemplate =
     })),
   });
 
+const REFINEMENT_GOVERNANCE_STRUCTURED_CONTRACT_TEMPLATE:
+  StructuredContractTemplate = deepFreeze({
+    contractId: REFINEMENT_GOVERNANCE_CONTRACT_ID,
+    version: REFINEMENT_GOVERNANCE_CONTRACT_VERSION,
+    tools: REFINEMENT_GOVERNANCE_TOOL_SET.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      schemaDigest: tool.schemaDigest,
+    })),
+  });
+
 const STRUCTURED_CONTRACT_REGISTRY: Readonly<
   Record<RegisteredBuiltInStructuredContractId, StructuredContractTemplate>
 > = deepFreeze({
   [AGENT_TOOL_CONTRACT_ID]: AGENT_STRUCTURED_CONTRACT_TEMPLATE,
   [REFINEMENT_REVIEW_CONTRACT_ID]: REFINEMENT_STRUCTURED_CONTRACT_TEMPLATE,
+  [REFINEMENT_GOVERNANCE_CONTRACT_ID]:
+    REFINEMENT_GOVERNANCE_STRUCTURED_CONTRACT_TEMPLATE,
 });
 
 export const REGISTERED_BUILT_IN_STRUCTURED_CONTRACT_IDS:
@@ -147,6 +170,7 @@ export const REGISTERED_BUILT_IN_STRUCTURED_CONTRACT_IDS:
     Object.freeze([
       AGENT_TOOL_CONTRACT_ID,
       REFINEMENT_REVIEW_CONTRACT_ID,
+      REFINEMENT_GOVERNANCE_CONTRACT_ID,
     ]);
 
 const RESOLVED_STRUCTURED_CONTRACT_REGISTRY = deepFreeze({
@@ -167,6 +191,16 @@ const RESOLVED_STRUCTURED_CONTRACT_REGISTRY = deepFreeze({
     ),
     "runtime-validated": buildStructuredContract(
       REFINEMENT_STRUCTURED_CONTRACT_TEMPLATE,
+      "runtime-validated",
+    ),
+  },
+  [REFINEMENT_GOVERNANCE_CONTRACT_ID]: {
+    "provider-strict": buildStructuredContract(
+      REFINEMENT_GOVERNANCE_STRUCTURED_CONTRACT_TEMPLATE,
+      "provider-strict",
+    ),
+    "runtime-validated": buildStructuredContract(
+      REFINEMENT_GOVERNANCE_STRUCTURED_CONTRACT_TEMPLATE,
       "runtime-validated",
     ),
   },
@@ -773,6 +807,13 @@ export function validateModelToolSubmission(
     normalizeRefinementReviewTransportValue(record.input, {
       encodedBytes: record.inputBytes as number,
     });
+  } else if (contract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+    if (record.name !== REFINEMENT_GOVERNANCE_TOOL_SET[0]!.name) {
+      throw new ValidationError(
+        "Refinement governance submission has the wrong tool name",
+      );
+    }
+    validateRefinementGovernanceDecision(record.input);
   } else {
     throw new CapabilityUnavailableError(
       `tool submission validation for ${contract.contractId}`,
@@ -806,6 +847,9 @@ export function modelResponseContractInputByteLimit(
   }
   if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
     return MAX_REFINEMENT_REVIEW_BYTES;
+  }
+  if (contract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+    return MAX_REFINEMENT_GOVERNANCE_OUTPUT_BYTES;
   }
   throw new CapabilityUnavailableError(
     `tool input limit for ${contract.contractId}`,
@@ -1683,7 +1727,8 @@ function isBuiltInStructuredContractId(
   value: string,
 ): value is BuiltInStructuredContractId {
   return value === AGENT_TOOL_CONTRACT_ID ||
-    value === REFINEMENT_REVIEW_CONTRACT_ID;
+    value === REFINEMENT_REVIEW_CONTRACT_ID ||
+    value === REFINEMENT_GOVERNANCE_CONTRACT_ID;
 }
 
 function buildStructuredContract(

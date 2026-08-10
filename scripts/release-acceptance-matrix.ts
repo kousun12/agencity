@@ -12,7 +12,7 @@ async function run(gate: string, command: string[], detail: string): Promise<voi
   if (status === "FAIL") failed = true;
 }
 
-await run("deterministic installed acceptance", ["bun", "run", "test:acceptance"], "isolated bun link, fixture provider, recovery and satellite paths");
+await run("deterministic installed acceptance", ["bun", "run", "test:acceptance"], "isolated bun link, fixture provider, profile governance, recovery and satellite paths");
 
 if (process.env.AGENCITY_ACCEPTANCE_REAL_PROVIDER === "1") {
   if (process.env.OPENAI_API_KEY && process.env.AGENCITY_ACCEPTANCE_REAL_MODEL) {

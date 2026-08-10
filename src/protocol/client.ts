@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentState, ModelConfigurationInput, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
+import type { AgentEvent, AgentProfileInput, AgentState, ModelConfigurationInput, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
 import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
@@ -10,10 +10,12 @@ import type {
   StartAgentRunInput, AgentRunResult, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
   RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
   StartRefinementReviewInput, RefinementReviewRecord, RefinementTriggerPolicyV1,
+  SubmitGovernedRefinementInput,
   SkillManagementView, SkillImportPreview, InstallLocalSkillInput,
   AgentToolContractCapabilityView, ModelContractDiagnosticsView,
+  AgentProfileDetail, AgentProfileSummary,
 } from "../runtime/index.ts";
-import type { CandidateAllocationRecord, EvaluationObservationRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
+import type { CandidateAllocationRecord, EvaluationObservationRecord, GovernedRefinementRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, RefinementRollbackResult, RollbackRefinementInput, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
 import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
 import type { ProductBranchSummary } from "../product/index.ts";
@@ -147,11 +149,48 @@ export class AgentClient {
   productCredentialReference(provider: string, reference: string, label: string): Promise<unknown> { return this.#post("/product/config/credential-reference", { provider, reference, label }); }
   stopSession(sessionId: string, branchId: string, reason?: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/stop?branch=${branchId}`, reason === undefined ? {} : { reason }); }
   modelProviders(): Promise<ModelProviderDescriptor[]> { return this.#json("/model-providers"); }
-  async createSession(workspaceId: string, options: { model?: unknown; budget?: unknown; sessionName?: string; branchName?: string } = {}): Promise<{ sessionId: string; branchId: string }> {
+  async createSession(workspaceId: string, options: { model?: unknown; budget?: unknown; sessionName?: string; branchName?: string; agentProfile?: AgentProfileInput } = {}): Promise<{ sessionId: string; branchId: string }> {
     const model = await this.#compatibleModel(options.model);
     return this.#post("/sessions", { workspaceId, ...options, ...(model === undefined ? {} : { model }) });
   }
   snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
+  agentProfile(sessionId: string, includePrompt = false): Promise<AgentProfileSummary | AgentProfileDetail> { return this.#json(`/sessions/${sessionId}/agent-profile${includePrompt ? "?detail=full" : ""}`); }
+  agentProfiles(sessionId: string, options: { readonly includePrompt?: boolean; readonly limit?: number } = {}): Promise<{ activeProfileVersionId: string; items: Array<AgentProfileSummary | AgentProfileDetail> }> {
+    const query = new URLSearchParams();
+    if (options.includePrompt) query.set("detail", "full");
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return this.#json(`/sessions/${sessionId}/agent-profiles${query.size ? `?${query}` : ""}`);
+  }
+  proposeProfileUpdate(sessionId: string, branchId: string, input: {
+    readonly expectedProfileVersionId: string;
+    readonly replacement: AgentProfileInput;
+    readonly reason: string;
+    readonly predictedEffect: string;
+    readonly evidenceEventIds: readonly string[];
+    readonly revisesProposalId?: string;
+    readonly clientRequestId?: string;
+    readonly wait?: boolean;
+  }): Promise<GovernedRefinementRecord> {
+    return this.#post(`/sessions/${sessionId}/profile-proposals?branch=${encodeURIComponent(branchId)}`, input);
+  }
+  governedRefinement(proposalId: string): Promise<GovernedRefinementRecord> {
+    return this.#json(`/governed-refinements/${encodeURIComponent(proposalId)}`);
+  }
+  proposeGovernedRefinement(sessionId: string, branchId: string, input: SubmitGovernedRefinementInput): Promise<GovernedRefinementRecord> {
+    return this.#post(`/sessions/${sessionId}/governed-refinements?branch=${encodeURIComponent(branchId)}`, input);
+  }
+  governedRefinements(options: { readonly status?: string; readonly limit?: number } = {}): Promise<GovernedRefinementRecord[]> {
+    const query = new URLSearchParams();
+    if (options.status) query.set("status", options.status);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return this.#json(`/governed-refinements${query.size ? `?${query}` : ""}`);
+  }
+  rollbackRefinement(sessionId: string, branchId: string, input: RollbackRefinementInput): Promise<RefinementRollbackResult> {
+    return this.#post(`/sessions/${sessionId}/profiles/rollback?branch=${encodeURIComponent(branchId)}`, input);
+  }
+  refinementCapabilities(): Promise<JsonValue> {
+    return this.#json("/refinement-capabilities");
+  }
   modelContractDiagnostics(sessionId: string, branchId: string): Promise<ModelContractDiagnosticsView> { return this.#json(`/sessions/${sessionId}/model-contract-diagnostics?branch=${branchId}`); }
   message(sessionId: string, branchId: string, content: string): Promise<AgentEvent> { return this.#post(`/sessions/${sessionId}/messages?branch=${branchId}`, { content }); }
   async selectModel(sessionId: string, branchId: string, model: ModelConfigurationInput): Promise<unknown> {
@@ -165,7 +204,7 @@ export class AgentClient {
   run(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#json(`/sessions/${sessionId}/runs/${runId}?branch=${branchId}`); }
   resumeRun(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/resume?branch=${branchId}`); }
   cancelRun(sessionId: string, branchId: string, runId: string, reason?: string): Promise<AgentRunResult> { return this.#post(`/sessions/${sessionId}/runs/${runId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }
-  /** Retained diagnostic one-turn chat. Product tasks use startRun. */
+  /** Retained diagnostic compatibility run. Product tasks use startRun. */
   turn(sessionId: string, branchId: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/turns?branch=${branchId}`); }
   cell(sessionId: string, branchId: string, code: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/cells?branch=${branchId}`, { code }); }
   fork(sessionId: string, branchId: string, cursor: string, name?: string, compactionStrategy?: "deterministic-extractive-v1" | "model-summary-v1"): Promise<{ branchId: string }> { return this.#post(`/sessions/${sessionId}/branches?branch=${branchId}`, { cursor, ...(name === undefined ? {} : { name }), ...(compactionStrategy === undefined ? {} : { compactionStrategy }) }); }
