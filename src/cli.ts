@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import { writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
@@ -1076,14 +1075,9 @@ function printProductRunResult(
 
 async function printValue(value: unknown, json: boolean): Promise<void> {
   const rendered = json ? JSON.stringify(value, null, 2) : typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  const output = `${rendered}\n`;
-  if (Buffer.byteLength(output) <= 64 * 1024) {
-    writeFileSync(process.stdout.fd, output, "utf8");
-  } else {
-    await new Promise<void>((resolveWrite, rejectWrite) => {
-      process.stdout.write(output, error => error ? rejectWrite(error) : resolveWrite());
-    });
-  }
+  await new Promise<void>((resolveWrite, rejectWrite) => {
+    process.stdout.write(`${rendered}\n`, error => error ? rejectWrite(error) : resolveWrite());
+  });
 }
 
 async function manageAutonomy(supervisor: Supervisor, sessionId: string, branchId: string, parsed: ParsedCliArgs): Promise<void> {
