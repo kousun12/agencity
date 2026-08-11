@@ -128,20 +128,17 @@ const SDK_GUIDE = [
   "Pass file.value.sha256 as expectedSha256 when replacing a previously read file. Shell options use { timeoutMs, cwd?, idempotencyKey? }; the option is timeoutMs, not timeout.",
   "tools.readFile, tools.writeFile, and tools.shell throw when their durable effect does not succeed. Use tools.request(executor, operation, input, options?) when an expected failed outcome must be inspected without failing the cell.",
   "After a validation or shell failure, use any reliable path, line, column, or named-symbol diagnostic to inspect only a small surrounding range (about 20 lines on each side). If no diagnostic maps reliably to source, inspect the smallest relevant function or section; do not reread the whole file.",
-  "Use sql`SELECT ... ${value}` only for read-only relational queries. Use ordinary const/let for values needed only in the current cell. Use scratch for replaceable cross-cell intermediates that can be reacquired from durable inputs; scratch is exact-session/branch, noncanonical, local, bounded, and may disappear after failure, eviction, restart, detach, or a long pause.",
-  "Use sdk.scratch.status() for bounded availability metadata and sdk.scratch.clear() to clear the live scope. Check a needed key or provide a deliberate fallback; never replay a prior cell automatically because it may have performed non-idempotent effects.",
-  "Use state.get/set/list for small JSON decisions, handles, evidence references, and checkpoints required for correct recovery. Each committed state write appends permanent canonical history, so use a small stable key set and do not copy temporary caches, per-step logs, complete tool outputs, retained cells, or repetitive summaries into state.",
-  "Use artifacts.put/readRange for large or byte-oriented content that must remain available. Artifacts are immutable retained data, not disposable scratch.",
+  "Use sql`SELECT ... ${value}` only for read-only relational queries. Keep current-cell values in const/let, replaceable cross-cell intermediates in scratch, small recovery-critical JSON in state, and large durable content in artifacts.",
+  "Scratch is bounded, noncanonical session/branch state and may disappear. Check or rebuild needed values from durable inputs; never replay a prior cell automatically because it may have performed effects.",
   "Use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
   "sdk.harness.review accepts either instructions or { instructions, requestedScope, allowedKinds, wait }. Restrict allowedKinds when the desired artifact mechanism is known. Do not start refinement as a substitute for repairing the current user task or silently broaden that task into standing behavior; automatic repeated-failure review runs only after committed run boundaries.",
-  "Keep large read, search, and tool results in local variables while inspecting and transforming them. Put only replaceable nearby-cell intermediates in scratch. Do not console.log or return complete tool objects unless the next model decision requires the complete value.",
-  "Return the smallest useful observation: a focused summary, selected slice, count, digest, error, status, or artifact reference. A bare scratch assignment is an expression, so end scratch-writing cells with a compact observation or null when no observation is needed.",
-  "A cell's final expression or explicit return is its bounded observation. Lexical bindings remain cell-local; later cells access replaceable values through scratch, durable values through state or artifacts, and retained observations through cells.list/get.",
+  "Keep large read, search, and tool results local while transforming them. Do not console.log or return complete tool objects unless the next decision requires them.",
+  "A cell's final expression or explicit return is its bounded observation. Return only a focused summary, slice, count, digest, error, status, or reference; after writing scratch, return compact evidence or null instead of the assigned value.",
   "For requested changes, inspect enough to choose a focused edit, verify it with the narrowest relevant evidence, then finish. Run another cell only when a concrete unresolved requirement remains.",
 ].join("\n");
 export const AGENT_RUN_EXECUTION_GUIDANCE = Object.freeze({
   id: "agencity.agent-run.execution-guidance",
-  version: 5,
+  version: 6,
   text: SDK_GUIDE,
 });
 

@@ -21,19 +21,22 @@ describe("scratch prompt doctrine", () => {
   test("activates scratch guidance with the cell runtime surface", () => {
     expect(AGENT_RUN_EXECUTION_GUIDANCE).toMatchObject({
       id: "agencity.agent-run.execution-guidance",
-      version: 5,
+      version: 6,
     });
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
       "Cell globals: sdk, sql, session, console, scratch, state",
     );
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
-      "Use scratch for replaceable cross-cell intermediates",
+      "replaceable cross-cell intermediates in scratch",
     );
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
-      "Each committed state write appends permanent canonical history",
+      "small recovery-critical JSON in state",
     );
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
-      "A bare scratch assignment is an expression",
+      "after writing scratch, return compact evidence or null",
+    );
+    expect(AGENT_RUN_EXECUTION_GUIDANCE.text).not.toContain(
+      "sdk.scratch.status() for bounded availability metadata",
     );
   });
 });
