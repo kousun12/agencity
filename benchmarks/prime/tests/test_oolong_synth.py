@@ -22,6 +22,7 @@ from agencity_oolong_synth.taskset import (
     SCORER_COMMIT,
     SCORER_SHA256,
     SELECTION_MANIFEST_ID,
+    _prompt,
     _read_answer,
     parse_candidate,
     score_answer,
@@ -32,6 +33,14 @@ from scripts.preflight_oolong import build_manifest
 
 
 ROOT = Path(__file__).resolve().parent.parent
+OOLONG_CONFIGS = (
+    "oolong-synth-smoke.toml",
+    "oolong-yahoo-128k-sample.toml",
+    "oolong-yahoo-128k-full.toml",
+    "oolong-yahoo-128k-shard-0-of-4.toml",
+    "oolong-yahoo-128k-sol-sample.toml",
+    "oolong-yahoo-128k-sol-8-current.toml",
+)
 
 
 def row(**updates: object) -> dict[str, object]:
@@ -47,6 +56,25 @@ def row(**updates: object) -> dict[str, object]:
     }
     value.update(updates)
     return value
+
+
+class PromptContractTests(unittest.TestCase):
+    def test_guides_bounded_file_and_recursive_aggregation(self) -> None:
+        prompt = _prompt("Which label is most common?")
+        self.assertIn(f"await Bun.file('{CONTEXT_PATH}').text()", prompt)
+        self.assertIn("do not request the whole file as one typed page", prompt)
+        self.assertIn("rlm.startMany([{ prompt, input }, ...])", prompt)
+        self.assertIn("handle.result({ wait: true })", prompt)
+        self.assertIn("not per-record output", prompt)
+        self.assertIn("Reject empty or truncated results", prompt)
+
+    def test_oolong_configs_allow_36k_outputs(self) -> None:
+        for name in OOLONG_CONFIGS:
+            with self.subTest(config=name):
+                config = tomllib.loads(
+                    (ROOT / "configs" / name).read_text(encoding="utf-8")
+                )
+                self.assertEqual(config["sampling"]["max_tokens"], 36_000)
 
 
 class ScoringTests(unittest.TestCase):

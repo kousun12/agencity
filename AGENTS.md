@@ -281,8 +281,10 @@ context identities, sizes, and answer types. Its deterministic scorer is
 parity-tested against pinned Prime OOLONG-synth v1 source, and suite configs use
 portable shutdown/cleanup plus serial execution. Full context and gold answers
 remain private task-object fields outside serialized task data and provenance.
-Its bounded eight-task Sol treatment uses four explicit IDs from each Yahoo
-context window. A
+OOLONG prompts give exact large-file and recursive aggregation guidance, and
+its suite configs use a 36,000-token per-response ceiling while retaining
+separate turn and total-token bounds. Its bounded eight-task Sol treatment uses
+four explicit IDs from each Yahoo context window. A
 pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
