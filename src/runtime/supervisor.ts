@@ -1610,7 +1610,7 @@ export class Supervisor {
       let checkpoint: ScratchCheckpointCandidate | null = null;
       try {
         checkpoint = await this.console.checkpointScratch(scratchScope, cellId);
-        checkpoint = filterSensitiveScratchCheckpoint(checkpoint);
+        if (checkpoint) checkpoint = filterSensitiveScratchCheckpoint(checkpoint);
       } catch {
         if (this.console.status().running) {
           await this.console

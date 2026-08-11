@@ -46,6 +46,36 @@ describe("bounded console scratch", () => {
     expect(Reflect.ownKeys(scope.object)).toEqual([]);
   });
 
+  test("tracks writes and conservatively tracks nested mutable access", () => {
+    const scope = createScratchProxy();
+    expect(scope.dirty).toBe(false);
+
+    scope.object.count = 1;
+    expect(scope.dirty).toBe(true);
+    scope.markClean();
+    expect(scope.dirty).toBe(false);
+
+    void scope.object.count;
+    delete scope.object.missing;
+    expect(scope.dirty).toBe(false);
+
+    scope.object.index = { files: ["a.ts"] };
+    scope.markClean();
+    void scope.object.index;
+    expect(scope.dirty).toBe(true);
+
+    scope.markClean();
+    Object.getOwnPropertyDescriptor(scope.object, "index");
+    expect(scope.dirty).toBe(true);
+
+    scope.markClean();
+    scope.clear();
+    expect(scope.dirty).toBe(true);
+    scope.markClean();
+    scope.clear();
+    expect(scope.dirty).toBe(false);
+  });
+
   test("serializes eligible siblings independently without invoking hooks", () => {
     let getterCalls = 0;
     let toJsonCalls = 0;

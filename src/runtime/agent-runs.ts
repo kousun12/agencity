@@ -129,7 +129,7 @@ const SDK_GUIDE = [
   "tools.readFile, tools.writeFile, and tools.shell throw when their durable effect does not succeed. Use tools.request(executor, operation, input, options?) when an expected failed outcome must be inspected without failing the cell.",
   "After a validation or shell failure, use any reliable path, line, column, or named-symbol diagnostic to inspect only a small surrounding range (about 20 lines on each side). If no diagnostic maps reliably to source, inspect the smallest relevant function or section; do not reread the whole file.",
   "Use sql`SELECT ... ${value}` only for read-only relational queries. Keep current-cell values in const/let, replaceable cross-cell intermediates in scratch, small recovery-critical JSON in state, and large durable content in artifacts.",
-  "Scratch is bounded, noncanonical session/branch state and may disappear. Check or rebuild needed values from durable inputs; never replay a prior cell automatically because it may have performed effects.",
+  "Scratch is bounded, noncanonical session/branch state and may disappear. It never crosses agents or branches, including parent, child, sibling, and forked work; pass needed values through delegation inputs, durable messages, or artifacts. Check or rebuild missing values from durable inputs; never replay a prior cell automatically because it may have performed effects.",
   "Use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
   "sdk.harness.review accepts either instructions or { instructions, requestedScope, allowedKinds, wait }. Restrict allowedKinds when the desired artifact mechanism is known. Do not start refinement as a substitute for repairing the current user task or silently broaden that task into standing behavior; automatic repeated-failure review runs only after committed run boundaries.",
   "Keep large read, search, and tool results local while transforming them. Do not console.log or return complete tool objects unless the next decision requires them.",
@@ -138,7 +138,7 @@ const SDK_GUIDE = [
 ].join("\n");
 export const AGENT_RUN_EXECUTION_GUIDANCE = Object.freeze({
   id: "agencity.agent-run.execution-guidance",
-  version: 6,
+  version: 7,
   text: SDK_GUIDE,
 });
 

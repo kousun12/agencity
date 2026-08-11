@@ -21,7 +21,7 @@ describe("scratch prompt doctrine", () => {
   test("activates scratch guidance with the cell runtime surface", () => {
     expect(AGENT_RUN_EXECUTION_GUIDANCE).toMatchObject({
       id: "agencity.agent-run.execution-guidance",
-      version: 6,
+      version: 7,
     });
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
       "Cell globals: sdk, sql, session, console, scratch, state",
@@ -34,6 +34,9 @@ describe("scratch prompt doctrine", () => {
     );
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
       "after writing scratch, return compact evidence or null",
+    );
+    expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
+      "It never crosses agents or branches, including parent, child, sibling, and forked work",
     );
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).not.toContain(
       "sdk.scratch.status() for bounded availability metadata",

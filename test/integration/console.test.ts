@@ -758,6 +758,72 @@ describe("disposable TypeScript console process", () => {
     await supervisor.close();
   });
 
+  test("skips scratch serialization and persistence until scratch may have changed", async () => {
+    const temp = await makeTempRuntime("agencity-console-scratch-dirty-");
+    temps.push(temp);
+    let checkpointCalls = 0;
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      scratchCheckpointHooks: {
+        async load() { return { status: "cold" }; },
+        async checkpoint() { checkpointCalls++; },
+      },
+      recover: false,
+    });
+    const session = await supervisor.createSession({ workspaceId: "scratch-dirty" });
+
+    await supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      `({ scratchUntouched: true })`,
+    );
+    expect(checkpointCalls).toBe(0);
+
+    await supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      `scratch.count = 1; null`,
+    );
+    expect(checkpointCalls).toBe(1);
+
+    await supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      `scratch.count`,
+    );
+    expect(checkpointCalls).toBe(1);
+
+    await supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      `scratch.index = { files: ["a.ts"] }; null`,
+    );
+    expect(checkpointCalls).toBe(2);
+
+    await supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      `scratch.index.files.length`,
+    );
+    expect(checkpointCalls).toBe(3);
+
+    await supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      `await sdk.scratch.clear(); null`,
+    );
+    expect(checkpointCalls).toBe(4);
+    await supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      `await sdk.scratch.clear(); null`,
+    );
+    expect(checkpointCalls).toBe(4);
+    await supervisor.close();
+  });
+
   test("evicts failed scratch mutation and promptly rejects stale captured RPC facades", async () => {
     const { supervisor, sessionId, branchId } = await open(false);
     await supervisor.executeCell(sessionId, branchId, `

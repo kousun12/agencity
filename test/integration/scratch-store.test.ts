@@ -130,6 +130,63 @@ describe("file-local scratch store", () => {
     })).toThrow(/exact file:/i);
   });
 
+  test("does not create or rewrite cache rows for clean scratch scopes", async () => {
+    const temp = await makeTempRuntime("agencity-scratch-dirty-store-");
+    temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      enableLocalScratchCheckpoints: true,
+      recover: false,
+      startWakeSchedulers: false,
+      executionLease: {
+        workspaceId: "workspace-dirty-store",
+        ownerProcessId: "scratch-dirty-store-service",
+        leaseMs: 30_000,
+        renewalIntervalMs: 10_000,
+      },
+    });
+    const raw = createClient({ url: temp.databaseUrl });
+    try {
+      const session = await supervisor.createSession({ workspaceId: "workspace-dirty-store" });
+      await supervisor.executeCell(
+        session.sessionId,
+        session.branchId,
+        `({ scratchUntouched: true })`,
+      );
+      const empty = await raw.execute(
+        "SELECT source_cell_id FROM console_scratch_cache",
+      );
+      expect(empty.rows).toHaveLength(0);
+
+      const changed = await supervisor.executeCell(
+        session.sessionId,
+        session.branchId,
+        `scratch.count = 1; null`,
+      );
+      const stored = await raw.execute(
+        "SELECT source_cell_id FROM console_scratch_cache",
+      );
+      expect(stored.rows).toHaveLength(1);
+      expect(String(stored.rows[0]!.source_cell_id)).toBe(changed.cellId);
+
+      await supervisor.executeCell(
+        session.sessionId,
+        session.branchId,
+        `scratch.count`,
+      );
+      const unchanged = await raw.execute(
+        "SELECT source_cell_id FROM console_scratch_cache",
+      );
+      expect(unchanged.rows).toHaveLength(1);
+      expect(String(unchanged.rows[0]!.source_cell_id)).toBe(changed.cellId);
+    } finally {
+      raw.close();
+      await supervisor.close();
+    }
+  });
+
   test("explicit file-local managed composition restores exact branches", async () => {
     const temp = await makeTempRuntime("agencity-scratch-product-");
     temps.push(temp);

@@ -414,8 +414,8 @@ describe("autonomous durable agent runs", () => {
       expect(firstContext).toContain("the option is timeoutMs, not timeout");
       expect(firstContext).toContain("agencity.bounded-output.v1");
       expect(firstContext).toContain("artifacts.readRange");
-      expect(firstContext).toContain("Keep large read, search, and tool results in local variables");
-      expect(firstContext).toContain("Return the smallest useful observation");
+      expect(firstContext).toContain("Keep large read, search, and tool results local while transforming them");
+      expect(firstContext).toContain("Return only a focused summary");
       expect(firstContext).toContain("Treat every model step as a decision boundary");
       expect(firstContext).toContain("do not query notebook history to reconstruct the active run");
       expect(firstContext).toContain("about 20 lines on each side");

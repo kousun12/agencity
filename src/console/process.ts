@@ -149,12 +149,13 @@ export class ConsoleProcess {
   async checkpointScratch(
     scope: ScratchScope,
     sourceCellId: string,
-  ): Promise<ScratchCheckpointCandidate> {
+  ): Promise<ScratchCheckpointCandidate | null> {
     const value = await this.#control(
       { type: "scratch-checkpoint", scope, sourceCellId },
       this.options.scratchCheckpointTimeoutMs ?? SCRATCH_LIMITS.checkpointTimeoutMs,
       "scratch-checkpoint-timeout",
     );
+    if (value === null) return null;
     return validateScratchCheckpoint(value as ScratchCheckpointCandidate);
   }
 

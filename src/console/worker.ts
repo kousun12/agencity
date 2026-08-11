@@ -545,6 +545,7 @@ function checkpointScratch(
 ) {
   const warm = scratchScopes.get(scopeKey(message.scope));
   if (!warm) throw new Error("Scratch scope is not warm");
+  if (!warm.proxy.dirty) return null;
   const candidate = serializeScratch(warm.proxy.target, warm.proxy.skipped);
   warm.lastUsedAt = Date.now();
   return candidate;
@@ -563,6 +564,7 @@ function recordScratchCheckpoint(
   warm.proxy.skipped.clear();
   for (const item of candidate.skipped) warm.proxy.skipped.set(item.name, item.reason);
   warm.proxy.unavailableCheckpointCellId = message.sourceCellId;
+  warm.proxy.markClean();
   warm.lastUsedAt = Date.now();
   return { recorded: true };
 }

@@ -148,8 +148,10 @@ export interface ScratchProxyState {
   readonly object: Record<string, unknown>;
   readonly target: Record<string, unknown>;
   readonly skipped: Map<string, ScratchSkipReason>;
+  readonly dirty: boolean;
   unavailableCheckpointCellId: string | null;
   clear(): void;
+  markClean(): void;
 }
 
 const RESERVED_KEYS = new Set(["__proto__", "prototype", "constructor"]);
@@ -162,6 +164,9 @@ export function createScratchProxy(
   const target = Object.create(null) as Record<string, unknown>;
   const unavailable = new Map(skipped);
   let unavailableCheckpointCellId = initialCheckpointCellId;
+  let dirty = false;
+  const isMutable = (value: unknown): boolean =>
+    (typeof value === "object" && value !== null) || typeof value === "function";
   const validateKey = (key: PropertyKey, adding: boolean): string => {
     if (typeof key !== "string") throw new ScratchKeyPolicyError("Scratch does not support symbol keys");
     if (RESERVED_KEYS.has(key)) throw new ScratchKeyPolicyError(`Scratch key ${JSON.stringify(key)} is reserved`);
@@ -183,12 +188,21 @@ export function createScratchProxy(
           unavailableCheckpointCellId,
         );
       }
-      return Reflect.get(current, key, receiver);
+      const value = Reflect.get(current, key, receiver);
+      // Mutable values can change below the top-level proxy (for example,
+      // scratch.index.files.push(...)). Treat access as potentially dirty so a
+      // later checkpoint never silently restores stale nested data.
+      if (isMutable(value)) dirty = true;
+      return value;
     },
     set(current, key, value) {
       const name = validateKey(key, true);
-      unavailable.delete(name);
-      return Reflect.set(current, name, value, current);
+      const written = Reflect.set(current, name, value, current);
+      if (written) {
+        unavailable.delete(name);
+        dirty = true;
+      }
+      return written;
     },
     defineProperty(current, key, descriptor) {
       const name = validateKey(key, true);
@@ -204,13 +218,27 @@ export function createScratchProxy(
           "Scratch properties must remain configurable so the scope can be cleared",
         );
       }
-      unavailable.delete(name);
-      return Reflect.defineProperty(current, name, descriptor);
+      const defined = Reflect.defineProperty(current, name, descriptor);
+      if (defined) {
+        unavailable.delete(name);
+        dirty = true;
+      }
+      return defined;
     },
     deleteProperty(current, key) {
       const name = validateKey(key, false);
-      unavailable.delete(name);
-      return Reflect.deleteProperty(current, name);
+      const existed = Object.hasOwn(current, name) || unavailable.has(name);
+      const deleted = Reflect.deleteProperty(current, name);
+      if (deleted) {
+        unavailable.delete(name);
+        if (existed) dirty = true;
+      }
+      return deleted;
+    },
+    getOwnPropertyDescriptor(current, key) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(current, key);
+      if (descriptor && "value" in descriptor && isMutable(descriptor.value)) dirty = true;
+      return descriptor;
     },
     setPrototypeOf() {
       throw new ScratchKeyPolicyError("Scratch has an immutable null prototype");
@@ -223,6 +251,9 @@ export function createScratchProxy(
     object,
     target,
     skipped: unavailable,
+    get dirty() {
+      return dirty;
+    },
     get unavailableCheckpointCellId() {
       return unavailableCheckpointCellId;
     },
@@ -230,8 +261,12 @@ export function createScratchProxy(
       unavailableCheckpointCellId = value;
     },
     clear() {
+      if (Reflect.ownKeys(target).length > 0 || unavailable.size > 0) dirty = true;
       for (const key of Reflect.ownKeys(target)) Reflect.deleteProperty(target, key);
       unavailable.clear();
+    },
+    markClean() {
+      dirty = false;
     },
   };
 }
