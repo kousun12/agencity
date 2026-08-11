@@ -117,6 +117,7 @@ export type RefinementTrajectoryTriggerInput =
   | { readonly kind: "repeated_effect_failure"; readonly failureEventIds: readonly string[] }
   | { readonly kind: "repeated_cell_failure"; readonly failureEventIds: readonly string[] }
   | { readonly kind: "repeated_gate_failure"; readonly failureEventIds: readonly string[] }
+  | { readonly kind: "repeated_success"; readonly successEventIds: readonly string[] }
   | { readonly kind: "explicit_user_correction"; readonly correctionEventIds: readonly string[] };
 
 export interface BuildRefinementTrajectorySnapshotInput {
@@ -515,6 +516,24 @@ function validateAndDescribeTrigger(
       throw new RefinementContextError("invalid-trigger", "Repeated gate failures must reference one exact goal/gate cluster");
     }
     cluster = { kind: "repeated_gate_failure", goalId: gates[0]!.goalId, gateId: gates[0]!.gateId };
+  } else if (triggerInput.kind === "repeated_success") {
+    evidenceEventIds = normalizedEvidenceIds(triggerInput.successEventIds, true);
+    const successes = evidenceEventIds.map((id) => {
+      const event = requireEvent(byId, id);
+      const payload = recordPayload(event.payload);
+      if (event.type !== "AgentRunStatusChanged" || payload.status !== "succeeded") {
+        throw new RefinementContextError(
+          "invalid-trigger",
+          `Success evidence ${event.eventId} is not a typed succeeded AgentRunStatusChanged event`,
+        );
+      }
+      return { runId: payloadString(payload, "runId", event.eventId) };
+    });
+    const runIds = sortedUnique(successes.map((success) => success.runId));
+    if (runIds.length !== successes.length) {
+      throw new RefinementContextError("invalid-trigger", "Repeated success evidence must reference distinct agent runs");
+    }
+    cluster = { kind: "repeated_success", runIds };
   } else if (triggerInput.kind === "explicit_user_correction") {
     evidenceEventIds = normalizedEvidenceIds(triggerInput.correctionEventIds, false, true);
     for (const id of evidenceEventIds) {
@@ -576,6 +595,7 @@ function selectTrajectoryEvents(
 
   const evidenceIds = trigger.kind === "manual" ? trigger.focusEventIds ?? []
     : trigger.kind === "explicit_user_correction" ? trigger.correctionEventIds
+    : trigger.kind === "repeated_success" ? trigger.successEventIds
     : trigger.failureEventIds;
   const anchors = evidenceIds.map((id) => requireEvent(byId, id));
   for (const event of anchors) add(event, "trigger", true, 0);
@@ -615,6 +635,11 @@ function selectTrajectoryEvents(
         add(event, "cluster", false, 1);
       }
     }
+  } else if (trigger.kind === "repeated_success") {
+    const runIds = new Set(anchors.map((event) => optionalPayloadString(event.payload, "runId")!));
+    for (const eventId of agentRunOwnedEventIds(events, runIds)) {
+      add(requireEvent(byId, eventId), "cluster", false, 1);
+    }
   } else if (trigger.kind === "explicit_user_correction") {
     for (const anchor of anchors) {
       if (anchor.type !== "UserCorrection") continue;
@@ -646,6 +671,62 @@ function selectTrajectoryEvents(
   const mandatoryCount = ranked.filter((item) => item.mandatory).length;
   if (mandatoryCount > MAX_SELECTED_EVENTS) throw new RefinementContextError("snapshot-too-large", "Trigger evidence exceeds the selected-event hard count");
   return kept.sort(compareEvents);
+}
+
+function agentRunOwnedEventIds(
+  events: readonly NormalizedEvent[],
+  runIds: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const selected = new Set<string>();
+  const cellIds = new Set<string>();
+  const effectIds = new Set<string>();
+  const messageIds = new Set<string>();
+  const referencedEventIds = new Set<string>();
+  const availableEventIds = new Set(events.map((event) => event.eventId));
+
+  for (const event of events) {
+    const payload = optionalRecordPayload(event.payload);
+    if (!payload || !runIds.has(optionalPayloadString(payload, "runId") ?? "")) continue;
+    selected.add(event.eventId);
+    const actionId = optionalPayloadString(payload, "actionId");
+    if (event.type === "AgentRunActionCommitted" && actionId) {
+      cellIds.add(`agent-run-cell-${actionId}`);
+    }
+    const effectId = optionalPayloadString(payload, "effectId");
+    if (effectId) effectIds.add(effectId);
+    const finalMessageId = optionalPayloadString(payload, "finalMessageId");
+    if (finalMessageId) messageIds.add(finalMessageId);
+    for (const key of ["observationEventIds", "gateEvaluationEventIds"] as const) {
+      const ids = payload[key];
+      if (!Array.isArray(ids)) continue;
+      for (const id of ids) if (typeof id === "string") referencedEventIds.add(id);
+    }
+  }
+
+  for (const event of events) {
+    const payload = optionalRecordPayload(event.payload);
+    if (!payload) continue;
+    const cellId = optionalPayloadString(payload, "cellId");
+    if (cellId && cellIds.has(cellId)) selected.add(event.eventId);
+    const messageId = optionalPayloadString(payload, "messageId");
+    if (messageId && messageIds.has(messageId)) selected.add(event.eventId);
+    const effectId = optionalPayloadString(payload, "effectId");
+    if (effectId && effectIds.has(effectId)) selected.add(event.eventId);
+    if (event.type === "EffectRequested") {
+      const origin = optionalRecordPayload(payload.origin);
+      const originCellId = origin ? optionalPayloadString(origin, "cellId") : undefined;
+      if (origin?.kind === "cell" && originCellId && cellIds.has(originCellId) && effectId) {
+        effectIds.add(effectId);
+        selected.add(event.eventId);
+      }
+    }
+  }
+  for (const event of events) {
+    const effectId = optionalPayloadString(event.payload, "effectId");
+    if (effectId && effectIds.has(effectId)) selected.add(event.eventId);
+  }
+  for (const eventId of referencedEventIds) if (availableEventIds.has(eventId)) selected.add(eventId);
+  return selected;
 }
 
 function materializeEvents(selected: readonly SelectedEvent[], budget: number, secrets: readonly string[]): RefinementTrajectorySnapshotEvent[] {
@@ -1061,6 +1142,11 @@ function requireEvent(byId: ReadonlyMap<string, NormalizedEvent>, id: string): N
 function recordPayload(payload: unknown): Record<string, unknown> {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new RefinementContextError("invalid-trigger", "Typed trigger evidence has a malformed payload");
   return payload as Record<string, unknown>;
+}
+function optionalRecordPayload(payload: unknown): Record<string, unknown> | undefined {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : undefined;
 }
 function payloadString(payload: Record<string, unknown>, key: string, eventId: string): string {
   const value = payload[key];

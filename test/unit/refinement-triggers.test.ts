@@ -114,18 +114,44 @@ function failedCells(
   });
 }
 
+function runStatus(
+  runId: string,
+  cursor: number,
+  status: "succeeded" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown" = "succeeded",
+  owner: { sessionId: string; branchId: string } = { sessionId: "session-1", branchId: "branch-1" },
+): RefinementTriggerRecordInput {
+  return record(`run-status-${runId}-${cursor}`, cursor, "AgentRunStatusChanged", { runId, status }, owner);
+}
+
+function successes(
+  count: number,
+  startCursor = 1,
+  owner: { sessionId: string; branchId: string } = { sessionId: "session-1", branchId: "branch-1" },
+): RefinementTriggerRecordInput[] {
+  return Array.from({ length: count }, (_, index) =>
+    runStatus(`run-${index + 1}`, startCursor + index, "succeeded", owner)
+  );
+}
+
 describe("FU-016 deterministic refinement trigger policy", () => {
-  test("is versioned, immutable, local-only, and automatic-off by default", () => {
+  test("is versioned, immutable, local-only, and automatic-on by default", () => {
     expect(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.version).toBe(1);
-    expect(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.automatic).toBe(false);
+    expect(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.automatic).toBe(true);
     expect(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.scope).toBe("local");
     expect(Object.isFrozen(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1)).toBe(true);
     expect(Object.isFrozen(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.effectFailure)).toBe(true);
     expect(Object.isFrozen(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.cellFailure)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.repeatedSuccess)).toBe(true);
     expect(scanRefinementTriggers({
       sessionId: "session-1",
       branchId: "branch-1",
       records: threeFailures(),
+    })).toHaveLength(1);
+    expect(scanRefinementTriggers({
+      sessionId: "session-1",
+      branchId: "branch-1",
+      records: [...threeFailures(), ...successes(5, 20)],
+      policy: policy({ automatic: false }),
     })).toEqual([]);
 
     expect(() => scanRefinementTriggers({
@@ -147,6 +173,14 @@ describe("FU-016 deterministic refinement trigger policy", () => {
       records: threeFailures(),
       policy: retainedEarlierPolicy,
     })).toHaveLength(1);
+
+    const { repeatedSuccess: _omittedSuccess, ...retainedWithoutSuccessPolicy } = policy();
+    expect(scanRefinementTriggers({
+      sessionId: "session-1",
+      branchId: "branch-1",
+      records: successes(5),
+      policy: retainedWithoutSuccessPolicy,
+    }).map((trigger) => trigger.kind)).toEqual(["repeated_success"]);
   });
 
   test("detects a repeated failed-cell repair loop within one exact agent run", () => {
@@ -340,6 +374,135 @@ describe("typed user correction trigger", () => {
     expect(scan([record("future-correction", 1, "UserCorrection", { correctedEventIds: ["future"] }), record("future", 2, "CellFailed", {})])).toEqual([]);
     expect(scan([source, record("wrong-payload", 2, "UserCorrection", { correctedEventIds: ["source-event", "source-event"] })])).toEqual([]);
     expect(scan([source, record("lookalike", 2, "user_correction", { correctedEventIds: ["source-event"] })])).toEqual([]);
+  });
+});
+
+describe("repeated successful run trigger", () => {
+  test("fires at five distinct succeeded runs with exactly the five most recent statuses", () => {
+    expect(scan(successes(4))).toEqual([]);
+
+    const records = [
+      ...successes(6),
+      runStatus("run-6", 7),
+    ];
+    const triggers = scan(records);
+    expect(triggers).toHaveLength(1);
+    const trigger = triggers[0]!;
+    expect(trigger.kind).toBe("repeated_success");
+    if (trigger.kind !== "repeated_success") throw new Error("expected repeated success");
+    expect(trigger.runIds).toEqual(["run-2", "run-3", "run-4", "run-5", "run-6"]);
+    expect(trigger.evidenceEventIds).toEqual([
+      "run-status-run-2-2",
+      "run-status-run-3-3",
+      "run-status-run-4-4",
+      "run-status-run-5-5",
+      "run-status-run-6-7",
+    ]);
+    expect(new Set(trigger.runIds).size).toBe(5);
+  });
+
+  test("uses the exact trailing 2,048 local-record window", () => {
+    const outside = [
+      runStatus("run-1", 1),
+      ...Array.from({ length: 2_044 }, (_, index) =>
+        record(`noise-${index}`, index + 2, "MessageAppended", { role: "assistant", content: "noise" })
+      ),
+      ...successes(4, 2_046).map((item, index) => ({
+        ...item,
+        id: `late-${index + 2}`,
+        payload: { runId: `run-${index + 2}`, status: "succeeded" },
+      })),
+    ];
+    expect(scan(outside)).toEqual([]);
+
+    const exactWindow = outside.slice(1);
+    exactWindow.unshift(runStatus("run-1", 0));
+    expect(exactWindow).toHaveLength(2_049);
+    // Move all five successes into the final 2,048 records.
+    exactWindow.splice(1, 1);
+    expect(scan(exactWindow).map((trigger) => trigger.kind)).toEqual(["repeated_success"]);
+  });
+
+  test("counts no non-success terminal state and counts each succeeded run ID once", () => {
+    const records = [
+      runStatus("run-succeeded-1", 1),
+      runStatus("run-succeeded-1", 2),
+      runStatus("run-succeeded-2", 3),
+      runStatus("run-blocked", 4, "blocked"),
+      runStatus("run-failed", 5, "failed"),
+      runStatus("run-cancelled", 6, "cancelled"),
+      runStatus("run-budget", 7, "budget_exceeded"),
+      runStatus("run-unknown", 8, "unknown"),
+      runStatus("run-succeeded-3", 9),
+      runStatus("run-succeeded-4", 10),
+    ];
+    expect(scan(records)).toEqual([]);
+    const fifthDistinct = [...records, runStatus("run-succeeded-5", 11)];
+    const trigger = scan(fifthDistinct)[0]!;
+    expect(trigger.kind).toBe("repeated_success");
+    if (trigger.kind !== "repeated_success") throw new Error("expected repeated success");
+    expect(trigger.runIds).toEqual([
+      "run-succeeded-1",
+      "run-succeeded-2",
+      "run-succeeded-3",
+      "run-succeeded-4",
+      "run-succeeded-5",
+    ]);
+    expect(trigger.evidenceEventIds[0]).toBe("run-status-run-succeeded-1-2");
+  });
+
+  test("uses a stable branch-local key and preserves deterministic trigger ordering", () => {
+    const branchOne = scan(successes(5))[0]!;
+    const branchOneAgain = scan([...successes(5)].reverse())[0]!;
+    const branchTwoOwner = { sessionId: "session-1", branchId: "branch-2" };
+    const branchTwo = scanRefinementTriggers({
+      sessionId: branchTwoOwner.sessionId,
+      branchId: branchTwoOwner.branchId,
+      records: successes(5, 1, branchTwoOwner),
+      policy: policy(),
+    })[0]!;
+    expect(branchOne.key).toBe(branchOneAgain.key);
+    expect(branchTwo.key).not.toBe(branchOne.key);
+
+    const ordered = scan([
+      ...threeFailures(),
+      ...successes(5, 20),
+    ]);
+    expect(ordered.map((trigger) => trigger.kind)).toEqual([
+      "repeated_effect_failure",
+      "repeated_success",
+    ]);
+  });
+
+  test("consumes one success tranche and refires only after five newer distinct successes", () => {
+    const initialRecords = successes(5);
+    const initial = scan(initialRecords)[0]!;
+    const consumption = refinementTriggerConsumption(initial);
+    expect(scan([...initialRecords, ...successes(4, 6).map((item, index) => ({
+      ...item,
+      id: `new-status-${index + 6}`,
+      payload: { runId: `run-${index + 6}`, status: "succeeded" },
+    }))], { consumptions: [consumption] })).toEqual([]);
+
+    const fiveNew = [
+      ...initialRecords,
+      ...successes(5, 6).map((item, index) => ({
+        ...item,
+        id: `new-status-${index + 6}`,
+        payload: { runId: `run-${index + 6}`, status: "succeeded" },
+      })),
+    ];
+    const refired = scan(fiveNew, { consumptions: [consumption] });
+    expect(refired).toHaveLength(1);
+    expect(refired[0]!.key).toBe(initial.key);
+    expect(refired[0]!.newEvidenceEventIds).toEqual([
+      "new-status-6",
+      "new-status-7",
+      "new-status-8",
+      "new-status-9",
+      "new-status-10",
+    ]);
+    expect(scan(fiveNew, { nonterminalKeys: [refired[0]!.nonterminalKey] })).toEqual([]);
   });
 });
 

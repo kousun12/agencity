@@ -956,11 +956,11 @@ describe("FU-016 durable RefinerService", () => {
     }
   });
 
-  test("automatic trigger policy is profile-opt-in, local-only, thresholded, and deduplicated", async () => {
+  test("automatic trigger policy defaults on, preserves an explicit pause, and deduplicates", async () => {
     const provider = new ReviewProvider("review-automatic");
     const { supervisor, sessionId, branchId } = await fixture(provider);
     try {
-      expect((await supervisor.refiner.automaticPolicy()).automatic).toBe(false);
+      expect((await supervisor.refiner.automaticPolicy()).automatic).toBe(true);
       for (let index = 1; index <= 3; index++) {
         const effectId = `repeat-effect-${index}`;
         await supervisor.storage.appendEvents([{
@@ -971,6 +971,7 @@ describe("FU-016 durable RefinerService", () => {
           payload: { effectId, attempt: 1, outcome: "failed", error: "command timed out", observedAt: new Date().toISOString() },
         }]);
       }
+      await supervisor.refiner.setAutomatic(false);
       expect(await supervisor.refiner.scanBoundary(sessionId, branchId)).toEqual([]);
       await supervisor.refiner.setAutomatic(true);
       expect((await supervisor.profile.getPreference("refinement.trigger-policy.v1"))?.value).toMatchObject({ version: 1, automatic: true, scope: "local" });
@@ -991,12 +992,130 @@ describe("FU-016 durable RefinerService", () => {
     } finally { await supervisor.close(); }
   });
 
-  test("adds failed-cell detection to a retained earlier trigger-policy shape", async () => {
+  test("an explicit automatic-learning pause persists across restart and workspaces", async () => {
+    const provider = new ReviewProvider("review-device-pause");
+    const firstTemp = await makeTempRuntime("agencity-refiner-pause-first-");
+    const secondTemp = await makeTempRuntime("agencity-refiner-pause-second-");
+    temps.push(firstTemp, secondTemp);
+    const profileDatabaseUrl = `file:${join(firstTemp.directory, "shared-profile.db")}`;
+    const first = await Supervisor.open({
+      databaseUrl: firstTemp.databaseUrl,
+      artifactDirectory: firstTemp.artifactDirectory,
+      workspaceRoot: firstTemp.workspaceRoot,
+      profileDatabaseUrl,
+      modelProviders: [provider],
+      recover: false,
+    });
+    try {
+      await first.createSession({
+        workspaceId: "pause-workspace-first",
+        model: { provider: provider.name, model: "scripted-v1" },
+      });
+      expect((await first.refiner.setAutomatic(false)).automatic).toBe(false);
+    } finally {
+      await first.close();
+    }
+
+    const secondOptions = {
+      databaseUrl: secondTemp.databaseUrl,
+      artifactDirectory: secondTemp.artifactDirectory,
+      workspaceRoot: secondTemp.workspaceRoot,
+      profileDatabaseUrl,
+      modelProviders: [provider],
+      recover: false,
+    } as const;
+    const second = await Supervisor.open(secondOptions);
+    try {
+      await second.createSession({
+        workspaceId: "pause-workspace-second",
+        model: { provider: provider.name, model: "scripted-v1" },
+      });
+      expect((await second.refiner.automaticPolicy()).automatic).toBe(false);
+    } finally {
+      await second.close();
+    }
+
+    const reopened = await Supervisor.open(secondOptions);
+    try {
+      expect((await reopened.refiner.automaticPolicy()).automatic).toBe(false);
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  test("one boundary scan admits only the first deterministic eligible trigger", async () => {
+    const provider = new ReviewProvider("review-one-trigger-per-scan");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      for (const [group, error] of [["first", "command timed out"], ["second", "permission denied"]] as const) {
+        for (let index = 1; index <= 3; index++) {
+          const effectId = `${group}-effect-${index}`;
+          await supervisor.storage.appendEvents([{
+            sessionId,
+            branchId,
+            type: "EffectRequested",
+            producer: "supervisor",
+            idempotencyKey: `${group}-request-${index}`,
+            payload: {
+              effectId,
+              executor: "shell",
+              operation: "run",
+              input: { command: "false" },
+              origin: { kind: "runtime", requestId: `${group}-${index}` },
+              idempotencyKey: `${group}-${index}`,
+              idempotent: true,
+            },
+          }, {
+            sessionId,
+            branchId,
+            type: "EffectOutcomeRecorded",
+            producer: "executor",
+            idempotencyKey: `${group}-outcome-${index}`,
+            payload: {
+              effectId,
+              attempt: 1,
+              outcome: "failed",
+              error,
+              observedAt: new Date().toISOString(),
+            },
+          }]);
+        }
+      }
+
+      const firstAttempt = await supervisor.refiner.scanBoundary(
+        sessionId,
+        branchId,
+        "one-admission-first",
+      );
+      expect(firstAttempt).toHaveLength(1);
+
+      const secondAttempt = await supervisor.refiner.scanBoundary(
+        sessionId,
+        branchId,
+        "one-admission-second",
+      );
+      expect(secondAttempt).toHaveLength(1);
+      expect(secondAttempt[0]!.triggerKey).not.toBe(firstAttempt[0]!.triggerKey);
+
+      await waitFor(async () => {
+        const reviews = await supervisor.refiner.list({ sessionId, branchId });
+        return reviews.filter((review) =>
+          review.mode === "automatic" && review.status === "no_change").length === 2;
+      }, "both deferred automatic reviews terminal", 5_000);
+      expect(provider.calls).toBe(2);
+    } finally { await supervisor.close(); }
+  });
+
+  test("adds newer detectors to a retained earlier trigger-policy shape", async () => {
     const provider = new ReviewProvider("review-policy-upgrade");
     const { supervisor } = await fixture(provider);
     try {
       const current = await supervisor.refiner.automaticPolicy();
-      const { cellFailure: _omitted, ...earlierShape } = current;
+      const {
+        cellFailure: _omittedCellFailure,
+        repeatedSuccess: _omittedRepeatedSuccess,
+        ...earlierShape
+      } = current;
       await supervisor.profile.setPreference(
         "refinement.trigger-policy.v1",
         { ...earlierShape, automatic: true } as any,
@@ -1008,6 +1127,12 @@ describe("FU-016 durable RefinerService", () => {
           threshold: 3,
           windowRecords: 128,
           refireAfterNewEvidence: 3,
+        },
+        repeatedSuccess: {
+          enabled: true,
+          threshold: 5,
+          windowRecords: 2_048,
+          refireAfterNewEvidence: 5,
         },
       });
     } finally { await supervisor.close(); }
@@ -1100,6 +1225,41 @@ describe("FU-016 durable RefinerService", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("the next committed boundary after five successful runs admits repeated-success reflection", async () => {
+    const provider = new ReviewProvider("review-repeated-success-boundary");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      for (let index = 1; index <= 5; index++) {
+        const run = await supervisor.runs.start(sessionId, branchId, {
+          task: `complete successful run ${index}`,
+          goalMode: "none",
+        });
+        expect(run.status).toBe("succeeded");
+      }
+      expect((await supervisor.refiner.list({ sessionId, branchId }))
+        .filter((review) => review.triggerKind === "repeated_success")).toEqual([]);
+
+      const next = await supervisor.runs.start(sessionId, branchId, {
+        task: "open the next committed boundary",
+        goalMode: "none",
+      });
+      expect(next.status).toBe("succeeded");
+      await waitFor(async () =>
+        (await supervisor.refiner.list({ sessionId, branchId })).some((review) =>
+          review.mode === "automatic" &&
+          review.triggerKind === "repeated_success" &&
+          review.status === "no_change"),
+      "repeated-success automatic refinement terminal", 5_000);
+
+      const review = (await supervisor.refiner.list({ sessionId, branchId }))
+        .find((item) => item.triggerKind === "repeated_success")!;
+      expect(review.evidenceEventIds).toHaveLength(5);
+      expect(review.requestedScope).toBe("local");
+      expect(provider.runCalls).toBe(6);
+      expect(provider.calls).toBe(1);
+    } finally { await supervisor.close(); }
+  });
+
   test("a committed failed-cell repair loop admits one automatic refinement", async () => {
     const provider = new CellRepairLoopProvider("review-cell-boundary");
     const { supervisor, sessionId, branchId } = await fixture(provider);
@@ -1141,7 +1301,7 @@ describe("FU-016 durable RefinerService", () => {
       const events = await reopened.storage.loadEvents(sessionId, { branchId });
       const observations = events.filter((event) => event.type === "MessageAppended" && String((event.payload as any).messageId).startsWith("refinement-scan-observation-"));
       expect(observations).toHaveLength(1);
-      expect((observations[0]!.payload as any).content).toBe("Automatic refinement scan skipped at a committed boundary (validation_failed); task execution remains available and no refinement result is implied.");
+      expect((observations[0]!.payload as any).content).toBe("Automatic learning scan skipped at a committed boundary (validation_failed); task execution remains available and no learning result is implied.");
       expect(provider.runCalls).toBe(1);
       expect(provider.calls).toBe(0);
     } finally {
@@ -1264,7 +1424,8 @@ describe("FU-016 durable RefinerService", () => {
     const protocol = new ProtocolServer(supervisor); const server = protocol.listen(0);
     const client = new AgentClient(`http://${server.hostname}:${server.port}`);
     try {
-      expect((await client.refinementPolicy()).automatic).toBe(false);
+      expect((await client.refinementPolicy()).automatic).toBe(true);
+      expect((await client.setAutomaticRefinement(false)).automatic).toBe(false);
       expect((await client.setAutomaticRefinement(true)).automatic).toBe(true);
       const correction = await client.userCorrection(sessionId, branchId, "Protocol correction", [evidence.id]);
       expect(correction.correctionId).toMatch(/^user-correction-/);

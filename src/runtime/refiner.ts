@@ -179,6 +179,8 @@ export class RefinerService {
       ...retained,
       cellFailure: retained.cellFailure ??
         DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.cellFailure,
+      repeatedSuccess: retained.repeatedSuccess ??
+        DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.repeatedSuccess,
     } as RefinementTriggerPolicyV1;
     try {
       // The pure scanner is the authoritative strict policy validator.
@@ -217,7 +219,12 @@ export class RefinerService {
         brokeredCredentialValues: knownSecretValues(),
       });
       const admitted: RefinementReviewRecord[] = [];
-      for (const trigger of detected) admitted.push(await this.#admitAutomatic(trigger));
+      // A committed-boundary scan may discover several eligible trigger
+      // tranches, but admits only the first deterministic result. The others
+      // remain unconsumed and are reconsidered by a later scan.
+      for (const trigger of detected.slice(0, 1)) {
+        admitted.push(await this.#admitAutomatic(trigger));
+      }
       return admitted;
     } catch (error) {
       // The observation is deliberately fixed-shape: malformed retained policy
@@ -237,7 +244,7 @@ export class RefinerService {
       payload: {
         messageId: `refinement-scan-observation-${fingerprint}`,
         role: "tool",
-        content: `Automatic refinement scan skipped at a committed boundary (${category}); task execution remains available and no refinement result is implied.`,
+        content: `Automatic learning scan skipped at a committed boundary (${category}); task execution remains available and no learning result is implied.`,
       },
     }]);
   }
@@ -307,6 +314,8 @@ export class RefinerService {
           trigger.kind === "repeated_cell_failure" ||
           trigger.kind === "repeated_gate_failure"
           ? { kind: trigger.kind, failureEventIds: trigger.evidenceEventIds }
+          : trigger.kind === "repeated_success"
+            ? { kind: trigger.kind, successEventIds: trigger.evidenceEventIds }
           : { kind: trigger.kind, correctionEventIds: trigger.evidenceEventIds };
       return this.#admit(trigger.sessionId, trigger.branchId, {
         mode: "automatic", wait: false, requestedScope: "local", allowedKinds: ALLOWED_KINDS,
