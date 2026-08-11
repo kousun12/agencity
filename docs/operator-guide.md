@@ -65,9 +65,9 @@ agencity service status
 agencity service status --json
 ```
 
-The status reports lifecycle, recovery, attached clients, idle deadline, retained roots, and reasons the service remains resident. Active runs, pending effects, queued wakes, schedules, heartbeats, resident workers, and clients can keep it alive. A terminal blocked branch does not.
+The status reports lifecycle, recovery, attached clients, idle deadline, retained roots, and reasons the service remains resident. Human output renders the default duration as `1 hour`; `--json` retains the exact `idleShutdownMs: 3600000`. Active runs, pending effects, queued wakes, schedules, heartbeats, resident managed run-queue work, and clients can keep it alive. A terminal blocked branch, an idle console worker, and warm scratch do not.
 
-The service normally exits 60 seconds after becoming quiescent. It is not registered as an OS boot or login service.
+The service normally exits one hour after becoming quiescent. This is an idle process-lifetime bound, not a task timeout or scratch-retention guarantee. It is not registered as an OS boot or login service.
 
 ### Graceful shutdown
 
@@ -88,6 +88,8 @@ If status reports a conflict:
 3. Allow a healthy owner to finish or shut it down through `agencity service shutdown`.
 4. Do not delete the service manifest to bypass a live lease.
 5. If the prior owner is gone, retry after the retained lease expires; startup validates the process, manifest, workspace identity, configuration hash, and authenticated health together.
+
+The normalized idle timeout is part of the service configuration hash. During an upgrade from the former 60-second default, a new client using the one-hour default receives `CONFIG_MISMATCH` while the old owner is live. It does not take ownership or delete discovery state. Wait for the old owner to exit, or use the matching old binary to request authenticated shutdown, then start the new client.
 
 ## Observe and control work
 

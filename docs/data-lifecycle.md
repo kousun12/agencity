@@ -30,6 +30,8 @@ Its append-only event history is the canonical record of sessions, immutable ses
 
 The same database contains rebuildable projections and operational rows such as snapshots, routing indexes, the effect outbox, process leases, and synchronization status. Those rows accelerate or coordinate the runtime; they do not replace canonical events.
 
+The managed file-local product may also store bounded same-device console scratch checkpoints in the private `console_scratch_cache` operational table. Scratch is safe to delete, expires after seven days, and is subject to 64-branch and 16 MiB workspace quotas. It is not canonical, is not read by generated SQL, and is not a supported source of task ownership, recovery correctness, or evidence.
+
 Structured model effects retain one complete accepted formal input. Model completion, action, diagnostics, and progress records use bounded digests, identities, counts, and summaries rather than copying accepted input or retaining rejected argument bodies. Context and model-call provenance retain the exact profile version, agent-prompt digest, effective-system-prompt digest, and immutable prompt-component references used by an autonomous or recursive invocation. Treat the workspace database as sensitive trajectory data even when artifacts are stored elsewhere.
 
 Opening a database applies the repository's numbered migrations. Retained event meanings are not rewritten during ordinary projection rebuild.
@@ -76,7 +78,7 @@ The replica exchanges immutable event envelopes and retains synchronization stat
 
 ## Backup requirements
 
-There is no single-file backup that captures all Agencity-owned data.
+There is no single-file backup that captures all durable Agencity-owned data.
 
 For a complete local workspace backup, retain:
 
@@ -91,6 +93,8 @@ Back up the profile `auth.json` only through an appropriately protected secret-b
 Quiesce writers before a raw filesystem copy. Use `agencity service shutdown` and confirm that no advanced Agencity process is using the same files. Copying only a database's main file while its write-ahead log (WAL) or other sidecars are active can produce an inconsistent backup.
 
 Workspace files and external systems are separate dependencies. Back up or version them through their own mechanisms.
+
+A raw workspace-database copy may incidentally contain scratch-cache rows, but backup and restore do not promise scratch availability. Restored rows still require exact device, branch, integrity, source-event, expiry, and execution-fence checks. Plan recovery around canonical state and artifacts.
 
 ## Export
 
@@ -120,7 +124,7 @@ Export first records an ownership-checked manifest. For an owned scope it writes
 - `export-audit.json` with profile, invocation-pin, governance, review, decision, restoration, evidence, and artifact completeness checks; and
 - `manifest.json` with counts, resources, status, missing-artifact IDs, and the same completeness audit.
 
-Raw provider key values are not exported from `auth.json`. Workspace source files and external service state are also not included.
+Raw provider key values are not exported from `auth.json`. Workspace source files, external service state, and console scratch checkpoints are also not included.
 
 For schema-version-5 workspaces, `events.jsonl` carries initial and historical agent profiles, invocation profile pins, context/model-call effective-prompt and provider-input provenance, typed effect origins, complete observation ledgers, bounded-output artifact references, governed proposals, frozen reviewer inputs and dispatch, reviewer-child links, decisions, terminal notices, and restoration provenance because those values are canonical event payloads. The rebuildable profile, outbox-origin, and governance projection tables are not separate authority that must be exported beside their source events.
 
@@ -157,7 +161,7 @@ Deletion is separate from append-only domain history. Ordinary runtime transitio
 
 ### Session deletion
 
-Session deletion is available only for an independently erasable local session. The runtime refuses when retained relationships or evidence make narrow erasure unsafe, including governed proposals and reviewer children, terminal notices, restorations, family or reconciliation provenance, recursive links, replication, harness/refinement references, cross-session artifact references, or protected quarantine records. Initial and historical profile rows are removed only when the complete independent session is otherwise erasable.
+Session deletion is available only for an independently erasable local session. The runtime refuses when retained relationships or evidence make narrow erasure unsafe, including governed proposals and reviewer children, terminal notices, restorations, family or reconciliation provenance, recursive links, replication, harness/refinement references, cross-session artifact references, or protected quarantine records. Initial and historical profile rows are removed only when the complete independent session is otherwise erasable. A successful independent-session erasure also removes that session's scratch-cache rows.
 
 The runtime preflights references before deleting artifact bytes, rechecks inside the relational erasure transaction, and retains shared artifact content that other sessions still reference.
 

@@ -6,6 +6,8 @@ The runtime assumes the model-generated program, its workspace, and its operator
 
 The Bun console worker is a crash/lifecycle boundary only. It is **not** a security sandbox. Generated TypeScript can use ambient Bun/JavaScript capabilities; a shell command can access anything its OS user can access. `workspaceRoot` narrows typed file operations and initial shell cwd but does not confine arbitrary code or a shell command.
 
+Branch-scoped `scratch` is behavioral isolation against accidental supported-API reuse, not a hostile-code boundary. Generated code in the shared trusted-local realm can still use `globalThis`, imported module singletons, ambient files, or deliberate references outside scratch. Scratch never grants file, shell, network, model, budget, publication, or canonical-write authority.
+
 ## Explicit non-claims
 
 The current runtime does not provide:
@@ -42,6 +44,8 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 - The shell executor receives an environment with credential-shaped names removed.
 - OpenAI, Anthropic, and Vercel AI Gateway providers resolve stored or environment keys in the supervisor.
 - Provider execution uses the Vercel AI SDK inside the supervisor; provider keys are not passed to the TypeScript console worker.
+- Managed local scratch checkpointing inspects ordinary own descriptors without intentionally invoking getters, `toJSON`, or iterators, rejects registered and credential-shaped secrets, bounds status metadata, and terminates a worker when the checkpoint deadline expires. JavaScript proxies can still run reflective traps, so checkpointing is not a side-effect isolation boundary.
+- The private `console_scratch_cache` table is excluded from generated analytical SQL. Cache rows can remain in SQLite free pages, WAL files, raw backups, or recovery media after logical pruning and follow the existing database storage lifecycle.
 - Provider tool declarations do not receive credentials and have no execute callback. Provider keys remain supervisor-side for the model request.
 - The public Gateway model-catalog request sends no provider credential. Custom provider origins receive execution prompts and authentication and must be treated as trusted network destinations.
 - TUI-stored model keys live in a profile-owned `auth.json` written with mode `0600`, separate from canonical events and profile preferences.

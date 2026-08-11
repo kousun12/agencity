@@ -17,6 +17,8 @@ Ordinary product commands discover or start a per-workspace managed service. It:
 
 The token is read from the manifest and is not placed in argv, URLs, events, or output. Authenticated health includes workspace and service identity, application/protocol versions, readiness, and the configuration hash used during discovery.
 
+The service shuts down after one hour of quiescence by default. The normalized `idleShutdownMs` is part of that configuration hash, so clients with a different default receive `CONFIG_MISMATCH` while the current owner remains live. Warm scratch and an idle console worker are not keep-alive reasons.
+
 This is authenticated local process access, not multi-tenant authorization or a hostile-code sandbox.
 
 ### Embedded diagnostic server
@@ -67,7 +69,7 @@ Session, branch, event, effect, task, and handle IDs are opaque strings. SSE cur
 | `GET /model-catalog` | Normalized Gateway language-model descriptors, catalog endpoint identity, origin, freshness, capacity, pricing, and reasoning capability. It refreshes an absent or stale cache and reports cached fallback or unavailability explicitly. |
 | `POST /model-catalog/refresh` | Bounded public Gateway catalog refresh, with an explicit cached-fallback or unavailable result. |
 | `GET /model-providers` | Secret-free raw supervisor provider descriptors. Product UIs must apply product policy; Echo is an internal test fixture, not a product-selectable provider. |
-| `GET /service/status` | Managed-only lifecycle, recovery, idle deadline, attached clients, keep-alive reasons, and resident root workers. |
+| `GET /service/status` | Managed-only lifecycle, recovery, exact `idleShutdownMs` (default `3600000`), idle deadline, attached clients, keep-alive reasons, and resident root workers. |
 | `POST /service/shutdown` | Managed-only accepted graceful drain. It does not cancel sessions. |
 | `GET /service/agents` | Managed-only named root sessions and resident worker states. |
 | `GET /product/sessions` | Managed-only `ProductBranchSummary[]` catalog for every retained workspace branch, including exact IDs, names, model, status, task summary, counts, timestamps, and root classification. |
@@ -117,6 +119,8 @@ Selected capability query values must be nonblank UTF-8 strings. Provider is lim
 | `POST /sessions/:session/effects/:effect/reconciliation?branch=:branch` | Append `{ reconciliationId?, assessment, summary, evidence?, recordedBy }`; durable effect status remains unknown. |
 
 Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start`. Missing information becomes a blocked `finish`; a later user message starts an ordinary new run. There is no separate run-input route or retained input-request state.
+
+`POST .../cells` executes with the private console's exact-branch scratch semantics. Scratch values and inventories never appear in snapshots, event history, SSE, automatic context, or any protocol export. A caller that needs scratch status must execute a cell using `sdk.scratch.status()`; this is generated execution, not a new public protocol route.
 
 Profile summaries include version/session IDs, revision, role, purpose, prompt contract and digest, creator, optional specification source IDs, reason, creation time, and active status. Full detail additionally returns `instructions`, `exactAgentPrompt`, evidence IDs, supersession/restoration IDs, and proposal/review IDs. Normal reads omit prompt-bearing fields to keep lists bounded. Reads are observational. Proposal and rollback are explicit mutations and require a live route.
 

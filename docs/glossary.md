@@ -148,11 +148,15 @@ The validated, canonical decision submitted by the model for one run step. The f
 
 ### Cell
 
-A proposed TypeScript program executed in a disposable Bun worker. A committed cell records source, dependencies, bounded logs, result, exports, and terminal status. Lexical variables and the worker heap are not durable across cells.
+A proposed TypeScript program executed in a disposable Bun worker. A committed cell records source, dependencies, bounded logs, result, exports, and terminal status. Lexical variables are cell-local; worker heap and scratch are not durable identity.
+
+### Scratch
+
+An exact-session-and-branch, noncanonical console cache for replaceable intermediates. Warm scratch may contain arbitrary runtime values while one worker survives. The managed file-local product may opportunistically restore bounded eligible JSON from a same-device fenced operational checkpoint. Scratch is excluded from events, synchronization, export, automatic context, gates, and correctness requirements.
 
 ### Working value
 
-A named durable JSON value, or a reference to an artifact, saved through the console state API for later cells. It is the small structured-data alternative to relying on worker memory.
+A named durable JSON value, or a reference to an artifact, saved through the console state API for later cells and recovery. Each committed update appends retained history. It is the small structured-data alternative when a value cannot safely depend on scratch.
 
 ### Artifact
 
@@ -338,7 +342,7 @@ The full-screen terminal client that presents conversation, runs, cells, effects
 
 ### Managed workspace service
 
-The authenticated loopback process that owns detached run advancement, recovery, schedules, wakes, and same-device execution fencing for product use. It may stop when quiescent without deleting durable agent identity.
+The authenticated loopback process that owns detached run advancement, recovery, schedules, wakes, and same-device execution fencing for product use. It stops after one hour of quiescence by default without deleting durable agent identity. Warm scratch and an idle console worker are not keep-alive reasons.
 
 ### Placement
 

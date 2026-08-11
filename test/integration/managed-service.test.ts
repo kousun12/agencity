@@ -7,7 +7,17 @@ import { ScriptedAgentActionProvider } from "../../src/executors/index.ts";
 import type { ModelProvider, TextModelResponse } from "../../src/executors/model.ts";
 import { formalOutputFromAgentAction, formalOutputFromRefinementGovernanceDecision } from "../../src/executors/model-response.ts";
 import { Supervisor } from "../../src/runtime/index.ts";
-import { ManagedWorkspaceService, connectManagedService, managedServiceConfigurationHash, readServiceManifest, resolveWorkspace, serviceStatePaths, type ManagedServiceConfiguration, type ServiceManifestV1 } from "../../src/product/index.ts";
+import {
+  DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS,
+  ManagedWorkspaceService,
+  connectManagedService,
+  managedServiceConfigurationHash,
+  readServiceManifest,
+  resolveWorkspace,
+  serviceStatePaths,
+  type ManagedServiceConfiguration,
+  type ServiceManifestV1,
+} from "../../src/product/index.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
 import { REFINEMENT_GOVERNANCE_CONTRACT_ID, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2 } from "../../src/domain/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
@@ -263,9 +273,24 @@ describe("managed workspace service", () => {
     expect(new Set(after.map(event => event.cursor)).size).toBe(after.length);
     const status = await reattached.serviceStatus() as any;
     expect(status.roots[0]).toMatchObject({ worker: "detached" });
-    expect(status).toMatchObject({ attachedClients: 0, idleShutdownMs: 60_000 });
+    expect(status).toMatchObject({
+      attachedClients: 0,
+      idleShutdownMs: DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS,
+    });
     expect(status.keepAliveReasons).not.toContainEqual(expect.objectContaining({ kind: "attached_clients" }));
-    expect(new Date(status.idleShutdownAt).getTime()).toBeGreaterThan(Date.now());
+    const idleRemainingMs = new Date(status.idleShutdownAt).getTime() - Date.now();
+    expect(idleRemainingMs).toBeGreaterThan(3_590_000);
+    expect(idleRemainingMs).toBeLessThanOrEqual(DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS);
+  });
+
+  test("detached service child retains the one-hour default", async () => {
+    const config = await configuration("agencity-managed-child-default-");
+    const connection = await connectManagedService(config, { timeoutMs: 5_000 });
+    const status = await connection.client.serviceStatus() as any;
+    expect(status.idleShutdownMs).toBe(DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS);
+    const idleRemainingMs = new Date(status.idleShutdownAt).getTime() - Date.now();
+    expect(idleRemainingMs).toBeGreaterThan(3_590_000);
+    expect(idleRemainingMs).toBeLessThanOrEqual(DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS);
   });
 
   test("detached governance resumes once across managed-service request and terminal-boundary restarts", async () => {
@@ -407,6 +432,40 @@ describe("managed workspace service", () => {
     const history = await client.history(session.sessionId, session.branchId);
     expect(history.filter(event => event.type === "WakeClaimed")).toHaveLength(1);
     expect(history.filter(event => event.type === "WakeDelivered")).toHaveLength(1);
+  });
+
+  test("treats the former and current omitted defaults as a configuration mismatch", async () => {
+    const config = await configuration("agencity-managed-default-mismatch-");
+    // A former binary normalized an omitted value to 60 seconds before hashing
+    // and serializing it for its child. Supplying that normalized value here
+    // reproduces the old owner's wire/discovery configuration.
+    const formerDefault = { ...config, idleShutdownMs: 60_000 };
+    expect(managedServiceConfigurationHash(formerDefault))
+      .not.toBe(managedServiceConfigurationHash(config));
+
+    const oldOwner = await opened(formerDefault);
+    const manifestPath = serviceStatePaths(config.workspace.root).manifestPath;
+    const discoveryBefore = await Bun.file(manifestPath).text();
+    const oldManifest = await readServiceManifest({
+      workspaceRoot: config.workspace.root,
+      workspaceId: config.workspace.workspaceId,
+    });
+    await expect(connectManagedService(config)).rejects.toMatchObject({
+      code: "CONFIG_MISMATCH",
+    });
+    expect(oldOwner.ready).toBe(true);
+    expect(await Bun.file(manifestPath).text()).toBe(discoveryBefore);
+    expect(await readServiceManifest({
+      workspaceRoot: config.workspace.root,
+      workspaceId: config.workspace.workspaceId,
+    })).toMatchObject({ instanceId: oldManifest?.instanceId });
+
+    await oldOwner.close();
+    const current = await connectManagedService(config, { timeoutMs: 5_000 });
+    expect(current.manifest.instanceId).not.toBe(oldManifest?.instanceId);
+    expect(current.manifest.configHash).toBe(managedServiceConfigurationHash(config));
+    expect((await current.client.serviceStatus() as any).idleShutdownMs)
+      .toBe(DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS);
   });
 
   test("graceful shutdown drains and unpublishes without turning detach into cancellation", async () => {
@@ -575,6 +634,36 @@ describe("managed workspace service", () => {
       expect(lease).toMatchObject({ ownerProcessId: service.manifest.instanceId });
       expect(lease?.releasedAt).not.toBeNull();
     } finally { raw.close(); }
+  });
+
+  test("warm scratch is not a keep-alive reason and idle shutdown stops its worker", async () => {
+    const config = {
+      ...(await configuration("agencity-managed-warm-scratch-idle-")),
+      idleShutdownMs: 2_000,
+    };
+    const service = await opened(config);
+    const session = await service.supervisor.createSession({
+      workspaceId: config.workspace.workspaceId,
+      model: { provider: "echo", model: "echo-1" },
+    });
+    await service.supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      "scratch.warmOnly = () => 42; ({ warm: typeof scratch.warmOnly === 'function' })",
+    );
+    expect(service.supervisor.console.status().running).toBe(true);
+    expect((await service.status()).keepAliveReasons).not.toContainEqual(
+      expect.objectContaining({ kind: "resident_workers" }),
+    );
+
+    await waitFor(
+      async () => !(await Bun.file(serviceStatePaths(config.workspace.root).manifestPath).exists()),
+      "idle service with warm scratch shutdown",
+      7_000,
+    );
+    await service.close();
+    expect(service.ready).toBe(false);
+    expect(service.supervisor.console.status().running).toBe(false);
   });
 
   test("a terminal blocked run does not keep the service process resident", async () => {

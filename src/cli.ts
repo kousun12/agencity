@@ -6,7 +6,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { parseCliArgs, type ParsedCliArgs } from "./cli-args.ts";
 import { buildDataDeleteConfirmation, parseAdvancedArgv, type AdvancedCommandPath } from "./cli/advanced.ts";
 import { cliHelpColorEnabled, renderCliHelp } from "./cli/help.ts";
-import { createCliErrorEnvelope, createCliSuccessEnvelope, planCliOutput, type CliJsonValue } from "./cli/output.ts";
+import { createCliErrorEnvelope, createCliSuccessEnvelope, formatDuration, planCliOutput, type CliJsonValue } from "./cli/output.ts";
 import { CliRunInterruptCoordinator } from "./cli/run-interrupt.ts";
 import {
   AgentRuntimeError,
@@ -623,7 +623,7 @@ async function serviceCommand(configuration: ManagedServiceConfiguration, parsed
     `Workspace service: ${status.lifecycle}`,
     `Recovery: ${status.recovery}${status.recoveryError ? ` — ${status.recoveryError}` : ""}`,
     `Attached clients: ${status.attachedClients ?? "not reported by this service version"}`,
-    `Idle shutdown: ${status.idleShutdownAt ?? "not reported by this service version"}${status.idleShutdownMs === undefined ? "" : ` (${status.idleShutdownMs} ms after activity)`}`,
+    `Idle shutdown: ${status.idleShutdownAt ?? "not reported by this service version"}${status.idleShutdownMs === undefined ? "" : ` (${formatDuration(status.idleShutdownMs)} after activity)`}`,
     `Keeps alive: ${status.keepAliveReasons === undefined ? "not reported by this service version" : status.keepAliveReasons.length ? status.keepAliveReasons.map(reason => reason.summary).join("; ") : "none"}`,
     `Root sessions: ${status.roots.length}`,
   ].join("\n"));

@@ -16,6 +16,26 @@ export const CLI_EXIT_CODES = Object.freeze({
 
 export type CliExitCode = (typeof CLI_EXIT_CODES)[keyof typeof CLI_EXIT_CODES];
 
+/** Format an admitted managed-service duration without changing typed/JSON milliseconds. */
+export function formatDuration(milliseconds: number): string {
+  if (milliseconds < 1_000) return `${milliseconds} ms`;
+  const units = [
+    { label: "hour", milliseconds: 60 * 60 * 1_000 },
+    { label: "minute", milliseconds: 60 * 1_000 },
+    { label: "second", milliseconds: 1_000 },
+  ] as const;
+  let remaining = milliseconds;
+  const parts: string[] = [];
+  for (const unit of units) {
+    const count = Math.floor(remaining / unit.milliseconds);
+    if (count === 0) continue;
+    parts.push(`${count} ${unit.label}${count === 1 ? "" : "s"}`);
+    remaining -= count * unit.milliseconds;
+  }
+  if (remaining > 0) parts.push(`${remaining} ms`);
+  return parts.join(" ");
+}
+
 /** Stable v1 mapping. Unknown codes deliberately remain generic failures. */
 export const CLI_ERROR_EXIT_CODES: Readonly<Record<string, Exclude<CliExitCode, 0>>> = Object.freeze({
   CLI_ERROR: CLI_EXIT_CODES.FAILURE,

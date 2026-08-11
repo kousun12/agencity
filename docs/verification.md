@@ -41,7 +41,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 
 These are static constraints. They do not replace replay, recovery, protocol, security, or product behavior tests.
 
-`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-5 event replay and reducer-15 rebuild, typed effect origins, exact provider-input admission, bounded observation ownership, bounded shell/file/artifact/cell output, root and nested repository-instruction loading, durable initial agent profiles and prompt pins, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, managed service behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
+`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-5 event replay and reducer-15 rebuild, typed effect origins, exact provider-input admission, bounded observation ownership, bounded shell/file/artifact/cell output, root and nested repository-instruction loading, durable initial agent profiles and prompt pins, branch-scoped warm scratch, bounded fenced local scratch checkpoints and recovery, disposable console behavior, outbox recovery, formal autonomous actions, structured refinement, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, one-hour managed-service defaults and keep-alive behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
 
 Those tests use local fixtures, temporary databases, deterministic providers, and in-process or loopback test services where appropriate. A pass supports the behaviors exercised by those tests. It does not establish hostile-code isolation, exactly-once external effects, automatic cross-device failover, or correctness at every possible machine-instruction crash boundary.
 
@@ -60,12 +60,13 @@ The suite uses a local OpenAI API fixture reached through the Vercel AI SDK tran
 - truthful missing-provider behavior and explicit provider/model selection;
 - canonical catalog model IDs and durable reasoning-effort selection;
 - autonomous TypeScript cells and typed file or shell effects;
+- compact cell observations, bounded durable-state use, warm scratch across cells, and truthful same-device scratch restore/reconstruction after managed worker and service loss;
 - unexpected large shell output, bounded spill delivery, and focused exact artifact-range recovery before completion;
 - exact root and child provider tool sets, single-call cardinality, narration-plus-call acceptance, and no text-JSON fallback;
 - durable recursive calls, child agents, messages, and retained follow-up;
 - sealed structured refinement submission with a message-free typed child result;
 - failed completion-gate repair;
-- detach, client loss, managed-service recovery, resume, named branching, tree, status, and history;
+- detach, client loss, managed-service recovery, one-hour typed and human status, resume, named branching, tree, status, and history;
 - distinct non-interactive run outcomes and interruption behavior;
 - committed-action and effect crash recovery without duplicate execution;
 - unknown effects, no automatic retry, and evidence-only reconciliation; and
@@ -158,6 +159,18 @@ Repository `AGENTS.md` loading was verified on August 10, 2026:
 - installed acceptance: 16 passed, 1 credential-gated skip, 0 failed.
 
 The focused coverage proves bounded root loading and change detection; root-to-nearest nested precedence; digest deduplication including concurrent same-directory reads; changed, removed, restored, and pending omitted nested files; restart retention; ancestor, digest, redaction, active-context, and per-cell omission limits; symlink refusal; provider-message placement; trajectory-snapshot scrubbing; and exclusion from sealed refinement and governance reviewer contexts. The complete default `bun run verify` gate passed. One preceding full attempt had a transient failure in the cross-device shell-effect test; its isolated seven-test file and the complete rerun passed. Live-provider, official Turso Sync server, and Turso Cloud checks remain skipped and unverified.
+
+### Console scratch and service-lifetime evidence
+
+The Phase D completion slice was verified on August 11, 2026:
+
+- managed-service integration: 20 passed, 0 failed;
+- product CLI integration: 16 passed, 0 failed;
+- primary isolated linked-executable acceptance: 3 passed, 0 failed;
+- typecheck and architecture checks: passed; and
+- `git diff --check`: passed.
+
+The coverage includes the exact one-hour default and deadline, detached child startup, short override shutdown, active keep-alive reasons, warm scratch as a non-keep-alive cache, console-worker shutdown, former/current normalized configuration mismatch without takeover, human `1 hour` status with exact JSON milliseconds, compact observations, one bounded durable-state key, warm exact-branch reuse, detach/no-ID resume, same-device eligible JSON restore after service loss, and deliberate reconstruction of a warm-only function. The full acceptance matrix and aggregate `bun run verify` remain parent-owned follow-up. Live-provider, official Turso Sync server, and Turso Cloud checks were not run in this slice and remain unverified.
 
 ### Previous recorded baseline
 

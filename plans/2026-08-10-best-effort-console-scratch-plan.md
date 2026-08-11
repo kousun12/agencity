@@ -1,6 +1,6 @@
 # Best-effort TypeScript console scratch plan
 
-**Status:** Proposed  
+**Status:** Implemented; aggregate verification pending
 **Date:** August 10, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Agent context and observation efficiency](./2026-08-09-agent-context-efficiency-plan.md), [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), and [Durable tenacious goal orchestration](./2026-08-09-tenacious-goal-orchestration-plan.md)
@@ -626,3 +626,10 @@ This plan is complete when:
 - Validation: Focused scratch storage, migration, managed fencing, recovery, console, placement, and data-control tests pass together with typecheck, architecture checking, and diff checking.
 - Plan notes: Cold persistence is enabled only when exact file-local composition also has managed execution-fence authority. Direct diagnostic supervisors and remote placements remain warm-only rather than receiving an unfenced or fallback cache.
 - Remaining: Managed-service lifetime, broader public documentation, installed-product coverage, aggregate verification, and external gated checks.
+
+### 2026-08-11 — Managed-service lifetime and installed product
+- Completed: Changed the normalized managed-service default to 3,600,000 milliseconds; preserved short overrides, keep-alive rules, and timeout-sensitive configuration hashing; added one-hour human status formatting with exact typed/JSON milliseconds; covered former/current default mismatch, detached child startup, active and scratch-only idle behavior, and worker shutdown; updated the repository guide and public Console SDK, operator, recovery, security, placement, data-lifecycle, glossary, capability, verification, README, user, configuration, architecture, API, protocol, and event references.
+- Installed product: Added an isolated linked-executable journey with compact cell observations, one bounded durable-state key, exact-branch warm object/function reuse, detached admission and no-ID resume, explicit service loss, same-device eligible JSON restoration, and deliberate rebuilding of a warm-only helper from durable input.
+- Validation: The complete managed-service integration file passed 20 tests, the product CLI integration file passed 16 tests, and the complete primary installed acceptance file passed 3 tests. Typecheck, architecture checking, and final diff checking passed.
+- Plan notes: The old-binary mismatch is represented by the exact former normalized 60,000-millisecond configuration because discovery hashes serialized normalized values. Warm scratch and a running but idle console process remain non-keep-alive state. Human formatting changes only CLI text; protocol and JSON shapes retain exact milliseconds.
+- Remaining: Parent-owned aggregate verification and separately gated live-provider, official Turso Sync, and Turso Cloud checks.

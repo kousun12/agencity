@@ -8,7 +8,7 @@ This reference describes the model-facing cell environment and its private super
 
 An autonomous model request exposes exactly two declaration-only provider tools: `bun_console` and `finish`. Those tools have no execute callbacks and do not expose the SDK to the provider. An accepted `bun_console` call proposes source text; Agencity validates and durably commits the canonical action before creating the disposable cell described below.
 
-The injected names in this document—`tools`, `sql`, `state`, `cells`, `artifacts`, `rlm`, `sdk`, memory, agents, skills, goals, and related facades—exist only inside that later cell. They are not provider tools. Provider narration cannot invoke them, and Agencity has no assistant-text JSON or fenced-code fallback.
+The injected names in this document—`tools`, `sql`, `scratch`, `state`, `cells`, `artifacts`, `rlm`, `sdk`, memory, agents, skills, goals, and related facades—exist only inside that later cell. They are not provider tools. Provider narration cannot invoke them, and Agencity has no assistant-text JSON or fenced-code fallback.
 
 ## Execution model
 
@@ -27,7 +27,7 @@ rows.slice(0, 5)
 
 If the cell has no cell-level `return`, its last top-level expression becomes the observation and is awaited when it is a promise. An explicit cell-level `return` keeps normal early-return behavior. A `return` inside a nested function does not suppress final-expression observation. A cell ending in a declaration observes `null`.
 
-Cells on one branch are serialized. The worker heap is disposable and can be restarted after every committed cell without changing durable semantics.
+Cells on one branch are serialized. The worker heap is disposable and can be restarted after every committed cell without changing durable semantics. Exact-session-and-branch scratch is a best-effort acceleration layer, not part of those semantics.
 
 ## Injected names
 
@@ -36,6 +36,7 @@ Every cell receives:
 | Name | Value |
 |---|---|
 | `session` | `{ id, branchId }` for the executing branch. |
+| `scratch` | Direct exact-branch object for replaceable cross-cell intermediates. |
 | `state` | Durable typed working values: `restored`, `get`, `set`, and `list`. |
 | `cells` | Retained cell history: `list` and `get`. |
 | `artifacts` | Scoped content-addressed artifacts: `put` and bounded `readRange`. |
@@ -43,21 +44,22 @@ Every cell receives:
 | `sql` | Parameterized read-only tagged template. |
 | `inspect` | Bounded, getter-free, redacting preview function. |
 | `rlm` | Durable recursive-model calls. |
-| `sdk` | Namespaced access to the surfaces above plus memory, harness, skills, specifications, agents, goals, heartbeats, schedules, and context. |
+| `sdk` | Namespaced access to the surfaces above, including `scratch.status/clear`, plus memory, harness, skills, specifications, agents, goals, heartbeats, schedules, and context. |
 | `console` | Cell-local `log`, `warn`, and `error`; output becomes bounded cell logs. |
 
-The direct `state`, `cells`, `artifacts`, `tools`, `inspect`, and `rlm` names are the same implementations exposed under `sdk`. `sql` and `session` are direct cell parameters rather than `sdk` properties.
+The direct `state`, `cells`, `artifacts`, `tools`, `inspect`, and `rlm` names are the same implementations exposed under `sdk`. `scratch` is the direct object; its controls are `sdk.scratch`. `sql` and `session` are direct cell parameters rather than `sdk` properties.
 
 ## Durability rules
 
-Durable identity lives in events, typed working values, artifacts, tasks, mailboxes, and model handles. JavaScript heap state does not.
+Durable identity lives in events, typed working values, artifacts, tasks, mailboxes, and model handles. JavaScript heap state and scratch do not.
 
 ```mermaid
 flowchart TD
     cell["TypeScript cell<br/>disposable worker"]
 
     cell --> heap["Lexical bindings and heap"]
-    heap --> discarded["Discarded after failure, commit, or restart"]
+    heap --> scratch["Exact-branch scratch<br/>best-effort warm cache"]
+    scratch --> discarded["May disappear after failure,<br/>eviction, restart, or service loss"]
 
     cell --> staged["state.set and artifacts.put<br/>staged for the cell"]
     staged --> terminal{"Cell terminal outcome"}
@@ -70,14 +72,37 @@ flowchart TD
     outcome --> retained["Retained even if the cell later fails"]
 ```
 
-- Lexical bindings, module instances, closures, sockets, subprocess handles, and `globalThis` changes disappear with the worker.
+- Lexical bindings are cell-local. Module instances, closures, sockets, subprocess handles, and `globalThis` changes disappear with the worker.
+- `scratch` may preserve ordinary runtime values across nearby successful cells while one exact branch scope remains warm. The managed file-local product also attempts a bounded same-device JSON checkpoint after a successful cell; this does not make scratch durable.
 - `state.set` stages JSON working values for atomic commit with the cell.
 - `artifacts.put` stages an immutable artifact reference for atomic registration with the cell.
 - Most effectful SDK calls commit their own outbox or domain events as they occur. A later cell failure does not erase an already committed external effect.
 - Only a successful cell terminal batch exposes staged working values and artifact registrations.
 - A failed or interrupted cell receives `CellFailed` or recovery-time `CellAbandoned`; its heap is never replayed.
 
-Use `state` for small structured values and artifacts for larger or byte-oriented content. Store durable handle IDs, not convenience functions.
+Use local variables inside one cell, `scratch` for replaceable nearby intermediates, `state` for small values required after recovery, and artifacts for larger or byte-oriented durable content. Store durable handle IDs, not convenience functions. End each cell with only the focused observation needed by the next decision.
+
+## `scratch`
+
+```ts
+const output = await tools.shell("rg --files");
+scratch.files = output.completeness === "inline"
+  ? output.value.stdout.split("\n").filter(Boolean)
+  : [];
+scratch.normalize = (value: string) => value.trim();
+
+return { fileCount: scratch.files.length };
+```
+
+Later cells on the same exact session and branch can read the same object while its worker scope remains warm. Values may include functions, classes, cyclic objects, parsed documents, and module objects. Do not retain cell-scoped SDK facades, long-lived clients, timers, streams, sockets, subprocesses, or the only copy of required evidence. Scratch has a null prototype, permits at most 64 own string properties, limits keys to 128 UTF-8 bytes, rejects symbols, accessors, and prototype-pollution names, and does not cross branch forks, child sessions, devices, or placements.
+
+After each successful committed cell, the supervisor makes a getter-free, 500 ms bounded checkpoint attempt. Eligible top-level properties are finite acyclic plain JSON, independently limited to 128 KiB and 256 KiB total with bounded depth/node/property counts. Unsupported, cyclic, accessor-backed, oversized, or secret-rejected siblings are recorded as skipped without hiding eligible values. Checkpoint failure never changes the committed cell result.
+
+The ordinary managed product enables fenced checkpoints only for an exact file-local workspace database. It keeps at most 64 branch rows and 16 MiB per workspace, expires rows after seven days, and may evict them earlier. A new worker on the same device and exact branch may restore an eligible checkpoint. Embedded diagnostic supervisors and remote relational placements are warm-only unless an embedding host explicitly supplies its own checkpoint hooks.
+
+Use `await sdk.scratch.status()` for bounded names, shallow types, temperature (`warm`, `restored`, or `cold`), checkpoint metadata, skipped reasons, cache availability, and limits. It never returns values. `await sdk.scratch.clear()` clears the live scope; the next successful checkpoint removes the retained cache row. A known skipped property throws `ScratchBindingUnavailableError` on direct read after restore. Rebuild it from durable inputs instead of replaying a prior cell that may have caused non-idempotent effects.
+
+Scratch is noncanonical. It is excluded from events, state projections, synchronization, export, branch lineage, automatic context, completion gates, and completion evidence. Warm scratch and the console worker are not managed-service keep-alive reasons.
 
 ## `state`
 
@@ -97,6 +122,8 @@ return { stored, restored, inventory };
 At or below 128 KiB after serialization, a value is retained as `{ kind: "json", value }`. Larger JSON is written to the artifact store and retained as `{ kind: "artifact", artifactId }`. Each committed name receives a monotonically increasing version.
 
 `state.restored` is the branch's working-value view captured at cell start. `state.get` includes this cell's staged updates. `state.list` returns name, version, handle, `committed` or `staged` status, and event provenance. It does not resolve artifact-backed values.
+
+Each committed write appends retained history, including overwrites across cells; there is no ordinary state-delete operation. Keep a small stable key set, checkpoint only meaningful recovery boundaries, and do not copy temporary caches, repeated summaries, raw tool output, or values already available through retained cells into state.
 
 ## `cells`
 
