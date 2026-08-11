@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -64,6 +65,9 @@ export class AcceptanceWorld {
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ]);
+    // #region agent log
+    appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "E", location: "test/acceptance/helpers.ts:spawn", message: "acceptance child output collected", data: { command: command.slice(-4), code, stdoutBytes: Buffer.byteLength(stdout), stdoutSuffix: stdout.slice(-16), stderrBytes: Buffer.byteLength(stderr) }, timestamp: Date.now() })}\n`);
+    // #endregion
     return { code, stdout, stderr };
   }
 
@@ -106,6 +110,9 @@ export class AcceptanceWorld {
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ]);
+    // #region agent log
+    appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "F", location: "test/acceptance/helpers.ts:spawn", message: "acceptance command output collected", data: { command: command.slice(-4), code, stdoutBytes: Buffer.byteLength(stdout), stdoutSuffix: stdout.slice(-16), stderrBytes: Buffer.byteLength(stderr) }, timestamp: Date.now() })}\n`);
+    // #endregion
     return { code, stdout, stderr };
   }
 
