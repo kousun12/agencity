@@ -209,7 +209,7 @@ describe("OpenTUI interactive terminal", () => {
     expect(structuredReview.conversation.at(-1)).toEqual({
       id: "structured-result:review-call",
       role: "runtime",
-      content: "Structured trajectory review submitted agencity_submit_refinement_review. The decision is retained on the parent session.",
+      content: "Structured learning reflection submitted agencity_submit_refinement_review. The decision is retained on the parent session.",
     });
     const displayProfile = fixtureAgentProfile(session.sessionId);
     const proposedFinal = buildTerminalScreen({

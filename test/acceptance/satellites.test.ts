@@ -40,9 +40,10 @@ describe("FU-009 installed satellite product surfaces", () => {
       toolChoice: "required",
       parallelToolCalls: false,
     });
-    const reviews = await world.command(["refine", "status", "--json"], environment);
+    const reviews = await world.command(["refine", "history", "--json"], environment);
     expect(reviews.code).toBe(0);
-    expect(reviews.stdout).toContain('"reviews"');
+    expect(reviews.stdout).toContain('"activities"');
+    expect(reviews.stdout).toContain('"effectiveStatus": "no_change"');
 
     const skillDirectory = join(world.repository, "acceptance-skill");
     await mkdir(skillDirectory);

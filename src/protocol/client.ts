@@ -10,12 +10,13 @@ import type {
   StartAgentRunInput, AgentRunResult, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
   RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
   StartRefinementReviewInput, RefinementReviewRecord, RefinementTriggerPolicyV1,
+  LearningActivity, LearningHistoryView, LearningStatusView,
   SubmitGovernedRefinementInput,
   SkillManagementView, SkillImportPreview, InstallLocalSkillInput,
   AgentToolContractCapabilityView, ModelContractDiagnosticsView,
   AgentProfileDetail, AgentProfileSummary,
 } from "../runtime/index.ts";
-import type { CandidateAllocationRecord, EvaluationObservationRecord, GovernedRefinementRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, RefinementRollbackResult, RollbackRefinementInput, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
+import type { CandidateAllocationRecord, EvaluationObservationRecord, GovernedRefinementRecord, GovernedRefinementRollbackRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, RefinementRollbackResult, RollbackGovernedRefinementInput, RollbackRefinementInput, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
 import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
 import type { ProductBranchSummary } from "../product/index.ts";
@@ -187,6 +188,9 @@ export class AgentClient {
   }
   rollbackRefinement(sessionId: string, branchId: string, input: RollbackRefinementInput): Promise<RefinementRollbackResult> {
     return this.#post(`/sessions/${sessionId}/profiles/rollback?branch=${encodeURIComponent(branchId)}`, input);
+  }
+  rollbackGovernedRefinement(sessionId: string, branchId: string, proposalId: string, input: RollbackGovernedRefinementInput): Promise<GovernedRefinementRollbackRecord> {
+    return this.#post(`/sessions/${sessionId}/governed-refinements/${encodeURIComponent(proposalId)}/rollback?branch=${encodeURIComponent(branchId)}`, input);
   }
   refinementCapabilities(): Promise<JsonValue> {
     return this.#json("/refinement-capabilities");
@@ -377,6 +381,11 @@ export class AgentClient {
   requestRefinement(sessionId: string, branchId: string, input: StartRefinementReviewInput = {}): Promise<RefinementReviewRecord> { return this.#post(`/sessions/${sessionId}/refinement-reviews?branch=${branchId}`, input); }
   refinementReviews(sessionId?: string, branchId?: string, status?: string): Promise<RefinementReviewRecord[]> { const query = new URLSearchParams(); if (branchId) query.set("branch", branchId); if (status) query.set("status", status); return this.#json(sessionId ? `/sessions/${sessionId}/refinement-reviews?${query}` : `/refinement-reviews${status ? `?status=${encodeURIComponent(status)}` : ""}`); }
   refinementReview(sessionId: string, branchId: string, reviewId: string): Promise<RefinementReviewRecord> { return this.#json(`/sessions/${sessionId}/refinement-reviews/${reviewId}?branch=${branchId}`); }
+  learningStatus(sessionId: string, branchId: string): Promise<LearningStatusView> { return this.#json(`/sessions/${sessionId}/learning/status?branch=${encodeURIComponent(branchId)}`); }
+  learningHistory(sessionId: string, branchId: string, limit = 50): Promise<LearningHistoryView> { return this.#json(`/sessions/${sessionId}/learning/history?branch=${encodeURIComponent(branchId)}&limit=${limit}`); }
+  learningActivity(sessionId: string, branchId: string, activityId: string): Promise<LearningActivity> { return this.#json(`/sessions/${sessionId}/learning/activities/${encodeURIComponent(activityId)}?branch=${encodeURIComponent(branchId)}`); }
+  pauseAutomaticLearning(): Promise<RefinementTriggerPolicyV1> { return this.setAutomaticRefinement(false); }
+  resumeAutomaticLearning(): Promise<RefinementTriggerPolicyV1> { return this.setAutomaticRefinement(true); }
   userCorrection(sessionId: string, branchId: string, correction: string, correctedEventIds: readonly string[]): Promise<{ correctionId: string }> { return this.#post(`/sessions/${sessionId}/user-corrections?branch=${branchId}`, { correction, correctedEventIds }); }
   refinementPolicy(): Promise<RefinementTriggerPolicyV1> { return this.#json("/refinement-policy"); }
   setAutomaticRefinement(enabled: boolean): Promise<RefinementTriggerPolicyV1> { return this.#put("/refinement-policy", { enabled }); }

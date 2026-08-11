@@ -68,6 +68,7 @@ export const eventTypes = [
   "RefinementGovernanceReviewRequested", "RefinementGovernanceReviewChildLinked",
   "RefinementGovernanceReviewDecided", "GovernedRefinementApplied",
   "RefinementProposalTerminalNoticeDelivered", "RefinementRollbackApplied",
+  "GovernedRefinementRollbackApplied",
   "SkillImported", "SkillAvailabilityChanged", "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
   "AgentRunRequested", "AgentRunStepStarted", "AgentRunModelAttemptStarted", "AgentRunActionCommitted", "AgentRunActionRejected", "AgentRunGoalCheckRecorded",
   "AgentRunCancellationRequested", "AgentRunStatusChanged",
@@ -78,6 +79,31 @@ export type CellLogStream = "stdout" | "stderr";
 export type SessionStatus = "idle" | "running" | "stopped" | "failed" | "archived";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 export type EffectOutcome = "succeeded" | "failed" | "cancelled" | "unknown";
+export type GovernedRefinementRollbackAction =
+  | {
+      readonly operation: "restore";
+      readonly editIndex: number;
+      readonly targetKind: "memory" | "prompt_note" | "skill" | "subagent_spec";
+      readonly targetId: string;
+      readonly appliedVersionId: string;
+      readonly restoreSourceVersionId: string;
+      readonly restorationVersionId: string;
+      readonly restorationRollbackId: string;
+    }
+  | {
+      readonly operation: "deactivate";
+      readonly editIndex: number;
+      readonly targetKind: "memory" | "prompt_note" | "skill" | "subagent_spec";
+      readonly targetId: string;
+      readonly appliedVersionId: string;
+    }
+  | {
+      readonly operation: "reactivate";
+      readonly editIndex: number;
+      readonly targetKind: "memory" | "prompt_note" | "skill" | "subagent_spec";
+      readonly targetId: string;
+      readonly reactivatedVersionId: string;
+    };
 export type EffectOrigin =
   | { readonly kind: "cell"; readonly cellId: string }
   | { readonly kind: "model-call"; readonly callId: string }
@@ -152,7 +178,7 @@ export interface EventPayloads {
   BranchNamed: { name: string };
   SessionStatusChanged: { status: SessionStatus; reason?: string };
   SessionModelChanged: { previousModel: ModelConfiguration; model: ModelConfiguration; selectedBy: "user" };
-  MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string; mailbox?: { mailboxMessageId: string; fromSessionId: string; relationship: FamilyRelationship; taskId?: string; artifactIds?: string[]; receiptEventId: string } };
+  MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string; mailbox?: { mailboxMessageId: string; fromSessionId: string; relationship: FamilyRelationship; taskId?: string; artifactIds?: string[]; receiptEventId: string }; learningScan?: { version: 1; category: "scan_unavailable" | "validation_failed" } };
   CellProposed: { cellId: string; code: string; dependencies: string[] };
   CellStarted: { cellId: string; attempt: number };
   CellCommitted: { cellId: string; result: JsonValue; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; exports: string[]; repositoryInstructions?: RepositoryInstructionDiscovery[]; repositoryInstructionOmission?: RepositoryInstructionOmission };
@@ -241,6 +267,7 @@ export interface EventPayloads {
   GovernedRefinementApplied: { proposalId: string; decisionId: string; status: "applied" | "apply_conflict" | "apply_failed"; appliedVersionIds: string[]; reason: string; expectedStatus: "reviewed_approved" };
   RefinementProposalTerminalNoticeDelivered: { proposalId: string; noticeId: string; originSessionId: string; originBranchId: string; status: "deterministically_rejected" | "reviewed_rejected" | "review_failed" | "review_unknown" | "apply_conflict" | "apply_failed" | "applied"; result: JsonValue };
   RefinementRollbackApplied: { rollbackId: string; targetKind: "agent_profile" | "memory" | "prompt_note" | "skill" | "subagent_spec"; targetId: string; previousVersionId: string; restoreSourceVersionId: string; restorationVersionId: string; actor: JsonValue; reason: string; evidenceEventIds: string[] };
+  GovernedRefinementRollbackApplied: { proposalId: string; rollbackId: string; actions: GovernedRefinementRollbackAction[]; actor: JsonValue; reason: string; evidenceEventIds: string[] };
   SkillImported: { entryId: string; versionId: string; digest: string; scope: "workspace"; origin: { kind: "local-directory"; reference: string; manifestDigest: string; sourceDigest: string }; installedBy: string };
   SkillAvailabilityChanged: { entryId: string; versionId: string; digest: string; availability: "enabled" | "disabled" | "removed"; reason: string; expectedAvailability?: "enabled" | "disabled" | "removed"; expectedPreviousActionSequence?: number | null };
   SkillInvocationRecorded: { entryId: string; versionId: string; effectId: string; input: JsonValue };
@@ -588,7 +615,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   BranchNamed: z.object({ name: z.string().min(1) }),
   SessionStatusChanged: z.object({ status: z.enum(["idle", "running", "stopped", "failed", "archived"]), reason: z.string().optional() }),
   SessionModelChanged: z.object({ previousModel: modelSchema, model: modelSchema, selectedBy: z.literal("user") }).strict(),
-  MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional(), mailbox: z.object({ mailboxMessageId: id, fromSessionId: id, relationship: z.enum(["parent", "child", "sibling"]), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), receiptEventId: id }).optional() }),
+  MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional(), mailbox: z.object({ mailboxMessageId: id, fromSessionId: id, relationship: z.enum(["parent", "child", "sibling"]), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), receiptEventId: id }).optional(), learningScan: z.object({ version: z.literal(1), category: z.enum(["scan_unavailable", "validation_failed"]) }).strict().optional() }),
   CellProposed: z.object({ cellId: id, code: z.string(), dependencies: z.array(id) }),
   CellStarted: z.object({ cellId: id, attempt: positiveInteger }),
   CellCommitted: z.object({
@@ -728,6 +755,39 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   GovernedRefinementApplied: z.object({ proposalId: id, decisionId: id, status: z.enum(["applied", "apply_conflict", "apply_failed"]), appliedVersionIds: z.array(id), reason: z.string().min(1).max(16384), expectedStatus: z.literal("reviewed_approved") }).strict(),
   RefinementProposalTerminalNoticeDelivered: z.object({ proposalId: id, noticeId: id, originSessionId: id, originBranchId: id, status: z.enum(["deterministically_rejected", "reviewed_rejected", "review_failed", "review_unknown", "apply_conflict", "apply_failed", "applied"]), result: jsonValueSchema }).strict(),
   RefinementRollbackApplied: z.object({ rollbackId: id, targetKind: z.enum(["agent_profile", "memory", "prompt_note", "skill", "subagent_spec"]), targetId: id, previousVersionId: id, restoreSourceVersionId: id, restorationVersionId: id, actor: jsonValueSchema, reason: z.string().min(1).max(1024), evidenceEventIds: z.array(id).max(32) }).strict(),
+  GovernedRefinementRollbackApplied: z.object({
+    proposalId: id,
+    rollbackId: id,
+    actions: z.array(z.discriminatedUnion("operation", [
+      z.object({
+        operation: z.literal("restore"),
+        editIndex: z.number().int().nonnegative(),
+        targetKind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]),
+        targetId: id,
+        appliedVersionId: id,
+        restoreSourceVersionId: id,
+        restorationVersionId: id,
+        restorationRollbackId: id,
+      }).strict(),
+      z.object({
+        operation: z.literal("deactivate"),
+        editIndex: z.number().int().nonnegative(),
+        targetKind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]),
+        targetId: id,
+        appliedVersionId: id,
+      }).strict(),
+      z.object({
+        operation: z.literal("reactivate"),
+        editIndex: z.number().int().nonnegative(),
+        targetKind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]),
+        targetId: id,
+        reactivatedVersionId: id,
+      }).strict(),
+    ])).min(1).max(16),
+    actor: jsonValueSchema,
+    reason: z.string().min(1).max(1024),
+    evidenceEventIds: z.array(id).max(32),
+  }).strict(),
   SkillImported: z.object({ entryId: id, versionId: id, digest, scope: z.literal("workspace"), origin: z.object({ kind: z.literal("local-directory"), reference: z.string().min(1).max(4096), manifestDigest: digest, sourceDigest: digest }).strict(), installedBy: id }).strict(),
   SkillAvailabilityChanged: z.object({ entryId: id, versionId: id, digest, availability: z.enum(["enabled", "disabled", "removed"]), reason: z.string().min(1).max(4096), expectedAvailability: z.enum(["enabled", "disabled", "removed"]).optional(), expectedPreviousActionSequence: positiveInteger.nullable().optional() }).strict(),
   SkillInvocationRecorded: z.object({ entryId: id, versionId: id, effectId: id, input: jsonValueSchema }),

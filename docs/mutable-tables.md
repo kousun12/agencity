@@ -65,6 +65,7 @@ Do not change the first three columns or class tokens without updating the archi
 | `profile_identity` | `operational-projection` | `mutable` | Profile-owned identity control record. It is separate from workspace event history and is included in profile backup and deletion scopes. |
 | `devices` | `operational-projection` | `mutable` | Profile-owned device identities used for origin attribution and local execution ownership. |
 | `preferences` | `operational-projection` | `mutable` | Profile-owned user and workspace preferences, including model-specific effort defaults. Preferences do not rewrite existing session configuration. |
+| `preference_leases` | `operational-projection` | `mutable` | Expiring profile-local coordination leases. Automatic-learning pause/resume and admission use the trigger-policy lease to order one device-wide preference across workspace-service instances; a lease is never policy authority or retained learning history. |
 | `credential_references` | `operational-projection` | `mutable` | Opaque profile-owned credential handles and non-secret metadata; credential values are stored outside this table. |
 | `profile_skill_versions` | `canonical-append-only` | `immutable` | Immutable profile skill definitions, provenance, and test evidence guarded against update and deletion. |
 | `profile_skills` | `operational-projection` | `mutable` | Current profile skill version and availability routing derived from retained profile skill actions. |

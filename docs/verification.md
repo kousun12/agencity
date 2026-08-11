@@ -96,7 +96,10 @@ Verification of default automatic learning must cover:
 - five successful terminal runs within a 2,048-record window, refiring only after five newer qualifying successes;
 - delayed consideration of the fifth success until the next committed boundary;
 - `no_change` as a normal terminal audit outcome rather than a behavioral update;
-- truthful `scan_unavailable` behavior when full-history loading supplies more than 10,000 records; and
+- truthful `scan_unavailable` history when full-history loading supplies more than 10,000 records;
+- pause/admission ordering and transaction-time stale-trigger rejection under concurrency;
+- joined status, history, and activity inspection across reflection, governance, application, scan failure, and rollback;
+- atomic proposal-level rollback for automatic create, replace, retire, and multi-edit changes; and
 - absence of a separate learning spend budget, aggregate review-rate limit, scheduler, or semantic grouping mechanism.
 
 The focused checks are:
@@ -106,9 +109,10 @@ bun run typecheck
 bun run check:architecture
 bun test --timeout 30000 test/unit/refinement-triggers.test.ts
 bun test --timeout 30000 test/integration/refiner.test.ts
+bun test --timeout 30000 test/acceptance/profile-governance.test.ts
 ```
 
-These focused checks are iteration evidence only. No new aggregate `bun run verify` result is recorded here for the default automatic-learning change. The live-provider, official Turso Sync, and Turso Cloud checks remain gated and unverified unless their prerequisites are supplied and the rows actually run.
+On August 11, 2026, the default automatic-learning change passed `bun run verify`: 1,007 core tests passed with 2 gated skips, 3 end-to-end tests passed, and 18 installed acceptance tests passed with 1 credential-gated skip. Aggregate evidence was 1,028 passes, 3 skips, and 0 failures. Typecheck, architecture checks, focused cross-service lease, divergent-sync, bounded-history, typed-scan, and skill-rollback tests, independent review, and `git diff --check` also passed. The release acceptance matrix reported 1 deterministic row passed, 3 external rows skipped, and 0 failures. The live-provider, official Turso Sync, and Turso Cloud checks remain gated and unverified because their prerequisites were not supplied.
 
 ### Adaptive-profile governance evidence
 

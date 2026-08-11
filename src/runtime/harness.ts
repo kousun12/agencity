@@ -648,6 +648,53 @@ export class HarnessService {
     }
   }
 
+  async preserveExactSkillTest(
+    sessionId: string,
+    branchId: string,
+    source: HarnessVersionRecord,
+    restoration: HarnessVersionRecord,
+  ): Promise<NewAgentEvent> {
+    if (source.kind !== "skill" || restoration.kind !== "skill" ||
+        source.entryId !== restoration.entryId ||
+        !Bun.deepEquals(source.content, restoration.content)) {
+      throw new ValidationError("Skill restoration test requires exact same-entry skill content");
+    }
+    const rows = await this.storage.readonlyQuery({
+      sql: `SELECT effect_id,report_json FROM skill_executions
+        WHERE entry_id=? AND version_id=? AND execution_kind='test' AND passed=1
+        ORDER BY created_at DESC,event_id DESC LIMIT 1`,
+      args: [source.entryId, source.versionId],
+    });
+    const retained = rows[0] as Record<string, unknown> | undefined;
+    const report = retained
+      ? JSON.parse(String(retained.report_json)) as Record<string, JsonValue>
+      : null;
+    if (!retained || !report || report.compiled !== true ||
+        Number(report.failed ?? 1) > 0) {
+      throw new ValidationError(
+        `Exact source skill ${source.versionId} lacks passing retained tests`,
+      );
+    }
+    return {
+      sessionId,
+      branchId,
+      type: "SkillTestRecorded",
+      producer: "supervisor",
+      idempotencyKey:
+        `governed-skill-restoration-test-recorded:${restoration.versionId}`,
+      payload: {
+        entryId: restoration.entryId,
+        versionId: restoration.versionId,
+        effectId: String(retained.effect_id),
+        passed: true,
+        report: {
+          ...report,
+          exactTestSourceVersionId: source.versionId,
+        },
+      },
+    };
+  }
+
   async prepareRestoreGoverned(
     sessionId: string,
     branchId: string,

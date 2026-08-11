@@ -104,6 +104,14 @@ export interface ProfileDatabase {
   getOrCreateDeviceIdentity(displayName?: string): Promise<DeviceIdentity>;
   getPreference(key: string): Promise<ProfilePreference | null>;
   setPreference(key: string, value: JsonValue): Promise<ProfilePreference>;
+  withPreferenceLock<T>(
+    key: string,
+    operation: (
+      current: ProfilePreference | null,
+      setValue: (value: JsonValue) => Promise<ProfilePreference>,
+      assertOwner: () => Promise<void>,
+    ) => Promise<T>,
+  ): Promise<T>;
   listPreferences(): Promise<ProfilePreference[]>;
   putCredentialReference(input: Omit<CredentialReference, "createdAt" | "updatedAt">): Promise<CredentialReference>;
   getCredentialReference(reference: string): Promise<CredentialReference | null>;

@@ -787,6 +787,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "GovernedRefinementApplied":
     case "RefinementProposalTerminalNoticeDelivered":
     case "RefinementRollbackApplied":
+    case "GovernedRefinementRollbackApplied":
     case "SkillImported":
     case "SkillAvailabilityChanged":
     case "SkillInvocationRecorded":

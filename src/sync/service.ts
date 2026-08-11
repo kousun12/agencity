@@ -581,6 +581,17 @@ function auditExportCompleteness(events:readonly AgentEvent[],missingArtifacts:r
       for(const versionId of [payload.previousVersionId,payload.restoreSourceVersionId,payload.restorationVersionId])if(!versions.has(versionId))missing("restoration-version",versionId);
       for(const evidenceId of payload.evidenceEventIds??[])if(!eventIds.has(evidenceId))missing("restoration-evidence-event",evidenceId);
     }
+    if(event.type==="GovernedRefinementRollbackApplied"){
+      if(!proposals.has(payload.proposalId))missing("governed-proposal",payload.proposalId);
+      for(const action of payload.actions??[]){
+        if(action.operation==="restore"){
+          for(const versionId of [action.appliedVersionId,action.restoreSourceVersionId,action.restorationVersionId])if(!versions.has(versionId))missing("governed-rollback-version",versionId);
+        }else if(action.operation==="deactivate"){
+          if(!versions.has(action.appliedVersionId))missing("governed-rollback-version",action.appliedVersionId);
+        }else if(!versions.has(action.reactivatedVersionId))missing("governed-rollback-version",action.reactivatedVersionId);
+      }
+      for(const evidenceId of payload.evidenceEventIds??[])if(!eventIds.has(evidenceId))missing("governed-rollback-evidence-event",evidenceId);
+    }
   }
   for(const artifactId of missingArtifacts)missing("artifact",artifactId);
   return{version:1,complete:issues.size===0,eventCount:events.length,profileVersionCount:profiles.size,governedProposalCount:proposals.size,reviewRequestCount:reviewRequests.size,decisionCount:decisions.size,missing:[...issues].sort()};

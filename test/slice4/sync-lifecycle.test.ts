@@ -157,6 +157,31 @@ describe("Slice 4 offline-first synchronization lifecycle",()=>{
   await expect(a.supervisor.agentProfiles.active(session.sessionId)).rejects.toMatchObject({code:"CONFLICT"});
   expect((await a.supervisor.storage.loadEvents(session.sessionId)).filter(event=>event.type==="RefinementRollbackApplied")).toHaveLength(2);
  });
+ test("ingests grouped automatic rollback on a derived branch without partial quarantine",async()=>{
+  root=await makeRoot();const hub=new DeterministicSyncHub();const providerA=new SyncReviewProvider();const providerB=new SyncReviewProvider();a=await openReplica(root,"a",hub,{modelProviders:[providerA]});b=await openReplica(root,"b",hub,{modelProviders:[providerB]});const session=await seedBoth(a,b,{provider:providerA.name,model:"fixture"});
+  const evidence=await a.supervisor.appendMessage(session.sessionId,session.branchId,"user","Shared automatic rollback evidence");
+  const admitted=await a.supervisor.refinementGovernance.proposeAutomatic(session.sessionId,session.branchId,{
+    clientRequestId:"shared-automatic-create",
+    triggerId:"shared-automatic-create-trigger",
+    target:{kind:"harness",harnessKind:"memory",edits:[{operation:"create",kind:"memory",scope:"local",scopeKey:session.sessionId,name:"sync-rollback-created",content:{kind:"memory",memoryKind:"claim",text:"Created before divergent rollback."}}]},
+    reason:"Create one reversible synchronized memory.",
+    predictedEffect:"Exercise grouped rollback synchronization.",
+    evidenceEventIds:[evidence.id],
+  });
+  const applied=await a.supervisor.refinementGovernance.wait(admitted.proposalId);expect(applied.status).toBe("applied");
+  const createdVersion=await a.supervisor.harness.getVersion(applied.appliedVersionIds[0]!);expect(createdVersion).not.toBeNull();
+  await a.supervisor.sync.sync();await b.supervisor.sync.sync();
+  await a.supervisor.appendMessage(session.sessionId,session.branchId,"user","Replica A advances after the shared proposal");
+  await a.supervisor.sync.sync();
+  const rollback=await b.supervisor.refinementGovernance.rollbackAutomaticProposalOwner(session.sessionId,session.branchId,applied.proposalId,{reason:"Replica B reverses the shared automatic change.",evidenceEventIds:[evidence.id]});
+  expect(rollback.actions.map(action=>action.operation)).toEqual(["deactivate"]);
+  await b.supervisor.sync.sync();await a.supervisor.sync.sync();
+  expect((await a.supervisor.sync.status()).quarantineCount).toBe(0);
+  expect((await a.supervisor.harness.get(createdVersion!.entryId))?.status).toBe("rolled_back");
+  const branches=await a.supervisor.storage.listBranches();
+  const histories=await Promise.all(branches.map(branch=>a!.supervisor.storage.loadEvents(branch.sessionId,{branchId:branch.branchId})));
+  expect(histories.some(events=>events.some(event=>event.type==="GovernedRefinementRollbackApplied"&&(event.payload as any).proposalId===applied.proposalId))).toBe(true);
+ });
  test("does not turn a remote owner's effect request into locally executable outbox work",async()=>{root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);const effectId=await a.supervisor.outbox.request({sessionId:session.sessionId,branchId:session.branchId,executor:"shell",operation:"run",input:{command:"printf owner-only"},origin:{kind:"runtime",requestId:"owner-only-effect"},idempotencyKey:"owner-only-effect",idempotent:true});await a.supervisor.sync.sync();await b.supervisor.sync.sync();expect((await b.supervisor.storage.loadEvents(session.sessionId)).some(e=>e.type==="EffectRequested"&&(e.payload as any).effectId===effectId)).toBe(true);expect(await b.supervisor.storage.getOutbox(effectId)).toBeNull();expect((await b.supervisor.storage.getSession?.(session.sessionId))?.executionOwnerDeviceId).toBe(a.supervisor.device.deviceId);await expect(b.supervisor.modelLoop.turn(session.sessionId,session.branchId)).rejects.toMatchObject({code:"CAPABILITY_UNAVAILABLE"});});
  test("replicates a structured refinement result with exact child provenance",async()=>{
   root=await makeRoot();const hub=new DeterministicSyncHub();const providerA=new SyncReviewProvider();const providerB=new SyncReviewProvider();

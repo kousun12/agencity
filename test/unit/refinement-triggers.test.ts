@@ -166,6 +166,19 @@ describe("FU-016 deterministic refinement trigger policy", () => {
       records: [],
       policy: { ...policy(), scope: "workspace" } as unknown as RefinementTriggerPolicyV1,
     })).toThrow(expect.objectContaining({ code: "unsupported-policy" }));
+    expect(() => scanRefinementTriggers({
+      sessionId: "session-1",
+      branchId: "branch-1",
+      records: [],
+      policy: policy({
+        repeatedSuccess: {
+          enabled: true,
+          threshold: 3,
+          windowRecords: 100,
+          refireAfterNewEvidence: 4,
+        },
+      }),
+    })).toThrow(expect.objectContaining({ code: "unsupported-policy" }));
     const { cellFailure: _omitted, ...retainedEarlierPolicy } = policy();
     expect(scanRefinementTriggers({
       sessionId: "session-1",

@@ -520,7 +520,15 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
       : null;
   const reviews = records(source.reviews);
   const proposals = records(source.proposals);
-  const activityPayload = "reviews" in source || "proposals" in source;
+  const activities = Array.isArray(source.activities)
+    ? records(source.activities)
+    : source.kind === "review" || source.kind === "scan_observation"
+      ? [source]
+      : source.latestActivity
+        ? [record(source.latestActivity)]
+        : [];
+  const activityPayload = "reviews" in source || "proposals" in source ||
+    "activities" in source || "latestActivity" in source;
   const items = reviews.length || proposals.length
     ? [...reviews, ...proposals]
     : Array.isArray(value)
@@ -540,8 +548,8 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
       rows: [
         statusRow(
           "Automatic learning",
-          policy.automatic ? "enabled" : "disabled",
-          `Scope: ${displayStatus(policy.scope)}. Use refine auto ${policy.automatic ? "off to pause" : "on to resume"}.`,
+          policy.automatic ? "enabled" : "paused",
+          `Scope: ${displayStatus(policy.scope)}. Use /refine ${policy.automatic ? "pause" : "resume"}.`,
         ),
         ...triggerRows.flatMap(([label, input, unit]) => {
           const trigger = record(input);
@@ -555,7 +563,59 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
         }),
       ],
     });
+  } else if (typeof source.automaticLearning === "string") {
+    sections.push({
+      title: "Automatic learning policy",
+      rows: [statusRow(
+        "Automatic learning",
+        source.automaticLearning,
+        source.policyError
+          ? `Policy status: ${displayStatus(source.policyError)}. Retained activity remains inspectable.`
+          : undefined,
+      )],
+    });
   }
+  if (typeof source.pendingActivityCount === "number") {
+    sections.push({
+      title: "Current activity",
+      rows: [statusRow(
+        "Pending learning activity",
+        source.pendingActivityCount > 0 ? "running" : "none",
+        `${source.pendingActivityCount} pending review or governed change.`,
+      )],
+    });
+  }
+  if (activities.length) sections.push({
+    title: `Learning activity · ${activities.length}`,
+    rows: activities.map((item) => {
+      if (item.kind === "scan_observation") {
+        return statusRow(
+          string(item.activityId, "Automatic scan"),
+          item.effectiveStatus,
+          sentence(item.message, 220),
+        );
+      }
+      const review = record(item.review);
+      const governance = record(item.governance);
+      const rollback = record(item.rollback);
+      return statusRow(
+        string(item.activityId, "Learning reflection"),
+        item.effectiveStatus,
+        [
+          review.triggerKind ? `Trigger: ${displayStatus(review.triggerKind)}` : "",
+          `${Array.isArray(review.evidenceEventIds) ? review.evidenceEventIds.length : 0} evidence events`,
+          governance.proposalId ? `Proposal: ${governance.proposalId}` : "",
+          Array.isArray(governance.appliedVersionIds)
+            ? `${governance.appliedVersionIds.length} applied versions`
+            : "",
+          rollback.rollbackId
+            ? `Rollback: ${rollback.rollbackId}`
+            : "",
+          review.reason ? `Reason: ${sentence(review.reason, 180)}` : "",
+        ].filter(Boolean).join(" · "),
+      );
+    }),
+  });
   if (reviews.length) sections.push({
     title: `Reflection activity · ${reviews.length}`,
     rows: reviews.map(item => statusRow(
@@ -577,7 +637,8 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
       `${Array.isArray(item.edits) ? item.edits.length : 0} edits · authority ${displayStatus(item.authority)}`,
     )),
   });
-  if (activityPayload && reviews.length === 0 && proposals.length === 0) {
+  if (activityPayload && reviews.length === 0 && proposals.length === 0 &&
+      activities.length === 0) {
     sections.push(emptySection("Learning activity", "No retained learning activity."));
   }
   if (!sections.length) sections.push({
@@ -597,7 +658,7 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
       ? "Learning status"
       : command === "/refine-history"
         ? "Learning history"
-        : command === "/rollback"
+        : command === "/refine-rollback"
           ? "Learning rollback"
           : policy
             ? "Automatic learning"

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { AGENT_TOOL_CONTRACT_ID, AgentClient, ConflictError, LibSqlStorage, ProtocolServer, REFINEMENT_GOVERNANCE_CONTRACT_ID, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, deriveModelContractDiagnostics, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, validateRefinementGovernanceRecursiveResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
+import { AGENT_TOOL_CONTRACT_ID, AgentClient, ConflictError, LibSqlStorage, ProfileStore, ProtocolServer, REFINEMENT_GOVERNANCE_CONTRACT_ID, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, createRefinementReviewRequest, deriveModelContractDiagnostics, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, validateRefinementGovernanceRecursiveResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
 import { ModelProviderResponseFailureError, formalMissingToolOutput, formalOutputFromAgentAction, formalOutputFromRefinementGovernanceDecision, formalOutputFromRefinementReviewSubmission } from "../../src/executors/model-response.ts";
 import { internalStructuredModelTurn } from "../../src/runtime/internal.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
@@ -170,6 +170,25 @@ class ReviewProvider implements ModelProvider {
       adapter: this.capabilities.requiredToolSet.adapter,
       usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 },
     });
+  }
+}
+
+class GatedGovernanceProvider extends ReviewProvider {
+  active = false;
+  #release!: () => void;
+  readonly #gate = new Promise<void>((resolve) => { this.#release = resolve; });
+  release(): void { this.#release(); }
+  override async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (dispatch.responseContract.kind === "required-tool-set" &&
+        dispatch.responseContract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID) {
+      this.active = true;
+      await this.#gate;
+    }
+    return super.streamResponse(context, dispatch, signal);
   }
 }
 
@@ -780,6 +799,191 @@ describe("FU-016 durable RefinerService", () => {
       expect((proposerLink.payload as any).childSessionId)
         .not.toBe((reviewerLink.payload as any).childSessionId);
       expect((await supervisor.harness.list()).some((entry) => entry.name === "evidence-discipline" && entry.current.status === "active")).toBe(true);
+      const status = await supervisor.refiner.learningStatus(sessionId, branchId);
+      expect(status).toMatchObject({
+        automaticLearning: "enabled",
+        pendingActivityCount: 0,
+        latestActivity: {
+          kind: "review",
+          activityId: review.reviewId,
+          effectiveStatus: "applied",
+          governance: {
+            proposalId: proposal.proposalId,
+            status: "applied",
+            appliedVersionIds: proposal.appliedVersionIds,
+          },
+          rollback: null,
+        },
+      });
+      const history = await supervisor.refiner.learningHistory(sessionId, branchId);
+      expect(history.activities).toHaveLength(1);
+      expect(await supervisor.refiner.learningActivity(
+        sessionId,
+        branchId,
+        review.reviewId,
+      )).toEqual(status.latestActivity!);
+      const forkBranchId = await supervisor.fork(
+        sessionId,
+        branchId,
+        events.at(-1)!.cursor,
+      );
+      const forkHistory = await supervisor.refiner.learningHistory(
+        sessionId,
+        forkBranchId,
+      );
+      expect(forkHistory.activities.map((activity) => activity.activityId))
+        .toContain(review.reviewId);
+      expect(await supervisor.refiner.learningActivity(
+        sessionId,
+        forkBranchId,
+        review.reviewId,
+      )).toEqual(status.latestActivity!);
+      await expect(supervisor.refiner.learningHistory(
+        sessionId,
+        "missing-learning-branch",
+      )).rejects.toThrow(/existing session branch/i);
+      await expect(supervisor.refiner.learningActivity(
+        sessionId,
+        "missing-learning-branch",
+        review.reviewId,
+      )).rejects.toThrow(/existing session branch/i);
+    } finally { await supervisor.close(); }
+  });
+
+  test("learning pending count excludes direct governance without a reflection review", async () => {
+    const provider = new GatedGovernanceProvider("review-pending-scope");
+    const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
+    try {
+      const initial = await supervisor.agentProfiles.active(sessionId);
+      const proposal = supervisor.refinementGovernance.proposeOwner(
+        sessionId,
+        branchId,
+        {
+          clientRequestId: "direct-profile-pending",
+          target: {
+            kind: "agent_profile",
+            agentSessionId: sessionId,
+            expectedProfileVersionId: initial.profileVersionId,
+            replacement: {
+              role: initial.role,
+              purpose: initial.purpose,
+              instructions: "Direct profile governance remains outside learning activity.",
+            },
+          },
+          reason: "Verify pending learning projection scope.",
+          predictedEffect: "No learning activity is implied.",
+          evidenceEventIds: [evidence.id],
+          wait: true,
+        },
+      );
+      await waitFor(() => provider.active, "direct governance review active", 5_000);
+      expect(await supervisor.refiner.learningStatus(sessionId, branchId))
+        .toMatchObject({ pendingActivityCount: 0, latestActivity: null });
+      provider.release();
+      expect((await proposal).status).toBe("applied");
+    } finally {
+      provider.release();
+      await supervisor.close();
+    }
+  });
+
+  test("learning history uses bounded summaries and a hard response byte ceiling", async () => {
+    const provider = new ReviewProvider("review-learning-history-bounds");
+    const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
+    try {
+      const sourceEvents = await supervisor.storage.appendEvents(
+        Array.from({ length: 255 }, (_, index) => ({
+          sessionId,
+          branchId,
+          type: "MessageAppended" as const,
+          producer: "client",
+          idempotencyKey: `bounded-learning-source-${index}`,
+          payload: {
+            messageId: `bounded-learning-source-${index}`,
+            role: "user" as const,
+            content: `bounded learning source ${index}`,
+          },
+        })),
+      );
+      const sourceEventIds = [
+        evidence.id,
+        ...sourceEvents.map((event) => event.id),
+      ];
+      const events: any[] = [];
+      for (let index = 0; index < 80; index += 1) {
+        const request = createRefinementReviewRequest({
+          mode: "manual",
+          sessionId,
+          branchId,
+          requestedScope: "local",
+          requestedScopeKey: sessionId,
+          allowedKinds: ["memory"],
+          visibleSourceEventIds: sourceEventIds,
+          editableTargets: [],
+          trigger: {
+            kind: "manual",
+            summary: `bounded learning history ${index}`,
+            evidenceEventIds: [evidence.id],
+          },
+          instructions: "i".repeat(8_000),
+        });
+        events.push({
+          sessionId,
+          branchId,
+          type: "RefinementReviewRequested",
+          producer: "client",
+          idempotencyKey: `bounded-learning-request-${index}`,
+          payload: {
+            reviewId: request.reviewId,
+            fingerprint: request.fingerprint,
+            mode: request.mode,
+            waitForGovernance: false,
+            requestedScope: request.requestedScope,
+            requestedScopeKey: sessionId,
+            allowedKinds: [...request.allowedKinds],
+            triggerId: request.trigger.triggerId,
+            triggerKind: request.trigger.kind,
+            triggerFingerprint: request.trigger.fingerprint,
+            evidenceEventIds: [...request.trigger.evidenceEventIds],
+            sourceEventIds: [...request.visibleSourceEventIds],
+            sourceSnapshotHash: canonicalJsonDigest({
+              reviewId: request.reviewId,
+            } as unknown as JsonValue),
+            sourceThroughCursor: evidence.cursor,
+            instructions: request.instructions,
+            request: request as unknown as JsonValue,
+          },
+        }, {
+          sessionId,
+          branchId,
+          type: "RefinementReviewStatusChanged",
+          producer: "supervisor",
+          idempotencyKey: `bounded-learning-terminal-${index}`,
+          payload: {
+            reviewId: request.reviewId,
+            status: "failed",
+            expectedStatus: "requested",
+            reason: "r".repeat(16_000),
+          },
+        });
+      }
+      await supervisor.storage.appendEvents(events);
+      const history = await supervisor.refiner.learningHistory(
+        sessionId,
+        branchId,
+        100,
+      );
+      expect(history.truncated).toBe(true);
+      expect(new TextEncoder().encode(JSON.stringify(history)).byteLength)
+        .toBeLessThanOrEqual(history.byteLimit);
+      const reviews = history.activities.filter((activity) =>
+        activity.kind === "review");
+      expect(reviews.length).toBeGreaterThan(0);
+      expect(reviews.every((activity) =>
+        activity.review.sourceEventIds.length <= 32 &&
+        activity.review.sourceEventIdsTruncated &&
+        activity.review.sourceEventCount === 256)).toBe(true);
+      expect(JSON.stringify(history)).not.toContain("governedResult");
     } finally { await supervisor.close(); }
   });
 
@@ -979,7 +1183,7 @@ describe("FU-016 durable RefinerService", () => {
         supervisor.refiner.scanBoundary(sessionId, branchId),
         supervisor.refiner.scanBoundary(sessionId, branchId),
       ]);
-      expect(duplicate?.reviewId).toBe(admitted?.reviewId);
+      expect(duplicate === undefined || duplicate.reviewId === admitted?.reviewId).toBe(true);
       expect(admitted?.mode).toBe("automatic");
       expect(admitted?.requestedScope).toBe("local");
       await waitFor(async () => (await supervisor.refiner.get(admitted!.reviewId)).status === "no_change", "automatic refinement terminal", 5_000);
@@ -988,7 +1192,255 @@ describe("FU-016 durable RefinerService", () => {
       expect(await supervisor.refiner.scanBoundary(sessionId, branchId)).toEqual([]);
       const consumption = await supervisor.storage.readonlyQuery({ sql: "SELECT * FROM refinement_trigger_consumptions WHERE review_id=?", args: [terminal.reviewId] });
       expect(consumption).toHaveLength(1);
+      const requestEvent = (await supervisor.storage.loadEvents(sessionId, { branchId })).find(
+        (event) => event.type === "RefinementReviewRequested" &&
+          (event.payload as any).reviewId === terminal.reviewId,
+      )!;
+      await expect(supervisor.storage.appendEvents([{
+        sessionId,
+        branchId,
+        type: "RefinementReviewRequested",
+        producer: "supervisor",
+        idempotencyKey: `stale-automatic-request:${terminal.reviewId}`,
+        payload: requestEvent.payload as any,
+      }])).rejects.toThrow(/already pending or consumed/i);
       expect(provider.calls).toBe(1);
+    } finally { await supervisor.close(); }
+  });
+
+  test("a completed automatic-learning pause orders after in-flight admission and blocks later reviews", async () => {
+    const provider = new ReviewProvider("review-pause-ordering");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    const storage = supervisor.storage as any;
+    const originalLoadEvents = storage.loadEvents.bind(storage);
+    let releaseLoad!: () => void;
+    const loadReleased = new Promise<void>((resolve) => { releaseLoad = resolve; });
+    let signalLoad!: () => void;
+    const loadStarted = new Promise<void>((resolve) => { signalLoad = resolve; });
+    let blocked = false;
+    try {
+      for (let index = 1; index <= 3; index += 1) {
+        const effectId = `pause-ordering-effect-${index}`;
+        await supervisor.storage.appendEvents([{
+          sessionId, branchId, type: "EffectRequested", producer: "supervisor",
+          idempotencyKey: `pause-ordering-request-${index}`,
+          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, origin: { kind: "runtime", requestId: `pause-ordering-${index}` }, idempotencyKey: `pause-ordering-${index}`, idempotent: true },
+        }, {
+          sessionId, branchId, type: "EffectOutcomeRecorded", producer: "executor",
+          idempotencyKey: `pause-ordering-outcome-${index}`,
+          payload: { effectId, attempt: 1, outcome: "failed", error: "pause ordering", observedAt: new Date().toISOString() },
+        }]);
+      }
+      storage.loadEvents = async (...args: any[]) => {
+        if (!blocked) {
+          blocked = true;
+          signalLoad();
+          await loadReleased;
+        }
+        return originalLoadEvents(...args);
+      };
+      const scan = supervisor.refiner.scanBoundary(sessionId, branchId, "pause-ordering-scan");
+      await loadStarted;
+      let pauseReturned = false;
+      const pause = supervisor.refiner.setAutomatic(false).then((policy) => {
+        pauseReturned = true;
+        return policy;
+      });
+      await Bun.sleep(10);
+      expect(pauseReturned).toBe(false);
+      releaseLoad();
+      expect(await scan).toHaveLength(1);
+      expect((await pause).automatic).toBe(false);
+      const before = (await supervisor.refiner.list({ sessionId, branchId })).length;
+      expect(await supervisor.refiner.scanBoundary(sessionId, branchId, "after-pause")).toEqual([]);
+      expect((await supervisor.refiner.list({ sessionId, branchId }))).toHaveLength(before);
+    } finally {
+      storage.loadEvents = originalLoadEvents;
+      releaseLoad?.();
+      await supervisor.close();
+    }
+  });
+
+  test("device-wide policy writes serialize with automatic admission across profile connections", async () => {
+    const provider = new ReviewProvider("review-policy-generation");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    const competingProfile = await ProfileStore.open(supervisor.profile.url);
+    const storage = supervisor.storage as any;
+    const originalLoadEvents = storage.loadEvents.bind(storage);
+    const enabledPolicy = await supervisor.refiner.automaticPolicy();
+    let loadCount = 0;
+    let releaseSnapshot!: () => void;
+    const snapshotReleased = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    let signalSnapshot!: () => void;
+    const snapshotStarted = new Promise<void>((resolve) => { signalSnapshot = resolve; });
+    try {
+      for (let index = 1; index <= 3; index += 1) {
+        const effectId = `policy-generation-effect-${index}`;
+        await supervisor.storage.appendEvents([{
+          sessionId, branchId, type: "EffectRequested", producer: "supervisor",
+          idempotencyKey: `policy-generation-request-${index}`,
+          payload: { effectId, executor: "shell", operation: "run", input: { command: "false" }, origin: { kind: "runtime", requestId: `policy-generation-${index}` }, idempotencyKey: `policy-generation-${index}`, idempotent: true },
+        }, {
+          sessionId, branchId, type: "EffectOutcomeRecorded", producer: "executor",
+          idempotencyKey: `policy-generation-outcome-${index}`,
+          payload: { effectId, attempt: 1, outcome: "failed", error: "policy generation", observedAt: new Date().toISOString() },
+        }]);
+      }
+      storage.loadEvents = async (...args: any[]) => {
+        loadCount += 1;
+        if (loadCount === 2) {
+          signalSnapshot();
+          await snapshotReleased;
+        }
+        return originalLoadEvents(...args);
+      };
+      const scan = supervisor.refiner.scanBoundary(sessionId, branchId, "policy-generation-scan");
+      await snapshotStarted;
+      let policyWriteReturned = false;
+      const policyWrite = competingProfile.setPreference(
+        "refinement.trigger-policy.v1",
+        { ...enabledPolicy, automatic: false } as any,
+      ).then((preference) => {
+        policyWriteReturned = true;
+        return preference;
+      });
+      await Bun.sleep(10);
+      expect(policyWriteReturned).toBe(false);
+      releaseSnapshot();
+      expect(await scan).toHaveLength(1);
+      expect((await policyWrite).value).toMatchObject({ automatic: false });
+      expect(await supervisor.refiner.scanBoundary(
+        sessionId,
+        branchId,
+        "policy-generation-after-pause",
+      )).toEqual([]);
+    } finally {
+      storage.loadEvents = originalLoadEvents;
+      releaseSnapshot?.();
+      competingProfile.close();
+      await supervisor.close();
+    }
+  });
+
+  test("preference leases recover dead owners and fence lost ownership", async () => {
+    const provider = new ReviewProvider("review-policy-lease-recovery");
+    const { supervisor } = await fixture(provider);
+    const profileClient = createClient({ url: supervisor.profile.url });
+    try {
+      await profileClient.execute({
+        sql: "INSERT INTO preference_leases(key,owner_id,process_id,expires_at) VALUES(?,?,?,?)",
+        args: [
+          "refinement.trigger-policy.v1",
+          "dead-owner",
+          2_147_483_647,
+          "2000-01-01T00:00:00.000Z",
+        ],
+      });
+      expect((await supervisor.refiner.setAutomatic(false)).automatic).toBe(false);
+      expect((await profileClient.execute({
+        sql: "SELECT * FROM preference_leases WHERE key=?",
+        args: ["refinement.trigger-policy.v1"],
+      })).rows).toHaveLength(0);
+      await profileClient.execute({
+        sql: "INSERT INTO preference_leases(key,owner_id,process_id,expires_at) VALUES(?,?,?,?)",
+        args: [
+          "refinement.trigger-policy.v1",
+          "same-process-release-failure",
+          process.pid,
+          "2000-01-01T00:00:00.000Z",
+        ],
+      });
+      expect((await supervisor.refiner.setAutomatic(true)).automatic).toBe(true);
+
+      await expect(supervisor.profile.withPreferenceLock(
+        "fencing-test",
+        async (_current, setValue) => {
+          await profileClient.execute({
+            sql: "UPDATE preference_leases SET owner_id=? WHERE key=?",
+            args: ["replacement-owner", "fencing-test"],
+          });
+          return setValue(null);
+        },
+      )).rejects.toThrow(/lease ownership was lost/i);
+    } finally {
+      await profileClient.execute({
+        sql: "DELETE FROM preference_leases WHERE key=?",
+        args: ["fencing-test"],
+      }).catch(() => {});
+      profileClient.close();
+      await supervisor.close();
+    }
+  });
+
+  test("default-on automatic learning applies, inspects, and rolls back one governed activity", async () => {
+    const provider = new ReviewProvider("review-default-on-applied", "replace");
+    const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
+    try {
+      const original = await supervisor.memory.create(sessionId, branchId, {
+        name: "default-on-rollback",
+        text: "default-on-v1",
+        memoryKind: "claim",
+        scope: "local",
+      });
+      provider.targetEntryId = original.entryId;
+      provider.targetVersionId = original.currentVersionId;
+      const correctionId = await supervisor.refiner.correct(
+        sessionId,
+        branchId,
+        "Use the corrected retained memory.",
+        [evidence.id],
+      );
+      const correction = (await supervisor.storage.loadEvents(sessionId, { branchId }))
+        .find((event) => event.type === "UserCorrection" &&
+          (event.payload as any).correctionId === correctionId)!;
+      provider.evidenceEventId = correction.id;
+      const [admitted] = await supervisor.refiner.scanBoundary(
+        sessionId,
+        branchId,
+        "default-on-applied",
+      );
+      expect(admitted?.mode).toBe("automatic");
+      await waitFor(async () =>
+        ["candidate", "failed", "no_change", "revision_required", "cancelled", "unknown"]
+          .includes((await supervisor.refiner.get(admitted!.reviewId)).status),
+      "default-on reflection terminal", 5_000);
+      const completed = await supervisor.refiner.get(admitted!.reviewId);
+      if (completed.status !== "candidate") {
+        throw new Error(`Unexpected automatic reflection ${completed.status}: ${completed.reason}`);
+      }
+      expect(completed.status).toBe("candidate");
+      await waitFor(async () =>
+        (await supervisor.refinementGovernance.get(completed.proposalId!)).status === "applied",
+      "default-on governed application", 5_000);
+      const rollback = await supervisor.refinementGovernance
+        .rollbackAutomaticProposalOwner(
+          sessionId,
+          branchId,
+          completed.proposalId!,
+          {
+            reason: "Reverse inspected default-on learning.",
+            evidenceEventIds: [],
+          },
+        );
+      expect(rollback.actions).toHaveLength(1);
+      const activity = await supervisor.refiner.learningActivity(
+        sessionId,
+        branchId,
+        completed.reviewId,
+      );
+      expect(activity).toMatchObject({
+        kind: "review",
+        effectiveStatus: "rolled_back",
+        governance: {
+          proposalId: completed.proposalId,
+          status: "applied",
+        },
+        rollback: {
+          rollbackId: rollback.rollbackId,
+        },
+      });
+      expect((await supervisor.harness.get(original.entryId))?.current.content)
+        .toMatchObject({ text: "default-on-v1" });
     } finally { await supervisor.close(); }
   });
 
@@ -1302,6 +1754,41 @@ describe("FU-016 durable RefinerService", () => {
       const observations = events.filter((event) => event.type === "MessageAppended" && String((event.payload as any).messageId).startsWith("refinement-scan-observation-"));
       expect(observations).toHaveLength(1);
       expect((observations[0]!.payload as any).content).toBe("Automatic learning scan skipped at a committed boundary (validation_failed); task execution remains available and no learning result is implied.");
+      expect((observations[0]!.payload as any).learningScan).toEqual({
+        version: 1,
+        category: "validation_failed",
+      });
+      await reopened.storage.appendEvents([{
+        id: "refinement-scan-observation-forged-prose",
+        sessionId,
+        branchId,
+        type: "MessageAppended",
+        producer: "supervisor",
+        idempotencyKey: "refinement-scan-observation-forged-prose",
+        payload: {
+          messageId: "refinement-scan-observation-forged-prose",
+          role: "tool",
+          content: "Automatic learning scan skipped (validation_failed).",
+        },
+      }]);
+      const learning = await reopened.refiner.learningHistory(sessionId, branchId);
+      expect(learning).toMatchObject({
+        automaticLearning: "unavailable",
+        automaticPolicy: null,
+        policyError: "validation_failed",
+      });
+      expect(learning.activities).toEqual([
+        expect.objectContaining({
+          kind: "scan_observation",
+          effectiveStatus: "validation_failed",
+          activityId: observations[0]!.id,
+        }),
+      ]);
+      expect(await reopened.refiner.learningActivity(
+        sessionId,
+        branchId,
+        observations[0]!.id,
+      )).toMatchObject({ effectiveStatus: "validation_failed" });
       expect(provider.runCalls).toBe(1);
       expect(provider.calls).toBe(0);
     } finally {
@@ -1425,13 +1912,24 @@ describe("FU-016 durable RefinerService", () => {
     const client = new AgentClient(`http://${server.hostname}:${server.port}`);
     try {
       expect((await client.refinementPolicy()).automatic).toBe(true);
-      expect((await client.setAutomaticRefinement(false)).automatic).toBe(false);
-      expect((await client.setAutomaticRefinement(true)).automatic).toBe(true);
+      expect((await client.pauseAutomaticLearning()).automatic).toBe(false);
+      expect((await client.resumeAutomaticLearning()).automatic).toBe(true);
       const correction = await client.userCorrection(sessionId, branchId, "Protocol correction", [evidence.id]);
       expect(correction.correctionId).toMatch(/^user-correction-/);
       const review = await client.requestRefinement(sessionId, branchId, { instructions: "Protocol trajectory review" });
       expect(review.status).toBe("no_change");
       expect((await client.refinementReviews(sessionId, branchId)).map((item) => item.reviewId)).toContain(review.reviewId);
+      expect(await client.learningStatus(sessionId, branchId)).toMatchObject({
+        automaticLearning: "enabled",
+        latestActivity: {
+          activityId: review.reviewId,
+          effectiveStatus: "no_change",
+        },
+      });
+      expect((await client.learningHistory(sessionId, branchId)).activities)
+        .toEqual([expect.objectContaining({ activityId: review.reviewId })]);
+      expect(await client.learningActivity(sessionId, branchId, review.reviewId))
+        .toMatchObject({ activityId: review.reviewId });
       const targeted = await client.requestRefinement(sessionId, branchId, {
         instructions: "Only consider a tested reusable operation",
         allowedKinds: ["skill"],
@@ -1481,10 +1979,10 @@ describe("FU-016 durable RefinerService", () => {
       const ui = new TerminalUI(client, { interactive: false, output: { write(value: string | Uint8Array) { terminalOutput += String(value); return true; } } });
       await ui.run(sessionId, branchId);
       await ui.execute("/refine status");
-      expect(terminalOutput).toContain("Protocol trajectory review — no change");
-      expect(terminalOutput).not.toContain(review.reviewId);
+      expect(terminalOutput).toContain("no change");
+      expect(terminalOutput).toContain(targeted.reviewId);
       await ui.execute("/raw");
-      expect(terminalOutput).toContain(review.reviewId);
+      expect(terminalOutput).toContain(targeted.reviewId);
       expect(terminalOutput).toContain('"kind": "formal-submission"');
       expect(terminalOutput).toContain('"tool": "agencity_submit_refinement_review"');
       expect(terminalOutput).not.toContain('"arguments"');
@@ -1497,7 +1995,7 @@ describe("FU-016 durable RefinerService", () => {
         (await client.refinementReview(sessionId, branchId, detached!.reviewId)).status === "no_change",
       "detached terminal refinement review", 5_000);
       await ui.execute("/refine status");
-      expect(terminalOutput).toContain("review the retained protocol trajectory — no change");
+      expect(terminalOutput).toContain(detached!.reviewId);
     } finally { protocol.stop(); await supervisor.close(); }
   });
 
@@ -2181,6 +2679,323 @@ describe("FU-016 durable RefinerService", () => {
         .toMatchObject({ text: "left-v2" });
       expect((await supervisor.harness.getActive(right.entryId))?.current.content)
         .toMatchObject({ text: "right-v2" });
+    } finally { await supervisor.close(); }
+  });
+
+  test("grouped automatic rollback reverses create, replace, and retire edits atomically", async () => {
+    const provider = new ReviewProvider("governance-automatic-grouped-rollback");
+    const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
+    const protocol = new ProtocolServer(supervisor);
+    const server = protocol.listen(0);
+    const client = new AgentClient(`http://${server.hostname}:${server.port}`);
+    try {
+      const replaced = await supervisor.memory.create(sessionId, branchId, {
+        name: "rollback-replaced", text: "replace-v1", memoryKind: "claim", scope: "local",
+      });
+      const retired = await supervisor.memory.create(sessionId, branchId, {
+        name: "rollback-retired", text: "retire-v1", memoryKind: "claim", scope: "local",
+      });
+      const admitted = await supervisor.refinementGovernance.proposeAutomatic(
+        sessionId,
+        branchId,
+        {
+          clientRequestId: "automatic-grouped-rollback",
+          triggerId: "automatic-grouped-rollback-trigger",
+          target: {
+            kind: "harness",
+            harnessKind: "memory",
+            edits: [{
+              operation: "replace",
+              entryId: replaced.entryId,
+              expectedVersionId: replaced.currentVersionId,
+              content: { kind: "memory", memoryKind: "claim", text: "replace-v2" },
+            }, {
+              operation: "create",
+              kind: "memory",
+              scope: "local",
+              scopeKey: sessionId,
+              name: "rollback-created",
+              content: { kind: "memory", memoryKind: "claim", text: "created-v1" },
+            }, {
+              operation: "retire",
+              entryId: retired.entryId,
+              expectedVersionId: retired.currentVersionId,
+              reason: "Temporarily retire this memory.",
+            }],
+          },
+          reason: "Exercise automatic grouped rollback.",
+          predictedEffect: "Apply three reversible local memory edits.",
+          evidenceEventIds: [evidence.id],
+        },
+      );
+      const applied = await supervisor.refinementGovernance.wait(admitted.proposalId);
+      expect(applied.status).toBe("applied");
+      expect((await supervisor.harness.get(replaced.entryId))?.current.content)
+        .toMatchObject({ text: "replace-v2" });
+      expect((await supervisor.harness.get(retired.entryId))?.status).toBe("retired");
+      const appliedVersions = await Promise.all(
+        applied.appliedVersionIds.map((versionId) =>
+          supervisor.harness.getVersion(versionId)),
+      );
+      const createdVersion = appliedVersions.find((version) =>
+        version?.entryId !== replaced.entryId);
+      expect(createdVersion).toBeTruthy();
+
+      const rollbackInput = {
+        reason: "Reverse the complete automatic learning activity.",
+        evidenceEventIds: [evidence.id],
+      };
+      const [first, retry] = await Promise.all([
+        client.rollbackGovernedRefinement(
+          sessionId,
+          branchId,
+          applied.proposalId,
+          rollbackInput,
+        ),
+        supervisor.refinementGovernance.rollbackAutomaticProposalOwner(
+          sessionId,
+          branchId,
+          applied.proposalId,
+          rollbackInput,
+        ),
+      ]);
+      expect(retry).toEqual(first);
+      expect(first.actions.map((action) => action.operation))
+        .toEqual(["restore", "deactivate", "reactivate"]);
+      expect((await supervisor.harness.get(replaced.entryId))?.current.content)
+        .toMatchObject({ text: "replace-v1" });
+      expect((await supervisor.harness.get(retired.entryId))?.status).toBe("active");
+      expect((await supervisor.harness.get(createdVersion!.entryId))?.status)
+        .toBe("rolled_back");
+      expect(await supervisor.harness.getActive(createdVersion!.entryId)).toBeNull();
+      const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+      expect(events.filter((event) =>
+        event.type === "GovernedRefinementRollbackApplied" &&
+        (event.payload as any).proposalId === applied.proposalId)).toHaveLength(1);
+      await expect(supervisor.refinementGovernance
+        .rollbackAutomaticProposalOwner(
+          sessionId,
+          "wrong-rollback-route",
+          applied.proposalId,
+          rollbackInput,
+        )).rejects.toThrow(/originating session branch/i);
+    } finally { protocol.stop(); await supervisor.close(); }
+  });
+
+  test("grouped automatic skill rollback tests replacements and terminally disables creations", async () => {
+    const provider = new ReviewProvider("governance-automatic-skill-rollback");
+    const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
+    const skillContent = (label: string) => ({
+      kind: "skill" as const,
+      description: `Return ${label} with the exact input.`,
+      source: `export default (input: unknown) => ({ label: ${JSON.stringify(label)}, input });`,
+      permissions: [],
+      tests: [{
+        name: `${label}-result`,
+        input: { value: 1 },
+        expected: { label, input: { value: 1 } },
+      }],
+      runtime: "bun" as const,
+    });
+    try {
+      const base = await supervisor.refinementGovernance.proposeOwner(
+        sessionId,
+        branchId,
+        {
+          clientRequestId: "automatic-skill-rollback-base",
+          target: {
+            kind: "harness",
+            harnessKind: "skill",
+            edits: [{
+              operation: "create",
+              kind: "skill",
+              scope: "local",
+              name: "rollback-skill-replaced",
+              content: skillContent("base"),
+            }],
+          },
+          reason: "Create the tested skill rollback baseline.",
+          predictedEffect: "Provide an approved prior skill version.",
+          evidenceEventIds: [evidence.id],
+          wait: true,
+        },
+      );
+      expect(base.status).toBe("applied");
+      const baseVersion = await supervisor.harness.getVersion(
+        base.appliedVersionIds[0]!,
+      );
+      const replacementAdmission =
+        await supervisor.refinementGovernance.proposeAutomatic(
+          sessionId,
+          branchId,
+          {
+            clientRequestId: "automatic-skill-rollback-replace",
+            triggerId: "automatic-skill-rollback-replace-trigger",
+            target: {
+              kind: "harness",
+              harnessKind: "skill",
+              edits: [{
+                operation: "replace",
+                entryId: baseVersion!.entryId,
+                expectedVersionId: baseVersion!.versionId,
+                content: skillContent("replacement"),
+              }],
+            },
+            reason: "Temporarily replace one tested skill.",
+            predictedEffect: "Exercise tested skill restoration.",
+            evidenceEventIds: [evidence.id],
+          },
+        );
+      const replacement = await supervisor.refinementGovernance.wait(
+        replacementAdmission.proposalId,
+      );
+      expect(replacement.status).toBe("applied");
+      const storage = supervisor.storage as any;
+      const append = storage.appendEvents.bind(storage);
+      let interrupted = false;
+      storage.appendEvents = async (events: any[], options?: any) => {
+        if (!interrupted && events.some((event) =>
+          event.type === "GovernedRefinementRollbackApplied")) {
+          interrupted = true;
+          throw new Error("simulated skill rollback final-batch interruption");
+        }
+        return append(events, options);
+      };
+      await expect(supervisor.refinementGovernance
+        .rollbackAutomaticProposalOwner(
+          sessionId,
+          branchId,
+          replacement.proposalId,
+          {
+            reason: "Restore the exact tested skill baseline.",
+            evidenceEventIds: [evidence.id],
+          },
+        )).rejects.toThrow(/final-batch interruption/i);
+      storage.appendEvents = append;
+      expect((await supervisor.harness.get(baseVersion!.entryId))
+        ?.currentVersionId).toBe(replacement.appliedVersionIds[0]);
+      const restored = await supervisor.refinementGovernance
+        .rollbackAutomaticProposalOwner(
+          sessionId,
+          branchId,
+          replacement.proposalId,
+          {
+            reason: "Restore the exact tested skill baseline.",
+            evidenceEventIds: [evidence.id],
+          },
+        );
+      expect(restored.actions[0]?.operation).toBe("restore");
+      const restorationVersionId = (restored.actions[0] as any)
+        .restorationVersionId;
+      expect(await supervisor.storage.readonlyQuery({
+        sql: "SELECT passed FROM skill_executions WHERE version_id=? AND execution_kind='test'",
+        args: [restorationVersionId],
+      })).toContainEqual({ passed: 1 });
+      expect((await supervisor.skillManagement.get(
+        sessionId,
+        branchId,
+        baseVersion!.entryId,
+      )).availability).toBe("enabled");
+      const directReplacement =
+        await supervisor.refinementGovernance.proposeOwner(
+          sessionId,
+          branchId,
+          {
+            clientRequestId: "direct-skill-rollback-replace",
+            target: {
+              kind: "harness",
+              harnessKind: "skill",
+              edits: [{
+                operation: "replace",
+                entryId: baseVersion!.entryId,
+                expectedVersionId: restorationVersionId,
+                content: skillContent("direct-replacement"),
+              }],
+            },
+            reason: "Temporarily replace the restored skill.",
+            predictedEffect: "Exercise direct exact skill rollback.",
+            evidenceEventIds: [evidence.id],
+            wait: true,
+          },
+        );
+      expect(directReplacement.status).toBe("applied");
+      const directRollback = await supervisor.refinementGovernance.rollbackOwner(
+        sessionId,
+        branchId,
+        {
+          targetKind: "skill",
+          targetId: baseVersion!.entryId,
+          expectedCurrentVersionId: directReplacement.appliedVersionIds[0]!,
+          restoreVersionId: restorationVersionId,
+          reason: "Restore the previously tested exact skill.",
+          evidenceEventIds: [evidence.id],
+        },
+      );
+      expect(await supervisor.storage.readonlyQuery({
+        sql: "SELECT passed FROM skill_executions WHERE version_id=? AND execution_kind='test'",
+        args: [directRollback.restorationVersionId],
+      })).toContainEqual({ passed: 1 });
+      expect((await supervisor.skillManagement.get(
+        sessionId,
+        branchId,
+        baseVersion!.entryId,
+      )).availability).toBe("enabled");
+
+      const createAdmission =
+        await supervisor.refinementGovernance.proposeAutomatic(
+          sessionId,
+          branchId,
+          {
+            clientRequestId: "automatic-skill-rollback-create",
+            triggerId: "automatic-skill-rollback-create-trigger",
+            target: {
+              kind: "harness",
+              harnessKind: "skill",
+              edits: [{
+                operation: "create",
+                kind: "skill",
+                scope: "local",
+                scopeKey: sessionId,
+                name: "rollback-skill-created",
+                content: skillContent("created"),
+              }],
+            },
+            reason: "Create one temporary tested skill.",
+            predictedEffect: "Exercise created-skill rollback.",
+            evidenceEventIds: [evidence.id],
+          },
+        );
+      const created = await supervisor.refinementGovernance.wait(
+        createAdmission.proposalId,
+      );
+      expect(created.status).toBe("applied");
+      const createdVersion = await supervisor.harness.getVersion(
+        created.appliedVersionIds[0]!,
+      );
+      await supervisor.skillManagement.disable(
+        sessionId,
+        branchId,
+        createdVersion!.entryId,
+      );
+      await supervisor.skillManagement.enable(
+        sessionId,
+        branchId,
+        createdVersion!.entryId,
+      );
+      await supervisor.refinementGovernance.rollbackAutomaticProposalOwner(
+        sessionId,
+        branchId,
+        created.proposalId,
+        {
+          reason: "Remove the temporary automatic skill.",
+          evidenceEventIds: [evidence.id],
+        },
+      );
+      expect((await supervisor.skillManagement.get(
+        sessionId,
+        branchId,
+        createdVersion!.entryId,
+      )).availability).toBe("rejected");
     } finally { await supervisor.close(); }
   });
 

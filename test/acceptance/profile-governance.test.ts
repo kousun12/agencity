@@ -36,6 +36,61 @@ function proposal(
 }
 
 describe("installed profile governance", () => {
+  test("fresh installed work admits default-on repeated-success learning", async () => {
+    const fixture = new StrictActionFixture(); fixtures.push(fixture);
+    const world = await AcceptanceWorld.create("default-automatic-learning"); worlds.push(world);
+    const environment = fixture.environment();
+    expect((await world.command([
+      "config", "set-model", "openai:openai/fixture-v1", "--json",
+    ], environment)).code).toBe(0);
+    for (let index = 1; index <= 6; index += 1) {
+      const task = `default learning success ${index}`;
+      fixture.script(task, [action("final", `Completed success ${index}.`)]);
+      expect(await world.command(["run", "--json", task], environment))
+        .toMatchObject({ code: 0, stderr: "" });
+    }
+    const history = await eventually(async () => {
+      const result = await world.command(["refine", "history", "--json"], environment);
+      if (result.code !== 0) return undefined;
+      const payload = json(result);
+      const activity = payload.activities?.find((item: any) =>
+        item.kind === "review" &&
+        item.review?.mode === "automatic" &&
+        item.review?.triggerKind === "repeated_success" &&
+        item.effectiveStatus === "no_change");
+      return activity ? payload : undefined;
+    });
+    expect(history).toMatchObject({
+      automaticLearning: "enabled",
+      automaticPolicy: { automatic: true, scope: "local" },
+    });
+    const activity = history.activities.find((item: any) =>
+      item.review?.triggerKind === "repeated_success");
+    expect(activity).toMatchObject({
+      kind: "review",
+      effectiveStatus: "no_change",
+      review: {
+        mode: "automatic",
+        triggerKind: "repeated_success",
+      },
+    });
+    expect(json(await world.command([
+      "refine", "inspect", activity.activityId, "--json",
+    ], environment))).toMatchObject({
+      activityId: activity.activityId,
+      effectiveStatus: "no_change",
+    });
+    expect((await world.command([
+      "refine", "pause",
+    ], environment)).stdout).toContain("Automatic learning paused.");
+    expect(json(await world.command([
+      "refine", "status", "--json",
+    ], environment))).toMatchObject({ automaticLearning: "paused" });
+    expect((await world.command([
+      "refine", "resume",
+    ], environment)).stdout).toContain("Automatic learning enabled.");
+  }, 30_000);
+
   test("governs, restores, restarts, and inspects a retained child through no-ID product routes", async () => {
     const fixture = new StrictActionFixture(); fixtures.push(fixture);
     const world = await AcceptanceWorld.create("profile-governance"); worlds.push(world);

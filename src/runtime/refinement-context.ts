@@ -291,6 +291,10 @@ interface SelectedEvent extends NormalizedEvent {
   mandatory: boolean;
   priority: number;
 }
+interface SelectedTrajectoryEvents {
+  readonly events: SelectedEvent[];
+  readonly candidateCount: number;
+}
 interface Sanitized<T> { readonly value: T; readonly redacted: boolean }
 interface MutableSnapshotState {
   events: RefinementTrajectorySnapshotEvent[];
@@ -330,7 +334,8 @@ export function buildRefinementTrajectorySnapshot(
   if (events.length === 0) throw new RefinementContextError("missing-evidence", "No branch events exist at or before throughCursor");
   const byId = new Map(events.map((event) => [event.eventId, event]));
   const trigger = validateAndDescribeTrigger(input.trigger, events, byId, secrets);
-  const selected = selectTrajectoryEvents(input.trigger, events, byId, options);
+  const selection = selectTrajectoryEvents(input.trigger, events, byId, options);
+  const selected = selection.events;
 
   const maxBytes = options.maxBytes ?? MAX_REFINEMENT_TRAJECTORY_SNAPSHOT_BYTES;
   const sectionBudget = sectionBudgets(maxBytes);
@@ -364,7 +369,7 @@ export function buildRefinementTrajectorySnapshot(
   const counts: SnapshotCounts = {
     eventsAfterCursor,
     eventsOutsideBranch,
-    selectedEventCandidates: selected.length,
+    selectedEventCandidates: selection.candidateCount,
     eligibleHarness: harnessEligible.length,
     excludedHarness: input.visibleHarnessVersions.length - harnessEligible.length,
     eligibleMemory: memoryEligible.length,
@@ -584,7 +589,7 @@ function selectTrajectoryEvents(
   events: readonly NormalizedEvent[],
   byId: ReadonlyMap<string, NormalizedEvent>,
   options: BuildRefinementTrajectorySnapshotOptions,
-): SelectedEvent[] {
+): SelectedTrajectoryEvents {
   const selected = new Map<string, SelectedEvent>();
   const add = (event: NormalizedEvent, reason: RefinementEventSelectionReason, mandatory: boolean, priority: number): void => {
     const current = selected.get(event.eventId);
@@ -653,7 +658,7 @@ function selectTrajectoryEvents(
     const recent = options.manualRecentEventCount ?? 32;
     const chosen = events.slice(-recent);
     chosen.forEach((event, index) => add(event, "recent", index === chosen.length - 1, 2 + (chosen.length - index)));
-  } else {
+  } else if (trigger.kind !== "repeated_success") {
     const radius = options.eventWindowRadius ?? DEFAULT_REFINEMENT_EVENT_WINDOW_RADIUS;
     const positions = new Map(events.map((event, index) => [event.eventId, index]));
     for (const anchor of anchors) {
@@ -670,7 +675,10 @@ function selectTrajectoryEvents(
   const kept = ranked.slice(0, MAX_SELECTED_EVENTS);
   const mandatoryCount = ranked.filter((item) => item.mandatory).length;
   if (mandatoryCount > MAX_SELECTED_EVENTS) throw new RefinementContextError("snapshot-too-large", "Trigger evidence exceeds the selected-event hard count");
-  return kept.sort(compareEvents);
+  return {
+    events: kept.sort(compareEvents),
+    candidateCount: ranked.length,
+  };
 }
 
 function agentRunOwnedEventIds(
@@ -680,6 +688,8 @@ function agentRunOwnedEventIds(
   const selected = new Set<string>();
   const cellIds = new Set<string>();
   const effectIds = new Set<string>();
+  const contextIds = new Set<string>();
+  const callIds = new Set<string>();
   const messageIds = new Set<string>();
   const referencedEventIds = new Set<string>();
   const availableEventIds = new Set(events.map((event) => event.eventId));
@@ -694,12 +704,17 @@ function agentRunOwnedEventIds(
     }
     const effectId = optionalPayloadString(payload, "effectId");
     if (effectId) effectIds.add(effectId);
+    const contextId = optionalPayloadString(payload, "contextId");
+    if (contextId) contextIds.add(contextId);
+    const callId = optionalPayloadString(payload, "callId");
+    if (callId) callIds.add(callId);
     const finalMessageId = optionalPayloadString(payload, "finalMessageId");
     if (finalMessageId) messageIds.add(finalMessageId);
-    for (const key of ["observationEventIds", "gateEvaluationEventIds"] as const) {
-      const ids = payload[key];
-      if (!Array.isArray(ids)) continue;
-      for (const id of ids) if (typeof id === "string") referencedEventIds.add(id);
+    const gateEvaluationEventIds = payload.gateEvaluationEventIds;
+    if (Array.isArray(gateEvaluationEventIds)) {
+      for (const id of gateEvaluationEventIds) {
+        if (typeof id === "string") referencedEventIds.add(id);
+      }
     }
   }
 
@@ -712,6 +727,14 @@ function agentRunOwnedEventIds(
     if (messageId && messageIds.has(messageId)) selected.add(event.eventId);
     const effectId = optionalPayloadString(payload, "effectId");
     if (effectId && effectIds.has(effectId)) selected.add(event.eventId);
+    const contextId = optionalPayloadString(payload, "contextId");
+    if (contextId && contextIds.has(contextId)) selected.add(event.eventId);
+    const callId = optionalPayloadString(payload, "callId");
+    if (callId && callIds.has(callId)) {
+      selected.add(event.eventId);
+      const responseMessageId = optionalPayloadString(payload, "responseMessageId");
+      if (responseMessageId) messageIds.add(responseMessageId);
+    }
     if (event.type === "EffectRequested") {
       const origin = optionalRecordPayload(payload.origin);
       const originCellId = origin ? optionalPayloadString(origin, "cellId") : undefined;
@@ -724,6 +747,8 @@ function agentRunOwnedEventIds(
   for (const event of events) {
     const effectId = optionalPayloadString(event.payload, "effectId");
     if (effectId && effectIds.has(effectId)) selected.add(event.eventId);
+    const messageId = optionalPayloadString(event.payload, "messageId");
+    if (messageId && messageIds.has(messageId)) selected.add(event.eventId);
   }
   for (const eventId of referencedEventIds) if (availableEventIds.has(eventId)) selected.add(eventId);
   return selected;

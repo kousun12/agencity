@@ -45,15 +45,30 @@ describe("terminal inspector view models", () => {
         completionGateFailure: { enabled: true, threshold: 2, windowRecords: 128, refireAfterNewEvidence: 2 },
         explicitUserCorrection: { enabled: true, threshold: 1, windowRecords: 128, refireAfterNewEvidence: 1 },
       },
-      reviews: [
-        { mode: "automatic", status: "no_change", triggerKind: "repeated_success", evidenceEventIds: ["e1", "e2"], reason: "No durable lesson was supported." },
-        { mode: "automatic", status: "failed", triggerKind: "repeated_effect_failure", evidenceEventIds: ["e3"] },
-        { mode: "manual", status: "unknown", evidenceEventIds: [] },
-      ],
-      proposals: [
-        { predictedEffect: "Reduce repeated failures", status: "applied", edits: [{}], authority: "agent" },
-        { predictedEffect: "Avoid an unsupported behavior", status: "rejected", edits: [], authority: "agent" },
-        { predictedEffect: "Restore earlier behavior", status: "rolled_back", edits: [], authority: "user" },
+      automaticLearning: "enabled",
+      policyError: null,
+      activities: [
+        {
+          kind: "review", activityId: "review-no-change", effectiveStatus: "no_change",
+          review: { triggerKind: "repeated_success", evidenceEventIds: ["e1", "e2"], reason: "No durable lesson was supported." },
+          governance: null, rollback: null,
+        },
+        {
+          kind: "review", activityId: "review-applied", effectiveStatus: "applied",
+          review: { triggerKind: "repeated_effect_failure", evidenceEventIds: ["e3"] },
+          governance: { proposalId: "proposal-applied", status: "applied", appliedVersionIds: ["v1"] },
+          rollback: null,
+        },
+        {
+          kind: "review", activityId: "review-rollback", effectiveStatus: "rolled_back",
+          review: { triggerKind: "explicit_user_correction", evidenceEventIds: ["e4"] },
+          governance: { proposalId: "proposal-rollback", status: "applied", appliedVersionIds: ["v2"] },
+          rollback: { rollbackId: "rollback-1" },
+        },
+        {
+          kind: "scan_observation", activityId: "scan-1", effectiveStatus: "scan_unavailable",
+          message: "Automatic learning scan was unavailable.",
+        },
       ],
     };
     const detail = buildTerminalDetail("/refine-history", value);
@@ -64,9 +79,10 @@ describe("terminal inspector view models", () => {
     expect(output).toContain("Automatic learning — enabled");
     expect(output).toContain("Repeated success — enabled");
     expect(output).toContain("Threshold: 5 successful runs.");
-    expect(output).toContain("Reflection activity · 3");
-    expect(output).toContain("Governed change activity · 3");
-    for (const status of ["no change", "applied", "rejected", "failed", "unknown", "rolled back"]) {
+    expect(output).toContain("Learning activity · 4");
+    expect(output).toContain("proposal-applied");
+    expect(output).toContain("rollback-1");
+    for (const status of ["no change", "applied", "scan unavailable", "rolled back"]) {
       expect(output).toContain(status);
     }
     expect(output).not.toContain("action queue");

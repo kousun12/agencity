@@ -347,7 +347,7 @@ describe("Vercel AI Gateway model catalog", () => {
     const versions = (await raw.execute("SELECT version FROM profile_schema_migrations ORDER BY version"))
       .rows.map(row => Number(row.version));
     raw.close();
-    expect(versions).toEqual([1, 2]);
+    expect(versions).toEqual([1, 2, 3]);
   });
 
   test("serializes fresh profile migration across independent processes", async () => {
@@ -369,6 +369,6 @@ describe("Vercel AI Gateway model catalog", () => {
     const versions = (await raw.execute("SELECT version FROM profile_schema_migrations ORDER BY version"))
       .rows.map(row => Number(row.version));
     raw.close();
-    expect(versions).toEqual([1, 2]);
+    expect(versions).toEqual([1, 2, 3]);
   });
 });

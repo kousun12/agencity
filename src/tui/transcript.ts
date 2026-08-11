@@ -340,7 +340,7 @@ export class TerminalTranscript {
           ? "YOU"
           : block.message.role === "assistant"
             ? "AGENT"
-            : "REFINEMENT";
+            : "LEARNING";
         role.fg = block.message.role === "user"
           ? TERMINAL_THEME.accent
           : block.message.role === "assistant"

@@ -488,8 +488,8 @@ function structuredRefinementConversation(
     if (contract.kind !== "required-tool-set" ||
         !contract.contractId.startsWith("agencity.refinement-")) return [];
     const label = contract.contractId.includes("governance")
-      ? "governance review"
-      : "trajectory review";
+      ? "learning governance review"
+      : "learning reflection";
     let content: string;
     if (call.status === "requested") {
       content = `Structured ${label} is running. Its formal result is retained without an assistant chat message.`;

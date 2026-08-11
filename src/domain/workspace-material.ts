@@ -96,6 +96,7 @@ export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   GovernedRefinementApplied: "non-material",
   RefinementProposalTerminalNoticeDelivered: "non-material",
   RefinementRollbackApplied: "non-material",
+  GovernedRefinementRollbackApplied: "non-material",
   SkillImported: "non-material",
   SkillAvailabilityChanged: "non-material",
   SkillInvocationRecorded: "non-material",

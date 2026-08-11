@@ -113,31 +113,58 @@ describe("FU-005 protocol-backed terminal UI", () => {
       completionGateFailure: { enabled: true, threshold: 2, windowRecords: 128, refireAfterNewEvidence: 2 },
       explicitUserCorrection: { enabled: true, threshold: 1, windowRecords: 128, refireAfterNewEvidence: 1 },
     };
+    const activity = {
+      kind: "review",
+      activityId: "review-learning",
+      effectiveStatus: "applied",
+      review: {
+        triggerKind: "repeated_success",
+        evidenceEventIds: ["evidence-1"],
+        sourceEventIds: ["event-1"],
+        reason: "Evidence-backed local behavior retained.",
+      },
+      governance: {
+        proposalId: "proposal-learning",
+        status: "applied",
+        harnessKind: "memory",
+        appliedVersionIds: ["version-learning"],
+      },
+      rollback: null,
+      createdAt: "2026-08-11T00:00:00.000Z",
+      updatedAt: "2026-08-11T00:00:01.000Z",
+    };
+    const actions: string[] = [];
     const client = new Proxy(base, {
       get(target, property) {
-        if (property === "refinementPolicy") return async () => automaticPolicy;
-        if (property === "refinementReviews") return async () => [{
-          mode: "automatic",
-          status: "no_change",
-          triggerKind: "repeated_success",
-          evidenceEventIds: ["evidence-1"],
-          sourceEventIds: ["event-1"],
-        }];
-        if (property === "refinements") return async () => [{
-          sessionId: session.sessionId,
-          branchId: session.branchId,
-          predictedEffect: "Keep a useful local behavior",
-          status: "applied",
-          edits: [],
-          authority: "agent",
-        }, {
-          sessionId: "other-session",
-          branchId: "other-branch",
-          predictedEffect: "Do not show this route",
-          status: "proposed",
-          edits: [],
-          authority: "agent",
-        }];
+        if (property === "learningStatus") return async () => ({
+          automaticLearning: "enabled",
+          automaticPolicy,
+          policyError: null,
+          pendingActivityCount: 0,
+          latestActivity: activity,
+        });
+        if (property === "learningHistory") return async () => ({
+          automaticLearning: "enabled",
+          automaticPolicy,
+          policyError: null,
+          activities: [activity],
+        });
+        if (property === "learningActivity") return async (_sessionId: string, _branchId: string, activityId: string) => {
+          actions.push(`inspect:${activityId}`);
+          return activity;
+        };
+        if (property === "pauseAutomaticLearning") return async () => {
+          actions.push("pause");
+          return { ...automaticPolicy, automatic: false };
+        };
+        if (property === "resumeAutomaticLearning") return async () => {
+          actions.push("resume");
+          return automaticPolicy;
+        };
+        if (property === "rollbackGovernedRefinement") return async (_sessionId: string, _branchId: string, proposalId: string, input: any) => {
+          actions.push(`rollback:${proposalId}:${input.reason}`);
+          return { proposalId, rollbackId: "rollback-learning", actions: [], reason: input.reason };
+        };
         const current = Reflect.get(target, property, target);
         return typeof current === "function" ? current.bind(target) : current;
       },
@@ -151,16 +178,33 @@ describe("FU-005 protocol-backed terminal UI", () => {
     await ui.attach(session.sessionId, session.branchId, false);
     await ui.execute("/refine status");
     await ui.execute("/refine history");
+    await ui.execute("/refine inspect review-learning");
+    await ui.execute("/refine pause");
+    await ui.execute("/refine resume");
+    await ui.execute("/refine rollback proposal-learning restore prior behavior");
 
-    expect(details.map(detail => detail.title)).toEqual(["Learning status", "Learning history"]);
-    for (const detail of details) {
-      expect(detail.raw).toMatchObject({
-        automaticPolicy: { automatic: true, repeatedSuccess: { enabled: true, threshold: 5 } },
-        reviews: [{ status: "no_change" }],
-        proposals: [{ status: "applied" }],
-      });
-      expect(detail.raw.proposals).toHaveLength(1);
-    }
+    expect(details.map(detail => detail.title)).toEqual([
+      "Learning status",
+      "Learning history",
+      "Learning activity",
+      "Automatic learning",
+      "Automatic learning",
+      "Learning rollback",
+    ]);
+    expect(details[0]!.raw).toMatchObject({
+      automaticLearning: "enabled",
+      automaticPolicy: { automatic: true, repeatedSuccess: { enabled: true, threshold: 5 } },
+      latestActivity: { activityId: "review-learning", effectiveStatus: "applied" },
+    });
+    expect(details[1]!.raw).toMatchObject({
+      activities: [{ activityId: "review-learning", governance: { proposalId: "proposal-learning" } }],
+    });
+    expect(actions).toEqual([
+      "inspect:review-learning",
+      "pause",
+      "resume",
+      "rollback:proposal-learning:restore prior behavior",
+    ]);
     expect(JSON.stringify(details)).toContain("Repeated success");
     expect(JSON.stringify(details)).toContain("Threshold: 5 successful runs.");
     await ui.detach(false);

@@ -47,7 +47,7 @@ export type TerminalAgentClient = Pick<AgentClient,
   "goals" | "currentGoal" | "createGoal" | "pauseGoal" | "resumeGoal" | "clearGoal" | "requestGoalCompletion" |
   "heartbeats" | "createHeartbeat" | "pauseHeartbeat" | "resumeHeartbeat" | "cancelHeartbeat" |
   "schedules" | "createSchedule" | "pauseSchedule" | "resumeSchedule" | "clearSchedule" |
-  "memoryList" | "memorySearch" | "harnessList" | "listSkills" | "getSkill" | "previewSkillImport" | "installSkill" | "enableSkill" | "disableSkill" | "removeSkill" | "proposeSkill" | "agentProfile" | "agentProfiles" | "proposeProfileUpdate" | "governedRefinements" | "rollbackRefinement" | "refinements" | "requestRefinement" | "refinementReviews" | "refinementPolicy" | "setAutomaticRefinement" | "userCorrection" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
+  "memoryList" | "memorySearch" | "harnessList" | "listSkills" | "getSkill" | "previewSkillImport" | "installSkill" | "enableSkill" | "disableSkill" | "removeSkill" | "proposeSkill" | "agentProfile" | "agentProfiles" | "proposeProfileUpdate" | "governedRefinements" | "rollbackRefinement" | "rollbackGovernedRefinement" | "refinements" | "requestRefinement" | "refinementReviews" | "refinementPolicy" | "setAutomaticRefinement" | "learningStatus" | "learningHistory" | "learningActivity" | "pauseAutomaticLearning" | "resumeAutomaticLearning" | "userCorrection" | "refine" | "validateRefinement" | "rollback" | "invokeSkill" | "testSkill" |
   "syncStatus" | "syncNow" | "syncConflicts" | "resolveSyncConflict" | "recoverySummary" | "unknownEffects" |
   "inspectUnknownEffect" | "reconcileUnknownEffect"
 > & Partial<Pick<AgentClient, "abortPendingRequests" | "serviceStatus">>;
@@ -115,8 +115,8 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/skill", aliases: [], category: "status", usage: "/skill ENTRY_ID JSON", summary: "Invoke a retained skill version." },
   { name: "/skill-test", aliases: [], category: "status", usage: "/skill-test ENTRY_ID [VERSION_ID]", summary: "Run a retained skill test." },
   { name: "/profile", aliases: [], category: "status", usage: "/profile [show|history|proposals|propose JSON|repropose latest|N JSON|rollback REVISION JSON]", summary: "Inspect and explicitly govern this agent's behavioral profile." },
-  { name: "/refine", aliases: [], category: "status", usage: "/refine [--wait|--detach] [--kind KIND[,KIND]] [INSTRUCTIONS|status|history|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Inspect automatic learning, start a manual reflection, or view learning history." },
-  { name: "/rollback", aliases: [], category: "status", usage: "/rollback PROPOSAL_ID REASON", summary: "Roll back an applied learning change." },
+  { name: "/refine", aliases: [], category: "status", usage: "/refine [status|history|inspect ID|pause|resume|rollback PROPOSAL REASON|--wait ...]", summary: "Inspect automatic learning, control admission, reverse an applied change, or start a manual reflection." },
+  { name: "/rollback", aliases: [], category: "status", usage: "/rollback PROPOSAL_ID REASON", summary: "Advanced legacy measured-candidate rollback." },
   { name: "/sync", aliases: [], category: "operations", usage: "/sync", summary: "Run explicit synchronization." },
   { name: "/sync-status", aliases: [], category: "operations", usage: "/sync-status", summary: "Inspect sync lifecycle." },
   { name: "/conflicts", aliases: [], category: "operations", usage: "/conflicts", summary: "Inspect unresolved sync conflicts." },
@@ -283,6 +283,10 @@ export function renderGovernanceNotice(value: unknown): string {
     : {};
   const reason = record.reason ?? decision.reason;
   const guidance = decision.revisionGuidance;
+  const targetKind = String(record.targetKind ?? "");
+  const label = targetKind === "agent_profile"
+    ? "profile governance"
+    : "learning governance";
   const suffix = [
     reason ? `Reason: ${conciseValue(reason)}` : "",
     guidance ? `Guidance: ${conciseValue(guidance)}` : "",
@@ -290,7 +294,7 @@ export function renderGovernanceNotice(value: unknown): string {
       ? "Reviewer approval establishes policy consistency, not proven improvement."
       : "",
   ].filter(Boolean).join(" ");
-  return `[profile governance: ${GOVERNANCE_STATUS_LABELS[status] ?? status.replaceAll("_", " ")}]${suffix ? ` ${suffix}` : ""}`;
+  return `[${label}: ${GOVERNANCE_STATUS_LABELS[status] ?? status.replaceAll("_", " ")}]${suffix ? ` ${suffix}` : ""}`;
 }
 
 const TERMINAL_REFINEMENT_KINDS = new Set<HarnessKind>([
@@ -504,6 +508,7 @@ export class TerminalUI {
       ].includes(record.status));
       if (latestNotice) this.#write(`${renderGovernanceNotice({
         status: latestNotice.status,
+        targetKind: "agent_profile",
         reason: latestNotice.terminalReason,
         decision: latestNotice.decision,
       })}\n`);
@@ -852,24 +857,17 @@ export class TerminalUI {
     if (line.startsWith("/skill-test ")) { const [entryId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires NAME_OR_ID");this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,entryId));return "continue"; }
     if (line.startsWith("/skill ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(7));if(!match)throw new Error("/skill requires ENTRY_ID JSON");this.#detail("/skill", await this.client.invokeSkill(this.#sessionId,this.#branchId,match[1]!,JSON.parse(match[2]!)));return "continue"; }
     if (line === "/refine") { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,{wait:false}));return "continue"; }
-    if (line === "/refine status" || line === "/refine history") {
-      const [automaticPolicy,reviews,proposals]=await Promise.all([
-        this.client.refinementPolicy(),
-        this.client.refinementReviews(this.#sessionId,this.#branchId),
-        this.client.refinements(),
-      ]);
-      this.#detail(line === "/refine status" ? "/refine-status" : "/refine-history",{
-        automaticPolicy,
-        reviews,
-        proposals:proposals.filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId),
-      });return "continue";
-    }
+    if (line === "/refine status") { this.#detail("/refine-status",await this.client.learningStatus(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/refine history") { this.#detail("/refine-history",await this.client.learningHistory(this.#sessionId,this.#branchId));return "continue"; }
+    if (line.startsWith("/refine inspect ")) { const activityId=line.slice(16).trim();if(!activityId)throw new Error("/refine inspect requires ACTIVITY_ID");this.#detail("/refine-activity",await this.client.learningActivity(this.#sessionId,this.#branchId,activityId));return "continue"; }
+    if (line === "/refine pause" || line === "/refine resume") { this.#detail("/refine",line.endsWith(" pause")?await this.client.pauseAutomaticLearning():await this.client.resumeAutomaticLearning());return "continue"; }
     if (line === "/refine auto on" || line === "/refine auto off") { this.#detail("/refine", await this.client.setAutomaticRefinement(line.endsWith(" on")));return "continue"; }
     if (line.startsWith("/refine auto")) throw new Error("/refine auto requires on or off");
+    if (line.startsWith("/refine rollback ")) { const [proposalId,...reason]=line.slice(17).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/refine rollback requires PROPOSAL_ID REASON");this.#detail("/refine-rollback",await this.client.rollbackGovernedRefinement(this.#sessionId,this.#branchId,proposalId,{reason:reason.join(" "),evidenceEventIds:[]}));return "continue"; }
     if (line.startsWith("/refine correct ")) { const match=/^([^ ]+)\s+--\s+([\s\S]+)$/.exec(line.slice(16));if(!match)throw new Error("/refine correct EVENT_ID[,EVENT_ID] -- CORRECTION");this.#detail("/refine", await this.client.userCorrection(this.#sessionId,this.#branchId,match[2]!,match[1]!.split(",").filter(Boolean)));return "continue"; }
     if (line.startsWith("/refine propose-json ")) { const proposed=await this.client.refine(this.#sessionId,this.#branchId,JSON.parse(line.slice(21)));this.#detail("/refine", await this.client.validateRefinement(this.#sessionId,this.#branchId,proposed.proposalId));return "continue"; }
     if (line.startsWith("/refine ")) { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,parseTerminalRefinementRequest(line.slice(8))));return "continue"; }
-    if (line.startsWith("/rollback ")) { const [proposalId,...reason]=line.slice(10).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/rollback requires PROPOSAL_ID REASON");this.#detail("/rollback", await this.client.rollback(this.#sessionId,this.#branchId,proposalId,reason.join(" ")));return "continue"; }
+    if (line.startsWith("/rollback ")) { const [proposalId,...reason]=line.slice(10).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/rollback requires legacy PROPOSAL_ID REASON");this.#detail("/legacy-rollback", await this.client.rollback(this.#sessionId,this.#branchId,proposalId,reason.join(" ")));return "continue"; }
     if (line.startsWith("/branch ")) { const [,cursor,...name]=line.split(/\s+/);if(!cursor)throw new Error("/branch requires CURSOR [NAME]");const fork=await this.client.fork(this.#sessionId,this.#branchId,cursor,name.join(" ")||undefined);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,fork.branchId);await this.#queueRouteTransition(this.#sessionId,fork.branchId);return "continue"; }
     if (line === "/resume" || line.startsWith("/resume ")) { const branch=line.slice(7).trim()||this.#branchId;await this.client.resume(this.#sessionId,branch);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,branch);await this.#queueRouteTransition(this.#sessionId,branch);return "continue"; }
     if (line === "/context") { this.#detail("/context", await this.client.inspectContext(this.#sessionId,this.#branchId));return "continue"; }

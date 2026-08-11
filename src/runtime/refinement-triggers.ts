@@ -783,6 +783,9 @@ function validatePolicy(policy: RefinementTriggerPolicyV1): RefinementTriggerPol
   validateThresholdPolicy(policy.explicitUserCorrection, "explicitUserCorrection");
   if (policy.repeatedSuccess !== undefined) {
     validateThresholdPolicy(policy.repeatedSuccess, "repeatedSuccess");
+    if (policy.repeatedSuccess.refireAfterNewEvidence > policy.repeatedSuccess.threshold) {
+      unsupported("repeatedSuccess.refireAfterNewEvidence cannot exceed repeatedSuccess.threshold");
+    }
   }
   return policy;
 }
