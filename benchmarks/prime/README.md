@@ -219,10 +219,7 @@ configs use the portable harness, explicit shutdown/cleanup, and serial
 execution. Context and gold answers remain private task-object fields: context
 is written only to the authorized workspace, while neither value is serialized
 in public task data or trace provenance. OOLONG is file-context reasoning
-evidence, not repository-coding evidence. The committed OOLONG configs use a
-36,000-token per-response sampling ceiling so recursive high-reasoning calls are
-not cut off at the former 4,096-token limit. Turn and total-token limits remain
-the rollout bounds; the per-response ceiling is not a billed-dollar cap.
+evidence, not repository-coding evidence.
 
 Regenerate and compare the pinned slice without admitting a model:
 
@@ -249,6 +246,11 @@ Full compatible set:
 ```sh
 uv run --locked eval @ configs/terminal-bench-2-full.toml
 ```
+
+Committed suite configs use a 36,000-token per-response sampling ceiling so
+high-reasoning calls are not cut off at the former 4,096-token limit. Treatments
+with a separate aggregate output ceiling use the same 36,000-token bound.
+Turn and total-token limits remain rollout bounds; none is a billed-dollar cap.
 
 These commands spend inference credit. Review the resolved config, current
 pricing, selected count, provider-window worst-case, and operator budget first.

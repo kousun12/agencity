@@ -14,6 +14,21 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class SuitePreflightTests(unittest.TestCase):
+    def test_suite_configs_use_36k_output_limits(self) -> None:
+        config_paths = sorted(
+            path
+            for path in (ROOT / "configs").glob("*.toml")
+            if path.name.startswith(("terminal-bench-", "swe-bench-", "oolong-"))
+        )
+        self.assertTrue(config_paths)
+        for path in config_paths:
+            with self.subTest(config=path.name):
+                config = tomllib.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(config["sampling"]["max_tokens"], 36_000)
+                agent = config["env"]["agent"]
+                if "max_output_tokens" in agent:
+                    self.assertEqual(agent["max_output_tokens"], 36_000)
+
     def test_full_catalog_configs_validate_without_loading_images(self) -> None:
         for name, expected in (
             ("terminal-bench-2-full.toml", 89),
