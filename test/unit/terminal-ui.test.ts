@@ -246,6 +246,49 @@ describe("FU-005 protocol-backed terminal UI", () => {
     await supervisor.close();
   });
 
+  test("/refine history repairs an unavailable transcript cache", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-refinement-retry-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "terminal-refinement-retry",
+      sessionName: "Refinement retry",
+      branchName: "main",
+    });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const retained = refinementReview({
+      sessionId: session.sessionId,
+      branchId: session.branchId,
+    });
+    let available = false;
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "refinementReviews") return async () => {
+          if (!available) throw new ProtocolClientError("UNAVAILABLE", "Refinement history unavailable", 503);
+          return [retained];
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const ui = new TerminalUI(client, { interactive: false, manageSignals: false });
+    await ui.attach(session.sessionId, session.branchId, false);
+    expect(ui.presentation.refinementRefresh).toBe("unavailable");
+    expect(buildTerminalScreen(ui.presentation).conversation).toHaveLength(0);
+
+    available = true;
+    await ui.execute("/refine history");
+    expect(ui.presentation.refinementRefresh).toBe("current");
+    expect(buildTerminalScreen(ui.presentation).conversation.at(-1)?.content)
+      .toContain("**Status:** No change");
+    await ui.detach(false);
+    await supervisor.close();
+  });
+
   test("live events are a concise product projection while internal action JSON stays audit-only", () => {
     const rawAction = JSON.stringify({
       protocol: "agencity.agent-action",

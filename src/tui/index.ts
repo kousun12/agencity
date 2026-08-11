@@ -880,7 +880,21 @@ export class TerminalUI {
     if (line.startsWith("/skill-test ")) { const [entryId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires NAME_OR_ID");this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,entryId));return "continue"; }
     if (line.startsWith("/skill ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(7));if(!match)throw new Error("/skill requires ENTRY_ID JSON");this.#detail("/skill", await this.client.invokeSkill(this.#sessionId,this.#branchId,match[1]!,JSON.parse(match[2]!)));return "continue"; }
     if (line === "/refine") { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,{wait:false}));return "continue"; }
-    if (line === "/refine status" || line === "/refine history") { this.#detail("/refine", { reviews: await this.client.refinementReviews(this.#sessionId,this.#branchId), proposals: (await this.client.refinements()).filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId) });return "continue"; }
+    if (line === "/refine status" || line === "/refine history") {
+      const [reviews, refinements] = await Promise.all([
+        this.client.refinementReviews(this.#sessionId, this.#branchId),
+        this.client.refinements(),
+      ]);
+      this.#refinementReviews = reviews.slice(-24);
+      this.#refinementRefresh = "current";
+      this.#publish();
+      this.#detail("/refine", {
+        reviews,
+        proposals: refinements.filter((item) =>
+          item.sessionId === this.#sessionId && item.branchId === this.#branchId),
+      });
+      return "continue";
+    }
     if (line === "/refine auto on" || line === "/refine auto off") { this.#detail("/refine", await this.client.setAutomaticRefinement(line.endsWith(" on")));return "continue"; }
     if (line.startsWith("/refine auto")) throw new Error("/refine auto requires on or off");
     if (line.startsWith("/refine correct ")) { const match=/^([^ ]+)\s+--\s+([\s\S]+)$/.exec(line.slice(16));if(!match)throw new Error("/refine correct EVENT_ID[,EVENT_ID] -- CORRECTION");this.#detail("/refine", await this.client.userCorrection(this.#sessionId,this.#branchId,match[2]!,match[1]!.split(",").filter(Boolean)));return "continue"; }
