@@ -72,6 +72,8 @@ describe("FU-005 protocol-backed terminal UI", () => {
       "/memory", "/skills", "/profile", "/refine", "/sync", "/conflicts", "/unknown", "/reconcile",
     ]) expect(names.has(required), required).toBe(true);
     expect(new Set(TERMINAL_COMMAND_REGISTRY.map((item) => item.name)).size).toBe(TERMINAL_COMMAND_REGISTRY.length);
+    expect(TERMINAL_COMMAND_REGISTRY.find(item => item.name === "/refine")?.summary)
+      .toContain("automatic learning");
   });
 
   test("manual refinement is detached by default and accepts explicit wait and target kinds", () => {
@@ -94,6 +96,75 @@ describe("FU-005 protocol-backed terminal UI", () => {
       .toThrow("memory, prompt_note, skill, or subagent_spec");
     expect(() => parseTerminalRefinementRequest("--wait --detach improve edits"))
       .toThrow("--wait or --detach");
+  });
+
+  test("learning status and history include automatic policy and route activity", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-learning-"); temps.push(temp);
+    const supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, recover: false });
+    const session = await supervisor.createSession({ workspaceId: "terminal-learning", sessionName: "Learning status", branchName: "main" });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const automaticPolicy = {
+      version: 1,
+      automatic: true,
+      scope: "local",
+      repeatedSuccess: { enabled: true, threshold: 5, windowRecords: 2_048, refireAfterNewEvidence: 5 },
+      effectFailure: { enabled: true, threshold: 3, windowRecords: 128, refireAfterNewEvidence: 3 },
+      cellFailure: { enabled: true, threshold: 3, windowRecords: 128, refireAfterNewEvidence: 3 },
+      completionGateFailure: { enabled: true, threshold: 2, windowRecords: 128, refireAfterNewEvidence: 2 },
+      explicitUserCorrection: { enabled: true, threshold: 1, windowRecords: 128, refireAfterNewEvidence: 1 },
+    };
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "refinementPolicy") return async () => automaticPolicy;
+        if (property === "refinementReviews") return async () => [{
+          mode: "automatic",
+          status: "no_change",
+          triggerKind: "repeated_success",
+          evidenceEventIds: ["evidence-1"],
+          sourceEventIds: ["event-1"],
+        }];
+        if (property === "refinements") return async () => [{
+          sessionId: session.sessionId,
+          branchId: session.branchId,
+          predictedEffect: "Keep a useful local behavior",
+          status: "applied",
+          edits: [],
+          authority: "agent",
+        }, {
+          sessionId: "other-session",
+          branchId: "other-branch",
+          predictedEffect: "Do not show this route",
+          status: "proposed",
+          edits: [],
+          authority: "agent",
+        }];
+        const current = Reflect.get(target, property, target);
+        return typeof current === "function" ? current.bind(target) : current;
+      },
+    });
+    const details: any[] = [];
+    const ui = new TerminalUI(client, {
+      interactive: false,
+      manageSignals: false,
+      onDetail: detail => { if (detail) details.push(detail); },
+    });
+    await ui.attach(session.sessionId, session.branchId, false);
+    await ui.execute("/refine status");
+    await ui.execute("/refine history");
+
+    expect(details.map(detail => detail.title)).toEqual(["Learning status", "Learning history"]);
+    for (const detail of details) {
+      expect(detail.raw).toMatchObject({
+        automaticPolicy: { automatic: true, repeatedSuccess: { enabled: true, threshold: 5 } },
+        reviews: [{ status: "no_change" }],
+        proposals: [{ status: "applied" }],
+      });
+      expect(detail.raw.proposals).toHaveLength(1);
+    }
+    expect(JSON.stringify(details)).toContain("Repeated success");
+    expect(JSON.stringify(details)).toContain("Threshold: 5 successful runs.");
+    await ui.detach(false);
+    await supervisor.close();
   });
 
   test("live events are a concise product projection while internal action JSON stays audit-only", () => {
@@ -134,13 +205,13 @@ describe("FU-005 protocol-backed terminal UI", () => {
     expect(renderEvent(event("RefinementReviewRequested", {
       reviewId: "review",
       instructions: "inspect repeated failures",
-    }))).toBe("[refinement requested] inspect repeated failures");
+    }))).toBe("[learning reflection requested] inspect repeated failures");
     expect(renderEvent(event("RefinementReviewChildLinked", {
       reviewId: "review",
-    }))).toBe("[refinement reviewer started]");
+    }))).toBe("[learning reflection started]");
     expect(renderEvent(event("RefinementGovernanceReviewRequested", {
       reviewId: "governance",
-    }))).toBe("[refinement governance requested]");
+    }))).toBe("[learning governance requested]");
   });
 
   test("the TUI imports only public client/domain contracts, not Supervisor or storage", async () => {

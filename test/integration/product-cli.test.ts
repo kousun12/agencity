@@ -339,6 +339,24 @@ describe("product CLI", () => {
       proposals: [],
     });
 
+    const enabledLearning = await cli(["refine", "auto", "on", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(enabledLearning).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(enabledLearning.stdout)).toMatchObject({ automatic: true, scope: "local" });
+    const learningStatus = await cli(["refine", "status", "--workspace", value.workspace, "--json"], { home: value.home });
+    const learningHistory = await cli(["refine", "history", "--workspace", value.workspace, "--json"], { home: value.home });
+    for (const result of [learningStatus, learningHistory]) {
+      expect(result).toMatchObject({ code: 0, stderr: "" });
+      const payload = JSON.parse(result.stdout);
+      expect(payload).toMatchObject({
+        automaticPolicy: { automatic: true, scope: "local" },
+        reviews: [],
+        proposals: [],
+      });
+      if (payload.automaticPolicy.repeatedSuccess !== undefined) {
+        expect(payload.automaticPolicy.repeatedSuccess).toMatchObject({ enabled: true, threshold: 5 });
+      }
+    }
+
     const renamed = await cli(["sessions", "--workspace", value.workspace, "--session", rows[0]!.sessionId, "--name", "Repository inspection", "--json"], { home: value.home });
     expect(renamed.code).toBe(0);
     expect((JSON.parse(renamed.stdout) as Array<{ sessionName: string }>)[0]!.sessionName).toBe("Repository inspection");

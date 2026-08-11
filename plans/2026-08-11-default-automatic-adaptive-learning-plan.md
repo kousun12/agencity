@@ -1,7 +1,8 @@
 # Default automatic adaptive learning plan
 
-**Status:** Proposed  
+**Status:** Implemented  
 **Date:** August 11, 2026  
+**Last revised:** August 11, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plan:** [Durable agent profiles and automated refinement review](./2026-08-08-adaptive-agent-city-plan.md)  
 **Related decisions:** [Event-sourced relational memory and measured refinement](../docs/decisions/0002-relational-memory-refinement.md) and [Durable agent profiles and automated refinement governance](../docs/decisions/0012-durable-agent-profiles-automated-refinement-governance.md)
@@ -497,3 +498,17 @@ Later work may add:
 - organization-level specialist discovery and routing.
 
 Each follow-up requires its own evidence model. None should introduce generalized semantic grouping unless narrower typed keys prove insufficient in real use.
+
+## Implementation log
+
+### 2026-08-11 — Default-on policy and bounded trigger admission
+- Completed: enabled the existing local automatic-refinement policy when no device-profile preference exists; preserved explicit device-wide pause/resume preferences; limited each `scanBoundary()` invocation to the first deterministically ordered eligible trigger; retained existing consumption, nonterminal, recovery, local-scope, governance, skill-test, and ordinary tree-budget semantics.
+- Validation: the pre-change focused baseline passed 73 tests across trigger, refiner, profile, and installed-governance suites. The completed focused implementation suite passed 143 tests across trigger/context, refiner, CLI, TUI, and installed-governance coverage with 0 failures.
+- Plan notes: no new durable boundary marker or proposal-rate rule was added. A later scan may admit another eligible trigger after the first is pending or consumed, as specified.
+- Remaining: aggregate repository verification and independent final review were pending at this checkpoint.
+
+### 2026-08-11 — Repeated-success reflection and learning history
+- Completed: added the optional version-1 `repeatedSuccess` policy fallback, the branch-local five-success detector, exact successful-run evidence, bounded run-owned trajectory selection, trigger mapping, and threshold/window/refire/locality/non-success coverage. CLI and TUI status/history now include the automatic policy and present retained activity as learning audit history. Installed-product coverage proves a fresh default-on profile and an explicit pause that survives managed-service restart.
+- Validation: focused trigger/context, refiner, product CLI, TUI, and installed profile-governance tests passed as part of the 143-test focused run. IDE diagnostics reported no errors in changed source and test files.
+- Plan notes: the existing `refine` command and protocol names remain compatibility surfaces. No learning aggregate, event schema, migration, scheduler, semantic grouping, separate spend budget, or memory backend was introduced.
+- Remaining: live-provider, official Turso Sync, and Turso Cloud verification remain gated and unverified.

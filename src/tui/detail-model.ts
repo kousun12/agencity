@@ -512,44 +512,97 @@ function skillsDetail(command: string, value: unknown): TerminalInspectionDetail
 
 function refinementDetail(command: string, value: unknown): TerminalInspectionDetail {
   const source = record(value);
+  const nestedPolicy = record(source.automaticPolicy);
+  const policy = typeof nestedPolicy.automatic === "boolean"
+    ? nestedPolicy
+    : typeof source.automatic === "boolean"
+      ? source
+      : null;
   const reviews = records(source.reviews);
   const proposals = records(source.proposals);
-  const items = reviews.length || proposals.length ? [...reviews, ...proposals] : Array.isArray(value) ? records(value) : [source];
+  const activityPayload = "reviews" in source || "proposals" in source;
+  const items = reviews.length || proposals.length
+    ? [...reviews, ...proposals]
+    : Array.isArray(value)
+      ? records(value)
+      : [source];
   const sections: TerminalDetailSection[] = [];
+  if (policy) {
+    const triggerRows = [
+      ["Repeated success", policy.repeatedSuccess, "successful runs"],
+      ["Effect failures", policy.effectFailure, "matching failures"],
+      ["Cell failures", policy.cellFailure, "failed cells"],
+      ["Completion-gate failures", policy.completionGateFailure, "distinct evidence pins"],
+      ["Typed user corrections", policy.explicitUserCorrection, "corrections"],
+    ] as const;
+    sections.push({
+      title: "Automatic learning policy",
+      rows: [
+        statusRow(
+          "Automatic learning",
+          policy.automatic ? "enabled" : "disabled",
+          `Scope: ${displayStatus(policy.scope)}. Use refine auto ${policy.automatic ? "off to pause" : "on to resume"}.`,
+        ),
+        ...triggerRows.flatMap(([label, input, unit]) => {
+          const trigger = record(input);
+          if (typeof trigger.enabled !== "boolean") return [];
+          const threshold = number(trigger.threshold);
+          return [statusRow(
+            label,
+            trigger.enabled ? "enabled" : "disabled",
+            threshold === null ? undefined : `Threshold: ${threshold} ${unit}.`,
+          )];
+        }),
+      ],
+    });
+  }
   if (reviews.length) sections.push({
-    title: `Reviews · ${reviews.length}`,
+    title: `Reflection activity · ${reviews.length}`,
     rows: reviews.map(item => statusRow(
-      string(item.instructions, `${displayStatus(item.mode)} review`),
+      string(item.instructions, `${displayStatus(item.mode)} reflection`),
       item.status,
-      item.reason ?? `${records(item.sourceEventIds).length || (Array.isArray(item.sourceEventIds) ? item.sourceEventIds.length : 0)} source events`,
+      [
+        item.triggerKind ? `Trigger: ${displayStatus(item.triggerKind)}` : "",
+        `${Array.isArray(item.evidenceEventIds) ? item.evidenceEventIds.length : Array.isArray(item.sourceEventIds) ? item.sourceEventIds.length : 0} evidence events`,
+        item.governedStatus ? `Governance: ${displayStatus(item.governedStatus)}` : "",
+        item.reason ? `Reason: ${sentence(item.reason, 180)}` : "",
+      ].filter(Boolean).join(" · "),
     )),
   });
   if (proposals.length) sections.push({
-    title: `Proposals · ${proposals.length}`,
+    title: `Governed change activity · ${proposals.length}`,
     rows: proposals.map(item => statusRow(
       sentence(item.predictedEffect, 140),
       item.status,
       `${Array.isArray(item.edits) ? item.edits.length : 0} edits · authority ${displayStatus(item.authority)}`,
     )),
   });
+  if (activityPayload && reviews.length === 0 && proposals.length === 0) {
+    sections.push(emptySection("Learning activity", "No retained learning activity."));
+  }
   if (!sections.length) sections.push({
     title: "Result",
     rows: items.map(item => {
-      const policy = typeof item.automatic === "boolean";
       return statusRow(
-        policy ? "Automatic refinement" : string(item.predictedEffect, string(item.instructions, string(item.mode, "Refinement"))),
-        item.status ?? (policy ? item.automatic ? "enabled" : "disabled" : item.enabled === undefined ? "recorded" : item.enabled ? "enabled" : "disabled"),
-        policy
-          ? `Scope: ${displayStatus(item.scope)} · effect failures ${bool(record(item.effectFailure).enabled) ? "enabled" : "disabled"} · cell failures ${bool(record(item.cellFailure).enabled) ? "enabled" : "disabled"} · gate failures ${bool(record(item.completionGateFailure).enabled) ? "enabled" : "disabled"}`
-          : item.reason ?? (item.correctionId ? "User correction recorded." : undefined),
+        string(item.predictedEffect, string(item.instructions, string(item.mode, "Learning activity"))),
+        item.status ?? (item.enabled === undefined ? "recorded" : item.enabled ? "enabled" : "disabled"),
+        item.reason ?? (item.correctionId ? "User correction recorded." : undefined),
       );
     }),
   });
   return {
     kind: "inspection",
     command,
-    title: "Refinement",
-    summary: "Attributable review, proposal, and policy state.",
+    title: command === "/refine-status"
+      ? "Learning status"
+      : command === "/refine-history"
+        ? "Learning history"
+        : command === "/rollback"
+          ? "Learning rollback"
+          : policy
+            ? "Automatic learning"
+            : "Learning activity",
+    summary: "Automatic learning policy and attributable learning activity.",
     sections,
     raw: value,
   };
@@ -986,7 +1039,7 @@ export function buildTerminalDetail(command: string, value: unknown): TerminalIn
   if (command === "/memory") return memoryDetail(value);
   if (command.startsWith("/profile")) return profileDetail(command, value);
   if (command.startsWith("/skill")) return skillsDetail(command, value);
-  if (command === "/refine" || command === "/rollback") return refinementDetail(command, value);
+  if (command.startsWith("/refine") || command === "/rollback") return refinementDetail(command, value);
   if (command === "/context" || command === "/compact") return contextDetail(command, value);
   if (["/sync", "/sync-status", "/conflicts", "/resolve-conflict"].includes(command)) return syncDetail(command, value);
   if (command === "/unknown" || command === "/reconcile") return unknownEffectsDetail(command, value);

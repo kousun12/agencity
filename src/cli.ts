@@ -166,7 +166,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const reconciliationCommand = parsed.command === "unknown" || parsed.command === "reconcile";
     if (reconciliationCommand && existing.length === 0) throw new ValidationError("No retained session is available for effect reconciliation");
     if ((parsed.command === "branch" || parsed.command === "history") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command}`);
-    if ((parsed.command === "profile" || parsed.command === "refine") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command === "profile" ? "profile management" : "trajectory refinement"}`);
+    if ((parsed.command === "profile" || parsed.command === "refine") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command === "profile" ? "profile management" : "learning activity"}`);
     if (parsed.command === "skills" && existing.length === 0) throw new ValidationError("No retained session is available for skill management");
     if ((parsed.command === "context" || parsed.command === "compact") && existing.length === 0) throw new ValidationError("No retained session is available for context management");
     const forceNew = parsed.command === "new" || parsed.flags.has("new");
@@ -288,7 +288,16 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       const [mode, ...rest] = parsed.positionals;
       if (mode === "status" || mode === "history") {
         if (rest.length) throw new ValidationError(`refine ${mode} accepts no additional arguments`);
-        await printValue({ reviews: await client.refinementReviews(selection.sessionId, selection.branchId), proposals: (await client.refinements()).filter((item) => item.sessionId === selection.sessionId && item.branchId === selection.branchId) }, parsed.flags.has("json"));
+        const [automaticPolicy, reviews, proposals] = await Promise.all([
+          client.refinementPolicy(),
+          client.refinementReviews(selection.sessionId, selection.branchId),
+          client.refinements(),
+        ]);
+        await printValue({
+          automaticPolicy,
+          reviews,
+          proposals: proposals.filter((item) => item.sessionId === selection.sessionId && item.branchId === selection.branchId),
+        }, parsed.flags.has("json"));
       } else if (mode === "auto") {
         if (rest.length !== 1 || (rest[0] !== "on" && rest[0] !== "off")) throw new ValidationError("refine auto requires on or off");
         await printValue(await client.setAutomaticRefinement(rest[0] === "on"), parsed.flags.has("json"));
@@ -307,7 +316,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
         });
         await printValue(review, parsed.flags.has("json"));
         if (!parsed.flags.has("wait") && !parsed.flags.has("json")) {
-          console.log("Refinement accepted (detached; use `agencity refine status` to inspect progress)");
+          console.log("Learning reflection accepted (detached; use `agencity refine status` to inspect activity)");
         }
       }
       return;

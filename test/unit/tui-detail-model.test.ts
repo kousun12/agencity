@@ -19,8 +19,8 @@ describe("terminal inspector view models", () => {
     ["/schedules", [{ kind: "once", prompt: "Run checks", nextTickAt: "2026-08-07T12:00:00.000Z", status: "active" }], "Run checks"],
     ["/memory", [{ name: "Testing preference", kind: "memory", scope: "workspace", current: { status: "active", content: { text: "Run focused tests first" } } }], "Run focused tests first"],
     ["/skills", [{ name: "verify", availability: "enabled", scope: "workspace", source: "harness", description: "Run verification", permissions: ["shell"] }], "Permissions: shell"],
-    ["/refine", { reviews: [{ mode: "manual", status: "completed", sourceEventIds: [] }], proposals: [{ predictedEffect: "Reduce repeated failures", status: "validated", edits: [], authority: "agent" }] }, "Proposals"],
-    ["/refine", { automatic: true, scope: "local", effectFailure: { enabled: true }, completionGateFailure: { enabled: true } }, "Automatic refinement — enabled"],
+    ["/refine", { reviews: [{ mode: "manual", status: "completed", sourceEventIds: [] }], proposals: [{ predictedEffect: "Reduce repeated failures", status: "validated", edits: [], authority: "agent" }] }, "Governed change activity"],
+    ["/refine", { automatic: true, scope: "local", effectFailure: { enabled: true }, completionGateFailure: { enabled: true } }, "Automatic learning — enabled"],
     ["/context", { canonicalEventCount: 20, messageCount: 5, uncoveredMessageCount: 2, estimatedUncompactedNarrativeTokens: 300, capacity: { source: "model-catalog" }, effective: null }, "Uncovered narrative"],
     ["/sync-status", { capabilities: { configured: false, networkSync: false }, replica: { lifecycle: "local_only", stagedEnvelopes: 0, quarantinedEnvelopes: 0 }, conflicts: [], quarantineCount: 0 }, "Local-only"],
     ["/conflicts", [{ conflictId: "conflict-needed-for-resolution", kind: "task_claim", status: "unresolved", detectedAt: "2026-08-07T12:00:00.000Z" }], "Conflict ID"],
@@ -31,6 +31,45 @@ describe("terminal inspector view models", () => {
     expect(output).toContain(expected);
     expect(output.trimStart().startsWith("{")).toBe(false);
     expect(output).not.toContain('"sessionId"');
+  });
+
+  test("learning history shows automatic policy and terminal audit activity", () => {
+    const value = {
+      automaticPolicy: {
+        version: 1,
+        automatic: true,
+        scope: "local",
+        repeatedSuccess: { enabled: true, threshold: 5, windowRecords: 2_048, refireAfterNewEvidence: 5 },
+        effectFailure: { enabled: true, threshold: 3, windowRecords: 128, refireAfterNewEvidence: 3 },
+        cellFailure: { enabled: true, threshold: 3, windowRecords: 128, refireAfterNewEvidence: 3 },
+        completionGateFailure: { enabled: true, threshold: 2, windowRecords: 128, refireAfterNewEvidence: 2 },
+        explicitUserCorrection: { enabled: true, threshold: 1, windowRecords: 128, refireAfterNewEvidence: 1 },
+      },
+      reviews: [
+        { mode: "automatic", status: "no_change", triggerKind: "repeated_success", evidenceEventIds: ["e1", "e2"], reason: "No durable lesson was supported." },
+        { mode: "automatic", status: "failed", triggerKind: "repeated_effect_failure", evidenceEventIds: ["e3"] },
+        { mode: "manual", status: "unknown", evidenceEventIds: [] },
+      ],
+      proposals: [
+        { predictedEffect: "Reduce repeated failures", status: "applied", edits: [{}], authority: "agent" },
+        { predictedEffect: "Avoid an unsupported behavior", status: "rejected", edits: [], authority: "agent" },
+        { predictedEffect: "Restore earlier behavior", status: "rolled_back", edits: [], authority: "user" },
+      ],
+    };
+    const detail = buildTerminalDetail("/refine-history", value);
+    const output = formatTerminalDetail(detail, { footer: false });
+
+    expect(detail.title).toBe("Learning history");
+    expect(output).toContain("Automatic learning policy");
+    expect(output).toContain("Automatic learning — enabled");
+    expect(output).toContain("Repeated success — enabled");
+    expect(output).toContain("Threshold: 5 successful runs.");
+    expect(output).toContain("Reflection activity · 3");
+    expect(output).toContain("Governed change activity · 3");
+    for (const status of ["no change", "applied", "rejected", "failed", "unknown", "rolled back"]) {
+      expect(output).toContain(status);
+    }
+    expect(output).not.toContain("action queue");
   });
 
   test("model status uses human provider and credential labels", () => {

@@ -115,8 +115,8 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/skill", aliases: [], category: "status", usage: "/skill ENTRY_ID JSON", summary: "Invoke a retained skill version." },
   { name: "/skill-test", aliases: [], category: "status", usage: "/skill-test ENTRY_ID [VERSION_ID]", summary: "Run a retained skill test." },
   { name: "/profile", aliases: [], category: "status", usage: "/profile [show|history|proposals|propose JSON|repropose latest|N JSON|rollback REVISION JSON]", summary: "Inspect and explicitly govern this agent's behavioral profile." },
-  { name: "/refine", aliases: [], category: "status", usage: "/refine [--wait|--detach] [--kind KIND[,KIND]] [INSTRUCTIONS|status|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Start a detached trajectory review; use --wait to block for governance." },
-  { name: "/rollback", aliases: [], category: "status", usage: "/rollback PROPOSAL_ID REASON", summary: "Request governed refinement rollback." },
+  { name: "/refine", aliases: [], category: "status", usage: "/refine [--wait|--detach] [--kind KIND[,KIND]] [INSTRUCTIONS|status|history|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Inspect automatic learning, start a manual reflection, or view learning history." },
+  { name: "/rollback", aliases: [], category: "status", usage: "/rollback PROPOSAL_ID REASON", summary: "Roll back an applied learning change." },
   { name: "/sync", aliases: [], category: "operations", usage: "/sync", summary: "Run explicit synchronization." },
   { name: "/sync-status", aliases: [], category: "operations", usage: "/sync-status", summary: "Inspect sync lifecycle." },
   { name: "/conflicts", aliases: [], category: "operations", usage: "/conflicts", summary: "Inspect unresolved sync conflicts." },
@@ -227,19 +227,19 @@ export function renderEvent(event: AgentEvent): string | null {
         ? payload.warnings.map((warning) => `[model warning] ${conciseValue((warning as { message?: unknown }).message)}`).join("\n")
         : null;
     case "RefinementReviewRequested":
-      return `[refinement requested] ${conciseValue(payload.instructions ?? payload.triggerKind ?? "trajectory review")}`;
+      return `[learning reflection requested] ${conciseValue(payload.instructions ?? payload.triggerKind ?? "trajectory review")}`;
     case "RefinementReviewChildLinked":
-      return "[refinement reviewer started]";
+      return "[learning reflection started]";
     case "RefinementReviewStatusChanged":
       return payload.status === "running"
-        ? "[refinement reviewer running]"
-        : `[refinement review ${String(payload.status)}]${payload.reason ? ` ${conciseValue(payload.reason)}` : ""}`;
+        ? "[learning reflection running]"
+        : `[learning activity ${String(payload.status).replaceAll("_", " ")}]${payload.reason ? ` ${conciseValue(payload.reason)}` : ""}`;
     case "RefinementGovernanceReviewRequested":
-      return "[refinement governance requested]";
+      return "[learning governance requested]";
     case "RefinementGovernanceReviewChildLinked":
-      return "[refinement governance reviewer started]";
+      return "[learning governance reviewer started]";
     case "RefinementGovernanceReviewDecided":
-      return `[refinement governance ${String(payload.status ?? "decided")}]`;
+      return `[learning governance ${String(payload.status ?? "decided").replaceAll("_", " ")}]`;
     case "RefinementProposalTerminalNoticeDelivered":
       return renderGovernanceNotice(payload.result);
     case "AgentRunStatusChanged": {
@@ -852,7 +852,18 @@ export class TerminalUI {
     if (line.startsWith("/skill-test ")) { const [entryId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires NAME_OR_ID");this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,entryId));return "continue"; }
     if (line.startsWith("/skill ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(7));if(!match)throw new Error("/skill requires ENTRY_ID JSON");this.#detail("/skill", await this.client.invokeSkill(this.#sessionId,this.#branchId,match[1]!,JSON.parse(match[2]!)));return "continue"; }
     if (line === "/refine") { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,{wait:false}));return "continue"; }
-    if (line === "/refine status" || line === "/refine history") { this.#detail("/refine", { reviews: await this.client.refinementReviews(this.#sessionId,this.#branchId), proposals: (await this.client.refinements()).filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId) });return "continue"; }
+    if (line === "/refine status" || line === "/refine history") {
+      const [automaticPolicy,reviews,proposals]=await Promise.all([
+        this.client.refinementPolicy(),
+        this.client.refinementReviews(this.#sessionId,this.#branchId),
+        this.client.refinements(),
+      ]);
+      this.#detail(line === "/refine status" ? "/refine-status" : "/refine-history",{
+        automaticPolicy,
+        reviews,
+        proposals:proposals.filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId),
+      });return "continue";
+    }
     if (line === "/refine auto on" || line === "/refine auto off") { this.#detail("/refine", await this.client.setAutomaticRefinement(line.endsWith(" on")));return "continue"; }
     if (line.startsWith("/refine auto")) throw new Error("/refine auto requires on or off");
     if (line.startsWith("/refine correct ")) { const match=/^([^ ]+)\s+--\s+([\s\S]+)$/.exec(line.slice(16));if(!match)throw new Error("/refine correct EVENT_ID[,EVENT_ID] -- CORRECTION");this.#detail("/refine", await this.client.userCorrection(this.#sessionId,this.#branchId,match[2]!,match[1]!.split(",").filter(Boolean)));return "continue"; }

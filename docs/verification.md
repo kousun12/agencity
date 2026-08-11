@@ -83,6 +83,33 @@ It records a focused family-projection benchmark with 25 relatives and branch hi
 
 The package is private. This verifies the documented source and `bun link` workflow; it is not evidence of a package-registry or standalone-binary release.
 
+### Default automatic-learning verification
+
+Verification of default automatic learning must cover:
+
+- default-on behavior for a device profile with no explicit preference;
+- persistent device-wide pause and resume across workspaces and restart;
+- local-only memory, prompt-note, tested-skill, and subagent-specification targets;
+- deterministic validation and one separate sealed reviewer for every proposal;
+- one admitted trigger per scan attempt with deferred evidence left available;
+- unchanged thresholds of three effect failures, three failed cells in one run, two distinct-pin gate failures, and one typed correction;
+- five successful terminal runs within a 2,048-record window, refiring only after five newer qualifying successes;
+- delayed consideration of the fifth success until the next committed boundary;
+- `no_change` as a normal terminal audit outcome rather than a behavioral update;
+- truthful `scan_unavailable` behavior when full-history loading supplies more than 10,000 records; and
+- absence of a separate learning spend budget, aggregate review-rate limit, scheduler, or semantic grouping mechanism.
+
+The focused checks are:
+
+```sh
+bun run typecheck
+bun run check:architecture
+bun test --timeout 30000 test/unit/refinement-triggers.test.ts
+bun test --timeout 30000 test/integration/refiner.test.ts
+```
+
+These focused checks are iteration evidence only. No new aggregate `bun run verify` result is recorded here for the default automatic-learning change. The live-provider, official Turso Sync, and Turso Cloud checks remain gated and unverified unless their prerequisites are supplied and the rows actually run.
+
 ### Adaptive-profile governance evidence
 
 The core profile/governance implementation was verified on August 9, 2026:

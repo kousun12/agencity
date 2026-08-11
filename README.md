@@ -62,6 +62,7 @@ Agencity:
 - commits each action and observation before a dependent model step;
 - keeps automatic observations bounded, spills recoverable large local output to immutable artifacts, and exposes file pages and artifact byte ranges for focused continuation;
 - retains child agents, messages, goals, completion checks, budgets, and unresolved outcomes;
+- enables bounded automatic learning for a device profile with no explicit preference, while preserving a persistent device-wide pause and local-only governed targets;
 - opens a full-screen terminal client on interactive terminals and a readable transcript for non-interactive use; and
 - starts an authenticated local-machine-only workspace service on demand so detached work can continue independently of the client; it exits after one hour of quiescence by default.
 
@@ -101,6 +102,8 @@ agencity profile rollback 1 '{"reason":"Restore the earlier approved behavior"}'
 ```
 
 The TUI exposes the same route-relative flow through `/profile`. Proposals are validated deterministically, reviewed by one separate sealed reviewer using the current route model, revalidated, and applied automatically only when approved. Rejections, failures, unknown outcomes, conflicts, reasons, and revision guidance remain visible; detached proposals deliver one durable terminal notice. Profile and non-skill changes apply atomically, while skills must also compile and pass declared runtime tests before activation. Approval establishes consistency with the pinned governance policy, not proof that outcomes improved.
+
+Automatic learning is on when the device profile has no explicit preference. `agencity refine auto off` stores a persistent pause for that device profile across its workspaces; `agencity refine auto on` resumes new automatic reviews. Automatic changes remain local to the originating session and can target only memory, prompt notes, tested skills, or subagent specifications. Each proposal still receives deterministic validation and one separate sealed review. Learning history is an audit log of reflections, `no_change` outcomes, proposals, decisions, applications, failures, and rollbacks; it is not a human approval queue.
 
 The default workspace database is `<repository>/.agencity/agent.db`. Large or byte-oriented results are stored separately in `<repository>/.agencity/artifacts/` and referenced by a SHA-256 content fingerprint. The product profile defaults to `~/.agencity/profile.db`.
 

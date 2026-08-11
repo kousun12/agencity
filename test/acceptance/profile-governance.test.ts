@@ -97,6 +97,26 @@ describe("installed profile governance", () => {
       steps: 2,
       final: "Created the retained profile-governance child.",
     });
+    const freshLearningStatus = json(await world.command([
+      "refine", "status", "--json",
+    ], environment));
+    expect(freshLearningStatus.automaticPolicy).toMatchObject({
+      version: 1,
+      automatic: true,
+      scope: "local",
+      repeatedSuccess: {
+        enabled: true,
+        threshold: 5,
+        windowRecords: 2_048,
+        refireAfterNewEvidence: 5,
+      },
+    });
+    expect(json(await world.command([
+      "refine", "auto", "off", "--json",
+    ], environment))).toMatchObject({
+      automatic: false,
+      scope: "local",
+    });
     const rootProfileResult = await world.command(["profile", "show", "--json"], environment);
     expect(rootProfileResult.code).toBe(0);
     const rootProfile = json(rootProfileResult);
@@ -372,6 +392,12 @@ describe("installed profile governance", () => {
     });
     const afterRestart = json(await world.command(["service", "status", "--json"], environment));
     expect(afterRestart.instanceId).not.toBe(beforeRestart.instanceId);
+    expect(json(await world.command([
+      "refine", "status", "--json",
+    ], environment)).automaticPolicy).toMatchObject({
+      automatic: false,
+      scope: "local",
+    });
 
     const finalProfile = json(await world.command(["profile", "show", "--json"], environment));
     expect(finalProfile).toMatchObject({
