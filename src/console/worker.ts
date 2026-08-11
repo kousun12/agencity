@@ -545,7 +545,7 @@ function checkpointScratch(
 ) {
   const warm = scratchScopes.get(scopeKey(message.scope));
   if (!warm) throw new Error("Scratch scope is not warm");
-  const candidate = serializeScratch(warm.proxy.target);
+  const candidate = serializeScratch(warm.proxy.target, warm.proxy.skipped);
   warm.lastUsedAt = Date.now();
   return candidate;
 }

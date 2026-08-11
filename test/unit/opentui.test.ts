@@ -363,7 +363,10 @@ describe("OpenTUI interactive terminal", () => {
     };
     try {
       app = new OpenTuiApp(setup.renderer, appController);
-      let frame = await setup.waitForFrame(value => value.includes("OpenTUI test / main") && value.includes("Inspect the workspace"));
+      let frame = await setup.waitForFrame(
+        value => value.includes("OpenTUI test / main") && value.includes("Inspect the workspace"),
+        { maxPasses: 100 },
+      );
       const initialMessageId = controller.presentation.state.messages.find(message => message.content === "Inspect the workspace")!.id;
       const initialMessageBody = setup.renderer.root.findDescendantById(
         `agencity-transcript-message-body-${initialMessageId}`,

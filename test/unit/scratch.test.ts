@@ -24,6 +24,20 @@ describe("bounded console scratch", () => {
     expect(() => Reflect.set(scope.object, Symbol("bad"), 1)).toThrow(/symbol/i);
     expect(() => Reflect.set(scope.object, "x".repeat(SCRATCH_LIMITS.maxKeyBytes + 1), 1))
       .toThrow(/UTF-8 bytes/i);
+    scope.object.mutable = 1;
+    Object.defineProperty(scope.object, "mutable", { value: 2 });
+    expect(scope.object.mutable).toBe(2);
+    expect(() => Object.defineProperty(scope.object, "fixed", { value: 1 }))
+      .toThrow(/configurable/i);
+    expect(() => Object.preventExtensions(scope.object)).toThrow(/extensible/i);
+    Object.defineProperty(scope.object, "temporary", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 1,
+    });
+    scope.clear();
+    expect(Reflect.ownKeys(scope.object)).toEqual([]);
     for (let index = 0; index < SCRATCH_LIMITS.maxKeys; index++) {
       scope.object[`k${index}`] = index;
     }

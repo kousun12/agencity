@@ -170,7 +170,9 @@ The Phase D completion slice was verified on August 11, 2026:
 - typecheck and architecture checks: passed; and
 - `git diff --check`: passed.
 
-The coverage includes the exact one-hour default and deadline, detached child startup, short override shutdown, active keep-alive reasons, warm scratch as a non-keep-alive cache, console-worker shutdown, former/current normalized configuration mismatch without takeover, human `1 hour` status with exact JSON milliseconds, compact observations, one bounded durable-state key, warm exact-branch reuse, detach/no-ID resume, same-device eligible JSON restore after service loss, and deliberate reconstruction of a warm-only function. The full acceptance matrix and aggregate `bun run verify` remain parent-owned follow-up. Live-provider, official Turso Sync server, and Turso Cloud checks were not run in this slice and remain unverified.
+The coverage includes the exact one-hour default and deadline, detached child startup, short override shutdown, active keep-alive reasons, warm scratch as a non-keep-alive cache, console-worker shutdown, former/current normalized configuration mismatch without takeover, human `1 hour` status with exact JSON milliseconds, compact observations, one bounded durable-state key, warm exact-branch reuse, detach/no-ID resume, same-device eligible JSON restore after service loss, and deliberate reconstruction of a warm-only function.
+
+The subsequent deterministic aggregate completed successfully: `bun run verify` passed 981 core tests, 3 end-to-end tests, and 17 acceptance tests, with 2 core external tests and 1 acceptance external test skipped. `bun run test:acceptance:matrix` passed its deterministic matrix; its real-provider, official Turso Sync, and Turso Cloud rows skipped and remain unverified. Independent final-review fixes for clearability, credential-shaped checkpoint rejection, and retained skipped-binding metadata passed 40 focused scratch, console, and storage tests plus typecheck and architecture checking.
 
 ### Previous recorded baseline
 

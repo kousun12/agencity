@@ -195,6 +195,15 @@ export function createScratchProxy(
       if ("get" in descriptor || "set" in descriptor) {
         throw new ScratchKeyPolicyError("Scratch does not support accessor properties");
       }
+      const currentDescriptor = Reflect.getOwnPropertyDescriptor(current, name);
+      const remainsConfigurable = descriptor.configurable ??
+        currentDescriptor?.configurable ??
+        false;
+      if (!remainsConfigurable) {
+        throw new ScratchKeyPolicyError(
+          "Scratch properties must remain configurable so the scope can be cleared",
+        );
+      }
       unavailable.delete(name);
       return Reflect.defineProperty(current, name, descriptor);
     },
@@ -205,6 +214,9 @@ export function createScratchProxy(
     },
     setPrototypeOf() {
       throw new ScratchKeyPolicyError("Scratch has an immutable null prototype");
+    },
+    preventExtensions() {
+      throw new ScratchKeyPolicyError("Scratch must remain extensible so the scope can be cleared");
     },
   });
   return {
@@ -237,9 +249,12 @@ class SerializationSkip extends Error {
 
 export function serializeScratch(
   value: Record<string, unknown>,
+  knownUnavailable: ReadonlyMap<string, ScratchSkipReason> = new Map(),
 ): ScratchCheckpointCandidate {
   const values: Record<string, JsonValue> = Object.create(null);
-  const skipped: ScratchSkippedProperty[] = [];
+  const skipped: ScratchSkippedProperty[] = [...knownUnavailable]
+    .filter(([name]) => !Object.hasOwn(value, name))
+    .map(([name, reason]) => ({ name, reason }));
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const names = Object.keys(descriptors).sort();
   const budget: TraversalBudget = { nodes: 0, properties: 0 };
@@ -280,12 +295,20 @@ export function serializeScratch(
 export function filterScratchCheckpoint(
   candidate: ScratchCheckpointCandidate,
   reject: (name: string, value: JsonValue) => boolean,
+  options: {
+    readonly retainRejectedNames?: boolean;
+    readonly omitSkippedName?: (name: string) => boolean;
+  } = {},
 ): ScratchCheckpointCandidate {
   const values: Record<string, JsonValue> = Object.create(null);
-  const skipped = [...candidate.skipped];
+  const skipped = candidate.skipped.filter((item) => !options.omitSkippedName?.(item.name));
   for (const name of candidate.savedNames) {
     const value = candidate.values[name]!;
-    if (reject(name, value)) pushSkipped(skipped, name, "secret_rejected");
+    if (reject(name, value)) {
+      if (options.retainRejectedNames !== false) {
+        pushSkipped(skipped, name, "secret_rejected");
+      }
+    }
     else values[name] = value;
   }
   return buildScratchCheckpointCandidate(values, skipped);

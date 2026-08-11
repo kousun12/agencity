@@ -1,6 +1,6 @@
 # Best-effort TypeScript console scratch plan
 
-**Status:** Implemented; aggregate verification pending
+**Status:** Complete for deterministic local verification; external integrations remain unverified
 **Date:** August 10, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Agent context and observation efficiency](./2026-08-09-agent-context-efficiency-plan.md), [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), and [Durable tenacious goal orchestration](./2026-08-09-tenacious-goal-orchestration-plan.md)
@@ -214,6 +214,7 @@ Initial live limits:
 - key length at most 128 UTF-8 bytes;
 - no symbol keys;
 - no accessor properties;
+- no non-configurable properties or extension locks, so `sdk.scratch.clear()` can always empty the scope;
 - `__proto__`, `prototype`, and `constructor` are rejected as keys.
 
 Values are otherwise unrestricted while warm. Nested mutation and object identity behave like ordinary JavaScript.
@@ -632,4 +633,11 @@ This plan is complete when:
 - Installed product: Added an isolated linked-executable journey with compact cell observations, one bounded durable-state key, exact-branch warm object/function reuse, detached admission and no-ID resume, explicit service loss, same-device eligible JSON restoration, and deliberate rebuilding of a warm-only helper from durable input.
 - Validation: The complete managed-service integration file passed 20 tests, the product CLI integration file passed 16 tests, and the complete primary installed acceptance file passed 3 tests. Typecheck, architecture checking, and final diff checking passed.
 - Plan notes: The old-binary mismatch is represented by the exact former normalized 60,000-millisecond configuration because discovery hashes serialized normalized values. Warm scratch and a running but idle console process remain non-keep-alive state. Human formatting changes only CLI text; protocol and JSON shapes retain exact milliseconds.
-- Remaining: Parent-owned aggregate verification and separately gated live-provider, official Turso Sync, and Turso Cloud checks.
+- Aggregate validation: `bun run verify` passed with 981 core tests, 3 end-to-end tests, and 17 acceptance tests; 2 core external tests and 1 acceptance external test skipped. `bun run test:acceptance:matrix` passed its deterministic matrix.
+- Remaining: Live-provider, official Turso Sync, and Turso Cloud checks remain gated, skipped, and unverified.
+
+### 2026-08-11 — Independent final review
+- Corrected: Scratch now rejects non-configurable properties and extension locks so the documented clear operation cannot leave undeletable warm values.
+- Corrected: Supervisor-side checkpoint filtering rejects credential-shaped content as well as registered credential values, and omits secret-bearing property names from checkpoint metadata.
+- Corrected: Known skipped-binding metadata now survives later successful checkpoints until the binding is rebuilt, deleted, or cleared.
+- Validation: Focused scratch unit, console integration, and scratch-store integration suites passed 40 tests; typecheck, architecture checking, and diff checking passed.

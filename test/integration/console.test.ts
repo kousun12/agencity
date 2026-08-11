@@ -9,6 +9,7 @@ import {
   Supervisor,
   jsonBytes,
   projectEvents,
+  serializeScratch,
 } from "../../src/index.ts";
 import {
   makeTempRuntime,
@@ -715,6 +716,19 @@ describe("disposable TypeScript console process", () => {
       status: { temperature: "warm" },
       pid: (first.result as any).pid,
     });
+    const cleared = await supervisor.executeCell(sessionId, branchId, `
+      const status = await sdk.scratch.clear();
+      ({
+        hasIndex: "index" in scratch,
+        propertyNames: status.propertyNames,
+        pid: process.pid,
+      })
+    `);
+    expect(cleared.result).toEqual({
+      hasIndex: false,
+      propertyNames: [],
+      pid: (first.result as any).pid,
+    });
 
     const other = await supervisor.createSession({ workspaceId: "console-workspace" });
     const isolated = await supervisor.executeCell(other.sessionId, other.branchId, `
@@ -864,6 +878,26 @@ describe("disposable TypeScript console process", () => {
       },
     });
     expect((restored.result as any).pid).not.toBe((first.result as any).pid);
+    const restoredAgain = await supervisor.executeCell(sessionId, branchId, `
+      let helperError = "";
+      try { scratch.helper(1); } catch (error) { helperError = String(error); }
+      ({
+        rows: scratch.rows,
+        helperError,
+        status: await sdk.scratch.status(),
+        pid: process.pid,
+      })
+    `);
+    expect(restoredAgain.result).toMatchObject({
+      rows: [{ id: 1 }],
+      helperError: expect.stringContaining("unsupported_type"),
+      status: {
+        temperature: "restored",
+        savedNames: ["rows"],
+        skipped: [{ name: "helper", reason: "unsupported_type" }],
+      },
+    });
+    expect((restoredAgain.result as any).pid).not.toBe((restored.result as any).pid);
     await supervisor.close();
   });
 
@@ -873,28 +907,58 @@ describe("disposable TypeScript console process", () => {
     const temp = await makeTempRuntime("agencity-console-scratch-secret-");
     temps.push(temp);
     let received: any = null;
+    const legacyCheckpoint = serializeScratch({
+      legacySafe: true,
+      legacyShaped: "sk-test-0987654321",
+      [secret]: () => "not checkpointable",
+    });
     const supervisor = await Supervisor.open({
       databaseUrl: temp.databaseUrl,
       artifactDirectory: temp.artifactDirectory,
       workspaceRoot: temp.workspaceRoot,
       scratchCheckpointHooks: {
-        async load() { return { status: "cold" }; },
+        async load() {
+          return {
+            status: "restored",
+            restore: {
+              candidate: legacyCheckpoint,
+              sourceCellId: "legacy-cell",
+            },
+          };
+        },
         async checkpoint(_scope, candidate) { received = candidate; },
       },
       recover: false,
     });
     const session = await supervisor.createSession({ workspaceId: "scratch-secret" });
-    await supervisor.executeCell(session.sessionId, session.branchId, `
+    const execution = await supervisor.executeCell(session.sessionId, session.branchId, `
+      let legacyError = "";
+      try { void scratch.legacyShaped; } catch (error) { legacyError = String(error); }
+      const legacySafe = scratch.legacySafe;
+      delete scratch.legacySafe;
+      delete scratch.legacyShaped;
       scratch.safe = { count: 1 };
       scratch.secret = ["rpc-broker-", "secret-a811"].join("");
-      ({ complete: true })
+      scratch.shaped = ["sk-test-", "1234567890"].join("");
+      scratch[["rpc-broker-", "secret-a811"].join("")] = () => "not checkpointable";
+      ({ complete: true, legacySafe, legacyError })
     `);
+    expect(execution.result).toMatchObject({
+      complete: true,
+      legacySafe: true,
+      legacyError: expect.stringContaining("secret_rejected"),
+    });
     expect(received.savedNames).toEqual(["safe"]);
     expect(received.skipped).toContainEqual({
       name: "secret",
       reason: "secret_rejected",
     });
+    expect(received.skipped).toContainEqual({
+      name: "shaped",
+      reason: "secret_rejected",
+    });
     expect(JSON.stringify(received)).not.toContain(secret);
+    expect(JSON.stringify(received)).not.toContain("sk-test-1234567890");
     await supervisor.close();
   });
 

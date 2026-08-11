@@ -68,6 +68,7 @@ import { ProjectionService } from "./projection.ts";
 import {
   ModelCredentialStore,
   containsBrokeredSecret,
+  containsCredentialMaterial,
   modelCredentialPathForProfile,
   scrubJson,
   scrubText,
@@ -1477,6 +1478,15 @@ export class Supervisor {
           status: "unavailable",
           reason: "storage_error",
         }));
+        if (loadResult.status === "restored") {
+          loadResult = {
+            status: "restored",
+            restore: {
+              ...loadResult.restore,
+              candidate: filterSensitiveScratchCheckpoint(loadResult.restore.candidate),
+            },
+          };
+        }
       }
       await this.console.prepareScratch(
         scratchScope,
@@ -1599,10 +1609,7 @@ export class Supervisor {
       let checkpoint: ScratchCheckpointCandidate | null = null;
       try {
         checkpoint = await this.console.checkpointScratch(scratchScope, cellId);
-        checkpoint = filterScratchCheckpoint(
-          checkpoint,
-          (_name, value) => containsBrokeredSecret(value),
-        );
+        checkpoint = filterSensitiveScratchCheckpoint(checkpoint);
       } catch {
         if (this.console.status().running) {
           await this.console
@@ -1691,6 +1698,23 @@ export class Supervisor {
       if (this.restartConsoleAfterCell) await this.console.stop();
     }
   }
+}
+
+function filterSensitiveScratchCheckpoint(
+  candidate: ScratchCheckpointCandidate,
+): ScratchCheckpointCandidate {
+  const safeNames = filterScratchCheckpoint(
+    candidate,
+    (name) => containsCredentialMaterial(name),
+    {
+      retainRejectedNames: false,
+      omitSkippedName: (name) => containsCredentialMaterial(name),
+    },
+  );
+  return filterScratchCheckpoint(
+    safeNames,
+    (_name, value) => containsCredentialMaterial(JSON.stringify(value)),
+  );
 }
 
 function acceptanceCrashAfterCellCommit(cellId: string): void {
