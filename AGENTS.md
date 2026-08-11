@@ -255,10 +255,11 @@ AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=...   bun test te
 
 The isolated `benchmarks/prime/` project provides a custom Prime Verifiers v1
 harness and a pinned Prime-style file-offloaded OOLONG-synth taskset. Its local
-contract and 1K OOLONG integration smokes have passed. Yahoo 128K development
-probes reached explicit turn or token ceilings and are retained as zero-score
-configuration evidence; no full OOLONG score, hosted run, or exact Prime Agent
-reproduction is verified.
+contract and 1K OOLONG integration smokes have passed. One revised Sol-high
+Yahoo 128K sample completed and scored `1.0`; the corresponding Luna sample
+completed but scored `0`. Earlier bounded failures remain configuration
+evidence. No full OOLONG score, hosted run, or exact Prime Agent reproduction is
+verified.
 
 Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified.
 

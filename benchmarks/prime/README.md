@@ -111,13 +111,23 @@ On August 10, 2026:
 - one Sol-high Yahoo 128K rollout launched 21 recursive classification shards
   but reached the 300,000-token probe limit before terminal aggregation. It
   scored `0`, took about 22 minutes, and consumed $9.91 of Prime inference
-  credit.
+  credit;
+- after adding in-cell recursive-result aggregation and raising the ceiling to
+  500,000 tokens, one Sol-high Yahoo 128K rollout completed in 22 model calls
+  and five Agencity steps. It used 397,293 total tokens, took about 22 minutes,
+  returned `Sports`, scored `1.0`, and consumed $3.85 of incremental Prime
+  inference credit;
+- the same revised sample on Luna completed in 12 model calls and nine Agencity
+  steps. It used 62,973 total tokens, took about three minutes, returned
+  `Society & Culture` instead of `Sports`, scored `0`, and consumed $0.37 of
+  incremental Prime inference credit.
 
-The two 128K probes are configuration evidence, not benchmark scores. They show
-that a 50-task Sol run can cost hundreds of dollars and that the harness must
-aggregate recursive results inside TypeScript to avoid returning large child
-outputs to the parent model. No further paid run should start until the operator
-approves a cost ceiling and one target-model sample completes under that ceiling.
+These single-task 128K probes are integration evidence, not benchmark scores.
+The successful Sol sample establishes the complete route, but extrapolating its
+cost linearly gives roughly $193 for 50 tasks before variance or failed work.
+The full run therefore remains operator-gated. Luna is materially cheaper but
+did not solve this sampled task, so its lower cost is not evidence that it is a
+viable replacement for the target-model run.
 
 ## Evidence and interpretation
 

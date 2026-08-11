@@ -534,13 +534,20 @@ the full 50-case Yahoo 128K slice.
   and reached the 300,000-token development limit before terminal aggregation.
   It scored `0`, took about 22 minutes, and consumed $9.91 of Prime inference
   credit.
+- With in-cell recursive-result aggregation and a 500,000-token ceiling, a
+  second Sol-high Yahoo 128K rollout completed in 22 model calls and five
+  Agencity steps. It used 397,293 total tokens, took about 22 minutes, returned
+  the correct `Sports` answer, scored `1.0`, and consumed $3.85 of incremental
+  Prime inference credit.
+- The revised Luna Yahoo 128K sample completed in 12 model calls and nine
+  Agencity steps. It used 62,973 total tokens, took about three minutes, returned
+  `Society & Culture` instead of `Sports`, scored `0`, and consumed $0.37 of
+  incremental Prime inference credit.
 
-The 128K probes establish that the route and recursive work operate, but they do
-not establish benchmark capability. The full config is retained but must not run
-until one target-model sample completes under an operator-approved cost ceiling.
-At observed probe cost, a 50-case run can cost hundreds of dollars. The prompt
-now directs recursive result aggregation to remain inside TypeScript so bulk
-child output does not inflate the next provider input.
+The successful Sol sample establishes the complete integration route, but one
+task does not establish benchmark capability. Linear cost extrapolation is about
+$193 for 50 Sol tasks before variance or failed work, so the full config remains
+operator-gated. Luna is materially cheaper but did not solve this sampled task.
 
 ## Verification and reporting rules
 
