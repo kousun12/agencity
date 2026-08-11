@@ -316,7 +316,7 @@ export const CLI_HELP_GROUPS: readonly CliHelpGroup[] = Object.freeze([
       productHelp("agencity unknown [EFFECT_ID]", "Inspect unknown external effects without retrying them."),
       productHelp("agencity reconcile EFFECT_ID ASSESSMENT SUMMARY", "Append operator evidence without rewriting effect status."),
       productHelp("agencity profile [show|history|proposals|propose|repropose|rollback]", "Inspect and explicitly govern the selected agent's behavioral profile without copying internal target IDs."),
-      productHelp("agencity refine [--wait] [--kind KIND[,KIND]] [--scope SCOPE] [INSTRUCTIONS]", "Start a detached attributable trajectory review; use --wait for a terminal result. Advanced diagnostics use refine propose-json."),
+      productHelp("agencity refine [--wait|--detach] [--kind KIND[,KIND]] [--scope SCOPE] [INSTRUCTIONS|status|history]", "Review retained experience for governed memory, prompt-note, skill, or subagent-spec changes; use ordinary tasks for code or runtime implementation. Manual reviews detach by default."),
       productHelp("agencity skills [list|show|install|propose|test|enable|disable|remove]", "Manage tested workspace and profile skills; local code installation requires an exact digest confirmation."),
       productHelp("agencity context", "Inspect effective context, capacity, and compaction provenance."),
       productHelp("agencity compact [GUIDANCE] [--strategy extractive|summary]", "Compact retained narrative without deleting canonical history."),

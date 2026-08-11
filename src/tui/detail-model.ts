@@ -4,9 +4,11 @@ import {
   describeCatalogAgentToolState,
   describeTransportAgentToolState,
   type AgentToolCapabilityState,
+  type RefinementReviewRecord,
   type SelectedAgentToolCapabilityView,
 } from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
+import { summarizeTerminalRefinement } from "./view-model.ts";
 
 export type TerminalDetailTone = "normal" | "success" | "warning" | "danger" | "muted";
 
@@ -518,11 +520,19 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
   const sections: TerminalDetailSection[] = [];
   if (reviews.length) sections.push({
     title: `Reviews · ${reviews.length}`,
-    rows: reviews.map(item => statusRow(
-      string(item.instructions, `${displayStatus(item.mode)} review`),
-      item.status,
-      item.reason ?? `${records(item.sourceEventIds).length || (Array.isArray(item.sourceEventIds) ? item.sourceEventIds.length : 0)} source events`,
-    )),
+    rows: reviews.map(item => {
+      const summary = summarizeTerminalRefinement(item as unknown as RefinementReviewRecord);
+      return {
+        label: summary.request,
+        value: summary.status,
+        detail: [
+          summary.result,
+          ...(summary.reason ? [`Reason: ${summary.reason}`] : []),
+          ...(summary.guidance ? [`Next: ${summary.guidance}`] : []),
+        ].join("\n"),
+        tone: summary.changed ? "success" : markerTone(item.governedStatus ?? item.status),
+      };
+    }),
   });
   if (proposals.length) sections.push({
     title: `Proposals · ${proposals.length}`,
@@ -549,7 +559,7 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
     kind: "inspection",
     command,
     title: "Refinement",
-    summary: "Attributable review, proposal, and policy state.",
+    summary: "Governed behavioral-harness review state. Code, repository, and runtime implementation remain normal agent tasks.",
     sections,
     raw: value,
   };
