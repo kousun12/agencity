@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { appendFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
@@ -219,9 +219,6 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       const target = parsed.positionals.join(" ").trim();
       if (target && target !== "current") throw new ValidationError("history accepts only `current`; use `resume NAME` before inspecting another named branch");
       const snapshot = await client.snapshot(selection.sessionId, selection.branchId);
-      // #region agent log
-      appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "D", location: "src/cli.ts:history", message: "history snapshot materialized", data: { messages: snapshot.state.messages.length, cells: Object.keys(snapshot.state.cells).length, effects: Object.keys(snapshot.state.effects).length, runs: Object.keys(snapshot.state.agentRuns).length }, timestamp: Date.now() })}\n`);
-      // #endregion
       await printValue({
         session: summary.sessionName,
         branch: summary.branchName,
@@ -1080,28 +1077,13 @@ function printProductRunResult(
 async function printValue(value: unknown, json: boolean): Promise<void> {
   const rendered = json ? JSON.stringify(value, null, 2) : typeof value === "string" ? value : JSON.stringify(value, null, 2);
   const output = `${rendered}\n`;
-  // #region agent log
-  appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "A", location: "src/cli.ts:printValue:before", message: "CLI value serialized", data: { bytes: Buffer.byteLength(rendered), suffix: rendered.slice(-16), stdoutLength: process.stdout.writableLength, needsDrain: process.stdout.writableNeedDrain }, timestamp: Date.now() })}\n`);
-  // #endregion
   if (Buffer.byteLength(output) <= 64 * 1024) {
     writeFileSync(process.stdout.fd, output, "utf8");
-    // #region agent log
-    appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "G", location: "src/cli.ts:printValue:syncWrite", message: "CLI synchronous stdout write completed", data: { bytes: Buffer.byteLength(rendered) + 1 }, timestamp: Date.now() })}\n`);
-    // #endregion
   } else {
     await new Promise<void>((resolveWrite, rejectWrite) => {
       process.stdout.write(output, error => error ? rejectWrite(error) : resolveWrite());
     });
-    // #region agent log
-    appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "H", location: "src/cli.ts:printValue:asyncWrite", message: "CLI backpressure-aware stdout write completed", data: { bytes: Buffer.byteLength(output) }, timestamp: Date.now() })}\n`);
-    // #endregion
   }
-  // #region agent log
-  appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "B", location: "src/cli.ts:printValue:after", message: "CLI console log returned", data: { bytes: Buffer.byteLength(rendered), stdoutLength: process.stdout.writableLength, needsDrain: process.stdout.writableNeedDrain }, timestamp: Date.now() })}\n`);
-  // #endregion
-  // #region agent log
-  process.once("beforeExit", () => appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "C", location: "src/cli.ts:printValue:beforeExit", message: "CLI reached beforeExit", data: { stdoutLength: process.stdout.writableLength, needsDrain: process.stdout.writableNeedDrain, destroyed: process.stdout.destroyed }, timestamp: Date.now() })}\n`));
-  // #endregion
 }
 
 async function manageAutonomy(supervisor: Supervisor, sessionId: string, branchId: string, parsed: ParsedCliArgs): Promise<void> {
