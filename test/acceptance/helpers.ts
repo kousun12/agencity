@@ -51,7 +51,8 @@ export class AcceptanceWorld {
   }
 
   async commandWithInput(args: readonly string[], input: string, extraEnvironment: Readonly<Record<string, string>> = {}): Promise<CommandResult> {
-    const child = Bun.spawn([this.binary, ...args], {
+    const command = [this.binary, ...args];
+    const child = Bun.spawn(command, {
       cwd: this.repository,
       env: this.environment(extraEnvironment),
       stdin: "pipe",
