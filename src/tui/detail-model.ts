@@ -4,9 +4,11 @@ import {
   describeCatalogAgentToolState,
   describeTransportAgentToolState,
   type AgentToolCapabilityState,
+  type RefinementReviewRecord,
   type SelectedAgentToolCapabilityView,
 } from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
+import { summarizeTerminalRefinement } from "./view-model.ts";
 
 export type TerminalDetailTone = "normal" | "success" | "warning" | "danger" | "muted";
 
@@ -618,16 +620,19 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
   });
   if (reviews.length) sections.push({
     title: `Reflection activity · ${reviews.length}`,
-    rows: reviews.map(item => statusRow(
-      string(item.instructions, `${displayStatus(item.mode)} reflection`),
-      item.status,
-      [
-        item.triggerKind ? `Trigger: ${displayStatus(item.triggerKind)}` : "",
-        `${Array.isArray(item.evidenceEventIds) ? item.evidenceEventIds.length : Array.isArray(item.sourceEventIds) ? item.sourceEventIds.length : 0} evidence events`,
-        item.governedStatus ? `Governance: ${displayStatus(item.governedStatus)}` : "",
-        item.reason ? `Reason: ${sentence(item.reason, 180)}` : "",
-      ].filter(Boolean).join(" · "),
-    )),
+    rows: reviews.map(item => {
+      const summary = summarizeTerminalRefinement(item as unknown as RefinementReviewRecord);
+      return {
+        label: summary.request,
+        value: summary.status,
+        detail: [
+          summary.result,
+          ...(summary.reason ? [`Reason: ${summary.reason}`] : []),
+          ...(summary.guidance ? [`Next: ${summary.guidance}`] : []),
+        ].join("\n"),
+        tone: summary.changed ? "success" : markerTone(item.governedStatus ?? item.status),
+      };
+    }),
   });
   if (proposals.length) sections.push({
     title: `Governed change activity · ${proposals.length}`,

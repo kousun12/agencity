@@ -6,6 +6,7 @@ import type {
   FamilyAgentActivityReason,
   FamilyAgentRecord,
   ModelContractDiagnosticOutcome,
+  RefinementReviewRecord,
 } from "../runtime/index.ts";
 import { deriveModelContractCallDiagnostic } from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
@@ -15,6 +16,7 @@ const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancel
 export type TerminalConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
 export type TerminalFamilyRefreshState = "current" | "refreshing" | "stale" | "unavailable";
 export type TerminalWorkspaceAgentsRefreshState = "loading" | "current" | "stale" | "unavailable";
+export type TerminalRefinementRefreshState = "refreshing" | "current" | "stale" | "unavailable";
 
 export interface TerminalRoute {
   readonly sessionId: string;
@@ -51,12 +53,23 @@ export interface TerminalPresentation {
   readonly provisionalRunIds: readonly string[];
   readonly family: TerminalFamilyNavigation;
   readonly workspaceAgents: TerminalWorkspaceAgentsState;
+  readonly refinementReviews: readonly RefinementReviewRecord[];
+  readonly refinementRefresh: TerminalRefinementRefreshState;
 }
 
 export interface TerminalConversationItem {
   readonly id: string;
   readonly role: "user" | "assistant" | "runtime";
   readonly content: string;
+}
+
+export interface TerminalRefinementSummary {
+  readonly request: string;
+  readonly status: string;
+  readonly result: string;
+  readonly reason: string | null;
+  readonly guidance: string | null;
+  readonly changed: boolean;
 }
 
 export interface TerminalStepView {
@@ -509,6 +522,194 @@ function structuredRefinementConversation(
   });
 }
 
+const GOVERNED_REFINEMENT_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  proposed: "Proposal pending validation",
+  validated: "Proposal validated; governance pending",
+  reviewing: "Governance review running",
+  deterministically_rejected: "Proposal rejected",
+  reviewed_rejected: "Governance reviewer rejected the proposal",
+  review_failed: "Governance review failed",
+  review_unknown: "Governance outcome unknown",
+  reviewed_approved: "Proposal approved; application pending",
+  apply_conflict: "Application conflict",
+  apply_failed: "Application failed",
+  applied: "Applied",
+});
+
+const TERMINAL_GOVERNED_WITHOUT_CHANGE = new Set([
+  "deterministically_rejected",
+  "reviewed_rejected",
+  "review_failed",
+  "review_unknown",
+  "apply_conflict",
+  "apply_failed",
+]);
+
+function refinementRequest(record: RefinementReviewRecord): string {
+  const instructions = record.instructions?.trim();
+  if (instructions) return oneLine(scrubText(instructions), 500);
+  if (record.mode === "automatic") {
+    return `Automatic ${record.triggerKind.replaceAll("_", " ")} review`;
+  }
+  if (record.mode === "skill_creation") return "Create a tested reusable skill from retained work";
+  return "Review the retained trajectory for a behavioral improvement";
+}
+
+function governedResult(record: RefinementReviewRecord): Record<string, JsonValue> {
+  return record.governedResult && typeof record.governedResult === "object" &&
+      !Array.isArray(record.governedResult)
+    ? record.governedResult as Record<string, JsonValue>
+    : {};
+}
+
+/** Human-facing retained outcome for one trajectory review and any linked governance. */
+export function summarizeTerminalRefinement(
+  record: RefinementReviewRecord,
+): TerminalRefinementSummary {
+  const governed = governedResult(record);
+  const governedStatus = record.governedStatus;
+  const governedReason = typeof governed.reason === "string" ? governed.reason : null;
+  const reason = oneLine(scrubText(governedReason ?? record.reason ?? ""), 700) || null;
+  const appliedVersionIds = Array.isArray(governed.appliedVersionIds)
+    ? governed.appliedVersionIds.filter((value): value is string => typeof value === "string")
+    : [];
+  if (governedStatus === "applied") {
+    const count = Math.max(1, appliedVersionIds.length);
+    return {
+      request: refinementRequest(record),
+      status: GOVERNED_REFINEMENT_LABELS.applied!,
+      result: `${count} behavioral harness artifact version${count === 1 ? "" : "s"} changed.`,
+      reason,
+      guidance: "Reviewer approval establishes policy consistency, not proven improvement.",
+      changed: true,
+    };
+  }
+  if (governedStatus) {
+    const terminal = TERMINAL_GOVERNED_WITHOUT_CHANGE.has(governedStatus);
+    return {
+      request: refinementRequest(record),
+      status: GOVERNED_REFINEMENT_LABELS[governedStatus] ?? governedStatus.replaceAll("_", " "),
+      result: terminal
+        ? "No behavioral harness artifact changed."
+        : "No behavioral harness artifact has changed yet.",
+      reason,
+      guidance: null,
+      changed: false,
+    };
+  }
+  switch (record.status) {
+    case "requested":
+      return {
+        request: refinementRequest(record),
+        status: "Review queued",
+        result: "No behavioral harness artifact has changed yet.",
+        reason,
+        guidance: null,
+        changed: false,
+      };
+    case "running":
+      return {
+        request: refinementRequest(record),
+        status: "Review running",
+        result: "No behavioral harness artifact has changed yet.",
+        reason,
+        guidance: null,
+        changed: false,
+      };
+    case "candidate":
+      return {
+        request: refinementRequest(record),
+        status: "Proposal pending governance",
+        result: "No behavioral harness artifact has changed yet.",
+        reason,
+        guidance: null,
+        changed: false,
+      };
+    case "no_change":
+      return {
+        request: refinementRequest(record),
+        status: "No change",
+        result: "No behavioral harness artifact changed.",
+        reason,
+        guidance: "Refinement updates memory, prompt notes, tested skills, or subagent specifications. Submit code, repository, or runtime implementation as a normal task.",
+        changed: false,
+      };
+    case "revision_required":
+      return {
+        request: refinementRequest(record),
+        status: "Revision required",
+        result: "No behavioral harness artifact changed.",
+        reason,
+        guidance: null,
+        changed: false,
+      };
+    case "failed":
+      return {
+        request: refinementRequest(record),
+        status: "Review failed",
+        result: "No behavioral harness artifact changed.",
+        reason,
+        guidance: null,
+        changed: false,
+      };
+    case "cancelled":
+      return {
+        request: refinementRequest(record),
+        status: "Review cancelled",
+        result: "No behavioral harness artifact changed.",
+        reason,
+        guidance: null,
+        changed: false,
+      };
+    case "unknown":
+      return {
+        request: refinementRequest(record),
+        status: "Review outcome unknown",
+        result: "No behavioral harness artifact change is confirmed.",
+        reason,
+        guidance: null,
+        changed: false,
+      };
+  }
+  return {
+    request: refinementRequest(record),
+    status: "Review status unavailable",
+    result: "No behavioral harness artifact change is confirmed.",
+    reason,
+    guidance: null,
+    changed: false,
+  };
+}
+
+export function retainedRefinementConversation(
+  records: readonly RefinementReviewRecord[],
+  refresh: TerminalRefinementRefreshState,
+): TerminalConversationItem[] {
+  const items = records.slice(-8).map((record): TerminalConversationItem => {
+    const summary = summarizeTerminalRefinement(record);
+    const content = [
+      `**Request:** ${summary.request}`,
+      `**Status:** ${summary.status}`,
+      summary.result,
+      ...(summary.reason ? [`**Reason:** ${summary.reason}`] : []),
+      ...(summary.guidance ? [`**Next:** ${summary.guidance}`] : []),
+    ].join("\n\n");
+    return {
+      id: `refinement-review:${record.reviewId}`,
+      role: "runtime",
+      content,
+    };
+  });
+  if (refresh === "stale" && items.length) {
+    items.push({
+      id: "refinement-review:stale",
+      role: "runtime",
+      content: "Refinement history is temporarily stale. Retained results remain visible; use `/refine history` to retry.",
+    });
+  }
+  return items;
+}
+
 function stepView(state: AgentState, run: AgentRunState, ordinal: number): TerminalStepView | null {
   const step = run.steps[ordinal]!;
   const action = step.action;
@@ -623,6 +824,9 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
     conversation: [
       ...visibleConversation(state.messages),
       ...structuredRefinementConversation(state),
+      ...(presentation.historicalCursor === null
+        ? retainedRefinementConversation(presentation.refinementReviews, presentation.refinementRefresh)
+        : []),
     ].slice(-24),
     runs,
     familyChildren,

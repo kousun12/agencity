@@ -1981,6 +1981,7 @@ describe("FU-016 durable RefinerService", () => {
       await ui.execute("/refine status");
       expect(terminalOutput).toContain("no change");
       expect(terminalOutput).toContain(targeted.reviewId);
+      expect(terminalOutput).not.toContain(review.reviewId);
       await ui.execute("/raw");
       expect(terminalOutput).toContain(targeted.reviewId);
       expect(terminalOutput).toContain('"kind": "formal-submission"');
