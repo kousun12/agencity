@@ -909,11 +909,8 @@ async function withPublicationLock<T>(
 }
 
 async function validateExistingLock(lockPath: string): Promise<void> {
-  let before: Stats;
   let handle: FileHandle;
   try {
-    before = await lstat(lockPath);
-    if (!before.isDirectory() || before.isSymbolicLink()) throw insecure("Publication lock is not a real directory");
     handle = await open(lockPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   } catch (error) {
     if (isErrno(error, "ENOENT")) return;
@@ -921,9 +918,9 @@ async function validateExistingLock(lockPath: string): Promise<void> {
     throw insecure("Publication lock could not be inspected securely");
   }
   try {
-    const after = await handle.stat();
-    assertSameFile(before, after, "Publication lock changed while it was inspected");
-    assertOwnerAndMode(after, DIRECTORY_MODE, "Publication lock");
+    const current = await handle.stat();
+    if (!current.isDirectory() || current.isSymbolicLink()) throw insecure("Publication lock is not a real directory");
+    assertOwnerAndMode(current, DIRECTORY_MODE, "Publication lock");
   } finally {
     await handle.close().catch(() => {});
   }

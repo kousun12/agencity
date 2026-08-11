@@ -25,10 +25,11 @@ packages = [
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
-"manifests/terminal-bench-2-fix-git.json" = "agencity_terminal_bench_2/data/manifest.json"
+"manifests/oolong-yahoo-128k.json" = "agencity_oolong_synth/data/selection.json"
+"manifests/terminal-bench-2-catalog.json" = "agencity_terminal_bench_2/data/catalog.json"
 "uv.lock" = "agencity_terminal_bench_2/data/uv.lock"
-"manifests/terminal-bench-2-1-fix-git.json" = "agencity_terminal_bench_2_1/data/manifest.json"
-"manifests/swe-bench-pro-public-qutebrowser.json" = "agencity_swe_bench_pro/data/manifest.json"
+"manifests/terminal-bench-2-1-catalog.json" = "agencity_terminal_bench_2_1/data/catalog.json"
+"manifests/swe-bench-pro-public-catalog.json" = "agencity_swe_bench_pro/data/catalog.json"
 
 [tool.hatch.build.targets.sdist]
 exclude = [

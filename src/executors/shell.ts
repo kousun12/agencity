@@ -199,6 +199,17 @@ interface CapturedStream {
   readonly stagingFailed: boolean;
 }
 
+export function releaseStreamReader(reader: { releaseLock?: () => void }): void {
+  const releaseLock = reader.releaseLock;
+  if (typeof releaseLock !== "function") return;
+  try {
+    Reflect.apply(releaseLock, reader, []);
+  } catch {
+    // Bun child-process pipe readers can expose a releaseLock function whose
+    // internal implementation has already been detached after EOF.
+  }
+}
+
 async function captureStream(
   stream: ReadableStream<Uint8Array>,
   stagingPath?: string,
@@ -249,7 +260,7 @@ async function captureStream(
     }
     await retain(scrubber.finish());
   } finally {
-    reader.releaseLock();
+    releaseStreamReader(reader);
     await handle?.close().catch(() => { stagingFailed = true; });
   }
   const value = preview.value();

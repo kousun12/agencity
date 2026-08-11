@@ -1,4 +1,4 @@
-"""Host-side official SWE-bench Pro scoring after the agent runtime is gone."""
+"""Host-side official SWE-bench Pro scoring after agent runtime destruction."""
 
 from __future__ import annotations
 
@@ -18,32 +18,8 @@ from typing import Any
 EVALUATOR_REPOSITORY = "https://github.com/scaleapi/SWE-bench_Pro-os"
 EVALUATOR_COMMIT = "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
 EVALUATOR_TREE_SHA256 = "472a5ec338449cc18d4e2809d134814ede3d98349e9ea09babc3fe098348a830"
-EVALUATOR_ENTRYPOINT_SHA256 = (
-    "bb5d4c5486be296e464e695df3747064aaa3bb197394bc6d39980634afec2034"
-)
-EVALUATOR_IMAGE_HELPER_SHA256 = (
-    "d1a858866dd2622c0e37986dd7b86698e5ea53546f30901d1bf0d6ba1b97384f"
-)
-RUN_SCRIPT_SHA256 = "7e157b74da158abf8aca7e020e376049b3155be2e46c70dd742eede21bba6860"
-PARSER_SHA256 = "4a1f537ce46faf1b056064a9e9318ac27a001fd53d9fa3c7767d3138d7067e42"
-BASE_DOCKERFILE_SHA256 = (
-    "cab8d4e09ade1c2e77519df13615c06e5d284b1bb06b0ab547b492af5f78598e"
-)
-INSTANCE_DOCKERFILE_SHA256 = (
-    "5326bf6d8adbb10f7b3a2fedb67c9a2a75eb63f9a900e9a2fc5b0f83531adbca"
-)
-IMAGE = (
-    "jefzda/sweap-images@"
-    "sha256:1607129d3ab3b54033dd9d6fdc9c05c6fad3d36dbdd89f36082f331acfcca35a"
-)
-IMAGE_ID = "sha256:1607129d3ab3b54033dd9d6fdc9c05c6fad3d36dbdd89f36082f331acfcca35a"
-IMAGE_CONFIG_DIGEST = (
-    "sha256:683080e5f4c5bb2b5260291dcecbac18a4a474283779ca033966d89bd530807c"
-)
-EXPECTED_IMAGE_IDS = frozenset({IMAGE_ID, IMAGE_CONFIG_DIGEST})
 DOCKER_PLATFORM = "linux/amd64"
 SCORER_TIMEOUT_SECONDS = 1800
-
 _EVALUATOR_ROW_FIELDS = (
     "instance_id",
     "repo",
@@ -68,12 +44,20 @@ class OfficialScore:
 def score_with_official_evaluator(
     patch: str,
     row: Mapping[str, Any],
+    pin: Mapping[str, Any],
     *,
     trace_id: str,
     timeout_seconds: int = SCORER_TIMEOUT_SECONDS,
 ) -> OfficialScore:
-    """Run one patch through the pinned evaluator in a fresh scorer container."""
     instance_id = _required_text(row, "instance_id")
+    if pin.get("id") != instance_id or pin.get("compatible") is not True:
+        raise OfficialEvaluatorError("SWE-bench Pro scorer received an incompatible pin")
+    image = _required_text(pin, "image")
+    manifest_digest = _required_text(pin, "image_manifest_digest")
+    config_digest = _required_text(pin, "image_config_digest")
+    if not image.endswith(f"@{manifest_digest}"):
+        raise OfficialEvaluatorError("SWE-bench Pro immutable image pin is malformed")
+
     with tempfile.TemporaryDirectory(prefix="agencity-swe-pro-scorer-") as directory:
         root = Path(directory)
         evaluator = root / "evaluator"
@@ -82,12 +66,14 @@ def score_with_official_evaluator(
         inputs.mkdir()
         outputs.mkdir()
         _checkout_evaluator(evaluator)
-        _validate_evaluator_source(evaluator, instance_id)
+        _validate_evaluator_source(evaluator, pin)
 
-        image_id = _ensure_pinned_image()
+        image_id = _ensure_pinned_image(image, {manifest_digest, config_digest})
         username = f"127.0.0.1:0/agencity-{_safe_token(trace_id)}"
-        alias = _official_image_alias(username, instance_id, _required_text(row, "repo"))
-        _run_checked(["docker", "tag", IMAGE, alias], "tag pinned scorer image")
+        alias = _official_image_alias(
+            username, instance_id, _required_text(row, "repo")
+        )
+        _run_checked(["docker", "tag", image, alias], "tag pinned scorer image")
         alias_id_before = _inspect_image_id(alias)
         if alias_id_before != image_id:
             _run_best_effort(["docker", "image", "rm", alias])
@@ -168,7 +154,7 @@ def score_with_official_evaluator(
             raise OfficialEvaluatorError(
                 f"Official evaluator exited with {None if process is None else process.returncode}"
             )
-        if _inspect_image_id(IMAGE) != image_id:
+        if _inspect_image_id(image) != image_id:
             raise OfficialEvaluatorError("Pinned scorer image changed during evaluation")
         if _inspect_optional_image_id(alias) is not None:
             raise OfficialEvaluatorError("Temporary scorer image alias was not removed")
@@ -180,18 +166,24 @@ def score_with_official_evaluator(
         )
         parsed_path = outputs / instance_id / "agencity_output.json"
         parsed_bytes = _read_bounded_file(parsed_path, 2 * 1024 * 1024)
-        validate_official_parser_output(json.loads(parsed_bytes.decode("utf-8")))
+        validate_official_parser_output(
+            json.loads(parsed_bytes.decode("utf-8")),
+            official_result=result,
+        )
 
         evidence = {
-            "schema": "agencity.swe-bench-pro-official-evidence.v1",
+            "schema": "agencity.swe-bench-pro-official-evidence.v2",
             "evaluator_commit": EVALUATOR_COMMIT,
             "evaluator_tree_sha256": EVALUATOR_TREE_SHA256,
-            "image": IMAGE,
+            "image": image,
             "image_id": image_id,
-            "image_config_digest": IMAGE_CONFIG_DIGEST,
+            "image_manifest_digest": manifest_digest,
+            "image_config_digest": config_digest,
             "alias_image_id_before": alias_id_before,
             "alias_image_id_after": alias_id_after,
-            "agent_runtime_stopped_before_scoring": True,
+            "agent_runtime_teardown_order": (
+                "verifiers-owned-runtime-stop-requested-before-env-finalize"
+            ),
             "network_blocked": True,
             "alias_pull_preflight": "failed_as_required",
             "official_result": result,
@@ -211,14 +203,18 @@ def score_with_official_evaluator(
 
 def validate_official_evaluator_evidence(value: object, instance_id: str) -> bool:
     if not isinstance(value, dict) or set(value) != {instance_id}:
-        raise ValueError("SWE-bench Pro evaluator evidence must contain one selected instance")
+        raise OfficialEvaluatorError(
+            "SWE-bench Pro evaluator evidence must contain one selected instance"
+        )
     result = value[instance_id]
     if type(result) is not bool:
-        raise ValueError("SWE-bench Pro evaluator result must be a boolean")
+        raise OfficialEvaluatorError("SWE-bench Pro evaluator result must be a boolean")
     return result
 
 
-def validate_official_parser_output(value: object) -> None:
+def validate_official_parser_output(
+    value: object, *, official_result: bool | None = None
+) -> None:
     if not isinstance(value, dict) or set(value) != {"tests"}:
         raise OfficialEvaluatorError("Official parser output has an invalid top-level shape")
     tests = value["tests"]
@@ -229,9 +225,18 @@ def validate_official_parser_output(value: object) -> None:
             not isinstance(test, dict)
             or set(test) != {"name", "status"}
             or not isinstance(test["name"], str)
+            or not test["name"]
             or test["status"] not in {"PASSED", "FAILED", "SKIPPED", "ERROR"}
         ):
-            raise OfficialEvaluatorError("Official parser output contains malformed test evidence")
+            raise OfficialEvaluatorError(
+                "Official parser output contains malformed test evidence"
+            )
+    if official_result is True and any(
+        test["status"] in {"FAILED", "ERROR"} for test in tests
+    ):
+        raise OfficialEvaluatorError(
+            "Official pass result conflicts with failing parser evidence"
+        )
 
 
 def _checkout_evaluator(destination: Path) -> None:
@@ -267,36 +272,38 @@ def _checkout_evaluator(destination: Path) -> None:
         raise OfficialEvaluatorError("Evaluator checkout does not match its pinned tree")
 
 
-def _validate_evaluator_source(root: Path, instance_id: str) -> None:
+def _validate_evaluator_source(root: Path, pin: Mapping[str, Any]) -> None:
+    instance_id = _required_text(pin, "id")
+    assets = pin.get("evaluator_assets")
+    if not isinstance(assets, Mapping):
+        raise OfficialEvaluatorError("SWE-bench Pro evaluator asset pins are unavailable")
     paths = {
-        Path("swe_bench_pro_eval.py"): EVALUATOR_ENTRYPOINT_SHA256,
-        Path("helper_code/image_uri.py"): EVALUATOR_IMAGE_HELPER_SHA256,
-        Path("run_scripts") / instance_id / "run_script.sh": RUN_SCRIPT_SHA256,
-        Path("run_scripts") / instance_id / "parser.py": PARSER_SHA256,
+        Path("run_scripts") / instance_id / "run_script.sh": "run_script_sha256",
+        Path("run_scripts") / instance_id / "parser.py": "parser_sha256",
         Path("dockerfiles/base_dockerfile") / instance_id / "Dockerfile": (
-            BASE_DOCKERFILE_SHA256
+            "base_dockerfile_sha256"
         ),
         Path("dockerfiles/instance_dockerfile") / instance_id / "Dockerfile": (
-            INSTANCE_DOCKERFILE_SHA256
+            "instance_dockerfile_sha256"
         ),
     }
-    for relative, expected in paths.items():
-        if _sha256_file(root / relative) != expected:
+    for relative, key in paths.items():
+        if _sha256_file(root / relative) != assets.get(key):
             raise OfficialEvaluatorError(f"Pinned evaluator file drifted: {relative}")
 
 
-def _ensure_pinned_image() -> str:
-    image_id = _inspect_optional_image_id(IMAGE)
+def _ensure_pinned_image(image: str, expected_ids: set[str]) -> str:
+    image_id = _inspect_optional_image_id(image)
     if image_id is None:
         _run_checked(
-            ["docker", "pull", "--platform", DOCKER_PLATFORM, IMAGE],
+            ["docker", "pull", "--platform", DOCKER_PLATFORM, image],
             "pull pinned scorer image",
         )
-        image_id = _inspect_image_id(IMAGE)
-    if image_id not in EXPECTED_IMAGE_IDS:
+        image_id = _inspect_image_id(image)
+    if image_id not in expected_ids:
         raise OfficialEvaluatorError(
-            "Pinned scorer image ID mismatch: expected the manifest or config "
-            f"digest, got {image_id}"
+            f"Pinned scorer image ID mismatch: expected one of {sorted(expected_ids)}, "
+            f"got {image_id}"
         )
     return image_id
 
@@ -365,9 +372,7 @@ def _run_evaluator(
 
 
 def _remove_alias_containers(alias: str) -> int:
-    listed = _run_best_effort(
-        ["docker", "ps", "-aq", "--filter", f"ancestor={alias}"]
-    )
+    listed = _run_best_effort(["docker", "ps", "-aq", "--filter", f"ancestor={alias}"])
     if listed is None:
         return 0
     identifiers = listed.stdout.decode().split()
@@ -438,10 +443,7 @@ def _file_evidence(path: Path) -> dict[str, Any]:
 
 
 def _bytes_evidence(value: bytes) -> dict[str, Any]:
-    return {
-        "bytes": len(value),
-        "sha256": hashlib.sha256(value).hexdigest(),
-    }
+    return {"bytes": len(value), "sha256": hashlib.sha256(value).hexdigest()}
 
 
 def _sha256_file(path: Path) -> str:
@@ -457,9 +459,7 @@ def _sha256_tree(root: Path) -> str:
             continue
         relative = path.relative_to(root).as_posix()
         payload = (
-            os.readlink(path).encode("utf-8")
-            if path.is_symlink()
-            else path.read_bytes()
+            os.readlink(path).encode("utf-8") if path.is_symlink() else path.read_bytes()
         )
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
@@ -467,13 +467,24 @@ def _sha256_tree(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _required_text(row: Mapping[str, Any], name: str) -> str:
-    value = row.get(name)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"SWE-bench Pro row has no usable {name}")
-    return value
+def _required_text(value: Mapping[str, Any], name: str) -> str:
+    item = value.get(name)
+    if not isinstance(item, str) or not item.strip():
+        raise OfficialEvaluatorError(f"SWE-bench Pro value has no usable {name}")
+    return item
 
 
 def _safe_token(value: str) -> str:
-    token = "".join(character for character in value.lower() if character.isalnum())
-    return token[:24] or "trace"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+__all__ = [
+    "EVALUATOR_COMMIT",
+    "EVALUATOR_REPOSITORY",
+    "EVALUATOR_TREE_SHA256",
+    "OfficialEvaluatorError",
+    "OfficialScore",
+    "score_with_official_evaluator",
+    "validate_official_evaluator_evidence",
+    "validate_official_parser_output",
+]

@@ -9,6 +9,7 @@ from agencity_oolong_synth.taskset import (
     OolongSynthConfig,
     OolongSynthTaskset,
 )
+from agencity_verifiers.selection import SelectionSpec
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,12 +22,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-tasks", type=int, default=50)
     parser.add_argument("--cache-dir")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--check", type=Path)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    config = OolongSynthConfig(
+    # Catalog generation is the only unmanifested load of the pinned comparison
+    # slice. Runtime configs use normal validation and cannot bypass the pin.
+    config = OolongSynthConfig.model_construct(
         id="agencity-oolong-synth",
         split=args.split,
         dataset_name=args.dataset_name,
@@ -34,9 +38,29 @@ def main() -> None:
         expected_tasks=args.expected_tasks,
         dataset_revision=DATASET_REVISION,
         cache_dir=args.cache_dir,
+        selection=SelectionSpec(mode="all"),
+        selection_manifest="none",
+        selection_manifest_sha256=None,
     )
     tasks = OolongSynthTaskset(config).load()
+    manifest = build_manifest(tasks, config)
+    encoded = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    if args.check is not None:
+        expected = args.check.read_text(encoding="utf-8")
+        if expected != encoded:
+            raise ValueError(
+                f"generated OOLONG selection differs from {args.check}"
+            )
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(encoded, encoding="utf-8")
+    print(encoded, end="")
 
+
+def build_manifest(
+    tasks,
+    config: OolongSynthConfig,
+) -> dict[str, object]:
     contexts: dict[int, dict[str, object]] = {}
     entries: list[dict[str, object]] = []
     for task in tasks:
@@ -71,21 +95,17 @@ def main() -> None:
         "version": 1,
         "dataset": "oolongbench/oolong-synth",
         "revision": DATASET_REVISION,
-        "split": args.split,
-        "datasetName": args.dataset_name,
-        "contextLength": args.context_len,
-        "withLabels": False,
-        "filterNumerical": False,
+        "split": config.split,
+        "datasetName": config.dataset_name,
+        "contextLength": config.context_len,
+        "withLabels": config.with_labels,
+        "filterNumerical": config.filter_numerical,
         "taskCount": len(tasks),
         "contextWindowCount": len(contexts),
         "contexts": sorted(contexts.values(), key=lambda value: value["contextWindowId"]),
         "tasks": entries,
     }
-    encoded = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(encoded, encoding="utf-8")
-    print(encoded, end="")
+    return manifest
 
 
 if __name__ == "__main__":

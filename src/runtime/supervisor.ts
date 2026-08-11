@@ -477,6 +477,7 @@ export class Supervisor {
     }
     const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
     const profileDatabaseUrl=options.profileDatabaseUrl??adjacentFileUrl(options.databaseUrl,".profile.db");
+    if(options.databaseUrl.startsWith("file:"))await mkdir(dirname(fileURLToPath(new URL(options.databaseUrl))),{recursive:true});
     if(profileDatabaseUrl.startsWith("file:"))await mkdir(dirname(fileURLToPath(new URL(profileDatabaseUrl))),{recursive:true});
     const profile = await ProfileStore.open(profileDatabaseUrl);
     const modelCatalog = new ModelCatalog(profile, {

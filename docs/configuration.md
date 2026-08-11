@@ -48,6 +48,10 @@ Overrides:
 - `--db PATH` changes the workspace database.
 - `--artifacts PATH` changes the content-addressed artifact directory.
 - `--profile PATH` changes the profile database. Its credential file is `auth.json` in the same directory.
+
+Writable product startup creates missing parent directories for file-backed
+workspace databases, profile databases, and artifact stores. Read-only
+observers do not initialize them.
 - `AGENCITY_PROFILE` changes the product profile database when `--profile` is absent.
 
 The profile default is intentionally not derived from the workspace database. The product default is `~/.agencity/profile.db`. Grouped advanced commands and direct `Supervisor.open` calls use an adjacent `<workspace-db>.profile.db` default when no profile path is supplied. Pass `--profile ~/.agencity/profile.db` or `profileDatabaseUrl` when those operations must use the product profile. This is especially important for sync, export, and deletion because ownership and workspace catalog records live in the selected profile.

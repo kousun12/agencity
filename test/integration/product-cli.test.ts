@@ -246,6 +246,35 @@ describe("product CLI", () => {
     await expect(resolveWorkspace({ override: invalidWorkspace })).rejects.toThrow("marker is invalid");
   });
 
+  test("creates a missing explicit state directory before opening the workspace database", async () => {
+    const value = await fixture();
+    const provider = new StrictActionFixture(); modelFixtures.push(provider);
+    const stateDirectory = join(value.directory, "external", "nested-state");
+    const result = await cli([
+      "run",
+      "--new",
+      "--json",
+      "--workspace",
+      value.workspace,
+      "--state-dir",
+      stateDirectory,
+      "--model",
+      "openai:openai/fixture-v1",
+      "exercise explicit state creation",
+    ], {
+      home: value.home,
+      extraEnv: provider.environment(),
+    });
+
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      protocol: "agencity.run-result",
+      status: "succeeded",
+    });
+    expect((await lstat(stateDirectory)).isDirectory()).toBe(true);
+    expect((await lstat(join(stateDirectory, "agent.db"))).isFile()).toBe(true);
+  });
+
   test("no-subcommand route reaches a ready TUI and a second invocation resumes without IDs", async () => {
     const value = await fixture();
     const provider = new StrictActionFixture(); modelFixtures.push(provider);

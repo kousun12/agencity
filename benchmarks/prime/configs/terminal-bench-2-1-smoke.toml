@@ -12,29 +12,25 @@ reasoning_effort = "high"
 max_tokens = 4096
 
 [env.taskset]
-id = "agencity-oolong-synth"
-split = "validation"
-dataset_name = "spam"
-context_len = 1024
-with_labels = false
-filter_numerical = false
-expected_tasks = 50
-dataset_revision = "f0d59eaf0febf130664cfceb710436c8e3216b2b"
-selection_manifest = "none"
+id = "agencity-terminal-bench-2-1"
+dataset = "terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
+ignore_timeouts = false
+require_image = true
+treatment = "agencity-portable"
 
 [env.taskset.selection]
 mode = "smoke"
-subset = "fixed"
+subset = "fix-git"
 
 [env.agent]
 max_turns = 12
-max_total_tokens = 50000
+max_total_tokens = 48000
 
 [env.agent.timeout]
-setup = 300
-rollout = 600
+setup = 600
+rollout = 900
 finalize = 60
-scoring = 60
+scoring = 900
 
 [env.agent.retries]
 max_retries = 0
@@ -49,9 +45,6 @@ bun_sha256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
 
 [env.agent.runtime]
 type = "docker"
-image = "oven/bun@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4"
-allow = []
-block = ["*"]
-cpu = 2
-memory = 4
-disk = 4
+cpu = 1
+memory = 2
+disk = 10

@@ -1,4 +1,4 @@
-"""A split-runtime SWE-bench Pro public treatment for one pinned instance."""
+"""Suite-capable split-runtime SWE-bench Pro public taskset."""
 
 from __future__ import annotations
 
@@ -11,33 +11,30 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import model_validator
 import verifiers.v1 as vf
 
-from agencity_swe_bench_pro.scorer import (
-    BASE_DOCKERFILE_SHA256,
-    EVALUATOR_COMMIT,
-    EVALUATOR_ENTRYPOINT_SHA256,
-    EVALUATOR_IMAGE_HELPER_SHA256,
-    EVALUATOR_REPOSITORY,
-    EVALUATOR_TREE_SHA256,
-    IMAGE,
-    IMAGE_CONFIG_DIGEST,
-    IMAGE_ID,
-    INSTANCE_DOCKERFILE_SHA256,
-    PARSER_SHA256,
-    RUN_SCRIPT_SHA256,
-    score_with_official_evaluator,
-    validate_official_evaluator_evidence,
-)
-from agencity_terminal_bench_2.taskset import _is_sha256, _sha256_file
+from agencity_swe_bench_pro.scorer import score_with_official_evaluator
+from agencity_verifiers.harbor_suite import _sha256_file
 from agencity_verifiers.harness import _cleanup_portable, _shutdown_portable
+from agencity_verifiers.selection import (
+    SelectionSpec,
+    catalog_digest,
+    load_catalog,
+    select_catalog_tasks,
+)
 
 
-SOURCE_MANIFEST_PATH = (
+DATASET = "ScaleAI/SWE-bench_Pro"
+DATASET_REVISION = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
+BENCHMARK = "swe-bench-pro-public"
+WORKSPACE = "/app"
+PATCH_MAX_BYTES = 8 * 1024 * 1024
+PATCH_PATH = "/tmp/agencity-swe-bench-pro.patch"
+SOURCE_CATALOG_PATH = (
     Path(__file__).resolve().parent.parent
     / "manifests"
-    / "swe-bench-pro-public-qutebrowser.json"
+    / "swe-bench-pro-public-catalog.json"
 )
 SOURCE_LOCK_PATH = Path(__file__).resolve().parent.parent / "uv.lock"
 PACKAGED_DATA_PATH = Path(__file__).resolve().parent / "data"
@@ -47,42 +44,14 @@ PACKAGED_LOCK_PATH = (
     / "data"
     / "uv.lock"
 )
-MANIFEST_PATH = (
-    SOURCE_MANIFEST_PATH
-    if SOURCE_MANIFEST_PATH.is_file()
-    else PACKAGED_DATA_PATH / "manifest.json"
+CATALOG_PATH = (
+    SOURCE_CATALOG_PATH
+    if SOURCE_CATALOG_PATH.is_file()
+    else PACKAGED_DATA_PATH / "catalog.json"
 )
-LOCK_PATH = SOURCE_LOCK_PATH if SOURCE_LOCK_PATH.is_file() else PACKAGED_LOCK_PATH
-MANIFEST_SCHEMA = "agencity.swe-bench-pro-public-manifest.v2"
-DATASET = "ScaleAI/SWE-bench_Pro"
-DATASET_REVISION = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
-TASK_ID = (
-    "instance_qutebrowser__qutebrowser-"
-    "0833b5f6f140d04200ec91605f88704dd18e2970-"
-    "v059c6fdc75567943479b23ebca7c07b5e9a7f34c"
+LOCK_PATH = (
+    SOURCE_LOCK_PATH if SOURCE_LOCK_PATH.is_file() else PACKAGED_LOCK_PATH
 )
-REPOSITORY = "qutebrowser/qutebrowser"
-BASE_COMMIT = "def864adc8b19bdbc506919270d8ff1408b4faac"
-DOCKER_TAG = (
-    "qutebrowser.qutebrowser-qutebrowser__qutebrowser-"
-    "0833b5f6f140d04200ec91605f88704dd18e2970-"
-    "v059c6fdc75567943479b23ebca7c07b5e9a7f"
-)
-WORKSPACE = "/app"
-PUBLIC_SELECTION_SHA256 = "2b0e0fc1d3f877c2870d3fd3d8c3a679b5a4d6fa4fad6e5f1732e7ba73509f50"
-AGENCITY_SOURCE_REPO = "https://github.com/kousun12/agencity.git"
-AGENCITY_SOURCE_REF = "ef16e551cc4494cdd76637249a80afa82cdf26be"
-BUN_VERSION = "1.3.14"
-BUN_ARCHIVE = (
-    "https://github.com/oven-sh/bun/releases/download/"
-    "bun-v1.3.14/bun-linux-x64.zip"
-)
-BUN_ARCHIVE_SHA256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
-VERIFIERS_VERSION = "0.3.0"
-DOCKER_SDK_VERSION = "7.2.0"
-PATCH_MAX_BYTES = 8 * 1024 * 1024
-PATCH_PATH = "/tmp/agencity-swe-bench-pro.patch"
-
 _PINNED_ROW_FIELDS = (
     "repo",
     "instance_id",
@@ -110,24 +79,36 @@ class SWEProConfig(vf.TasksetConfig):
     revision: Literal["7ab5114912baf22bb098818e604c02fe7ad2c11f"] = (
         DATASET_REVISION
     )
-    instances: list[str] = Field(default_factory=lambda: [TASK_ID])
+    selection: SelectionSpec = SelectionSpec()
+    treatment: Literal["agencity-portable", "harness-native"] = "agencity-portable"
 
     @model_validator(mode="after")
-    def validates_bounded_selection(self) -> "SWEProConfig":
-        if self.instances != [TASK_ID]:
-            raise ValueError(f"SWE-bench Pro integration permits exactly {TASK_ID!r}")
+    def validate_catalog_selection(self) -> "SWEProConfig":
+        catalog = load_catalog(CATALOG_PATH, BENCHMARK)
+        dataset = catalog["dataset"]
+        if dataset["id"] != self.dataset or dataset["revision"] != self.revision:
+            raise ValueError("SWE-bench Pro catalog dataset pin drifted")
+        select_catalog_tasks(catalog, self.selection)
         return self
 
 
 class SWEProData(vf.TaskData):
-    instance_id: str
+    selection_id: str
     repository: str
     base_commit: str
     dataset_revision: str
+    catalog_sha256: str
+    catalog_tasks_sha256: str
+    selected_ids: list[str]
+    selected_ids_sha256: str
+    public_selection_sha256: str
+    image_manifest_digest: str
+    image_config_digest: str
+    treatment: str
 
 
 class SWEProTask(vf.Task[SWEProData]):
-    """Sanitize the agent workspace and privately retain only its final patch."""
+    """Sanitize the agent workspace and retain only a bounded private patch."""
 
     NEEDS_CONTAINER = True
 
@@ -136,20 +117,33 @@ class SWEProTask(vf.Task[SWEProData]):
         data: SWEProData,
         config: vf.TaskConfig | None = None,
         *,
-        evaluator_row: Mapping[str, Any] | None = None,
+        evaluator_row: Mapping[str, Any],
+        pin: Mapping[str, Any],
     ) -> None:
         super().__init__(data, config)
-        self._evaluator_row = dict(evaluator_row or {})
+        self._evaluator_row = dict(evaluator_row)
+        self._pin = dict(pin)
         self._baselines: dict[str, str] = {}
         self._patches: dict[str, str] = {}
 
     async def setup(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
-        baseline = await _sanitize_workspace(runtime)
+        baseline = await _sanitize_workspace(
+            runtime, self.data.workdir, self.data.base_commit
+        )
         self._baselines[trace.id] = baseline
-        forbidden = _forbidden_history_commits(self._evaluator_row)
+        forbidden = _forbidden_history_commits(
+            self._evaluator_row, self.data.base_commit
+        )
         for commit in forbidden:
             observed = await runtime.run(
-                ["git", "-C", WORKSPACE, "cat-file", "-e", f"{commit}^{{commit}}"],
+                [
+                    "git",
+                    "-C",
+                    self.data.workdir,
+                    "cat-file",
+                    "-e",
+                    f"{commit}^{{commit}}",
+                ],
                 {},
             )
             if observed.exit_code == 0:
@@ -157,9 +151,9 @@ class SWEProTask(vf.Task[SWEProData]):
                     "Sanitized agent repository still resolves withheld Git history"
                 )
         trace.info["swe_bench_pro_isolation"] = {
-            "schema": "agencity.swe-bench-pro-agent-isolation.v1",
-            "workspace": WORKSPACE,
-            "base_commit": BASE_COMMIT,
+            "schema": "agencity.swe-bench-pro-agent-isolation.v2",
+            "workspace": self.data.workdir,
+            "base_commit": self.data.base_commit,
             "original_git_history_removed": True,
             "fresh_baseline_repository": True,
             "withheld_commits_resolvable": False,
@@ -167,29 +161,52 @@ class SWEProTask(vf.Task[SWEProData]):
         }
 
     async def finalize(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
-        metadata = trace.info.setdefault("agencity", {})
-        if not isinstance(metadata, dict):
-            raise ValueError("Agencity trace metadata is malformed")
-        try:
-            metadata["service_shutdown"] = await _shutdown_portable(runtime, WORKSPACE)
-        finally:
-            metadata["cleanup"] = await _cleanup_portable(runtime, WORKSPACE)
+        if self.data.treatment == "agencity-portable":
+            metadata = trace.info.setdefault("agencity", {})
+            if not isinstance(metadata, dict):
+                raise ValueError("Agencity trace metadata is malformed")
+            try:
+                metadata["service_shutdown"] = await _shutdown_portable(
+                    runtime, self.data.workdir
+                )
+            finally:
+                metadata["cleanup"] = await _cleanup_portable(
+                    runtime, self.data.workdir
+                )
 
         baseline = self._baselines.pop(trace.id, None)
         if baseline is None:
             raise RuntimeError("SWE-bench Pro baseline identity was not retained")
-        patch = await _capture_patch(runtime, baseline)
+        patch = await _capture_patch(runtime, self.data.workdir, baseline)
         synthetic_noop = not patch
         if synthetic_noop:
             patch = _EMPTY_PATCH
         self._patches[trace.id] = patch
         trace.info["swe_bench_pro_patch"] = {
-            "schema": "agencity.swe-bench-pro-private-patch.v1",
+            "schema": "agencity.swe-bench-pro-private-patch.v2",
             "bytes": len(patch.encode("utf-8")),
             "sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
             "synthetic_noop": synthetic_noop,
             "content_retained_in_trace": False,
-            "workspace_metadata_removed_before_capture": True,
+            "workspace_metadata_removed_before_capture": (
+                self.data.treatment == "agencity-portable"
+            ),
+        }
+        trace.info["benchmark_provenance"] = {
+            "schema": "agencity.benchmark-task-provenance.v1",
+            "benchmark": BENCHMARK,
+            "selection_id": self.data.selection_id,
+            "catalog_sha256": self.data.catalog_sha256,
+            "catalog_tasks_sha256": self.data.catalog_tasks_sha256,
+            "selected_ids": self.data.selected_ids,
+            "selected_ids_sha256": self.data.selected_ids_sha256,
+            "dataset_revision": self.data.dataset_revision,
+            "public_selection_sha256": self.data.public_selection_sha256,
+            "image": self.data.image,
+            "image_manifest_digest": self.data.image_manifest_digest,
+            "image_config_digest": self.data.image_config_digest,
+            "workdir": self.data.workdir,
+            "treatment": self.data.treatment,
         }
 
     def take_patch(self, trace_id: str) -> str:
@@ -200,9 +217,11 @@ class SWEProTask(vf.Task[SWEProData]):
 
     @property
     def evaluator_row(self) -> Mapping[str, Any]:
-        if not self._evaluator_row:
-            raise RuntimeError("SWE-bench Pro evaluator row is unavailable")
         return self._evaluator_row
+
+    @property
+    def pin(self) -> Mapping[str, Any]:
+        return self._pin
 
 
 class SWEProEnvConfig(vf.EnvConfig):
@@ -210,27 +229,33 @@ class SWEProEnvConfig(vf.EnvConfig):
 
 
 class SWEProEnv(vf.Env[SWEProEnvConfig]):
-    """Run Agencity first, then score privately after its runtime teardown."""
+    """Run one harness, destroy its runtime, then invoke the official scorer."""
 
     async def setup(self, agents: vf.Agents) -> None:
         config = agents.agent.config
+        if config.runtime.type != "docker":
+            raise ValueError("SWE-bench Pro requires a disposable Docker agent runtime")
+        taskset_config = self.taskset.config
+        if taskset_config.treatment != "agencity-portable":
+            return
+        catalog = load_catalog(CATALOG_PATH, BENCHMARK)
+        treatment = catalog["treatments"]["agencity-portable"]
         harness = config.harness
         expected = {
-            "id": "agencity-verifiers",
-            "source_repo": AGENCITY_SOURCE_REPO,
-            "source_ref": AGENCITY_SOURCE_REF,
+            "id": treatment["harness"],
+            "source_repo": treatment["source_repo"],
+            "source_ref": treatment["source_ref"],
             "installation": "portable",
-            "bun_url": BUN_ARCHIVE,
-            "bun_sha256": BUN_ARCHIVE_SHA256,
+            "bun_url": treatment["bun_archive"],
+            "bun_sha256": treatment["bun_archive_sha256"],
         }
         if harness is None or any(
             getattr(harness, name, None) != value for name, value in expected.items()
         ):
             raise ValueError(
-                "SWE-bench Pro requires the exact pinned Agencity portable harness"
+                "Agencity SWE-bench Pro treatment requires the catalog-pinned "
+                "portable Agencity harness"
             )
-        if config.runtime.type != "docker":
-            raise ValueError("SWE-bench Pro requires a disposable Docker agent runtime")
 
     async def run(self, task: vf.Task, agents: vf.Agents) -> None:
         await agents.agent.run(task)
@@ -248,6 +273,7 @@ class SWEProEnv(vf.Env[SWEProEnvConfig]):
             score_with_official_evaluator,
             patch,
             task.evaluator_row,
+            task.pin,
             trace_id=trace.id,
         )
         trace.info["swe_bench_pro_official"] = score.evidence
@@ -256,146 +282,113 @@ class SWEProEnv(vf.Env[SWEProEnvConfig]):
 
 class SWEProTaskset(vf.Taskset[SWEProTask, SWEProConfig]):
     def load(self) -> list[SWEProTask]:
-        manifest = load_manifest()
-        validate_runtime_versions()
-        validate_lockfile(manifest)
-        row = load_selected_public_row()
-        validate_selected_public_row(row, manifest)
-        data = SWEProData(
-            idx=0,
-            name=TASK_ID,
-            prompt=build_prompt(row),
-            image=IMAGE,
-            workdir=WORKSPACE,
-            network_allow=[],
-            instance_id=TASK_ID,
-            repository=REPOSITORY,
-            base_commit=BASE_COMMIT,
-            dataset_revision=DATASET_REVISION,
-        )
-        return [SWEProTask(data, self.config.task, evaluator_row=row)]
-
-
-def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("schema") != MANIFEST_SCHEMA:
-        raise ValueError("SWE-bench Pro manifest schema is unsupported")
-    selection = value.get("selection")
-    expected_selection = {
-        "dataset": DATASET,
-        "dataset_revision": DATASET_REVISION,
-        "instance_id": TASK_ID,
-        "repository": REPOSITORY,
-        "base_commit": BASE_COMMIT,
-        "docker_tag": DOCKER_TAG,
-        "image": IMAGE,
-        "image_id": IMAGE_ID,
-        "image_config_digest": IMAGE_CONFIG_DIGEST,
-        "workspace": WORKSPACE,
-        "public_selection_sha256": PUBLIC_SELECTION_SHA256,
-    }
-    if not isinstance(selection, dict) or {
-        key: selection.get(key) for key in expected_selection
-    } != expected_selection:
-        raise ValueError("SWE-bench Pro manifest selection does not match taskset")
-    evaluator = value.get("official_evaluator")
-    expected_evaluator = {
-        "repository": EVALUATOR_REPOSITORY,
-        "commit": EVALUATOR_COMMIT,
-        "tree_sha256": EVALUATOR_TREE_SHA256,
-        "entrypoint_sha256": EVALUATOR_ENTRYPOINT_SHA256,
-        "image_helper_sha256": EVALUATOR_IMAGE_HELPER_SHA256,
-        "run_script_sha256": RUN_SCRIPT_SHA256,
-        "parser_sha256": PARSER_SHA256,
-        "base_dockerfile_sha256": BASE_DOCKERFILE_SHA256,
-        "instance_dockerfile_sha256": INSTANCE_DOCKERFILE_SHA256,
-        "upstream_accepts_image_digest": False,
-        "adapter_enforces_image_digest": True,
-    }
-    if not isinstance(evaluator, dict) or {
-        key: evaluator.get(key) for key in expected_evaluator
-    } != expected_evaluator:
-        raise ValueError("SWE-bench Pro evaluator manifest does not match the pinned route")
-    agencity = value.get("agencity")
-    expected_agencity = {
-        "source_repo": AGENCITY_SOURCE_REPO,
-        "source_ref": AGENCITY_SOURCE_REF,
-        "bun_version": BUN_VERSION,
-        "bun_archive": BUN_ARCHIVE,
-        "bun_archive_sha256": BUN_ARCHIVE_SHA256,
-    }
-    if not isinstance(agencity, dict) or {
-        key: agencity.get(key) for key in expected_agencity
-    } != expected_agencity:
-        raise ValueError("SWE-bench Pro Agencity pins do not match")
-    if not _is_sha256(value.get("python_lock_sha256")):
-        raise ValueError("SWE-bench Pro manifest Python lock digest is invalid")
-    runtime = value.get("runtime")
-    expected_runtime = {
-        "verifiers_version": VERIFIERS_VERSION,
-        "docker_sdk_version": DOCKER_SDK_VERSION,
-    }
-    if not isinstance(runtime, dict) or {
-        key: runtime.get(key) for key in expected_runtime
-    } != expected_runtime:
-        raise ValueError("SWE-bench Pro runtime version pins do not match")
-    return value
-
-
-def validate_runtime_versions() -> None:
-    expected = {
-        "verifiers": VERIFIERS_VERSION,
-        "docker": DOCKER_SDK_VERSION,
-    }
-    for package, pinned in expected.items():
-        installed = version(package)
-        if installed != pinned:
-            raise ValueError(
-                f"SWE-bench Pro requires {package}=={pinned}, found {installed}"
+        catalog = load_catalog(CATALOG_PATH, BENCHMARK)
+        _validate_catalog(catalog, self.config)
+        selected, selection = select_catalog_tasks(catalog, self.config.selection)
+        selected_ids = [entry["id"] for entry in selected]
+        rows = load_selected_public_rows(selected_ids)
+        digest = catalog_digest(CATALOG_PATH)
+        tasks: list[SWEProTask] = []
+        for idx, pin in enumerate(selected):
+            identifier = pin["id"]
+            row = rows[identifier]
+            validate_selected_public_row(row, pin)
+            data = SWEProData(
+                idx=idx,
+                name=identifier,
+                prompt=build_prompt(row),
+                image=pin["image"],
+                workdir=pin["workdir"],
+                network_allow=[],
+                network_block=["*"],
+                selection_id=identifier,
+                repository=pin["repository"],
+                base_commit=pin["base_commit"],
+                dataset_revision=DATASET_REVISION,
+                catalog_sha256=digest,
+                catalog_tasks_sha256=catalog["tasks_sha256"],
+                selected_ids=selection["selected_ids"],
+                selected_ids_sha256=selection["selected_ids_sha256"],
+                public_selection_sha256=pin["public_selection_sha256"],
+                image_manifest_digest=pin["image_manifest_digest"],
+                image_config_digest=pin["image_config_digest"],
+                treatment=self.config.treatment,
             )
+            tasks.append(
+                SWEProTask(
+                    data,
+                    self.config.task,
+                    evaluator_row=row,
+                    pin=pin,
+                )
+            )
+        return tasks
 
 
-def validate_lockfile(manifest: Mapping[str, Any]) -> None:
-    if _sha256_file(LOCK_PATH) != manifest["python_lock_sha256"]:
-        raise ValueError("SWE-bench Pro manifest Python lock digest does not match uv.lock")
+def _validate_catalog(catalog: Mapping[str, Any], config: SWEProConfig) -> None:
+    dataset = catalog.get("dataset")
+    if (
+        not isinstance(dataset, Mapping)
+        or dataset.get("id") != config.dataset
+        or dataset.get("revision") != config.revision
+    ):
+        raise ValueError("SWE-bench Pro catalog dataset does not match taskset config")
+    runtime = catalog.get("runtime")
+    expected = {"verifiers_version": "0.3.0", "docker_sdk_version": "7.2.0"}
+    if not isinstance(runtime, Mapping) or {
+        key: runtime.get(key) for key in expected
+    } != expected:
+        raise ValueError("SWE-bench Pro catalog runtime pins do not match")
+    installed = {"verifiers_version": version("verifiers"), "docker_sdk_version": version("docker")}
+    if installed != expected:
+        raise ValueError(
+            f"SWE-bench Pro runtime mismatch: expected {expected}, installed {installed}"
+        )
+    if catalog.get("python_lock_sha256") != _sha256_file(LOCK_PATH):
+        raise ValueError("SWE-bench Pro catalog Python lock digest does not match uv.lock")
 
 
-def load_selected_public_row() -> Mapping[str, Any]:
+def load_selected_public_rows(ids: list[str]) -> dict[str, Mapping[str, Any]]:
     from datasets import load_dataset
 
+    wanted = set(ids)
     rows = load_dataset(DATASET, revision=DATASET_REVISION, split="test")
-    matching = [row for row in rows if row.get("instance_id") == TASK_ID]
-    if len(matching) != 1:
-        raise ValueError(f"Expected one selected SWE-bench Pro instance, found {len(matching)}")
-    return matching[0]
+    matching = {
+        row["instance_id"]: row
+        for row in rows
+        if row.get("instance_id") in wanted
+    }
+    if set(matching) != wanted:
+        raise ValueError(
+            f"SWE-bench Pro selected rows drifted; missing {sorted(wanted - set(matching))}"
+        )
+    return matching
 
 
 def validate_selected_public_row(
-    row: Mapping[str, Any], manifest: Mapping[str, Any] | None = None
+    row: Mapping[str, Any], pin: Mapping[str, Any]
 ) -> None:
-    if row.get("repo") != REPOSITORY or row.get("base_commit") != BASE_COMMIT:
-        raise ValueError("SWE-bench Pro selected repository or base revision drifted")
-    if row.get("dockerhub_tag") != DOCKER_TAG:
-        raise ValueError("SWE-bench Pro selected Docker tag drifted")
+    expected = {
+        "instance_id": pin["id"],
+        "repo": pin["repository"],
+        "base_commit": pin["base_commit"],
+        "dockerhub_tag": pin["docker_tag"],
+    }
+    if {key: row.get(key) for key in expected} != expected:
+        raise ValueError("SWE-bench Pro selected row identity drifted")
     public = {key: row.get(key) for key in _PINNED_ROW_FIELDS}
     digest = hashlib.sha256(
         json.dumps(public, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    expected = (
-        manifest["selection"]["public_selection_sha256"]
-        if manifest is not None
-        else PUBLIC_SELECTION_SHA256
-    )
-    if digest != expected:
+    if digest != pin["public_selection_sha256"]:
         raise ValueError("SWE-bench Pro public selection fields drifted")
 
 
 def build_prompt(row: Mapping[str, Any]) -> str:
-    """Expose issue materials only; evaluator-only fields never reach Agencity."""
     sections = [
         "Resolve the following public SWE-bench Pro issue in the repository workspace.",
-        f"Repository: {REPOSITORY}",
-        f"Base revision: {BASE_COMMIT}",
+        f"Repository: {required_text(row, 'repo')}",
+        f"Base revision: {required_text(row, 'base_commit')}",
         "Issue:",
         required_text(row, "problem_statement"),
     ]
@@ -405,7 +398,7 @@ def build_prompt(row: Mapping[str, Any]) -> str:
             sections.extend((f"{heading}:", value))
     sections.append(
         "Work only in the repository workspace. Do not assume access to hidden tests, "
-        "reference patches, evaluator scripts, or evaluator output."
+        "reference patches, evaluator scripts, Docker, or evaluator output."
     )
     return "\n\n".join(sections)
 
@@ -417,25 +410,27 @@ def required_text(row: Mapping[str, Any], name: str) -> str:
     return value
 
 
-async def _sanitize_workspace(runtime: vf.Runtime) -> str:
+async def _sanitize_workspace(
+    runtime: vf.Runtime, workspace: str, base_commit: str
+) -> str:
     command = f"""
 set -eu
-cd {WORKSPACE}
-test "$(git rev-parse HEAD)" = "{BASE_COMMIT}"
+cd {workspace}
+test "$(git rev-parse HEAD)" = "{base_commit}"
 archive=/tmp/agencity-swe-bench-pro-public.tar
-git archive --format=tar --output="$archive" {BASE_COMMIT}
-find {WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +
-tar -xf "$archive" -C {WORKSPACE}
+git archive --format=tar --output="$archive" {base_commit}
+find {workspace} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +
+tar -xf "$archive" -C {workspace}
 rm -f "$archive"
-test ! -e {WORKSPACE}/.git
-git -C {WORKSPACE} init -q
-git -C {WORKSPACE} config user.name "Agencity Benchmark"
-git -C {WORKSPACE} config user.email "benchmark@agencity.invalid"
-git -C {WORKSPACE} add -A
+test ! -e {workspace}/.git
+git -C {workspace} init -q
+git -C {workspace} config user.name "Agencity Benchmark"
+git -C {workspace} config user.email "benchmark@agencity.invalid"
+git -C {workspace} add -A
 GIT_AUTHOR_DATE="2000-01-01T00:00:00Z" \
 GIT_COMMITTER_DATE="2000-01-01T00:00:00Z" \
-  git -C {WORKSPACE} commit -qm "sanitized public baseline"
-git -C {WORKSPACE} rev-parse HEAD
+  git -C {workspace} commit -qm "sanitized public baseline"
+git -C {workspace} rev-parse HEAD
 """
     result = await runtime.run(["sh", "-lc", command], {})
     if result.exit_code != 0:
@@ -447,12 +442,12 @@ git -C {WORKSPACE} rev-parse HEAD
     return baseline
 
 
-async def _capture_patch(runtime: vf.Runtime, baseline: str) -> str:
-    staged = await runtime.run(["git", "-C", WORKSPACE, "add", "-A"], {})
+async def _capture_patch(runtime: vf.Runtime, workspace: str, baseline: str) -> str:
+    staged = await runtime.run(["git", "-C", workspace, "add", "-A"], {})
     if staged.exit_code != 0:
         raise RuntimeError("SWE-bench Pro could not stage the final workspace")
     command = (
-        f"git -C {WORKSPACE} diff --cached --binary --no-ext-diff "
+        f"git -C {workspace} diff --cached --binary --no-ext-diff "
         f"{baseline} -- > {PATCH_PATH}"
     )
     captured = await runtime.run(["sh", "-lc", command], {})
@@ -470,20 +465,26 @@ async def _capture_patch(runtime: vf.Runtime, baseline: str) -> str:
         raise RuntimeError("SWE-bench Pro patch is not valid UTF-8") from error
 
 
-def _forbidden_history_commits(row: Mapping[str, Any]) -> set[str]:
+def _forbidden_history_commits(
+    row: Mapping[str, Any], base_commit: str
+) -> set[str]:
     command = row.get("before_repo_set_cmd")
     if not isinstance(command, str):
         return set()
     return {
         commit
         for commit in _COMMIT_PATTERN.findall(command)
-        if commit != BASE_COMMIT
+        if commit != base_commit
     }
 
 
 __all__ = [
+    "SWEProConfig",
+    "SWEProData",
     "SWEProEnv",
     "SWEProEnvConfig",
+    "SWEProTask",
     "SWEProTaskset",
-    "validate_official_evaluator_evidence",
+    "build_prompt",
+    "validate_selected_public_row",
 ]

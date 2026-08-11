@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 
 from agencity_verifiers.harness import (
+    ADAPTER_DIAGNOSTIC_STREAM_BYTES,
+    ARTIFACTS_DIR,
+    HOME_DIR,
+    STATE_DIR,
+    AgencityHarness,
+    AgencityHarnessConfig,
+    _adapter_failure_diagnostics,
     _agencity_command,
     _endpoint_origin,
     _provider_environment,
@@ -44,6 +52,44 @@ class ResultTests(unittest.TestCase):
             4,
         )
         self.assertEqual(result.status, "blocked")
+
+    def test_failure_diagnostics_are_bounded_and_scrub_known_secrets(self) -> None:
+        secret = "intercept-secret-value"
+        diagnostics = _adapter_failure_diagnostics(
+            f"{secret}\n" + ("x" * (ADAPTER_DIAGNOSTIC_STREAM_BYTES * 2)),
+            json.dumps({"error": secret}),
+            2,
+            secrets=[secret],
+            parse_error=ValueError(f"invalid result near {secret}"),
+        )
+        self.assertEqual(diagnostics["schema"], "agencity.adapter-failure.v1")
+        self.assertEqual(diagnostics["process_exit_code"], 2)
+        stdout = diagnostics["stdout"]
+        stderr = diagnostics["stderr"]
+        self.assertEqual(stdout["completeness"], "truncated")
+        self.assertLessEqual(
+            len((stdout["head"] + stdout["tail"]).encode("utf-8")),
+            ADAPTER_DIAGNOSTIC_STREAM_BYTES + 6,
+        )
+        self.assertNotIn(secret, json.dumps(diagnostics))
+        self.assertIn("[REDACTED]", stderr["value"])
+
+
+class SetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_apt_git_setup_prepares_every_explicit_runtime_directory(self) -> None:
+        commands: list[list[str]] = []
+
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                commands.append(command)
+                return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+        harness = AgencityHarness(AgencityHarnessConfig(id="agencity-verifiers"))
+        await harness.setup(Runtime())
+        self.assertIn(
+            ["mkdir", "-p", "/app/workspace", STATE_DIR, ARTIFACTS_DIR, HOME_DIR],
+            commands,
+        )
 
 
 class RoutingTests(unittest.TestCase):

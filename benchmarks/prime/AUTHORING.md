@@ -95,6 +95,12 @@ The reusable harness owns:
 Do not add benchmark-specific scoring, hidden answers, repository fixes, or
 solution strategies to the shared harness.
 
+Harness-specific workspace preparation and cleanup belong in an explicit
+treatment boundary. A reusable task may call capability-named lifecycle hooks
+such as `prepare_task_workspace` and `finalize_task_workspace`; it must not
+assume every harness creates Agencity state. This permits the same task and
+official scorer to run with another Verifiers-compatible coding harness.
+
 ### Runtime
 
 The runtime owns:
@@ -139,6 +145,12 @@ The verifier must run after agent execution. Agencity is trusted-local code with
 the runtime process's operating-system authority. Hidden tests placed anywhere
 the agent can inspect are not hidden. Use a separate verifier phase, a separate
 runtime, or post-agent injection when the benchmark requires withheld tests.
+When the entire agent runtime must be destroyed before host-side scoring, use a
+custom Verifiers v1 `Env` to enforce that ordering. A task finalizer alone is
+not sufficient if the framework retains the runtime through reward evaluation.
+If runtime teardown can fail, require a teardown receipt before scoring or
+document that the framework logs teardown failure without exposing it to the
+environment. The current Verifiers API provides ordering but not that receipt.
 
 ## Repository layout
 
@@ -151,8 +163,11 @@ benchmarks/prime/
 ├── pyproject.toml
 ├── uv.lock
 ├── agencity_verifiers/
+│   ├── harbor_suite.py
 │   ├── harness.py
-│   └── result.py
+│   ├── reporting.py
+│   ├── result.py
+│   └── selection.py
 ├── agencity_<benchmark>/
 │   ├── __init__.py
 │   └── taskset.py
@@ -172,6 +187,38 @@ The package `__init__.py` exports exactly one taskset class and may also export
 one benchmark-specific `Env` subclass when scoring requires multi-stage control
 flow. Keep shared Agencity execution behavior in `agencity_verifiers`; keep
 benchmark rules in the benchmark package.
+
+## Deterministic suite selection
+
+Suite-capable tasksets use the shared `SelectionSpec` contract:
+
+- `exact` selects one ID;
+- `ids` selects an explicit ordered ID list;
+- `smoke` selects a catalog-defined named subset;
+- `sample` selects a deterministic count from a retained seed;
+- `shard` assigns all compatible IDs through stable hashing;
+- `all` selects every compatible catalog entry.
+
+Partial and full runs use the same task class, workspace setup, lifecycle, and
+scorer. A smoke config is a selection, not a separate weakened adapter.
+
+Catalog-backed tasksets must:
+
+- enumerate every task in the pinned source dataset;
+- retain canonical task ordering and a digest over canonical task entries;
+- record `compatible` for every entry;
+- retain structured reason codes and details for every incompatible entry;
+- reject unknown or incompatible explicit IDs before model admission;
+- pin task source, complete task tree where applicable, immutable image manifest
+  and config, workdir, evaluator assets, and lockfile;
+- expose named smoke subsets as IDs from the same catalog; and
+- support preflight selection and pin validation without pulling every image.
+
+Dynamic datasets such as OOLONG may select after predicate-pushed loading only
+when a packaged immutable manifest is an admission check over exact task order
+and permitted content identities. The selected IDs and digest must also be
+retained in each task trace. A script that only emits a manifest is not a
+runtime integrity boundary.
 
 ## Authoring workflow
 
@@ -225,6 +272,9 @@ Pin:
 
 Create a bounded task manifest containing IDs, revisions, and content digests.
 Do not put full licensed datasets, hidden answers, or secrets in the manifest.
+Generate catalogs with a reviewed script. A hand-edited catalog is not
+acceptable unless the generation source is unavailable and every entry has an
+independent integrity check.
 
 ### 4. Implement setup and scoring
 
@@ -254,9 +304,10 @@ For a workspace task:
 - inspect the agent image for retained Git history, test commits, evaluator
   files, and other withheld material. A two-stage treatment must prove that the
   agent sees only an authorized base tree in a new history, that withheld
-  commits are unresolved, that patch content remains private, that the agent
-  runtime is destroyed before official scoring, and that scorer files,
-  containers, aliases, and temporary state are removed;
+  commits are unresolved, that patch content remains private, that runtime
+  teardown is ordered before official scoring and has a receipt when the
+  framework supports one, and that scorer files, containers, aliases, and
+  temporary state are removed;
 - retain verifier stdout and stderr only through bounded summaries or
   non-versioned raw outputs;
 - treat missing verifier dependencies and malformed evidence as infrastructure
@@ -279,6 +330,10 @@ Every benchmark has separate configurations:
    model and full treatment.
 5. **Full run:** contains the complete selected task set and remains
    operator-gated.
+
+Also provide a stable shard config for suites intended to run in parallel.
+Every committed suite config must pass both Verifiers `--dry-run` and the
+model-free selection preflight.
 
 Development configs use concurrency one, no whole-rollout retries, and
 `push = false`. Increase concurrency only after one-task cleanup, timing, usage,
@@ -345,6 +400,22 @@ Public harness comparisons use:
 Report all attempted tasks and separate successful, zero-score, blocked, failed,
 budget-exceeded, unknown, cancelled, and infrastructure-error outcomes. Do not
 compare a best-of-N result with a single rollout or omit failed attempts.
+
+Use `agencity_verifiers.reporting` or an equivalent versioned report contract.
+The report must state:
+
+- pass, valid-zero, partial, harness-failure, provider-failure,
+  scorer/infrastructure-error, cancellation, unknown, skipped, and incompatible
+  counts;
+- reward sum, denominator, mean, and whether unscored failures enter that
+  denominator;
+- model calls, provider-reported tokens, timing, and cost when supplied;
+- exact config and selection digests; and
+- bounded model, harness, runtime, evaluator, source, image, and lock
+  provenance.
+
+Never map missing or malformed scorer evidence to zero. Never average
+infrastructure errors into reward without an explicit published failure policy.
 
 ## Public evidence
 
