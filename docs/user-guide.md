@@ -101,6 +101,10 @@ Unexpected large output does not become an unbounded next prompt. Shell and file
 
 Automatic observations are also capped per step. The complete canonical event-ID ledger remains retained for inspection; the model receives a bounded derived view that avoids repeating a successful cell effect both as an effect outcome and as the cell result. Failed, cancelled, and unknown effects remain visible and actionable.
 
+Inside a cell, ordinary variables last only for that cell. Direct `scratch` is an exact-session-and-branch cache for replaceable parsed data, indexes, helper functions, and other intermediates useful across nearby cells. `state` and artifacts remain the correct place for anything required after recovery. Each cell should return only the focused summary, slice, status, digest, or reference needed for the next decision instead of returning the complete value placed in scratch.
+
+Scratch is not durable work. Arbitrary values survive only while the worker remains warm. The managed file-local product attempts a bounded same-device JSON checkpoint after successful cells, but functions, classes, cycles, modules, skipped values, and evicted or expired cache rows do not restore. A later cell can inspect `sdk.scratch.status()` and rebuild missing values from durable inputs. Scratch does not cross forks, child sessions, devices, synchronization, or export and is never automatic context or completion evidence.
+
 ## Sessions and branches
 
 A session is a durable agent identity with its conversation, model, budget, goals, and child work. A branch is one retained line of that session's history.
@@ -219,7 +223,7 @@ agencity agents
 agencity stop "unique agent name"
 ```
 
-The on-demand workspace service owns detached execution. It is not an operating-system login service. It exits after becoming quiescent, while active runs, effects, schedules, heartbeats, queued wakes, workers, or attached clients can keep it resident.
+The on-demand workspace service owns detached execution. It is not an operating-system login service. It exits after one hour of quiescence by default, while active runs, effects, schedules, heartbeats, queued wakes, resident managed run-queue work, or attached clients can keep it resident. Warm scratch and an idle console worker do not keep the service alive, so detach/resume does not promise warm scratch retention.
 
 ## Recovery attention
 

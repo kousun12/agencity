@@ -119,7 +119,7 @@ const SDK_GUIDE = [
   "Match the action to the request. Questions, reviews, explanations, and diagnoses are read-only unless the user also asks for a change. Inspect only enough evidence to answer them.",
   "Before calling bun_console, identify the specific unresolved requirement or uncertainty that the cell will resolve and begin the source with a short // Purpose: comment naming it. Do not repeat an unchanged read, status check, diff, test, or history query.",
   "The only executable action is a TypeScript cell. Do not request parallel provider tools.",
-  "Cell globals: sdk, sql, session, console, state, artifacts, tools, inspect, cells, rlm.",
+  "Cell globals: sdk, sql, session, console, scratch, state, artifacts, tools, inspect, cells, rlm.",
   "Use tools.readFile(path, { startLine?, endLine?, expectedSha256? }), tools.writeFile(path, content, expectedSha256?), and tools.shell(command, options?) for repository work.",
   "Shell and file-read results use agencity.bounded-output.v1. Read complete inline data from result.value; spilled or truncated results include bounded previews and explicit recovery guidance.",
   "File reads return complete one-based line pages in value with content, startLine, endLine, totalLines, nextLine, and sha256. Continue with expectedSha256 so a mutable-file change fails visibly.",
@@ -128,14 +128,19 @@ const SDK_GUIDE = [
   "Pass file.value.sha256 as expectedSha256 when replacing a previously read file. Shell options use { timeoutMs, cwd?, idempotencyKey? }; the option is timeoutMs, not timeout.",
   "tools.readFile, tools.writeFile, and tools.shell throw when their durable effect does not succeed. Use tools.request(executor, operation, input, options?) when an expected failed outcome must be inspected without failing the cell.",
   "After a validation or shell failure, use any reliable path, line, column, or named-symbol diagnostic to inspect only a small surrounding range (about 20 lines on each side). If no diagnostic maps reliably to source, inspect the smallest relevant function or section; do not reread the whole file.",
-  "Use sql`SELECT ... ${value}` only for read-only relational queries; use state.get/set/list for durable JSON and artifacts.put/readRange for larger content.",
+  "Use sql`SELECT ... ${value}` only for read-only relational queries. Keep current-cell values in const/let, replaceable cross-cell intermediates in scratch, small recovery-critical JSON in state, and large durable content in artifacts.",
+  "Scratch is bounded, noncanonical session/branch state and may disappear. It never crosses agents or branches, including parent, child, sibling, and forked work; pass needed values through delegation inputs, durable messages, or artifacts. Check or rebuild missing values from durable inputs; never replay a prior cell automatically because it may have performed effects.",
   "Use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents spawn/list/send/messages/acknowledge/cancel/followUp provides durable nuclear-family messaging; sdk.memory, sdk.harness, sdk.skills, sdk.specs, and rlm.start/startMany/get/result/cancel provide adaptation and delegation.",
   "sdk.harness.review accepts either instructions or { instructions, requestedScope, allowedKinds, wait }. Restrict allowedKinds when the desired artifact mechanism is known. Do not start refinement as a substitute for repairing the current user task or silently broaden that task into standing behavior; automatic repeated-failure review runs only after committed run boundaries.",
-  "Keep large read, search, and tool results in local variables while inspecting and transforming them. Do not console.log or return complete tool objects unless the next model decision requires the complete value.",
-  "Return the smallest useful observation: a focused summary, selected slice, count, digest, error, or artifact reference. Use state for small durable JSON and artifacts for large durable content.",
-  "A cell's final expression or explicit return is its bounded observation. Values in lexical bindings or globalThis disappear after the committed cell boundary.",
+  "Keep large read, search, and tool results local while transforming them. Do not console.log or return complete tool objects unless the next decision requires them.",
+  "A cell's final expression or explicit return is its bounded observation. Return only a focused summary, slice, count, digest, error, status, or reference; after writing scratch, return compact evidence or null instead of the assigned value.",
   "For requested changes, inspect enough to choose a focused edit, verify it with the narrowest relevant evidence, then finish. Run another cell only when a concrete unresolved requirement remains.",
 ].join("\n");
+export const AGENT_RUN_EXECUTION_GUIDANCE = Object.freeze({
+  id: "agencity.agent-run.execution-guidance",
+  version: 7,
+  text: SDK_GUIDE,
+});
 
 class RunQueue {
   readonly #tails = new Map<string, Promise<void>>();
@@ -916,9 +921,7 @@ export class AgentRunService {
         })}`,
       },
       executionGuidance: {
-        id: "agencity.agent-run.execution-guidance",
-        version: 4,
-        text: SDK_GUIDE,
+        ...AGENT_RUN_EXECUTION_GUIDANCE,
       },
     });
   }

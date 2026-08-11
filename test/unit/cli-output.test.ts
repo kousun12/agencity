@@ -8,6 +8,7 @@ import {
   createCliErrorEnvelope,
   createCliSuccessEnvelope,
   exitCodeForCliError,
+  formatDuration,
   parseCliOutputEnvelope,
   planCliOutput,
   renderCliEnvelope,
@@ -15,6 +16,36 @@ import {
   type CliSuccessEnvelope,
   type CliOutputEnvelope,
 } from "../../src/cli/output.ts";
+
+describe("CLI human durations", () => {
+  test("formats the complete managed-service range at meaningful boundaries", () => {
+    expect([
+      100,
+      999,
+      1_000,
+      1_001,
+      59_999,
+      60_000,
+      61_001,
+      3_599_999,
+      3_600_000,
+      3_600_001,
+      86_400_000,
+    ].map(formatDuration)).toEqual([
+      "100 ms",
+      "999 ms",
+      "1 second",
+      "1 second 1 ms",
+      "59 seconds 999 ms",
+      "1 minute",
+      "1 minute 1 second 1 ms",
+      "59 minutes 59 seconds 999 ms",
+      "1 hour",
+      "1 hour 1 ms",
+      "24 hours",
+    ]);
+  });
+});
 
 describe("CLI output v1 success envelope", () => {
   test("has one exact versioned JSON shape and stable success status", () => {

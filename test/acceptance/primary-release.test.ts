@@ -211,4 +211,199 @@ describe("FU-009 installed no-ID release transcript", () => {
     });
     expect(fixture.count(task)).toBe(3);
   }, 120_000);
+
+  test("keeps scratch warm across detached cells and restores only reconstructible cache after service loss", async () => {
+    const fixture = new StrictActionFixture(); fixtures.push(fixture);
+    const world = await AcceptanceWorld.create("scratch-lifecycle"); worlds.push(world);
+    const warmTask = "exercise compact warm scratch";
+    const isolationTask = "write isolated fork scratch";
+    const coldTask = "recover scratch after service loss";
+
+    fixture.script(warmTask, [
+      action("typescript", String.raw`
+        const durableInput = { seed: 7, count: 2048 };
+        await state.set("scratch-rebuild-input", durableInput);
+        scratch.rows = Array.from(
+          { length: durableInput.count },
+          (_, index) => durableInput.seed + index,
+        );
+        scratch.identity = { label: "same-worker-object" };
+        scratch.alias = scratch.identity;
+        scratch.transform = (value: number) => value * 2;
+        scratch.persisted = durableInput;
+        return { cachedRows: scratch.rows.length, durableKeys: 1 };
+      `),
+      probe => {
+        expect(probe.lastUserText).toContain('"cachedRows":2048');
+        expect(probe.lastUserText.length).toBeLessThan(100_000);
+        return action("typescript", String.raw`
+          const status = await sdk.scratch.status();
+          const warmIdentity = scratch.identity === scratch.alias;
+          const transformed = scratch.transform(scratch.rows[10]);
+          return {
+            temperature: status.temperature,
+            warmIdentity,
+            transformed,
+            cachedRows: scratch.rows.length,
+          };
+        `);
+      },
+      probe => {
+        expect(probe.lastUserText).toContain('"temperature":"warm"');
+        expect(probe.lastUserText).toContain('"warmIdentity":true');
+        expect(probe.lastUserText).toContain('"transformed":34');
+        expect(probe.lastUserText).toContain('"cachedRows":2048');
+        return action("final", "warm scratch was reused with compact observations");
+      },
+    ]);
+    fixture.script(isolationTask, [
+      action("typescript", String.raw`
+        scratch.persisted = { seed: 99, count: 1 };
+        scratch.transform = (value: number) => value + 1;
+        return { forkSeed: scratch.persisted.seed };
+      `),
+      probe => {
+        expect(probe.lastUserText).toContain('"forkSeed":99');
+        return action("final", "fork scratch remained isolated");
+      },
+    ]);
+    fixture.script(coldTask, [
+      action("typescript", String.raw`
+        const before = await sdk.scratch.status();
+        const durable = await state.get("scratch-rebuild-input");
+        const stateInventory = await state.list();
+        const helperWasMissing = !("transform" in scratch);
+        if (helperWasMissing) {
+          scratch.transform = (value: number) => value * 2;
+        }
+        const restoredInput = scratch.persisted;
+        return {
+          temperature: before.temperature,
+          cacheStatus: before.cache.status,
+          restoredSeed: restoredInput.seed,
+          helperWasMissing,
+          rebuiltValue: scratch.transform(durable.value.seed),
+          durableStateNames: stateInventory.map(item => item.name),
+        };
+      `),
+      probe => {
+        expect(probe.lastUserText).toContain('"temperature":"restored"');
+        expect(probe.lastUserText).toContain('"cacheStatus":"restored"');
+        expect(probe.lastUserText).toContain('"restoredSeed":7');
+        expect(probe.lastUserText).toContain('"helperWasMissing":true');
+        expect(probe.lastUserText).toContain('"rebuiltValue":14');
+        expect(probe.lastUserText).toContain('"durableStateNames":["scratch-rebuild-input"]');
+        return action("final", "eligible scratch restored and the warm-only helper was rebuilt from durable input");
+      },
+    ]);
+    fixture.hold(warmTask, 2);
+
+    expect((await world.command(
+      ["config", "set-model", "openai:openai/fixture-v1", "--json"],
+      fixture.environment(),
+    )).code).toBe(0);
+    const humanServiceStatus = await world.command(
+      ["service", "status"],
+      fixture.environment(),
+    );
+    expect(humanServiceStatus).toMatchObject({ code: 0, stderr: "" });
+    expect(humanServiceStatus.stdout).toContain("(1 hour after activity)");
+    expect(JSON.parse((await world.command(
+      ["service", "status", "--json"],
+      fixture.environment(),
+    )).stdout).idleShutdownMs).toBe(3_600_000);
+
+    const detached = await world.command(
+      ["run", "--detach", "--json", warmTask],
+      fixture.environment(),
+    );
+    expect(parseSingleJson(detached)).toEqual({
+      protocol: "agencity.run-accepted",
+      version: 1,
+      accepted: true,
+      detached: true,
+    });
+    await fixture.waitFor(warmTask, 2);
+    fixture.release(warmTask, 2);
+    await eventually(async () => {
+      const status = await world.command(["status", "current", "--json"], fixture.environment());
+      if (status.code !== 0) return undefined;
+      const value = parseSingleJson(status);
+      return value.status === "succeeded" ? value : undefined;
+    });
+    const resumed = await world.command(["resume"], fixture.environment());
+    expect(resumed).toMatchObject({ code: 0, stderr: "" });
+    expect(resumed.stdout).toContain("Session: exercise compact warm scratch / main");
+    expect(resumed.stdout).toContain("Detached. Session identity and durable work remain owned by the service.");
+
+    const warmHistory = JSON.parse((await world.command(
+      ["history", "current", "--json"],
+      fixture.environment(),
+    )).stdout);
+    expect(warmHistory.cells).toHaveLength(2);
+    expect(warmHistory.cells.every((cell: any) =>
+      JSON.stringify(cell.result).length < 1_000)).toBe(true);
+
+    const forked = await world.command(
+      ["branch", "head", "scratch-isolation", "--json"],
+      fixture.environment(),
+    );
+    expect(JSON.parse(forked.stdout)).toMatchObject({
+      created: true,
+      branch: "scratch-isolation",
+      from: "head",
+    });
+    const isolated = await world.command(["run", "--json", isolationTask], fixture.environment());
+    expect(parseSingleJson(isolated)).toMatchObject({
+      status: "succeeded",
+      final: "fork scratch remained isolated",
+    });
+    const mainResume = await world.command(
+      ["resume", "main"],
+      fixture.environment(),
+    );
+    expect(mainResume).toMatchObject({ code: 0, stderr: "" });
+    expect(mainResume.stdout).toContain("Session: exercise compact warm scratch / main");
+    const resumedMainHistory = JSON.parse((await world.command(
+      ["history", "current", "--json"],
+      fixture.environment(),
+    )).stdout);
+    expect(resumedMainHistory.branch).toBe("main");
+    expect(resumedMainHistory.cells).toHaveLength(2);
+
+    const beforeLoss = JSON.parse((await world.command(
+      ["service", "status", "--json"],
+      fixture.environment(),
+    )).stdout);
+    const shutdown = await world.command(
+      ["service", "shutdown", "--json"],
+      fixture.environment(),
+    );
+    expect(JSON.parse(shutdown.stdout)).toEqual({ accepted: true, lifecycle: "draining" });
+    await eventually(async () => {
+      const status = await world.command(["service", "status", "--json"], fixture.environment());
+      if (status.code !== 0) return undefined;
+      const value = JSON.parse(status.stdout);
+      return value.lifecycle === "stopped" ? value : undefined;
+    });
+    await eventually(async () => {
+      const sessions = await world.command(["sessions", "--json"], fixture.environment());
+      return sessions.code === 0 ? JSON.parse(sessions.stdout) : undefined;
+    });
+    const afterLoss = JSON.parse((await world.command(
+      ["service", "status", "--json"],
+      fixture.environment(),
+    )).stdout);
+    expect(afterLoss.instanceId).not.toBe(beforeLoss.instanceId);
+
+    const recovered = await world.command(["run", "--json", coldTask], fixture.environment());
+    expect(recovered.code, `${recovered.stdout}\n${recovered.stderr}`).toBe(0);
+    expect(parseSingleJson(recovered)).toMatchObject({
+      status: "succeeded",
+      final: "eligible scratch restored and the warm-only helper was rebuilt from durable input",
+    });
+    expect(fixture.count(warmTask)).toBe(3);
+    expect(fixture.count(isolationTask)).toBe(2);
+    expect(fixture.count(coldTask)).toBe(2);
+  }, 120_000);
 });

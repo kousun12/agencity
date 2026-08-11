@@ -29,7 +29,7 @@ import {
 
 export const MANAGED_SERVICE_PROTOCOL_VERSION = 1;
 export const MANAGED_SERVICE_CONFIG_ENV = "AGENCITY_SERVICE_CONFIG";
-export const DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 60_000;
+export const DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 3_600_000;
 const MIN_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 100;
 const MAX_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 24 * 60 * 60 * 1_000;
 const MAX_SERVICE_CHILD_STARTUP_ERROR_BYTES = 16 * 1_024;
@@ -266,6 +266,7 @@ export class ManagedWorkspaceService {
       restartConsoleAfterCell: normalized.restartConsoleAfterCell ?? false,
       recover: false,
       startWakeSchedulers: false,
+      enableLocalScratchCheckpoints: true,
       ...options,
       executionLease: {
         workspaceId: normalized.workspace.workspaceId,

@@ -16,8 +16,8 @@ import { effectiveCompaction } from "./context-compaction.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
 import type { RepositoryInstructionService } from "./repository-instructions.ts";
 
-export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. Persist every value needed after a cell boundary. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
-export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 1, text: BASE_POLICY });
+export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. Persist every value required after recovery; scratch and console heap values are replaceable and may disappear. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
+export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 2, text: BASE_POLICY });
 function hash(value: string): string { const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex"); }
 
 export interface ContextMaterializeOptions {

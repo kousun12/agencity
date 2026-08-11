@@ -52,7 +52,7 @@ export function fixturePromptProvenanceForPin(
     effectiveSystemPromptDigest: effectiveDigest,
     systemPromptContractId: "agencity.system-prompt.v1" as const,
     components: {
-      basePolicy: { componentId: "agencity-base-policy", version: 1, digest: componentDigest },
+      basePolicy: { componentId: "agencity-base-policy", version: 2, digest: componentDigest },
       agentProfile: { componentId: pin.profileVersionId, version: 1, digest: pin.agentPromptDigest },
       responseContract: { componentId: "test-response", version: 1, digest: componentDigest },
       executionGuidance: { componentId: "test-guidance", version: 1, digest: componentDigest },

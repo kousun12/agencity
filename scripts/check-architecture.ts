@@ -120,7 +120,12 @@ const expectedBarrelMembers: Readonly<Record<string, readonly string[]>> = {
 for (const [barrel, members] of Object.entries(expectedBarrelMembers)) {
   const source = await Bun.file(resolve(src, barrel)).text();
   for (const member of members) {
-    if (!source.includes(`export * from "./${member}"`) && !source.includes(`export * from './${member}'`)) {
+    const starExport = source.includes(`export * from "./${member}"`) ||
+      source.includes(`export * from './${member}'`);
+    const privateLibSqlExport = barrel === "storage/index.ts" &&
+      member === "libsql.ts" &&
+      (source.includes('} from "./libsql.ts"') || source.includes("} from './libsql.ts'"));
+    if (!starExport && !privateLibSqlExport) {
       violations.push(`src/${barrel}: missing public export for ./${member}`);
     }
   }
@@ -231,6 +236,7 @@ const requiredClassifications: Readonly<Record<string, string>> = {
   branches: "rebuildable-projection",
   snapshots: "rebuildable-projection",
   outbox: "operational-projection",
+  console_scratch_cache: "operational-projection",
   agent_profile_versions: "rebuildable-projection",
   workspace_agent_profiles: "rebuildable-projection",
   schema_migrations: "migration-metadata",
@@ -240,6 +246,13 @@ for (const [table, classification] of Object.entries(requiredClassifications)) {
   if (classifications.get(table)?.classification !== classification) {
     violations.push(`docs/mutable-tables.md: ${table} must be classified ${classification}`);
   }
+}
+
+const storageContractSource = await Bun.file(resolve(src, "storage/contract.ts")).text();
+const storageBarrelSource = await Bun.file(resolve(src, "storage/index.ts")).text();
+if (storageContractSource.includes("ScratchStore") ||
+    storageBarrelSource.includes("./scratch.ts")) {
+  violations.push("scratch storage must remain private and outside AgentStorage/public storage exports");
 }
 
 const immutableTables = [...classifications.entries()]

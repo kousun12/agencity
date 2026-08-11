@@ -13,7 +13,15 @@ At every **committed cell boundary**, state needed later must be one of:
 - a registered content-addressed artifact reference plus available bytes;
 - an external resource reference/outcome explicitly represented by an effect event.
 
-The Bun heap, console globals, open handles, child processes, notifications, snapshots, and outbox leases are not durable identity. `events` is canonical. The reducer plus retained artifact contents projects `AgentState`; snapshots accelerate this and may be discarded. External files/services remain external and can change independently.
+The Bun heap, console globals, scratch, open handles, child processes, notifications, snapshots, and outbox leases are not durable identity. `events` is canonical. The reducer plus retained artifact contents projects `AgentState`; snapshots accelerate this and may be discarded. External files/services remain external and can change independently.
+
+### Best-effort console scratch
+
+Every cell receives a direct scratch object keyed by exact `(sessionId, branchId)`. One worker can keep arbitrary runtime values warm across successful cells. A process-wide lifecycle queue serializes exact-scope preparation, cell execution, canonical terminalization, post-commit checkpointing, eviction, and worker recycling so one branch cannot race another branch's shared console lifecycle.
+
+After `CellCommitted`, the supervisor independently requests a getter-free bounded JSON projection. The managed exact-file-local composition may write that projection through a private `ScratchStore` using the current process execution fence. `console_scratch_cache` is an overwriteable operational projection with same-device exact-key restore, source-event/cursor validation, integrity digests, seven-day expiry, 64-branch and 16 MiB workspace quotas, and least-recently-used eviction. It has no foreign key to rebuildable session projections and is excluded from generated SQL, canonical rebuild, synchronization, and export.
+
+Checkpoint failure never changes the cell outcome. Failed, abandoned, or uncommitted execution evicts the warm scope. Branch forks, child sessions, other devices, and remote relational placement do not inherit or restore the parent scope. Direct diagnostic supervisors remain warm-only because they do not have managed execution-fence authority. Any value required for correctness after a committed boundary must still use canonical state, an artifact, or another durable reference.
 
 ## Dependency direction
 
@@ -102,7 +110,7 @@ flowchart LR
     cloud <-->|"push and pull"| bReplica
 ```
 
-Only immutable envelopes cross the cloud boundary. Artifact bytes, workspace snapshots, outbox leases, and other mutable operational projections remain local.
+Only immutable envelopes cross the cloud boundary. Artifact bytes, workspace snapshots, scratch checkpoints, outbox leases, and other mutable operational projections remain local.
 
 Cloud exchange uses a second local file through `TursoSyncTransport` and pinned `@tursodatabase/sync@0.7.2`. Its `connect()` URL callback returns `null` during initialization, schema creation, staging, queries, checkpointing, and stats, and returns the configured URL only during an explicit official `push()` or `pull()`. This is the installed offline-first equivalent of `bootstrapIfEmpty:false`. Cloud exchange does not use remote schema administration, database-client swapping, frame-replication APIs, or an invented `sync()` wrapper. Rejected network calls leave the same local database and unsent change-data-capture (CDC) operations usable. Capabilities truthfully advertise directional push/pull/checkpoint/stats for this adapter; the deterministic in-process hub remains `bidirectional-only`.
 
@@ -114,7 +122,7 @@ Startup, reconnect, interval, and manual cycles stage local envelopes, optionall
 
 ## Canonical versus derived relational data
 
-Canonical events are physically guarded against update and delete. Context records are immutable derived provenance and have the same physical guards. Mutable tables are limited to migration metadata, rebuildable routing/snapshot projections, and the operational outbox/lease projection. [The table registry](./mutable-tables.md) specifies every table and is checked against every migration.
+Canonical events are physically guarded against update and delete. Context records are immutable derived provenance and have the same physical guards. Mutable tables are limited to migration metadata, rebuildable routing/snapshot projections, and operational cache/outbox/lease state. The private `console_scratch_cache` is classified as an `operational-projection`: it is safe to delete and never projects into `AgentState`. [The table registry](./mutable-tables.md) specifies every table and is checked against every migration.
 
 The adapter is the only code allowed to issue canonical inserts. Application state changes call `appendEvents`; the checker rejects update/delete/replace patterns for immutable tables anywhere in `src`.
 

@@ -158,6 +158,8 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
 
+Scratch has no event type or event payload field. A successful `CellCommitted` is the durable terminal boundary; only after that append succeeds may the supervisor attempt a noncanonical scratch checkpoint. The private mutable cache can be absent, stale, evicted, expired, corrupt, or placement-unavailable without changing historical projection. Event replay, branching, synchronization, context materialization, gate evaluation, and export never consult it.
+
 Mailbox intent, artifact, follow-up, and receipt-link fields are optional by schema. New messages carry an intent and require an explicit context-delivery event before acknowledgement.
 
 ## Lifecycle groupings
@@ -179,6 +181,8 @@ CellProposed/CellStarted   \-> CellAbandoned (recovery)
 ```
 
 A cell's external effects have their own lifecycle and can outlive an abandoned cell. Do not infer that abandonment rolled them back.
+
+A successful cell may leave an exact-branch scratch scope warm and may trigger a later bounded local cache update. Neither operation appends an event. Failed, abandoned, or uncommitted cells evict their warm scope and cannot advance the retained checkpoint.
 
 ### External effect
 

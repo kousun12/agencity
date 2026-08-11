@@ -13,7 +13,7 @@ The package is private and is consumed from a source checkout or Bun link. It is
 | `@prime-agent/runtime/storage` | `AgentStorage`, storage capabilities, `LibSqlStorage`, and the Turso transport adapter. |
 | `@prime-agent/runtime/artifacts` | `ArtifactStore` and `LocalArtifactStore`. |
 | `@prime-agent/runtime/executors` | Effect contracts and file, shell, model, and skill executors. |
-| `@prime-agent/runtime/console` | Generated-cell SDK types, observation helpers, and the private worker-process host. |
+| `@prime-agent/runtime/console` | Generated-cell SDK and scratch types, observation helpers, and the private worker-process host. |
 | `@prime-agent/runtime/runtime` | `Supervisor` and its run, outbox, projection, context, recursive-agent, memory, harness, skill, goal, schedule, and recovery services. |
 | `@prime-agent/runtime/protocol` | `ProtocolServer`, `AgentClient`, HTTP and in-process transports, and wire-facing types. |
 | `@prime-agent/runtime/security` | Secret filtering, scrubbing, and model-credential helpers. |
@@ -71,13 +71,15 @@ async function usingRuntime() {
 }
 ```
 
-`Supervisor.open` migrates the local stores, opens the content-addressed artifact store and profile-owned credential store, installs the standard executors, and optionally performs recovery. `close` stops local schedulers, drains local recursive runners, stops the console worker, releases registered credential-redaction values, and closes storage.
+`Supervisor.open` migrates the local stores, opens the content-addressed artifact store and profile-owned credential store, installs the standard executors, and optionally performs recovery. Every supervisor supports warm exact-branch scratch. `enableLocalScratchCheckpoints: true` is a product-composition opt-in that additionally requires an exact local `file:` workspace database and managed execution fencing; direct diagnostic and remote placements remain warm-only. Custom embeddings may instead supply explicit `scratchCheckpointHooks`. `close` stops local schedulers, drains local recursive runners, stops the console worker, releases registered credential-redaction values, and closes storage.
 
 An embedded supervisor does not by itself provide the managed product service's discovery manifest, bearer authentication, resident run queue, process fencing, or idle shutdown. If an embedded host creates a `ProtocolServer`, it also owns network exposure and authentication policy.
 
 ### Managed product service
 
-Ordinary `agencity` product flows discover or start a per-workspace `ManagedWorkspaceService`. That service owns the `Supervisor`, local process lease, startup recovery, resident run advancement, schedules, loopback listener, bearer token, and graceful drain. Clients attach through `AgentClient` and do not open the workspace database directly.
+Ordinary `agencity` product flows discover or start a per-workspace `ManagedWorkspaceService`. That service owns the `Supervisor`, local process lease, startup recovery, resident run advancement, schedules, loopback listener, bearer token, one-hour default quiescent shutdown, and graceful drain. Clients attach through `AgentClient` and do not open the workspace database directly.
+
+`ManagedServiceConfiguration.idleShutdownMs` remains available for embedding and deterministic tests. Its normalized value defaults to `3_600_000` and participates in the discovery configuration hash. `ManagedServiceStatus.idleShutdownMs` and JSON output retain exact milliseconds; the product CLI formats the default human duration as one hour. Warm scratch and the mere existence of a console worker do not count as resident work.
 
 The managed service is a product lifecycle component, not a hosted multi-tenant service and not a placement adapter. It binds to `127.0.0.1`, authenticates every route with an owner bearer from an owner-only manifest, and retains trusted-local OS authority. See [Public client protocol](./protocol.md).
 
@@ -107,7 +109,7 @@ Structured requests use response-aware `agencity.model-dispatch.v2`, immutable `
 - `selectModel` normalizes provider shorthand, checks availability, requires an idle model boundary, and appends `SessionModelChanged`.
 - `appendMessage` scrubs known credentials and appends a message event.
 - `fork` creates a durable branch from a validated lineage cursor without changing the parent.
-- `executeCell` serializes cell execution per branch and atomically commits its observation, staged working values, and artifact references.
+- `executeCell` serializes cell execution per branch and through the shared console lifecycle queue, atomically commits its observation, staged working values, and artifact references, then independently attempts a nonfatal scratch checkpoint.
 - `resume` reconstructs and reattaches to a retained branch.
 
 Product tasks use the strict autonomous-run service:
