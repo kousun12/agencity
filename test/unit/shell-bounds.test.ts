@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { LocalArtifactStore, OUTPUT_LIMITS, ShellExecutor } from "../../src/index.ts";
+import { releaseStreamReader } from "../../src/executors/shell.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -38,6 +39,23 @@ async function setup(store: "local" | "none" | "failing" = "local") {
 }
 
 describe("bounded streaming shell output", () => {
+  test("accepts Bun child-pipe readers that omit releaseLock", () => {
+    expect(() => releaseStreamReader({})).not.toThrow();
+    let released = false;
+    releaseStreamReader({ releaseLock: () => { released = true; } });
+    expect(released).toBe(true);
+    let reads = 0;
+    let unstableReleased = false;
+    releaseStreamReader(Object.defineProperty({}, "releaseLock", {
+      get: () => ++reads === 1 ? function(this: unknown) { unstableReleased = true; } : undefined,
+    }));
+    expect(unstableReleased).toBe(true);
+    expect(reads).toBe(1);
+    expect(() => releaseStreamReader({
+      releaseLock: () => { throw new TypeError("detached Bun pipe reader"); },
+    })).not.toThrow();
+  });
+
   test("retains Unicode-safe head/tail previews and a digest-verified complete spill", async () => {
     const { local, execute } = await setup();
     const execution = await execute(

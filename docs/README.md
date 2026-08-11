@@ -53,7 +53,9 @@ This index is the public documentation entrypoint. Start with the user guide for
 ## Verification
 
 - [Verification guide](./verification.md) — deterministic checks, external gates, benchmark integration, and how to report skips.
-- [Prime Verifiers benchmarks](../benchmarks/prime/README.md) — isolated benchmark adapters, bounded OOLONG probes, independently pinned one-task Terminal-Bench 2 and 2.1 Harbor treatments, and a split agent/scorer SWE-bench Pro public treatment.
+- [Prime Verifiers benchmarks](../benchmarks/prime/README.md) — suite-capable
+  selection, immutable task catalogs, Harbor and split agent/scorer adapters,
+  mixed-outcome reporting, run commands, and matched-harness methodology.
 
 ## Implementation plans
 

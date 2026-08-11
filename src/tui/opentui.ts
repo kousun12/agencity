@@ -1259,6 +1259,10 @@ export class OpenTuiApp {
   };
 
   #scrollActiveView(delta: number): void {
+    if (this.#activeInspector() && this.#detailScrollTimer) {
+      clearTimeout(this.#detailScrollTimer);
+      this.#detailScrollTimer = null;
+    }
     this.#details.stickyScroll = false;
     const target = this.#activeInspector() ? this.#details : this.#timeline;
     target.scrollBy({ x: 0, y: delta });

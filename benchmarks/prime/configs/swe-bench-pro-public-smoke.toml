@@ -12,28 +12,27 @@ reasoning_effort = "high"
 max_tokens = 4096
 
 [env.taskset]
-id = "agencity-oolong-synth"
-split = "validation"
-dataset_name = "spam"
-context_len = 1024
-with_labels = false
-filter_numerical = false
-expected_tasks = 50
-dataset_revision = "f0d59eaf0febf130664cfceb710436c8e3216b2b"
-selection_manifest = "none"
+id = "agencity-swe-bench-pro"
+dataset = "ScaleAI/SWE-bench_Pro"
+revision = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
+treatment = "agencity-portable"
 
 [env.taskset.selection]
 mode = "smoke"
-subset = "fixed"
+subset = "qutebrowser"
+
+[env.timeout]
+episode = 1800
+finalize = 2100
 
 [env.agent]
 max_turns = 12
-max_total_tokens = 50000
+max_total_tokens = 48000
 
 [env.agent.timeout]
-setup = 300
-rollout = 600
-finalize = 60
+setup = 600
+rollout = 900
+finalize = 120
 scoring = 60
 
 [env.agent.retries]
@@ -49,9 +48,6 @@ bun_sha256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
 
 [env.agent.runtime]
 type = "docker"
-image = "oven/bun@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4"
-allow = []
-block = ["*"]
 cpu = 2
-memory = 4
-disk = 4
+memory = 8
+disk = 20

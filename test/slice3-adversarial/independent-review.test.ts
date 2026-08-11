@@ -43,7 +43,10 @@ async function effect(
     idempotencyKey: `independent-review:${key}`,
     idempotent: true,
   });
-  await supervisor.outbox.run(effectId);
+  const result = await supervisor.outbox.run(effectId);
+  if (result.outcome !== "succeeded") {
+    throw new Error(`Objective evidence effect failed: ${JSON.stringify(result)}`);
+  }
   return (await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }))
     .findLast((event) => event.type === "EffectOutcomeRecorded" && (event.payload as any).effectId === effectId)!;
 }

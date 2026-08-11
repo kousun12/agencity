@@ -134,7 +134,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 
 ### Implemented runtime foundations
 
-- local LibSQL canonical event storage, immutable event guards, deterministic projection/rebuild, branches, snapshots, and cursor-based subscriptions;
+- local LibSQL canonical event storage, recursive creation of missing file-backed database parents, immutable event guards, deterministic projection/rebuild, branches, snapshots, and cursor-based subscriptions;
 - disposable Bun TypeScript cells with final-expression or explicit-return observations, bounded safe inspection/logs, durable working values, retained cell history, read-only analytical SQL, content-addressed artifacts, 128 KiB cell-result IPC with streamed JSON artifact staging above that boundary, one-based bounded file pages, and exact bounded artifact byte ranges;
 - outbox-backed model, shell, file, and skill effects with typed pre-execution origins, crash recovery, explicit unknown outcomes, and `agencity.bounded-output.v1` completeness envelopes; local shell execution streams scrubbed 24 KiB head/tail previews and spills complete output up to 32 MiB to CAS when available;
 - durable root and child sessions, nuclear-family mailboxes and retained follow-up, cancellation trees, recursive-model runtime handles, documents/input sets, goals, cached attributable gates, heartbeats, schedules, and wake queues;
@@ -254,47 +254,60 @@ AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=...   bun test te
 ```
 
 The isolated `benchmarks/prime/` project provides a custom Prime Verifiers v1
-harness and a pinned Prime-style file-offloaded OOLONG-synth taskset. Its local
-contract and 1K OOLONG integration smokes have passed. One revised Sol-high
-Yahoo 128K sample completed and scored `1.0`; the corresponding Luna sample
-completed but scored `0`. Earlier bounded failures remain configuration
-evidence. No full OOLONG score, hosted run, or exact Prime Agent reproduction is
-verified. New adapters follow `benchmarks/prime/AUTHORING.md`; workspace-scored
-coding tasks are the primary benchmark class, with answer-only tasksets reserved
-for narrow integration or reasoning checks. The project contains separate
-Terminal-Bench 2 and Terminal-Bench 2.1 Harbor tasksets, each pinned to its
-own `fix-git` task package, task image, dataset and complete task-tree digests,
-Verifiers/Harbor versions, Agencity commit, Linux Bun archive, and Python
-lockfile. Their portable harness stages Agencity into the task container without
-assuming its package manager, runs in the task work directory, keeps rollout
-state outside the scored workspace, passes only the Verifiers interception
-credential, confirms managed-service shutdown, removes generated workspace
-metadata and state during finalization outside the agent timeout and before
-scoring, and leaves the upstream Harbor verifier authoritative. The final
-hardened Terminal-Bench 2 Luna-high treatment completed in eight calls and
-scored `1.0`. The independently pinned Terminal-Bench 2.1 treatment completed
-in seven calls and also scored `1.0`, with stopped-service and cleanup evidence.
-Both are one-task integration evidence only; no Terminal-Bench suite capability,
-unattended cancellation recovery, performance result, or full-suite result is
-verified. A separate SWE-bench Pro public treatment pins one qutebrowser
-instance, its public dataset/base revision, task image manifest digest and image
-ID, official evaluator commit/tree and selected-file digests, Agencity commit,
-Bun archive, Verifiers/Docker SDK versions, and Python lock. Its agent stage
-archives only the base revision, deletes the original Git history, creates one
-fresh baseline commit, proves the withheld test commit is unresolved, limits
-network to Verifiers interception, and emits only a bounded private patch after
-Agencity shutdown and generated-state cleanup. The agent container is then
-destroyed. A host stage verifies the evaluator source, supplies the immutable
-image through an unreachable local alias required by the unmodified upstream
-mutable-tag route, and runs the official scorer in a fresh network-disabled
-container. Model-free reference/no-op checks scored `1.0`/`0.0`. One attended
-Luna-high treatment made nine calls, reached Agencity's total-token bound with
-no patch, and received official reward `0.0`; all service, metadata, scorer,
-alias, and temporary-file cleanup completed. This is one zero-score integration
-treatment, not a SWE-bench Pro performance or suite-capability claim. The paid
-probe used the initial port-1 alias route; a later model-free audit hardened the
-current adapter to port 0, a required failed pull of the populated alias, and
-before/after alias identity checks without authorizing a second paid probe.
+harness plus suite-capable Terminal-Bench 2, Terminal-Bench 2.1, SWE-bench Pro
+public, and OOLONG tasksets. One shared deterministic selection contract
+supports exact IDs, explicit ID lists, named smoke subsets, seeded samples,
+stable shards, and all compatible tasks. Generated immutable catalogs retain
+complete task coverage, typed incompatibility reasons, task/source/tree/image/
+workdir/evaluator/lock pins, exact selected IDs and digests, and named smoke
+sets. Terminal-Bench 2 and 2.1 each catalog 89/89 compatible official tasks and
+leave the unmodified Harbor verifier authoritative. SWE-bench Pro catalogs all
+731 public rows: one qutebrowser row is compatible, 729 remain incompatible
+with `image_configuration_not_audited`, and one audited Vuls row is incompatible
+because its official no-op control produced no parsed test evidence. Its `all`
+mode therefore means all compatible tasks, not the complete public suite. Every
+compatible SWE-bench Pro task uses the split lifecycle that replaces original
+Git history with one pinned baseline, proves the withheld commit unresolved,
+captures only a bounded private patch after Agencity shutdown and cleanup, and
+enters host scoring only after Verifiers requests owned-runtime teardown. The
+pinned unmodified official evaluator then runs in a fresh network-disabled
+scorer. Verifiers currently logs runtime-stop failures without exposing a
+teardown receipt to the custom environment, and the private patch is not
+host-crash-resumable between finalization and scoring. Missing or malformed
+scorer evidence is an infrastructure error, never reward zero. The OOLONG adapter
+applies the same selection controls to its pinned file-context slice. Yahoo
+128K admission enforces the packaged 50-task manifest over exact order, IDs,
+context identities, sizes, and answer types. Its deterministic scorer is
+parity-tested against pinned Prime OOLONG-synth v1 source, and suite configs use
+portable shutdown/cleanup plus serial execution. Full context and gold answers
+remain private task-object fields outside serialized task data and provenance.
+Its bounded eight-task Sol treatment uses four explicit IDs from each Yahoo
+context window. A
+pinned-container fake-provider
+test exercises the exact JSON product startup path with an initially missing
+explicit state directory. Malformed launch results retain bounded scrubbed
+stdout/stderr diagnostics instead of collapsing to a parser-only error.
+
+Deterministic summaries separate passes, valid zeros, partial rewards, harness
+terminal failures, provider failures, scorer/infrastructure errors,
+cancellations, unknowns, and incompatibilities, and state the official-score
+denominator. Taskset/scorer semantics are separated from harness-specific
+installation and cleanup so a future Verifiers-compatible harness can use the
+same selection and scorer. No second harness integration or matched comparison
+is implemented.
+
+Model-free suite validation is infrastructure evidence, not benchmark
+performance. Paid evidence remains limited to one passing Terminal-Bench 2
+`fix-git` treatment, one passing Terminal-Bench 2.1 `fix-git` treatment, bounded
+OOLONG probes including one revised Sol-high Yahoo 128K pass and one
+current-revision Sol-high zero, and one zero-score SWE-bench Pro qutebrowser
+treatment that reached Agencity's token bound without a patch. The OOLONG zero
+completed startup, execution, scoring, and cleanup on commit `5d533d1` but
+returned `Society & Culture` instead of `Sports` after 19 Agencity steps, 20
+provider calls, 90,951 prompt-plus-completion tokens, about four minutes, and
+$0.89. No paid full-suite, hosted, or matched-harness result is verified. Large
+unattended runs also remain limited by the absence of a public durable
+cancellation/reconciliation receipt.
 
 Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified.
 

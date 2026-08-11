@@ -2,7 +2,7 @@ model = "openai/gpt-5.6-sol"
 num_tasks = 8
 num_rollouts = 1
 shuffle = false
-max_concurrent = 2
+max_concurrent = 1
 push = false
 rich = false
 
@@ -20,6 +20,21 @@ with_labels = false
 filter_numerical = false
 expected_tasks = 50
 dataset_revision = "f0d59eaf0febf130664cfceb710436c8e3216b2b"
+selection_manifest = "yahoo-test-128k-v1"
+selection_manifest_sha256 = "d0a105f1ee619adf94cdaf8cc5e9606cb82a57bd7f970d476a3a2db3b9a5c275"
+
+[env.taskset.selection]
+mode = "ids"
+ids = [
+  "yahoo:131072:517050021:50021",
+  "yahoo:131072:517050022:50021",
+  "yahoo:131072:517050034:50021",
+  "yahoo:131072:517050045:50021",
+  "yahoo:131072:517050046:50022",
+  "yahoo:131072:517050047:50022",
+  "yahoo:131072:517050058:50022",
+  "yahoo:131072:517050070:50022",
+]
 
 [env.agent]
 max_turns = 64
@@ -37,7 +52,10 @@ max_retries = 0
 [env.agent.harness]
 id = "agencity-verifiers"
 source_repo = "https://github.com/kousun12/agencity.git"
-source_ref = "ef16e551cc4494cdd76637249a80afa82cdf26be"
+source_ref = "5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193"
+installation = "portable"
+bun_url = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
+bun_sha256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
 
 [env.agent.runtime]
 type = "docker"

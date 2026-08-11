@@ -38,6 +38,39 @@ import { fixtureAgentProfile, makeTempRuntime, removeTempRuntime, type TempRunti
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
 
+interface RenderableTree {
+  getChildren(): RenderableTree[];
+}
+
+async function awaitCodeHighlighting(root: RenderableTree): Promise<void> {
+  const queue = [...root.getChildren()];
+  const pending: Promise<void>[] = [];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current instanceof CodeRenderable) pending.push(current.highlightingDone);
+    queue.push(...current.getChildren());
+  }
+  await Promise.all(pending);
+}
+
+async function awaitPresentedMessage(controller: OpenTuiController, messageId: string): Promise<void> {
+  if (controller.presentation.state.messages.some(message => message.id === messageId)) return;
+  await new Promise<void>(resolve => {
+    let settled = false;
+    let unsubscribe = (): void => {};
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      resolve();
+    };
+    unsubscribe = controller.subscribePresentation(presentation => {
+      if (presentation.state.messages.some(message => message.id === messageId)) finish();
+    });
+    if (settled) unsubscribe();
+  });
+}
+
 describe("OpenTUI interactive terminal", () => {
   test("renders the family browser as bounded, visually distinct option rows", () => {
     const view = {
@@ -363,12 +396,16 @@ describe("OpenTUI interactive terminal", () => {
     };
     try {
       app = new OpenTuiApp(setup.renderer, appController);
-      let frame = await setup.waitForFrame(value => value.includes("OpenTUI test / main") && value.includes("Inspect the workspace"));
+      let frame = await setup.waitForFrame(value => value.includes("OpenTUI test / main") && value.includes("YOU"));
       const initialMessageId = controller.presentation.state.messages.find(message => message.content === "Inspect the workspace")!.id;
       const initialMessageBody = setup.renderer.root.findDescendantById(
         `agencity-transcript-message-body-${initialMessageId}`,
       );
       expect(initialMessageBody).toBeInstanceOf(MarkdownRenderable);
+      await awaitCodeHighlighting(initialMessageBody as MarkdownRenderable);
+      await setup.renderOnce();
+      frame = await setup.waitForFrame(value =>
+        value.includes("OpenTUI test / main") && value.includes("Inspect the workspace"));
       expect(frame).toContain("TRUSTED-LOCAL");
       expect(frame).toContain("Ask Agencity");
       expect(frame).not.toContain("SESSION");
@@ -416,7 +453,21 @@ describe("OpenTUI interactive terminal", () => {
       frame = await setup.waitForFrame(value => value.includes("draft response"));
       expect(frame).toContain("draft response");
       const committedMarkdown = "## A committed update arrived\n\n- retained item\n\n```typescript\nconst answer = 42;\n```\n\n```unsupported-language\nplain fallback\n```";
-      await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", committedMarkdown);
+      const committedMarkdownEvent = await supervisor.appendMessage(
+        session.sessionId,
+        session.branchId,
+        "assistant",
+        committedMarkdown,
+      );
+      const markdownMessageId = committedMarkdownEvent.payload.messageId;
+      await awaitPresentedMessage(appController, markdownMessageId);
+      await setup.renderOnce();
+      const markdownBody = setup.renderer.root.findDescendantById(
+        `agencity-transcript-message-body-${markdownMessageId}`,
+      ) as MarkdownRenderable;
+      expect(markdownBody).toBeInstanceOf(MarkdownRenderable);
+      await awaitCodeHighlighting(markdownBody);
+      await setup.renderOnce();
       frame = await setup.waitForFrame(value =>
         value.includes("A committed update arrived")
         && value.includes("const answer")
@@ -427,14 +478,25 @@ describe("OpenTUI interactive terminal", () => {
       expect(frame).not.toContain("## A committed update arrived");
       expect(setup.renderer.root.findDescendantById(`agencity-transcript-message-body-${initialMessageId}`))
         .toBe(initialMessageBody);
-      const markdownMessageId = controller.presentation.state.messages.find(message => message.content === committedMarkdown)!.id;
-      const markdownBody = setup.renderer.root.findDescendantById(
-        `agencity-transcript-message-body-${markdownMessageId}`,
-      ) as MarkdownRenderable;
       expect(markdownBody.content).toBe(committedMarkdown);
+      let latestMessageId = "";
       for (let index = 1; index <= 28; index++) {
-        await supervisor.appendMessage(session.sessionId, session.branchId, "assistant", `Long timeline update ${index}`);
+        const event = await supervisor.appendMessage(
+          session.sessionId,
+          session.branchId,
+          "assistant",
+          `Long timeline update ${index}`,
+        );
+        latestMessageId = event.payload.messageId;
       }
+      await awaitPresentedMessage(appController, latestMessageId);
+      await setup.renderOnce();
+      const latestMessageBody = setup.renderer.root.findDescendantById(
+        `agencity-transcript-message-body-${latestMessageId}`,
+      ) as MarkdownRenderable;
+      expect(latestMessageBody).toBeInstanceOf(MarkdownRenderable);
+      await awaitCodeHighlighting(latestMessageBody);
+      await setup.renderOnce();
       frame = await setup.waitForFrame(value => value.includes("Long timeline update 28") && value.includes("draft response"));
       expect(frame).toContain("Long timeline update 28");
       expect(app.handleAlternateScrollInput("\u001bOA")).toBe(true);
@@ -544,6 +606,7 @@ describe("OpenTUI interactive terminal", () => {
       expect(slowCommandAborted).toBe(true);
     } finally {
       releaseSlowCommand();
+      await awaitCodeHighlighting(setup.renderer.root);
       app?.destroy();
       await controller.detach(false);
       setup.renderer.destroy();
@@ -1364,6 +1427,7 @@ describe("OpenTUI interactive terminal", () => {
       await source.highlightingDone;
       await Bun.sleep(25);
     } finally {
+      await awaitCodeHighlighting(setup.renderer.root);
       host.destroyRecursively();
       syntaxStyle.destroy();
       setup.renderer.destroy();

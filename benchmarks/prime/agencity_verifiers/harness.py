@@ -16,6 +16,9 @@ RESULT_PATH = ".agencity-eval/agencity-result.json"
 AGENCITY_DIR = "/opt/agencity"
 WORKSPACE_DIR = "/app/workspace"
 PROFILE_PATH = "/app/.agencity-eval/profile.db"
+STATE_DIR = "/app/.agencity-eval/state"
+ARTIFACTS_DIR = "/app/.agencity-eval/artifacts"
+HOME_DIR = "/app/.agencity-eval/home"
 PORTABLE_ROOT = "/tmp/agencity-eval"
 PORTABLE_PROFILE_PATH = f"{PORTABLE_ROOT}/profile.db"
 PORTABLE_STATE_DIR = f"{PORTABLE_ROOT}/state"
@@ -23,6 +26,7 @@ PORTABLE_ARTIFACTS_DIR = f"{PORTABLE_ROOT}/artifacts"
 PORTABLE_BUNDLE_PATH = "/tmp/agencity-bootstrap.tgz"
 PORTABLE_BUN_PATH = f"{AGENCITY_DIR}/bin/bun"
 PORTABLE_GIT_EXCLUDES_PATH = f"{PORTABLE_ROOT}/git-excludes"
+ADAPTER_DIAGNOSTIC_STREAM_BYTES = 4 * 1024
 BUN_LINUX_X64_URL = (
     "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
 )
@@ -31,7 +35,7 @@ BUN_LINUX_X64_SHA256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbcc
 
 class AgencityHarnessConfig(vf.HarnessConfig):
     source_repo: str = "https://github.com/kousun12/agencity.git"
-    source_ref: str = "eeceb6f02e2178e2e0d0e1a9b2f6e3f31a907a02"
+    source_ref: str = "5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193"
     installation: Literal["apt-git", "portable"] = "apt-git"
     bun_url: str = BUN_LINUX_X64_URL
     bun_sha256: str = BUN_LINUX_X64_SHA256
@@ -96,6 +100,17 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
                 "sh",
                 "-lc",
                 f"cd {shlex.quote(AGENCITY_DIR)} && bun install --frozen-lockfile",
+            ],
+        )
+        await _checked(
+            runtime,
+            [
+                "mkdir",
+                "-p",
+                WORKSPACE_DIR,
+                STATE_DIR,
+                ARTIFACTS_DIR,
+                HOME_DIR,
             ],
         )
 
@@ -188,11 +203,28 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
             ),
             environment,
         )
-        if self.config.installation == "portable":
+        try:
             result = parse_run_result(process.stdout, process.exit_code)
+        except Exception as error:
+            diagnostics = _adapter_failure_diagnostics(
+                process.stdout,
+                process.stderr,
+                process.exit_code,
+                secrets=[secret],
+                parse_error=error,
+            )
+            trace.info["agencity_adapter_failure"] = diagnostics
+            stderr_preview = _diagnostic_summary(diagnostics["stderr"])
+            raise ValueError(
+                "Agencity result protocol failed "
+                f"(exit={process.exit_code}, "
+                f"stdout_lines={diagnostics['stdout']['line_count']}, "
+                f"stderr={stderr_preview!r}): "
+                f"{diagnostics['parse_error']['message']}"
+            ) from error
+        if self.config.installation == "portable":
             trace.info["agencity"] = _trace_result(result)
         else:
-            result = parse_run_result(process.stdout, process.exit_code)
             await runtime.write(
                 RESULT_PATH,
                 (
@@ -241,9 +273,9 @@ def _agencity_command(
         "--workspace",
         workspace,
         "--state-dir",
-        PORTABLE_STATE_DIR if installation == "portable" else "/app/.agencity-eval/state",
+        PORTABLE_STATE_DIR if installation == "portable" else STATE_DIR,
         "--artifacts",
-        PORTABLE_ARTIFACTS_DIR if installation == "portable" else "/app/.agencity-eval/artifacts",
+        PORTABLE_ARTIFACTS_DIR if installation == "portable" else ARTIFACTS_DIR,
         "--profile",
         PORTABLE_PROFILE_PATH if installation == "portable" else PROFILE_PATH,
         "--model",
@@ -301,7 +333,7 @@ def _evaluation_environment(
     environment = {
         **provider_env,
         "AGENCITY_PROFILE": profile,
-        "HOME": f"{root}/home",
+        "HOME": f"{root}/home" if installation == "portable" else HOME_DIR,
         "NO_COLOR": "1",
     }
     if installation == "portable":
@@ -315,6 +347,71 @@ def _evaluation_environment(
     return environment
 
 
+def _adapter_failure_diagnostics(
+    stdout: str,
+    stderr: str,
+    exit_code: int,
+    *,
+    secrets: list[str],
+    parse_error: Exception,
+) -> dict[str, object]:
+    return {
+        "schema": "agencity.adapter-failure.v1",
+        "process_exit_code": exit_code,
+        "parse_error": {
+            "type": type(parse_error).__name__,
+            "message": _redact_known_secrets(str(parse_error), secrets),
+        },
+        "stdout": _bounded_diagnostic_stream(stdout, secrets),
+        "stderr": _bounded_diagnostic_stream(stderr, secrets),
+    }
+
+
+def _bounded_diagnostic_stream(
+    value: str,
+    secrets: list[str],
+) -> dict[str, object]:
+    original_bytes = len(value.encode("utf-8"))
+    redacted = _redact_known_secrets(value, secrets)
+    encoded = redacted.encode("utf-8")
+    common = {
+        "byte_count": original_bytes,
+        "redacted_byte_count": len(encoded),
+        "line_count": len(redacted.splitlines()),
+    }
+    if len(encoded) <= ADAPTER_DIAGNOSTIC_STREAM_BYTES:
+        return {
+            **common,
+            "completeness": "complete",
+            "value": redacted,
+        }
+    side = ADAPTER_DIAGNOSTIC_STREAM_BYTES // 2
+    return {
+        **common,
+        "completeness": "truncated",
+        "head": encoded[:side].decode("utf-8", errors="replace"),
+        "tail": encoded[-side:].decode("utf-8", errors="replace"),
+    }
+
+
+def _redact_known_secrets(value: str, secrets: list[str]) -> str:
+    redacted = value
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "[REDACTED]")
+    return redacted
+
+
+def _diagnostic_summary(stream: object) -> str:
+    if not isinstance(stream, dict):
+        return ""
+    if isinstance(stream.get("value"), str):
+        return stream["value"]
+    head = stream.get("head") if isinstance(stream.get("head"), str) else ""
+    tail = stream.get("tail") if isinstance(stream.get("tail"), str) else ""
+    return f"{head}\n[...diagnostic truncated...]\n{tail}"
+
+
 def _trace_result(result) -> dict[str, object]:
     return {
         "protocol": result.value["protocol"],
@@ -322,6 +419,7 @@ def _trace_result(result) -> dict[str, object]:
         "status": result.status,
         "exit_code": result.value["exitCode"],
         "steps": result.value["steps"],
+        "final": result.final,
     }
 
 

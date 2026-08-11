@@ -1,352 +1,363 @@
-# Prime Verifiers benchmarks
+# Prime Verifiers benchmark suites
 
-This project runs Agencity as a custom Prime Verifiers v1 harness. Its Python
-dependencies and lockfile are isolated from Agencity's Bun product runtime.
+This isolated Python project evaluates Agencity as a Prime Verifiers v1 coding
+harness. Benchmarks own tasks and authoritative scoring, Verifiers owns
+evaluation execution and model interception, Agencity owns agent orchestration
+and its `bun_console`/`finish` contract, and the configured model is a
+replaceable evaluation parameter.
 
-See [`AUTHORING.md`](./AUTHORING.md) to add a benchmark. Workspace-scored coding
-tasks are the primary benchmark class; answer-only adapters are deferred until
-a concrete low-cost evaluation requires one.
+The implementation is suite-capable. This means the same task and scorer path
+supports one exact task, a named smoke subset, an explicit ID list, a seeded
+sample, a stable shard, or every compatible task. It does not mean that a paid
+full-suite model run has been completed.
 
-## OOLONG treatment
+See [`AUTHORING.md`](./AUTHORING.md) for the reusable benchmark contract.
 
-The OOLONG integration implements a **Prime-style file-offloaded
-OOLONG-synth** treatment:
+## Execution model
 
-- dataset: `oolongbench/oolong-synth`;
-- pinned revision: `f0d59eaf0febf130664cfceb710436c8e3216b2b`;
-- benchmark context written to `/app/workspace/oolong-context.txt`;
-- original question passed to a fresh Agencity root;
-- answer read from `/app/workspace/oolong-answer.txt`, with Agencity's terminal
-  `final` value as fallback;
-- deterministic official OOLONG-synth scoring, including numeric partial credit;
-- model calls routed through Verifiers' rollout interception endpoint.
+- `agencity_verifiers.harness.AgencityHarness` installs one pinned Agencity
+  revision, routes all model calls through Verifiers, keeps state outside scored
+  workspaces, preserves typed terminal outcomes, retains bounded scrubbed
+  stdout/stderr evidence for malformed startup results, and performs treatment
+  cleanup.
+- Benchmark tasksets load pinned datasets, select tasks deterministically,
+  construct authorized workspaces, retain public provenance, and invoke the
+  official scorer.
+- `agencity_verifiers.selection` is the shared catalog and selection layer.
+- `agencity_verifiers.harbor_suite` is reusable Harbor task/scorer integration.
+- SWE-bench Pro uses a custom `Env` so Verifiers completes the owned-runtime
+  teardown path before private host-side scoring starts. Verifiers currently
+  logs runtime-stop failures but does not expose a teardown receipt to the
+  custom environment.
+- `agencity_verifiers.reporting` creates deterministic mixed-outcome summaries.
 
-The full comparison config selects the identifiable slice from Prime Agent's
-published table: test split, Yahoo source, 131,072-token bucket, all 50 tasks,
-two context windows, no label augmentation, and no numeric-task filtering.
+Task traces retain the complete selected ID list and digest, catalog and task
+digests, task/image/workdir pins, benchmark-specific evaluator pins, the model,
+sampling, harness, runtime, limits, usage, timing, reward, terminal status, and
+cleanup evidence. Generated resolved configs and raw traces remain private
+because they can contain model text, licensed data, or private client headers.
 
-This is not the paper's direct-context treatment and is not an exact
-reproduction of Prime Agent's result. Prime says it gave every compared harness
-the main context through a file, but it does not publish its complete task
-manifest, dataset revision, prompt, numeric-filter choice, sampling settings,
-budgets, or adapter.
+## Selection interface
 
-## Setup and model-free verification
+Every suite taskset accepts an `[env.taskset.selection]` table:
 
-Requirements:
-
-- Bun 1.3.14 or newer;
-- Docker with the pinned Bun image available;
-- Python 3.12 or 3.13 (the pinned Harbor extra requires Python 3.12+);
-- `uv`;
-- network access to Hugging Face for the dataset preflight;
-- a current Prime login and inference credit only for paid rollouts.
-
-From this directory:
-
-```sh
-uv sync --locked
-uv run --locked python -m unittest discover -s tests -v
-uv run --locked eval @ configs/oolong-synth-smoke.toml --dry-run
-uv run --locked eval @ configs/oolong-yahoo-128k-sample.toml --dry-run
-uv run --locked eval @ configs/oolong-yahoo-128k-sol-sample.toml --dry-run
-uv run --locked eval @ configs/oolong-yahoo-128k-full.toml --dry-run
+```toml
+[env.taskset.selection]
+mode = "smoke" # exact | ids | smoke | sample | shard | all
+subset = "default"
+seed = 0
 ```
 
-Resolve the pinned Yahoo 128K selection without model inference:
+Examples:
+
+```toml
+# One exact task
+[env.taskset.selection]
+mode = "exact"
+ids = ["fix-git"]
+
+# Explicit subset
+[env.taskset.selection]
+mode = "ids"
+ids = ["fix-git", "build-cython-ext"]
+
+# Deterministic sample
+[env.taskset.selection]
+mode = "sample"
+count = 8
+seed = 20260810
+
+# Stable parallel shard
+[env.taskset.selection]
+mode = "shard"
+shard_index = 0
+shard_count = 4
+
+# Every catalog-compatible task
+[env.taskset.selection]
+mode = "all"
+```
+
+Catalog order is canonical. Samples use a retained seed. Shards assign each ID
+by stable SHA-256 hashing, so shards are disjoint and cover the compatible
+catalog. Unknown IDs, incompatible IDs, empty selections, and invalid shard
+parameters fail before model admission.
+
+Resolve a config and emit its immutable selection without downloading all task
+images or calling a model:
+
+```sh
+uv run --locked python scripts/preflight_suite.py \
+  configs/terminal-bench-2-full.toml
+```
+
+Run a Verifiers configuration dry-run:
+
+```sh
+uv run --locked eval @ configs/terminal-bench-2-full.toml --dry-run
+```
+
+## Configurations
+
+Suite configs are provided for:
+
+- Terminal-Bench 2: `terminal-bench-2-{smoke,sample,full}.toml` and
+  `terminal-bench-2-shard-0-of-4.toml`;
+- Terminal-Bench 2.1: `terminal-bench-2-1-{smoke,sample,full}.toml` and
+  `terminal-bench-2-1-shard-0-of-4.toml`;
+- SWE-bench Pro public: `swe-bench-pro-public-{smoke,sample,full}.toml` and
+  `swe-bench-pro-public-shard-2-of-3.toml`;
+- OOLONG: `oolong-synth-smoke.toml`,
+  `oolong-yahoo-128k-{sample,full}.toml`,
+  `oolong-yahoo-128k-sol-{sample,8-current}.toml`, and
+  `oolong-yahoo-128k-shard-0-of-4.toml`. The eight-task Sol treatment selects
+  four explicit IDs from each context window and runs them serially.
+
+The earlier `fix-git` and qutebrowser filenames remain aliases for fast exact
+treatments. They use the same task and scorer implementation as larger runs.
+
+## Compatibility and immutable catalogs
+
+### Terminal-Bench 2
+
+Catalog: [`manifests/terminal-bench-2-catalog.json`](./manifests/terminal-bench-2-catalog.json)
+
+- dataset:
+  `terminal-bench/terminal-bench-2@sha256:c6fc2e2382c1dbae99b2d5ecd2f4f4a60c3c01e0d84642d69b4afd92e99d078b`;
+- upstream source commit: `afbb742d222491967eea7f14e532abd481726a8c`;
+- catalog coverage: 89/89 compatible tasks;
+- catalog SHA-256:
+  `42170432fabf7dd049c09917f491c754bfb318ddd306a5d2c9e18609030c5290`;
+- canonical task-entry SHA-256:
+  `8962dbae91eeb702f4f1fbca6505053bc9da19305dfe773c0b407efa04e22972`.
+
+Each entry pins the complete downloaded task tree, `task.toml`, immutable
+linux/amd64 image manifest and config, declared workdir, and upstream identity.
+Harbor collection hooks run against the intact workspace first. Agencity's
+portable service and generated state are then removed before the unmodified
+Harbor verifier scores the collected evidence.
+
+### Terminal-Bench 2.1
+
+Catalog: [`manifests/terminal-bench-2-1-catalog.json`](./manifests/terminal-bench-2-1-catalog.json)
+
+- dataset:
+  `terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a`;
+- upstream source commit: `ffccbe05ee73a9d59518217f294ad711bda39304`;
+- catalog coverage: 89/89 compatible tasks;
+- catalog SHA-256:
+  `abdf5a37bac0f947721489ff3dcdd6668097a480a5f338590b2d6ca6c520e968`;
+- canonical task-entry SHA-256:
+  `403f87827daa0c418edbe13082b55919e8f657f943ad1b55f539c84bcc1fde94`.
+
+This is a distinct pinned dataset and catalog. It does not reinterpret
+Terminal-Bench 2 history.
+
+### SWE-bench Pro public
+
+Catalog: [`manifests/swe-bench-pro-public-catalog.json`](./manifests/swe-bench-pro-public-catalog.json)
+
+- public dataset revision: `7ab5114912baf22bb098818e604c02fe7ad2c11f`;
+- catalog coverage: all 731 public rows;
+- compatible set: 1 task;
+- incompatible set: 730 tasks;
+- catalog SHA-256:
+  `370a192eb7f64292399e1489be0dc5c00633ebe715bedaefc1836edc58d39ce8`;
+- canonical task-entry SHA-256:
+  `1ac0a1db2f3705ae1c2cbbeb30d31dcdb54443c930365137ea86d8fef25b5fc6`.
+
+Compatible row:
+
+- `qutebrowser/qutebrowser` at base
+  `def864adc8b19bdbc506919270d8ff1408b4faac`, image manifest
+  `sha256:1607129d3ab3b54033dd9d6fdc9c05c6fad3d36dbdd89f36082f331acfcca35a`,
+  workdir `/app`.
+
+Of the incompatible rows, 729 have typed reason
+`image_configuration_not_audited`: their public data and evaluator assets are
+pinned, but their linux/amd64 image manifest/config pairs have not been resolved
+and audited. The audited Vuls row is incompatible with
+`official_noop_parser_evidence_empty`: its official no-op control produced no
+parsed test evidence, so reward zero could not be distinguished from evaluator
+failure. These rows are visible in coverage reports and cannot be selected by
+`all`. Here, `all` means all compatible tasks, not the complete 731-row suite.
+
+For each compatible task, setup archives only the pinned base tree, deletes the
+original workspace and Git object store, creates one fresh baseline commit, and
+proves the withheld commit cannot resolve. Only a bounded private patch crosses
+to host scoring. Verifiers requests owned-runtime teardown before the custom
+environment starts host scoring. A fresh network-disabled scorer then runs the
+pinned unmodified official evaluator against the verified immutable image.
+Empty, missing, or malformed official parser evidence is an infrastructure
+error, never reward zero. The current Verifiers API does not return a
+runtime-stop receipt, so a teardown exception is logged rather than made
+available as scorer admission evidence.
+
+### OOLONG-synth
+
+- dataset: `oolongbench/oolong-synth`;
+- revision: `f0d59eaf0febf130664cfceb710436c8e3216b2b`;
+- pinned comparison slice: test/Yahoo/131,072 tokens, 50 tasks over two context
+  windows;
+- enforced manifest:
+  [`manifests/oolong-yahoo-128k.json`](./manifests/oolong-yahoo-128k.json),
+  SHA-256
+  `d0a105f1ee619adf94cdaf8cc5e9606cb82a57bd7f970d476a3a2db3b9a5c275`;
+- scorer source:
+  `PrimeIntellect-ai/research-environments@ba7eabc710b0d49cab25f52a5457ad56ca04613c`,
+  file SHA-256
+  `3cf9882c294be58f3b92cda5773c56ae5ebbb53e97f25c1ec9c8c612515c6131`.
+
+OOLONG supports the same exact, smoke, IDs, sample, shard, and all controls
+after loading the pinned predicate-pushed slice. Every Yahoo 128K admission
+checks exact task order, row IDs, context IDs, context hashes, context sizes,
+and normalized answer types against the packaged manifest before applying the
+selection. Its deterministic scorer is a parity-tested port of the pinned Prime
+OOLONG-synth v1 source. File and terminal answers retain separate digests and an
+agreement flag; the file remains authoritative as upstream specifies. Suite
+configs use the portable harness, explicit shutdown/cleanup, and serial
+execution. Context and gold answers remain private task-object fields: context
+is written only to the authorized workspace, while neither value is serialized
+in public task data or trace provenance. OOLONG is file-context reasoning
+evidence, not repository-coding evidence.
+
+Regenerate and compare the pinned slice without admitting a model:
 
 ```sh
 uv run --locked python scripts/preflight_oolong.py \
-  --output manifests/oolong-yahoo-128k.json
+  --split test --dataset-name yahoo --context-len 131072 \
+  --expected-tasks 50 --check manifests/oolong-yahoo-128k.json
 ```
 
-The loader uses Parquet predicate pushdown. Hugging Face may still populate its
-local cache, so allow several gigabytes of free storage. Set `HF_HOME` or pass
-`--cache-dir` to place the cache on another volume. The complete dataset is
-about 12 GB compressed; the selected slice is much smaller.
+## Running evaluations
 
-## Paid rollout ladder
+Set the top-level `model` in a copied config to a Verifiers-supported model that
+can produce Agencity's required formal tool calls. Do not change taskset
+semantics when changing the model.
 
-Every command below spends Prime inference credit. Keep `push = false` during
-development.
-
-First run one 1K validation task:
+Smoke:
 
 ```sh
-uv run --locked eval @ configs/oolong-synth-smoke.toml
+uv run --locked eval @ configs/terminal-bench-2-smoke.toml
 ```
 
-After inspecting its trace, score, terminal status, answer source, and cleanup,
-run one task from the target Yahoo 128K treatment:
+Full compatible set:
 
 ```sh
-uv run --locked eval @ configs/oolong-yahoo-128k-sample.toml
+uv run --locked eval @ configs/terminal-bench-2-full.toml
 ```
 
-That config uses Luna as a lower-cost integration probe. The target-model probe
-is separate:
+These commands spend inference credit. Review the resolved config, current
+pricing, selected count, provider-window worst-case, and operator budget first.
+Keep `push = false` during development. Turn and token limits are checked
+between calls and are not a hard billed-dollar cap.
+
+## Matched harness comparisons
+
+Benchmark semantics are independent from the Agencity harness. A future
+Verifiers-compatible coding harness can be selected under `[env.agent.harness]`
+without changing the taskset or scorer.
+
+For a matched comparison:
+
+1. preflight one config and retain its exact selected IDs and digest;
+2. hold dataset/catalog, task IDs/order, model snapshot, endpoint class,
+   reasoning, sampling, rollout count, turn/token/time budgets, runtime image,
+   CPU/memory/disk/network, and official scorer constant;
+3. vary only harness ID/config and harness source pin;
+4. report every attempted task and the same failure policy;
+5. use repeated rollouts and uncertainty estimates when stochasticity matters.
+
+Model comparisons are a separate experiment: hold the harness and all other
+fields fixed, then vary only the model configuration.
+
+## Reporting
+
+Create a scrubbed deterministic summary from a local Verifiers output:
 
 ```sh
-uv run --locked eval @ configs/oolong-yahoo-128k-sol-sample.toml
+uv run --locked python -m agencity_verifiers.reporting \
+  outputs/<run-directory> \
+  --selection /path/to/preflight-selection.json \
+  --output /path/to/summary.json
 ```
 
-The fully loaded 50-task command is intentionally separate:
+The report separates passes, valid zeros, partial rewards, harness terminal
+failures, provider failures, scorer/infrastructure errors, skips, cancellations,
+unknowns, and catalog incompatibility counts. Reward mean uses only officially
+scored tasks and states its denominator. Infrastructure errors are not silently
+averaged as zero. Provider-supplied calls, tokens, timing, and cost are
+aggregated when present.
 
-```sh
-uv run --locked eval @ configs/oolong-yahoo-128k-full.toml
-```
-
-Do not start the full command without reviewing current Prime pricing and
-wallet balance. Its proxy-side upper bounds permit up to 64 model turns and
-500,000 total tokens for each of 50 rollouts. Those are safety ceilings, not an
-expected cost estimate.
-
-## Development evidence
-
-On August 10, 2026:
-
-- the pinned 1K spam selection resolved to 50 tasks and two context windows;
-- the pinned Yahoo 128K selection resolved to 50 tasks, two context windows,
-  280,690- and 292,898-byte context files, and the generated selection manifest;
-- one Luna 1K rollout completed in seven model turns, used the answer file, and
-  scored `1.0`;
-- one Luna Yahoo 128K rollout reached the 12-turn probe limit while beginning a
-  recursive batch-classification strategy and scored `0`;
-- one Sol-high Yahoo 128K rollout launched 21 recursive classification shards
-  but reached the 300,000-token probe limit before terminal aggregation. It
-  scored `0`, took about 22 minutes, and consumed $9.91 of Prime inference
-  credit;
-- after adding in-cell recursive-result aggregation and raising the ceiling to
-  500,000 tokens, one Sol-high Yahoo 128K rollout completed in 22 model calls
-  and five Agencity steps. It used 397,293 total tokens, took about 22 minutes,
-  returned `Sports`, scored `1.0`, and consumed $3.85 of incremental Prime
-  inference credit;
-- the same revised sample on Luna completed in 12 model calls and nine Agencity
-  steps. It used 62,973 total tokens, took about three minutes, returned
-  `Society & Culture` instead of `Sports`, scored `0`, and consumed $0.37 of
-  incremental Prime inference credit.
-
-These single-task 128K probes are integration evidence, not benchmark scores.
-The successful Sol sample establishes the complete route, but extrapolating its
-cost linearly gives roughly $193 for 50 tasks before variance or failed work.
-The full run therefore remains operator-gated. Luna is materially cheaper but
-did not solve this sampled task, so its lower cost is not evidence that it is a
-viable replacement for the target-model run.
-
-## Terminal-Bench 2 Harbor treatment
-
-The Terminal-Bench 2 integration is a one-task workspace-scored Harbor
-treatment, not a Terminal-Bench suite result.
-
-- source: `terminal-bench/terminal-bench-2`, pinned to Harbor dataset digest
-  `sha256:c6fc2e2382c1dbae99b2d5ecd2f4f4a60c3c01e0d84642d69b4afd92e99d078b`;
-- selected task: `fix-git`, recording upstream task reference
-  `sha256:66be7179f07f1aa8f0d60f88800a883a68c1ffb7a349aae76aa60fa679485473`
-  and enforcing complete task-tree digest
-  `5390c93a787a9cfea243764401ad5f9ca3733346553997c812865f3981943abd`;
-- task image: `alexgshaw/fix-git@sha256:61e431c00c58df652287aadce5457634d9f9330cfdd153ebdf2802df0d540119`;
-- task workspace: `/app/personal-site`;
-- scorer: the upstream Harbor `tests/test.sh` verifier, staged only after
-  Agencity exits;
-- treatment manifest:
-  [`manifests/terminal-bench-2-fix-git.json`](./manifests/terminal-bench-2-fix-git.json).
-
-The portable harness path downloads the exact Agencity Git revision on the
-evaluator host, verifies and stages a pinned Linux x64 Bun executable, then
-installs the locked Bun dependencies in the selected task image. It does not
-assume `apt-get`, Git, Bun, or Node are available in that image. The task
-workspace remains Agencity's workspace; profile, database, artifacts, and
-bootstrap files are rollout-local under `/tmp/agencity-eval`. The harness
-refuses a workspace with pre-existing `.agencity` metadata, hides only the
-generated marker from Git during execution, confirms managed-service shutdown,
-and removes the generated marker and rollout state during task finalization,
-outside the agent timeout and before scoring. Only the Verifiers interception
-credential is passed by the harness to Agencity.
-
-Model-free checks:
+## Model-free verification
 
 ```sh
 uv lock --check
 uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m unittest tests/test_exact_container_startup.py -v
 uv build
-uv run --locked eval @ configs/terminal-bench-2-fix-git-sample.toml --dry-run
 ```
 
-The sample configuration uses one task, one rollout, concurrency one, no
-whole-rollout retries, no upload, twelve turns, 64,000 input tokens, 32,768
-output tokens, 48,000 total tokens, a 900-second agent cap, and a 900-second
-scoring cap. Run it only after reviewing current model pricing and the resolved
-configuration:
+The exact-container startup test archives the current runtime source, installs
+it inside the pinned Bun image, and runs the real JSON product path against a
+local fake provider. It deliberately supplies a missing explicit state
+directory and requires one valid terminal result without paid inference.
+
+Official SWE-bench Pro Docker reference/no-op checks are opt-in:
 
 ```sh
-uv run --locked eval @ configs/terminal-bench-2-fix-git-sample.toml
+AGENCITY_SWE_PRO_OFFICIAL=1 \
+uv run --locked python -m unittest \
+  tests.test_swe_bench_pro.OfficialScorerIntegrationTests -v
 ```
 
-The turn and token limits are checked between model calls. They bound this
-attended treatment but are not a hard billed-dollar admission control; one
-final call can overshoot a token threshold. Review a provider-window
-worst-case estimate and available wallet before every paid run. Generated
-resolved configurations can contain private client headers and remain ignored
-local evidence; scrub them before sharing.
+Model-free checks validate selection, pins, packaging, isolation, sanitizer,
+official scorer parsing, lifecycle order, cleanup, and reporting. They are not
+model performance evaluations.
 
-The task image is `linux/amd64`; Apple Silicon Docker runs it through platform
-emulation. The current single-agent harness does not expose a public durable
-cancellation/reconciliation receipt if an outer evaluation timeout interrupts a
-run. This limits the integration to short attended probes until that interface
-exists. Harbor's hidden verifier reward, not Agencity's final message, is the
-authoritative score.
+The final August 11, 2026 run recorded 70 passing benchmark tests, 1 skipped
+opt-in scorer test, and 0 failures. The same official scorer test passed
+separately when enabled. The live Yahoo 128K slice exactly matched its packaged
+manifest. All 21 suite preflights, all 22 config dry-runs, source/wheel builds,
+isolated wheel/sdist loading, lock validation, root typecheck, architecture
+checks, and patch checks passed. A Vuls no-op audit returned empty parser
+evidence; the catalog therefore retains that row as incompatible rather than
+mapping it to reward zero.
 
-On August 10, 2026, the lock, 39 model-free tests, source and wheel builds,
-installed-wheel pin validation, dry-run resolution, exact Harbor task loading,
-source-distribution leak checks, complete task-tree integrity checks, and
-portable lifecycle checks in the pinned task image passed. The first paid
-attempt failed before model admission because the portable state directory did
-not exist; it made zero model calls and did not reach Harbor scoring. An
-eight-call diagnostic rollout then reached Harbor and scored `0`: Agencity
-reported `failed` at its turn limit after generated `.agencity` metadata made
-the Git worktree appear dirty. Both failures are retained as infrastructure and
-treatment-debugging evidence.
+## Recorded model evidence
 
-After the harness isolated and removed generated workspace metadata, the
-final hardened one-task Luna-high rollout completed in eight model calls and
-eight Agencity
-steps. Agencity reported `succeeded`, the managed service reported stopped,
-cleanup completed, and the upstream Harbor verifier scored `1.0`. The trace
-recorded 19,408 prompt tokens, 3,088 completion tokens, 11,320 cached input
-tokens, 1,622 reasoning tokens, no errors, and an `agent_completed` stop.
-At the preflight prices of $1 per million input tokens and $6 per million
-output tokens, that usage has a $0.0379 undiscounted listed-price ceiling.
-This is one passing treatment probe, not a Terminal-Bench score or suite claim.
+- OOLONG: one revised Sol-high Yahoo 128K task scored `1.0`; a corresponding
+  Luna task scored `0`. A later current-revision Sol-high canary on commit
+  `5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193` completed the repaired
+  infrastructure path but returned `Society & Culture` instead of the expected
+  `Sports`, scoring `0`. It used 19 Agencity steps, 20 provider calls, 90,951
+  prompt-plus-completion tokens, about four minutes, and $0.89. No full OOLONG
+  run was made.
+- Terminal-Bench 2: one hardened Luna-high `fix-git` task scored `1.0`.
+- Terminal-Bench 2.1: one independently pinned Luna-high `fix-git` task scored
+  `1.0`.
+- SWE-bench Pro: one attended Luna-high qutebrowser task made nine calls,
+  reached Agencity's total-token bound without a patch, and officially scored
+  `0.0`. It must not be rerun merely to seek a better result.
 
-## Terminal-Bench 2.1 Harbor treatment
+These are single-task integration treatments, not suite scores or comparative
+performance claims. No paid full-suite execution has been performed.
 
-Terminal-Bench 2.1 is a separate one-task Harbor treatment. It does not
-replace, migrate, or reinterpret the Terminal-Bench 2 treatment.
+## Remaining limits
 
-- dataset: `terminal-bench/terminal-bench-2-1` at
-  `sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a`;
-- selected task: the refreshed `fix-git` package at
-  `sha256:16948b980df9d96de616a205f5acca1c5d395de83ff4f8ffabcafacb93226f2e`;
-- complete downloaded Harbor task-tree digest:
-  `30aed800ba51d02a300800e34db211afa4a0ea9f4af098c628bdb8308facbfc8`;
-- task image:
-  `alexgshaw/fix-git@sha256:389b9c8247610c2c5be080b1ac00429007c2c69bf57f7f26c79f0f75ba2d5c74`;
-- workspace: `/app/personal-site`;
-- scorer: the unmodified upstream Harbor verifier, after Agencity's managed
-  service has stopped and the generated `.agencity` marker and rollout-local
-  state have been removed.
-
-The deliberately short Git-recovery task has a revised 2.1 task package and
-image from the Terminal-Bench 2 selection. Its bounded manifest records the
-official source commit, task/image digests, shared harness pins, Python lock
-digest, selection rationale, and the treatment's only harness deviation.
-
-Run the model-free checks:
-
-```sh
-uv lock --check
-uv run --locked python -m unittest discover -s tests -v
-uv build
-uv run --locked eval @ configs/terminal-bench-2-1-fix-git-sample.toml --dry-run
-```
-
-On August 10, 2026, the 62-test model-free suite, wheel/sdist inspection,
-installed-wheel pin check, exact Harbor loading and tree verification, both
-dry-runs, and a portable bootstrap/metadata-cleanup lifecycle in the pinned
-image passed. One attended Luna-high rollout made seven model calls, reported
-`succeeded` after seven Agencity steps, confirmed service shutdown and cleanup,
-and received Harbor reward `1.0`. It used 17,036 prompt tokens and 2,334
-completion tokens (8,490 cached input and 1,492 reasoning tokens reported).
-The run did not report provider cost. A deliberately conservative preflight
-using twelve full configured provider windows at the previously recorded
-$1/M-input and $6/M-output list rates was $3.15; the observed non-cached
-listed-rate calculation is about $0.031. This one result is integration
-evidence, not a Terminal-Bench 2.1 score or a suite capability claim.
-
-## SWE-bench Pro public split treatment
-
-`agencity_swe_bench_pro` is a separate one-instance treatment for public
-SWE-bench Pro. It selects
-`instance_qutebrowser__qutebrowser-0833b5f6f140d04200ec91605f88704dd18e2970-v059c6fdc75567943479b23ebca7c07b5e9a7f34c`
-from dataset revision `7ab5114912baf22bb098818e604c02fe7ad2c11f`.
-The manifest pins repository `qutebrowser/qutebrowser`, base revision
-`def864adc8b19bdbc506919270d8ff1408b4faac`, public selection digest, task
-image manifest/config digests and observed image ID, evaluator commit/tree and selected-file
-digests, Verifiers and Docker SDK versions, Agencity commit
-`ef16e551cc4494cdd76637249a80afa82cdf26be`, Bun archive digest, and Python
-lock digest.
-
-The treatment has two isolated stages:
-
-1. The agent container archives only the pinned base revision, deletes the
-   original workspace and Git object store, initializes one fresh baseline
-   commit, and confirms that the withheld test commit is not resolvable. The
-   prompt contains only the public issue, requirements, interface, repository,
-   and base revision. Network access is limited to Verifiers interception.
-2. After Agencity stops and generated metadata/state are removed, finalization
-   captures a bounded private patch. The agent container is destroyed. A host
-   scorer fetches and verifies the pinned official evaluator, aliases the
-   immutable task image under a loopback-unreachable name required by the
-   upstream mutable-tag interface, and runs the unmodified official local-Docker
-   evaluator in a fresh network-disabled container.
-
-Reference patches, withheld test patches and Git objects, official run/parser
-scripts, patch content, parsed test names, and evaluator output are absent from
-agent-visible task data and committed trace evidence. Traces retain only
-bounded digests, byte counts, the official boolean result, and cleanup facts.
-
-Run the bounded sample:
-
-```sh
-uv run --locked eval @ configs/swe-bench-pro-public-qutebrowser-sample.toml --dry-run
-```
-
-Model-free validation proved that the pinned container sanitizer leaves one
-fresh commit and no resolvable withheld commit. The official evaluator scored
-the reference patch `1.0` and a no-op patch `0.0`; temporary scorer aliases,
-containers, and directories were removed.
-
-One attended Luna-high rollout then made nine model calls. Agencity exhausted
-the configured total-token bound after ten steps, reported terminal `failed`,
-and produced no workspace change, so the adapter supplied its declared
-synthetic no-op patch. The official evaluator completed normally and returned
-`0.0`. The trace reported 34,058 prompt tokens, 3,331 completion tokens, 11,840
-cached input tokens, and 2,019 reasoning tokens. Service shutdown, generated
-metadata/state cleanup, scorer-container teardown, image-alias removal, and
-temporary-directory cleanup all completed. The provider trace had no per-run
-cost field; the attended wallet display decreased by approximately `$0.01`.
-That paid probe used the initial port-1 alias route. A subsequent audit hardened
-the current adapter to port 0, an explicit failed pull of the populated alias,
-and before/after alias-ID checks; the model-free no-op scorer passed again.
-No second paid probe was run.
-This is one zero-score integration treatment, not a SWE-bench Pro score or
-capability claim. SWE-bench Verified is not used as the primary benchmark.
-
-## Evidence and interpretation
-
-Retain:
-
-- the resolved TOML;
-- Agencity source revision;
-- Python lockfile and Docker image digest;
-- generated OOLONG selection manifest;
-- model, reasoning effort, sampling, limits, and rollout count;
-- `traces.jsonl`, terminal status, answer source, reward, token usage, and any
-  Prime-reported cost;
-- pass, zero-score, blocked, failed, unknown, cancelled, and infrastructure
-  error counts separately.
-
-For the new additions: Terminal-Bench 2.1 has one pass and zero zero-score,
-blocked, failed, unknown, skipped, or infrastructure-error outcomes. SWE-bench
-Pro has one completed zero-score treatment with Agencity terminal `failed`, and
-zero pass, blocked, unknown, skipped, or infrastructure-error outcomes.
-
-The OOLONG reward is a mean task score, not binary accuracy. Numeric tasks use
-`0.75 ** absolute_error`; other supported synth answers use exact matching
-after the official parser.
-
-Agencity's current `run --json` envelope does not expose durable run identity,
-internal budget telemetry, or cancellation reconciliation. Verifiers' proxy
-limits and local Docker disposal bound these development runs. A large
-unattended or hosted run remains blocked on a bounded Agencity benchmark-runner
-contract with explicit cancellation and cleanup receipts.
+- Only 1 of 731 SWE-bench Pro public rows is currently compatible. Of the 730
+  incompatible rows, 729 lack audited immutable image pins and one audited Vuls
+  row fails the required official no-op parser-evidence control. This blocks a
+  complete public-suite run, but not the one-task full compatible set.
+- Full-suite model runs remain operator-gated by cost. Suite-capable loading and
+  dry-run validation do not imply model-based completion.
+- Agencity's public JSON result lacks durable cancellation/reconciliation and
+  aggregate internal budget receipts. Runtime disposal and Verifiers limits
+  bound attended development runs; large unattended execution remains unsafe.
+- The SWE-bench Pro private patch is retained only in the host task object
+  between agent finalization and environment scoring. A host crash in that
+  interval is not resumable. Verifiers also does not expose an owned-runtime
+  teardown receipt to scorer admission.
+- No second harness integration is included. The taskset/harness separation is
+  implemented and tested, but an actual matched comparison remains future work.
+- Hosted execution and local/hosted parity are unverified.

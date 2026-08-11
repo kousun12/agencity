@@ -147,6 +147,13 @@ It runs type checking, architecture checks, the core test suites, and linked-exe
 
 See [Verification](./docs/verification.md) and [Installation](./docs/install.md) for the tested executable workflows.
 
+The isolated [`benchmarks/prime/`](./benchmarks/prime/README.md) project evaluates
+Agencity as a Verifiers v1 harness on catalog-backed Terminal-Bench 2,
+Terminal-Bench 2.1, SWE-bench Pro public, and OOLONG tasksets. It supports
+deterministic smoke, sample, shard, and full-compatible selections and preserves
+official scoring. Suite-capable infrastructure is not a claim that a paid
+full-suite run or matched harness comparison has completed.
+
 ## Documentation
 
 Start with the [documentation map](./docs/README.md).

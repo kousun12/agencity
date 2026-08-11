@@ -2,7 +2,7 @@ model = "openai/gpt-5.6-sol"
 num_tasks = 50
 num_rollouts = 1
 shuffle = false
-max_concurrent = 2
+max_concurrent = 1
 push = false
 rich = false
 
@@ -20,6 +20,11 @@ with_labels = false
 filter_numerical = false
 expected_tasks = 50
 dataset_revision = "f0d59eaf0febf130664cfceb710436c8e3216b2b"
+selection_manifest = "yahoo-test-128k-v1"
+selection_manifest_sha256 = "d0a105f1ee619adf94cdaf8cc5e9606cb82a57bd7f970d476a3a2db3b9a5c275"
+
+[env.taskset.selection]
+mode = "all"
 
 [env.agent]
 max_turns = 64
@@ -37,7 +42,10 @@ max_retries = 0
 [env.agent.harness]
 id = "agencity-verifiers"
 source_repo = "https://github.com/kousun12/agencity.git"
-source_ref = "dbe1606fdf2ed390fa0815098c1014438fc740bf"
+source_ref = "5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193"
+installation = "portable"
+bun_url = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
+bun_sha256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
 
 [env.agent.runtime]
 type = "docker"
