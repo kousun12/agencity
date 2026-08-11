@@ -180,6 +180,21 @@ describe("advanced CLI command recognition", () => {
       positionals: ["review", "the", "retained", "failures"],
     });
     expect(parseCliArgs(["refine", "auto", "on"]).advanced).toBeUndefined();
+    const targeted = parseCliArgs([
+      "refine",
+      "--detach",
+      "--kind",
+      "skill,prompt_note",
+      "--scope",
+      "workspace",
+      "improve",
+      "editing",
+    ]);
+    expect(targeted.flags.has("detach")).toBe(true);
+    expect(targeted.values.get("kind")).toBe("skill,prompt_note");
+    expect(targeted.values.get("scope")).toBe("workspace");
+    expect(targeted.positionals).toEqual(["improve", "editing"]);
+    expect(parseCliArgs(["refine", "--wait"]).flags.has("wait")).toBe(true);
   });
 
   test("maps bare and legacy options-only sync to sync now without stealing sync task text", () => {

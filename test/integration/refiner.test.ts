@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { AgentClient, ConflictError, LibSqlStorage, ProtocolServer, REFINEMENT_GOVERNANCE_CONTRACT_ID, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, deriveModelContractDiagnostics, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, validateRefinementGovernanceRecursiveResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
+import { AGENT_TOOL_CONTRACT_ID, AgentClient, ConflictError, LibSqlStorage, ProtocolServer, REFINEMENT_GOVERNANCE_CONTRACT_ID, REFINEMENT_REVIEW_CONTRACT_ID, REFINEMENT_REVIEW_TOOL_NAME, Supervisor, TerminalUI, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, createModelEffectOutputV2, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, deriveModelContractDiagnostics, encodeRefinementReviewTransportValue, projectEvents, registerBrokeredSecret, validateRefinementGovernanceRecursiveResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type RefinementReviewDecision, type TextModelResponse } from "../../src/index.ts";
 import { ModelProviderResponseFailureError, formalMissingToolOutput, formalOutputFromAgentAction, formalOutputFromRefinementGovernanceDecision, formalOutputFromRefinementReviewSubmission } from "../../src/executors/model-response.ts";
 import { internalStructuredModelTurn } from "../../src/runtime/internal.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
@@ -170,6 +170,40 @@ class ReviewProvider implements ModelProvider {
       adapter: this.capabilities.requiredToolSet.adapter,
       usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 },
     });
+  }
+}
+
+class CellRepairLoopProvider extends ReviewProvider {
+  override async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (dispatch.responseContract.kind === "required-tool-set" &&
+        dispatch.responseContract.contractId === AGENT_TOOL_CONTRACT_ID) {
+      this.runCalls++;
+      return formalOutputFromAgentAction({
+        action: this.runCalls <= 3
+          ? {
+              protocol: "agencity.agent-action",
+              version: 1,
+              type: "typescript",
+              code: `// Purpose: attempt repair ${this.runCalls}\nthrow new Error("repair-${this.runCalls}-failed");`,
+            }
+          : {
+              protocol: "agencity.agent-action",
+              version: 1,
+              type: "final",
+              content: "Repair loop ended safely.",
+            },
+        dispatch,
+        providerToolCallId: `repair-loop-${this.runCalls}`,
+        provider: this.name,
+        adapter: this.capabilities.requiredToolSet.adapter,
+        usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 },
+      });
+    }
+    return super.streamResponse(context, dispatch, signal);
   }
 }
 
@@ -720,6 +754,23 @@ describe("FU-016 durable RefinerService", () => {
       const proposal = await supervisor.refinementGovernance.get(review.proposalId!);
       expect(proposal.status).toBe("applied");
       expect(proposal.proposal.evidenceEventIds).toContain(evidence.id);
+      expect(proposal.frozenInput?.version).toBe(2);
+      if (proposal.frozenInput?.version !== 2) {
+        throw new Error("expected governance input v2");
+      }
+      expect(proposal.frozenInput.refinementGrounding).toMatchObject({
+        reviewId: review.reviewId,
+        sourceSnapshotHash: review.sourceSnapshotHash,
+        allowedKinds: ["memory", "prompt_note", "skill", "subagent_spec"],
+        evidence: [{
+          eventId: evidence.id,
+          type: "MessageAppended",
+          truncated: false,
+          redacted: false,
+        }],
+      });
+      expect(JSON.stringify(proposal.frozenInput.refinementGrounding))
+        .toContain("Retained evidence for refinement");
       expect(provider.calls).toBe(1);
       expect(provider.governanceCalls).toBe(1);
       expect(proposal.reviewerSessionId).not.toBeNull();
@@ -729,6 +780,37 @@ describe("FU-016 durable RefinerService", () => {
       expect((proposerLink.payload as any).childSessionId)
         .not.toBe((reviewerLink.payload as any).childSessionId);
       expect((await supervisor.harness.list()).some((entry) => entry.name === "evidence-discipline" && entry.current.status === "active")).toBe(true);
+    } finally { await supervisor.close(); }
+  });
+
+  test("bounds cited trajectory payloads before sealed governance review", async () => {
+    const provider = new ReviewProvider("review-bounded-grounding", "propose");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      const marker = "bounded-grounding-marker";
+      const evidence = await supervisor.appendMessage(
+        sessionId,
+        branchId,
+        "user",
+        `${marker}:${"x".repeat(12_000)}`,
+      );
+      provider.evidenceEventId = evidence.id;
+      const review = await supervisor.refiner.request(sessionId, branchId);
+      await waitFor(async () =>
+        (await supervisor.refinementGovernance.get(review.proposalId!)).status === "applied",
+      "bounded grounding applied", 5_000);
+      const governed = await supervisor.refinementGovernance.get(review.proposalId!);
+      if (governed.frozenInput?.version !== 2) {
+        throw new Error("expected governance input v2");
+      }
+      const item = governed.frozenInput.refinementGrounding?.evidence[0];
+      expect(item).toMatchObject({
+        eventId: evidence.id,
+        type: "MessageAppended",
+        truncated: true,
+      });
+      expect(JSON.stringify(item?.payload)).toContain(marker);
+      expect(canonicalJsonByteLength(item?.payload ?? null)).toBeLessThan(2_300);
     } finally { await supervisor.close(); }
   });
 
@@ -909,6 +991,28 @@ describe("FU-016 durable RefinerService", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("adds failed-cell detection to a retained earlier trigger-policy shape", async () => {
+    const provider = new ReviewProvider("review-policy-upgrade");
+    const { supervisor } = await fixture(provider);
+    try {
+      const current = await supervisor.refiner.automaticPolicy();
+      const { cellFailure: _omitted, ...earlierShape } = current;
+      await supervisor.profile.setPreference(
+        "refinement.trigger-policy.v1",
+        { ...earlierShape, automatic: true } as any,
+      );
+      expect(await supervisor.refiner.automaticPolicy()).toMatchObject({
+        automatic: true,
+        cellFailure: {
+          enabled: true,
+          threshold: 3,
+          windowRecords: 128,
+          refireAfterNewEvidence: 3,
+        },
+      });
+    } finally { await supervisor.close(); }
+  });
+
   test("refinement correction, review lifecycle, and trigger consumption projections survive rebuild without refiring evidence", async () => {
     const provider = new ReviewProvider("review-rebuild");
     const { supervisor, sessionId, branchId, evidence } = await fixture(provider);
@@ -996,6 +1100,31 @@ describe("FU-016 durable RefinerService", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("a committed failed-cell repair loop admits one automatic refinement", async () => {
+    const provider = new CellRepairLoopProvider("review-cell-boundary");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      await supervisor.refiner.setAutomatic(true);
+      const run = await supervisor.runs.start(sessionId, branchId, {
+        task: "attempt a repair until the scripted provider completes",
+        goalMode: "auto",
+      });
+      expect(run.status).toBe("succeeded");
+      await waitFor(async () =>
+        (await supervisor.refiner.list({ sessionId, branchId }))
+          .some((review) =>
+            review.mode === "automatic" &&
+            review.triggerKind === "repeated_cell_failure" &&
+            review.status === "no_change"),
+      "failed-cell automatic refinement terminal", 5_000);
+      const reviews = await supervisor.refiner.list({ sessionId, branchId });
+      expect(reviews.filter((review) =>
+        review.triggerKind === "repeated_cell_failure")).toHaveLength(1);
+      expect(provider.runCalls).toBe(4);
+      expect(provider.calls).toBe(1);
+    } finally { await supervisor.close(); }
+  });
+
   test("malformed automatic policy is a bounded non-fatal boundary observation and cannot wedge run recovery", async () => {
     const provider = new ReviewProvider("review-malformed-policy");
     const { temp, supervisor, sessionId, branchId } = await fixture(provider);
@@ -1069,11 +1198,25 @@ describe("FU-016 durable RefinerService", () => {
     const { supervisor, sessionId, branchId } = await fixture(provider);
     try {
       const cell = await supervisor.executeCell(sessionId, branchId, `
-        const review = await sdk.harness.review("Inspect the retained local trajectory");
+        const review = await sdk.harness.review({
+          instructions: "Inspect the retained local trajectory",
+          allowedKinds: ["skill"],
+          wait: true,
+        });
         const reviews = await sdk.harness.reviews();
-        return { status: review.status, count: reviews.length, correctionAvailable: typeof (sdk.harness as any).correct };
+        return {
+          status: review.status,
+          allowedKinds: review.allowedKinds,
+          count: reviews.length,
+          correctionAvailable: typeof (sdk.harness as any).correct,
+        };
       `);
-      expect(cell.result).toEqual({ status: "no_change", count: 1, correctionAvailable: "undefined" });
+      expect(cell.result).toEqual({
+        status: "no_change",
+        allowedKinds: ["skill"],
+        count: 1,
+        correctionAvailable: "undefined",
+      });
     } finally { await supervisor.close(); }
   });
 
@@ -1128,6 +1271,18 @@ describe("FU-016 durable RefinerService", () => {
       const review = await client.requestRefinement(sessionId, branchId, { instructions: "Protocol trajectory review" });
       expect(review.status).toBe("no_change");
       expect((await client.refinementReviews(sessionId, branchId)).map((item) => item.reviewId)).toContain(review.reviewId);
+      const targeted = await client.requestRefinement(sessionId, branchId, {
+        instructions: "Only consider a tested reusable operation",
+        allowedKinds: ["skill"],
+        wait: false,
+      });
+      expect(targeted).toMatchObject({
+        status: "requested",
+        allowedKinds: ["skill"],
+      });
+      await waitFor(async () =>
+        (await client.refinementReview(sessionId, branchId, targeted.reviewId)).status === "no_change",
+      "targeted detached refinement review", 5_000);
       const activeProfile = await supervisor.agentProfiles.active(sessionId);
       const governed = await client.proposeProfileUpdate(sessionId, branchId, {
         expectedProfileVersionId: activeProfile.profileVersionId,
@@ -1174,6 +1329,13 @@ describe("FU-016 durable RefinerService", () => {
       expect(terminalOutput).not.toContain('"arguments"');
       expect(terminalOutput).toContain('"status": "no_change"');
       await ui.execute("/refine review the retained protocol trajectory");
+      const detached = (await client.refinementReviews(sessionId, branchId))
+        .find((item) => item.instructions === "review the retained protocol trajectory");
+      expect(detached).toBeTruthy();
+      await waitFor(async () =>
+        (await client.refinementReview(sessionId, branchId, detached!.reviewId)).status === "no_change",
+      "detached terminal refinement review", 5_000);
+      await ui.execute("/refine status");
       expect(terminalOutput).toContain("review the retained protocol trajectory — no change");
     } finally { protocol.stop(); await supervisor.close(); }
   });

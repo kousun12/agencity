@@ -1,4 +1,4 @@
-import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, ModelConfiguration, WorkingValue } from "../domain/index.ts";
+import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, HarnessKind, HarnessScope, ModelConfiguration, WorkingValue } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { InspectOptions, InspectPreview } from "./inspect.ts";
 
@@ -128,7 +128,13 @@ export interface ToolsSdk {
   writeFile(path: string, content: string, expectedSha256?: string): Promise<JsonValue>;
 }
 export interface MemorySdk { search(query: string, options?: JsonValue): Promise<JsonValue>; create(input: JsonValue | string): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue> }
-export interface HarnessSdk { review(instructions?: string): Promise<JsonValue>; reviews(options?: JsonValue): Promise<JsonValue>; propose(input: JsonValue): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue>; history(entryId: string): Promise<JsonValue> }
+export interface HarnessReviewInput {
+  readonly instructions?: string;
+  readonly requestedScope?: HarnessScope;
+  readonly allowedKinds?: readonly HarnessKind[];
+  readonly wait?: boolean;
+}
+export interface HarnessSdk { review(input?: string | HarnessReviewInput): Promise<JsonValue>; reviews(options?: JsonValue): Promise<JsonValue>; propose(input: JsonValue): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue>; history(entryId: string): Promise<JsonValue> }
 export interface SkillsSdk {
   list(options?: { readonly includeUnavailable?: boolean }): Promise<JsonValue>;
   get(nameOrId: string): Promise<JsonValue>;

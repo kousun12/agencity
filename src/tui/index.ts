@@ -8,12 +8,17 @@ import {
   type AgentEvent,
   type AgentState,
   type GovernedRefinementRecord,
+  type HarnessKind,
 } from "../domain/index.ts";
 import {
   ProtocolClientError,
   type AgentClient, type BranchWatchHandlers, type ProtocolCapabilities,
 } from "../protocol/index.ts";
-import type { FamilyAgentRecord, RecoverySummaryView } from "../runtime/index.ts";
+import type {
+  FamilyAgentRecord,
+  RecoverySummaryView,
+  StartRefinementReviewInput,
+} from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
 import type { ModelConfiguration } from "../domain/index.ts";
 import {
@@ -110,7 +115,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/skill", aliases: [], category: "status", usage: "/skill ENTRY_ID JSON", summary: "Invoke a retained skill version." },
   { name: "/skill-test", aliases: [], category: "status", usage: "/skill-test ENTRY_ID [VERSION_ID]", summary: "Run a retained skill test." },
   { name: "/profile", aliases: [], category: "status", usage: "/profile [show|history|proposals|propose JSON|repropose latest|N JSON|rollback REVISION JSON]", summary: "Inspect and explicitly govern this agent's behavioral profile." },
-  { name: "/refine", aliases: [], category: "status", usage: "/refine [INSTRUCTIONS|status|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Run a trajectory review; raw proposal JSON is an advanced diagnostic." },
+  { name: "/refine", aliases: [], category: "status", usage: "/refine [--wait|--detach] [--kind KIND[,KIND]] [INSTRUCTIONS|status|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Start a detached trajectory review; use --wait to block for governance." },
   { name: "/rollback", aliases: [], category: "status", usage: "/rollback PROPOSAL_ID REASON", summary: "Request governed refinement rollback." },
   { name: "/sync", aliases: [], category: "operations", usage: "/sync", summary: "Run explicit synchronization." },
   { name: "/sync-status", aliases: [], category: "operations", usage: "/sync-status", summary: "Inspect sync lifecycle." },
@@ -221,6 +226,20 @@ export function renderEvent(event: AgentEvent): string | null {
       return Array.isArray(payload.warnings) && payload.warnings.length
         ? payload.warnings.map((warning) => `[model warning] ${conciseValue((warning as { message?: unknown }).message)}`).join("\n")
         : null;
+    case "RefinementReviewRequested":
+      return `[refinement requested] ${conciseValue(payload.instructions ?? payload.triggerKind ?? "trajectory review")}`;
+    case "RefinementReviewChildLinked":
+      return "[refinement reviewer started]";
+    case "RefinementReviewStatusChanged":
+      return payload.status === "running"
+        ? "[refinement reviewer running]"
+        : `[refinement review ${String(payload.status)}]${payload.reason ? ` ${conciseValue(payload.reason)}` : ""}`;
+    case "RefinementGovernanceReviewRequested":
+      return "[refinement governance requested]";
+    case "RefinementGovernanceReviewChildLinked":
+      return "[refinement governance reviewer started]";
+    case "RefinementGovernanceReviewDecided":
+      return `[refinement governance ${String(payload.status ?? "decided")}]`;
     case "RefinementProposalTerminalNoticeDelivered":
       return renderGovernanceNotice(payload.result);
     case "AgentRunStatusChanged": {
@@ -272,6 +291,54 @@ export function renderGovernanceNotice(value: unknown): string {
       : "",
   ].filter(Boolean).join(" ");
   return `[profile governance: ${GOVERNANCE_STATUS_LABELS[status] ?? status.replaceAll("_", " ")}]${suffix ? ` ${suffix}` : ""}`;
+}
+
+const TERMINAL_REFINEMENT_KINDS = new Set<HarnessKind>([
+  "memory",
+  "prompt_note",
+  "skill",
+  "subagent_spec",
+]);
+
+/** Parse user-facing refinement controls without rewriting retained instructions. */
+export function parseTerminalRefinementRequest(
+  command: string,
+): StartRefinementReviewInput {
+  let remaining = command.trim();
+  let wait = false;
+  let detach = false;
+  let allowedKinds: HarnessKind[] | undefined;
+  while (remaining.startsWith("--")) {
+    if (remaining === "--wait" || remaining.startsWith("--wait ")) {
+      wait = true;
+      remaining = remaining.slice("--wait".length).trimStart();
+      continue;
+    }
+    if (remaining === "--detach" || remaining.startsWith("--detach ")) {
+      detach = true;
+      remaining = remaining.slice("--detach".length).trimStart();
+      continue;
+    }
+    if (remaining.startsWith("--kind ")) {
+      const value = /^--kind\s+(\S+)(?:\s+|$)/.exec(remaining);
+      if (!value) throw new Error("/refine --kind requires comma-separated kinds");
+      const kinds = value[1]!.split(",").filter(Boolean) as HarnessKind[];
+      if (kinds.length === 0 || new Set(kinds).size !== kinds.length ||
+          kinds.some((kind) => !TERMINAL_REFINEMENT_KINDS.has(kind))) {
+        throw new Error("/refine --kind requires memory, prompt_note, skill, or subagent_spec");
+      }
+      allowedKinds = kinds;
+      remaining = remaining.slice(value[0].length).trimStart();
+      continue;
+    }
+    throw new Error("Unknown /refine option; use --wait, --detach, or --kind KIND[,KIND]");
+  }
+  if (wait && detach) throw new Error("/refine accepts --wait or --detach, not both");
+  return {
+    wait,
+    ...(allowedKinds === undefined ? {} : { allowedKinds }),
+    ...(remaining ? { instructions: remaining } : {}),
+  };
 }
 
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]);
@@ -784,13 +851,13 @@ export class TerminalUI {
     if (line.startsWith("/skills ")) { const [action,reference,...rest]=line.slice(8).trim().split(/\s+/);if(action==="show"&&reference)this.#detail("/skills", await this.client.getSkill(this.#sessionId,this.#branchId,reference));else if(action==="preview"&&reference){const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);this.#detail("/skills-preview", preview);}else if(action==="install"&&reference){const [scope,digest]=rest;if((scope!=="workspace"&&scope!=="profile")||!digest)throw new Error("/skills install requires DIRECTORY workspace|profile CONFIRMATION_DIGEST");const preview=await this.client.previewSkillImport(this.#sessionId,this.#branchId,reference);if(digest!==preview.confirmationDigest)throw new Error(`Confirmation digest must equal ${preview.confirmationDigest}`);this.#detail("/skills", await this.client.installSkill(this.#sessionId,this.#branchId,{directory:reference,scope,confirmationDigest:digest,installedBy:"tui-owner"}));}else if(action==="test"&&reference)this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,reference));else if(action==="enable"&&reference)this.#detail("/skills", await this.client.enableSkill(this.#sessionId,this.#branchId,reference));else if(action==="disable"&&reference)this.#detail("/skills", await this.client.disableSkill(this.#sessionId,this.#branchId,reference));else if(action==="remove"&&reference)this.#detail("/skills", await this.client.removeSkill(this.#sessionId,this.#branchId,reference));else if(action==="propose"&&reference)this.#detail("/refine", await this.client.proposeSkill(this.#sessionId,this.#branchId,[reference,...rest].join(" ")));else throw new Error("/skills requires show|preview|install|test|enable|disable|remove or propose");return "continue"; }
     if (line.startsWith("/skill-test ")) { const [entryId]=line.slice(12).trim().split(/\s+/);if(!entryId)throw new Error("/skill-test requires NAME_OR_ID");this.#detail("/skill-test", await this.client.testSkill(this.#sessionId,this.#branchId,entryId));return "continue"; }
     if (line.startsWith("/skill ")) { const match=/^(\S+)\s+([\s\S]+)$/.exec(line.slice(7));if(!match)throw new Error("/skill requires ENTRY_ID JSON");this.#detail("/skill", await this.client.invokeSkill(this.#sessionId,this.#branchId,match[1]!,JSON.parse(match[2]!)));return "continue"; }
-    if (line === "/refine") { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId));return "continue"; }
+    if (line === "/refine") { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,{wait:false}));return "continue"; }
     if (line === "/refine status" || line === "/refine history") { this.#detail("/refine", { reviews: await this.client.refinementReviews(this.#sessionId,this.#branchId), proposals: (await this.client.refinements()).filter((item)=>item.sessionId===this.#sessionId&&item.branchId===this.#branchId) });return "continue"; }
     if (line === "/refine auto on" || line === "/refine auto off") { this.#detail("/refine", await this.client.setAutomaticRefinement(line.endsWith(" on")));return "continue"; }
     if (line.startsWith("/refine auto")) throw new Error("/refine auto requires on or off");
     if (line.startsWith("/refine correct ")) { const match=/^([^ ]+)\s+--\s+([\s\S]+)$/.exec(line.slice(16));if(!match)throw new Error("/refine correct EVENT_ID[,EVENT_ID] -- CORRECTION");this.#detail("/refine", await this.client.userCorrection(this.#sessionId,this.#branchId,match[2]!,match[1]!.split(",").filter(Boolean)));return "continue"; }
     if (line.startsWith("/refine propose-json ")) { const proposed=await this.client.refine(this.#sessionId,this.#branchId,JSON.parse(line.slice(21)));this.#detail("/refine", await this.client.validateRefinement(this.#sessionId,this.#branchId,proposed.proposalId));return "continue"; }
-    if (line.startsWith("/refine ")) { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,{instructions:line.slice(8)}));return "continue"; }
+    if (line.startsWith("/refine ")) { this.#detail("/refine", await this.client.requestRefinement(this.#sessionId,this.#branchId,parseTerminalRefinementRequest(line.slice(8))));return "continue"; }
     if (line.startsWith("/rollback ")) { const [proposalId,...reason]=line.slice(10).trim().split(/\s+/);if(!proposalId||!reason.length)throw new Error("/rollback requires PROPOSAL_ID REASON");this.#detail("/rollback", await this.client.rollback(this.#sessionId,this.#branchId,proposalId,reason.join(" ")));return "continue"; }
     if (line.startsWith("/branch ")) { const [,cursor,...name]=line.split(/\s+/);if(!cursor)throw new Error("/branch requires CURSOR [NAME]");const fork=await this.client.fork(this.#sessionId,this.#branchId,cursor,name.join(" ")||undefined);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,fork.branchId);await this.#queueRouteTransition(this.#sessionId,fork.branchId);return "continue"; }
     if (line === "/resume" || line.startsWith("/resume ")) { const branch=line.slice(7).trim()||this.#branchId;await this.client.resume(this.#sessionId,branch);if(this.#productCatalog)await this.client.productSelect(this.#sessionId,branch);await this.#queueRouteTransition(this.#sessionId,branch);return "continue"; }

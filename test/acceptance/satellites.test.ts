@@ -31,7 +31,7 @@ describe("FU-009 installed satellite product surfaces", () => {
     const compacted = await world.command(["compact", "retain acceptance evidence", "--strategy", "extractive", "--json"], environment);
     expect(compacted.code).toBe(0);
     expect(compacted.stdout).toContain("deterministic-extractive-v1");
-    const reviewed = await world.command(["refine", "review the frozen acceptance trajectory", "--json"], environment);
+    const reviewed = await world.command(["refine", "review the frozen acceptance trajectory", "--wait", "--json"], environment);
     expect(reviewed.code).toBe(0);
     expect(reviewed.stdout).toContain('"status": "no_change"');
     expect(fixture.requests.find(item =>

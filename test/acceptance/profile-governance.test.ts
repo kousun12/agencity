@@ -341,7 +341,7 @@ describe("installed profile governance", () => {
       protocol: "agencity.refinement-governance-input",
       proposal: { proposalId: detachedAdmission.proposalId },
       constitution: { componentId: "agencity.product-constitution", version: 1 },
-      reviewPolicy: { componentId: "agencity.refinement-governance-policy", version: 1 },
+      reviewPolicy: { componentId: "agencity.refinement-governance-policy", version: 2 },
     });
 
     const beforeRestart = json(await world.command(["service", "status", "--json"], environment));

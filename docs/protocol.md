@@ -234,6 +234,8 @@ Governed statuses are `proposed`, `deterministically_rejected`, `validated`, `re
 | `POST /sync/export` | Export events, redaction-safe profile data, envelopes, verified artifacts, and a manifest. |
 | `POST /sync/delete` | Perform confirmed owned-scope physical deletion and return a receipt. |
 
+`POST /sessions/:session/refinement-reviews` accepts `{ instructions?, requestedScope?, allowedKinds?, wait? }`. `allowedKinds` is a non-empty subset of `memory`, `prompt_note`, `skill`, and `subagent_spec`. The protocol API defaults `wait` to `true` for compatibility; product CLI and TUI commands explicitly send `false` unless the user selects `--wait`.
+
 `POST /sync/delete` requires `{ scopeKind, scopeId, requestedBy, confirmation, receiptDirectory? }`, where confirmation exactly equals `DELETE <scopeKind> <scopeId>`. Workspace/profile deletion requires an external receipt directory. Managed remote evidence can block deletion when authenticated administration is absent or the selected granularity is unsupported.
 
 ## `AgentClient`

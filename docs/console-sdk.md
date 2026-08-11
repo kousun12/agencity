@@ -322,13 +322,15 @@ Agent-created memory is local-only and requires source-trajectory evidence. Broa
 
 Methods:
 
-- `review(instructions?)` starts an attributable trajectory review;
+- `review(instructions | { instructions?, requestedScope?, allowedKinds?, wait? })` starts an attributable trajectory review;
 - `reviews(options?)` lists retained review records for the branch;
 - `propose(input)` submits an agent-authority proposal;
 - `list(options?)` returns the scope-filtered model view;
 - `history(entryId)` returns authorized version history.
 
 The model view includes active entries authorized for the local/workspace/user/global scope plus candidate versions from the branch's exact exposed allocation. Unexposed candidates are omitted from these facades.
+
+`allowedKinds` accepts `memory`, `prompt_note`, `skill`, and `subagent_spec` and restricts the formal proposal schema for that review. The string form remains shorthand for `{ instructions }`. The SDK retains the runtime API's wait-by-default behavior unless `wait: false` is explicit.
 
 `review()` uses a supervisor-selected sealed recursive response contract with exactly one fully typed `agencity_submit_refinement_review` provider tool. The structured child result is retained without an assistant result message and is bound to the exact child model completion. This internal path does not change the public `rlm` methods below, which remain text-result calls.
 

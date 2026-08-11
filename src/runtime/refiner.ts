@@ -174,7 +174,12 @@ export class RefinerService {
     if (stored === null) return DEFAULT_REFINEMENT_TRIGGER_POLICY_V1;
     if (typeof stored.value === "boolean") return { ...DEFAULT_REFINEMENT_TRIGGER_POLICY_V1, automatic: stored.value };
     if (!stored.value || typeof stored.value !== "object" || Array.isArray(stored.value)) throw new ValidationError("Stored refinement trigger policy is malformed");
-    const policy = stored.value as unknown as RefinementTriggerPolicyV1;
+    const retained = stored.value as unknown as Partial<RefinementTriggerPolicyV1>;
+    const policy = {
+      ...retained,
+      cellFailure: retained.cellFailure ??
+        DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.cellFailure,
+    } as RefinementTriggerPolicyV1;
     try {
       // The pure scanner is the authoritative strict policy validator.
       scanRefinementTriggers({ sessionId: "policy-check", branchId: "policy-check", records: [], policy });
@@ -297,9 +302,10 @@ export class RefinerService {
 
   async #admitAutomatic(trigger: RefinementDetectedTrigger): Promise<RefinementReviewRecord> {
     return this.#queue.run(`trigger:${trigger.nonterminalKey}`, async () => {
-      const trajectoryTrigger: RefinementTrajectoryTriggerInput = trigger.kind === "repeated_effect_failure"
-        ? { kind: trigger.kind, failureEventIds: trigger.evidenceEventIds }
-        : trigger.kind === "repeated_gate_failure"
+      const trajectoryTrigger: RefinementTrajectoryTriggerInput =
+        trigger.kind === "repeated_effect_failure" ||
+          trigger.kind === "repeated_cell_failure" ||
+          trigger.kind === "repeated_gate_failure"
           ? { kind: trigger.kind, failureEventIds: trigger.evidenceEventIds }
           : { kind: trigger.kind, correctionEventIds: trigger.evidenceEventIds };
       return this.#admit(trigger.sessionId, trigger.branchId, {

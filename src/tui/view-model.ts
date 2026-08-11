@@ -55,7 +55,7 @@ export interface TerminalPresentation {
 
 export interface TerminalConversationItem {
   readonly id: string;
-  readonly role: "user" | "assistant";
+  readonly role: "user" | "assistant" | "runtime";
   readonly content: string;
 }
 
@@ -480,6 +480,35 @@ function visibleConversation(messages: readonly MessageState[]): TerminalConvers
     .slice(-24);
 }
 
+function structuredRefinementConversation(
+  state: AgentState,
+): TerminalConversationItem[] {
+  return Object.values(state.modelCalls).flatMap((call) => {
+    const contract = call.modelDispatch.responseContract;
+    if (contract.kind !== "required-tool-set" ||
+        !contract.contractId.startsWith("agencity.refinement-")) return [];
+    const label = contract.contractId.includes("governance")
+      ? "governance review"
+      : "trajectory review";
+    let content: string;
+    if (call.status === "requested") {
+      content = `Structured ${label} is running. Its formal result is retained without an assistant chat message.`;
+    } else if (call.status === "succeeded" && call.result?.kind === "tool-submission") {
+      content = `Structured ${label} submitted ${call.result.name}. The decision is retained on the parent session.`;
+    } else if (call.status === "failed" || call.status === "cancelled" ||
+        call.status === "unknown") {
+      content = `Structured ${label} ended ${call.status}${call.error ? `: ${oneLine(call.error)}` : "."}`;
+    } else {
+      content = `Structured ${label} ended without a valid formal submission.`;
+    }
+    return [{
+      id: `structured-result:${call.id}`,
+      role: "runtime" as const,
+      content,
+    }];
+  });
+}
+
 function stepView(state: AgentState, run: AgentRunState, ordinal: number): TerminalStepView | null {
   const step = run.steps[ordinal]!;
   const action = step.action;
@@ -591,7 +620,10 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
     connection: presentation.connection,
     historicalCursor: presentation.historicalCursor,
     ancestry,
-    conversation: visibleConversation(state.messages),
+    conversation: [
+      ...visibleConversation(state.messages),
+      ...structuredRefinementConversation(state),
+    ].slice(-24),
     runs,
     familyChildren,
     familyParent: presentation.family.parent,

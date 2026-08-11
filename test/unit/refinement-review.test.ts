@@ -9,6 +9,7 @@ import {
   REFINEMENT_REVIEW_CONTRACT_ID,
   REFINEMENT_REVIEW_INPUT_SCHEMA,
   REFINEMENT_REVIEW_INPUT_SCHEMA_DIGEST,
+  REFINEMENT_REVIEW_POLICY,
   REFINEMENT_REVIEW_PROTOCOL,
   REFINEMENT_REVIEW_TOOL_NAME,
   REFINEMENT_REVIEW_TOOL_SET,
@@ -31,6 +32,9 @@ import {
   type CreateRefinementReviewRequest,
   type RefinementReviewPropose,
 } from "../../src/domain/index.ts";
+import {
+  REFINEMENT_GOVERNANCE_POLICY,
+} from "../../src/domain/refinement-governance.ts";
 
 const requestInput = (overrides: Partial<CreateRefinementReviewRequest> = {}): CreateRefinementReviewRequest => ({
   mode: "manual",
@@ -88,6 +92,16 @@ const parseObject = (value: unknown, req = request()) =>
 
 
 describe("refinement review request", () => {
+  test("gives proposer and governance reviewer a direct artifact-selection rubric", () => {
+    expect(REFINEMENT_REVIEW_POLICY).toContain("Repository-specific source organization");
+    expect(REFINEMENT_REVIEW_POLICY).toContain("skill packages a reusable deterministic operation");
+    expect(REFINEMENT_REVIEW_POLICY).toContain("prompt_note corrects a repeated behavioral tendency");
+    expect(REFINEMENT_REVIEW_POLICY).toContain("do not silently broaden the user's original task");
+    expect(REFINEMENT_GOVERNANCE_POLICY.version).toBe(2);
+    expect(REFINEMENT_GOVERNANCE_POLICY.text).toContain("selected artifact does not directly address");
+    expect(REFINEMENT_GOVERNANCE_POLICY.text).toContain("generic diligence");
+  });
+
   test("constructs one canonical request and stable review/trigger identities", () => {
     const left = createRefinementReviewRequest(requestInput());
     const right = createRefinementReviewRequest(requestInput({

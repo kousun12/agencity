@@ -1134,7 +1134,12 @@ export class Supervisor {
       if (method === "memory.search") return this.memory.search(sessionId,branchId,String(args[0] ?? ""),(args[1] ?? {}) as any);
       if (method === "memory.create") return this.memory.create(sessionId,branchId,args[0] as any,"agent");
       if (method === "memory.list") return this.memory.list(sessionId,branchId,(args[0] ?? {}) as any);
-      if (method === "harness.review") return this.refiner.request(sessionId,branchId,{ ...(typeof args[0] === "string" ? { instructions: args[0] } : {}) });
+      if (method === "harness.review") {
+        const input = typeof args[0] === "string"
+          ? { instructions: args[0] }
+          : (args[0] ?? {});
+        return this.refiner.request(sessionId,branchId,input as any);
+      }
       if (method === "harness.reviews") return this.refiner.list({ sessionId, branchId, ...((args[0] ?? {}) as any) });
       if (method === "harness.propose") return this.harness.propose(sessionId,branchId,{...(args[0] as any),authority:"agent"});
       if (method === "harness.list") return this.harness.modelList(sessionId,branchId,(args[0] ?? {}) as any);

@@ -151,6 +151,33 @@ describe("OpenTUI interactive terminal", () => {
       onDetail: detail => app?.showDetail(detail),
     });
     await controller.attach(session.sessionId, session.branchId, false);
+    const structuredReview = buildTerminalScreen({
+      ...controller.presentation,
+      state: {
+        ...controller.presentation.state,
+        modelCalls: {
+          "review-call": {
+            id: "review-call",
+            status: "succeeded",
+            modelDispatch: {
+              responseContract: {
+                kind: "required-tool-set",
+                contractId: "agencity.refinement-review.v1",
+              },
+            },
+            result: {
+              kind: "tool-submission",
+              name: "agencity_submit_refinement_review",
+            },
+          },
+        } as any,
+      },
+    });
+    expect(structuredReview.conversation.at(-1)).toEqual({
+      id: "structured-result:review-call",
+      role: "runtime",
+      content: "Structured trajectory review submitted agencity_submit_refinement_review. The decision is retained on the parent session.",
+    });
     const displayProfile = fixtureAgentProfile(session.sessionId);
     const proposedFinal = buildTerminalScreen({
       ...controller.presentation,
@@ -309,6 +336,7 @@ describe("OpenTUI interactive terminal", () => {
     const setup = await createTestRenderer({ width: 112, height: 30, kittyKeyboard: true });
     let releaseSlowCommand = (): void => {};
     let slowCommandAborted = false;
+    let interruptCalls = 0;
     const executedLines: string[] = [];
     const slowCommand = new Promise<void>(resolve => { releaseSlowCommand = resolve; });
     const appController: OpenTuiController = {
@@ -324,7 +352,10 @@ describe("OpenTUI interactive terminal", () => {
         }
         return controller.execute(line);
       },
-      handleInterrupt: () => controller.handleInterrupt(),
+      handleInterrupt: () => {
+        interruptCalls++;
+        return controller.handleInterrupt();
+      },
       abortPendingOperations: () => {
         slowCommandAborted = true;
         releaseSlowCommand();
@@ -503,12 +534,13 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressEnter();
       await setup.waitForFrame(value => value.includes("Working"));
       const done = app.run();
-      setup.mockInput.pressKey("d", { ctrl: true });
+      setup.mockInput.pressKey("c", { ctrl: true });
       await Promise.race([
         done,
-        Bun.sleep(1_000).then(() => { throw new Error("OpenTUI did not detach after Ctrl-D"); }),
+        Bun.sleep(1_000).then(() => { throw new Error("OpenTUI did not interrupt a busy command"); }),
       ]);
       expect(await app.settle(100)).toBe(true);
+      expect(interruptCalls).toBe(1);
       expect(slowCommandAborted).toBe(true);
     } finally {
       releaseSlowCommand();

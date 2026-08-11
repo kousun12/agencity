@@ -61,7 +61,9 @@ There is no environment variable or profile-database preference that changes ini
 
 ### Refinement governance
 
-Governed profile and harness proposals wait for their terminal result by default. Proposal JSON may set `"wait": false` to detach after durable admission and receive a later route notice. Automatic trajectory refinement is off by default and is controlled by `agencity refine auto on|off` or `/refine auto on|off`. It is profile-scoped, local-only, and currently recognizes only repeated typed effect failures, distinct-pin gate failures, and explicit `UserCorrection` events at committed run boundaries.
+Governed profile and harness API proposals wait for their terminal result by default. Proposal JSON may set `"wait": false` to detach after durable admission and receive a later route notice. Product `agencity refine` and TUI `/refine` detach by default and accept `--wait`; explicit `--detach` is also accepted and cannot be combined with `--wait`. Both accept `--kind memory,prompt_note,skill,subagent_spec`; `agencity refine` also accepts the existing `--scope` option.
+
+Automatic trajectory refinement is off by default and is controlled by `agencity refine auto on|off` or `/refine auto on|off`. It is profile-scoped and local-only. It recognizes repeated typed effect failures, three failed cells belonging to one agent run, distinct-pin gate failures, and explicit `UserCorrection` events at committed run boundaries.
 
 The reviewer is not configurable by the caller. The supervisor uses the origin route's current model configuration and freezes that dispatch before review. The product constitution and review policy are packaged immutable components. Workspace-charter and user-constraint configuration is unavailable; both fields are retained as `null` rather than inferred from repository files, prompts, or profile preferences. There is no environment variable or CLI option for reviewer identity, governance charter, review policy, reproposal bound, or per-proposal human approval.
 

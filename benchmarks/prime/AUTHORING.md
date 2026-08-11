@@ -128,10 +128,12 @@ A workspace benchmark follows this sequence:
 5. Route every model call through Verifiers interception.
 6. Let Agencity reach a typed terminal state or an explicit outer limit.
 7. Stop or reconcile rollout-local Agencity work before scoring.
-8. Run the independent verifier against the resulting workspace.
-9. Record reward, task metrics, terminal status, usage, timing, cleanup status,
+8. Remove only harness-generated workspace metadata, preserving task-owned
+   files and the agent's scored changes.
+9. Run the independent verifier against the resulting workspace.
+10. Record reward, task metrics, terminal status, usage, timing, cleanup status,
    and source pins.
-10. Dispose of the runtime and generated workspace.
+11. Dispose of the runtime and generated workspace.
 
 The verifier must run after agent execution. Agencity is trusted-local code with
 the runtime process's operating-system authority. Hidden tests placed anywhere
@@ -229,8 +231,17 @@ For a workspace task:
 
 - create the workspace from immutable task inputs;
 - verify source digests before admission;
+- verify the complete selected task tree when a framework reuses a mutable
+  local cache; checking only task metadata does not protect verifier,
+  instruction, environment, or solution files;
 - set the task work directory explicitly;
 - expose only authorized public materials;
+- keep databases, artifacts, bootstrap files, and service state outside the
+  scored workspace;
+- account for Agencity's `.agencity` identity marker: reject pre-existing
+  task-owned metadata rather than overwriting it, keep the generated marker
+  from contaminating Git-based decisions, and remove only the generated marker
+  after service shutdown and before scoring;
 - run the official deterministic verifier when available;
 - retain verifier stdout and stderr only through bounded summaries or
   non-versioned raw outputs;
@@ -266,6 +277,7 @@ At minimum, test:
 - exact task selection and ordering;
 - manifest and digest validation;
 - workspace setup;
+- generated workspace-metadata isolation and cleanup;
 - no hidden material in the agent-visible workspace;
 - official scorer success and failure fixtures;
 - malformed and missing verifier evidence;
@@ -278,7 +290,10 @@ At minimum, test:
 - bounded trace metadata with no secrets or full restricted inputs.
 
 The benchmark package must build from `uv.lock`, all unit tests must pass, and
-every committed config must resolve with `eval --dry-run`.
+every committed config must resolve with `eval --dry-run`. Source distributions
+must exclude local caches, outputs, virtual environments, task solutions, and
+held-out verifier material; inspect built archive contents in an automated
+test.
 
 ### 7. Run paid probes
 
@@ -291,6 +306,13 @@ Before each paid increase:
 - inspect raw traces locally;
 - update bounded evidence;
 - stop on unexplained score, cost, usage, timeout, cleanup, or routing behavior.
+
+Treat turn and token thresholds according to their actual enforcement point.
+Limits checked between calls can overshoot once and are not a hard
+billed-dollar cap. Use a provider-window worst-case estimate, an approved
+operator budget, and attended execution until a pre-request cost admission
+control exists. Resolved configurations may contain private client headers and
+must remain ignored local evidence or be scrubbed before sharing.
 
 One successful task establishes integration, not benchmark performance.
 

@@ -540,7 +540,7 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
         policy ? "Automatic refinement" : string(item.predictedEffect, string(item.instructions, string(item.mode, "Refinement"))),
         item.status ?? (policy ? item.automatic ? "enabled" : "disabled" : item.enabled === undefined ? "recorded" : item.enabled ? "enabled" : "disabled"),
         policy
-          ? `Scope: ${displayStatus(item.scope)} · effect failures ${bool(record(item.effectFailure).enabled) ? "enabled" : "disabled"} · gate failures ${bool(record(item.completionGateFailure).enabled) ? "enabled" : "disabled"}`
+          ? `Scope: ${displayStatus(item.scope)} · effect failures ${bool(record(item.effectFailure).enabled) ? "enabled" : "disabled"} · cell failures ${bool(record(item.cellFailure).enabled) ? "enabled" : "disabled"} · gate failures ${bool(record(item.completionGateFailure).enabled) ? "enabled" : "disabled"}`
           : item.reason ?? (item.correctionId ? "User correction recorded." : undefined),
       );
     }),

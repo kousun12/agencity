@@ -53,6 +53,7 @@ This index is the public documentation entrypoint. Start with the user guide for
 ## Verification
 
 - [Verification guide](./verification.md) — deterministic checks, external gates, benchmark integration, and how to report skips.
+- [Prime Verifiers benchmarks](../benchmarks/prime/README.md) — isolated benchmark adapters, bounded OOLONG probes, and the one-task Terminal-Bench 2 Harbor treatment.
 
 ## Implementation plans
 

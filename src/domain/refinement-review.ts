@@ -14,6 +14,7 @@ export type RefinementReviewStatus = (typeof refinementReviewStatuses)[number];
 export const refinementTriggerKinds = [
   "manual",
   "repeated_effect_failure",
+  "repeated_cell_failure",
   "repeated_gate_failure",
   "explicit_user_correction",
   "repeated_success",
@@ -271,6 +272,11 @@ export const REFINEMENT_REVIEW_POLICY = [
   "Submit status=no_change or one status=propose decision; never submit multiple proposals.",
   "Follow the tool schema's explicit presence and lossless JSON-value encodings exactly.",
   "A proposal must cite only source event IDs visible in the review request and must remain within requestedScope and allowedKinds.",
+  "Address the exact retained trigger and manual instructions; do not substitute a smaller but neighboring problem merely because it is easier to encode.",
+  "Choose the harness artifact by mechanism: memory retains a durable fact, preference, decision, observation, or constraint; prompt_note corrects a repeated behavioral tendency; skill packages a reusable deterministic operation with executable tests; subagent_spec packages a recurring delegated role with bounded completion criteria.",
+  "Repository-specific source organization, maintainability, or product behavior belongs in ordinary repository work, not a behavioral harness artifact. A new runtime primitive or unavailable dependency requires ordinary runtime implementation. Return no_change with that boundary when no allowed harness kind directly implements the requested improvement.",
+  "For repeated failures, propose a bounded investment only when the evidence supports a recurring mechanism; do not silently broaden the user's original task or turn one incidental error into standing behavior.",
+  "The trigger, predicted effect, selected kind, content, evidence, and objective evaluation must form one direct causal chain. A generic instruction to try harder, follow through, or avoid mistakes is not a substitute for the capability or behavior identified by the evidence.",
   "Replace or retire only an editable target and use its exact currentVersionId as expectedVersionId.",
   "Never include credentials, brokered secret values, or instructions that change the immutable base policy or permission boundary.",
 ].join(" ");

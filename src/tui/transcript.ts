@@ -307,7 +307,11 @@ export class TerminalTranscript {
       id: `agencity-transcript-message-role-${message.id}`,
       width: "100%",
       height: 1,
-      fg: message.role === "user" ? TERMINAL_THEME.accent : TERMINAL_THEME.success,
+      fg: message.role === "user"
+        ? TERMINAL_THEME.accent
+        : message.role === "assistant"
+          ? TERMINAL_THEME.success
+          : TERMINAL_THEME.muted,
       wrapMode: "none",
     });
     const body = new MarkdownRenderable(this.renderer, {
@@ -332,8 +336,16 @@ export class TerminalTranscript {
       body,
       message,
       update: () => {
-        role.content = block.message.role === "user" ? "YOU" : "AGENT";
-        role.fg = block.message.role === "user" ? TERMINAL_THEME.accent : TERMINAL_THEME.success;
+        role.content = block.message.role === "user"
+          ? "YOU"
+          : block.message.role === "assistant"
+            ? "AGENT"
+            : "REFINEMENT";
+        role.fg = block.message.role === "user"
+          ? TERMINAL_THEME.accent
+          : block.message.role === "assistant"
+            ? TERMINAL_THEME.success
+            : TERMINAL_THEME.muted;
         if (body.content !== block.message.content) body.content = block.message.content;
       },
     };

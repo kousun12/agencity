@@ -1,6 +1,6 @@
 # Prime Verifiers benchmarking
 
-**Status:** In progress; contract and OOLONG integration probes verified
+**Status:** In progress; contract and OOLONG probes verified; one hardened Terminal-Bench 2 Harbor treatment scored 1.0
 **Date:** August 10, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), [Reasoning effort and model capabilities](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md), and [Dynamic typed connectors](./2026-08-09-dynamic-typed-connectors-plan.md)
@@ -24,8 +24,8 @@ The first milestone is deliberately small:
 4. retain the exact harness revision, task, model, limits, trace, Agencity
    result, token usage, score, and cost evidence.
 
-Long benchmark suites, concurrent rollouts, harness comparisons, Terminal-Bench,
-and ARC-AGI-3 follow only after the smoke path is deterministic and bounded.
+Long benchmark suites, concurrent rollouts, harness comparisons, and ARC-AGI-3
+follow only after each preceding treatment is deterministic and bounded.
 
 ## Verified starting point
 
@@ -286,8 +286,8 @@ scoring.
 ### Workspace-scored agent tasks
 
 Tasksets such as Harbor or Terminal-Bench score files and commands in the
-harness runtime rather than only the final assistant text. They are a natural
-later fit, but require:
+harness runtime rather than only the final assistant text. The first
+Terminal-Bench 2 treatment selects one short fixed task and requires:
 
 - Agencity installed inside the same task runtime;
 - the task work directory exposed as Agencity's workspace;
@@ -416,10 +416,23 @@ verification documentation.
 
 ### Phase 4 — Agentic workspace benchmarks
 
-- Add current v1 Harbor/Terminal-Bench tasksets.
-- Pin exact task revisions and container images.
-- Preserve hidden-test boundaries and score failed/unknown effects correctly.
-- Start with one known-short task before any suite run.
+- A current v1 Harbor/Terminal-Bench taskset selects the explicit `fix-git`
+  task through a bounded manifest. It pins the Harbor dataset and complete
+  task-tree digests, Verifiers and Harbor versions, task image digest, task
+  workspace, Agencity source commit, Bun archive, and Python lockfile.
+- The portable shared-harness path stages source and Bun without relying on
+  task-image `apt-get`, Git, Node, or Bun; it keeps Agencity state outside the
+  scored workspace, isolates and removes generated workspace metadata before
+  scoring during finalization outside the agent timeout, and retains bounded
+  terminal and cleanup metadata in the trace.
+- Harbor stages its hidden verifier after Agencity exits and remains the sole
+  scoring authority.
+- Model-free selection, manifest, workspace, credential, verifier-isolation,
+  result-mapping, cleanup, lock, build, and dry-run checks are required before
+  the one-task paid probe.
+- A completed one-task probe is integration evidence only. Any additional task,
+  model change, concurrency increase, retry policy change, or full-suite run
+  requires a separate approval.
 
 ### Phase 5 — Multi-turn and ARC readiness
 
@@ -558,6 +571,50 @@ The successful Sol sample establishes the complete integration route, but one
 task does not establish benchmark capability. Linear cost extrapolation is about
 $193 for 50 Sol tasks before variance or failed work, so the full config remains
 operator-gated. Luna is materially cheaper but did not solve this sampled task.
+
+## Terminal-Bench 2 development evidence
+
+On August 10, 2026, the repository added one bounded current-v1 Harbor
+Terminal-Bench 2 treatment:
+
+- the taskset pins Harbor dataset digest
+  `sha256:c6fc2e2382c1dbae99b2d5ecd2f4f4a60c3c01e0d84642d69b4afd92e99d078b`
+  and selects only `fix-git`, task digest
+  `sha256:66be7179f07f1aa8f0d60f88800a883a68c1ffb7a349aae76aa60fa679485473`;
+- the manifest pins the task `linux/amd64` image, work directory, Agencity
+  revision, Bun archive, and Python lockfile;
+- the portable harness passed setup and lifecycle checks in the pinned task
+  image without `apt-get`, Git, Bun, or Node in that image;
+- `uv lock --check`, 39 model-free tests, source and wheel builds,
+  installed-wheel pin validation, source-distribution leak checks, dry-run
+  configuration resolution, exact task loading, and complete task-tree
+  integrity validation passed;
+- the first paid attempt failed before model admission because its explicit
+  state directory did not exist, made zero model calls, and did not reach
+  Harbor scoring;
+- an eight-call diagnostic rollout reached Harbor and scored `0` after
+  generated `.agencity` metadata dirtied the worktree and Agencity reached its
+  turn cap;
+- the harness now rejects pre-existing task-owned `.agencity` metadata, hides
+  only its generated marker from Git during execution, confirms managed-service
+  shutdown, and removes generated metadata and rollout state during task
+  finalization outside the agent timeout and before scoring;
+- the final hardened bounded Luna-high rollout completed in eight calls and eight
+  Agencity steps, reported `succeeded`, retained no errors, and received `1.0`
+  from Harbor's upstream verifier.
+
+The passing trace recorded 19,408 prompt tokens, 3,088 completion tokens, 11,320
+cached input tokens, and 1,622 reasoning tokens. At the preflight list prices,
+its undiscounted model-cost ceiling was $0.0379. The two failed attempts remain
+infrastructure and treatment-debugging evidence. The passing run establishes
+this one-task integration route only; it does not establish Terminal-Bench
+performance or broader task compatibility.
+
+Verifiers evaluates the committed turn and token limits between calls, so they
+are bounded trajectory controls rather than a hard billed-dollar admission
+limit. Paid runs remain attended and require a provider-window worst-case cost
+estimate plus an operator-approved budget. Generated resolved configuration is
+private local evidence because it can contain client account headers.
 
 ## Verification and reporting rules
 

@@ -1,6 +1,6 @@
 import type { JsonValue } from "../domain/json.ts";
 import type { CellLogStream } from "../domain/events.ts";
-import type { ConsoleSdk, SqlTag } from "./sdk.ts";
+import type { ConsoleSdk, HarnessReviewInput, SqlTag } from "./sdk.ts";
 import {
   MAX_CELL_OBSERVATION_JSON_BYTES,
   encodeObservation,
@@ -186,7 +186,8 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     list: (options: JsonValue = {}) => call("memory.list", [options]),
   };
   const harness = {
-    review: (instructions?: string) => call("harness.review", [instructions]),
+    review: (input?: string | HarnessReviewInput) =>
+      call("harness.review", [input as JsonValue | undefined]),
     reviews: (options: JsonValue = {}) => call("harness.reviews", [options]),
     propose: (input: JsonValue) => call("harness.propose", [input]),
     list: (options: JsonValue = {}) => call("harness.list", [options]),

@@ -34,6 +34,7 @@ const NONTERMINAL_KEY_PATTERN = /^refinement-trigger-nonterminal-v1-[a-f0-9]{32}
 
 export type RefinementAutomaticTriggerKind =
   | "repeated_effect_failure"
+  | "repeated_cell_failure"
   | "repeated_gate_failure"
   | "explicit_user_correction";
 
@@ -53,6 +54,8 @@ export interface RefinementTriggerPolicyV1 {
   /** Version 1 cannot automatically widen authority beyond the owning session. */
   readonly scope: "local";
   readonly effectFailure: RefinementTriggerThresholdPolicyV1;
+  /** Added compatibly to v1; omitted retained policies use the default threshold. */
+  readonly cellFailure?: RefinementTriggerThresholdPolicyV1;
   readonly completionGateFailure: RefinementTriggerThresholdPolicyV1;
   readonly explicitUserCorrection: RefinementTriggerThresholdPolicyV1;
 }
@@ -62,6 +65,12 @@ export const DEFAULT_REFINEMENT_TRIGGER_POLICY_V1: RefinementTriggerPolicyV1 = d
   automatic: false,
   scope: "local",
   effectFailure: {
+    enabled: true,
+    threshold: 3,
+    windowRecords: 128,
+    refireAfterNewEvidence: 3,
+  },
+  cellFailure: {
     enabled: true,
     threshold: 3,
     windowRecords: 128,
@@ -145,6 +154,12 @@ export interface RefinementRepeatedGateFailureTrigger extends RefinementDetected
   readonly evidencePins: readonly string[];
 }
 
+export interface RefinementRepeatedCellFailureTrigger extends RefinementDetectedTriggerBase {
+  readonly kind: "repeated_cell_failure";
+  readonly runId: string;
+  readonly errorSignatures: readonly string[];
+}
+
 export interface RefinementExplicitUserCorrectionTrigger extends RefinementDetectedTriggerBase {
   readonly kind: "explicit_user_correction";
   /** Exact existing, earlier local event IDs named by the typed UserCorrection payload. */
@@ -153,6 +168,7 @@ export interface RefinementExplicitUserCorrectionTrigger extends RefinementDetec
 
 export type RefinementDetectedTrigger =
   | RefinementRepeatedEffectFailureTrigger
+  | RefinementRepeatedCellFailureTrigger
   | RefinementRepeatedGateFailureTrigger
   | RefinementExplicitUserCorrectionTrigger;
 
@@ -176,6 +192,7 @@ interface EffectRequest {
   readonly executor: string;
   readonly operation: string;
   readonly cursor: string;
+  readonly originCellId?: string;
 }
 interface EffectFailureEvidence {
   readonly event: NormalizedRecord;
@@ -190,6 +207,11 @@ interface GateFailureEvidence {
   readonly definitionHash: string;
   readonly evidencePin: string;
 }
+interface CellFailureEvidence {
+  readonly event: NormalizedRecord;
+  readonly runId: string;
+  readonly errorSignature: string;
+}
 interface CorrectionEvidence {
   readonly event: NormalizedRecord;
   readonly correctedEventIds: readonly string[];
@@ -202,6 +224,8 @@ interface CorrectionEvidence {
 export function scanRefinementTriggers(input: ScanRefinementTriggersInput): readonly RefinementDetectedTrigger[] {
   validateTopLevelCollections(input);
   const policy = validatePolicy(input.policy ?? DEFAULT_REFINEMENT_TRIGGER_POLICY_V1);
+  const cellFailurePolicy = policy.cellFailure ??
+    DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.cellFailure!;
   const secrets = normalizeSecrets(input.brokeredCredentialValues ?? []);
   const records = normalizeRecords(input.records, input.sessionId, input.branchId);
   const consumptions = normalizeConsumptions(input.consumptions ?? []);
@@ -254,6 +278,70 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
         executor: first.executor,
         operation: first.operation,
         errorSignature: first.errorSignature,
+      }));
+    }
+  }
+
+  if (cellFailurePolicy.enabled) {
+    const window = trailingWindow(localRecords, cellFailurePolicy.windowRecords);
+    const runByCellId = collectAgentRunCellOwners(localRecords);
+    const requests = collectEffectRequests(localRecords);
+    const effectFailedCellIds = new Set<string>();
+    for (const record of localRecords) {
+      if (record.type !== "EffectOutcomeRecorded") continue;
+      const payload = asRecord(record.payload);
+      if (payload?.outcome !== "failed") continue;
+      const effectId = boundedPayloadId(payload.effectId);
+      const request = effectId === null ? undefined : requests.get(effectId);
+      if (request?.originCellId &&
+          compareCursor(request.cursor, record.cursor) < 0) {
+        effectFailedCellIds.add(request.originCellId);
+      }
+    }
+    const groups = new Map<string, CellFailureEvidence[]>();
+    for (const record of window) {
+      if (record.type !== "CellFailed") continue;
+      const payload = asRecord(record.payload);
+      const cellId = boundedPayloadId(payload?.cellId);
+      const error = boundedError(payload?.error);
+      const runId = cellId === null ? undefined : runByCellId.get(cellId);
+      if (!runId || error === null || effectFailedCellIds.has(cellId!)) continue;
+      const item: CellFailureEvidence = {
+        event: record,
+        runId,
+        errorSignature: normalizedRefinementErrorSignature(error, secrets),
+      };
+      const group = groups.get(runId);
+      if (group) group.push(item); else groups.set(runId, [item]);
+    }
+    for (const unboundedEvidence of groups.values()) {
+      if (unboundedEvidence.length < cellFailurePolicy.threshold) continue;
+      const evidence = unboundedEvidence.slice(-MAX_REFINEMENT_TRIGGER_EVIDENCE_EVENTS);
+      const first = evidence[0]!;
+      const identity = { runId: first.runId };
+      const key = triggerKey("repeated_cell_failure", identity);
+      const admitted = admitEvidence(
+        key,
+        evidence.map((item) => item.event),
+        cellFailurePolicy,
+        consumptions,
+        nonterminalKeys,
+        input.sessionId,
+        input.branchId,
+      );
+      if (!admitted) continue;
+      const errorSignatures = [...new Set(evidence.map((item) => item.errorSignature))].sort();
+      triggers.push(deepFreeze({
+        ...admitted,
+        policyVersion: REFINEMENT_TRIGGER_POLICY_VERSION,
+        kind: "repeated_cell_failure",
+        scope: "local",
+        scopeKey: input.sessionId,
+        sessionId: input.sessionId,
+        branchId: input.branchId,
+        summary: `Agent run ${first.runId} required repeated failed-cell repair (${evidence.length} failures across ${errorSignatures.length} error signature(s))`,
+        runId: first.runId,
+        errorSignatures,
       }));
     }
   }
@@ -456,8 +544,18 @@ function collectEffectRequests(records: readonly NormalizedRecord[]): ReadonlyMa
     const operation = boundedPayloadId(payload.operation);
     if (effectId === null || executor === null || operation === null) continue;
     // Ambiguous effect identity cannot safely be joined to an outcome.
+    const origin = asRecord(payload.origin);
+    const originCellId = origin?.kind === "cell"
+      ? boundedPayloadId(origin.cellId)
+      : null;
     if (requests.has(effectId)) requests.set(effectId, null);
-    else requests.set(effectId, { effectId, executor, operation, cursor: record.cursor });
+    else requests.set(effectId, {
+      effectId,
+      executor,
+      operation,
+      cursor: record.cursor,
+      ...(originCellId === null ? {} : { originCellId }),
+    });
   }
   const unambiguous = new Map<string, EffectRequest>();
   for (const [effectId, request] of requests) if (request) unambiguous.set(effectId, request);
@@ -609,9 +707,28 @@ function validatePolicy(policy: RefinementTriggerPolicyV1): RefinementTriggerPol
   if (typeof policy.automatic !== "boolean") unsupported("Refinement trigger policy automatic must be boolean");
   if (policy.scope !== "local") unsupported("Automatic refinement trigger policy scope must be local");
   validateThresholdPolicy(policy.effectFailure, "effectFailure");
+  if (policy.cellFailure !== undefined) {
+    validateThresholdPolicy(policy.cellFailure, "cellFailure");
+  }
   validateThresholdPolicy(policy.completionGateFailure, "completionGateFailure");
   validateThresholdPolicy(policy.explicitUserCorrection, "explicitUserCorrection");
   return policy;
+}
+
+function collectAgentRunCellOwners(
+  records: readonly NormalizedRecord[],
+): ReadonlyMap<string, string> {
+  const owners = new Map<string, string>();
+  for (const record of records) {
+    if (record.type !== "AgentRunActionCommitted") continue;
+    const payload = asRecord(record.payload);
+    const action = asRecord(payload?.action);
+    const actionId = boundedPayloadId(payload?.actionId);
+    const runId = boundedPayloadId(payload?.runId);
+    if (action?.type !== "typescript" || actionId === null || runId === null) continue;
+    owners.set(`agent-run-cell-${actionId}`, runId);
+  }
+  return owners;
 }
 
 function validateThresholdPolicy(value: RefinementTriggerThresholdPolicyV1, name: string): void {

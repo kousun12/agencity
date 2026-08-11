@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
+from typing import Literal
 from urllib.parse import urlsplit
 
 import verifiers.v1 as vf
 
+from agencity_verifiers.bootstrap import PortableBootstrap, build_portable_bootstrap
 from agencity_verifiers.result import parse_run_result
 
 
@@ -13,11 +16,25 @@ RESULT_PATH = ".agencity-eval/agencity-result.json"
 AGENCITY_DIR = "/opt/agencity"
 WORKSPACE_DIR = "/app/workspace"
 PROFILE_PATH = "/app/.agencity-eval/profile.db"
+PORTABLE_ROOT = "/tmp/agencity-eval"
+PORTABLE_PROFILE_PATH = f"{PORTABLE_ROOT}/profile.db"
+PORTABLE_STATE_DIR = f"{PORTABLE_ROOT}/state"
+PORTABLE_ARTIFACTS_DIR = f"{PORTABLE_ROOT}/artifacts"
+PORTABLE_BUNDLE_PATH = "/tmp/agencity-bootstrap.tgz"
+PORTABLE_BUN_PATH = f"{AGENCITY_DIR}/bin/bun"
+PORTABLE_GIT_EXCLUDES_PATH = f"{PORTABLE_ROOT}/git-excludes"
+BUN_LINUX_X64_URL = (
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
+)
+BUN_LINUX_X64_SHA256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
 
 
 class AgencityHarnessConfig(vf.HarnessConfig):
     source_repo: str = "https://github.com/kousun12/agencity.git"
-    source_ref: str = "dbe1606fdf2ed390fa0815098c1014438fc740bf"
+    source_ref: str = "eeceb6f02e2178e2e0d0e1a9b2f6e3f31a907a02"
+    installation: Literal["apt-git", "portable"] = "apt-git"
+    bun_url: str = BUN_LINUX_X64_URL
+    bun_sha256: str = BUN_LINUX_X64_SHA256
 
 
 class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
@@ -28,6 +45,9 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
     NEEDS_CONTAINER = True
 
     async def setup(self, runtime: vf.Runtime) -> None:
+        if self.config.installation == "portable":
+            await self._setup_portable(runtime)
+            return
         await _checked(runtime, ["apt-get", "update"])
         await _checked(
             runtime,
@@ -79,6 +99,37 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
             ],
         )
 
+    async def _setup_portable(self, runtime: vf.Runtime) -> None:
+        bootstrap = await asyncio.to_thread(
+            build_portable_bootstrap,
+            PortableBootstrap(
+                source_repo=self.config.source_repo,
+                source_ref=self.config.source_ref,
+                bun_url=self.config.bun_url,
+                bun_sha256=self.config.bun_sha256,
+            ),
+        )
+        await runtime.write(PORTABLE_BUNDLE_PATH, bootstrap)
+        await _checked(
+            runtime,
+            [
+                "sh",
+                "-c",
+                (
+                    f"rm -rf {shlex.quote(AGENCITY_DIR)} {shlex.quote(PORTABLE_ROOT)} && "
+                    f"mkdir -p {shlex.quote(AGENCITY_DIR)} {shlex.quote(PORTABLE_ROOT)} "
+                    f"{shlex.quote(PORTABLE_STATE_DIR)} {shlex.quote(PORTABLE_ARTIFACTS_DIR)} "
+                    f"{shlex.quote(PORTABLE_ROOT + '/home')} && "
+                    f"tar --no-same-owner -xzf {shlex.quote(PORTABLE_BUNDLE_PATH)} -C {shlex.quote(AGENCITY_DIR)} "
+                    f"--strip-components=1 && "
+                    f"rm -f {shlex.quote(PORTABLE_BUNDLE_PATH)} && "
+                    f"chmod 0755 {shlex.quote(PORTABLE_BUN_PATH)} && "
+                    f"cd {shlex.quote(AGENCITY_DIR)} && "
+                    f"{shlex.quote(PORTABLE_BUN_PATH)} install --frozen-lockfile"
+                ),
+            ],
+        )
+
     async def launch(
         self,
         ctx: vf.ModelContext,
@@ -89,7 +140,6 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
         mcp_urls: dict[str, str],
         data: vf.TaskData,
     ) -> vf.ProgramResult:
-        del trace
         if mcp_urls:
             raise ValueError("The initial Agencity harness does not support MCP tools")
 
@@ -109,7 +159,11 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
             _endpoint_origin(endpoint),
             secret,
         )
-        await _checked(runtime, ["mkdir", "-p", WORKSPACE_DIR, "/app/.agencity-eval"])
+        workspace = _workspace(data, self.config.installation)
+        if self.config.installation == "portable":
+            await _prepare_portable_workspace(runtime, workspace)
+        else:
+            await _checked(runtime, ["mkdir", "-p", WORKSPACE_DIR, "/app/.agencity-eval"])
 
         effort = ctx.sampling.reasoning_effort
         if effort not in {
@@ -122,33 +176,50 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
         }:
             effort = "provider-default"
 
-        environment = {
-            **self.config.resolved_env,
-            **provider_env,
-            "AGENCITY_PROFILE": PROFILE_PATH,
-            "HOME": "/app/.agencity-eval/home",
-            "NO_COLOR": "1",
-        }
+        environment = _evaluation_environment(provider_env, self.config.installation)
         process = await runtime.run_program(
-            _agencity_command(provider, ctx.model, effort, task),
+            _agencity_command(
+                provider,
+                ctx.model,
+                effort,
+                task,
+                workspace=workspace,
+                installation=self.config.installation,
+            ),
             environment,
         )
-        result = parse_run_result(process.stdout, process.exit_code)
-        await runtime.write(
-            RESULT_PATH,
-            (
-                json.dumps(result.value, sort_keys=True, separators=(",", ":")) + "\n"
-            ).encode("utf-8"),
-        )
+        if self.config.installation == "portable":
+            result = parse_run_result(process.stdout, process.exit_code)
+            trace.info["agencity"] = _trace_result(result)
+        else:
+            result = parse_run_result(process.stdout, process.exit_code)
+            await runtime.write(
+                RESULT_PATH,
+                (
+                    json.dumps(result.value, sort_keys=True, separators=(",", ":")) + "\n"
+                ).encode("utf-8"),
+            )
 
-        # Recognized Agencity terminal states are semantic rollout outcomes. The
-        # taskset scores them from RESULT_PATH; malformed or missing output raises
-        # above as a harness infrastructure error.
+        # Recognized terminal states are semantic rollout outcomes. Benchmark
+        # tasksets either read RESULT_PATH or score the resulting workspace;
+        # malformed or missing output raises as a harness infrastructure error.
         return vf.ProgramResult(
             exit_code=0,
             stdout=process.stdout,
             stderr=process.stderr,
         )
+
+    async def cleanup(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
+        if self.config.installation != "portable":
+            return
+        metadata = trace.info.setdefault("agencity", {})
+        if not isinstance(metadata, dict) or metadata.get("cleanup") is not None:
+            return
+        workspace = _workspace(trace.task.data, "portable")
+        try:
+            metadata["service_shutdown"] = await _shutdown_portable(runtime, workspace)
+        finally:
+            metadata["cleanup"] = await _cleanup_portable(runtime, workspace)
 
 
 def _agencity_command(
@@ -156,18 +227,25 @@ def _agencity_command(
     model: str,
     effort: str,
     task: str,
+    *,
+    workspace: str = WORKSPACE_DIR,
+    installation: Literal["apt-git", "portable"] = "apt-git",
 ) -> list[str]:
-    return [
-        "bun",
+    command = [
+        PORTABLE_BUN_PATH if installation == "portable" else "bun",
         "run",
         f"{AGENCITY_DIR}/src/cli.ts",
         "run",
         "--new",
         "--json",
         "--workspace",
-        WORKSPACE_DIR,
+        workspace,
+        "--state-dir",
+        PORTABLE_STATE_DIR if installation == "portable" else "/app/.agencity-eval/state",
+        "--artifacts",
+        PORTABLE_ARTIFACTS_DIR if installation == "portable" else "/app/.agencity-eval/artifacts",
         "--profile",
-        PROFILE_PATH,
+        PORTABLE_PROFILE_PATH if installation == "portable" else PROFILE_PATH,
         "--model",
         f"{provider}:{model}",
         "--effort",
@@ -175,6 +253,124 @@ def _agencity_command(
         "--",
         task,
     ]
+    return command
+
+
+def _agencity_service_command(action: Literal["status", "shutdown"], workspace: str) -> list[str]:
+    return [
+        PORTABLE_BUN_PATH,
+        "run",
+        f"{AGENCITY_DIR}/src/cli.ts",
+        "service",
+        action,
+        "--json",
+        "--workspace",
+        workspace,
+        "--state-dir",
+        PORTABLE_STATE_DIR,
+        "--artifacts",
+        PORTABLE_ARTIFACTS_DIR,
+        "--profile",
+        PORTABLE_PROFILE_PATH,
+    ]
+
+
+def _workspace(data: vf.TaskData, installation: Literal["apt-git", "portable"]) -> str:
+    if installation == "apt-git":
+        return WORKSPACE_DIR
+    workdir = data.workdir
+    if not isinstance(workdir, str) or not workdir.startswith("/"):
+        raise ValueError(
+            "Portable Agencity installation requires an explicit absolute task work directory"
+        )
+    return workdir
+
+
+def _evaluation_environment(
+    provider_env: dict[str, str],
+    installation: Literal["apt-git", "portable"],
+) -> dict[str, str]:
+    """Pass only the rollout interception credential into Agencity.
+
+    `Runtime.run_program` receives image defaults plus this mapping. Host
+    provider, Gateway, GitHub, and unrelated credentials are deliberately not
+    inherited through the harness configuration.
+    """
+    root = PORTABLE_ROOT if installation == "portable" else "/app/.agencity-eval"
+    profile = PORTABLE_PROFILE_PATH if installation == "portable" else PROFILE_PATH
+    environment = {
+        **provider_env,
+        "AGENCITY_PROFILE": profile,
+        "HOME": f"{root}/home",
+        "NO_COLOR": "1",
+    }
+    if installation == "portable":
+        environment.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.excludesFile",
+                "GIT_CONFIG_VALUE_0": PORTABLE_GIT_EXCLUDES_PATH,
+            }
+        )
+    return environment
+
+
+def _trace_result(result) -> dict[str, object]:
+    return {
+        "protocol": result.value["protocol"],
+        "version": result.value["version"],
+        "status": result.status,
+        "exit_code": result.value["exitCode"],
+        "steps": result.value["steps"],
+    }
+
+
+async def _prepare_portable_workspace(runtime: vf.Runtime, workspace: str) -> None:
+    marker = f"{workspace}/.agencity"
+    available = await runtime.run(["test", "!", "-e", marker], {})
+    if available.exit_code != 0:
+        raise RuntimeError(
+            "Portable Agencity evaluation refuses a task workspace with "
+            "pre-existing .agencity metadata"
+        )
+    await runtime.write(PORTABLE_GIT_EXCLUDES_PATH, b".agencity/\n")
+
+
+async def _cleanup_portable(runtime: vf.Runtime, workspace: str) -> str:
+    result = await runtime.run(
+        ["rm", "-rf", "--", f"{workspace}/.agencity", PORTABLE_ROOT],
+        {},
+    )
+    if result.exit_code != 0:
+        detail = (result.stderr or result.stdout).strip()[-500:]
+        raise RuntimeError(f"Agencity portable-state cleanup failed: {detail}")
+    return "workspace-metadata-and-state-removed"
+
+
+async def _shutdown_portable(runtime: vf.Runtime, workspace: str) -> str:
+    environment = _evaluation_environment({}, "portable")
+    requested = await runtime.run(
+        _agencity_service_command("shutdown", workspace),
+        environment,
+    )
+    if requested.exit_code != 0:
+        detail = (requested.stderr or requested.stdout).strip()[-500:]
+        raise RuntimeError(f"Agencity service shutdown request failed: {detail}")
+
+    for _ in range(100):
+        observed = await runtime.run(
+            _agencity_service_command("status", workspace),
+            environment,
+        )
+        if observed.exit_code == 0:
+            try:
+                value = json.loads(observed.stdout)
+            except json.JSONDecodeError:
+                value = None
+            if isinstance(value, dict) and value.get("lifecycle") == "stopped":
+                return "stopped"
+        await asyncio.sleep(0.1)
+    raise RuntimeError("Agencity service did not confirm shutdown within 10 seconds")
 
 
 async def _checked(runtime: vf.Runtime, command: list[str]) -> None:

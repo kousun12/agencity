@@ -239,6 +239,66 @@ disposable repository or task workspace, then an independent verifier scores
 the resulting files after agent execution. Answer-only tasksets remain useful
 for low-cost integration checks but are not the main product benchmark.
 
+### Terminal-Bench 2 Harbor probe
+
+The local Prime project contains one bounded Terminal-Bench 2 Harbor treatment:
+the explicitly selected `fix-git` task. Its manifest pins the Harbor dataset
+digest, complete task-tree digest, Linux `amd64` image digest, task workspace,
+Agencity source revision, Bun archive, Verifiers and Harbor versions, and
+Python lockfile. The shared harness stages the pinned
+source and Bun into the task image without assuming `apt-get`, Git, Node, or Bun
+in that image. It runs Agencity in `/app/personal-site` and keeps its state,
+profile, and artifacts under rollout-local `/tmp/agencity-eval`. It rejects
+pre-existing task-owned `.agencity` metadata, hides the generated workspace
+marker from Git while Agencity runs, confirms service shutdown, and removes
+generated metadata and state during task finalization, outside the agent
+timeout and before scoring.
+
+Run model-free checks and configuration validation:
+
+```sh
+cd benchmarks/prime
+uv lock --check
+uv run --locked python -m unittest discover -s tests -v
+uv build
+uv run --locked eval @ configs/terminal-bench-2-fix-git-sample.toml --dry-run
+```
+
+The configuration uses one task, one rollout, concurrency one, zero whole-run
+retries, and `push = false`. Harbor stages the hidden verifier only after
+Agencity's process exits; its reward is the score. Agencity terminal status,
+steps, exit code, and cleanup outcome remain trace metadata, but its final
+message does not determine the reward.
+
+Turn and token limits are evaluated between model calls and do not constitute a
+hard billed-dollar cap. Paid runs require a provider-window worst-case estimate,
+an operator-approved budget, and an attended one-task configuration. Resolved
+TOML may contain private client headers and remains ignored local evidence
+unless scrubbed.
+
+This is integration wiring and bounded-probe evidence only. It does not
+establish Terminal-Bench performance, all-task compatibility, public
+reproducibility, or unattended timeout/cancellation recovery. Additional
+Terminal-Bench tasks or a suite require an explicit cost and scope approval.
+
+On August 10, 2026, lock validation, 39 model-free benchmark tests, source and
+wheel builds, installed-wheel pin validation, dry-run resolution, exact Harbor
+task loading, source-distribution leak checks, complete task-tree integrity
+checks, and portable lifecycle checks in the pinned task image passed.
+An initial attempt failed before model admission because its state directory
+was absent. A later eight-call diagnostic run reached Harbor but scored `0`
+after generated `.agencity` metadata dirtied the worktree and Agencity reached
+the turn cap. These are retained as infrastructure and treatment-debugging
+evidence.
+
+With generated workspace metadata isolated, the bounded Luna-high run completed
+in eight calls and eight Agencity steps. Agencity reported `succeeded`; service
+shutdown and cleanup were confirmed; Harbor's upstream verifier scored `1.0`;
+and the trace recorded no errors. Usage was 19,408 prompt tokens, 3,088
+completion tokens, 11,320 cached input tokens, and 1,622 reasoning tokens. The
+undiscounted listed-price ceiling at the preflight rates was $0.0379. This is
+one passing integration treatment, not a Terminal-Bench performance result.
+
 ### Real OpenAI-compatible provider
 
 ```sh

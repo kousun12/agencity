@@ -38,6 +38,7 @@ import {
 } from "./internal.ts";
 import type { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import type { PublicRecursiveModelService } from "./models.ts";
+import type { RefinementTrajectorySnapshot } from "./refinement-context.ts";
 
 const TERMINAL = new Set<GovernedRefinementStatus>([
   "deterministically_rejected", "reviewed_rejected", "review_failed",
@@ -45,6 +46,7 @@ const TERMINAL = new Set<GovernedRefinementStatus>([
 ]);
 const MAX_REASON_BYTES = 4 * 1024;
 const MAX_EVIDENCE = 32;
+const MAX_GOVERNANCE_GROUNDING_PAYLOAD_BYTES = 2 * 1024;
 const MAX_PENDING_PER_SESSION = 4;
 const MAX_PROPOSALS_PER_HOUR = 12;
 const RECOVERY_PAGE_SIZE = 200;
@@ -1037,13 +1039,15 @@ export class RefinementGovernanceService {
       proposal.origin.sessionId,
       proposal.origin.branchId,
     );
+    const refinementGrounding = await this.#refinementGrounding(proposal);
     const body = {
       protocol: "agencity.refinement-governance-input",
-      version: 1,
+      version: 2,
       proposal,
       currentTarget,
       renderedReplacement,
       evidence,
+      ...(refinementGrounding === undefined ? {} : { refinementGrounding }),
       proposerRelationship: relationship,
       targetScope: proposal.target.kind === "agent_profile"
         ? { kind: "session", agentSessionId: proposal.target.agentSessionId }
@@ -1074,6 +1078,58 @@ export class RefinementGovernanceService {
       ...body,
       canonicalDigest: canonicalJsonDigest(body as unknown as JsonValue),
     });
+  }
+
+  async #refinementGrounding(
+    proposal: GovernedRefinementProposal,
+  ): Promise<JsonValue | undefined> {
+    const reviewId = proposal.origin.clientRequestId;
+    if (!reviewId) return undefined;
+    const rows = await this.storage.readonlyQuery({
+      sql: "SELECT review_id,trigger_id,allowed_kinds_json,source_snapshot_hash,snapshot_json FROM refinement_reviews WHERE review_id=? AND session_id=? AND branch_id=?",
+      args: [reviewId, proposal.origin.sessionId, proposal.origin.branchId],
+    });
+    const row = rows[0] as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    if (proposal.origin.triggerId !== String(row.trigger_id)) {
+      throw new ValidationError("Refinement governance source review trigger does not match");
+    }
+    const snapshot = parseJson<RefinementTrajectorySnapshot | null>(
+      row.snapshot_json,
+      null,
+    );
+    if (!snapshot ||
+        snapshot.canonicalHash !== String(row.source_snapshot_hash)) {
+      throw new ValidationError("Refinement governance source snapshot is unavailable or inconsistent");
+    }
+    const snapshotByEventId = new Map(
+      snapshot.events.map((event) => [event.eventId, event] as const),
+    );
+    const evidence = proposal.evidenceEventIds.map((eventId) => {
+      const event = snapshotByEventId.get(eventId);
+      if (!event) {
+        throw new ValidationError("Refinement governance evidence is absent from the frozen source snapshot");
+      }
+      const bounded = boundedGovernanceGroundingPayload(
+        event.payload as unknown as JsonValue,
+      );
+      return {
+        eventId,
+        cursor: event.cursor,
+        type: event.type,
+        payload: bounded.payload,
+        payloadDigest: bounded.payloadDigest,
+        truncated: event.truncated || bounded.truncated,
+        redacted: event.redacted,
+      };
+    });
+    return {
+      reviewId,
+      sourceSnapshotHash: snapshot.canonicalHash,
+      allowedKinds: parseJson(row.allowed_kinds_json, []),
+      trigger: snapshot.trigger as unknown as JsonValue,
+      evidence,
+    };
   }
 
   async #relationship(
@@ -1318,6 +1374,37 @@ function rowToRecord(row: Record<string, unknown>): GovernedRefinementRecord {
 function parseJson<T>(value: unknown, fallback: T): T {
   if (value === null || value === undefined) return fallback;
   return JSON.parse(String(value)) as T;
+}
+
+function boundedGovernanceGroundingPayload(value: JsonValue): {
+  readonly payload: JsonValue;
+  readonly payloadDigest: `sha256:${string}`;
+  readonly truncated: boolean;
+} {
+  const payload = scrubJson(value);
+  const payloadDigest = canonicalJsonDigest(payload);
+  const serialized = JSON.stringify(payload);
+  const utf8Bytes = new TextEncoder().encode(serialized).byteLength;
+  if (utf8Bytes <= MAX_GOVERNANCE_GROUNDING_PAYLOAD_BYTES) {
+    return { payload, payloadDigest, truncated: false };
+  }
+  return {
+    payload: {
+      truncated: true,
+      originalUtf8Bytes: utf8Bytes,
+      canonicalHash: payloadDigest,
+      preview: truncateUtf8(serialized, MAX_GOVERNANCE_GROUNDING_PAYLOAD_BYTES),
+    },
+    payloadDigest,
+    truncated: true,
+  };
+}
+
+function truncateUtf8(value: string, maximum: number): string {
+  const bytes = new TextEncoder().encode(value);
+  return bytes.byteLength <= maximum
+    ? value
+    : new TextDecoder().decode(bytes.slice(0, maximum));
 }
 
 function normalizeBounded(value: string, label: string, maxBytes: number): string {

@@ -1626,7 +1626,13 @@ export class OpenTuiApp {
   }
 
   #interrupt(): Promise<void> {
-    if (this.#busy) return Promise.resolve();
+    if (this.#busy) {
+      return this.controller.handleInterrupt().then((decision) => {
+        if (decision.action === "detach") this.requestExit();
+      }).catch((error) => {
+        this.showOutput(renderTerminalError(error, "interrupt"));
+      });
+    }
     const operation = this.#performInterrupt();
     this.#activeOperation = operation;
     return operation.finally(() => {

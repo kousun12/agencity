@@ -37,7 +37,7 @@ Requirements:
 
 - Bun 1.3.14 or newer;
 - Docker with the pinned Bun image available;
-- Python 3.11 through 3.13;
+- Python 3.12 or 3.13 (the pinned Harbor extra requires Python 3.12+);
 - `uv`;
 - network access to Hugging Face for the dataset preflight;
 - a current Prime login and inference credit only for paid rollouts.
@@ -132,6 +132,91 @@ cost linearly gives roughly $193 for 50 tasks before variance or failed work.
 The full run therefore remains operator-gated. Luna is materially cheaper but
 did not solve this sampled task, so its lower cost is not evidence that it is a
 viable replacement for the target-model run.
+
+## Terminal-Bench 2 Harbor treatment
+
+The Terminal-Bench 2 integration is a one-task workspace-scored Harbor
+treatment, not a Terminal-Bench suite result.
+
+- source: `terminal-bench/terminal-bench-2`, pinned to Harbor dataset digest
+  `sha256:c6fc2e2382c1dbae99b2d5ecd2f4f4a60c3c01e0d84642d69b4afd92e99d078b`;
+- selected task: `fix-git`, recording upstream task reference
+  `sha256:66be7179f07f1aa8f0d60f88800a883a68c1ffb7a349aae76aa60fa679485473`
+  and enforcing complete task-tree digest
+  `5390c93a787a9cfea243764401ad5f9ca3733346553997c812865f3981943abd`;
+- task image: `alexgshaw/fix-git@sha256:61e431c00c58df652287aadce5457634d9f9330cfdd153ebdf2802df0d540119`;
+- task workspace: `/app/personal-site`;
+- scorer: the upstream Harbor `tests/test.sh` verifier, staged only after
+  Agencity exits;
+- treatment manifest:
+  [`manifests/terminal-bench-2-fix-git.json`](./manifests/terminal-bench-2-fix-git.json).
+
+The portable harness path downloads the exact Agencity Git revision on the
+evaluator host, verifies and stages a pinned Linux x64 Bun executable, then
+installs the locked Bun dependencies in the selected task image. It does not
+assume `apt-get`, Git, Bun, or Node are available in that image. The task
+workspace remains Agencity's workspace; profile, database, artifacts, and
+bootstrap files are rollout-local under `/tmp/agencity-eval`. The harness
+refuses a workspace with pre-existing `.agencity` metadata, hides only the
+generated marker from Git during execution, confirms managed-service shutdown,
+and removes the generated marker and rollout state during task finalization,
+outside the agent timeout and before scoring. Only the Verifiers interception
+credential is passed by the harness to Agencity.
+
+Model-free checks:
+
+```sh
+uv lock --check
+uv run --locked python -m unittest discover -s tests -v
+uv build
+uv run --locked eval @ configs/terminal-bench-2-fix-git-sample.toml --dry-run
+```
+
+The sample configuration uses one task, one rollout, concurrency one, no
+whole-rollout retries, no upload, twelve turns, 64,000 input tokens, 32,768
+output tokens, 48,000 total tokens, a 900-second agent cap, and a 900-second
+scoring cap. Run it only after reviewing current model pricing and the resolved
+configuration:
+
+```sh
+uv run --locked eval @ configs/terminal-bench-2-fix-git-sample.toml
+```
+
+The turn and token limits are checked between model calls. They bound this
+attended treatment but are not a hard billed-dollar admission control; one
+final call can overshoot a token threshold. Review a provider-window
+worst-case estimate and available wallet before every paid run. Generated
+resolved configurations can contain private client headers and remain ignored
+local evidence; scrub them before sharing.
+
+The task image is `linux/amd64`; Apple Silicon Docker runs it through platform
+emulation. The current single-agent harness does not expose a public durable
+cancellation/reconciliation receipt if an outer evaluation timeout interrupts a
+run. This limits the integration to short attended probes until that interface
+exists. Harbor's hidden verifier reward, not Agencity's final message, is the
+authoritative score.
+
+On August 10, 2026, the lock, 39 model-free tests, source and wheel builds,
+installed-wheel pin validation, dry-run resolution, exact Harbor task loading,
+source-distribution leak checks, complete task-tree integrity checks, and
+portable lifecycle checks in the pinned task image passed. The first paid
+attempt failed before model admission because the portable state directory did
+not exist; it made zero model calls and did not reach Harbor scoring. An
+eight-call diagnostic rollout then reached Harbor and scored `0`: Agencity
+reported `failed` at its turn limit after generated `.agencity` metadata made
+the Git worktree appear dirty. Both failures are retained as infrastructure and
+treatment-debugging evidence.
+
+After the harness isolated and removed generated workspace metadata, the
+final hardened one-task Luna-high rollout completed in eight model calls and
+eight Agencity
+steps. Agencity reported `succeeded`, the managed service reported stopped,
+cleanup completed, and the upstream Harbor verifier scored `1.0`. The trace
+recorded 19,408 prompt tokens, 3,088 completion tokens, 11,320 cached input
+tokens, 1,622 reasoning tokens, no errors, and an `agent_completed` stop.
+At the preflight prices of $1 per million input tokens and $6 per million
+output tokens, that usage has a $0.0379 undiscounted listed-price ceiling.
+This is one passing treatment probe, not a Terminal-Bench score or suite claim.
 
 ## Evidence and interpretation
 

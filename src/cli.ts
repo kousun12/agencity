@@ -14,6 +14,8 @@ import {
   ValidationError,
   assertReasoningSelection,
   normalizeReasoningEffort,
+  type HarnessKind,
+  type HarnessScope,
   type JsonValue,
   type ModelConfiguration,
   type ReasoningEffort,
@@ -291,7 +293,23 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
         if (rest.length !== 1 || (rest[0] !== "on" && rest[0] !== "off")) throw new ValidationError("refine auto requires on or off");
         printValue(await client.setAutomaticRefinement(rest[0] === "on"), parsed.flags.has("json"));
       } else if (mode === "propose-json") { const proposed = await client.refine(selection.sessionId, selection.branchId, parseJsonValue(rest.join(" "), "refinement proposal") as any); printValue(await client.validateRefinement(selection.sessionId, selection.branchId, proposed.proposalId), parsed.flags.has("json")); }
-      else printValue(await client.requestRefinement(selection.sessionId, selection.branchId, { ...(parsed.positionals.length ? { instructions: parsed.positionals.join(" ") } : {}) }), parsed.flags.has("json"));
+      else {
+        if (parsed.flags.has("wait") && parsed.flags.has("detach")) {
+          throw new ValidationError("refine accepts --wait or --detach, not both");
+        }
+        const requestedScope = option("scope") as HarnessScope | undefined;
+        const allowedKinds = option("kind")?.split(",").filter(Boolean) as HarnessKind[] | undefined;
+        const review = await client.requestRefinement(selection.sessionId, selection.branchId, {
+          ...(parsed.positionals.length ? { instructions: parsed.positionals.join(" ") } : {}),
+          ...(requestedScope === undefined ? {} : { requestedScope }),
+          ...(allowedKinds === undefined ? {} : { allowedKinds }),
+          wait: parsed.flags.has("wait"),
+        });
+        printValue(review, parsed.flags.has("json"));
+        if (!parsed.flags.has("wait") && !parsed.flags.has("json")) {
+          console.log("Refinement accepted (detached; use `agencity refine status` to inspect progress)");
+        }
+      }
       return;
     }
     if (parsed.command === "skills") {

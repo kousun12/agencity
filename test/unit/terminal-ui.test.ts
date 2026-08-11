@@ -13,7 +13,14 @@ import {
   type BranchWatchHandlers,
   type EffectProgressNotification,
 } from "../../src/index.ts";
-import { TERMINAL_COMMAND_REGISTRY, TerminalInterruptPolicy, TerminalUI, renderEvent, renderTerminalError } from "../../src/tui/index.ts";
+import {
+  TERMINAL_COMMAND_REGISTRY,
+  TerminalInterruptPolicy,
+  TerminalUI,
+  parseTerminalRefinementRequest,
+  renderEvent,
+  renderTerminalError,
+} from "../../src/tui/index.ts";
 import type { ProductBranchSummary } from "../../src/product/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
@@ -67,6 +74,28 @@ describe("FU-005 protocol-backed terminal UI", () => {
     expect(new Set(TERMINAL_COMMAND_REGISTRY.map((item) => item.name)).size).toBe(TERMINAL_COMMAND_REGISTRY.length);
   });
 
+  test("manual refinement is detached by default and accepts explicit wait and target kinds", () => {
+    expect(parseTerminalRefinementRequest("improve repeated editing failures")).toEqual({
+      wait: false,
+      instructions: "improve repeated editing failures",
+    });
+    expect(parseTerminalRefinementRequest("--detach improve repeated editing failures")).toEqual({
+      wait: false,
+      instructions: "improve repeated editing failures",
+    });
+    expect(parseTerminalRefinementRequest(
+      "--wait --kind skill,prompt_note build the smallest direct mechanism",
+    )).toEqual({
+      wait: true,
+      allowedKinds: ["skill", "prompt_note"],
+      instructions: "build the smallest direct mechanism",
+    });
+    expect(() => parseTerminalRefinementRequest("--kind parser improve edits"))
+      .toThrow("memory, prompt_note, skill, or subagent_spec");
+    expect(() => parseTerminalRefinementRequest("--wait --detach improve edits"))
+      .toThrow("--wait or --detach");
+  });
+
   test("live events are a concise product projection while internal action JSON stays audit-only", () => {
     const rawAction = JSON.stringify({
       protocol: "agencity.agent-action",
@@ -102,6 +131,16 @@ describe("FU-005 protocol-backed terminal UI", () => {
       "[operation outcome unknown] Inspect with /unknown before retrying.",
     ]);
     expect(visible.join("\n")).not.toMatch(/internal-id|cursor=|agencity\.agent-action|secret-internal-command/);
+    expect(renderEvent(event("RefinementReviewRequested", {
+      reviewId: "review",
+      instructions: "inspect repeated failures",
+    }))).toBe("[refinement requested] inspect repeated failures");
+    expect(renderEvent(event("RefinementReviewChildLinked", {
+      reviewId: "review",
+    }))).toBe("[refinement reviewer started]");
+    expect(renderEvent(event("RefinementGovernanceReviewRequested", {
+      reviewId: "governance",
+    }))).toBe("[refinement governance requested]");
   });
 
   test("the TUI imports only public client/domain contracts, not Supervisor or storage", async () => {

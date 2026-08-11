@@ -192,6 +192,59 @@ describe("FU-016 pure refinement trajectory context", () => {
     expect(effects.sourceEventIds).toEqual(["request-1", "failure-1", "request-2", "failure-2"]);
     expect(effects.sourceEventIds).not.toContain("unrelated-failure");
 
+    const cells = buildRefinementTrajectorySnapshot(base({
+      events: [
+        event("action-1", "1", "AgentRunActionCommitted", {
+          runId: "run-1",
+          actionId: "action-1",
+          action: { type: "typescript" },
+        }),
+        event("cell-1", "2", "CellFailed", {
+          cellId: "agent-run-cell-action-1",
+          error: "parse error",
+        }),
+        event("action-2", "3", "AgentRunActionCommitted", {
+          runId: "run-1",
+          actionId: "action-2",
+          action: { type: "typescript" },
+        }),
+        event("cell-2", "4", "CellFailed", {
+          cellId: "agent-run-cell-action-2",
+          error: "shape error",
+        }),
+        event("action-3", "5", "AgentRunActionCommitted", {
+          runId: "run-1",
+          actionId: "action-3",
+          action: { type: "typescript" },
+        }),
+        event("cell-3", "6", "CellFailed", {
+          cellId: "agent-run-cell-action-3",
+          error: "verification error",
+        }),
+      ],
+      trigger: {
+        kind: "repeated_cell_failure",
+        failureEventIds: ["cell-1", "cell-2", "cell-3"],
+      },
+    }), { eventWindowRadius: 0 });
+    expect(cells.trigger.cluster).toEqual({
+      cellIds: [
+        "agent-run-cell-action-1",
+        "agent-run-cell-action-2",
+        "agent-run-cell-action-3",
+      ],
+      kind: "repeated_cell_failure",
+      runId: "run-1",
+    });
+    expect(cells.sourceEventIds).toEqual([
+      "action-1",
+      "cell-1",
+      "action-2",
+      "cell-2",
+      "action-3",
+      "cell-3",
+    ]);
+
     const gates = buildRefinementTrajectorySnapshot(base({
       events: [
         event("gate-added", "1", "GoalGateAdded", { goalId: "goal-1", gateId: "gate-1", name: "tests" }),

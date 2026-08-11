@@ -115,6 +115,7 @@ export interface RefinementEvaluationHistoryInput {
 export type RefinementTrajectoryTriggerInput =
   | { readonly kind: "manual"; readonly focusEventIds?: readonly string[] }
   | { readonly kind: "repeated_effect_failure"; readonly failureEventIds: readonly string[] }
+  | { readonly kind: "repeated_cell_failure"; readonly failureEventIds: readonly string[] }
   | { readonly kind: "repeated_gate_failure"; readonly failureEventIds: readonly string[] }
   | { readonly kind: "explicit_user_correction"; readonly correctionEventIds: readonly string[] };
 
@@ -476,6 +477,30 @@ function validateAndDescribeTrigger(
       effectIds: uniqueEffects,
       ...(signatures.length === 1 ? { executor: signatures[0]!.split("\u0000")[0]!, operation: signatures[0]!.split("\u0000")[1]! } : {}),
     };
+  } else if (triggerInput.kind === "repeated_cell_failure") {
+    evidenceEventIds = normalizedEvidenceIds(triggerInput.failureEventIds, true);
+    const failures = evidenceEventIds.map((id) => requireEvent(byId, id));
+    const runByCellId = agentRunCellOwners(events);
+    const cells = failures.map((event) => {
+      if (event.type !== "CellFailed") {
+        throw new RefinementContextError("invalid-trigger", `Cell failure evidence ${event.eventId} is not a typed CellFailed event`);
+      }
+      const payload = recordPayload(event.payload);
+      const cellId = payloadString(payload, "cellId", event.eventId);
+      const runId = runByCellId.get(cellId);
+      if (!runId) {
+        throw new RefinementContextError("invalid-trigger", `Cell failure evidence ${event.eventId} has no retained agent-run action owner`);
+      }
+      return { cellId, runId };
+    });
+    if (new Set(cells.map((cell) => cell.runId)).size !== 1) {
+      throw new RefinementContextError("invalid-trigger", "Repeated cell failures must reference one exact agent run");
+    }
+    cluster = {
+      kind: "repeated_cell_failure",
+      runId: cells[0]!.runId,
+      cellIds: cells.map((cell) => cell.cellId),
+    };
   } else if (triggerInput.kind === "repeated_gate_failure") {
     evidenceEventIds = normalizedEvidenceIds(triggerInput.failureEventIds, true);
     const failures = evidenceEventIds.map((id) => requireEvent(byId, id));
@@ -519,6 +544,22 @@ function validateAndDescribeTrigger(
   };
 }
 
+function agentRunCellOwners(
+  events: readonly NormalizedEvent[],
+): ReadonlyMap<string, string> {
+  const owners = new Map<string, string>();
+  for (const event of events) {
+    if (event.type !== "AgentRunActionCommitted") continue;
+    const payload = recordPayload(event.payload);
+    const action = recordPayload(payload.action);
+    const actionId = optionalPayloadString(payload, "actionId");
+    const runId = optionalPayloadString(payload, "runId");
+    if (action.type !== "typescript" || !actionId || !runId) continue;
+    owners.set(`agent-run-cell-${actionId}`, runId);
+  }
+  return owners;
+}
+
 function selectTrajectoryEvents(
   trigger: RefinementTrajectoryTriggerInput,
   events: readonly NormalizedEvent[],
@@ -544,6 +585,25 @@ function selectTrajectoryEvents(
     for (const event of events) {
       if (!["EffectRequested", "EffectAttemptStarted", "EffectOutcomeRecorded"].includes(event.type)) continue;
       if (effectIds.has(optionalPayloadString(event.payload, "effectId") ?? "")) add(event, "cluster", false, 1);
+    }
+  } else if (trigger.kind === "repeated_cell_failure") {
+    const cellIds = new Set(anchors.map((event) =>
+      optionalPayloadString(event.payload, "cellId")!
+    ));
+    const runIds = new Set(
+      [...agentRunCellOwners(events).entries()]
+        .filter(([cellId]) => cellIds.has(cellId))
+        .map(([, runId]) => runId),
+    );
+    for (const event of events) {
+      if (["CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned"].includes(event.type) &&
+          cellIds.has(optionalPayloadString(event.payload, "cellId") ?? "")) {
+        add(event, "cluster", false, 1);
+      }
+      if (event.type === "AgentRunActionCommitted" &&
+          runIds.has(optionalPayloadString(event.payload, "runId") ?? "")) {
+        add(event, "cluster", false, 1);
+      }
     }
   } else if (trigger.kind === "repeated_gate_failure") {
     const anchorPayload = recordPayload(anchors[0]!.payload);

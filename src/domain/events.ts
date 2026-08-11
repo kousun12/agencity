@@ -219,7 +219,7 @@ export interface EventPayloads {
   HarnessVersionCreated: { entryId: string; versionId: string; version: number; kind: "memory" | "prompt_note" | "skill" | "subagent_spec"; scope: "local" | "workspace" | "user" | "global"; scopeKey: string; name: string; content: JsonValue; tags: string[]; confidence: number; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; evidenceEventIds: string[]; conflictEntryIds: string[]; supersedesVersionId?: string; proposalId?: string; createdBy: string; lastConfirmedAt: string };
   HarnessVersionStatusChanged: { entryId: string; versionId: string; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; reason: string; proposalId?: string };
   UserCorrection: { correctionId: string; correctedEventIds: string[]; correction: string };
-  RefinementReviewRequested: { reviewId: string; fingerprint: string; mode: "manual" | "automatic" | "skill_creation"; waitForGovernance: boolean; requestedScope: "local" | "workspace" | "user" | "global"; requestedScopeKey: string; allowedKinds: ("memory" | "prompt_note" | "skill" | "subagent_spec")[]; triggerId: string; triggerKind: "manual" | "repeated_effect_failure" | "repeated_gate_failure" | "explicit_user_correction" | "repeated_success" | "stale_memory" | "unproductive_delegation" | "skill_creation"; triggerFingerprint: string; triggerKey?: string; nonterminalKey?: string; triggerEvidenceThroughCursor?: string; evidenceEventIds: string[]; sourceEventIds: string[]; sourceSnapshotHash: string; sourceThroughCursor: string; instructions?: string; request: JsonValue; snapshot?: JsonValue };
+  RefinementReviewRequested: { reviewId: string; fingerprint: string; mode: "manual" | "automatic" | "skill_creation"; waitForGovernance: boolean; requestedScope: "local" | "workspace" | "user" | "global"; requestedScopeKey: string; allowedKinds: ("memory" | "prompt_note" | "skill" | "subagent_spec")[]; triggerId: string; triggerKind: "manual" | "repeated_effect_failure" | "repeated_cell_failure" | "repeated_gate_failure" | "explicit_user_correction" | "repeated_success" | "stale_memory" | "unproductive_delegation" | "skill_creation"; triggerFingerprint: string; triggerKey?: string; nonterminalKey?: string; triggerEvidenceThroughCursor?: string; evidenceEventIds: string[]; sourceEventIds: string[]; sourceSnapshotHash: string; sourceThroughCursor: string; instructions?: string; request: JsonValue; snapshot?: JsonValue };
   RefinementReviewChildLinked: { reviewId: string; handleId: string; childSessionId: string; childBranchId: string };
   RefinementReviewStatusChanged: { reviewId: string; status: Exclude<RefinementReviewLifecycleStatus, "requested">; expectedStatus: RefinementReviewLifecycleStatus; decisionFingerprint?: string; proposalId?: string; reason?: string };
   RefinementTriggerConsumed: { reviewId: string; triggerKey: string; evidenceThroughCursor: string };
@@ -388,7 +388,7 @@ const reviewerLimitsSchema = z.object({
 }).strict();
 const frozenGovernanceInputSchema = z.object({
   protocol: z.literal("agencity.refinement-governance-input"),
-  version: z.literal(1),
+  version: z.union([z.literal(1), z.literal(2)]),
   proposal: governedRefinementProposalSchema,
   currentTarget: jsonValueSchema,
   renderedReplacement: jsonValueSchema,
@@ -400,6 +400,21 @@ const frozenGovernanceInputSchema = z.object({
     type: id,
     payloadDigest: fingerprint,
   }).strict()).max(32),
+  refinementGrounding: z.object({
+    reviewId: id,
+    sourceSnapshotHash: fingerprint,
+    allowedKinds: z.array(z.enum(["memory", "prompt_note", "skill", "subagent_spec"])).min(1).max(4),
+    trigger: jsonValueSchema,
+    evidence: z.array(z.object({
+      eventId: id,
+      cursor: z.string().regex(/^\d+$/),
+      type: id,
+      payload: jsonValueSchema,
+      payloadDigest: fingerprint,
+      truncated: z.boolean(),
+      redacted: z.boolean(),
+    }).strict()).max(32),
+  }).strict().optional(),
   proposerRelationship: z.enum(["self", "direct_parent", "workspace_owner", "automatic_refiner"]),
   targetScope: jsonValueSchema,
   runtimeBoundaries: z.array(z.string().min(1)).min(1).max(32),
@@ -414,6 +429,9 @@ const frozenGovernanceInputSchema = z.object({
   const { canonicalDigest, ...body } = value;
   if (canonicalJsonDigest(body as unknown as JsonValue) !== canonicalDigest) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "frozen governance input digest does not match" });
+  }
+  if (value.version === 1 && value.refinementGrounding !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "governance input v1 cannot contain refinement grounding" });
   }
 });
 const immutablePromptComponentSchema = z.object({
@@ -670,7 +688,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   HarnessVersionCreated: z.object({ entryId: id, versionId: id, version: positiveInteger, kind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]), scope: z.enum(["local", "workspace", "user", "global"]), scopeKey: id, name: z.string().min(1), content: jsonValueSchema, tags: z.array(z.string()), confidence: z.number().finite().min(0).max(1), status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), evidenceEventIds: z.array(id), conflictEntryIds: z.array(id), supersedesVersionId: id.optional(), proposalId: id.optional(), createdBy: id, lastConfirmedAt: dateTime }),
   HarnessVersionStatusChanged: z.object({ entryId: id, versionId: id, status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), reason: z.string().min(1), proposalId: id.optional() }),
   UserCorrection: z.object({ correctionId: id, correctedEventIds: z.array(id).min(1).max(64), correction: z.string().min(1).max(8192) }).strict(),
-  RefinementReviewRequested: z.object({ reviewId: id, fingerprint, mode: z.enum(["manual", "automatic", "skill_creation"]), waitForGovernance: z.boolean(), requestedScope: z.enum(["local", "workspace", "user", "global"]), requestedScopeKey: id, allowedKinds: z.array(z.enum(["memory", "prompt_note", "skill", "subagent_spec"])).min(1).max(4), triggerId: id, triggerKind: z.enum(["manual", "repeated_effect_failure", "repeated_gate_failure", "explicit_user_correction", "repeated_success", "stale_memory", "unproductive_delegation", "skill_creation"]), triggerFingerprint: fingerprint, triggerKey: id.optional(), nonterminalKey: id.optional(), triggerEvidenceThroughCursor: z.string().regex(/^\d+$/).optional(), evidenceEventIds: z.array(id).max(64), sourceEventIds: z.array(id).min(1).max(256), sourceSnapshotHash: fingerprint, sourceThroughCursor: z.string().regex(/^\d+$/), instructions: z.string().max(8192).optional(), request: jsonValueSchema, snapshot: jsonValueSchema.optional() }).strict(),
+  RefinementReviewRequested: z.object({ reviewId: id, fingerprint, mode: z.enum(["manual", "automatic", "skill_creation"]), waitForGovernance: z.boolean(), requestedScope: z.enum(["local", "workspace", "user", "global"]), requestedScopeKey: id, allowedKinds: z.array(z.enum(["memory", "prompt_note", "skill", "subagent_spec"])).min(1).max(4), triggerId: id, triggerKind: z.enum(["manual", "repeated_effect_failure", "repeated_cell_failure", "repeated_gate_failure", "explicit_user_correction", "repeated_success", "stale_memory", "unproductive_delegation", "skill_creation"]), triggerFingerprint: fingerprint, triggerKey: id.optional(), nonterminalKey: id.optional(), triggerEvidenceThroughCursor: z.string().regex(/^\d+$/).optional(), evidenceEventIds: z.array(id).max(64), sourceEventIds: z.array(id).min(1).max(256), sourceSnapshotHash: fingerprint, sourceThroughCursor: z.string().regex(/^\d+$/), instructions: z.string().max(8192).optional(), request: jsonValueSchema, snapshot: jsonValueSchema.optional() }).strict(),
   RefinementReviewChildLinked: z.object({ reviewId: id, handleId: id, childSessionId: id, childBranchId: id }).strict(),
   RefinementReviewStatusChanged: z.object({ reviewId: id, status: z.enum(["running", "no_change", "candidate", "revision_required", "failed", "cancelled", "unknown"]), expectedStatus: z.enum(["requested", "running", "no_change", "candidate", "revision_required", "failed", "cancelled", "unknown"]), decisionFingerprint: fingerprint.optional(), proposalId: id.optional(), reason: z.string().max(16384).optional() }).strict(),
   RefinementTriggerConsumed: z.object({ reviewId: id, triggerKey: id, evidenceThroughCursor: z.string().regex(/^\d+$/) }).strict(),

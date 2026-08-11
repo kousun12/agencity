@@ -93,6 +93,27 @@ function threeFailures(start = 1, error = "timed out"): RefinementTriggerRecordI
   ];
 }
 
+function failedCells(
+  runId = "run-1",
+  errors = ["parse error", "wrong result shape", "verification failed"],
+): RefinementTriggerRecordInput[] {
+  return errors.flatMap((error, index) => {
+    const actionId = `${runId}-action-${index + 1}`;
+    const cursor = index * 2 + 1;
+    return [
+      record(`action-event-${index + 1}`, cursor, "AgentRunActionCommitted", {
+        runId,
+        actionId,
+        action: { type: "typescript" },
+      }),
+      record(`cell-failed-${index + 1}`, cursor + 1, "CellFailed", {
+        cellId: `agent-run-cell-${actionId}`,
+        error,
+      }),
+    ];
+  });
+}
+
 describe("FU-016 deterministic refinement trigger policy", () => {
   test("is versioned, immutable, local-only, and automatic-off by default", () => {
     expect(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.version).toBe(1);
@@ -100,6 +121,7 @@ describe("FU-016 deterministic refinement trigger policy", () => {
     expect(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.scope).toBe("local");
     expect(Object.isFrozen(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1)).toBe(true);
     expect(Object.isFrozen(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.effectFailure)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.cellFailure)).toBe(true);
     expect(scanRefinementTriggers({
       sessionId: "session-1",
       branchId: "branch-1",
@@ -118,6 +140,61 @@ describe("FU-016 deterministic refinement trigger policy", () => {
       records: [],
       policy: { ...policy(), scope: "workspace" } as unknown as RefinementTriggerPolicyV1,
     })).toThrow(expect.objectContaining({ code: "unsupported-policy" }));
+    const { cellFailure: _omitted, ...retainedEarlierPolicy } = policy();
+    expect(scanRefinementTriggers({
+      sessionId: "session-1",
+      branchId: "branch-1",
+      records: threeFailures(),
+      policy: retainedEarlierPolicy,
+    })).toHaveLength(1);
+  });
+
+  test("detects a repeated failed-cell repair loop within one exact agent run", () => {
+    expect(scan(failedCells().slice(0, 4))).toEqual([]);
+    const triggers = scan(failedCells());
+    expect(triggers).toHaveLength(1);
+    const trigger = triggers[0]!;
+    expect(trigger.kind).toBe("repeated_cell_failure");
+    if (trigger.kind !== "repeated_cell_failure") throw new Error("expected cell failure");
+    expect(trigger.runId).toBe("run-1");
+    expect(trigger.evidenceEventIds).toEqual([
+      "cell-failed-1",
+      "cell-failed-2",
+      "cell-failed-3",
+    ]);
+    expect(trigger.errorSignatures).toHaveLength(3);
+    expect(trigger.summary).toContain("3 failures across 3 error signature");
+
+    const splitRuns = [
+      ...failedCells("run-1", ["one", "two"]),
+      ...failedCells("run-2", ["three"]),
+    ].map((item, index) => ({
+      ...item,
+      id: `${item.id}-${index}`,
+      cursor: String(index + 1),
+    }));
+    expect(scan(splitRuns)).toEqual([]);
+  });
+
+  test("does not duplicate failed cell refinement when failed cell effects explain it", () => {
+    const cells = failedCells();
+    const effects = Array.from({ length: 3 }, (_, index) => {
+      const effectId = `cell-effect-${index + 1}`;
+      return [
+        record(`cell-effect-request-${index + 1}`, 7 + index * 2, "EffectRequested", {
+          effectId,
+          executor: "shell",
+          operation: "run",
+          origin: {
+            kind: "cell",
+            cellId: `agent-run-cell-run-1-action-${index + 1}`,
+          },
+        }),
+        outcome(effectId, 8 + index * 2, "failed", "same effect failure"),
+      ];
+    }).flat();
+    expect(scan([...cells, ...effects]).map((trigger) => trigger.kind))
+      .toEqual(["repeated_effect_failure"]);
   });
 
   test("fires repeated effect failure at exactly three matching failed outcomes", () => {

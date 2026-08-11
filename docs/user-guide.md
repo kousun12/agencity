@@ -253,10 +253,16 @@ Refinement reviews retained work and may propose attributable memory, prompt-not
 
 ```sh
 agencity refine "look for repeated failure patterns"
+agencity refine --kind skill "package a reusable deterministic operation"
+agencity refine --detach "review this trajectory in the background"
 agencity refine status
 agencity refine auto on
 ```
 
-Manual refinement waits for governance by default. Automatic refinement is off by default, profile-scoped, local-only, and detached. Its implemented triggers are repeated typed effect failures, distinct-pin gate failures, and explicit `UserCorrection` events at committed run boundaries. Repeated success, stale-memory, and unproductive-delegation detectors are unavailable.
+The CLI and TUI detach manual refinement by default so the interface remains usable while retained review and governance progress continues. `agencity refine --wait` or `/refine --wait` blocks explicitly; `--detach` is an accepted explicit spelling of the default and cannot be combined with `--wait`. Both surfaces accept `--kind memory,prompt_note,skill,subagent_spec` to restrict what may be proposed. A structured refinement or governance child returns a formal tool submission rather than an assistant message, and its route shows a derived `REFINEMENT` runtime row instead of appearing empty.
+
+The sealed refinement prompt selects an artifact by mechanism. Memory retains durable facts, preferences, decisions, observations, or constraints. Prompt notes address repeated behavioral tendencies. Skills package reusable deterministic operations with executable tests. Subagent specifications package recurring delegated roles. Repository-specific maintainability and product behavior remain ordinary repository work, while a missing runtime primitive remains runtime implementation. The refiner must return no change when no allowed harness kind directly addresses the evidence; it cannot replace the requested capability with generic advice to try harder. The separate governance reviewer receives bounded, redacted excerpts from the refiner's exact frozen source snapshot and checks this direct evidence-to-artifact relationship in addition to scope and policy.
+
+Automatic refinement is off by default, profile-scoped, local-only, and detached. Its implemented triggers are repeated typed effect failures, three failed cells in one agent-run repair loop, distinct-pin gate failures, and explicit `UserCorrection` events at committed run boundaries. Repeated success, stale-memory, and unproductive-delegation detectors are unavailable. A trigger proposes a bounded investment after the current run; it never silently broadens the active user task.
 
 An approved profile or non-skill harness proposal applies atomically after final validation. An approved skill is staged, compiled, and run through its declared tests before activation. Failure, unknown review, stale application, or failed skill tests activate nothing. Later attributable outcomes may support another proposal or exact rollback.
