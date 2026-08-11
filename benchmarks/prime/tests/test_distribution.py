@@ -4,6 +4,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -35,7 +36,41 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(
             any(name.endswith("/manifests/terminal-bench-2-fix-git.json") for name in names)
         )
+        self.assertTrue(
+            any(
+                name.endswith("/manifests/terminal-bench-2-1-fix-git.json")
+                for name in names
+            )
+        )
+        self.assertTrue(
+            any(name.endswith("/manifests/swe-bench-pro-public-vuls.json") for name in names)
+        )
         self.assertTrue(any(name.endswith("/uv.lock") for name in names))
+
+    def test_wheel_contains_all_adapter_manifests_without_local_material(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["uv", "build", "--wheel", "--out-dir", directory],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            wheel_path = next(Path(directory).glob("*.whl"))
+            with zipfile.ZipFile(wheel_path) as archive:
+                names = archive.namelist()
+
+        self.assertIn("agencity_terminal_bench_2_1/data/manifest.json", names)
+        self.assertIn("agencity_swe_bench_pro/data/manifest.json", names)
+        self.assertIn("agencity_terminal_bench_2/data/uv.lock", names)
+        self.assertFalse(
+            any(
+                part in {".cache", ".venv", "dist", "outputs", "solution"}
+                for name in names
+                for part in Path(name).parts
+            )
+        )
 
 
 if __name__ == "__main__":

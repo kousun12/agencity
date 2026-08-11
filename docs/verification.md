@@ -239,7 +239,7 @@ disposable repository or task workspace, then an independent verifier scores
 the resulting files after agent execution. Answer-only tasksets remain useful
 for low-cost integration checks but are not the main product benchmark.
 
-### Terminal-Bench 2 Harbor probe
+### Terminal-Bench Harbor probes
 
 The local Prime project contains one bounded Terminal-Bench 2 Harbor treatment:
 the explicitly selected `fix-git` task. Its manifest pins the Harbor dataset
@@ -298,6 +298,37 @@ and the trace recorded no errors. Usage was 19,408 prompt tokens, 3,088
 completion tokens, 11,320 cached input tokens, and 1,622 reasoning tokens. The
 undiscounted listed-price ceiling at the preflight rates was $0.0379. This is
 one passing integration treatment, not a Terminal-Bench performance result.
+
+The independent Terminal-Bench 2.1 treatment uses the same portable lifecycle
+in a separate taskset and manifest. It pins
+`terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a`,
+the refreshed `fix-git` task package and complete downloaded task-tree digest,
+and image
+`alexgshaw/fix-git@sha256:389b9c8247610c2c5be080b1ac00429007c2c69bf57f7f26c79f0f75ba2d5c74`.
+On August 10, 2026, its model-free suite, package checks, pinned-image
+portable lifecycle, exact task loading, and dry-run passed. One attended
+Luna-high rollout made seven calls, reported `succeeded`, retained stopped
+service and cleanup evidence, and received upstream Harbor reward `1.0`.
+Its conservative 12-window preflight was $3.15 under the recorded $1/M-input
+and $6/M-output list rates; no provider-reported cost was available. This is
+one integration treatment, not a Terminal-Bench 2.1 score.
+
+### SWE-bench Pro public evaluator-compatibility spike
+
+The Prime project contains a separate, model-free taskset for one public
+SWE-bench Pro Vuls instance. It validates the public dataset revision, selected
+repository/base revision, prompt isolation, agent image digest, evaluator
+source pin, evidence shape, package contents, and dry-run configuration. The
+agent prompt excludes `patch`, `test_patch`, evaluator scripts, and evaluator
+output.
+
+The official evaluator at the pinned source commit derives a mutable Docker Hub
+tag and provides no immutable digest input. Its original task image also retains
+Git history that can recover withheld tests. The shared one-runtime harness has
+no proven sanitized-agent/fresh-scorer split, so the taskset refuses before
+model admission. No SWE-bench Pro provider call, official evaluator execution,
+reward, cost, or benchmark result is claimed. SWE-bench Verified is not a
+primary capability benchmark.
 
 ### Real OpenAI-compatible provider
 

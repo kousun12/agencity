@@ -1,0 +1,33 @@
+{
+  "schema": "agencity.terminal-bench-2-1-manifest.v1",
+  "upstream": {
+    "verifiers_version": "0.3.0",
+    "harbor_version": "0.20.0",
+    "terminal_bench_source": "https://github.com/harbor-framework/terminal-bench-2-1",
+    "terminal_bench_source_commit": "ffccbe05ee73a9d59518217f294ad711bda39304",
+    "harbor_dataset": "terminal-bench/terminal-bench-2-1",
+    "harbor_dataset_reference": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
+  },
+  "selection": {
+    "dataset": "terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+    "task_id": "fix-git",
+    "task_reference": "sha256:16948b980df9d96de616a205f5acca1c5d395de83ff4f8ffabcafacb93226f2e",
+    "task_toml_sha256": "f59d711003b974e4ef8ed63556614e2ea9ea7d0e394af13b2071225e3fda7805",
+    "task_tree_sha256": "30aed800ba51d02a300800e34db211afa4a0ea9f4af098c628bdb8308facbfc8",
+    "declared_image": "alexgshaw/fix-git:20260403",
+    "image": "alexgshaw/fix-git@sha256:389b9c8247610c2c5be080b1ac00429007c2c69bf57f7f26c79f0f75ba2d5c74",
+    "workspace": "/app/personal-site"
+  },
+  "treatment": {
+    "selection_rationale": "The official 2.1 revision retains a short, container-backed Git-recovery task while changing the pinned task package and image from the existing Terminal-Bench 2 treatment. It exercises the refreshed 2.1 dataset and its official Harbor verifier without a service dependency or an unbounded workload.",
+    "deviation_from_official_harness": "Agencity is invoked through the Prime Verifiers interception route in the task workspace. The upstream Harbor verifier remains the only scorer and runs only after managed-service shutdown and generated-metadata cleanup."
+  },
+  "agencity": {
+    "source_repo": "https://github.com/kousun12/agencity.git",
+    "source_ref": "eeceb6f02e2178e2e0d0e1a9b2f6e3f31a907a02",
+    "bun_version": "1.3.14",
+    "bun_archive": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip",
+    "bun_archive_sha256": "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+  },
+  "python_lock_sha256": "52a6ddf573ae5e679c9dede7b221f424a44c12e9efbf6cbac1a847cacfecfdb5"
+}

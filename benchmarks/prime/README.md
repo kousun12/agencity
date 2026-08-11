@@ -218,6 +218,85 @@ At the preflight prices of $1 per million input tokens and $6 per million
 output tokens, that usage has a $0.0379 undiscounted listed-price ceiling.
 This is one passing treatment probe, not a Terminal-Bench score or suite claim.
 
+## Terminal-Bench 2.1 Harbor treatment
+
+Terminal-Bench 2.1 is a separate one-task Harbor treatment. It does not
+replace, migrate, or reinterpret the Terminal-Bench 2 treatment.
+
+- dataset: `terminal-bench/terminal-bench-2-1` at
+  `sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a`;
+- selected task: the refreshed `fix-git` package at
+  `sha256:16948b980df9d96de616a205f5acca1c5d395de83ff4f8ffabcafacb93226f2e`;
+- complete downloaded Harbor task-tree digest:
+  `30aed800ba51d02a300800e34db211afa4a0ea9f4af098c628bdb8308facbfc8`;
+- task image:
+  `alexgshaw/fix-git@sha256:389b9c8247610c2c5be080b1ac00429007c2c69bf57f7f26c79f0f75ba2d5c74`;
+- workspace: `/app/personal-site`;
+- scorer: the unmodified upstream Harbor verifier, after Agencity's managed
+  service has stopped and the generated `.agencity` marker and rollout-local
+  state have been removed.
+
+The deliberately short Git-recovery task has a revised 2.1 task package and
+image from the Terminal-Bench 2 selection. Its bounded manifest records the
+official source commit, task/image digests, shared harness pins, Python lock
+digest, selection rationale, and the treatment's only harness deviation.
+
+Run the model-free checks:
+
+```sh
+uv lock --check
+uv run --locked python -m unittest discover -s tests -v
+uv build
+uv run --locked eval @ configs/terminal-bench-2-1-fix-git-sample.toml --dry-run
+```
+
+On August 10, 2026, the 56-test model-free suite, wheel/sdist inspection,
+installed-wheel pin check, exact Harbor loading and tree verification, both
+dry-runs, and a portable bootstrap/metadata-cleanup lifecycle in the pinned
+image passed. One attended Luna-high rollout made seven model calls, reported
+`succeeded` after seven Agencity steps, confirmed service shutdown and cleanup,
+and received Harbor reward `1.0`. It used 17,036 prompt tokens and 2,334
+completion tokens (8,490 cached input and 1,492 reasoning tokens reported).
+The run did not report provider cost. A deliberately conservative preflight
+using twelve full configured provider windows at the previously recorded
+$1/M-input and $6/M-output list rates was $3.15; the observed non-cached
+listed-rate calculation is about $0.031. This one result is integration
+evidence, not a Terminal-Bench 2.1 score or a suite capability claim.
+
+## SWE-bench Pro public adapter spike
+
+`agencity_swe_bench_pro` is a separate model-free adapter spike for the public
+SWE-bench Pro instance
+`instance_future-architect__vuls-36456cb151894964ba1683ce7da5c35ada789970`.
+It pins the public dataset revision
+`7ab5114912baf22bb098818e604c02fe7ad2c11f`, repository
+`future-architect/vuls`, base revision
+`4ae87cc36cb1b1dbc7fd49680d553c8bb47fa8b6`, selected public-field digest,
+agent image digest, evaluator repository commit, evaluator-tree digest, and
+Python lock digest.
+
+The task data and prompt contain only the public issue, requirements, and
+interface. Reference patches, test patches, evaluator scripts, and evaluator
+outputs are not put in task data or traces. A future runnable treatment must
+also create a sanitized agent workspace: the original official image retains
+Git history from which withheld tests can be recovered.
+
+The official evaluator at the pinned commit derives and pulls a mutable Docker
+Hub tag internally and exposes no image-digest override. Together with the
+missing proven sanitized-agent/fresh-scorer split, that cannot preserve the
+manifest's immutable environment pin or hidden-test boundary. The taskset
+therefore rejects before model admission; it does not run a patched evaluator
+or substitute a non-equivalent scorer. Its sample config is valid for
+resolution only:
+
+```sh
+uv run --locked eval @ configs/swe-bench-pro-public-vuls-sample.toml --dry-run
+```
+
+No SWE-bench Pro model call, patch evaluation, reward, or paid cost was
+recorded. This is not a SWE-bench Pro result. SWE-bench Verified is not used as
+the primary benchmark and is only a compatibility reference.
+
 ## Evidence and interpretation
 
 Retain:
@@ -231,6 +310,11 @@ Retain:
   Prime-reported cost;
 - pass, zero-score, blocked, failed, unknown, cancelled, and infrastructure
   error counts separately.
+
+For the new additions: Terminal-Bench 2.1 has one pass and zero zero-score,
+blocked, failed, unknown, skipped, or infrastructure-error outcomes. SWE-bench
+Pro has zero model attempts and one blocked-by-design adapter route; it is
+reported separately from rollout outcomes rather than as a zero score.
 
 The OOLONG reward is a mean task score, not binary accuracy. Numeric tasks use
 `0.75 ** absolute_error`; other supported synth answers use exact matching

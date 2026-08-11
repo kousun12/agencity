@@ -261,22 +261,29 @@ completed but scored `0`. Earlier bounded failures remain configuration
 evidence. No full OOLONG score, hosted run, or exact Prime Agent reproduction is
 verified. New adapters follow `benchmarks/prime/AUTHORING.md`; workspace-scored
 coding tasks are the primary benchmark class, with answer-only tasksets reserved
-for narrow integration or reasoning checks. The project also contains one
-Terminal-Bench 2 Harbor taskset pinned to the `fix-git` task, its task image,
-the Harbor dataset and complete task-tree digests, Verifiers and Harbor
-versions, an Agencity commit, a Linux Bun archive, and the Python lockfile. Its
-portable harness stages Agencity into the task
-container without assuming its package manager, runs in the task work directory,
-keeps rollout state outside the scored workspace, passes only the Verifiers
-interception credential from the harness, confirms managed-service shutdown,
-removes generated workspace metadata and state during finalization outside the
-agent timeout and before scoring, and leaves the upstream Harbor
-verifier authoritative. The final hardened Luna-high `fix-git` treatment
-completed in eight calls and scored `1.0` after two retained diagnostic failures exposed and
-corrected state-directory and generated-workspace-metadata defects. Model-free
-tests, lifecycle checks, and this one passing treatment are integration
-evidence only; no Terminal-Bench suite capability, unattended cancellation
-recovery, performance result, or full-suite result is verified.
+for narrow integration or reasoning checks. The project contains separate
+Terminal-Bench 2 and Terminal-Bench 2.1 Harbor tasksets, each pinned to its
+own `fix-git` task package, task image, dataset and complete task-tree digests,
+Verifiers/Harbor versions, Agencity commit, Linux Bun archive, and Python
+lockfile. Their portable harness stages Agencity into the task container without
+assuming its package manager, runs in the task work directory, keeps rollout
+state outside the scored workspace, passes only the Verifiers interception
+credential, confirms managed-service shutdown, removes generated workspace
+metadata and state during finalization outside the agent timeout and before
+scoring, and leaves the upstream Harbor verifier authoritative. The final
+hardened Terminal-Bench 2 Luna-high treatment completed in eight calls and
+scored `1.0`. The independently pinned Terminal-Bench 2.1 treatment completed
+in seven calls and also scored `1.0`, with stopped-service and cleanup evidence.
+Both are one-task integration evidence only; no Terminal-Bench suite capability,
+unattended cancellation recovery, performance result, or full-suite result is
+verified. A separate SWE-bench Pro public adapter pins one public Vuls instance,
+its public dataset/evaluator revisions, agent image digest, and isolation
+boundary, but remains a model-free spike: the official evaluator accepts only a
+mutable image tag and has no digest override, while the original task image
+retains Git history that can reveal withheld tests. The current harness has no
+verified sanitized-agent/fresh-scorer split, so the taskset blocks before model
+admission rather than use a non-equivalent or hidden-test-exposing treatment.
+No SWE-bench Pro reward or performance claim is verified.
 
 Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified.
 

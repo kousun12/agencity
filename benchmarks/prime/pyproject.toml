@@ -15,11 +15,19 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["agencity_verifiers", "agencity_oolong_synth", "agencity_terminal_bench_2"]
+packages = [
+    "agencity_verifiers",
+    "agencity_oolong_synth",
+    "agencity_terminal_bench_2",
+    "agencity_terminal_bench_2_1",
+    "agencity_swe_bench_pro",
+]
 
 [tool.hatch.build.targets.wheel.force-include]
 "manifests/terminal-bench-2-fix-git.json" = "agencity_terminal_bench_2/data/manifest.json"
 "uv.lock" = "agencity_terminal_bench_2/data/uv.lock"
+"manifests/terminal-bench-2-1-fix-git.json" = "agencity_terminal_bench_2_1/data/manifest.json"
+"manifests/swe-bench-pro-public-vuls.json" = "agencity_swe_bench_pro/data/manifest.json"
 
 [tool.hatch.build.targets.sdist]
 exclude = [

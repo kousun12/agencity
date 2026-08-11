@@ -243,6 +243,15 @@ For a workspace task:
   from contaminating Git-based decisions, and remove only the generated marker
   after service shutdown and before scoring;
 - run the official deterministic verifier when available;
+- verify that the official evaluator can consume the treatment's immutable
+  image or environment identity. If it only resolves mutable tags or otherwise
+  cannot preserve the declared pin, implement a model-free adapter spike that
+  rejects before model admission. Do not patch the evaluator or substitute a
+  non-equivalent scorer merely to obtain a rollout;
+- inspect the agent image for retained Git history, test commits, evaluator
+  files, and other withheld material. A future two-stage treatment must prove a
+  sanitized agent workspace and a fresh scorer runtime before it exposes a
+  repository workspace to the model;
 - retain verifier stdout and stderr only through bounded summaries or
   non-versioned raw outputs;
 - treat missing verifier dependencies and malformed evidence as infrastructure

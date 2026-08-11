@@ -1,6 +1,6 @@
 # Prime Verifiers benchmarking
 
-**Status:** In progress; contract and OOLONG probes verified; one hardened Terminal-Bench 2 Harbor treatment scored 1.0
+**Status:** In progress; contract and OOLONG probes verified; independent hardened Terminal-Bench 2 and 2.1 Harbor treatments scored 1.0; SWE-bench Pro public remains a model-free evaluator-compatibility spike
 **Date:** August 10, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), [Reasoning effort and model capabilities](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md), and [Dynamic typed connectors](./2026-08-09-dynamic-typed-connectors-plan.md)
@@ -609,6 +609,56 @@ its undiscounted model-cost ceiling was $0.0379. The two failed attempts remain
 infrastructure and treatment-debugging evidence. The passing run establishes
 this one-task integration route only; it does not establish Terminal-Bench
 performance or broader task compatibility.
+
+## Terminal-Bench 2.1 development evidence
+
+The repository contains a separate Terminal-Bench 2.1 taskset, manifest, and
+sample configuration. It selects only the refreshed `fix-git` task from
+`terminal-bench/terminal-bench-2-1` at dataset digest
+`sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a`.
+The manifest pins task package digest
+`sha256:16948b980df9d96de616a205f5acca1c5d395de83ff4f8ffabcafacb93226f2e`,
+the complete Harbor-downloaded task-tree digest
+`30aed800ba51d02a300800e34db211afa4a0ea9f4af098c628bdb8308facbfc8`,
+the `linux/amd64` image digest, source/Bun/lock inputs, and the precise
+treatment deviation.
+
+The shared portable harness retains its existing state isolation, metadata
+rejection, Git exclusion, shutdown confirmation, cleanup-before-scoring order,
+and Verifiers interception route. The upstream Harbor verifier remains the
+sole score source.
+
+On August 10, 2026, lock validation, the 56-test model-free suite, source and
+wheel builds, installed-wheel manifest/lock resolution, both dry-runs, exact
+Harbor task loading, complete tree verification, and an actual portable setup
+and cleanup lifecycle in the pinned 2.1 image passed. One attended Luna-high
+rollout made seven model calls. It reported `succeeded`, completed seven
+Agencity steps, recorded stopped-service and cleanup evidence, and received
+upstream Harbor reward `1.0`. It reported 17,036 prompt tokens, 2,334
+completion tokens, 8,490 cached input tokens, and 1,492 reasoning tokens. No
+provider cost field was returned. The conservative twelve-window preflight at
+the existing $1/M-input and $6/M-output list rates was $3.15. This is
+single-task integration evidence only.
+
+## SWE-bench Pro public adapter spike
+
+The public SWE-bench Pro taskset pins one `future-architect/vuls` instance,
+public dataset revision `7ab5114912baf22bb098818e604c02fe7ad2c11f`, repository
+base revision, public-field selection digest, agent image digest, evaluator
+repository commit, evaluator-tree digest, and Python lockfile. It constructs
+the model prompt only from public issue, requirements, and interface materials.
+Reference patches, test patches, official run scripts, parser scripts, and
+evaluator output remain outside agent prompt and task data.
+
+The feasibility audit found that the official evaluator's local-Docker route
+derives and pulls a mutable Docker Hub tag from the dataset row. It supplies no
+immutable digest override. The original task image also retains Git history
+that can recover withheld tests, and the shared one-runtime harness has no
+verified sanitized-agent/fresh-scorer split. The adapter therefore fails before
+model admission instead of altering the evaluator or using a non-equivalent or
+hidden-test-exposing treatment. Model-free manifest, prompt-isolation,
+evidence-shape, wheel/sdist, task-loading, and dry-run checks pass. No
+SWE-bench Pro paid attempt, official reward, or performance result is present.
 
 Verifiers evaluates the committed turn and token limits between calls, so they
 are bounded trajectory controls rather than a hard billed-dollar admission
