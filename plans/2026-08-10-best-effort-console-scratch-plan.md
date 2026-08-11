@@ -612,3 +612,11 @@ This plan is complete when:
 10. state guidance explains permanent event-history accretion and discourages transient or repetitive writes;
 11. the default managed-service quiescent timeout is one hour while scratch remains a non-keep-alive cache;
 12. public documentation, `AGENTS.md`, architecture checks, recovery tests, and installed-product acceptance match the implemented behavior.
+
+## Implementation log
+
+### 2026-08-11 — Warm branch-scoped scratch
+- Completed: Added the direct branch-scoped `scratch` object, `sdk.scratch` status and clear controls, bounded getter-free checkpoint serialization, exact-scope preparation and eviction, a process-wide lifecycle queue, prompt guidance, stale-RPC failures, post-terminal RSS recycling, and focused unit and integration coverage.
+- Validation: `bun run typecheck`, `bun run check:architecture`, `git diff --check`, and 33 focused scratch and console tests passed.
+- Plan notes: Checkpoint node and property budgets apply across the complete candidate. Persistence-hook failures remain nonfatal and preserve warm scratch; unsafe worker checkpoint timeout recycles the worker.
+- Remaining: Local checkpoint persistence, managed-service lifetime, public documentation, installed-product coverage, aggregate verification, and external gated checks.

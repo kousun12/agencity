@@ -1,6 +1,7 @@
 import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, HarnessKind, HarnessScope, ModelConfiguration, WorkingValue } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { InspectOptions, InspectPreview } from "./inspect.ts";
+import type { ScratchSdk } from "./scratch.ts";
 
 export interface ConsoleSession { readonly id: string; readonly branchId: string }
 
@@ -271,6 +272,7 @@ export interface ContextSdk {
 }
 
 export interface ConsoleSdk {
+  readonly scratch: ScratchSdk;
   readonly state: StateSdk;
   readonly cells: CellsSdk;
   readonly artifacts: ArtifactsSdk;

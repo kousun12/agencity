@@ -9,9 +9,25 @@ import {
   type InspectOptions,
 } from "./inspect.ts";
 import { notebookCellBody } from "./notebook.ts";
+import {
+  SCRATCH_LIMITS,
+  createScratchProxy,
+  scratchValueType,
+  serializeScratch,
+  validateScratchCheckpoint,
+  type ScratchCheckpointRestore,
+  type ScratchProxyState,
+  type ScratchScope,
+  type ScratchStatus,
+} from "./scratch.ts";
 
 type Incoming =
   | { type: "execute"; executionId: string; code: string; session: { id: string; branchId: string }; restored: Record<string, unknown> }
+  | { type: "scratch-prepare"; requestId: string; scope: ScratchScope; restore: ScratchCheckpointRestore | null; cacheAvailable: boolean; idleScopeMs: number; maxWarmScopes: number }
+  | { type: "scratch-probe"; requestId: string; scope: ScratchScope }
+  | { type: "scratch-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string }
+  | { type: "scratch-record-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string; candidate: import("./scratch.ts").ScratchCheckpointCandidate }
+  | { type: "scratch-evict"; requestId: string; scope: ScratchScope }
   | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string }
   | { type: "shutdown" };
 
@@ -62,6 +78,25 @@ function send(message: unknown): void {
 
 const pendingRpc = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 let executionQueue = Promise.resolve();
+interface WarmScratchScope {
+  readonly scope: ScratchScope;
+  readonly proxy: ScratchProxyState;
+  temperature: "warm" | "cold" | "restored";
+  readonly cacheAvailable: boolean;
+  readonly restoreAttempted: boolean;
+  lastUsedAt: number;
+  lastCheckpointAt: string | null;
+  lastCheckpointCellId: string | null;
+  savedNames: string[];
+  skipped: Array<{ name: string; reason: import("./scratch.ts").ScratchSkipReason }>;
+}
+const scratchScopes = new Map<string, WarmScratchScope>();
+let idleScopeMs: number = SCRATCH_LIMITS.idleScopeMs;
+let maxWarmScopes: number = SCRATCH_LIMITS.maxWarmScopes;
+
+function scopeKey(scope: ScratchScope): string {
+  return `${scope.sessionId.length}:${scope.sessionId}${scope.branchId}`;
+}
 
 function rpc(executionId: string, method: string, args: unknown[]): Promise<unknown> {
   const requestId = crypto.randomUUID();
@@ -88,10 +123,48 @@ process.on("message", (raw: unknown) => {
     executionQueue = executionQueue.then(() => execute(message));
     return;
   }
+  if (message.type === "scratch-prepare") {
+    executionQueue = executionQueue.then(() => control(message.requestId, () => prepareScratch(message)));
+    return;
+  }
+  if (message.type === "scratch-probe") {
+    executionQueue = executionQueue.then(() => control(message.requestId, () => {
+      evictScratchScopes();
+      return { warm: scratchScopes.has(scopeKey(message.scope)) };
+    }));
+    return;
+  }
+  if (message.type === "scratch-checkpoint") {
+    executionQueue = executionQueue.then(() => control(message.requestId, () => checkpointScratch(message)));
+    return;
+  }
+  if (message.type === "scratch-record-checkpoint") {
+    executionQueue = executionQueue.then(() => control(
+      message.requestId,
+      () => recordScratchCheckpoint(message),
+    ));
+    return;
+  }
+  if (message.type === "scratch-evict") {
+    executionQueue = executionQueue.then(() => control(message.requestId, () => {
+      scratchScopes.delete(scopeKey(message.scope));
+      return { evicted: true };
+    }));
+    return;
+  }
   process.exit(0);
 });
 
 async function execute(message: Extract<Incoming, { type: "execute" }>): Promise<void> {
+  evictScratchScopes();
+  const warmScratch = scratchScopes.get(scopeKey({
+    sessionId: message.session.id,
+    branchId: message.session.branchId,
+  })) ?? createWarmScratch({
+    sessionId: message.session.id,
+    branchId: message.session.branchId,
+  }, null, false);
+  warmScratch.lastUsedAt = Date.now();
   const logs = new BoundedLogs();
   const printable = (value: unknown): string => {
     if (typeof value === "string") return value;
@@ -241,6 +314,39 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     inspect: () => call("context.inspect", []),
     compact: (options: Record<string, unknown> = {}) => call("context.compact", [options]),
   };
+  const scratchStatus = (): ScratchStatus => {
+    const descriptors = Object.getOwnPropertyDescriptors(warmScratch.proxy.target);
+    const propertyNames = Object.keys(descriptors).sort();
+    const propertyTypes: Record<string, import("./scratch.ts").ScratchValueType> = Object.create(null);
+    for (const name of propertyNames) {
+      const descriptor = descriptors[name]!;
+      propertyTypes[name] = "value" in descriptor
+        ? scratchValueType(descriptor.value)
+        : "undefined";
+    }
+    return {
+      scope: warmScratch.scope,
+      temperature: warmScratch.temperature,
+      propertyNames,
+      propertyTypes,
+      lastCheckpointAt: warmScratch.lastCheckpointAt,
+      lastCheckpointCellId: warmScratch.lastCheckpointCellId,
+      savedNames: [...warmScratch.savedNames],
+      skipped: [...warmScratch.skipped],
+      cache: {
+        available: warmScratch.cacheAvailable,
+        restoreAttempted: warmScratch.restoreAttempted,
+      },
+      limits: SCRATCH_LIMITS,
+    };
+  };
+  const scratchSdk = {
+    status: async () => scratchStatus(),
+    clear: async () => {
+      warmScratch.proxy.clear();
+      return scratchStatus();
+    },
+  };
   const rlmId = (handle: string | { handleId?: unknown }): string => {
     const id = typeof handle === "string" ? handle : handle?.handleId;
     if (typeof id !== "string" || !id) throw new Error("Recursive model handle must contain a non-empty handleId");
@@ -271,11 +377,11 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     return call("sql", [text, values]) as Promise<JsonValue[]>;
   });
 
-  let response: Record<string, unknown>;
+  let response: Record<string, unknown> & { rssBytes: number };
   try {
     const transpiler = new Bun.Transpiler({ loader: "ts", target: "bun" });
     const body = notebookCellBody(message.code);
-    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools,inspect,cells,rlm){\n${body}\n}`;
+    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools,inspect,cells,rlm,scratch){\n${body}\n}`;
     const javascript = transpiler.transformSync(source);
     const factory = new Function(`${javascript}\nreturn __cell;`)() as (
       sdk: ConsoleSdk,
@@ -288,9 +394,10 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       inspect: typeof inspectValue,
       cells: unknown,
       rlm: unknown,
+      scratch: Record<string, unknown>,
     ) => Promise<unknown>;
-    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, rlm, inspect } as unknown as ConsoleSdk;
-    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm);
+    const sdk = { scratch: scratchSdk, state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, rlm, inspect } as unknown as ConsoleSdk;
+    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm, warmScratch.proxy.object);
     const encoded = encodeObservation(value);
     const inlineTerminal = {
       type: "result",
@@ -305,7 +412,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
        ipcBytes(inlineTerminal) > MAX_TERMINAL_IPC_BYTES)
       ? await stageObservation(message.executionId, encoded)
       : encoded;
-    response = { type: "result", executionId: message.executionId, ok: true, observation };
+    response = { type: "result", executionId: message.executionId, ok: true, observation, rssBytes: process.memoryUsage.rss() };
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
     response = {
@@ -313,12 +420,137 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       executionId: message.executionId,
       ok: false,
       error: detail.length > MAX_LOG_BYTES ? `${detail.slice(0, MAX_LOG_BYTES)}…` : detail,
+      rssBytes: process.memoryUsage.rss(),
     };
   } finally {
     stdout.write = originalStdout;
     stderr.write = originalStderr;
   }
+  warmScratch.lastUsedAt = Date.now();
+  warmScratch.temperature = "warm";
+  evictScratchScopes();
   send(fitTerminalIpc({ ...response, logs: logs.values, logStreams: logs.streams }));
+}
+
+async function control(requestId: string, operation: () => unknown | Promise<unknown>): Promise<void> {
+  try {
+    send({ type: "control-result", requestId, ok: true, value: await operation() });
+  } catch (error) {
+    send({
+      type: "control-result",
+      requestId,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function prepareScratch(
+  message: Extract<Incoming, { type: "scratch-prepare" }>,
+): ScratchStatus {
+  idleScopeMs = message.idleScopeMs;
+  maxWarmScopes = message.maxWarmScopes;
+  evictScratchScopes();
+  const key = scopeKey(message.scope);
+  let warm = scratchScopes.get(key);
+  if (!warm) warm = createWarmScratch(message.scope, message.restore, message.cacheAvailable);
+  warm.lastUsedAt = Date.now();
+  evictScratchScopes(key);
+  const descriptors = Object.getOwnPropertyDescriptors(warm.proxy.target);
+  const names = Object.keys(descriptors).sort();
+  const propertyTypes: Record<string, import("./scratch.ts").ScratchValueType> = Object.create(null);
+  for (const name of names) {
+    const descriptor = descriptors[name]!;
+    propertyTypes[name] = "value" in descriptor ? scratchValueType(descriptor.value) : "undefined";
+  }
+  return {
+    scope: warm.scope,
+    temperature: warm.temperature,
+    propertyNames: names,
+    propertyTypes,
+    lastCheckpointAt: warm.lastCheckpointAt,
+    lastCheckpointCellId: warm.lastCheckpointCellId,
+    savedNames: [...warm.savedNames],
+    skipped: [...warm.skipped],
+    cache: { available: warm.cacheAvailable, restoreAttempted: warm.restoreAttempted },
+    limits: SCRATCH_LIMITS,
+  };
+}
+
+function createWarmScratch(
+  scope: ScratchScope,
+  restore: ScratchCheckpointRestore | null,
+  cacheAvailable: boolean,
+): WarmScratchScope {
+  const candidate = restore ? validateScratchCheckpoint(restore.candidate) : null;
+  const skipped = new Map(candidate?.skipped.map((item) => [item.name, item.reason]) ?? []);
+  const proxy = createScratchProxy(skipped, restore?.sourceCellId ?? null);
+  if (candidate) {
+    for (const name of candidate.savedNames) {
+      Reflect.defineProperty(proxy.target, name, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: structuredClone(candidate.values[name]),
+      });
+    }
+  }
+  const warm: WarmScratchScope = {
+    scope,
+    proxy,
+    temperature: restore ? "restored" : "cold",
+    cacheAvailable,
+    restoreAttempted: cacheAvailable,
+    lastUsedAt: Date.now(),
+    lastCheckpointAt: restore?.checkpointedAt ?? null,
+    lastCheckpointCellId: restore?.sourceCellId ?? null,
+    savedNames: candidate ? [...candidate.savedNames] : [],
+    skipped: candidate ? [...candidate.skipped] : [],
+  };
+  scratchScopes.set(scopeKey(scope), warm);
+  return warm;
+}
+
+function checkpointScratch(
+  message: Extract<Incoming, { type: "scratch-checkpoint" }>,
+) {
+  const warm = scratchScopes.get(scopeKey(message.scope));
+  if (!warm) throw new Error("Scratch scope is not warm");
+  const candidate = serializeScratch(warm.proxy.target);
+  warm.lastUsedAt = Date.now();
+  return candidate;
+}
+
+function recordScratchCheckpoint(
+  message: Extract<Incoming, { type: "scratch-record-checkpoint" }>,
+): { recorded: true } {
+  const warm = scratchScopes.get(scopeKey(message.scope));
+  if (!warm) throw new Error("Scratch scope is not warm");
+  const candidate = validateScratchCheckpoint(message.candidate);
+  warm.lastCheckpointAt = new Date().toISOString();
+  warm.lastCheckpointCellId = message.sourceCellId;
+  warm.savedNames = [...candidate.savedNames];
+  warm.skipped = [...candidate.skipped];
+  warm.proxy.skipped.clear();
+  for (const item of candidate.skipped) warm.proxy.skipped.set(item.name, item.reason);
+  warm.proxy.unavailableCheckpointCellId = message.sourceCellId;
+  warm.lastUsedAt = Date.now();
+  return { recorded: true };
+}
+
+function evictScratchScopes(preserveKey?: string): void {
+  const now = Date.now();
+  for (const [key, scope] of scratchScopes) {
+    if (key !== preserveKey && now - scope.lastUsedAt >= idleScopeMs) scratchScopes.delete(key);
+  }
+  while (scratchScopes.size > maxWarmScopes) {
+    const candidate = [...scratchScopes.entries()]
+      .filter(([key]) => key !== preserveKey)
+      .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt ||
+        left[0].localeCompare(right[0]))[0];
+    if (!candidate) break;
+    scratchScopes.delete(candidate[0]);
+  }
 }
 
 async function stageObservation(
@@ -349,6 +581,7 @@ function ipcBytes(value: unknown): number {
 function fitTerminalIpc<T extends Record<string, unknown> & {
   readonly logs: string[];
   readonly logStreams: CellLogStream[];
+  readonly rssBytes: number;
   readonly error?: string;
 }>(input: T): T {
   if (ipcBytes(input) <= MAX_TERMINAL_IPC_BYTES) return input;
@@ -383,6 +616,7 @@ function fitTerminalIpc<T extends Record<string, unknown> & {
       error: "Console terminal IPC response exceeded the 128 KiB product limit",
       logs: [],
       logStreams: [],
+      rssBytes: input.rssBytes,
     } as unknown as T;
   }
   return output;

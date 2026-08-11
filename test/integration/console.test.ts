@@ -685,4 +685,410 @@ describe("disposable TypeScript console process", () => {
     await supervisor.close();
   });
 
+  test("keeps arbitrary scratch identity on one warm exact session branch", async () => {
+    const { supervisor, sessionId, branchId } = await open(false);
+    const first = await supervisor.executeCell(sessionId, branchId, `
+      scratch.index = { files: ["a.ts"], marker: {} };
+      scratch.sameMarker = scratch.index.marker;
+      scratch.helper = (value: string) => value.trim().toUpperCase();
+      ({ status: await sdk.scratch.status(), pid: process.pid })
+    `);
+    expect((first.result as any).status).toMatchObject({
+      scope: { sessionId, branchId },
+      temperature: "cold",
+      cache: { available: false, restoreAttempted: false },
+    });
+    const second = await supervisor.executeCell(sessionId, branchId, `
+      scratch.index.files.push("b.ts");
+      ({
+        files: scratch.index.files,
+        identity: scratch.sameMarker === scratch.index.marker,
+        helper: scratch.helper(" warm "),
+        status: await sdk.scratch.status(),
+        pid: process.pid,
+      })
+    `);
+    expect(second.result).toMatchObject({
+      files: ["a.ts", "b.ts"],
+      identity: true,
+      helper: "WARM",
+      status: { temperature: "warm" },
+      pid: (first.result as any).pid,
+    });
+
+    const other = await supervisor.createSession({ workspaceId: "console-workspace" });
+    const isolated = await supervisor.executeCell(other.sessionId, other.branchId, `
+      ({ hasIndex: "index" in scratch, status: await sdk.scratch.status() })
+    `);
+    expect(isolated.result).toMatchObject({
+      hasIndex: false,
+      status: { scope: other, temperature: "cold" },
+    });
+
+    const parentEvents = await supervisor.storage.loadEvents(sessionId, { branchId });
+    const forkBranchId = await supervisor.fork(
+      sessionId,
+      branchId,
+      parentEvents.at(-1)!.cursor,
+    );
+    const forked = await supervisor.executeCell(sessionId, forkBranchId, `
+      ({ hasIndex: "index" in scratch, status: await sdk.scratch.status() })
+    `);
+    expect(forked.result).toMatchObject({
+      hasIndex: false,
+      status: {
+        scope: { sessionId, branchId: forkBranchId },
+        temperature: "cold",
+      },
+    });
+    await supervisor.close();
+  });
+
+  test("evicts failed scratch mutation and promptly rejects stale captured RPC facades", async () => {
+    const { supervisor, sessionId, branchId } = await open(false);
+    await supervisor.executeCell(sessionId, branchId, `
+      scratch.value = { committed: true };
+      scratch.staleStateRead = () => state.get("missing");
+      ({ ready: true })
+    `);
+    await expect(supervisor.executeCell(sessionId, branchId, `
+      scratch.value.committed = false;
+      throw new Error("discard partial scratch");
+    `)).rejects.toThrow(/discard partial scratch/);
+    const afterFailure = await supervisor.executeCell(sessionId, branchId, `
+      ({ hasValue: "value" in scratch, status: await sdk.scratch.status() })
+    `);
+    expect(afterFailure.result).toMatchObject({
+      hasValue: false,
+      status: { temperature: "cold" },
+    });
+
+    await supervisor.executeCell(sessionId, branchId, `
+      scratch.staleStateRead = () => state.get("missing");
+      null
+    `);
+    const started = performance.now();
+    await expect(supervisor.executeCell(sessionId, branchId, `
+      await scratch.staleStateRead();
+      "unreachable"
+    `)).rejects.toThrow(/no longer active/i);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    await supervisor.close();
+  });
+
+  test("evicts scratch when canonical cell commit fails", async () => {
+    const { supervisor, sessionId, branchId } = await open(false);
+    const append = supervisor.storage.appendEvents.bind(supervisor.storage);
+    let failed = false;
+    Object.defineProperty(supervisor.storage, "appendEvents", {
+      configurable: true,
+      value: async (events: Parameters<typeof append>[0]) => {
+        if (!failed && events.some((event) => event.type === "CellCommitted")) {
+          failed = true;
+          throw new Error("simulated terminal commit failure");
+        }
+        return append(events);
+      },
+    });
+    try {
+      await expect(supervisor.executeCell(sessionId, branchId, `
+        scratch.partial = { visible: false };
+        ({ complete: true })
+      `)).rejects.toThrow(/terminal commit failure/);
+    } finally {
+      Object.defineProperty(supervisor.storage, "appendEvents", {
+        configurable: true,
+        value: append,
+      });
+    }
+    const next = await supervisor.executeCell(sessionId, branchId, `
+      ({ hasPartial: "partial" in scratch, status: await sdk.scratch.status() })
+    `);
+    expect(next.result).toMatchObject({
+      hasPartial: false,
+      status: { temperature: "cold" },
+    });
+    const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+    expect(events.filter((event) => event.type === "CellFailed")).toHaveLength(1);
+    await supervisor.close();
+  });
+
+  test("restores only hook-provided JSON checkpoints and reports skipped warm values", async () => {
+    const temp = await makeTempRuntime("agencity-console-scratch-hook-");
+    temps.push(temp);
+    const checkpoints = new Map<string, any>();
+    const hooks = {
+      async load(scope: { sessionId: string; branchId: string }) {
+        return checkpoints.get(`${scope.sessionId}/${scope.branchId}`) ?? null;
+      },
+      async checkpoint(scope: { sessionId: string; branchId: string }, candidate: any, sourceCellId: string) {
+        checkpoints.set(`${scope.sessionId}/${scope.branchId}`, {
+          candidate,
+          sourceCellId,
+          checkpointedAt: "2026-08-11T00:00:00.000Z",
+        });
+      },
+    };
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      restartConsoleAfterCell: true,
+      scratchCheckpointHooks: hooks,
+      recover: false,
+    });
+    const { sessionId, branchId } = await supervisor.createSession({ workspaceId: "scratch-hook" });
+    const first = await supervisor.executeCell(sessionId, branchId, `
+      scratch.rows = [{ id: 1 }];
+      scratch.helper = (value: number) => value + 1;
+      ({ pid: process.pid })
+    `);
+    const restored = await supervisor.executeCell(sessionId, branchId, `
+      let helperError = "";
+      try { scratch.helper(1); } catch (error) { helperError = String(error); }
+      ({
+        rows: scratch.rows,
+        helperError,
+        status: await sdk.scratch.status(),
+        pid: process.pid,
+      })
+    `);
+    expect(restored.result).toMatchObject({
+      rows: [{ id: 1 }],
+      helperError: expect.stringContaining("unsupported_type"),
+      status: {
+        temperature: "restored",
+        savedNames: ["rows"],
+        skipped: [{ name: "helper", reason: "unsupported_type" }],
+      },
+    });
+    expect((restored.result as any).pid).not.toBe((first.result as any).pid);
+    await supervisor.close();
+  });
+
+  test("rejects reconstructed brokered values before invoking checkpoint storage", async () => {
+    const secret = "rpc-broker-secret-a811";
+    process.env.AGENCITY_RPC_TEST_SECRET = secret;
+    const temp = await makeTempRuntime("agencity-console-scratch-secret-");
+    temps.push(temp);
+    let received: any = null;
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      scratchCheckpointHooks: {
+        async load() { return null; },
+        async checkpoint(_scope, candidate) { received = candidate; },
+      },
+      recover: false,
+    });
+    const session = await supervisor.createSession({ workspaceId: "scratch-secret" });
+    await supervisor.executeCell(session.sessionId, session.branchId, `
+      scratch.safe = { count: 1 };
+      scratch.secret = ["rpc-broker-", "secret-a811"].join("");
+      ({ complete: true })
+    `);
+    expect(received.savedNames).toEqual(["safe"]);
+    expect(received.skipped).toContainEqual({
+      name: "secret",
+      reason: "secret_rejected",
+    });
+    expect(JSON.stringify(received)).not.toContain(secret);
+    await supervisor.close();
+  });
+
+  test("keeps committed warm scratch when checkpoint persistence fails", async () => {
+    const temp = await makeTempRuntime("agencity-console-scratch-store-failure-");
+    temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      scratchCheckpointHooks: {
+        async load() { return null; },
+        async checkpoint() { throw new Error("cache storage unavailable"); },
+      },
+      recover: false,
+    });
+    const session = await supervisor.createSession({ workspaceId: "scratch-store-failure" });
+    const first = await supervisor.executeCell(session.sessionId, session.branchId, `
+      scratch.value = { retained: true };
+      ({ pid: process.pid })
+    `);
+    const second = await supervisor.executeCell(session.sessionId, session.branchId, `
+      ({
+        value: scratch.value,
+        pid: process.pid,
+        status: await sdk.scratch.status(),
+      })
+    `);
+    expect(second.result).toMatchObject({
+      value: { retained: true },
+      pid: (first.result as any).pid,
+      status: {
+        lastCheckpointAt: null,
+        lastCheckpointCellId: null,
+        savedNames: [],
+        skipped: [],
+      },
+    });
+    expect(supervisor.console.status()).toEqual({
+      running: true,
+      lastRecycleReason: null,
+    });
+    const events = await supervisor.storage.loadEvents(session.sessionId, {
+      branchId: session.branchId,
+    });
+    expect(events.filter((event) => event.type === "CellCommitted")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "CellFailed")).toHaveLength(0);
+    await supervisor.close();
+  });
+
+  test("uses LRU scope eviction and recycles above the RSS soft threshold", async () => {
+    const temp = await makeTempRuntime("agencity-console-scratch-lru-");
+    temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      scratchMaxWarmScopes: 2,
+      consoleRssRecycleThresholdBytes: 1,
+      recover: false,
+    });
+    const first = await supervisor.createSession({ workspaceId: "scratch-lru" });
+    const initial = await supervisor.executeCell(first.sessionId, first.branchId, `
+      scratch.value = 1;
+      ({ pid: process.pid })
+    `);
+    expect(supervisor.console.status().lastRecycleReason).toBe("rss-soft-threshold");
+    const recycled = await supervisor.executeCell(first.sessionId, first.branchId, `
+      ({ pid: process.pid, hasValue: "value" in scratch })
+    `);
+    expect(recycled.result).toMatchObject({ hasValue: false });
+    expect((recycled.result as any).pid).not.toBe((initial.result as any).pid);
+
+    // Disable the injected recycle threshold to exercise process-local LRU.
+    Object.defineProperty(supervisor, "consoleRssRecycleThresholdBytes", { value: Number.MAX_SAFE_INTEGER });
+    const second = await supervisor.createSession({ workspaceId: "scratch-lru" });
+    const third = await supervisor.createSession({ workspaceId: "scratch-lru" });
+    await supervisor.executeCell(first.sessionId, first.branchId, `scratch.lru = "first"; null`);
+    await Bun.sleep(2);
+    await supervisor.executeCell(second.sessionId, second.branchId, `scratch.lru = "second"; null`);
+    await Bun.sleep(2);
+    await supervisor.executeCell(third.sessionId, third.branchId, `scratch.lru = "third"; null`);
+    const evicted = await supervisor.executeCell(first.sessionId, first.branchId, `
+      ({ hasLru: "lru" in scratch, status: await sdk.scratch.status() })
+    `);
+    expect(evicted.result).toMatchObject({
+      hasLru: false,
+      status: { temperature: "cold" },
+    });
+    await supervisor.close();
+  });
+
+  test("evicts idle scopes without making warm scratch a keep-alive contract", async () => {
+    const temp = await makeTempRuntime("agencity-console-scratch-idle-");
+    temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      scratchIdleScopeMs: 10,
+      recover: false,
+    });
+    const session = await supervisor.createSession({ workspaceId: "scratch-idle" });
+    await supervisor.executeCell(session.sessionId, session.branchId, `
+      scratch.replaceable = true;
+      null
+    `);
+    await Bun.sleep(20);
+    const afterIdle = await supervisor.executeCell(session.sessionId, session.branchId, `
+      ({ available: "replaceable" in scratch, status: await sdk.scratch.status() })
+    `);
+    expect(afterIdle.result).toMatchObject({
+      available: false,
+      status: { temperature: "cold" },
+    });
+    await supervisor.close();
+  });
+
+  test("holds the process lifecycle queue through the checkpoint hook", async () => {
+    const temp = await makeTempRuntime("agencity-console-scratch-queue-");
+    temps.push(temp);
+    let enterCheckpoint!: () => void;
+    const checkpointEntered = new Promise<void>((resolve) => { enterCheckpoint = resolve; });
+    let releaseCheckpoint!: () => void;
+    const checkpointReleased = new Promise<void>((resolve) => { releaseCheckpoint = resolve; });
+    let held = false;
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      scratchCheckpointHooks: {
+        async load() { return null; },
+        async checkpoint() {
+          if (held) return;
+          held = true;
+          enterCheckpoint();
+          await checkpointReleased;
+        },
+      },
+      recover: false,
+    });
+    const first = await supervisor.createSession({ workspaceId: "scratch-queue" });
+    const second = await supervisor.createSession({ workspaceId: "scratch-queue" });
+    const firstRun = supervisor.executeCell(first.sessionId, first.branchId, `
+      scratch.first = true;
+      ({ first: true })
+    `);
+    await checkpointEntered;
+    const secondRun = supervisor.executeCell(second.sessionId, second.branchId, `
+      scratch.second = true;
+      ({ second: true })
+    `);
+    await Bun.sleep(30);
+    expect((await supervisor.storage.loadEvents(second.sessionId, {
+      branchId: second.branchId,
+    })).map((event) => event.type)).toEqual(["SessionCreated"]);
+    releaseCheckpoint();
+    expect((await firstRun).result).toEqual({ first: true });
+    expect((await secondRun).result).toEqual({ second: true });
+    await supervisor.close();
+  });
+
+  test("bounds adversarial checkpoint reflection by recycling after commit", async () => {
+    const temp = await makeTempRuntime("agencity-console-scratch-timeout-");
+    temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      scratchCheckpointTimeoutMs: 50,
+      recover: false,
+    });
+    const session = await supervisor.createSession({ workspaceId: "scratch-timeout" });
+    const committed = await supervisor.executeCell(session.sessionId, session.branchId, `
+      scratch.adversarial = new Proxy({}, {
+        getPrototypeOf() { while (true) {} }
+      });
+      ({ committed: true, pid: process.pid })
+    `);
+    expect(committed.result).toMatchObject({ committed: true });
+    expect(supervisor.console.status()).toEqual({
+      running: false,
+      lastRecycleReason: "scratch-checkpoint-timeout",
+    });
+    const events = await supervisor.storage.loadEvents(session.sessionId, {
+      branchId: session.branchId,
+    });
+    expect(events.filter((event) => event.type === "CellCommitted")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "CellFailed")).toHaveLength(0);
+    const next = await supervisor.executeCell(session.sessionId, session.branchId, `
+      ({ usable: true, pid: process.pid, hasAdversarial: "adversarial" in scratch })
+    `);
+    expect(next.result).toMatchObject({ usable: true, hasAdversarial: false });
+    expect((next.result as any).pid).not.toBe((committed.result as any).pid);
+    await supervisor.close();
+  });
+
 });

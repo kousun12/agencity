@@ -6,6 +6,11 @@ import {
   ConsoleCellError,
   ConsoleProcess,
   MAX_CELL_OBSERVATION_JSON_BYTES,
+  SCRATCH_LIMITS,
+  filterScratchCheckpoint,
+  type ScratchCheckpointCandidate,
+  type ScratchCheckpointHooks,
+  type ScratchScope,
   type CellHistoryEntry,
   type CellHistoryStatus,
   type CellListOptions,
@@ -102,6 +107,12 @@ export interface SupervisorOptions {
   readonly artifactDirectoryOwnership?: "exclusive" | "shared";
   readonly workspaceRoot?: string;
   readonly restartConsoleAfterCell?: boolean;
+  /** Optional noncanonical cold-cache adapter; Phase B defaults to warm-only scratch. */
+  readonly scratchCheckpointHooks?: ScratchCheckpointHooks;
+  readonly scratchCheckpointTimeoutMs?: number;
+  readonly scratchIdleScopeMs?: number;
+  readonly scratchMaxWarmScopes?: number;
+  readonly consoleRssRecycleThresholdBytes?: number;
   readonly modelProviders?: readonly ModelProvider[];
   /** Model-catalog transport controls; fetch injection is intended for deterministic conformance tests. */
   readonly modelCatalog?: ModelCatalogOptions;
@@ -322,8 +333,11 @@ export class Supervisor {
   readonly modelCatalog: ModelCatalog;
   readonly repositoryInstructions: RepositoryInstructionService;
   readonly restartConsoleAfterCell: boolean;
+  readonly scratchCheckpointHooks: ScratchCheckpointHooks | null;
+  readonly consoleRssRecycleThresholdBytes: number;
   readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
   readonly #cells = new BranchQueue();
+  readonly #consoleLifecycle = new BranchQueue();
   readonly #sessionCreations = new BranchQueue();
   #closed = false;
 
@@ -337,6 +351,8 @@ export class Supervisor {
     consoleProcess: ConsoleProcess,
     outbox: OutboxRunner,
     restartConsoleAfterCell: boolean,
+    scratchCheckpointHooks: ScratchCheckpointHooks | null,
+    consoleRssRecycleThresholdBytes: number,
     maxSessionDepth: number,
     maxChildrenPerSession: number,
     userScopeKey: string,
@@ -403,6 +419,8 @@ export class Supervisor {
     );
     this.models = this.#recursiveModels;
     this.restartConsoleAfterCell = restartConsoleAfterCell;
+    this.scratchCheckpointHooks = scratchCheckpointHooks;
+    this.consoleRssRecycleThresholdBytes = consoleRssRecycleThresholdBytes;
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), acceptanceAgentRunMaxSteps(), this.compactions, modelExecutor, this.agentProfiles);
     this.effectReconciliation = new EffectReconciliationService(storage);
     this.refiner = new RefinerService(
@@ -432,6 +450,11 @@ export class Supervisor {
   }
 
   static async open(options: SupervisorOptions): Promise<Supervisor> {
+    if (options.consoleRssRecycleThresholdBytes !== undefined &&
+        (!Number.isSafeInteger(options.consoleRssRecycleThresholdBytes) ||
+         options.consoleRssRecycleThresholdBytes < 1)) {
+      throw new ValidationError("Console RSS recycle threshold must be a positive integer");
+    }
     const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
     const profileDatabaseUrl=options.profileDatabaseUrl??adjacentFileUrl(options.databaseUrl,".profile.db");
     if(profileDatabaseUrl.startsWith("file:"))await mkdir(dirname(fileURLToPath(new URL(profileDatabaseUrl))),{recursive:true});
@@ -554,9 +577,21 @@ export class Supervisor {
       device,
       sync,
       artifacts,
-      new ConsoleProcess(),
+      new ConsoleProcess(undefined, {
+        ...(options.scratchCheckpointTimeoutMs === undefined ? {} : {
+          scratchCheckpointTimeoutMs: options.scratchCheckpointTimeoutMs,
+        }),
+        ...(options.scratchIdleScopeMs === undefined ? {} : {
+          scratchIdleScopeMs: options.scratchIdleScopeMs,
+        }),
+        ...(options.scratchMaxWarmScopes === undefined ? {} : {
+          scratchMaxWarmScopes: options.scratchMaxWarmScopes,
+        }),
+      }),
       new OutboxRunner(storage, executors),
       options.restartConsoleAfterCell ?? false,
+      options.scratchCheckpointHooks ?? null,
+      options.consoleRssRecycleThresholdBytes ?? SCRATCH_LIMITS.rssRecycleBytes,
       options.maxSessionDepth ?? 8,
       options.maxChildrenPerSession ?? 32,
       options.userScopeKey ?? "default-user",
@@ -867,7 +902,13 @@ export class Supervisor {
   ): Promise<{ cellId: string; result: JsonValue; logs: string[] }> {
     const session = await this.storage.getSession?.(sessionId);
     if (session?.executionOwnerDeviceId && session.executionOwnerDeviceId !== this.device.deviceId) throw new CapabilityUnavailableError(`execution of session owned by device ${session.executionOwnerDeviceId}`, `device ${this.device.deviceId} (automatic ownership failover is unavailable)`);
-    return this.#cells.run(`${sessionId}/${branchId}`, () => this.#executeCell(sessionId, branchId, code, dependencies, stableCellId));
+    return this.#cells.run(
+      `${sessionId}/${branchId}`,
+      () => this.#consoleLifecycle.run(
+        "shared-console-process",
+        () => this.#executeCell(sessionId, branchId, code, dependencies, stableCellId),
+      ),
+    );
   }
 
   async #executeCell(
@@ -893,6 +934,7 @@ export class Supervisor {
       throw new ValidationError(`Stable cell ${cellId} is ${existing.status}; started cells are never blindly replayed`);
     }
     const started = performance.now();
+    const scratchScope: ScratchScope = { sessionId, branchId };
     await this.storage.appendEvents([{
       sessionId,
       branchId,
@@ -1376,8 +1418,20 @@ export class Supervisor {
       throw new ValidationError(`Unknown console RPC method: ${method}`);
     };
 
+    let terminalCommitted = false;
+    let workerRssBytes = 0;
     try {
+      let restore = null;
+      if (this.scratchCheckpointHooks && !await this.console.hasScratch(scratchScope)) {
+        restore = await this.scratchCheckpointHooks.load(scratchScope).catch(() => null);
+      }
+      await this.console.prepareScratch(
+        scratchScope,
+        restore,
+        this.scratchCheckpointHooks !== null,
+      );
       const execution = await this.console.execute(code, { id: sessionId, branchId }, restored, handler);
+      workerRssBytes = execution.rssBytes;
       const rawPreview = JSON.parse(JSON.stringify(execution.observation.preview)) as unknown;
       assertJsonValue(rawPreview);
       const preview = scrubJson(rawPreview);
@@ -1481,30 +1535,92 @@ export class Supervisor {
         },
       });
       await this.storage.appendEvents(events);
+      terminalCommitted = true;
       acceptanceCrashAfterCellCommit(cellId);
+      let checkpoint: ScratchCheckpointCandidate | null = null;
+      try {
+        checkpoint = await this.console.checkpointScratch(scratchScope, cellId);
+        checkpoint = filterScratchCheckpoint(
+          checkpoint,
+          (_name, value) => containsBrokeredSecret(value),
+        );
+      } catch {
+        if (this.console.status().running) {
+          await this.console
+            .recycle("scratch-checkpoint-serialization-failed")
+            .catch(() => {});
+        }
+      }
+      if (checkpoint && this.scratchCheckpointHooks) {
+        let persisted = false;
+        try {
+          await this.scratchCheckpointHooks.checkpoint(
+            scratchScope,
+            checkpoint,
+            cellId,
+          );
+          persisted = true;
+        } catch {
+          // Scratch persistence is an optional operational cache. The warm
+          // scope and committed cell remain valid when its storage is absent.
+        }
+        if (persisted) {
+          try {
+            await this.console.recordScratchCheckpoint(
+              scratchScope,
+              cellId,
+              checkpoint,
+            );
+          } catch {
+            if (this.console.status().running) {
+              await this.console
+                .recycle("scratch-checkpoint-status-failed")
+                .catch(() => {});
+            }
+          }
+        }
+      }
       return { cellId, result, logs };
     } catch (error) {
+      if (error instanceof ConsoleCellError) workerRssBytes = error.rssBytes;
       const logs = error instanceof ConsoleCellError ? error.logs.map(scrubText) : [];
       const logStreams = error instanceof ConsoleCellError ? [...error.logStreams] : [];
-      await this.storage.appendEvents([{
-        sessionId,
-        branchId,
-        type: "CellFailed",
-        producer: "console",
-        idempotencyKey: `cell-failed:${cellId}`,
-        payload: {
-          cellId,
-          error: scrubText(error instanceof Error ? error.message : String(error)),
-          logs,
-          logStreams,
-          durationMs: Math.round(performance.now() - started),
-        },
-      }]);
+      if (!terminalCommitted) {
+        await this.storage.appendEvents([{
+          sessionId,
+          branchId,
+          type: "CellFailed",
+          producer: "console",
+          idempotencyKey: `cell-failed:${cellId}`,
+          payload: {
+            cellId,
+            error: scrubText(error instanceof Error ? error.message : String(error)),
+            logs,
+            logStreams,
+            durationMs: Math.round(performance.now() - started),
+          },
+        }]);
+      }
       throw error;
     } finally {
       const unfinishedWriter = stagedObservationWriter as StreamingJsonStager | null;
       await unfinishedWriter?.abort();
       if (stagedObservationPath) await rm(stagedObservationPath, { force: true }).catch(() => {});
+      if (!terminalCommitted) {
+        if (this.console.status().running) {
+          try {
+            await this.console.evictScratch(scratchScope);
+          } catch {
+            if (this.console.status().running) {
+              await this.console.recycle("failed-scope-eviction").catch(() => {});
+            }
+          }
+        }
+      }
+      if (workerRssBytes > this.consoleRssRecycleThresholdBytes &&
+          this.console.status().running) {
+        await this.console.recycle("rss-soft-threshold").catch(() => {});
+      }
       if (this.restartConsoleAfterCell) await this.console.stop();
     }
   }
