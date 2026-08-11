@@ -313,21 +313,40 @@ Its conservative 12-window preflight was $3.15 under the recorded $1/M-input
 and $6/M-output list rates; no provider-reported cost was available. This is
 one integration treatment, not a Terminal-Bench 2.1 score.
 
-### SWE-bench Pro public evaluator-compatibility spike
+### SWE-bench Pro public split treatment
 
-The Prime project contains a separate, model-free taskset for one public
-SWE-bench Pro Vuls instance. It validates the public dataset revision, selected
-repository/base revision, prompt isolation, agent image digest, evaluator
-source pin, evidence shape, package contents, and dry-run configuration. The
-agent prompt excludes `patch`, `test_patch`, evaluator scripts, and evaluator
-output.
+The Prime project contains a separate taskset and environment for one public
+qutebrowser instance. The agent starts from an immutable task image, but setup
+archives only the pinned base revision, deletes the original workspace and Git
+object store, initializes one fresh baseline commit, and proves that the
+withheld test commit is not resolvable. Prompt and trace task data exclude the
+reference patch, withheld test patch, official scripts, and evaluator output.
 
-The official evaluator at the pinned source commit derives a mutable Docker Hub
-tag and provides no immutable digest input. Its original task image also retains
-Git history that can recover withheld tests. The shared one-runtime harness has
-no proven sanitized-agent/fresh-scorer split, so the taskset refuses before
-model admission. No SWE-bench Pro provider call, official evaluator execution,
-reward, cost, or benchmark result is claimed. SWE-bench Verified is not a
+After Agencity stops and generated metadata/state are removed, only a bounded
+private patch crosses to host-side scoring. The agent runtime is destroyed. The
+adapter fetches and verifies the pinned official evaluator, makes the pinned
+image available under a loopback-unreachable local alias required by the
+upstream mutable-tag interface, and runs the unmodified official local-Docker
+evaluator in a fresh network-disabled scorer container. Trace evidence retains
+only digests, byte counts, the official boolean result, and cleanup status.
+
+On August 10, 2026, 62 model-free tests, lock/build/distribution checks,
+installed package checks, dry-run resolution, exact task loading, the real
+pinned-image sanitizer and portable bootstrap, and scorer cleanup checks passed.
+The official scorer returned `1.0` for the reference patch and `0.0` for a
+no-op patch. One attended Luna-high treatment made nine calls. Agencity reached
+the total-token bound after ten steps, reported `failed`, and left no change;
+the official evaluator completed normally and returned `0.0` for the declared
+synthetic no-op. Service, metadata/state, scorer-container, image-alias, and
+temporary-directory cleanup all completed. The provider trace exposed no
+per-run cost; the observed wallet display changed by about `$0.01`.
+The paid probe used the initial port-1 alias route. A later audit hardened the
+current model-free path to port 0, a required failed pull of the populated
+alias, and before/after alias identity checks; that no-op scorer rerun passed.
+No second paid probe was run.
+
+This is one zero-score integration treatment, not a SWE-bench Pro score,
+performance result, or suite capability claim. SWE-bench Verified is not a
 primary capability benchmark.
 
 ### Real OpenAI-compatible provider

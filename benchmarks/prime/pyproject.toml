@@ -5,6 +5,7 @@ description = "Prime Verifiers adapter and benchmark tasksets for Agencity."
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "datasets>=5.0.1",
+    "docker>=7.2.0",
     "harbor==0.20.0",
     "python-dateutil>=2.9.0.post0",
     "verifiers[harbor]==0.3.0",
@@ -27,7 +28,7 @@ packages = [
 "manifests/terminal-bench-2-fix-git.json" = "agencity_terminal_bench_2/data/manifest.json"
 "uv.lock" = "agencity_terminal_bench_2/data/uv.lock"
 "manifests/terminal-bench-2-1-fix-git.json" = "agencity_terminal_bench_2_1/data/manifest.json"
-"manifests/swe-bench-pro-public-vuls.json" = "agencity_swe_bench_pro/data/manifest.json"
+"manifests/swe-bench-pro-public-qutebrowser.json" = "agencity_swe_bench_pro/data/manifest.json"
 
 [tool.hatch.build.targets.sdist]
 exclude = [

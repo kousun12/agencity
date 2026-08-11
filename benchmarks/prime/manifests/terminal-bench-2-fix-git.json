@@ -25,5 +25,5 @@
     "bun_archive": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip",
     "bun_archive_sha256": "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
   },
-  "python_lock_sha256": "52a6ddf573ae5e679c9dede7b221f424a44c12e9efbf6cbac1a847cacfecfdb5"
+  "python_lock_sha256": "f82b9b74572046cb2e440c924dcf9e289c8c59317639157fea34c79635fd444e"
 }

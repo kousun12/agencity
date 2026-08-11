@@ -1,6 +1,6 @@
 # Prime Verifiers benchmarking
 
-**Status:** In progress; contract and OOLONG probes verified; independent hardened Terminal-Bench 2 and 2.1 Harbor treatments scored 1.0; SWE-bench Pro public remains a model-free evaluator-compatibility spike
+**Status:** In progress; contract and OOLONG probes verified; independent hardened Terminal-Bench 2 and 2.1 Harbor treatments scored 1.0; one split-runtime SWE-bench Pro public treatment completed and scored 0.0
 **Date:** August 10, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), [Reasoning effort and model capabilities](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md), and [Dynamic typed connectors](./2026-08-09-dynamic-typed-connectors-plan.md)
@@ -628,7 +628,7 @@ rejection, Git exclusion, shutdown confirmation, cleanup-before-scoring order,
 and Verifiers interception route. The upstream Harbor verifier remains the
 sole score source.
 
-On August 10, 2026, lock validation, the 56-test model-free suite, source and
+On August 10, 2026, lock validation, the 62-test model-free suite, source and
 wheel builds, installed-wheel manifest/lock resolution, both dry-runs, exact
 Harbor task loading, complete tree verification, and an actual portable setup
 and cleanup lifecycle in the pinned 2.1 image passed. One attended Luna-high
@@ -640,25 +640,45 @@ provider cost field was returned. The conservative twelve-window preflight at
 the existing $1/M-input and $6/M-output list rates was $3.15. This is
 single-task integration evidence only.
 
-## SWE-bench Pro public adapter spike
+## SWE-bench Pro public split treatment
 
-The public SWE-bench Pro taskset pins one `future-architect/vuls` instance,
-public dataset revision `7ab5114912baf22bb098818e604c02fe7ad2c11f`, repository
-base revision, public-field selection digest, agent image digest, evaluator
-repository commit, evaluator-tree digest, and Python lockfile. It constructs
-the model prompt only from public issue, requirements, and interface materials.
-Reference patches, test patches, official run scripts, parser scripts, and
-evaluator output remain outside agent prompt and task data.
+The public taskset pins one qutebrowser instance from dataset revision
+`7ab5114912baf22bb098818e604c02fe7ad2c11f`, repository base revision
+`def864adc8b19bdbc506919270d8ff1408b4faac`, selected public-field digest,
+task-image manifest digest and image ID, evaluator commit/tree and selected-file
+digests, Verifiers and Docker SDK versions, Agencity commit, Bun archive, and
+Python lockfile. Prompt and trace task data contain only public issue materials.
 
-The feasibility audit found that the official evaluator's local-Docker route
-derives and pulls a mutable Docker Hub tag from the dataset row. It supplies no
-immutable digest override. The original task image also retains Git history
-that can recover withheld tests, and the shared one-runtime harness has no
-verified sanitized-agent/fresh-scorer split. The adapter therefore fails before
-model admission instead of altering the evaluator or using a non-equivalent or
-hidden-test-exposing treatment. Model-free manifest, prompt-isolation,
-evidence-shape, wheel/sdist, task-loading, and dry-run checks pass. No
-SWE-bench Pro paid attempt, official reward, or performance result is present.
+The agent stage archives only the base revision, deletes the original workspace
+and Git object store, initializes one fresh baseline commit, and rejects a
+workspace in which the withheld test commit remains resolvable. Agencity runs
+with network access limited to Verifiers interception. After service shutdown
+and generated-state cleanup, finalization retains a bounded private patch and
+the agent runtime is destroyed.
+
+The host scoring stage fetches and verifies the pinned official evaluator. The
+upstream evaluator still requires a mutable tag, so the adapter verifies the
+immutable image manifest and config digests, creates a unique alias under
+`127.0.0.1:0`, proves a pull of that populated alias fails without changing its
+identity, lets the unmodified evaluator use its local-image fallback, and
+re-verifies the alias identity after a fresh network-disabled scorer run. Only
+boolean reward and bounded digest/size cleanup evidence enter the trace.
+
+The 62-test suite, package checks, dry-run, exact task loading, real
+pinned-container sanitizer and current-head portable bootstrap, and scorer
+cleanup checks passed. The official evaluator scored the model-free reference
+patch `1.0` and no-op `0.0`. One attended Luna-high treatment made nine calls.
+Agencity reached its total-token bound after ten steps, reported terminal
+`failed`, and emitted no patch; the official evaluator completed and scored the
+declared synthetic no-op `0.0`. All service, generated-state, scorer-container,
+alias, and temporary-directory cleanup completed. Usage was 34,058 prompt,
+3,331 completion, 11,840 cached input, and 2,019 reasoning tokens. No per-run
+provider cost field was present; the attended wallet display changed by about
+`$0.01`. That paid probe used the initial port-1 alias route. A later audit
+hardened the current adapter to port 0, a required failed pull of the populated
+alias, and before/after alias identity checks; the model-free no-op rerun passed
+and no second paid probe was run. This is one zero-score integration treatment,
+not a performance or suite-capability result.
 
 Verifiers evaluates the committed turn and token limits between calls, so they
 are bounded trajectory controls rather than a hard billed-dollar admission

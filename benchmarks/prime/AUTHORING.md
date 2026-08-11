@@ -168,9 +168,10 @@ benchmarks/prime/
     └── test_<benchmark>.py
 ```
 
-The package `__init__.py` exports exactly one taskset class. Keep shared
-Agencity execution behavior in `agencity_verifiers`; keep benchmark rules in the
-benchmark package.
+The package `__init__.py` exports exactly one taskset class and may also export
+one benchmark-specific `Env` subclass when scoring requires multi-stage control
+flow. Keep shared Agencity execution behavior in `agencity_verifiers`; keep
+benchmark rules in the benchmark package.
 
 ## Authoring workflow
 
@@ -244,14 +245,18 @@ For a workspace task:
   after service shutdown and before scoring;
 - run the official deterministic verifier when available;
 - verify that the official evaluator can consume the treatment's immutable
-  image or environment identity. If it only resolves mutable tags or otherwise
-  cannot preserve the declared pin, implement a model-free adapter spike that
-  rejects before model admission. Do not patch the evaluator or substitute a
-  non-equivalent scorer merely to obtain a rollout;
+  image or environment identity. If it only resolves mutable tags, an adapter
+  may use the unmodified evaluator's documented local-image fallback only when
+  it verifies the immutable image first, makes remote resolution impossible,
+  and re-verifies image identity after scoring. Otherwise implement a
+  model-free adapter spike that rejects before model admission. Do not patch the
+  evaluator or substitute a non-equivalent scorer merely to obtain a rollout;
 - inspect the agent image for retained Git history, test commits, evaluator
-  files, and other withheld material. A future two-stage treatment must prove a
-  sanitized agent workspace and a fresh scorer runtime before it exposes a
-  repository workspace to the model;
+  files, and other withheld material. A two-stage treatment must prove that the
+  agent sees only an authorized base tree in a new history, that withheld
+  commits are unresolved, that patch content remains private, that the agent
+  runtime is destroyed before official scoring, and that scorer files,
+  containers, aliases, and temporary state are removed;
 - retain verifier stdout and stderr only through bounded summaries or
   non-versioned raw outputs;
 - treat missing verifier dependencies and malformed evidence as infrastructure

@@ -276,14 +276,25 @@ scored `1.0`. The independently pinned Terminal-Bench 2.1 treatment completed
 in seven calls and also scored `1.0`, with stopped-service and cleanup evidence.
 Both are one-task integration evidence only; no Terminal-Bench suite capability,
 unattended cancellation recovery, performance result, or full-suite result is
-verified. A separate SWE-bench Pro public adapter pins one public Vuls instance,
-its public dataset/evaluator revisions, agent image digest, and isolation
-boundary, but remains a model-free spike: the official evaluator accepts only a
-mutable image tag and has no digest override, while the original task image
-retains Git history that can reveal withheld tests. The current harness has no
-verified sanitized-agent/fresh-scorer split, so the taskset blocks before model
-admission rather than use a non-equivalent or hidden-test-exposing treatment.
-No SWE-bench Pro reward or performance claim is verified.
+verified. A separate SWE-bench Pro public treatment pins one qutebrowser
+instance, its public dataset/base revision, task image manifest digest and image
+ID, official evaluator commit/tree and selected-file digests, Agencity commit,
+Bun archive, Verifiers/Docker SDK versions, and Python lock. Its agent stage
+archives only the base revision, deletes the original Git history, creates one
+fresh baseline commit, proves the withheld test commit is unresolved, limits
+network to Verifiers interception, and emits only a bounded private patch after
+Agencity shutdown and generated-state cleanup. The agent container is then
+destroyed. A host stage verifies the evaluator source, supplies the immutable
+image through an unreachable local alias required by the unmodified upstream
+mutable-tag route, and runs the official scorer in a fresh network-disabled
+container. Model-free reference/no-op checks scored `1.0`/`0.0`. One attended
+Luna-high treatment made nine calls, reached Agencity's total-token bound with
+no patch, and received official reward `0.0`; all service, metadata, scorer,
+alias, and temporary-file cleanup completed. This is one zero-score integration
+treatment, not a SWE-bench Pro performance or suite-capability claim. The paid
+probe used the initial port-1 alias route; a later model-free audit hardened the
+current adapter to port 0, a required failed pull of the populated alias, and
+before/after alias identity checks without authorizing a second paid probe.
 
 Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified.
 

@@ -250,7 +250,7 @@ uv build
 uv run --locked eval @ configs/terminal-bench-2-1-fix-git-sample.toml --dry-run
 ```
 
-On August 10, 2026, the 56-test model-free suite, wheel/sdist inspection,
+On August 10, 2026, the 62-test model-free suite, wheel/sdist inspection,
 installed-wheel pin check, exact Harbor loading and tree verification, both
 dry-runs, and a portable bootstrap/metadata-cleanup lifecycle in the pinned
 image passed. One attended Luna-high rollout made seven model calls, reported
@@ -263,39 +263,64 @@ $1/M-input and $6/M-output list rates was $3.15; the observed non-cached
 listed-rate calculation is about $0.031. This one result is integration
 evidence, not a Terminal-Bench 2.1 score or a suite capability claim.
 
-## SWE-bench Pro public adapter spike
+## SWE-bench Pro public split treatment
 
-`agencity_swe_bench_pro` is a separate model-free adapter spike for the public
-SWE-bench Pro instance
-`instance_future-architect__vuls-36456cb151894964ba1683ce7da5c35ada789970`.
-It pins the public dataset revision
-`7ab5114912baf22bb098818e604c02fe7ad2c11f`, repository
-`future-architect/vuls`, base revision
-`4ae87cc36cb1b1dbc7fd49680d553c8bb47fa8b6`, selected public-field digest,
-agent image digest, evaluator repository commit, evaluator-tree digest, and
-Python lock digest.
+`agencity_swe_bench_pro` is a separate one-instance treatment for public
+SWE-bench Pro. It selects
+`instance_qutebrowser__qutebrowser-0833b5f6f140d04200ec91605f88704dd18e2970-v059c6fdc75567943479b23ebca7c07b5e9a7f34c`
+from dataset revision `7ab5114912baf22bb098818e604c02fe7ad2c11f`.
+The manifest pins repository `qutebrowser/qutebrowser`, base revision
+`def864adc8b19bdbc506919270d8ff1408b4faac`, public selection digest, task
+image manifest/config digests and observed image ID, evaluator commit/tree and selected-file
+digests, Verifiers and Docker SDK versions, Agencity commit
+`ef16e551cc4494cdd76637249a80afa82cdf26be`, Bun archive digest, and Python
+lock digest.
 
-The task data and prompt contain only the public issue, requirements, and
-interface. Reference patches, test patches, evaluator scripts, and evaluator
-outputs are not put in task data or traces. A future runnable treatment must
-also create a sanitized agent workspace: the original official image retains
-Git history from which withheld tests can be recovered.
+The treatment has two isolated stages:
 
-The official evaluator at the pinned commit derives and pulls a mutable Docker
-Hub tag internally and exposes no image-digest override. Together with the
-missing proven sanitized-agent/fresh-scorer split, that cannot preserve the
-manifest's immutable environment pin or hidden-test boundary. The taskset
-therefore rejects before model admission; it does not run a patched evaluator
-or substitute a non-equivalent scorer. Its sample config is valid for
-resolution only:
+1. The agent container archives only the pinned base revision, deletes the
+   original workspace and Git object store, initializes one fresh baseline
+   commit, and confirms that the withheld test commit is not resolvable. The
+   prompt contains only the public issue, requirements, interface, repository,
+   and base revision. Network access is limited to Verifiers interception.
+2. After Agencity stops and generated metadata/state are removed, finalization
+   captures a bounded private patch. The agent container is destroyed. A host
+   scorer fetches and verifies the pinned official evaluator, aliases the
+   immutable task image under a loopback-unreachable name required by the
+   upstream mutable-tag interface, and runs the unmodified official local-Docker
+   evaluator in a fresh network-disabled container.
+
+Reference patches, withheld test patches and Git objects, official run/parser
+scripts, patch content, parsed test names, and evaluator output are absent from
+agent-visible task data and committed trace evidence. Traces retain only
+bounded digests, byte counts, the official boolean result, and cleanup facts.
+
+Run the bounded sample:
 
 ```sh
-uv run --locked eval @ configs/swe-bench-pro-public-vuls-sample.toml --dry-run
+uv run --locked eval @ configs/swe-bench-pro-public-qutebrowser-sample.toml --dry-run
 ```
 
-No SWE-bench Pro model call, patch evaluation, reward, or paid cost was
-recorded. This is not a SWE-bench Pro result. SWE-bench Verified is not used as
-the primary benchmark and is only a compatibility reference.
+Model-free validation proved that the pinned container sanitizer leaves one
+fresh commit and no resolvable withheld commit. The official evaluator scored
+the reference patch `1.0` and a no-op patch `0.0`; temporary scorer aliases,
+containers, and directories were removed.
+
+One attended Luna-high rollout then made nine model calls. Agencity exhausted
+the configured total-token bound after ten steps, reported terminal `failed`,
+and produced no workspace change, so the adapter supplied its declared
+synthetic no-op patch. The official evaluator completed normally and returned
+`0.0`. The trace reported 34,058 prompt tokens, 3,331 completion tokens, 11,840
+cached input tokens, and 2,019 reasoning tokens. Service shutdown, generated
+metadata/state cleanup, scorer-container teardown, image-alias removal, and
+temporary-directory cleanup all completed. The provider trace had no per-run
+cost field; the attended wallet display decreased by approximately `$0.01`.
+That paid probe used the initial port-1 alias route. A subsequent audit hardened
+the current adapter to port 0, an explicit failed pull of the populated alias,
+and before/after alias-ID checks; the model-free no-op scorer passed again.
+No second paid probe was run.
+This is one zero-score integration treatment, not a SWE-bench Pro score or
+capability claim. SWE-bench Verified is not used as the primary benchmark.
 
 ## Evidence and interpretation
 
@@ -313,8 +338,8 @@ Retain:
 
 For the new additions: Terminal-Bench 2.1 has one pass and zero zero-score,
 blocked, failed, unknown, skipped, or infrastructure-error outcomes. SWE-bench
-Pro has zero model attempts and one blocked-by-design adapter route; it is
-reported separately from rollout outcomes rather than as a zero score.
+Pro has one completed zero-score treatment with Agencity terminal `failed`, and
+zero pass, blocked, unknown, skipped, or infrastructure-error outcomes.
 
 The OOLONG reward is a mean task score, not binary accuracy. Numeric tasks use
 `0.75 ** absolute_error`; other supported synth answers use exact matching

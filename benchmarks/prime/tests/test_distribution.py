@@ -43,7 +43,10 @@ class DistributionTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            any(name.endswith("/manifests/swe-bench-pro-public-vuls.json") for name in names)
+            any(
+                name.endswith("/manifests/swe-bench-pro-public-qutebrowser.json")
+                for name in names
+            )
         )
         self.assertTrue(any(name.endswith("/uv.lock") for name in names))
 
@@ -63,7 +66,10 @@ class DistributionTests(unittest.TestCase):
 
         self.assertIn("agencity_terminal_bench_2_1/data/manifest.json", names)
         self.assertIn("agencity_swe_bench_pro/data/manifest.json", names)
+        self.assertIn("agencity_swe_bench_pro/scorer.py", names)
         self.assertIn("agencity_terminal_bench_2/data/uv.lock", names)
+        self.assertFalse(any(name.endswith("/run_script.sh") for name in names))
+        self.assertFalse(any(name.endswith("/parser.py") for name in names))
         self.assertFalse(
             any(
                 part in {".cache", ".venv", "dist", "outputs", "solution"}
