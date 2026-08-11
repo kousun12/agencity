@@ -3,6 +3,10 @@
 This project runs Agencity as a custom Prime Verifiers v1 harness. Its Python
 dependencies and lockfile are isolated from Agencity's Bun product runtime.
 
+See [`AUTHORING.md`](./AUTHORING.md) to add a benchmark. Workspace-scored coding
+tasks are the primary benchmark class; answer-only adapters are deferred until
+a concrete low-cost evaluation requires one.
+
 ## OOLONG treatment
 
 The OOLONG integration implements a **Prime-style file-offloaded

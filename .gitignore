@@ -9,6 +9,11 @@ coverage/
 .claude
 .idea/
 benchmarks/prime/.venv/
+benchmarks/prime/.cache/
+benchmarks/prime/cache/
 benchmarks/prime/outputs/
+benchmarks/prime/workspaces/
+benchmarks/prime/tmp/
+benchmarks/prime/evidence/raw/
 benchmarks/prime/**/__pycache__/
 benchmarks/prime/**/*.pyc

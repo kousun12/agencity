@@ -232,6 +232,13 @@ blockers are documented in [`benchmarks/prime/README.md`](../benchmarks/prime/RE
 The development probes are integration evidence only. No full OOLONG score,
 hosted Prime execution, or exact Prime Agent reproduction is verified.
 
+New benchmark integrations follow the
+[`benchmarks/prime/AUTHORING.md`](../benchmarks/prime/AUTHORING.md) contract.
+Workspace-scored coding tasks are the primary class: Agencity works in a
+disposable repository or task workspace, then an independent verifier scores
+the resulting files after agent execution. Answer-only tasksets remain useful
+for low-cost integration checks but are not the main product benchmark.
+
 ### Real OpenAI-compatible provider
 
 ```sh

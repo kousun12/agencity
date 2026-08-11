@@ -52,7 +52,7 @@ This index is the public documentation entrypoint. Start with the user guide for
 
 ## Verification
 
-- [Verification guide](./verification.md) — deterministic checks, external gates, and how to report skips.
+- [Verification guide](./verification.md) — deterministic checks, external gates, benchmark integration, and how to report skips.
 
 ## Implementation plans
 

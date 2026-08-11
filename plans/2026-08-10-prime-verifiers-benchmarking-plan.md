@@ -341,24 +341,34 @@ complete Agencity-comparable reproduction bundle. Any future comparison must
 pin the game set, prompt, action limit, model, reasoning effort, run count,
 selection rule, token use, and scorecard evidence.
 
-## Proposed repository layout
+## Repository layout
+
+[`benchmarks/prime/AUTHORING.md`](../benchmarks/prime/AUTHORING.md) is the
+authoritative contract for new benchmark adapters. Workspace-scored coding tasks
+are the primary next class; answer-only tasksets remain optional low-cost checks.
 
 ```text
 benchmarks/prime/
+├── AUTHORING.md
 ├── README.md
 ├── pyproject.toml
 ├── uv.lock
 ├── configs/
 │   ├── smoke.toml
-│   └── answer-smoke.toml
+│   └── <benchmark>-{smoke,sample,full}.toml
 ├── agencity_verifiers/
 │   ├── __init__.py
 │   ├── harness.py
 │   ├── result.py
-│   └── smoke_taskset.py
+│   └── taskset.py
+├── agencity_<benchmark>/
+│   ├── __init__.py
+│   └── taskset.py
+├── manifests/
+├── scripts/
 └── tests/
-    ├── test_harness.py
-    └── test_result.py
+    ├── test_adapter.py
+    └── test_<benchmark>.py
 ```
 
 Generated evaluation outputs remain ignored and outside the committed fixture

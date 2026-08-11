@@ -259,7 +259,9 @@ contract and 1K OOLONG integration smokes have passed. One revised Sol-high
 Yahoo 128K sample completed and scored `1.0`; the corresponding Luna sample
 completed but scored `0`. Earlier bounded failures remain configuration
 evidence. No full OOLONG score, hosted run, or exact Prime Agent reproduction is
-verified.
+verified. New adapters follow `benchmarks/prime/AUTHORING.md`; workspace-scored
+coding tasks are the primary benchmark class, with answer-only tasksets reserved
+for narrow integration or reasoning checks.
 
 Report pass, fail, and skip counts separately. Never summarize a skipped real integration as verified.
 
