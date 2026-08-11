@@ -402,7 +402,11 @@ describe("installed profile governance", () => {
       item.frozenInput.reviewPolicy.digest &&
       item.frozenInput.reviewerDispatch.configuration)).toBe(true);
 
-    const finalHistory = json(await world.command(["history", "current", "--json"], environment));
+    const finalHistoryResult = await world.command(["history", "current", "--json"], environment);
+    expect(finalHistoryResult.code).toBe(0);
+    expect(Buffer.byteLength(finalHistoryResult.stdout)).toBeGreaterThan(200_000);
+    expect(finalHistoryResult.stdout.endsWith("\n")).toBe(true);
+    const finalHistory = json(finalHistoryResult);
     expect(finalHistory.runs.map((run: any) => run.profilePin.profileVersionId)).toEqual([
       initial.profileVersionId,
       approvedProfile.profileVersionId,

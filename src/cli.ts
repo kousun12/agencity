@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
@@ -1082,7 +1082,10 @@ function printValue(value: unknown, json: boolean): void {
   // #region agent log
   appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "A", location: "src/cli.ts:printValue:before", message: "CLI value serialized", data: { bytes: Buffer.byteLength(rendered), suffix: rendered.slice(-16), stdoutLength: process.stdout.writableLength, needsDrain: process.stdout.writableNeedDrain }, timestamp: Date.now() })}\n`);
   // #endregion
-  console.log(rendered);
+  writeFileSync(process.stdout.fd, `${rendered}\n`, "utf8");
+  // #region agent log
+  appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "G", location: "src/cli.ts:printValue:syncWrite", message: "CLI synchronous stdout write completed", data: { bytes: Buffer.byteLength(rendered) + 1 }, timestamp: Date.now() })}\n`);
+  // #endregion
   // #region agent log
   appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "B", location: "src/cli.ts:printValue:after", message: "CLI console log returned", data: { bytes: Buffer.byteLength(rendered), stdoutLength: process.stdout.writableLength, needsDrain: process.stdout.writableNeedDrain }, timestamp: Date.now() })}\n`);
   // #endregion
