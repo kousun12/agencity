@@ -11,7 +11,7 @@ rich = false
 [sampling]
 temperature = 0
 reasoning_effort = "high"
-max_tokens = 4096
+max_tokens = 36000
 
 [env.taskset]
 id = "agencity-swe-bench-pro"
@@ -30,7 +30,7 @@ finalize = 2100
 [env.agent]
 max_turns = 12
 max_input_tokens = 64000
-max_output_tokens = 32768
+max_output_tokens = 36000
 max_total_tokens = 48000
 
 [env.agent.timeout]
