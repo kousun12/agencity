@@ -1320,7 +1320,8 @@ describe("FU-016 durable RefinerService", () => {
       const ui = new TerminalUI(client, { interactive: false, output: { write(value: string | Uint8Array) { terminalOutput += String(value); return true; } } });
       await ui.run(sessionId, branchId);
       await ui.execute("/refine status");
-      expect(terminalOutput).toContain("Protocol trajectory review — no change");
+      expect(terminalOutput).toContain("Protocol trajectory review — No change");
+      expect(terminalOutput).toContain("No behavioral harness artifact changed.");
       expect(terminalOutput).not.toContain(review.reviewId);
       await ui.execute("/raw");
       expect(terminalOutput).toContain(review.reviewId);
@@ -1336,7 +1337,7 @@ describe("FU-016 durable RefinerService", () => {
         (await client.refinementReview(sessionId, branchId, detached!.reviewId)).status === "no_change",
       "detached terminal refinement review", 5_000);
       await ui.execute("/refine status");
-      expect(terminalOutput).toContain("review the retained protocol trajectory — no change");
+      expect(terminalOutput).toContain("review the retained protocol trajectory — No change");
     } finally { protocol.stop(); await supervisor.close(); }
   });
 

@@ -12,6 +12,7 @@ import {
   type AgentEvent,
   type BranchWatchHandlers,
   type EffectProgressNotification,
+  type RefinementReviewRecord,
 } from "../../src/index.ts";
 import {
   TERMINAL_COMMAND_REGISTRY,
@@ -21,6 +22,11 @@ import {
   renderEvent,
   renderTerminalError,
 } from "../../src/tui/index.ts";
+import {
+  buildTerminalScreen,
+  retainedRefinementConversation,
+  summarizeTerminalRefinement,
+} from "../../src/tui/view-model.ts";
 import type { ProductBranchSummary } from "../../src/product/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
@@ -63,6 +69,46 @@ function progress(effectId: string, text: string, sequence = 0): EffectProgressN
   };
 }
 
+function refinementReview(
+  overrides: Partial<RefinementReviewRecord> = {},
+): RefinementReviewRecord {
+  return {
+    reviewId: "review-visible",
+    sessionId: "session-visible",
+    branchId: "branch-visible",
+    fingerprint: "fingerprint",
+    mode: "manual",
+    waitForGovernance: false,
+    requestedScope: "local",
+    requestedScopeKey: "scope-visible",
+    allowedKinds: ["memory", "prompt_note", "skill", "subagent_spec"],
+    triggerId: "trigger-visible",
+    triggerKind: "manual",
+    triggerFingerprint: "trigger-fingerprint",
+    triggerKey: null,
+    nonterminalKey: null,
+    triggerEvidenceThroughCursor: null,
+    evidenceEventIds: [],
+    sourceEventIds: [],
+    sourceSnapshotHash: "snapshot-hash",
+    sourceThroughCursor: "42",
+    instructions: "Make HTML editing more robust",
+    status: "no_change",
+    handleId: null,
+    childSessionId: null,
+    childBranchId: null,
+    decisionFingerprint: null,
+    proposalId: null,
+    reason: "This needs ordinary repository implementation.",
+    governedStatus: null,
+    governedResult: null,
+    createdEventId: "event-created",
+    createdAt: "2026-08-11T18:33:43.657Z",
+    updatedAt: "2026-08-11T18:33:53.427Z",
+    ...overrides,
+  };
+}
+
 describe("FU-005 protocol-backed terminal UI", () => {
   test("the public command registry covers product, live/history, status, autonomy, and operations", () => {
     const names = new Set(TERMINAL_COMMAND_REGISTRY.flatMap((item) => [item.name, ...item.aliases]));
@@ -94,6 +140,110 @@ describe("FU-005 protocol-backed terminal UI", () => {
       .toThrow("memory, prompt_note, skill, or subagent_spec");
     expect(() => parseTerminalRefinementRequest("--wait --detach improve edits"))
       .toThrow("--wait or --detach");
+  });
+
+  test("summarizes retained refinement outcomes without implying an unapplied change", () => {
+    expect(summarizeTerminalRefinement(refinementReview())).toEqual({
+      request: "Make HTML editing more robust",
+      status: "No change",
+      result: "No behavioral harness artifact changed.",
+      reason: "This needs ordinary repository implementation.",
+      guidance: "Refinement updates memory, prompt notes, tested skills, or subagent specifications. Submit code, repository, or runtime implementation as a normal task.",
+      changed: false,
+    });
+    expect(summarizeTerminalRefinement(refinementReview({
+      status: "candidate",
+      proposalId: "proposal-visible",
+      reason: "Governance is pending.",
+    }))).toMatchObject({
+      status: "Proposal pending governance",
+      result: "No behavioral harness artifact has changed yet.",
+      changed: false,
+    });
+    expect(summarizeTerminalRefinement(refinementReview({
+      status: "candidate",
+      proposalId: "proposal-visible",
+      governedStatus: "reviewed_rejected",
+      governedResult: {
+        status: "reviewed_rejected",
+        reason: "The proposal did not meet the sealed policy.",
+        appliedVersionIds: [],
+      },
+    }))).toMatchObject({
+      status: "Governance reviewer rejected the proposal",
+      result: "No behavioral harness artifact changed.",
+      reason: "The proposal did not meet the sealed policy.",
+      changed: false,
+    });
+    expect(summarizeTerminalRefinement(refinementReview({
+      status: "candidate",
+      proposalId: "proposal-visible",
+      governedStatus: "applied",
+      governedResult: {
+        status: "applied",
+        reason: "Approved and revalidated.",
+        appliedVersionIds: ["version-visible"],
+      },
+    }))).toEqual({
+      request: "Make HTML editing more robust",
+      status: "Applied",
+      result: "1 behavioral harness artifact version changed.",
+      reason: "Approved and revalidated.",
+      guidance: "Reviewer approval establishes policy consistency, not proven improvement.",
+      changed: true,
+    });
+    expect(retainedRefinementConversation([refinementReview()], "current")[0]?.content)
+      .toContain("**Next:** Refinement updates memory");
+  });
+
+  test("reloads retained refinement results into the transcript after reopen", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-refinement-history-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "terminal-refinement-history",
+      sessionName: "Refinement history",
+      branchName: "main",
+    });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const retained = refinementReview({
+      sessionId: session.sessionId,
+      branchId: session.branchId,
+    });
+    let loads = 0;
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "refinementReviews") return async () => {
+          loads++;
+          return [retained];
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const first = new TerminalUI(client, { interactive: false, manageSignals: false });
+    await first.attach(session.sessionId, session.branchId, false);
+    const firstResult = buildTerminalScreen(first.presentation).conversation.at(-1);
+    expect(firstResult).toMatchObject({
+      id: "refinement-review:review-visible",
+      role: "runtime",
+    });
+    expect(firstResult?.content).toContain("**Request:** Make HTML editing more robust");
+    expect(firstResult?.content).toContain("**Status:** No change");
+    expect(firstResult?.content).toContain("No behavioral harness artifact changed.");
+    expect(firstResult?.content).toContain("**Reason:** This needs ordinary repository implementation.");
+    await first.detach(false);
+
+    const reopened = new TerminalUI(client, { interactive: false, manageSignals: false });
+    await reopened.attach(session.sessionId, session.branchId, false);
+    expect(buildTerminalScreen(reopened.presentation).conversation.at(-1)).toEqual(firstResult);
+    expect(loads).toBeGreaterThanOrEqual(2);
+    await reopened.detach(false);
+    await supervisor.close();
   });
 
   test("live events are a concise product projection while internal action JSON stays audit-only", () => {

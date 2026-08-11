@@ -17,6 +17,7 @@ import {
 import type {
   FamilyAgentRecord,
   RecoverySummaryView,
+  RefinementReviewRecord,
   StartRefinementReviewInput,
 } from "../runtime/index.ts";
 import { scrubText } from "../security/index.ts";
@@ -28,6 +29,7 @@ import {
   type TerminalConnectionState,
   type TerminalFamilyNavigation,
   type TerminalPresentation,
+  type TerminalRefinementRefreshState,
   type TerminalWorkspaceAgentsState,
 } from "./view-model.ts";
 import {
@@ -115,7 +117,7 @@ export const TERMINAL_COMMAND_REGISTRY: readonly TerminalCommandDefinition[] = O
   { name: "/skill", aliases: [], category: "status", usage: "/skill ENTRY_ID JSON", summary: "Invoke a retained skill version." },
   { name: "/skill-test", aliases: [], category: "status", usage: "/skill-test ENTRY_ID [VERSION_ID]", summary: "Run a retained skill test." },
   { name: "/profile", aliases: [], category: "status", usage: "/profile [show|history|proposals|propose JSON|repropose latest|N JSON|rollback REVISION JSON]", summary: "Inspect and explicitly govern this agent's behavioral profile." },
-  { name: "/refine", aliases: [], category: "status", usage: "/refine [--wait|--detach] [--kind KIND[,KIND]] [INSTRUCTIONS|status|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Start a detached trajectory review; use --wait to block for governance." },
+  { name: "/refine", aliases: [], category: "status", usage: "/refine [--wait|--detach] [--kind KIND[,KIND]] [INSTRUCTIONS|status|auto on|off|correct IDS -- TEXT|propose-json JSON]", summary: "Review experience for governed memory, prompt-note, skill, or subagent-spec changes; submit code/runtime work as a normal task." },
   { name: "/rollback", aliases: [], category: "status", usage: "/rollback PROPOSAL_ID REASON", summary: "Request governed refinement rollback." },
   { name: "/sync", aliases: [], category: "operations", usage: "/sync", summary: "Run explicit synchronization." },
   { name: "/sync-status", aliases: [], category: "operations", usage: "/sync-status", summary: "Inspect sync lifecycle." },
@@ -349,6 +351,16 @@ const FAMILY_REFRESH_EVENT_TYPES = new Set<AgentEvent["type"]>([
   "AgentRunCancellationRequested", "AgentRunStatusChanged", "BudgetExceeded",
   "EffectOutcomeRecorded", "EffectReconciliationRecorded",
 ]);
+const REFINEMENT_REFRESH_EVENT_TYPES = new Set<AgentEvent["type"]>([
+  "RefinementReviewRequested", "RefinementReviewChildLinked", "RefinementReviewStatusChanged",
+  "GovernedRefinementProposed", "GovernedRefinementValidated", "RefinementGovernanceReviewRequested",
+  "RefinementGovernanceReviewChildLinked", "RefinementGovernanceReviewDecided",
+  "GovernedRefinementApplied", "RefinementProposalTerminalNoticeDelivered",
+]);
+
+function refinementHistoryUnavailable(state: TerminalRefinementRefreshState): boolean {
+  return state === "unavailable";
+}
 
 export class TerminalUI {
   readonly #output: Pick<NodeJS.WriteStream, "write">;
@@ -407,6 +419,11 @@ export class TerminalUI {
   #familyRefreshTimer: unknown = null;
   #familyBrowserOpen = false;
   #familyGeneration = 0;
+  #refinementReviews: RefinementReviewRecord[] = [];
+  #refinementRefresh: TerminalRefinementRefreshState = "unavailable";
+  #refinementRefreshPromise: Promise<void> | null = null;
+  #refinementRefreshQueued = false;
+  #refinementGeneration = 0;
   #navigationGeneration = 0;
   #navigationTail: Promise<void> = Promise.resolve();
 
@@ -459,6 +476,9 @@ export class TerminalUI {
     this.#liveState = snapshot.state;
     this.#viewState = snapshot.state;
     this.#navigationGeneration++;
+    this.#refinementGeneration++;
+    this.#refinementReviews = [];
+    this.#refinementRefresh = "refreshing";
     this.#family = {
       route: { sessionId, branchId },
       parent: null,
@@ -478,7 +498,10 @@ export class TerminalUI {
       fetchedAt: null,
       generation: this.#workspaceAgents.generation + 1,
     };
-    await this.#refreshFamily(true);
+    await Promise.all([
+      this.#refreshFamily(true),
+      this.#refreshRefinementReviews(),
+    ]);
     const recovery = await this.client.recoverySummary(sessionId, branchId);
     let profileGovernance: GovernedRefinementRecord[] = [];
     let profileGovernanceUnavailable = false;
@@ -490,6 +513,9 @@ export class TerminalUI {
     if (announce) {
       this.#write(`${renderStartupStatus(snapshot.state, capabilities, recovery, agentTools.selected)}\n`);
       if (recovery.unknownEffects.length) this.#write("Unknown effects require inspection with /unknown and evidence-only /reconcile; resume never retries them.\n");
+      if (refinementHistoryUnavailable(this.#refinementRefresh)) {
+        this.#write("Refinement history is temporarily unavailable; retry with /refine history.\n");
+      }
       if (profileGovernanceUnavailable) this.#write("Profile governance notices are temporarily unavailable; profile inspection remains available.\n");
       const pendingGovernance = profileGovernance.filter(record => ![
         "deterministically_rejected", "reviewed_rejected", "review_failed", "review_unknown",
@@ -570,6 +596,8 @@ export class TerminalUI {
       provisionalRunIds: [...this.#agentWorkingRunIds],
       family: this.#family,
       workspaceAgents: this.#workspaceAgents,
+      refinementReviews: this.#refinementReviews,
+      refinementRefresh: this.#refinementRefresh,
     };
   }
 
@@ -958,6 +986,7 @@ export class TerminalUI {
         }
         this.#publish();
         if (FAMILY_REFRESH_EVENT_TYPES.has(event.type)) void this.#refreshFamily();
+        if (REFINEMENT_REFRESH_EVENT_TYPES.has(event.type)) void this.#refreshRefinementReviews();
       },
       onProgress: (progress) => {
         if (!currentRoute()) return;
@@ -1010,6 +1039,7 @@ export class TerminalUI {
         this.#connection = "reconnecting";
         this.#publish();
         void this.#refreshFamily();
+        void this.#refreshRefinementReviews();
       },
       onConnectionState: (state) => {
         if (!currentRoute()) return;
@@ -1017,6 +1047,7 @@ export class TerminalUI {
         this.#publish();
         if (state === "connected") {
           void this.#refreshFamily();
+          void this.#refreshRefinementReviews();
           this.#scheduleFamilyRefresh();
         } else {
           this.#clearFamilyRefreshTimer();
@@ -1157,6 +1188,9 @@ export class TerminalUI {
     this.#agentProgressRunByEffect.clear();
     this.#agentWorkingRunIds.clear();
     this.#agentWorkingAnnouncementRunIds.clear();
+    this.#refinementGeneration++;
+    this.#refinementReviews = [];
+    this.#refinementRefresh = "refreshing";
     this.#liveState = snapshot.state;
     this.#viewState = snapshot.state;
     this.#family = {
@@ -1170,10 +1204,56 @@ export class TerminalUI {
     };
     this.#interrupts.reset();
     await this.#startWatch();
-    await this.#refreshFamily(true);
+    await Promise.all([
+      this.#refreshFamily(true),
+      this.#refreshRefinementReviews(),
+    ]);
     const sessionName = snapshot.state.sessionName ?? "unnamed session";
     const branchName = snapshot.state.branch.name ?? "unnamed branch";
     this.#write(`Switched to ${sessionName}/${branchName}.\n`);
+    this.#publish();
+  }
+
+  async #refreshRefinementReviews(): Promise<void> {
+    if (this.#detached || this.#closing || !this.#liveState) return;
+    if (this.#refinementRefreshPromise) {
+      this.#refinementRefreshQueued = true;
+      await this.#refinementRefreshPromise;
+      return;
+    }
+    const operation = this.#drainRefinementRefresh();
+    this.#refinementRefreshPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.#refinementRefreshPromise === operation) this.#refinementRefreshPromise = null;
+    }
+  }
+
+  async #drainRefinementRefresh(): Promise<void> {
+    do {
+      this.#refinementRefreshQueued = false;
+      await this.#performRefinementRefresh();
+    } while (this.#refinementRefreshQueued && !this.#detached && !this.#closing);
+  }
+
+  async #performRefinementRefresh(): Promise<void> {
+    const sessionId = this.#sessionId;
+    const branchId = this.#branchId;
+    const generation = ++this.#refinementGeneration;
+    this.#refinementRefresh = "refreshing";
+    this.#publish();
+    try {
+      const records = await this.client.refinementReviews(sessionId, branchId);
+      if (generation !== this.#refinementGeneration ||
+          sessionId !== this.#sessionId || branchId !== this.#branchId) return;
+      this.#refinementReviews = records.slice(-24);
+      this.#refinementRefresh = "current";
+    } catch {
+      if (generation !== this.#refinementGeneration ||
+          sessionId !== this.#sessionId || branchId !== this.#branchId) return;
+      this.#refinementRefresh = this.#refinementReviews.length ? "stale" : "unavailable";
+    }
     this.#publish();
   }
 
@@ -1393,7 +1473,7 @@ export class TerminalUI {
   async #schedule(command:string):Promise<void>{const once=/^once\s+(\S+)\s+([\s\S]+)$/.exec(command);const every=/^every\s+(\d+)\s+([\s\S]+)$/.exec(command);if(once){this.#detail("/schedule", await this.client.createSchedule(this.#sessionId,this.#branchId,{at:once[1]!,prompt:once[2]!}));return;}if(every){this.#detail("/schedule", await this.client.createSchedule(this.#sessionId,this.#branchId,{intervalMs:Number(every[1]),prompt:every[2]!}));return;}const change=/^(pause|resume|clear)\s+(\d+)$/.exec(command);if(!change)throw new Error("/schedule once ISO PROMPT|every MS PROMPT|pause N|resume N|clear N");const item=(await this.client.schedules(this.#sessionId,this.#branchId))[Number(change[2])-1];if(!item)throw new Error("Schedule number not found");this.#detail("/schedule", change[1]==="pause"?await this.client.pauseSchedule(item.scheduleId):change[1]==="resume"?await this.client.resumeSchedule(item.scheduleId):await this.client.clearSchedule(item.scheduleId));}
   async #reconcile(command:string):Promise<void>{const match=/^(\S+)\s+(succeeded|failed|no_effect|still_unknown)\s+([\s\S]+)$/.exec(command);if(!match)throw new Error("/reconcile EFFECT_ID succeeded|failed|no_effect|still_unknown SUMMARY");this.#detail("/reconcile", await this.client.reconcileUnknownEffect(this.#sessionId,this.#branchId,match[1]!,{assessment:match[2] as "succeeded"|"failed"|"no_effect"|"still_unknown",summary:match[3]!,recordedBy:"terminal-user"}));this.#write("Assessment recorded as evidence. The durable effect remains unknown and was not retried. Start a new /run only if safe.\n");}
   #agentRunIdForEffect(effectId:string):string|null{for(const run of Object.values(this.#liveState?.agentRuns??{})){for(const step of run.steps){if(step.effectId===effectId||step.modelAttempts.some((attempt)=>attempt.effectId===effectId))return run.id;}}return null;}
-  #requestDetach(decision?:Extract<InterruptDecision,{action:"detach"}>):boolean{if(this.#detached)return false;this.#detached=true;this.#familyGeneration++;this.#clearFamilyRefreshTimer();if(decision)this.#lastDetachDecision=decision;this.#removeSigintHandler();this.#detachController?.abort();this.#watchController?.abort();return true;}
+  #requestDetach(decision?:Extract<InterruptDecision,{action:"detach"}>):boolean{if(this.#detached)return false;this.#detached=true;this.#familyGeneration++;this.#refinementGeneration++;this.#clearFamilyRefreshTimer();if(decision)this.#lastDetachDecision=decision;this.#removeSigintHandler();this.#detachController?.abort();this.#watchController?.abort();return true;}
   #removeSigintHandler():void{if(!this.#sigintHandler)return;process.off("SIGINT",this.#sigintHandler);this.#sigintHandler=null;}
   #activeRun(){return Object.values(this.#liveState?.agentRuns??{}).find((run)=>!TERMINAL_RUN_STATUSES.has(run.status));}
   #requireState():AgentState{if(!this.#viewState)throw new Error("No projected state");return this.#viewState;}
