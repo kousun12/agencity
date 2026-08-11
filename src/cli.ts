@@ -152,10 +152,10 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const client = connection.client;
     if (parsed.command === "config") { await managedConfig(client, parsed); return; }
     if (parsed.command === "sessions") { await managedSessions(client, parsed); return; }
-    if (parsed.command === "agents") { printValue(await client.serviceAgents(), parsed.flags.has("json")); return; }
+    if (parsed.command === "agents") { await printValue(await client.serviceAgents(), parsed.flags.has("json")); return; }
     if (parsed.command === "tree") {
       const selected = await client.productSelect();
-      printValue(await client.agents(selected.sessionId, selected.branchId), parsed.flags.has("json"));
+      await printValue(await client.agents(selected.sessionId, selected.branchId), parsed.flags.has("json"));
       return;
     }
     if (parsed.command === "status") { await managedStatus(client, parsed); return; }
@@ -212,7 +212,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       const snapshot = await client.snapshot(selection.sessionId, selection.branchId);
       const forked = await client.fork(selection.sessionId, selection.branchId, snapshot.cursor, name);
       await client.productSelect(selection.sessionId, forked.branchId);
-      printValue({ created: true, session: summary.sessionName, branch: name, from: "head" }, parsed.flags.has("json"));
+      await printValue({ created: true, session: summary.sessionName, branch: name, from: "head" }, parsed.flags.has("json"));
       return;
     }
     if (parsed.command === "history") {
@@ -222,7 +222,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       // #region agent log
       appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "D", location: "src/cli.ts:history", message: "history snapshot materialized", data: { messages: snapshot.state.messages.length, cells: Object.keys(snapshot.state.cells).length, effects: Object.keys(snapshot.state.effects).length, runs: Object.keys(snapshot.state.agentRuns).length }, timestamp: Date.now() })}\n`);
       // #endregion
-      printValue({
+      await printValue({
         session: summary.sessionName,
         branch: summary.branchName,
         status: summary.status,
@@ -235,7 +235,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     }
     if (parsed.command === "unknown") {
       const effectId = parsed.positionals.join(" ").trim();
-      printValue(effectId
+      await printValue(effectId
         ? await client.inspectUnknownEffect(selection.sessionId, selection.branchId, effectId)
         : await client.unknownEffects(selection.sessionId, selection.branchId), parsed.flags.has("json"));
       return;
@@ -260,7 +260,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
         ...(option("reconciliation-id") ? { reconciliationId: option("reconciliation-id")! } : {}),
         ...(option("evidence") ? { evidence: parseJsonValue(option("evidence")!, "reconciliation evidence") } : {}),
       });
-      printValue(result, parsed.flags.has("json"));
+      await printValue(result, parsed.flags.has("json"));
       if (!parsed.flags.has("json")) console.log("Assessment appended as evidence; the effect remains unknown and was not retried.");
       return;
     }
@@ -270,7 +270,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     }
     if (parsed.command === "context") {
       if (parsed.positionals.length) throw new ValidationError("context accepts no positional arguments");
-      printValue(await client.inspectContext(selection.sessionId, selection.branchId), parsed.flags.has("json"));
+      await printValue(await client.inspectContext(selection.sessionId, selection.branchId), parsed.flags.has("json"));
       return;
     }
     if (parsed.command === "compact") {
@@ -278,7 +278,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       if (!["extractive", "summary", "deterministic-extractive-v1", "model-summary-v1"].includes(strategyName)) throw new ValidationError("--strategy must be extractive or summary");
       const strategy = strategyName === "summary" || strategyName === "model-summary-v1" ? "model-summary-v1" : "deterministic-extractive-v1";
       const instructions = parsed.positionals.join(" ").trim();
-      printValue(await client.compact(selection.sessionId, selection.branchId, {
+      await printValue(await client.compact(selection.sessionId, selection.branchId, {
         strategy, ...(instructions ? { instructions } : {}),
         ...(option("from-context") ? { rematerializeFromContextId: option("from-context")! } : {}),
       }), parsed.flags.has("json"));
@@ -292,11 +292,11 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       const [mode, ...rest] = parsed.positionals;
       if (mode === "status" || mode === "history") {
         if (rest.length) throw new ValidationError(`refine ${mode} accepts no additional arguments`);
-        printValue({ reviews: await client.refinementReviews(selection.sessionId, selection.branchId), proposals: (await client.refinements()).filter((item) => item.sessionId === selection.sessionId && item.branchId === selection.branchId) }, parsed.flags.has("json"));
+        await printValue({ reviews: await client.refinementReviews(selection.sessionId, selection.branchId), proposals: (await client.refinements()).filter((item) => item.sessionId === selection.sessionId && item.branchId === selection.branchId) }, parsed.flags.has("json"));
       } else if (mode === "auto") {
         if (rest.length !== 1 || (rest[0] !== "on" && rest[0] !== "off")) throw new ValidationError("refine auto requires on or off");
-        printValue(await client.setAutomaticRefinement(rest[0] === "on"), parsed.flags.has("json"));
-      } else if (mode === "propose-json") { const proposed = await client.refine(selection.sessionId, selection.branchId, parseJsonValue(rest.join(" "), "refinement proposal") as any); printValue(await client.validateRefinement(selection.sessionId, selection.branchId, proposed.proposalId), parsed.flags.has("json")); }
+        await printValue(await client.setAutomaticRefinement(rest[0] === "on"), parsed.flags.has("json"));
+      } else if (mode === "propose-json") { const proposed = await client.refine(selection.sessionId, selection.branchId, parseJsonValue(rest.join(" "), "refinement proposal") as any); await printValue(await client.validateRefinement(selection.sessionId, selection.branchId, proposed.proposalId), parsed.flags.has("json")); }
       else {
         if (parsed.flags.has("wait") && parsed.flags.has("detach")) {
           throw new ValidationError("refine accepts --wait or --detach, not both");
@@ -309,7 +309,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
           ...(allowedKinds === undefined ? {} : { allowedKinds }),
           wait: parsed.flags.has("wait"),
         });
-        printValue(review, parsed.flags.has("json"));
+        await printValue(review, parsed.flags.has("json"));
         if (!parsed.flags.has("wait") && !parsed.flags.has("json")) {
           console.log("Refinement accepted (detached; use `agencity refine status` to inspect progress)");
         }
@@ -458,7 +458,7 @@ async function manageProfileClient(
   const json = parsed.flags.has("json");
   if (action === "show" || action === "current") {
     if (selector !== undefined) throw new ValidationError(`profile ${action} accepts no additional arguments`);
-    printValue(await client.agentProfile(sessionId, true), json);
+    await printValue(await client.agentProfile(sessionId, true), json);
     return;
   }
   if (action === "history") {
@@ -467,18 +467,18 @@ async function manageProfileClient(
       client.agentProfiles(sessionId, { includePrompt: true, limit: 100 }),
       profileGovernanceRecords(client, sessionId),
     ]);
-    printValue({ ...profiles, proposals }, json);
+    await printValue({ ...profiles, proposals }, json);
     return;
   }
   if (action === "proposals" || action === "notices") {
     if (selector !== undefined) throw new ValidationError(`profile ${action} accepts no additional arguments`);
-    printValue(await profileGovernanceRecords(client, sessionId), json);
+    await printValue(await profileGovernanceRecords(client, sessionId), json);
     return;
   }
   if (action === "propose") {
     const input = profileProposalInput([selector, ...rest].filter(Boolean).join(" "));
     const current = await client.agentProfile(sessionId);
-    printValue(await client.proposeProfileUpdate(sessionId, branchId, {
+    await printValue(await client.proposeProfileUpdate(sessionId, branchId, {
       expectedProfileVersionId: current.profileVersionId,
       ...input,
       evidenceEventIds: input.evidenceEventIds ?? [],
@@ -494,7 +494,7 @@ async function manageProfileClient(
     if (!previous) throw new ValidationError("Rejected profile proposal selection was not found");
     const input = profileProposalInput(rest.join(" "));
     const current = await client.agentProfile(sessionId);
-    printValue(await client.proposeProfileUpdate(sessionId, branchId, {
+    await printValue(await client.proposeProfileUpdate(sessionId, branchId, {
       expectedProfileVersionId: current.profileVersionId,
       ...input,
       evidenceEventIds: input.evidenceEventIds ?? [],
@@ -517,7 +517,7 @@ async function manageProfileClient(
     const restore = history.items.find(item => item.revision === revision);
     if (!current || !restore) throw new ValidationError(`Profile revision ${revision} was not found`);
     if (restore.active) throw new ValidationError(`Profile revision ${revision} is already active`);
-    printValue(await client.rollbackRefinement(sessionId, branchId, {
+    await printValue(await client.rollbackRefinement(sessionId, branchId, {
       targetKind: "agent_profile",
       targetId: sessionId,
       expectedCurrentVersionId: current.profileVersionId,
@@ -532,15 +532,15 @@ async function manageProfileClient(
 
 async function manageSkillsClient(client:AgentClient,sessionId:string,branchId:string,parsed:ParsedCliArgs,prompter:ProductPrompter,interactive:boolean):Promise<void>{
   const [action="list",reference,...rest]=parsed.positionals;
-  if(action==="list"){printValue(await client.listSkills(sessionId,branchId,true),parsed.flags.has("json"));return;}
-  if(action==="show"){if(!reference)throw new ValidationError("skills show requires NAME_OR_ID");printValue(await client.getSkill(sessionId,branchId,reference),parsed.flags.has("json"));return;}
-  if(action==="test"){if(!reference)throw new ValidationError("skills test requires NAME_OR_ID");printValue(await client.testSkill(sessionId,branchId,reference),parsed.flags.has("json"));return;}
+  if(action==="list"){await printValue(await client.listSkills(sessionId,branchId,true),parsed.flags.has("json"));return;}
+  if(action==="show"){if(!reference)throw new ValidationError("skills show requires NAME_OR_ID");await printValue(await client.getSkill(sessionId,branchId,reference),parsed.flags.has("json"));return;}
+  if(action==="test"){if(!reference)throw new ValidationError("skills test requires NAME_OR_ID");await printValue(await client.testSkill(sessionId,branchId,reference),parsed.flags.has("json"));return;}
   if(action==="enable"||action==="disable"||action==="remove"){
     if(!reference)throw new ValidationError(`skills ${action} requires NAME_OR_ID`);
     const result=action==="enable"?await client.enableSkill(sessionId,branchId,reference):action==="disable"?await client.disableSkill(sessionId,branchId,reference):await client.removeSkill(sessionId,branchId,reference);
-    printValue(result,parsed.flags.has("json"));return;
+    await printValue(result,parsed.flags.has("json"));return;
   }
-  if(action==="propose"){const instructions=[reference,...rest].filter(Boolean).join(" ").trim();if(!instructions)throw new ValidationError("skills propose requires instructions");const scope=parsed.values.get("scope")==="local"?"local":"workspace";printValue(await client.proposeSkill(sessionId,branchId,instructions,scope),parsed.flags.has("json"));return;}
+  if(action==="propose"){const instructions=[reference,...rest].filter(Boolean).join(" ").trim();if(!instructions)throw new ValidationError("skills propose requires instructions");const scope=parsed.values.get("scope")==="local"?"local":"workspace";await printValue(await client.proposeSkill(sessionId,branchId,instructions,scope),parsed.flags.has("json"));return;}
   if(action==="install"){
     if(!reference||rest.length)throw new ValidationError("skills install requires one local DIRECTORY");const scope=parsed.values.get("scope")??"workspace";if(scope!=="workspace"&&scope!=="profile")throw new ValidationError("skills install --scope must be workspace or profile");
     const preview=await client.previewSkillImport(sessionId,branchId,reference);let confirmation=parsed.values.get("confirmation");
@@ -549,7 +549,7 @@ async function manageSkillsClient(client:AgentClient,sessionId:string,branchId:s
       if(!interactive)throw new ValidationError(`Skill installation requires --confirmation ${preview.confirmationDigest}`);
       confirmation=(await prompter.question("Type the complete source digest to confirm trusted-local installation: ")).trim();
     }
-    printValue(await client.installSkill(sessionId,branchId,{directory:reference,scope,confirmationDigest:confirmation,installedBy:"cli-owner"}),parsed.flags.has("json"));return;
+    await printValue(await client.installSkill(sessionId,branchId,{directory:reference,scope,confirmationDigest:confirmation,installedBy:"cli-owner"}),parsed.flags.has("json"));return;
   }
   throw new ValidationError("skills action must be list, show, install, propose, test, enable, disable, or remove");
 }
@@ -591,7 +591,7 @@ async function serviceCommand(configuration: ManagedServiceConfiguration, parsed
   const observed = await observeManagedService(configuration);
   if (observed.state !== "running" || !observed.manifest) {
     const value = { lifecycle: observed.state === "stopped" ? "stopped" : "conflict", mode: "trusted-local", onDemand: true };
-    printValue(value, parsed.flags.has("json"));
+    await printValue(value, parsed.flags.has("json"));
     if (action === "shutdown" && observed.state !== "stopped") throw new ValidationError("Service authority is conflicted; refusing unauthenticated shutdown");
     return;
   }
@@ -607,7 +607,7 @@ async function serviceCommand(configuration: ManagedServiceConfiguration, parsed
     else before = observedStatus as Partial<ManagedServiceStatus> | null;
     const result = await client.shutdownService();
     if (parsed.flags.has("json")) {
-      printValue(result, true);
+      await printValue(result, true);
     } else {
       const reasons = before?.keepAliveReasons?.map(reason => reason.summary) ?? [];
       console.log([
@@ -620,7 +620,7 @@ async function serviceCommand(configuration: ManagedServiceConfiguration, parsed
   }
   const status = await client.serviceStatus() as ManagedServiceStatus;
   if (parsed.flags.has("json")) {
-    printValue(status, true);
+    await printValue(status, true);
     return;
   }
   console.log([
@@ -693,7 +693,7 @@ async function managedSessions(client: AgentClient, parsed: ParsedCliArgs): Prom
   const select = parsed.values.get("select");
   if (select) {
     const selected = await client.productSelect(select, branchId);
-    if (parsed.flags.has("json")) printValue(selected, true);
+    if (parsed.flags.has("json")) await printValue(selected, true);
     else console.log(`Selected ${selected.sessionId}/${selected.branchId}`);
     return;
   }
@@ -704,25 +704,25 @@ async function managedSessions(client: AgentClient, parsed: ParsedCliArgs): Prom
 
 async function managedConfig(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
   const action = parsed.positionals[0];
-  if (!action) { printValue(await client.productConfig(), parsed.flags.has("json")); return; }
+  if (!action) { await printValue(await client.productConfig(), parsed.flags.has("json")); return; }
   if (action === "set-model") {
     const value = parsed.positionals[1];
     if (!value) throw new ValidationError("config set-model requires PROVIDER:MODEL");
     const model = parseModel(value);
-    printValue(await client.productSetModel(formatModel(model)), parsed.flags.has("json"));
+    await printValue(await client.productSetModel(formatModel(model)), parsed.flags.has("json"));
     return;
   }
-  if (action === "clear-model") { printValue(await client.productSetModel(null), parsed.flags.has("json")); return; }
+  if (action === "clear-model") { await printValue(await client.productSetModel(null), parsed.flags.has("json")); return; }
   if (action === "set-effort") {
     const value = parsed.positionals[1];
     if (!value) throw new ValidationError("config set-effort requires LEVEL");
     const model = await configuredEffortModel(client, parsed.values.get("model"));
-    printValue(await client.productSetReasoningEffort(model, normalizeReasoningEffort(value)), parsed.flags.has("json"));
+    await printValue(await client.productSetReasoningEffort(model, normalizeReasoningEffort(value)), parsed.flags.has("json"));
     return;
   }
   if (action === "clear-effort") {
     const model = await configuredEffortModel(client, parsed.values.get("model"));
-    printValue(await client.productSetReasoningEffort(model, null), parsed.flags.has("json"));
+    await printValue(await client.productSetReasoningEffort(model, null), parsed.flags.has("json"));
     return;
   }
   if (action === "credential-ref") {
@@ -730,7 +730,7 @@ async function managedConfig(client: AgentClient, parsed: ParsedCliArgs): Promis
     if(!provider||!reference||!label)throw new ValidationError("config credential-ref requires PROVIDER REFERENCE LABEL");
     if(containsCredentialMaterial(reference)||containsCredentialMaterial(label))throw new ValidationError("Credential references and labels must be non-secret opaque identifiers");
     if(!/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(reference))throw new ValidationError("Credential references must be opaque handles such as env:OPENAI_API_KEY or keychain:item; raw values are rejected");
-    printValue(await client.productCredentialReference(provider,reference,label),parsed.flags.has("json"));return;
+    await printValue(await client.productCredentialReference(provider,reference,label),parsed.flags.has("json"));return;
   }
   throw new ValidationError(`Unknown config action: ${action}`);
 }
@@ -876,7 +876,7 @@ async function managedStatus(client: AgentClient, parsed: ParsedCliArgs): Promis
   }
   const agents = await client.serviceAgents() as any[];
   const value = target ? resolveAgentTarget(agents, target) : agents;
-  printValue(value, parsed.flags.has("json"));
+  await printValue(value, parsed.flags.has("json"));
 }
 
 async function managedSend(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
@@ -885,14 +885,14 @@ async function managedSend(client: AgentClient, parsed: ParsedCliArgs): Promise<
   if (!target || !content) throw new ValidationError("send requires TARGET MESSAGE");
   const selected = resolveAgentTarget(await client.serviceAgents() as any[], target);
   const event = await client.message(selected.sessionId, selected.branchId, content);
-  printValue({ delivered: true, eventId: event.id, sessionId: selected.sessionId, branchId: selected.branchId }, parsed.flags.has("json"));
+  await printValue({ delivered: true, eventId: event.id, sessionId: selected.sessionId, branchId: selected.branchId }, parsed.flags.has("json"));
 }
 
 async function managedStop(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
   const target = parsed.positionals.join(" ").trim();
   if (!target) throw new ValidationError("stop requires TARGET");
   const selected = resolveAgentTarget(await client.serviceAgents() as any[], target);
-  printValue(await client.stopSession(selected.sessionId, selected.branchId, "Stopped by user command"), parsed.flags.has("json"));
+  await printValue(await client.stopSession(selected.sessionId, selected.branchId, "Stopped by user command"), parsed.flags.has("json"));
 }
 
 function resolveAgentTarget(rows: any[], target: string): any {
@@ -1077,15 +1077,25 @@ function printProductRunResult(
   process.exitCode = exitCode;
 }
 
-function printValue(value: unknown, json: boolean): void {
+async function printValue(value: unknown, json: boolean): Promise<void> {
   const rendered = json ? JSON.stringify(value, null, 2) : typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  const output = `${rendered}\n`;
   // #region agent log
   appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "A", location: "src/cli.ts:printValue:before", message: "CLI value serialized", data: { bytes: Buffer.byteLength(rendered), suffix: rendered.slice(-16), stdoutLength: process.stdout.writableLength, needsDrain: process.stdout.writableNeedDrain }, timestamp: Date.now() })}\n`);
   // #endregion
-  writeFileSync(process.stdout.fd, `${rendered}\n`, "utf8");
-  // #region agent log
-  appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "G", location: "src/cli.ts:printValue:syncWrite", message: "CLI synchronous stdout write completed", data: { bytes: Buffer.byteLength(rendered) + 1 }, timestamp: Date.now() })}\n`);
-  // #endregion
+  if (Buffer.byteLength(output) <= 64 * 1024) {
+    writeFileSync(process.stdout.fd, output, "utf8");
+    // #region agent log
+    appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "G", location: "src/cli.ts:printValue:syncWrite", message: "CLI synchronous stdout write completed", data: { bytes: Buffer.byteLength(rendered) + 1 }, timestamp: Date.now() })}\n`);
+    // #endregion
+  } else {
+    await new Promise<void>((resolveWrite, rejectWrite) => {
+      process.stdout.write(output, error => error ? rejectWrite(error) : resolveWrite());
+    });
+    // #region agent log
+    appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "H", location: "src/cli.ts:printValue:asyncWrite", message: "CLI backpressure-aware stdout write completed", data: { bytes: Buffer.byteLength(output) }, timestamp: Date.now() })}\n`);
+    // #endregion
+  }
   // #region agent log
   appendFileSync("/opt/cursor/logs/debug.log", `${JSON.stringify({ hypothesisId: "B", location: "src/cli.ts:printValue:after", message: "CLI console log returned", data: { bytes: Buffer.byteLength(rendered), stdoutLength: process.stdout.writableLength, needsDrain: process.stdout.writableNeedDrain }, timestamp: Date.now() })}\n`);
   // #endregion
