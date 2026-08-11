@@ -282,8 +282,10 @@ context identities, sizes, and answer types. Its deterministic scorer is
 parity-tested against pinned Prime OOLONG-synth v1 source, and suite configs use
 portable shutdown/cleanup plus serial execution. Full context and gold answers
 remain private task-object fields outside serialized task data and provenance.
-Its bounded eight-task Sol treatment uses four explicit IDs from each Yahoo
-context window. A
+OOLONG prompts give exact large-file and recursive aggregation guidance, and
+its suite configs use a 36,000-token per-response ceiling while retaining
+separate turn and total-token bounds. Its bounded eight-task Sol treatment uses
+four explicit IDs from each Yahoo context window. A
 pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
@@ -552,3 +554,14 @@ A change is done when:
 7. Remaining limitations are explicit.
 
 For product tickets, include a black-box path from the documented entrypoint. A direct unit test of the underlying service is not sufficient evidence that the user journey works.
+
+## Cursor Cloud specific instructions
+
+This environment is preconfigured so that `bun` (1.3.14, satisfying the `>=1.3.13` engine) is on the standard `PATH` via `/usr/local/bin/bun`. The startup update script runs only `bun install --frozen-lockfile`. Standard commands live in this file's "Runtime and development requirements" section and in `package.json`; use those rather than re-deriving them. The canonical gate is `bun run verify`.
+
+Non-obvious caveats discovered while running the suites in this VM:
+
+- No real provider is configured. The product CLI (`agencity` / `bun run dev`) refuses non-interactive autonomous runs without a usable OpenAI/Anthropic/Gateway credential, and Echo is filtered from product selection, so `agencity --model echo:...` is not a runtime fallback. To exercise a real end-to-end task through the installed CLI without external secrets, drive it against the loopback OpenAI-compatible fixture in `test/acceptance/strict-action-fixture.ts` together with `AcceptanceWorld` from `test/acceptance/helpers.ts` (the acceptance tests are the reference pattern: `config set-model openai:openai/fixture-v1` with `fixture.environment()`, then `run --json`).
+- `bun run test:unit` and `bun run test:integration` use `--parallel=4` with the default 5000 ms per-test timeout. On this shared VM, heavier integration tests (`product-cli`, `refiner`, `skill-management`) and some OpenTUI frame-render unit tests intermittently hit that 5000 ms limit under CPU pressure; they pass when run with `--timeout 30000` or in isolation. The canonical `bun run verify` / `test:core` gate already uses `--timeout 30000`, so prefer it for a trustworthy result.
+- One OpenTUI unit test in `test/unit/opentui.test.ts` ("renders a stable workspace, preserves input during protocol updates, responds to resize, and detaches") consistently times out on the native frame-render predicate in this headless VM even in isolation; the frame content does render and the remaining OpenTUI cases plus the `test/e2e/opentui-pty.test.ts` pseudo-terminal journey pass. Treat this single case as a headless native-renderer limitation, not a regression.
+- The `profile-governance` acceptance test can fail at `history current --json` with a JSON "Unterminated string": that command emits a large (~475 KB) document and the CLI process may exit before the piped stdout is fully drained. This is a large-output flush behavior, not an environment/setup problem.

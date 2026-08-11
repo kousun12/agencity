@@ -74,18 +74,24 @@ AnswerType = Literal["", "ANSWER_TYPE.NUMERIC", "ANSWER_TYPE.DATE"]
 
 def _prompt(question: str) -> str:
     return (
-        f"The benchmark context is stored in `{CONTEXT_PATH}`. Inspect that file "
-        "programmatically and answer this question. The runtime provides Bun and "
-        "Agencity's TypeScript console, including `sdk.rlm.start`, "
-        "`sdk.rlm.startMany`, and `sdk.rlm.result` for recursive model work; do "
-        "not assume Python or Node are installed. If you delegate, keep the "
-        "returned handles and collect and aggregate child results inside the "
-        "TypeScript cell rather than returning bulk child output to the parent "
-        "model.\n\n"
+        f"The benchmark context is stored in `{CONTEXT_PATH}` and is larger than "
+        "one typed file page. Read the complete file inside a TypeScript cell with "
+        f"`await Bun.file({CONTEXT_PATH!r}).text()`, or use bounded "
+        "`tools.readFile` line windows; do not request the whole file as one typed "
+        "page. Bun is available, but do not assume Python or Node are installed.\n\n"
+        "For parallel recursive work, use "
+        "`const handles = await rlm.startMany([{ prompt, input }, ...])`, then "
+        "collect the results in the same cell with "
+        "`await Promise.all(handles.map((handle) => "
+        "handle.result({ wait: true })))`. Give each child a self-contained input "
+        "and require only a compact partial aggregate that fits the configured "
+        "output limit, not per-record output. Reject empty or truncated results "
+        "before aggregation. Keep handles and child-result aggregation inside the "
+        "cell, and return only the compact evidence needed for the next decision.\n\n"
         f"{question}\n\n"
-        f"Write only the final answer to `{ANSWER_PATH}`, then finish with exactly "
-        "the same answer. The answer should be one label, number, date, user ID, "
-        "or comparison phrase as requested by the question."
+        f"Write only the final answer to `{ANSWER_PATH}` with `Bun.write`, then "
+        "finish with exactly the same answer. The answer should be one label, "
+        "number, date, user ID, or comparison phrase as requested by the question."
     )
 
 
