@@ -819,12 +819,13 @@ describe("disposable TypeScript console process", () => {
     const checkpoints = new Map<string, any>();
     const hooks = {
       async load(scope: { sessionId: string; branchId: string }) {
-        return checkpoints.get(`${scope.sessionId}/${scope.branchId}`) ?? null;
+        const restore = checkpoints.get(`${scope.sessionId}/${scope.branchId}`);
+        return restore ? { status: "restored" as const, restore } : { status: "cold" as const };
       },
-      async checkpoint(scope: { sessionId: string; branchId: string }, candidate: any, sourceCellId: string) {
+      async checkpoint(scope: { sessionId: string; branchId: string }, candidate: any, source: { cellId: string }) {
         checkpoints.set(`${scope.sessionId}/${scope.branchId}`, {
           candidate,
-          sourceCellId,
+          sourceCellId: source.cellId,
           checkpointedAt: "2026-08-11T00:00:00.000Z",
         });
       },
@@ -877,7 +878,7 @@ describe("disposable TypeScript console process", () => {
       artifactDirectory: temp.artifactDirectory,
       workspaceRoot: temp.workspaceRoot,
       scratchCheckpointHooks: {
-        async load() { return null; },
+        async load() { return { status: "cold" }; },
         async checkpoint(_scope, candidate) { received = candidate; },
       },
       recover: false,
@@ -905,7 +906,7 @@ describe("disposable TypeScript console process", () => {
       artifactDirectory: temp.artifactDirectory,
       workspaceRoot: temp.workspaceRoot,
       scratchCheckpointHooks: {
-        async load() { return null; },
+        async load() { return { status: "cold" }; },
         async checkpoint() { throw new Error("cache storage unavailable"); },
       },
       recover: false,
@@ -930,6 +931,7 @@ describe("disposable TypeScript console process", () => {
         lastCheckpointCellId: null,
         savedNames: [],
         skipped: [],
+        cache: { lastWrite: "unavailable" },
       },
     });
     expect(supervisor.console.status()).toEqual({
@@ -1025,7 +1027,7 @@ describe("disposable TypeScript console process", () => {
       artifactDirectory: temp.artifactDirectory,
       workspaceRoot: temp.workspaceRoot,
       scratchCheckpointHooks: {
-        async load() { return null; },
+        async load() { return { status: "cold" }; },
         async checkpoint() {
           if (held) return;
           held = true;

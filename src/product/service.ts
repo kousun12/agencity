@@ -266,6 +266,7 @@ export class ManagedWorkspaceService {
       restartConsoleAfterCell: normalized.restartConsoleAfterCell ?? false,
       recover: false,
       startWakeSchedulers: false,
+      enableLocalScratchCheckpoints: true,
       ...options,
       executionLease: {
         workspaceId: normalized.workspace.workspaceId,

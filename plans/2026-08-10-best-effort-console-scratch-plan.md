@@ -620,3 +620,9 @@ This plan is complete when:
 - Validation: `bun run typecheck`, `bun run check:architecture`, `git diff --check`, and 33 focused scratch and console tests passed.
 - Plan notes: Checkpoint node and property budgets apply across the complete candidate. Persistence-hook failures remain nonfatal and preserve warm scratch; unsafe worker checkpoint timeout recycles the worker.
 - Remaining: Local checkpoint persistence, managed-service lifetime, public documentation, installed-product coverage, aggregate verification, and external gated checks.
+
+### 2026-08-11 — Bounded local scratch checkpoints
+- Completed: Added migration 020 and the private file-local `ScratchStore`, exact managed-product injection, current-device exact-branch restoration, transactional source/fence validation, content and full-row integrity checks, expiry and LRU quotas, explicit cold/unavailable/corrupt load results, private SQL exclusion, and owned-scope deletion behavior.
+- Validation: Focused scratch storage, migration, managed fencing, recovery, console, placement, and data-control tests pass together with typecheck, architecture checking, and diff checking.
+- Plan notes: Cold persistence is enabled only when exact file-local composition also has managed execution-fence authority. Direct diagnostic supervisors and remote placements remain warm-only rather than receiving an unfenced or fallback cache.
+- Remaining: Managed-service lifetime, broader public documentation, installed-product coverage, aggregate verification, and external gated checks.

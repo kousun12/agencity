@@ -5,7 +5,7 @@ import {
   SCRATCH_LIMITS,
   validateScratchCheckpoint,
   type ScratchCheckpointCandidate,
-  type ScratchCheckpointRestore,
+  type ScratchCheckpointLoadResult,
   type ScratchScope,
   type ScratchStatus,
 } from "./scratch.ts";
@@ -123,13 +123,13 @@ export class ConsoleProcess {
 
   async prepareScratch(
     scope: ScratchScope,
-    restore: ScratchCheckpointRestore | null,
+    loadResult: ScratchCheckpointLoadResult,
     cacheAvailable: boolean,
   ): Promise<ScratchStatus> {
     const value = await this.#control({
       type: "scratch-prepare",
       scope,
-      restore,
+      loadResult,
       cacheAvailable,
       idleScopeMs: this.options.scratchIdleScopeMs ?? SCRATCH_LIMITS.idleScopeMs,
       maxWarmScopes: this.options.scratchMaxWarmScopes ?? SCRATCH_LIMITS.maxWarmScopes,
@@ -167,6 +167,16 @@ export class ConsoleProcess {
       { type: "scratch-record-checkpoint", scope, sourceCellId, candidate },
       5_000,
       "scratch-control-timeout",
+    );
+  }
+
+  async recordScratchCacheWrite(
+    scope: ScratchScope,
+    status: "stored" | "cleared" | "unavailable",
+  ): Promise<void> {
+    await this.#control(
+      { type: "scratch-record-cache-write", scope, status },
+      5_000,
     );
   }
 

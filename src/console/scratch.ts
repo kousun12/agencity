@@ -53,14 +53,36 @@ export interface ScratchCheckpointRestore {
   readonly checkpointedAt?: string;
 }
 
+export type ScratchCacheUnavailableReason =
+  | "device_mismatch"
+  | "placement_unavailable"
+  | "storage_error";
+
+export type ScratchCacheCorruptReason =
+  | "checkpoint_integrity"
+  | "row_integrity"
+  | "row_malformed";
+
+export type ScratchCheckpointLoadResult =
+  | { readonly status: "restored"; readonly restore: ScratchCheckpointRestore }
+  | { readonly status: "cold" }
+  | { readonly status: "unavailable"; readonly reason: ScratchCacheUnavailableReason }
+  | { readonly status: "corrupt"; readonly reason: ScratchCacheCorruptReason };
+
+export interface ScratchCheckpointSource {
+  readonly cellId: string;
+  readonly eventId: string;
+  readonly cursor: string;
+}
+
 export interface ScratchCheckpointHooks {
   /** Phase-C storage may return only an exact session/branch restore. */
-  load(scope: ScratchScope): Promise<ScratchCheckpointRestore | null>;
+  load(scope: ScratchScope): Promise<ScratchCheckpointLoadResult>;
   /** The hook is awaited inside the process lifecycle queue. */
   checkpoint(
     scope: ScratchScope,
     candidate: ScratchCheckpointCandidate,
-    sourceCellId: string,
+    source: ScratchCheckpointSource,
   ): Promise<void>;
 }
 
@@ -89,6 +111,9 @@ export interface ScratchStatus {
   readonly cache: {
     readonly available: boolean;
     readonly restoreAttempted: boolean;
+    readonly status: ScratchCheckpointLoadResult["status"];
+    readonly reason: ScratchCacheUnavailableReason | ScratchCacheCorruptReason | null;
+    readonly lastWrite: "stored" | "cleared" | "unavailable" | null;
   };
   readonly limits: typeof SCRATCH_LIMITS;
 }

@@ -15,7 +15,7 @@ import {
   scratchValueType,
   serializeScratch,
   validateScratchCheckpoint,
-  type ScratchCheckpointRestore,
+  type ScratchCheckpointLoadResult,
   type ScratchProxyState,
   type ScratchScope,
   type ScratchStatus,
@@ -23,10 +23,11 @@ import {
 
 type Incoming =
   | { type: "execute"; executionId: string; code: string; session: { id: string; branchId: string }; restored: Record<string, unknown> }
-  | { type: "scratch-prepare"; requestId: string; scope: ScratchScope; restore: ScratchCheckpointRestore | null; cacheAvailable: boolean; idleScopeMs: number; maxWarmScopes: number }
+  | { type: "scratch-prepare"; requestId: string; scope: ScratchScope; loadResult: ScratchCheckpointLoadResult; cacheAvailable: boolean; idleScopeMs: number; maxWarmScopes: number }
   | { type: "scratch-probe"; requestId: string; scope: ScratchScope }
   | { type: "scratch-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string }
   | { type: "scratch-record-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string; candidate: import("./scratch.ts").ScratchCheckpointCandidate }
+  | { type: "scratch-record-cache-write"; requestId: string; scope: ScratchScope; status: "stored" | "cleared" | "unavailable" }
   | { type: "scratch-evict"; requestId: string; scope: ScratchScope }
   | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string }
   | { type: "shutdown" };
@@ -84,6 +85,10 @@ interface WarmScratchScope {
   temperature: "warm" | "cold" | "restored";
   readonly cacheAvailable: boolean;
   readonly restoreAttempted: boolean;
+  cacheStatus: ScratchCheckpointLoadResult["status"];
+  cacheReason: import("./scratch.ts").ScratchCacheUnavailableReason |
+    import("./scratch.ts").ScratchCacheCorruptReason | null;
+  lastCacheWrite: "stored" | "cleared" | "unavailable" | null;
   lastUsedAt: number;
   lastCheckpointAt: string | null;
   lastCheckpointCellId: string | null;
@@ -145,6 +150,15 @@ process.on("message", (raw: unknown) => {
     ));
     return;
   }
+  if (message.type === "scratch-record-cache-write") {
+    executionQueue = executionQueue.then(() => control(message.requestId, () => {
+      const warm = scratchScopes.get(scopeKey(message.scope));
+      if (!warm) throw new Error("Scratch scope is not warm");
+      warm.lastCacheWrite = message.status;
+      return { recorded: true };
+    }));
+    return;
+  }
   if (message.type === "scratch-evict") {
     executionQueue = executionQueue.then(() => control(message.requestId, () => {
       scratchScopes.delete(scopeKey(message.scope));
@@ -163,7 +177,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   })) ?? createWarmScratch({
     sessionId: message.session.id,
     branchId: message.session.branchId,
-  }, null, false);
+  }, { status: "unavailable", reason: "placement_unavailable" }, false);
   warmScratch.lastUsedAt = Date.now();
   const logs = new BoundedLogs();
   const printable = (value: unknown): string => {
@@ -336,6 +350,9 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       cache: {
         available: warmScratch.cacheAvailable,
         restoreAttempted: warmScratch.restoreAttempted,
+        status: warmScratch.cacheStatus,
+        reason: warmScratch.cacheReason,
+        lastWrite: warmScratch.lastCacheWrite,
       },
       limits: SCRATCH_LIMITS,
     };
@@ -453,7 +470,7 @@ function prepareScratch(
   evictScratchScopes();
   const key = scopeKey(message.scope);
   let warm = scratchScopes.get(key);
-  if (!warm) warm = createWarmScratch(message.scope, message.restore, message.cacheAvailable);
+  if (!warm) warm = createWarmScratch(message.scope, message.loadResult, message.cacheAvailable);
   warm.lastUsedAt = Date.now();
   evictScratchScopes(key);
   const descriptors = Object.getOwnPropertyDescriptors(warm.proxy.target);
@@ -472,16 +489,23 @@ function prepareScratch(
     lastCheckpointCellId: warm.lastCheckpointCellId,
     savedNames: [...warm.savedNames],
     skipped: [...warm.skipped],
-    cache: { available: warm.cacheAvailable, restoreAttempted: warm.restoreAttempted },
+    cache: {
+      available: warm.cacheAvailable,
+      restoreAttempted: warm.restoreAttempted,
+      status: warm.cacheStatus,
+      reason: warm.cacheReason,
+      lastWrite: warm.lastCacheWrite,
+    },
     limits: SCRATCH_LIMITS,
   };
 }
 
 function createWarmScratch(
   scope: ScratchScope,
-  restore: ScratchCheckpointRestore | null,
+  loadResult: ScratchCheckpointLoadResult,
   cacheAvailable: boolean,
 ): WarmScratchScope {
+  const restore = loadResult.status === "restored" ? loadResult.restore : null;
   const candidate = restore ? validateScratchCheckpoint(restore.candidate) : null;
   const skipped = new Map(candidate?.skipped.map((item) => [item.name, item.reason]) ?? []);
   const proxy = createScratchProxy(skipped, restore?.sourceCellId ?? null);
@@ -501,6 +525,11 @@ function createWarmScratch(
     temperature: restore ? "restored" : "cold",
     cacheAvailable,
     restoreAttempted: cacheAvailable,
+    cacheStatus: loadResult.status,
+    cacheReason: loadResult.status === "unavailable" || loadResult.status === "corrupt"
+      ? loadResult.reason
+      : null,
+    lastCacheWrite: null,
     lastUsedAt: Date.now(),
     lastCheckpointAt: restore?.checkpointedAt ?? null,
     lastCheckpointCellId: restore?.sourceCellId ?? null,
