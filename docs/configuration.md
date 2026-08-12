@@ -94,7 +94,7 @@ Supported variables:
 - Anthropic: `ANTHROPIC_API_KEY`
 - Vercel AI Gateway: `AI_GATEWAY_API_KEY`
 
-Credentials saved through first-run setup or `/model login PROVIDER` take precedence over the corresponding environment variable. Saved values live in the owner-only profile `auth.json`, not in the profile database, workspace events, artifacts, or command output.
+Credentials saved through first-run setup or `/model login PROVIDER` take precedence over the corresponding environment variable. Saved values live in the owner-only profile `auth.json`, not in the profile database, workspace events, artifacts, or command output. First-run input is hidden. If the later model picker is cancelled, the saved credential remains, while no model preference or session is created.
 
 `/model logout PROVIDER` removes the saved value. The environment fallback remains usable if it is still set.
 
@@ -123,26 +123,34 @@ For new work, selection order is:
 1. `--model PROVIDER:MODEL`
 2. the workspace-scoped model preference in the profile database
 3. the selected provider's model environment variable
-4. interactive model entry
+4. interactive provider/model selection
 
 Model environment variables are `OPENAI_MODEL`, `ANTHROPIC_MODEL`, and `VERCEL_MODEL`. The Vercel provider uses `VERCEL_MODEL`, not `AI_GATEWAY_MODEL`.
 
-First interactive startup asks for a provider key through hidden input and then asks for the model ID. Non-interactive new work fails when no usable credential and model can be selected.
+Interactive setup uses keyboard-driven provider and model typeahead. Provider search covers display names and stable IDs. Model search uses deterministic fuzzy matching across catalog display names and canonical IDs; Up/Down moves, Enter confirms, Backspace edits, and Escape cancels. A valid unmatched canonical ID becomes an explicit, initially selected manual row even when fuzzy catalog suggestions remain. Direct OpenAI rows and manual input are limited to `openai/...`, direct Anthropic to `anthropic/...`, and Gateway accepts any valid creator namespace. Display names are presentation only; persistence and dispatch use the confirmed canonical ID.
+
+The model picker loads language-model metadata from the `/v1/models` route at the configured `AI_GATEWAY_BASE_URL` origin. This request is credential-free and makes no inference request. A successful refresh returns current rows; a failed refresh may return a visibly stale, digest-checked endpoint-specific cache; unavailable, rejected, malformed, or provider-filtered-empty results keep exact manual canonical-ID entry available. Catalog membership does not prove credentials, formal-tool support, reasoning support, provider availability, or successful execution, and catalog absence does not reject an otherwise valid manual ID.
+
+Non-interactive new work fails when no usable credential and model can be selected. A malformed retained workspace default also fails closed with the retained diagnostic and guidance to pass `--model PROVIDER:MODEL` or use an interactive terminal. Interactive startup instead warns, leaves the malformed value inspectable for diagnostics, and opens provider/model reselection. The replacement is stored only after confirmation.
 
 `agencity config set-model PROVIDER:MODEL` changes the default for new work. `agencity config clear-model` clears that preference. A branch already created with another model retains its committed model.
 
+Model confirmation authorizes the workspace-preference write before the separate root-creation request. If root creation later fails, the confirmed preference remains valid for later use. If transport is lost after request dispatch, startup reports root creation as unconfirmed; inspect `agencity agents` before retrying because the client cannot infer whether the service committed the root. This boundary is not a cross-store transaction.
+
+Existing non-Echo branches retain their committed model and effort during resume, regardless of later default changes. A retained internal Echo branch follows the explicit compatibility migration path: Agencity resolves a usable product model and commits `SessionModelChanged` before ordinary product work. Echo is not offered for new product selection.
+
 ### Formal agent-tool capability
 
-Autonomous work requires the selected model and transport to support Agencity's formal `bun_console` and `finish` response contract. Model setup and the model picker report one of four states:
+Autonomous work requires the selected model and transport to support Agencity's formal `bun_console` and `finish` response contract. New product selections whose fixed-tool capability is known unsupported are rejected before a workspace model preference, root, or branch model-change event is written. Unknown exact-model capability remains admissible when the transport proves the required formal primitives. Model setup and the model picker report one of four states:
 
 - `provider-strict` — authoritative provider capability constrains the schema and required call; Agencity also validates the result;
 - `runtime-validated` — the transport supplies the formal call channel and Agencity enforces schema and cardinality;
 - `unknown` — exact-model support is unverified, but the model may be attempted when the transport proves bounded formal-tool streaming; and
 - `unavailable` — new autonomous work is rejected before its task message or run is committed.
 
-Credential usability is separate from capability state. Capability inspection uses retained transport/catalog facts and does not call the provider. The shipped product transports prove formal primitives; the public Gateway catalog normally leaves exact-model support `unknown` because it has no authoritative fields for these facts. Do not interpret a shipped transport as proof of provider-strict support for every model.
+Credential usability is separate from capability state. Capability inspection uses retained transport/catalog facts and does not call the provider. The shipped product transports prove formal primitives; the configured Gateway-compatible catalog normally leaves exact-model support `unknown` because it has no authoritative fields for these facts. Do not interpret a shipped transport as proof of provider-strict support for every model.
 
-An unknown model that the provider rejects fails visibly as an unsupported response contract. Agencity does not change reasoning effort, switch transports, downgrade schema enforcement, or fall back to assistant JSON text. A resumed branch retains its committed model; select another model for new work rather than silently changing the existing branch.
+An unknown model that the provider rejects fails visibly as an unsupported response contract. Agencity does not change reasoning effort, switch transports, downgrade schema enforcement, or fall back to assistant JSON text. A resumed non-Echo branch retains its committed model; select another model for new work rather than silently changing the existing branch.
 
 ### Reasoning effort
 
@@ -159,7 +167,7 @@ When `--model` is omitted, the workspace default model is required and supplies 
 
 An explicit unsupported choice fails. A stale stored preference falls back visibly to `provider-default` rather than silently selecting another non-default level. Preferences are keyed by workspace, normalized Gateway catalog endpoint, and canonical model ID so custom Gateway origins do not share capability assumptions.
 
-Agencity fetches language-model metadata from the Vercel AI Gateway public `/v1/models` catalog and stores a bounded, digest-checked profile cache. Catalog metadata supplies context capacity, output limits, prices, and reasoning choices. Missing reasoning metadata is shown as unverified; it is not treated as proof that a model rejects the standard effort vocabulary. A failed refresh may use a visibly stale cache. It never changes a dispatch already committed for a model call.
+Agencity fetches language-model metadata from the configured Gateway-compatible `/v1/models` catalog and stores a bounded, digest-checked, endpoint-keyed profile cache. The default origin is the public Vercel AI Gateway; an `AI_GATEWAY_BASE_URL` override is not described as public. Catalog metadata supplies context capacity, output limits, prices, and reasoning choices. Missing reasoning metadata is shown as unverified; it is not treated as proof that a model rejects the standard effort vocabulary. A failed refresh may use a visibly stale cache. It never changes a dispatch already committed for a model call.
 
 ### Opaque credential references
 

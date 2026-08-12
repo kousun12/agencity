@@ -1,13 +1,75 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
-import { Supervisor, projectEvents } from "../../src/index.ts";
+import {
+  EchoModelProvider,
+  ModelExecutor,
+  Supervisor,
+  createAnthropicModelProvider,
+  createOpenAIModelProvider,
+  createVercelModelProvider,
+  projectEvents,
+} from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
 afterEach(async () => { await Promise.all(temps.splice(0).map(removeTempRuntime)); });
 
 describe("durable model configuration", () => {
+  test("applies canonical grammar only to configured product transports", () => {
+    const executor = new ModelExecutor([
+      new EchoModelProvider(),
+      createOpenAIModelProvider({
+        origin: "https://api.openai.test",
+        apiKey: () => "unused",
+      }),
+      createAnthropicModelProvider({
+        origin: "https://api.anthropic.test",
+        apiKey: () => "unused",
+      }),
+      createVercelModelProvider({
+        origin: "https://gateway.test",
+        apiKey: () => "unused",
+      }),
+      {
+        name: "custom",
+        normalizeModel: model => `custom:${model}`,
+        async complete() {
+          return {
+            text: "ok",
+            finishReason: "stop",
+            usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+          };
+        },
+      },
+    ]);
+
+    expect(executor.normalizeConfigurationIdentity({
+      provider: "echo",
+      model: "echo model without slash",
+    }).model).toBe("echo model without slash");
+    expect(executor.normalizeConfigurationIdentity({
+      provider: "custom",
+      model: "provider-specific identity",
+    }).model).toBe("custom:provider-specific identity");
+    expect(executor.normalizeConfigurationIdentity({
+      provider: "vercel",
+      model: "meta/private/model",
+    }).model).toBe("meta/private/model");
+    expect(() => executor.normalizeConfigurationIdentity({
+      provider: "openai",
+      model: "anthropic/claude",
+    })).toThrow("Direct OpenAI");
+    expect(() => executor.normalizeConfigurationIdentity({
+      provider: "anthropic",
+      model: "anthropic/claude\u202e",
+    })).toThrow("bounded canonical");
+    expect(() => executor.normalizeConfigurationIdentity({
+      provider: "vercel",
+      model: `a/${"x".repeat(511)}`,
+    })).toThrow("bounded canonical");
+  });
+
   test("persists provider auth separately and records explicit branch model changes", async () => {
     const temp = await makeTempRuntime("agencity-model-configuration-");
     temps.push(temp);

@@ -19,6 +19,7 @@ import {
   normalizeReasoningEffort,
   normalizeProviderMessages,
   resolveModelDispatch,
+  validateCanonicalProductModelId,
   validateProviderInputCandidate,
   validateModelDispatch,
   validateModelEffectOutputV2,
@@ -322,9 +323,7 @@ class AiSdkModelProvider implements ModelProvider {
 
   normalizeModel(model: string): string {
     const canonical = model.trim();
-    if (!canonical || /\s/.test(canonical) || !canonical.includes("/")) {
-      throw new ValidationError("Product models must use the canonical creator/model catalog ID");
-    }
+    validateCanonicalProductModelId(canonical);
     if (this.name === "openai" && !canonical.startsWith("openai/")) {
       throw new ValidationError("Direct OpenAI transport requires an openai/... canonical model ID");
     }

@@ -202,6 +202,64 @@ describe("Vercel AI Gateway model catalog", () => {
     expect(catalog.list()).toHaveLength(0);
   });
 
+  test("rejects live catalog IDs outside the shared canonical product grammar", async () => {
+    directory = await mkdtemp(join(tmpdir(), "ag-model-catalog-identity-"));
+    profile = await ProfileStore.open(`file:${directory}/profile.db`);
+    const invalidIds = [
+      ".creator/model",
+      "creator//model",
+      "creator/model\u001b[31m",
+      "creator/model\u202e",
+      `a/${"x".repeat(511)}`,
+    ];
+    for (const [index, id] of invalidIds.entries()) {
+      const catalog = new ModelCatalog(profile, {
+        gatewayOrigin: `https://invalid-${index}.example`,
+        fetch: (async () => Response.json({
+          data: [{ id, name: "Untrusted", type: "language" }],
+        })) as unknown as typeof fetch,
+      });
+      const result = await catalog.refresh();
+      expect(result.status).toBe("unavailable");
+      expect(result.error).toMatch(
+        /(?:bounded canonical creator\/model form|model ID is invalid)/,
+      );
+      expect(catalog.list()).toHaveLength(0);
+    }
+  });
+
+  test("discards cached descriptors outside the shared canonical product grammar", async () => {
+    directory = await mkdtemp(join(tmpdir(), "ag-model-catalog-cache-identity-"));
+    const url = `file:${directory}/profile.db`;
+    profile = await ProfileStore.open(url);
+    const catalog = new ModelCatalog(profile, {
+      fetch: (async () => Response.json(catalogBody())) as unknown as typeof fetch,
+    });
+    await catalog.refresh();
+    const raw = createClient({ url });
+    const row = (await raw.execute({
+      sql: "SELECT descriptors_json FROM model_catalog_cache WHERE endpoint_id=?",
+      args: [catalog.endpointId],
+    })).rows[0]!;
+    const descriptors = JSON.parse(String(row.descriptors_json)) as Array<
+      Record<string, unknown>
+    >;
+    descriptors[0]!.model = ".invalid/model";
+    const descriptorsJson = stableJson(descriptors);
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(descriptorsJson);
+    await raw.execute({
+      sql: "UPDATE model_catalog_cache SET descriptors_json=?,revision_digest=? WHERE endpoint_id=?",
+      args: [descriptorsJson, hasher.digest("hex"), catalog.endpointId],
+    });
+    raw.close();
+
+    const restored = new ModelCatalog(profile);
+    await restored.hydrate();
+    expect(restored.list()).toHaveLength(0);
+    expect(await profile.getModelCatalogCache(catalog.endpointId)).toBeNull();
+  });
+
   test("treats budget-only reasoning metadata as unverified rather than unsupported", async () => {
     directory = await mkdtemp(join(tmpdir(), "ag-model-catalog-budget-reasoning-"));
     profile = await ProfileStore.open(`file:${directory}/profile.db`);

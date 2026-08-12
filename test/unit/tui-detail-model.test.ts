@@ -143,22 +143,38 @@ describe("terminal inspector view models", () => {
           stale: false,
         },
       },
-      catalogModels: [{
-        model: "openai/unsupported-test",
-        displayName: "Unsupported test model",
-        contextWindowTokens: null,
-        maxOutputTokens: null,
-        pricing: null,
-        reasoning: { status: "unsupported", levels: [] },
-        requiredToolSet: {
-          status: "unsupported",
-          strictSchema: "unsupported",
-          requiredChoice: "unsupported",
-        },
-        catalogDigest: "c".repeat(64),
-        catalogEndpointId: "d".repeat(64),
-        stale: false,
-      }],
+      catalog: {
+        status: "cached-fallback",
+        origin: "https://catalog.example.test/\u202eoverride",
+        error: "refresh\n\u001b[31mfailed\u001b[0m",
+        descriptors: [{
+          model: "openai/unsupported-test",
+          displayName:
+            `Unsupported\n\u001b[31mtest model\u001b[0m\u202e ${"wide".repeat(100)}`,
+          contextWindowTokens: null,
+          maxOutputTokens: null,
+          pricing: null,
+          reasoning: { status: "unsupported", levels: [] },
+          requiredToolSet: {
+            status: "unsupported",
+            strictSchema: "unsupported",
+            requiredChoice: "unsupported",
+          },
+          catalogDigest: "c".repeat(64),
+          catalogEndpointId: "d".repeat(64),
+          stale: false,
+        }, ...Array.from({ length: 12 }, (_, index) => ({
+          model: `openai/additional-${index}`,
+          displayName: `Additional model ${index}`,
+          contextWindowTokens: null,
+          maxOutputTokens: null,
+          pricing: null,
+          reasoning: { status: "unsupported" as const, levels: [] },
+          catalogDigest: `additional-${index}`,
+          catalogEndpointId: "d".repeat(64),
+          stale: false,
+        }))],
+      },
     });
     const output = formatTerminalDetail(detail);
     expect(output).toContain("Vercel AI Gateway");
@@ -167,6 +183,15 @@ describe("terminal inspector view models", () => {
     expect(output).toContain("Agent tools: unknown");
     expect(output).toContain("Catalog evidence remains unknown.");
     expect(output).toContain("agent tools unavailable");
+    expect(output).toContain("Unsupported ␛[31mtest model␛[0m�");
+    expect(output).toContain("refresh ␛[31mfailed␛[0m");
+    expect(output).not.toMatch(/[\u001b\u202e]/u);
+    expect(output.split("\n").every(line => Bun.stringWidth(line) <= 80)).toBe(
+      true,
+    );
+    expect(output).toContain("Additional model 10");
+    expect(output).not.toContain("Additional model 11");
+    expect(formatTerminalRaw(detail.raw)).not.toMatch(/[\u001b\u202e]/u);
     expect(output).not.toContain('"credentialSource"');
   });
 

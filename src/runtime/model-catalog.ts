@@ -1,6 +1,7 @@
 import {
   STANDARD_UNVERIFIED_REASONING_LEVELS,
   ValidationError,
+  isCanonicalProductModelId,
   type JsonValue,
   type ModelDescriptor,
   type RequestedReasoningEffort,
@@ -221,7 +222,9 @@ function catalogRecords(value: unknown): Array<Record<string, unknown>> {
 
 function normalizeDescriptor(record: Record<string, unknown>, endpointId: string): ModelDescriptor {
   const model = boundedString(record.id, "model ID", 512);
-  if (!/^[a-z0-9][a-z0-9._-]*\/[^\s/][^\s]*$/i.test(model)) throw new ValidationError("Model catalog ID must use creator/model form");
+  if (!isCanonicalProductModelId(model)) {
+    throw new ValidationError("Model catalog ID must use bounded canonical creator/model form");
+  }
   const displayName = record.name === undefined ? model : boundedString(record.name, "model name", MAX_TEXT);
   const tags = boundedStringArray(record.tags, "model tags");
   const options = record.reasoning_options;
@@ -278,6 +281,9 @@ function normalizeDescriptor(record: Record<string, unknown>, endpointId: string
 function parseCachedDescriptor(value: JsonValue, endpointId: string): ModelDescriptor {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ValidationError("Cached model descriptor is invalid");
   const model = boundedString(value.model, "cached model ID", 512);
+  if (!isCanonicalProductModelId(model)) {
+    throw new ValidationError("Cached model ID must use bounded canonical creator/model form");
+  }
   const displayName = boundedString(value.displayName, "cached model name", MAX_TEXT);
   const status = value.reasoning && typeof value.reasoning === "object" && !Array.isArray(value.reasoning)
     ? value.reasoning.status : undefined;

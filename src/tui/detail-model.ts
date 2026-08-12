@@ -1,6 +1,11 @@
 import type { AgentEvent, AgentState, ModelConfiguration, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import {
+  fitTerminalLine,
+  filterCatalogModelsForProvider,
+  sanitizeTerminalLine,
+} from "../product/model-selection.ts";
+import {
   describeCatalogAgentToolState,
   describeTransportAgentToolState,
   type AgentToolCapabilityState,
@@ -53,6 +58,9 @@ export interface TerminalModelDetail {
   readonly workspaceDefault: string | null;
   readonly providers: readonly TerminalModelProviderDetail[];
   readonly catalogModels: readonly ModelDescriptor[];
+  readonly catalogStatus: "refreshed" | "cached-fallback" | "unavailable";
+  readonly catalogOrigin?: string;
+  readonly catalogError?: string;
   readonly currentAgentTools?: SelectedAgentToolCapabilityView;
   readonly catalogAgentToolStates: Readonly<Record<string, AgentToolCapabilityState>>;
   readonly raw: unknown;
@@ -1133,6 +1141,12 @@ export function buildTerminalModelDetail(input: {
   readonly workspaceDefault: string | null;
   readonly providers: readonly ModelProviderDescriptor[];
   readonly catalogModels?: readonly ModelDescriptor[];
+  readonly catalog?: {
+    readonly status?: "refreshed" | "cached-fallback" | "unavailable";
+    readonly descriptors: readonly ModelDescriptor[];
+    readonly origin?: string;
+    readonly error?: string;
+  };
   readonly currentAgentTools?: SelectedAgentToolCapabilityView;
 }): TerminalModelDetail {
   const visibleProviderDescriptors = input.providers.filter(provider => provider.name !== "echo");
@@ -1162,11 +1176,19 @@ export function buildTerminalModelDetail(input: {
         : "rejected" as const,
     };
   });
-  const catalogModels = Object.freeze([...(input.catalogModels ?? [])]);
+  const catalogModels = Object.freeze([
+    ...(input.catalog?.descriptors ?? input.catalogModels ?? []),
+  ]);
+  const catalogStatus = input.catalog?.status ?? "refreshed";
+  const catalogOrigin = input.catalog?.origin
+    ? oneLine(sanitizeTerminalLine(input.catalog.origin), 300)
+    : undefined;
+  const catalogError = input.catalog?.error
+    ? oneLine(sanitizeTerminalLine(input.catalog.error), 300)
+    : undefined;
   const catalogAgentToolStates = Object.freeze(Object.fromEntries(
     visibleProviderDescriptors.flatMap(provider =>
-      catalogModels
-        .filter(model => provider.name === "vercel" || model.model.startsWith(`${provider.name}/`))
+      filterCatalogModelsForProvider(catalogModels, provider.name)
         .map(model => [
           catalogCapabilityKey(provider.name, model.model),
           describeCatalogAgentToolState(provider, model),
@@ -1180,12 +1202,23 @@ export function buildTerminalModelDetail(input: {
     workspaceDefault: input.workspaceDefault,
     providers,
     catalogModels,
+    catalogStatus,
+    ...(catalogOrigin === undefined ? {} : { catalogOrigin }),
+    ...(catalogError === undefined ? {} : { catalogError }),
     ...(input.currentAgentTools === undefined ? {} : { currentAgentTools: input.currentAgentTools }),
     catalogAgentToolStates,
     raw: {
       current: `${input.current.provider}:${input.current.model}`,
       workspaceDefault: input.workspaceDefault,
-      catalogModels: input.catalogModels ?? [],
+      catalog: {
+        status: catalogStatus,
+        descriptors: catalogModels.map(descriptor => ({
+          ...descriptor,
+          displayName: sanitizeTerminalLine(descriptor.displayName),
+        })),
+        ...(catalogOrigin === undefined ? {} : { origin: catalogOrigin }),
+        ...(catalogError === undefined ? {} : { error: catalogError }),
+      },
       ...(input.currentAgentTools === undefined ? {} : { agentTools: input.currentAgentTools }),
       catalogAgentToolStates,
       providers: providers.map(provider => ({
@@ -1265,8 +1298,10 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
   }
   if (detail.kind === "model") {
     const currentProvider = detail.providers.find(provider => provider.name === detail.current.provider);
-    const catalogModels = detail.catalogModels.filter(model =>
-      detail.current.provider === "vercel" || model.model.startsWith(`${detail.current.provider}/`));
+    const catalogModels = filterCatalogModelsForProvider(
+      detail.catalogModels,
+      detail.current.provider,
+    );
     const lines = [
       "MODEL",
       "",
@@ -1279,20 +1314,33 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
       "",
       "Workspace default",
       `  ${detail.workspaceDefault ?? "Not set"}`,
+      ...(detail.catalogStatus === "cached-fallback"
+        ? [
+            "",
+            "Catalog",
+            `! Cached catalog fallback${detail.catalogError ? ` · ${detail.catalogError}` : ""}`,
+          ]
+        : detail.catalogStatus === "unavailable"
+          ? [
+              "",
+              "Catalog",
+              `! Catalog unavailable${detail.catalogError ? ` · ${detail.catalogError}` : ""}`,
+            ]
+          : []),
       "",
       "Providers",
       ...detail.providers.map(provider => `${provider.usable && provider.agentToolAdmission === "allowed" ? "✓" : "○"} ${provider.displayName} — ${provider.credentialLabel} · agent tools ${provider.agentToolState}`),
       ...(catalogModels.length ? [
         "",
         "Catalog models",
-        ...catalogModels.slice(0, 12).map(model => formatCatalogModel(
+        ...catalogModels.slice(0, 12).flatMap(model => formatCatalogModel(
           model,
           terminalCatalogAgentToolState(detail, detail.current.provider, model.model),
         )),
       ] : []),
     ];
     if (options.footer !== false) lines.push("", "Enter choose · L login · X logout · Shift-R raw · Esc close");
-    return lines.join("\n");
+    return lines.map(line => fitTerminalLine(line)).join("\n");
   }
   if (detail.kind === "effort") {
     const lines = [
@@ -1322,13 +1370,19 @@ export function formatTerminalDetail(detail: TerminalDetail, options: { raw?: bo
   return lines.join("\n");
 }
 
-function formatCatalogModel(model: ModelDescriptor, agentTools: AgentToolCapabilityState): string {
+function formatCatalogModel(
+  model: ModelDescriptor,
+  agentTools: AgentToolCapabilityState,
+): readonly string[] {
   const capacity = model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`;
   const reasoning = model.reasoning.status === "listed" ? "effort"
     : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed";
   const price = model.pricing === null ? "price unknown"
     : `$${(model.pricing.inputUsdPerToken * 1_000_000).toFixed(2)}/$${(model.pricing.outputUsdPerToken * 1_000_000).toFixed(2)} per 1M`;
-  return `• ${model.displayName} — ${model.model}\n  ${capacity} · ${price} · ${reasoning} · agent tools ${agentTools}${model.stale ? " · stale" : ""}`;
+  return [
+    `• ${sanitizeTerminalLine(model.displayName)} — ${model.model}`,
+    `  ${capacity} · ${price} · ${reasoning} · agent tools ${agentTools}${model.stale ? " · stale" : ""}`,
+  ];
 }
 
 function catalogCapabilityKey(provider: string, model: string): string {

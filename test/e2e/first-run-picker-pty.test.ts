@@ -1,0 +1,523 @@
+import { afterEach, expect, test } from "bun:test";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { StrictActionFixture } from "../acceptance/strict-action-fixture.ts";
+
+const root = resolve(new URL("../..", import.meta.url).pathname);
+const python = Bun.which("python3");
+const worlds: TestWorld[] = [];
+
+interface TestWorld {
+  readonly directory: string;
+  readonly workspace: string;
+  readonly home: string;
+  readonly fixture: StrictActionFixture;
+  readonly environment: Record<string, string>;
+}
+
+interface CommandResult {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+interface PtyResult {
+  readonly providerPrompt: boolean;
+  readonly keyPrompt: boolean;
+  readonly catalogReady: boolean;
+  readonly manualRow: boolean;
+  readonly ready: boolean;
+  readonly exitCode: number | null;
+  readonly preConfirmationConfig: unknown;
+  readonly preConfirmationSessions: unknown;
+  readonly servicePid: number | null;
+  readonly serviceKilled: boolean;
+  readonly pickerOutputBase64: string;
+  readonly outputTail: string;
+}
+
+afterEach(async () => {
+  for (const world of worlds.splice(0)) {
+    await command(world, ["service", "shutdown", "--json"], 5_000).catch(
+      () => undefined,
+    );
+    world.fixture.close();
+    await rm(world.directory, { recursive: true, force: true });
+  }
+});
+
+async function createWorld(
+  catalogMode: NonNullable<
+    NonNullable<
+      ConstructorParameters<typeof StrictActionFixture>[0]
+    >["catalogMode"]
+  >,
+): Promise<TestWorld> {
+  const directory = await mkdtemp(
+    join(tmpdir(), "agencity-first-run-picker-pty-"),
+  );
+  const workspace = join(directory, "workspace");
+  const home = join(directory, "home");
+  await mkdir(join(workspace, ".git"), { recursive: true });
+  await mkdir(home, { recursive: true });
+  const fixture = new StrictActionFixture({ catalogMode });
+  const {
+    OPENAI_API_KEY: _openaiKey,
+    OPENAI_MODEL: _openaiModel,
+    ANTHROPIC_API_KEY: _anthropicKey,
+    ANTHROPIC_MODEL: _anthropicModel,
+    AI_GATEWAY_API_KEY: _gatewayKey,
+    AI_GATEWAY_MODEL: _gatewayModel,
+    VERCEL_MODEL: _vercelModel,
+    AGENCITY_PROFILE: _profile,
+    ...clean
+  } = process.env;
+  const environment = {
+    ...Object.fromEntries(
+      Object.entries(clean).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
+    HOME: home,
+    ...fixture.firstRunEnvironment(),
+  };
+  const world = { directory, workspace, home, fixture, environment };
+  worlds.push(world);
+  return world;
+}
+
+async function command(
+  world: TestWorld,
+  args: readonly string[],
+  timeoutMs = 10_000,
+): Promise<CommandResult> {
+  const child = Bun.spawn(
+    [process.execPath, join(root, "src/cli.ts"), ...args],
+    {
+      cwd: root,
+      env: world.environment,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const timeout = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    return { code, stdout, stderr };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function runPty(
+  world: TestWorld,
+  scenario: "unavailable" | "hostile" | "service-loss",
+  columns: number,
+  controlPath = "",
+): Promise<PtyResult> {
+  const driver = String.raw`
+import base64, fcntl, json, os, pty, select, signal, struct, subprocess, sys, termios, time
+
+root, workspace, scenario, columns_text, control_path = sys.argv[1:]
+columns = int(columns_text)
+cli = os.path.join(root, "src", "cli.ts")
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(root)
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, columns, 0, 0))
+    os.execvp("bun", ["bun", cli, "new", "--workspace", workspace])
+
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, columns, 0, 0))
+os.set_blocking(fd, False)
+output = bytearray()
+
+def pump(seconds, needle=None, start=0):
+    deadline = time.time() + seconds
+    target = needle.encode() if needle else None
+    while time.time() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        output.extend(chunk)
+        if target and target in output[start:]:
+            return True
+    return target is None or target in output[start:]
+
+def wait_exit(seconds):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            return os.waitstatus_to_exitcode(status)
+        time.sleep(0.05)
+    return None
+
+def public_json(args):
+    result = subprocess.run(
+        ["bun", cli, *args, "--workspace", workspace, "--json"],
+        cwd=root,
+        env=os.environ.copy(),
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return {"commandError": result.stderr.decode("utf-8", "replace")[-500:]}
+    return json.loads(result.stdout)
+
+def owned_service_pid():
+    manifest_path = os.path.join(workspace, ".agencity", "service", "manifest.json")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+            candidate = value.get("pidHint")
+            if isinstance(candidate, int) and candidate > 0:
+                return candidate
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+        time.sleep(0.05)
+    return None
+
+provider_prompt = pump(10, "Choose a provider")
+if provider_prompt:
+    os.write(fd, b"openai\r")
+key_prompt = pump(5, "API key for OpenAI")
+if key_prompt:
+    os.write(fd, b"acceptance-fixture-key\r")
+
+catalog_ready = False
+manual_row = False
+ready = False
+pre_config = None
+pre_sessions = None
+service_pid = None
+service_killed = False
+picker_start = len(output)
+picker_end = picker_start
+
+if scenario == "unavailable":
+    catalog_ready = pump(10, "Catalog unavailable", picker_start)
+    if catalog_ready:
+        pre_config = public_json(["config"])
+        pre_sessions = public_json(["sessions"])
+        model_mark = len(output)
+        os.write(fd, b"openai/private-preview-v1")
+        manual_row = pump(5, "not listed in catalog", model_mark)
+        picker_end = len(output)
+        if manual_row:
+            os.write(fd, b"\r")
+            ready = pump(10, "Ask Agencity", picker_end)
+elif scenario == "hostile":
+    catalog_ready = pump(10, "Scarlet", picker_start)
+    query_mark = len(output)
+    if catalog_ready:
+        os.write(fd, b"scarlet")
+        manual_row = pump(5, "openai/fixture-v1", query_mark)
+    picker_end = len(output)
+    if manual_row:
+        os.write(fd, b"\r")
+        ready = pump(10, "Ask Agencity", picker_end)
+else:
+    catalog_ready = pump(10, "Loading configured model catalog", picker_start)
+    picker_end = len(output)
+    if catalog_ready:
+        with open(control_path + ".ready", "w", encoding="utf-8") as handle:
+            handle.write("ready\n")
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                with open(control_path, "r", encoding="utf-8") as handle:
+                    if handle.read().strip() == "kill":
+                        break
+            except FileNotFoundError:
+                pass
+            time.sleep(0.05)
+        service_pid = owned_service_pid()
+        if service_pid is not None:
+            try:
+                os.kill(service_pid, signal.SIGKILL)
+                service_killed = True
+            except ProcessLookupError:
+                pass
+        if service_killed:
+            pump(2, "Catalog unavailable", picker_end)
+            os.write(fd, b"\x1b")
+
+if scenario != "service-loss" and ready:
+    os.write(fd, b"/quit\r")
+    pump(5, "workspace service will stop automatically")
+
+exit_code = wait_exit(10)
+if exit_code is None:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    exit_code = wait_exit(2)
+if exit_code is None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    done, status = os.waitpid(pid, 0)
+    exit_code = os.waitstatus_to_exitcode(status)
+try:
+    os.close(fd)
+except OSError:
+    pass
+
+print(json.dumps({
+    "providerPrompt": provider_prompt,
+    "keyPrompt": key_prompt,
+    "catalogReady": catalog_ready,
+    "manualRow": manual_row,
+    "ready": ready,
+    "exitCode": exit_code,
+    "preConfirmationConfig": pre_config,
+    "preConfirmationSessions": pre_sessions,
+    "servicePid": service_pid,
+    "serviceKilled": service_killed,
+    "pickerOutputBase64": base64.b64encode(bytes(output[picker_start:picker_end])).decode("ascii"),
+    "outputTail": output.decode("utf-8", "replace")[-1600:],
+}))
+`;
+  const child = Bun.spawn(
+    [
+      python!,
+      "-c",
+      driver,
+      root,
+      world.workspace,
+      scenario,
+      String(columns),
+      controlPath,
+    ],
+    {
+      cwd: root,
+      env: world.environment,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 25_000);
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code, stderr).toBe(0);
+    return JSON.parse(stdout) as PtyResult;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function configAndSessions(world: TestWorld): Promise<{
+  readonly config: { readonly defaultModel: string | null };
+  readonly sessions: Array<{
+    readonly model: {
+      readonly provider: string;
+      readonly model: string;
+      readonly reasoningEffort: string;
+    };
+  }>;
+}> {
+  const configured = await command(world, [
+    "config",
+    "--workspace",
+    world.workspace,
+    "--json",
+  ]);
+  expect(configured.code, configured.stderr).toBe(0);
+  const sessions = await command(world, [
+    "sessions",
+    "--workspace",
+    world.workspace,
+    "--json",
+  ]);
+  expect(sessions.code, sessions.stderr).toBe(0);
+  return {
+    config: JSON.parse(configured.stdout),
+    sessions: JSON.parse(sessions.stdout),
+  };
+}
+
+test.skipIf(!python || process.platform === "win32")(
+  "selects an exact manual model when the configured catalog is unavailable without creating a placeholder root",
+  async () => {
+    const world = await createWorld("unavailable");
+    const result = await runPty(world, "unavailable", 80);
+    expect(result, result.outputTail).toMatchObject({
+      providerPrompt: true,
+      keyPrompt: true,
+      catalogReady: true,
+      manualRow: true,
+      ready: true,
+      exitCode: 0,
+      preConfirmationConfig: expect.objectContaining({ defaultModel: null }),
+      preConfirmationSessions: [],
+    });
+    const pickerOutput = Buffer.from(
+      result.pickerOutputBase64,
+      "base64",
+    ).toString("utf8");
+    expect(pickerOutput).toContain("Catalog unavailable");
+    expect(pickerOutput).toContain("not listed in catalog");
+    expect(pickerOutput).not.toMatch(
+      /catalog\s+(?:verified|confirmed)|(?:verified|confirmed)\s+by\s+(?:the\s+)?catalog/i,
+    );
+    expect(world.fixture.catalogRequests.length).toBeGreaterThan(0);
+    expect(
+      world.fixture.catalogRequests.every(
+        (request) => request.authorization === null,
+      ),
+    ).toBeTrue();
+
+    const durable = await configAndSessions(world);
+    expect(durable.config.defaultModel).toBe(
+      "openai:openai/private-preview-v1",
+    );
+    expect(durable.sessions).toHaveLength(1);
+    expect(durable.sessions[0]?.model).toEqual({
+      provider: "openai",
+      model: "openai/private-preview-v1",
+      reasoningEffort: "provider-default",
+    });
+  },
+  30_000,
+);
+
+test.skipIf(!python || process.platform === "win32")(
+  "sanitizes hostile catalog labels within terminal width and persists the canonical model ID",
+  async () => {
+    const columns = 42;
+    const world = await createWorld("hostile");
+    const result = await runPty(world, "hostile", columns);
+    expect(result, result.outputTail).toMatchObject({
+      providerPrompt: true,
+      keyPrompt: true,
+      catalogReady: true,
+      manualRow: true,
+      ready: true,
+      exitCode: 0,
+    });
+    expect(world.fixture.catalogRequests.length).toBeGreaterThan(0);
+    expect(
+      world.fixture.catalogRequests.every(
+        (request) => request.authorization === null,
+      ),
+    ).toBeTrue();
+
+    const pickerOutput = Buffer.from(
+      result.pickerOutputBase64,
+      "base64",
+    ).toString("utf8");
+    expect(pickerOutput).not.toContain("\u001b[31m");
+    expect(pickerOutput).not.toContain("\u001b[2J");
+    expect(pickerOutput).not.toMatch(/[\u202e\u2066\u2069]/u);
+    expect(pickerOutput).not.toMatch(
+      /Fixture\r?\n\u001b\[2K\r[^\n]*Scarlet/u,
+    );
+    expect(pickerOutput).not.toMatch(
+      /Mini\r?\n\u001b\[2K\r[^\n]*catalog/u,
+    );
+    expect(pickerOutput).toMatch(/[模型界試験]/u);
+    const emittedLines = pickerOutput.split("\u001b[2K\r").slice(1).map(
+      (write) =>
+        (write.split("\n")[0] ?? "")
+          .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+          .replace(/\r/g, ""),
+    );
+    expect(emittedLines.length).toBeGreaterThan(1);
+    for (const line of emittedLines) {
+      expect(Bun.stringWidth(line), JSON.stringify(line)).toBeLessThanOrEqual(
+        columns,
+      );
+    }
+
+    const durable = await configAndSessions(world);
+    expect(durable.config.defaultModel).toBe("openai:openai/fixture-v1");
+    expect(durable.sessions).toHaveLength(1);
+    expect(durable.sessions[0]?.model.model).toBe("openai/fixture-v1");
+    expect(JSON.stringify(durable)).not.toContain("Scarlet");
+    expect(JSON.stringify(durable)).not.toContain("override");
+  },
+  30_000,
+);
+
+test.skipIf(!python || process.platform === "win32")(
+  "retains the stored credential but no model or root after managed-service loss during catalog loading",
+  async () => {
+    const world = await createWorld("delayed");
+    const controlPath = join(world.directory, "service-loss-control");
+    const running = runPty(world, "service-loss", 80, controlPath);
+    const [, catalogRequest] = await Promise.all([
+      waitForFile(`${controlPath}.ready`, 10_000),
+      world.fixture.waitForCatalog(1, 10_000),
+    ]);
+    expect(catalogRequest.authorization).toBeNull();
+    await writeFile(controlPath, "kill\n");
+    const result = await running;
+    expect(result, result.outputTail).toMatchObject({
+      providerPrompt: true,
+      keyPrompt: true,
+      catalogReady: true,
+      ready: false,
+      serviceKilled: true,
+    });
+    expect(result.servicePid).toBeGreaterThan(0);
+    expect(result.exitCode).not.toBe(0);
+
+    world.fixture.releaseCatalog();
+    const durable = await configAndSessions(world);
+    expect(durable.config.defaultModel).toBeNull();
+    expect(durable.sessions).toEqual([]);
+    const doctor = await command(world, [
+      "doctor",
+      "--workspace",
+      world.workspace,
+      "--json",
+    ]);
+    expect(doctor.code, doctor.stderr).toBe(0);
+    expect(JSON.parse(doctor.stdout).providers).toContainEqual(
+      expect.objectContaining({
+        provider: "openai",
+        usable: true,
+        credentialSource: "stored",
+      }),
+    );
+  },
+  30_000,
+);
+
+async function waitForFile(path: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if ((await readFile(path, "utf8")).trim() === "ready") return;
+    } catch {}
+    await Bun.sleep(25);
+  }
+  throw new Error(`PTY driver did not create readiness marker: ${path}`);
+}
