@@ -24,6 +24,7 @@ import {
   type ModelDispatch,
   type ModelEffectOutputV2,
   type ModelProvider,
+  type StartAgentRunInput,
   type TextModelResponse,
 } from "../../src/index.ts";
 import { consumeRequiredToolStream, ModelProviderResponseFailureError, ModelResponseGuard } from "../../src/executors/model-response.ts";
@@ -136,6 +137,78 @@ class FailingFormalActions extends GuardAbortActions {
       "failure-v1",
       "Fixture stream failed",
     );
+  }
+}
+
+class TypedFinishActions implements ModelProvider {
+  readonly name = "typed-finish-actions";
+  readonly capabilities = {
+    streaming: false,
+    contextWindowTokens: 128_000,
+    contextCapacitySource: "provider-metadata",
+    requiredToolSet: {
+      status: "provider-strict",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "provider-disabled",
+      streaming: true,
+      adapter: "agencity.typed-finish.fixture.v1",
+    },
+  } as const;
+  readonly contexts: JsonValue[] = [];
+  readonly dispatches: ModelDispatch[] = [];
+  #index = 0;
+  constructor(readonly script: readonly JsonValue[]) {}
+  async complete(): Promise<TextModelResponse> {
+    throw new Error("Typed finish fixture requires formal streaming");
+  }
+  async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+    onDelta: (delta: any) => void,
+  ): Promise<ModelEffectOutputV2> {
+    this.contexts.push(context);
+    this.dispatches.push(dispatch);
+    const input = this.script[this.#index++] ?? {
+      outcome: { status: "failed", message: "Typed fixture exhausted" },
+    };
+    const callId = `typed-finish-${this.#index}`;
+    const encoded = JSON.stringify(input);
+    const guard = new ModelResponseGuard(signal);
+    return consumeRequiredToolStream({
+      dispatch,
+      guard,
+      onDelta,
+      gatewayCost: () => 0,
+      stream: {
+        fullStream: (async function* () {
+          yield { type: "tool-input-start", id: callId, toolName: "finish" };
+          yield { type: "tool-input-delta", id: callId, delta: encoded };
+          yield { type: "tool-input-end", id: callId };
+          yield {
+            type: "tool-call",
+            toolCallId: callId,
+            toolName: "finish",
+            input,
+            dynamic: false,
+            invalid: false,
+          };
+          const usage = { inputTokens: 1, outputTokens: 1 };
+          yield {
+            type: "finish-step",
+            finishReason: "tool-calls",
+            rawFinishReason: "tool_calls",
+            usage,
+          };
+          yield {
+            type: "finish",
+            finishReason: "tool-calls",
+            rawFinishReason: "tool_calls",
+            totalUsage: usage,
+          };
+        })(),
+      },
+    });
   }
 }
 
@@ -1478,7 +1551,508 @@ describe("autonomous durable agent runs", () => {
       const state = projectEvents(await supervisor.storage.loadEvents(session.sessionId, { branchId: session.branchId }));
       expect(state.effects[effectId]?.attempts).toBe(1);
       expect(state.messages.map(message => message.content)).toEqual(["Recover pending request", "Pending recovered once."]);
+      expect(state.agentRuns[runId]?.invocationContract).toBeUndefined();
+      expect(state.agentRuns[runId]?.result).toBeUndefined();
     } finally { await supervisor.close(); }
+  });
+
+  test("pins default text results without changing retained legacy text runs", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "Pinned text result." }),
+    ]);
+    try {
+      const result = await value.supervisor.runs.start(
+        value.sessionId,
+        value.branchId,
+        { task: "Return text", requestKey: "pinned-text" },
+      );
+      expect(result).toMatchObject({
+        status: "succeeded",
+        final: "Pinned text result.",
+        output: { kind: "text", text: "Pinned text result." },
+        invocationContract: {
+          protocol: "agencity.agent-invocation-contract",
+          version: 1,
+          output: { kind: "text" },
+          resultPolicy: { storage: "inline", inlineByteLimit: 65_536 },
+        },
+        resultReference: {
+          protocol: "agencity.agent-run-result-reference",
+          version: 1,
+          kind: "text",
+        },
+      });
+      const events = await value.supervisor.storage.loadEvents(value.sessionId, {
+        branchId: value.branchId,
+      });
+      expect(events.filter(event => event.type === "AgentInvocationContractPinned")).toHaveLength(1);
+      expect(events.filter(event => event.type === "AgentRunResultCommitted")).toHaveLength(1);
+    } finally {
+      await value.supervisor.close();
+    }
+  });
+
+  test("rejects an oversized pinned text result before successful persistence and accepts one repair", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "x".repeat(70_000) }),
+      action({ type: "final", content: "Bounded repair." }),
+    ]);
+    try {
+      const result = await value.supervisor.runs.start(
+        value.sessionId,
+        value.branchId,
+        { task: "Return bounded text", requestKey: "bounded-text" },
+      );
+      expect(result).toMatchObject({
+        status: "succeeded",
+        steps: 2,
+        output: { kind: "text", text: "Bounded repair." },
+      });
+      expect(providerObservations(value.provider.contexts[1]!)).toEqual([
+        expect.objectContaining({
+          type: "AgentRunTypedActionViolationCommitted",
+        }),
+      ]);
+      const events = await value.supervisor.storage.loadEvents(value.sessionId, {
+        branchId: value.branchId,
+      });
+      expect(events.filter(event =>
+        event.type === "AgentRunTypedActionViolationCommitted"
+      )).toHaveLength(1);
+      expect(events.filter(event => event.type === "AgentRunResultCommitted"))
+        .toHaveLength(1);
+      expect(events.filter(event =>
+        event.type === "MessageAppended" &&
+        (event.payload as any).role === "assistant"
+      )).toHaveLength(1);
+    } finally {
+      await value.supervisor.close();
+    }
+  });
+
+  test("repairs a typed object violation and atomically commits the validated result", async () => {
+    const temp = await makeTempRuntime("agencity-typed-agent-run-"); temps.push(temp);
+    const provider = new TypedFinishActions([{
+      outcome: {
+        status: "succeeded",
+        message: "Missing the required count.",
+        value: { summary: "incomplete" },
+      },
+    }, {
+      outcome: {
+        status: "succeeded",
+        message: "Structured work complete.",
+        value: { summary: "complete", count: 2 },
+      },
+    }]);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "typed-agent-run",
+      model: { provider: provider.name, model: "typed-v1" },
+    });
+    try {
+      const request: StartAgentRunInput = {
+        task: "Return structured work",
+        requestKey: "typed-object",
+        output: {
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["summary", "count"],
+            properties: {
+              summary: { type: "string" },
+              count: { type: "integer", minimum: 0 },
+            },
+          },
+        },
+      };
+      const result = await supervisor.runs.start(
+        session.sessionId,
+        session.branchId,
+        request,
+      );
+      expect(result).toMatchObject({
+        status: "succeeded",
+        final: "Structured work complete.",
+        steps: 2,
+        output: {
+          kind: "object",
+          object: { summary: "complete", count: 2 },
+        },
+        resultReference: { kind: "object" },
+      });
+      expect(provider.dispatches).toHaveLength(2);
+      for (const dispatch of provider.dispatches) {
+        expect(dispatch.responseContract.kind).toBe("required-tool-set");
+        if (dispatch.responseContract.kind !== "required-tool-set") continue;
+        expect(dispatch.responseContract.tools.map(tool => tool.name)).toEqual([
+          "bun_console",
+          "finish",
+        ]);
+      }
+      expect(providerObservations(provider.contexts[1]!)).toEqual([
+        expect.objectContaining({ type: "AgentRunTypedActionViolationCommitted" }),
+      ]);
+
+      const events = await supervisor.storage.loadEvents(session.sessionId, {
+        branchId: session.branchId,
+      });
+      expect(events.filter(event => event.type === "AgentRunTypedActionViolationCommitted")).toHaveLength(1);
+      const terminalTypes = events
+        .slice(events.findIndex(event => event.type === "AgentRunTypedFinishCommitted"))
+        .filter(event => [
+          "AgentRunTypedFinishCommitted",
+          "MessageAppended",
+          "AgentRunResultCommitted",
+          "AgentRunStatusChanged",
+        ].includes(event.type))
+        .map(event => event.type);
+      expect(terminalTypes).toEqual([
+        "AgentRunTypedFinishCommitted",
+        "MessageAppended",
+        "AgentRunResultCommitted",
+        "AgentRunStatusChanged",
+      ]);
+      expect(projectEvents(events).agentRuns[result.runId]?.result?.value).toEqual({
+        summary: "complete",
+        count: 2,
+      });
+      const resultIndex = events.findIndex(event =>
+        event.type === "AgentRunResultCommitted"
+      );
+      const messageIndex = resultIndex - 1;
+      const finishIndex = events.findIndex(event =>
+        event.type === "AgentRunTypedFinishCommitted" &&
+        (event.payload as any).outcome.status === "succeeded"
+      );
+      expect(() => projectEvents(events.filter((_, index) =>
+        index !== messageIndex
+      ))).toThrow();
+      const reordered = [...events];
+      [reordered[messageIndex], reordered[resultIndex]] = [
+        reordered[resultIndex]!,
+        reordered[messageIndex]!,
+      ];
+      expect(() => projectEvents(reordered)).toThrow();
+      expect(() => projectEvents([
+        ...events.slice(0, finishIndex + 1),
+        {
+          ...events[finishIndex]!,
+          id: "sync-injected-duplicate-typed-finish",
+          idempotencyKey: "sync-injected-duplicate-typed-finish",
+        },
+        ...events.slice(finishIndex + 1),
+      ])).toThrow();
+      expect(() => projectEvents(events.map((event, index) =>
+        index === resultIndex
+          ? {
+              ...event,
+              payload: {
+                ...(event.payload as any),
+                value: { summary: "tampered", count: 2 },
+              },
+            } as any
+          : event
+      ))).toThrow();
+      expect(await supervisor.runs.admit(
+        session.sessionId,
+        session.branchId,
+        request,
+      )).toMatchObject({
+        runId: result.runId,
+        output: { kind: "object", object: { summary: "complete", count: 2 } },
+      });
+      await expect(supervisor.runs.admit(
+        session.sessionId,
+        session.branchId,
+        {
+          ...request,
+          output: {
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["different"],
+              properties: { different: { type: "boolean" } },
+            },
+          },
+        },
+      )).rejects.toThrow(/different output schema/i);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("typed blocked output commits no fabricated programmatic result", async () => {
+    const temp = await makeTempRuntime("agencity-typed-agent-blocked-"); temps.push(temp);
+    const provider = new TypedFinishActions([{
+      outcome: {
+        status: "blocked",
+        message: "Required source data is unavailable.",
+      },
+    }]);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "typed-agent-blocked",
+      model: { provider: provider.name, model: "typed-v1" },
+    });
+    try {
+      const result = await supervisor.runs.start(session.sessionId, session.branchId, {
+        task: "Return a blocked structured result",
+        output: {
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["answer"],
+            properties: { answer: { type: "string" } },
+          },
+        },
+      });
+      expect(result).toMatchObject({
+        status: "blocked",
+        final: "Required source data is unavailable.",
+      });
+      expect(result.output).toBeUndefined();
+      expect(result.resultReference).toBeUndefined();
+      const events = await supervisor.storage.loadEvents(session.sessionId, {
+        branchId: session.branchId,
+      });
+      expect(events.filter(event => event.type === "AgentRunTypedFinishCommitted")).toHaveLength(1);
+      expect(events.filter(event => event.type === "AgentRunResultCommitted")).toHaveLength(0);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("schema-constrained completion preserves goal gates and goal-derived failure parity", async () => {
+    const temp = await makeTempRuntime("agencity-typed-agent-goal-"); temps.push(temp);
+    const provider = new TypedFinishActions([{
+      outcome: {
+        status: "succeeded",
+        message: "Claimed structured completion.",
+        value: { ready: true },
+      },
+    }, {
+      outcome: {
+        status: "failed",
+        message: "Could not repair the required gate.",
+      },
+    }]);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "typed-agent-goal",
+      model: { provider: provider.name, model: "typed-v1" },
+    });
+    try {
+      const goal = await supervisor.goals.create(session.sessionId, session.branchId, {
+        description: "Pass the required gate before structured completion",
+        gates: [{
+          name: "always fails",
+          executor: "shell",
+          operation: "run",
+          input: { command: "exit 7" },
+          idempotent: true,
+          required: true,
+        }],
+      });
+      const result = await supervisor.runs.start(
+        session.sessionId,
+        session.branchId,
+        {
+          task: "Return a gated structured decision",
+          goalId: goal.goalId,
+          output: {
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["ready"],
+              properties: { ready: { type: "boolean" } },
+            },
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        status: "blocked",
+        final: "Could not repair the required gate.",
+        reason: expect.stringContaining(
+          "Goal repair stopped after a failed required gate",
+        ),
+      });
+      expect(result.output).toBeUndefined();
+      expect(result.resultReference).toBeUndefined();
+      const events = await supervisor.storage.loadEvents(session.sessionId, {
+        branchId: session.branchId,
+      });
+      expect(events.filter(event =>
+        event.type === "AgentRunTypedFinishCommitted"
+      )).toHaveLength(2);
+      expect(events.filter(event =>
+        event.type === "AgentRunGoalCheckRecorded"
+      )).toHaveLength(1);
+      expect(events.filter(event =>
+        event.type === "AgentRunResultCommitted"
+      )).toHaveLength(0);
+      expect(projectEvents(events).goals[goal.goalId]?.status).toBe("blocked");
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("schema-constrained completion commits its result only after required gates pass", async () => {
+    const temp = await makeTempRuntime("agencity-typed-agent-passing-goal-"); temps.push(temp);
+    const provider = new TypedFinishActions([{
+      outcome: {
+        status: "succeeded",
+        message: "Gated structured completion.",
+        value: { ready: true },
+      },
+    }]);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "typed-agent-passing-goal",
+      model: { provider: provider.name, model: "typed-v1" },
+    });
+    try {
+      const goal = await supervisor.goals.create(session.sessionId, session.branchId, {
+        description: "Pass before structured completion",
+        gates: [{
+          name: "passes",
+          executor: "shell",
+          operation: "run",
+          input: { command: "exit 0" },
+          idempotent: true,
+          required: true,
+        }],
+      });
+      const result = await supervisor.runs.start(
+        session.sessionId,
+        session.branchId,
+        {
+          task: "Return a gated structured decision",
+          goalId: goal.goalId,
+          output: {
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["ready"],
+              properties: { ready: { type: "boolean" } },
+            },
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        status: "succeeded",
+        output: { kind: "object", object: { ready: true } },
+        resultReference: { kind: "object" },
+      });
+      const events = await supervisor.storage.loadEvents(session.sessionId, {
+        branchId: session.branchId,
+      });
+      const finish = events.findIndex(event =>
+        event.type === "AgentRunTypedFinishCommitted"
+      );
+      const check = events.findIndex(event =>
+        event.type === "AgentRunGoalCheckRecorded"
+      );
+      const message = events.findIndex((event, index) =>
+        index > check && event.type === "MessageAppended" &&
+        (event.payload as any).role === "assistant"
+      );
+      const committed = events.findIndex(event =>
+        event.type === "AgentRunResultCommitted"
+      );
+      const status = events.findIndex((event, index) =>
+        index > committed && event.type === "AgentRunStatusChanged"
+      );
+      expect(finish).toBeLessThan(check);
+      expect(check).toBeLessThan(message);
+      expect(message).toBeLessThan(committed);
+      expect(committed).toBeLessThan(status);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("sdk.agents.run returns a schema-validated object result", async () => {
+    const temp = await makeTempRuntime("agencity-typed-agent-sdk-"); temps.push(temp);
+    const provider = new TypedFinishActions([{
+      outcome: {
+        status: "succeeded",
+        message: "SDK structured result.",
+        value: { ready: true, checks: 3 },
+      },
+    }]);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "typed-agent-sdk",
+      model: { provider: provider.name, model: "typed-v1" },
+    });
+    try {
+      const cell = await supervisor.executeCell(
+        session.sessionId,
+        session.branchId,
+        `return sdk.agents.run({
+          task: "Return SDK structured output",
+          idempotencyKey: "sdk-structured-output",
+          output: {
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["ready", "checks"],
+              properties: {
+                ready: { type: "boolean" },
+                checks: { type: "integer", minimum: 0 },
+              },
+            },
+          },
+        });`,
+      );
+      expect(cell.result).toMatchObject({
+        status: "succeeded",
+        final: "SDK structured result.",
+        output: { kind: "object", object: { ready: true, checks: 3 } },
+        resultReference: { kind: "object" },
+      });
+      const tasks = await supervisor.agents.listTasks(
+        session.sessionId,
+        session.branchId,
+      );
+      expect(tasks[0]?.result).toMatchObject({
+        protocol: "agencity.agent-run-result-reference",
+        kind: "object",
+      });
+    } finally {
+      await supervisor.close();
+    }
   });
 
   test("recovery makes a lost non-idempotent effect an unknown run terminal without a model call", async () => {

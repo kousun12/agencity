@@ -8,6 +8,12 @@ import {
 } from "./agent-action.ts";
 import { ValidationError } from "./errors.ts";
 import {
+  resolveDeclaredSchema,
+  validateDeclaredSchemaValue,
+  validateResolvedDeclaredSchema,
+  type ResolvedDeclaredSchema,
+} from "./declared-schema.ts";
+import {
   assertJsonValue,
   canonicalJsonByteLength,
   canonicalJsonDigest,
@@ -18,6 +24,8 @@ import {
 
 export const AGENT_TOOL_CONTRACT_ID = "agencity.agent-tools.v1" as const;
 export const AGENT_TOOL_CONTRACT_VERSION = 1 as const;
+export const AGENT_TYPED_TOOL_CONTRACT_ID = "agencity.agent-tools.v2" as const;
+export const AGENT_TYPED_TOOL_CONTRACT_VERSION = 2 as const;
 export const AGENT_TOOL_SELECTION = "exactly-one-of" as const;
 export const BUN_CONSOLE_TOOL_NAME = "bun_console" as const;
 export const FINISH_TOOL_NAME = "finish" as const;
@@ -57,6 +65,21 @@ export type AgentToolName =
 export type AgentToolSubmission =
   | { readonly name: typeof BUN_CONSOLE_TOOL_NAME; readonly input: BunConsoleInput }
   | { readonly name: typeof FINISH_TOOL_NAME; readonly input: FinishInput };
+
+export type TypedAgentFinishOutcome =
+  | {
+      readonly status: "succeeded";
+      readonly message: string;
+      readonly value: JsonValue;
+    }
+  | { readonly status: "blocked" | "failed"; readonly message: string };
+
+export type TypedAgentToolSubmission =
+  | { readonly name: typeof BUN_CONSOLE_TOOL_NAME; readonly input: BunConsoleInput }
+  | {
+      readonly name: typeof FINISH_TOOL_NAME;
+      readonly input: { readonly outcome: TypedAgentFinishOutcome };
+    };
 
 export const BUN_CONSOLE_INPUT_SCHEMA: JsonValue = deepFreeze({
   type: "object",
@@ -130,6 +153,81 @@ export const AGENT_TOOL_SET: readonly [
     schemaDigest: FINISH_INPUT_SCHEMA_DIGEST,
   },
 ]);
+
+export interface AgentTypedToolContract {
+  readonly contractId: typeof AGENT_TYPED_TOOL_CONTRACT_ID;
+  readonly version: typeof AGENT_TYPED_TOOL_CONTRACT_VERSION;
+  readonly selection: typeof AGENT_TOOL_SELECTION;
+  readonly tools: readonly [
+    AgentToolDefinition<typeof BUN_CONSOLE_TOOL_NAME>,
+    AgentToolDefinition<typeof FINISH_TOOL_NAME>,
+  ];
+  readonly declaredSchema: ResolvedDeclaredSchema;
+  readonly contractDigest: Sha256Digest;
+}
+
+export function resolveAgentTypedToolContract(
+  schema: unknown,
+): AgentTypedToolContract {
+  const declaredSchema = "schema" in ((schema ?? {}) as Record<string, unknown>) &&
+      "schemaDigest" in ((schema ?? {}) as Record<string, unknown>)
+    ? validateResolvedDeclaredSchema(schema)
+    : resolveDeclaredSchema(schema);
+  const root = declaredSchema.schema as Record<string, JsonValue>;
+  const { $schema: _draft, $defs, ...valueSchema } = root;
+  const finishSchema = resolveDeclaredSchema({
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      outcome: {
+        anyOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              status: { type: "string", const: "succeeded" },
+              message: { type: "string", minLength: 1 },
+              value: valueSchema,
+            },
+            required: ["status", "message", "value"],
+          },
+          {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              status: { type: "string", enum: ["blocked", "failed"] },
+              message: { type: "string", minLength: 1 },
+            },
+            required: ["status", "message"],
+          },
+        ],
+      },
+    },
+    required: ["outcome"],
+    ...($defs === undefined ? {} : { $defs }),
+  });
+  const tools = deepFreeze([
+    AGENT_TOOL_SET[0],
+    {
+      name: FINISH_TOOL_NAME,
+      description: FINISH_TOOL_DESCRIPTION +
+        " For successful structured completion, status must be succeeded and value must match the host-pinned declared schema.",
+      inputSchema: finishSchema.schema,
+      schemaDigest: finishSchema.schemaDigest,
+    },
+  ]) as AgentTypedToolContract["tools"];
+  const body = {
+    contractId: AGENT_TYPED_TOOL_CONTRACT_ID,
+    version: AGENT_TYPED_TOOL_CONTRACT_VERSION,
+    selection: AGENT_TOOL_SELECTION,
+    tools,
+    declaredSchema,
+  };
+  return deepFreeze({
+    ...body,
+    contractDigest: canonicalJsonDigest(body),
+  });
+}
 
 const MAX_CANONICAL_ACTION_EXPANSION_BYTES = Math.max(
   canonicalJsonByteLength({
@@ -311,6 +409,119 @@ export function validateAgentToolSubmissionValue(
     encodedBytes: canonicalJsonByteLength(action),
   });
   return submission;
+}
+
+export function validateTypedAgentToolSubmissionValue(
+  value: unknown,
+  declaredSchema: ResolvedDeclaredSchema,
+  options: { readonly encodedBytes: number },
+): TypedAgentToolSubmission {
+  assertEncodedBytes(options.encodedBytes, MAX_AGENT_TOOL_INPUT_BYTES, "Typed agent tool input");
+  assertJsonValue(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ValidationError("Typed agent tool submission must be an object");
+  }
+  const submission = value as Record<string, any>;
+  if (
+    Object.keys(submission).length !== 2 ||
+    !Object.hasOwn(submission, "name") ||
+    !Object.hasOwn(submission, "input")
+  ) {
+    throw new ValidationError("Typed agent tool submission has invalid fields");
+  }
+  if (submission.name === BUN_CONSOLE_TOOL_NAME) {
+    const parsed = bunConsoleInputSchema.safeParse(submission.input);
+    if (!parsed.success) {
+      throw new ValidationError("Typed agent bun_console input is invalid", {
+        issues: parsed.error.issues,
+      });
+    }
+    const result = { name: BUN_CONSOLE_TOOL_NAME, input: parsed.data } as const;
+    assertTypedSubmissionBounds(result, options.encodedBytes, {
+      protocol: AGENT_ACTION_PROTOCOL,
+      version: AGENT_ACTION_VERSION,
+      type: "typescript",
+      code: parsed.data.source,
+    });
+    return result;
+  }
+  if (submission.name !== FINISH_TOOL_NAME ||
+      !submission.input || typeof submission.input !== "object" ||
+      Array.isArray(submission.input) ||
+      !submission.input.outcome || typeof submission.input.outcome !== "object" ||
+      Array.isArray(submission.input.outcome)) {
+    throw new ValidationError("Typed agent finish input is invalid");
+  }
+  const inputKeys = Object.keys(submission.input);
+  const outcome = submission.input.outcome as Record<string, unknown>;
+  if (inputKeys.length !== 1 || inputKeys[0] !== "outcome" ||
+      typeof outcome.message !== "string" || !outcome.message) {
+    throw new ValidationError("Typed agent finish input is invalid");
+  }
+  if (outcome.status === "succeeded") {
+    if (Object.keys(outcome).length !== 3 || !Object.hasOwn(outcome, "value")) {
+      throw new ValidationError("Successful typed finish requires only status, message, and value");
+    }
+    const result = validateDeclaredSchemaValue(declaredSchema, outcome.value);
+    const submissionResult = {
+      name: FINISH_TOOL_NAME,
+      input: {
+        outcome: {
+          status: "succeeded",
+          message: outcome.message,
+          value: result,
+        },
+      },
+    } as const;
+    assertTypedSubmissionBounds(submissionResult, options.encodedBytes, {
+      protocol: AGENT_ACTION_PROTOCOL,
+      version: AGENT_ACTION_VERSION,
+      type: "final",
+      content: outcome.message,
+    });
+    return submissionResult;
+  }
+  if (
+    !["blocked", "failed"].includes(String(outcome.status)) ||
+    Object.keys(outcome).length !== 2
+  ) {
+    throw new ValidationError("Non-successful typed finish requires only status and message");
+  }
+  const submissionResult = {
+    name: FINISH_TOOL_NAME,
+    input: {
+      outcome: {
+        status: outcome.status as "blocked" | "failed",
+        message: outcome.message,
+      },
+    },
+  } as const;
+  assertTypedSubmissionBounds(submissionResult, options.encodedBytes, {
+    protocol: AGENT_ACTION_PROTOCOL,
+    version: AGENT_ACTION_VERSION,
+    type: outcome.status === "blocked" ? "blocked" : "failed",
+    ...(outcome.status === "blocked"
+      ? { reason: outcome.message }
+      : { error: outcome.message }),
+  } as AgentAction);
+  return submissionResult;
+}
+
+function assertTypedSubmissionBounds(
+  submission: TypedAgentToolSubmission,
+  encodedBytes: number,
+  action: AgentAction,
+): void {
+  const canonicalInputBytes = canonicalJsonByteLength(submission.input);
+  if (canonicalInputBytes > encodedBytes) {
+    throw new ValidationError(
+      "Typed agent tool input byte count is smaller than its canonical JSON encoding",
+      { expectedAtLeast: canonicalInputBytes, received: encodedBytes },
+    );
+  }
+  validateAgentActionValue(action, {
+    encodedBytes: canonicalJsonByteLength(action),
+  });
 }
 
 export function validateAgentToolContract(value: unknown): AgentToolContract {

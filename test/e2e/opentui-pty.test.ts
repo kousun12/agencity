@@ -61,11 +61,11 @@ test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI
   const childRunTask = "Create the PTY grandchild";
   const grandchildTask = "PTY retained grandchild";
   provider.script(childRunTask, [
-    action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(grandchildTask)}, name: "PTY grandchild", run: false }); return "spawned grandchild";`),
+    action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(grandchildTask)}, name: "PTY grandchild" }); return "spawned grandchild";`),
     action("final", `fixture completed: ${childRunTask}`),
   ]);
   provider.script(task, [
-    action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer", run: false }); return "spawned";`),
+    action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer" }); return "spawned";`),
     action("final", `fixture completed: ${task}`),
   ]);
   const script = String.raw`
@@ -369,14 +369,16 @@ print(json.dumps({
       await Bun.sleep(50);
     }
     expect(history, historyError).not.toBeNull();
-    expect(history.messages.map((message: any) => [message.role, message.content])).toEqual([
-      ["user", task],
-      ["assistant", `fixture completed: ${task}`],
-    ]);
+    expect(history.messages.map((message: any) => [message.role, message.content]))
+      .toEqual(expect.arrayContaining([
+        ["user", task],
+        ["user", `fixture completed: ${childTask}`],
+        ["assistant", `fixture completed: ${task}`],
+      ]));
     expect(history.runs.at(-1)?.status).toBe("succeeded");
     expect(history.runs.at(-1)?.steps).toHaveLength(2);
     expect(history.cells).toEqual([expect.objectContaining({
-      code: `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer", run: false }); return "spawned";`,
+      code: `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer" }); return "spawned";`,
       status: "committed",
       result: "spawned",
     })]);
@@ -387,7 +389,7 @@ print(json.dumps({
       name: "PTY reviewer",
       relationship: "child",
       task: childTask,
-      taskStatus: "admitted",
+      taskStatus: "completed",
       cancellationRequested: false,
       activity: "idle",
     })]);

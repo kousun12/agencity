@@ -1,11 +1,11 @@
-import type { AgentEvent, AgentProfileInput, AgentState, ModelConfigurationInput, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
+import type { AgentEvent, AgentInvocationContract, AgentProfileInput, AgentState, ModelConfigurationInput, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
 import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
   AiGenerationHandle, AiGenerationInput, AiGenerationResult, AiObjectGenerationInput,
   CreateGoalInput, CreateHeartbeatInput, CreateScheduleInput, CreateInputSetInput, DocumentHandle, GoalHandle,
   HeartbeatHandle, ImportDocumentInput, InputSetHandle, ScheduleHandle, SendMessageInput,
-  SpawnAgentInput, SubagentHandle, CreateMemoryInput,
+  AgentInvocationResult, SpawnAgentInput, SubagentHandle, CreateMemoryInput,
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
   StartAgentRunInput, AgentRunResult, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
@@ -24,6 +24,7 @@ import type { ProductBranchSummary } from "../product/index.ts";
 
 
 const PROTOCOL_STREAM_ITEMS_PER_TURN = 32;
+const MAX_AGENT_INVOCATION_WAIT_MS = 86_400_000;
 
 export interface ProtocolCapabilities {
   readonly protocol: "agencity.protocol";
@@ -323,9 +324,9 @@ export class AgentClient {
   reconcileUnknownEffect(sessionId: string, branchId: string, effectId: string, input: RecordEffectReconciliationInput): Promise<EffectReconciliationView> { return this.#post(`/sessions/${sessionId}/effects/${encodeURIComponent(effectId)}/reconciliation?branch=${branchId}`, input); }
 
   async spawn(sessionId: string, branchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> {
-    if (typeof input === "string") return this.#post(`/sessions/${sessionId}/agents?branch=${branchId}`, { task: input });
+    if (typeof input === "string") return this.#post(`/sessions/${sessionId}/agent-invocations?branch=${branchId}`, { task: input });
     const model = await this.#compatibleModel(input.model);
-    return this.#post(`/sessions/${sessionId}/agents?branch=${branchId}`, { ...input, ...(model === undefined ? {} : { model }) });
+    return this.#post(`/sessions/${sessionId}/agent-invocations?branch=${branchId}`, { ...input, ...(model === undefined ? {} : { model }) });
   }
   async spawnMany(sessionId: string, branchId: string, inputs: readonly (SpawnAgentInput | string)[]): Promise<SubagentHandle[]> {
     const compatible = await Promise.all(inputs.map(async input => {
@@ -333,7 +334,43 @@ export class AgentClient {
       const model = await this.#compatibleModel(input.model);
       return { ...input, ...(model === undefined ? {} : { model }) };
     }));
-    return this.#post(`/sessions/${sessionId}/agents/batch?branch=${branchId}`, { inputs: compatible });
+    return this.#post(`/sessions/${sessionId}/agent-invocations/batch?branch=${branchId}`, { inputs: compatible });
+  }
+  agentInvocationResult(sessionId: string, branchId: string, taskId: string): Promise<AgentInvocationResult> {
+    return this.#json(`/sessions/${sessionId}/agent-invocations/${encodeURIComponent(taskId)}/result?branch=${branchId}`);
+  }
+  agentInvocationContract(sessionId: string, branchId: string, taskId: string): Promise<AgentInvocationContract> {
+    return this.#json(`/sessions/${sessionId}/agent-invocations/${encodeURIComponent(taskId)}/contract?branch=${branchId}`);
+  }
+  findAgentInvocation(sessionId: string, branchId: string, idempotencyKey: string): Promise<SubagentHandle | null> {
+    return this.#json(`/sessions/${sessionId}/agent-invocations/by-key?branch=${branchId}&idempotencyKey=${encodeURIComponent(idempotencyKey)}`);
+  }
+  cancelAgentInvocation(sessionId: string, branchId: string, taskId: string, reason?: string): Promise<unknown> {
+    return this.#post(`/sessions/${sessionId}/agent-invocations/${encodeURIComponent(taskId)}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason });
+  }
+  async runAgent(
+    sessionId: string,
+    branchId: string,
+    input: SpawnAgentInput | string,
+    options: { readonly timeoutMs?: number } = {},
+  ): Promise<AgentInvocationResult> {
+    if (options.timeoutMs !== undefined &&
+        (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0 ||
+          options.timeoutMs > MAX_AGENT_INVOCATION_WAIT_MS)) {
+      throw new ProtocolClientError(
+        "VALIDATION_ERROR",
+        `Agent invocation wait timeout must be from 0 to ${MAX_AGENT_INVOCATION_WAIT_MS}ms`,
+        400,
+      );
+    }
+    const handle = await this.spawn(sessionId, branchId, input);
+    const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+    for (;;) {
+      const result = await this.agentInvocationResult(sessionId, branchId, handle.taskId);
+      if (["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(result.status) ||
+          Date.now() >= deadline) return result;
+      await Bun.sleep(25);
+    }
   }
   tasks(sessionId: string, branchId: string): Promise<TaskRecord[]> { return this.#json(`/sessions/${sessionId}/tasks?branch=${branchId}`); }
   cancelTask(sessionId: string, branchId: string, taskId: string, reason?: string): Promise<TaskRecord> { return this.#post(`/sessions/${sessionId}/tasks/${taskId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }

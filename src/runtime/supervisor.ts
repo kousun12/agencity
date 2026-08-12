@@ -1270,14 +1270,13 @@ export class Supervisor {
         const raw = args[0]; const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.spawn requires a task string or object");
         const idempotencyKey = typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method);
-        if (input.run !== false) return this.agents.spawnRunnable(sessionId, branchId, { ...input, idempotencyKey } as any);
-        return this.agents.spawn(sessionId, branchId, { ...input, idempotencyKey } as any);
+        return this.agents.spawnRunnable(sessionId, branchId, { ...input, idempotencyKey } as any);
       }
       if (method === "agents.spawnMany") {
         if (!Array.isArray(args[0]) || args[0].length === 0 || args[0].length > 16) {
           throw new ValidationError("agents.spawnMany requires 1-16 inputs");
         }
-        return Promise.all(args[0].map((raw, index) => {
+        const inputs = args[0].map((raw, index) => {
           const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
           if (!input || typeof input !== "object" || Array.isArray(input)) {
             throw new ValidationError("agents.spawnMany inputs must be task strings or objects");
@@ -1288,10 +1287,65 @@ export class Supervisor {
               ? input.idempotencyKey
               : `${nextRpcKey(method)}:${index + 1}`,
           };
-          return input.run === false
-            ? this.agents.spawn(sessionId, branchId, normalized as any)
-            : this.agents.spawnRunnable(sessionId, branchId, normalized as any);
-        }));
+          return normalized;
+        });
+        return this.agents.spawnManyRunnable(sessionId, branchId, inputs as any);
+      }
+      if (method === "agents.run" || method === "agents.runMany") {
+        const values = method === "agents.run" ? [args[0]] : args[0];
+        if (!Array.isArray(values) || values.length === 0 || values.length > 16) {
+          throw new ValidationError(`${method} requires 1-16 inputs`);
+        }
+        const inputs = values.map((raw, index) => {
+          const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
+          if (!input || typeof input !== "object" || Array.isArray(input)) {
+            throw new ValidationError(`${method} inputs must be task strings or objects`);
+          }
+          return {
+            ...input,
+            idempotencyKey: typeof input.idempotencyKey === "string"
+              ? input.idempotencyKey
+              : `${nextRpcKey(method)}:${index + 1}`,
+          };
+        });
+        const results = await this.agents.runMany(sessionId, branchId, inputs as any);
+        return method === "agents.run" ? results[0] : results;
+      }
+      if (method === "agents.result") {
+        const handle = args[0];
+        const taskId = typeof handle === "string"
+          ? handle
+          : handle && typeof handle === "object" && !Array.isArray(handle) &&
+              typeof (handle as Record<string, unknown>).taskId === "string"
+          ? (handle as Record<string, string>).taskId
+          : "";
+        if (!taskId) {
+          throw new ValidationError(
+            "agents.result requires a task ID or retained agent handle",
+          );
+        }
+        if (args[1] !== undefined &&
+            (!args[1] || typeof args[1] !== "object" ||
+              Array.isArray(args[1]))) {
+          throw new ValidationError("agents.result options must be an object");
+        }
+        const options = (args[1] ?? {}) as Record<string, unknown>;
+        if (Object.keys(options).some((key) =>
+          key !== "wait" && key !== "timeoutMs"
+        )) {
+          throw new ValidationError("agents.result options contain unknown fields");
+        }
+        if (options.wait !== undefined && typeof options.wait !== "boolean") {
+          throw new ValidationError("agents.result wait must be boolean");
+        }
+        if (options.timeoutMs !== undefined &&
+            typeof options.timeoutMs !== "number") {
+          throw new ValidationError("agents.result timeoutMs must be a number");
+        }
+        return this.agents.result(sessionId, branchId, taskId, {
+          wait: options.wait !== false,
+          ...(typeof options.timeoutMs === "number" ? { timeoutMs: options.timeoutMs } : {}),
+        });
       }
       if (method === "agents.get") {
         const target = typeof args[0] === "string" && args[0] ? args[0] : sessionId;

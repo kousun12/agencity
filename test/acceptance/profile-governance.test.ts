@@ -126,7 +126,6 @@ describe("installed profile governance", () => {
         const child = await sdk.agents.spawn({
           task: "wait for profile-governance work",
           name: "${childName}",
-          run: false,
           idempotencyKey: "profile-governance-child",
         });
         return { childCreated: true, name: "${childName}", child };
@@ -285,6 +284,7 @@ describe("installed profile governance", () => {
     expect(approvedRun.code).toBe(0);
     const approvedHistory = json(await world.command(["history", "current", "--json"], environment));
     expect(approvedHistory.runs.map((run: any) => run.profilePin.profileVersionId)).toEqual([
+      initial.profileVersionId,
       initial.profileVersionId,
       approvedProfile.profileVersionId,
     ]);
@@ -489,6 +489,7 @@ describe("installed profile governance", () => {
     expect(finalHistoryResult.stdout.endsWith("\n")).toBe(true);
     const finalHistory = json(finalHistoryResult);
     expect(finalHistory.runs.map((run: any) => run.profilePin.profileVersionId)).toEqual([
+      initial.profileVersionId,
       initial.profileVersionId,
       approvedProfile.profileVersionId,
       restored.profileVersionId,

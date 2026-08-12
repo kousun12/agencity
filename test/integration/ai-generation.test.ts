@@ -759,7 +759,6 @@ describe("durable raw AI generation", () => {
       }, { cellId: "shared-cell" })).rejects.toThrow(/per-cell admission bound|turns reservation exceeds/i);
       await expect(second.agents.spawn(root.sessionId, root.branchId, {
         task: "cannot overlap raw reservations",
-        run: false,
         budget: { tokenLimit: 10_000, costLimitUsd: 1, turnLimit: 1, wallTimeLimitMs: 10_000 },
       })).rejects.toThrow(/active child reservations exceed parent/i);
       await Promise.all(admitted.map(item => first.ai.cancel(item.generationId)));
@@ -771,7 +770,6 @@ describe("durable raw AI generation", () => {
       });
       const child = await first.agents.spawn(parent.sessionId, parent.branchId, {
         task: "raw generation child",
-        run: false,
         budget: { tokenLimit: 10_000, costLimitUsd: 1, turnLimit: 5, wallTimeLimitMs: 10_000 },
       });
       const childGeneration = await second.ai.admitText(child.sessionId, child.branchId, {
@@ -859,7 +857,6 @@ describe("durable raw AI generation", () => {
       })).rejects.toThrow(/turns reservation exceeds/i);
       await expect(supervisor.agents.spawn(root.sessionId, root.branchId, {
         task: "cannot overlap reserved raw call",
-        run: false,
         budget: { turnLimit: 1, tokenLimit: 10_000, wallTimeLimitMs: 10_000 },
       })).rejects.toThrow(/active child reservations exceed parent/i);
       await supervisor.ai.cancel(admitted.generationId);
@@ -870,7 +867,7 @@ describe("durable raw AI generation", () => {
         budget: { turnLimit: 1, tokenLimit: 10_000, wallTimeLimitMs: 10_000 },
       });
       await supervisor.agents.spawn(childReservedRoot.sessionId, childReservedRoot.branchId, {
-        task: "reserve the only turn", run: false,
+        task: "reserve the only turn",
         budget: { turnLimit: 1, tokenLimit: 10_000, wallTimeLimitMs: 10_000 },
       });
       await expect(supervisor.ai.admitText(childReservedRoot.sessionId, childReservedRoot.branchId, {

@@ -141,9 +141,12 @@ describe("FU-013 retained private recursive-model service", () => {
       } as any)).rejects.toThrow(/reserved dispatch field responseContract/i);
       await expect(supervisor.agents.spawn(root.sessionId, root.branchId, {
         task: "arbitrary child tools",
-        run: false,
         tools: [{ name: "shell" }],
       } as any)).rejects.toThrow(/reserved dispatch field tools/i);
+      await expect(supervisor.agents.spawn(root.sessionId, root.branchId, {
+        task: "obsolete run toggle",
+        run: false,
+      } as any)).rejects.toThrow(/spawn is always detached-running/i);
       const surface = await supervisor.executeCell(root.sessionId, root.branchId, `
         return { rlm: typeof rlm, sdkRlm: typeof sdk.rlm };
       `);

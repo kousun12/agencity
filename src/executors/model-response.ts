@@ -6,6 +6,7 @@ import {
 } from "ai";
 import {
   AGENT_TOOL_CONTRACT_ID,
+  AGENT_TYPED_TOOL_CONTRACT_ID,
   DECLARED_DATA_CONTRACT_ID,
   MAX_MODEL_FORMAL_RESPONSE_BYTES,
   MAX_MODEL_RESPONSE_BLOCKS,
@@ -28,6 +29,7 @@ import {
   validateRefinementGovernanceDecision,
   validateDeclaredDataSubmissionInput,
   validateAgentToolSubmissionValue,
+  validateTypedAgentToolSubmissionValue,
   type AgentAction,
   type CompleteModelResponse,
   type InvalidToolCallCode,
@@ -897,6 +899,13 @@ function validateToolInputValue(
   if (contract.contractId === AGENT_TOOL_CONTRACT_ID) {
     return validateAgentToolSubmissionValue(
       { name, input: value },
+      { encodedBytes: inputBytes },
+    ).input as unknown as JsonValue;
+  }
+  if (contract.contractId === AGENT_TYPED_TOOL_CONTRACT_ID) {
+    return validateTypedAgentToolSubmissionValue(
+      { name, input: value },
+      contract.declaredSchema,
       { encodedBytes: inputBytes },
     ).input as unknown as JsonValue;
   }

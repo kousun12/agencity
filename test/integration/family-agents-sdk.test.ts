@@ -80,11 +80,17 @@ async function fixture(script: AgentAction[] = []) {
 
 describe("FU-012 retained family messaging", () => {
   test("sdk.agents exposes spawn/list/send/messages/acknowledge with derived identity and stable cell intents", async () => {
-    const value = await fixture();
+    const value = await fixture([action({ type: "final", content: "child completed" })]);
     try {
-      const spawned = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.spawn({ task: "wait", name: "researcher", run: false });`, [], "family-spawn-cell");
+      const spawned = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.spawn({ task: "wait", name: "researcher" });`, [], "family-spawn-cell");
       const handle = spawned.result as any;
       expect(handle.name).toBe("researcher");
+      const completed = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.result("${handle.taskId}", { wait: true, timeoutMs: 3000 });`);
+      expect(completed.result).toMatchObject({
+        status: "succeeded",
+        final: "child completed",
+        output: { kind: "text", text: "child completed" },
+      });
       const roster = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.list();`);
       expect((roster.result as any).items).toEqual([expect.objectContaining({
         sessionId: handle.sessionId,
@@ -111,13 +117,201 @@ describe("FU-012 retained family messaging", () => {
     } finally { await value.supervisor.close(); }
   });
 
+  test("sdk.agents run, runMany, spawn, and result retain task result references and notices", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "single result" }),
+      action({ type: "final", content: "batch result one" }),
+      action({ type: "final", content: "batch result two" }),
+      action({ type: "final", content: "detached result" }),
+    ]);
+    try {
+      const single = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `return sdk.agents.run({ task: "single child", idempotencyKey: "single-child" });`,
+      );
+      expect(single.result).toMatchObject({
+        status: "succeeded",
+        output: { kind: "text", text: "single result" },
+        resultReference: { kind: "text" },
+      });
+
+      const batch = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `return sdk.agents.runMany([
+          { task: "batch child one", idempotencyKey: "batch-child-one" },
+          { task: "batch child two", idempotencyKey: "batch-child-two" },
+        ]);`,
+      );
+      expect((batch.result as any[]).every(item =>
+        item.status === "succeeded" && item.output?.kind === "text"
+      )).toBe(true);
+      expect(new Set((batch.result as any[]).map(item => item.output.text))).toEqual(
+        new Set(["batch result one", "batch result two"]),
+      );
+
+      const detached = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `return sdk.agents.spawn({ task: "detached child", idempotencyKey: "detached-child" });`,
+      );
+      const detachedHandle = detached.result as any;
+      expect(detachedHandle.runId).toBeString();
+      const retained = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `return sdk.agents.result(${JSON.stringify(detachedHandle)}, { wait: true, timeoutMs: 3000 });`,
+      );
+      expect(retained.result).toMatchObject({
+        status: "succeeded",
+        output: { kind: "text", text: "detached result" },
+      });
+
+      const tasks = await value.supervisor.agents.listTasks(
+        value.root.sessionId,
+        value.root.branchId,
+      );
+      expect(tasks).toHaveLength(4);
+      expect(tasks.every(task =>
+        task.status === "completed" &&
+        task.result &&
+        typeof task.result === "object" &&
+        !Array.isArray(task.result) &&
+        task.result.protocol === "agencity.agent-run-result-reference"
+      )).toBe(true);
+      const parentEvents = await value.supervisor.storage.loadEvents(
+        value.root.sessionId,
+        { branchId: value.root.branchId },
+      );
+      expect(parentEvents.filter(event =>
+        event.type === "TaskTerminalNoticeDelivered"
+      )).toHaveLength(4);
+      const completedStatus = parentEvents.find(event =>
+        event.type === "TaskStatusChanged" &&
+        (event.payload as any).result?.protocol ===
+          "agencity.agent-run-result-reference"
+      )!;
+      expect(() => projectEvents(parentEvents.map(event =>
+        event.id === completedStatus.id
+          ? {
+              ...event,
+              payload: { ...(event.payload as any), status: "failed" },
+            } as any
+          : event
+      ))).toThrow(/result references may only complete tasks/i);
+    } finally {
+      await value.supervisor.close();
+    }
+  });
+
+  test("agent invocation admission fails closed and keeps mixed idempotent batches atomic", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "existing invocation result" }),
+    ]);
+    try {
+      const before = await value.supervisor.agents.listTasks(
+        value.root.sessionId,
+        value.root.branchId,
+      );
+      expect(before).toHaveLength(0);
+      await expect(value.supervisor.agents.spawnRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          task: "unknown output field",
+          output: {
+            schema: { type: "object", additionalProperties: false },
+            tools: ["shell"],
+          },
+        } as any,
+      )).rejects.toThrow(/only the declared schema/i);
+      await expect(value.supervisor.agents.spawnRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          task: "obsolete run toggle",
+          run: false,
+        } as any,
+      )).rejects.toThrow(/spawn is always detached-running/i);
+      await expect(value.supervisor.agents.spawnRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          task: "secret schema",
+          output: {
+            schema: {
+              type: "object",
+              description: "Use sk-proj-1234567890secret",
+              additionalProperties: false,
+            },
+          },
+        },
+      )).rejects.toThrow(/credential material/i);
+      await expect(value.supervisor.agents.spawnManyRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        [],
+      )).rejects.toThrow(/requires 1-16 inputs/i);
+      await expect(value.supervisor.agents.spawnManyRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        Array.from({ length: 17 }, (_, index) => `child ${index}`),
+      )).rejects.toThrow(/requires 1-16 inputs/i);
+      expect(await value.supervisor.agents.listTasks(
+        value.root.sessionId,
+        value.root.branchId,
+      )).toHaveLength(0);
+
+      const existing = await value.supervisor.agents.spawnRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          task: "existing invocation",
+          idempotencyKey: "existing-invocation",
+        },
+      );
+      await expect(value.supervisor.agents.result(
+        value.root.sessionId,
+        value.root.branchId,
+        existing.taskId,
+        { wait: true, timeoutMs: -1 },
+      )).rejects.toThrow(/timeout must be from 0/i);
+      await expect(value.supervisor.agents.spawnManyRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        [{
+          task: "must not be admitted",
+          idempotencyKey: "novel-before-conflict",
+        }, {
+          task: "existing invocation",
+          idempotencyKey: "existing-invocation",
+          output: {
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["changed"],
+              properties: { changed: { type: "boolean" } },
+            },
+          },
+        }],
+      )).rejects.toThrow(/different invocation contract/i);
+      const tasks = await value.supervisor.agents.listTasks(
+        value.root.sessionId,
+        value.root.branchId,
+      );
+      expect(tasks.map(task => task.taskId)).toEqual([existing.taskId]);
+    } finally {
+      await value.supervisor.close();
+    }
+  });
+
   test("family projection follows exact branch task edges and retains missing children as unavailable", async () => {
     const value = await fixture();
     try {
       const child = await value.supervisor.agents.spawn(value.root.sessionId, value.root.branchId, {
         task: "visible only from the admitting branch",
         name: "exact child",
-        run: false,
       });
       const rootEvents = await value.supervisor.storage.loadEvents(value.root.sessionId, { branchId: value.root.branchId });
       const fork = await value.supervisor.fork(
@@ -229,6 +423,65 @@ describe("FU-012 retained family messaging", () => {
       expect(reply.content).toBe("wire follow-up result");
       expect(await client.cancelAgent(value.root.sessionId, value.root.branchId, "wire agent", "wire done")).toMatchObject({ status: "cancelled" });
     } finally { server.stop(); await value.supervisor.close(); }
+  });
+
+  test("protocol/client exposes retained agent invocation lifecycle lookup", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "wire invocation result" }),
+    ]);
+    const server = new ProtocolServer(value.supervisor);
+    const listener = server.listen(0);
+    const client = new AgentClient(`http://127.0.0.1:${listener.port}`);
+    try {
+      const input = {
+        task: "wire invocation",
+        idempotencyKey: "wire-invocation",
+      };
+      const first = await client.spawn(
+        value.root.sessionId,
+        value.root.branchId,
+        input,
+      );
+      const duplicate = await client.spawn(
+        value.root.sessionId,
+        value.root.branchId,
+        input,
+      );
+      expect(duplicate).toMatchObject({
+        taskId: first.taskId,
+        runId: first.runId,
+        sessionId: first.sessionId,
+        branchId: first.branchId,
+      });
+      expect(await client.findAgentInvocation(
+        value.root.sessionId,
+        value.root.branchId,
+        input.idempotencyKey,
+      )).toMatchObject({ taskId: first.taskId, runId: first.runId });
+      expect(await client.agentInvocationContract(
+        value.root.sessionId,
+        value.root.branchId,
+        first.taskId,
+      )).toMatchObject({
+        runId: first.runId,
+        output: { kind: "text" },
+      });
+      const result = await waitFor(async () => {
+        const current = await client.agentInvocationResult(
+          value.root.sessionId,
+          value.root.branchId,
+          first.taskId,
+        );
+        return current.status === "succeeded" ? current : undefined;
+      });
+      expect(result).toMatchObject({
+        output: { kind: "text", text: "wire invocation result" },
+        resultReference: { kind: "text" },
+      });
+    } finally {
+      server.stop();
+      await value.supervisor.close();
+    }
   });
 
 
@@ -418,10 +671,176 @@ describe("FU-012 retained family messaging", () => {
       expect((await value.supervisor.agents.listTasks(value.root.sessionId)).find(task => task.taskId === handle.taskId)?.status).toBe("admitted");
       await value.supervisor.close();
       resumed = await Supervisor.open({ databaseUrl: value.temp.databaseUrl, artifactDirectory: value.temp.artifactDirectory, workspaceRoot: value.temp.workspaceRoot, recover: true });
-      expect((await resumed.agents.listTasks(value.root.sessionId)).find(task => task.taskId === handle.taskId)?.status).toBe("completed");
+      const recoveredTask = (await resumed.agents.listTasks(value.root.sessionId))
+        .find(task => task.taskId === handle.taskId);
+      expect(recoveredTask).toMatchObject({
+        status: "completed",
+        result: {
+          protocol: "agencity.agent-run-result-reference",
+          kind: "text",
+        },
+      });
       const replies = (await resumed.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.filter(message => message.taskId === handle.taskId && message.content === "terminal before crash");
       expect(replies).toHaveLength(1);
+      const parentEvents = await resumed.storage.loadEvents(value.root.sessionId, {
+        branchId: value.root.branchId,
+      });
+      expect(parentEvents.filter(event =>
+        event.type === "TaskTerminalNoticeDelivered" &&
+        (event.payload as any).taskId === handle.taskId
+      )).toHaveLength(1);
     } finally { if (resumed) await resumed.close(); else await value.supervisor.close(); }
+  });
+
+  test("recovery completes a retained parent task-status prefix without duplicate notices or usage", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "terminal prefix result" }),
+    ]);
+    let resumed: Supervisor | undefined;
+    try {
+      (value.supervisor.agents as any).onRunTerminal = async () => {};
+      const handle = await value.supervisor.agents.spawnRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          task: "recover terminal prefix",
+          idempotencyKey: "recover-terminal-prefix",
+        },
+      );
+      const result = await waitFor(async () => {
+        const current = await value.supervisor.agents.result(
+          value.root.sessionId,
+          value.root.branchId,
+          handle.taskId,
+          { wait: false },
+        );
+        return current.status === "succeeded" ? current : undefined;
+      });
+      expect(result.resultReference).toBeDefined();
+      await value.supervisor.storage.appendEvents([{
+        sessionId: value.root.sessionId,
+        branchId: value.root.branchId,
+        type: "TaskStatusChanged",
+        producer: "supervisor",
+        idempotencyKey: `task-terminal-status:${handle.taskId}`,
+        payload: {
+          taskId: handle.taskId,
+          status: "completed",
+          result: result.resultReference!,
+        } as any,
+      }]);
+      expect((await value.supervisor.agents.listTasks(
+        value.root.sessionId,
+        value.root.branchId,
+      )).find(task => task.taskId === handle.taskId)?.status).toBe("completed");
+      await value.supervisor.close();
+
+      resumed = await Supervisor.open({
+        databaseUrl: value.temp.databaseUrl,
+        artifactDirectory: value.temp.artifactDirectory,
+        workspaceRoot: value.temp.workspaceRoot,
+        recover: true,
+      });
+      const parentEvents = await resumed.storage.loadEvents(
+        value.root.sessionId,
+        { branchId: value.root.branchId },
+      );
+      const childEvents = await resumed.storage.loadEvents(handle.sessionId, {
+        branchId: handle.branchId,
+      });
+      expect(parentEvents.filter(event =>
+        event.type === "TaskStatusChanged" &&
+        (event.payload as any).taskId === handle.taskId
+      )).toHaveLength(1);
+      expect(parentEvents.filter(event =>
+        event.type === "TaskTerminalNoticeDelivered" &&
+        (event.payload as any).taskId === handle.taskId
+      )).toHaveLength(1);
+      expect(parentEvents.filter(event =>
+        event.type === "TaskUsageAttributed" &&
+        (event.payload as any).taskId === handle.taskId
+      )).toHaveLength(1);
+      const usage = parentEvents.find(event =>
+        event.type === "TaskUsageAttributed" &&
+        (event.payload as any).taskId === handle.taskId
+      )!;
+      expect(() => projectEvents([...parentEvents, {
+        ...usage,
+        id: "sync-injected-duplicate-task-usage",
+        idempotencyKey: "sync-injected-duplicate-task-usage",
+      }])).toThrow(/taskUsageAttribution/i);
+      expect(childEvents.filter(event =>
+        event.type === "TaskTerminalNoticeSent" &&
+        (event.payload as any).taskId === handle.taskId
+      )).toHaveLength(1);
+      await resumed.agents.recoverDeliveries();
+      const after = await resumed.storage.loadEvents(value.root.sessionId, {
+        branchId: value.root.branchId,
+      });
+      expect(after.filter(event =>
+        event.type === "TaskTerminalNoticeDelivered" &&
+        (event.payload as any).taskId === handle.taskId
+      )).toHaveLength(1);
+      expect(after.filter(event =>
+        event.type === "TaskUsageAttributed" &&
+        (event.payload as any).taskId === handle.taskId
+      )).toHaveLength(1);
+    } finally {
+      if (resumed) await resumed.close();
+      else await value.supervisor.close();
+    }
+  });
+
+  test("delivery recovery preserves terminal usage after later child runs", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "initial child result" }),
+      action({ type: "final", content: "later child result" }),
+    ]);
+    try {
+      const handle = await value.supervisor.agents.spawnRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          task: "complete before later child work",
+          idempotencyKey: "terminal-usage-before-later-work",
+        },
+      );
+      await waitFor(async () => {
+        const task = (await value.supervisor.agents.listTasks(
+          value.root.sessionId,
+          value.root.branchId,
+        )).find(candidate => candidate.taskId === handle.taskId);
+        return task?.status === "completed" ? task : undefined;
+      });
+      const before = (await value.supervisor.storage.loadEvents(
+        value.root.sessionId,
+        { branchId: value.root.branchId },
+      )).find(event =>
+        event.type === "TaskUsageAttributed" &&
+        (event.payload as any).taskId === handle.taskId
+      );
+      expect(before).toBeDefined();
+
+      const later = await value.supervisor.runs.start(
+        handle.sessionId,
+        handle.branchId,
+        { task: "perform later unrelated child work", goalMode: "none" },
+      );
+      expect(later.status).toBe("succeeded");
+      await value.supervisor.agents.recoverDeliveries();
+
+      const after = (await value.supervisor.storage.loadEvents(
+        value.root.sessionId,
+        { branchId: value.root.branchId },
+      )).filter(event =>
+        event.type === "TaskUsageAttributed" &&
+        (event.payload as any).taskId === handle.taskId
+      );
+      expect(after).toHaveLength(1);
+      expect(after[0]!.payload).toEqual(before!.payload);
+    } finally {
+      await value.supervisor.close();
+    }
   });
 
 });

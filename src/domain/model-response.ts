@@ -2,8 +2,12 @@ import {
   AGENT_TOOL_CONTRACT_ID,
   AGENT_TOOL_CONTRACT_VERSION,
   AGENT_TOOL_SET,
+  AGENT_TYPED_TOOL_CONTRACT_ID,
+  AGENT_TYPED_TOOL_CONTRACT_VERSION,
   MAX_AGENT_TOOL_INPUT_BYTES,
+  resolveAgentTypedToolContract,
   validateAgentToolSubmissionValue,
+  validateTypedAgentToolSubmissionValue,
 } from "./agent-tool-contract.ts";
 import {
   REFINEMENT_REVIEW_CONTRACT_ID,
@@ -70,7 +74,8 @@ export const DECLARED_DATA_TOOL_DESCRIPTION =
   "Submit exactly one JSON value matching the host-pinned declared schema.";
 export type ModelStructuredContractId =
   | BuiltInStructuredContractId
-  | typeof DECLARED_DATA_CONTRACT_ID;
+  | typeof DECLARED_DATA_CONTRACT_ID
+  | typeof AGENT_TYPED_TOOL_CONTRACT_ID;
 export type ModelSchemaEnforcement = "provider-strict" | "runtime-validated";
 
 export interface TextModelResponseContract {
@@ -110,9 +115,19 @@ export interface DeclaredDataModelResponseContract
   readonly inlineResultByteLimit: typeof MAX_DECLARED_INLINE_RESULT_BYTES;
 }
 
+export interface TypedAgentModelResponseContract
+  extends RequiredToolSetModelResponseContractBase {
+  readonly contractId: typeof AGENT_TYPED_TOOL_CONTRACT_ID;
+  readonly familyVersion: typeof AGENT_TYPED_TOOL_CONTRACT_VERSION;
+  readonly declaredSchema: ResolvedDeclaredSchema;
+  readonly validatorId: typeof DECLARED_SCHEMA_VALIDATOR_ID;
+  readonly inlineResultByteLimit: typeof MAX_DECLARED_INLINE_RESULT_BYTES;
+}
+
 export type RequiredToolSetModelResponseContract =
   | BuiltInRequiredToolSetModelResponseContract
-  | DeclaredDataModelResponseContract;
+  | DeclaredDataModelResponseContract
+  | TypedAgentModelResponseContract;
 
 export type ModelResponseContract =
   | TextModelResponseContract
@@ -313,6 +328,38 @@ export function resolveDeclaredDataModelResponseContract(
   });
 }
 
+export function resolveTypedAgentModelResponseContract(
+  schema: unknown,
+  schemaEnforcement: ModelSchemaEnforcement,
+): TypedAgentModelResponseContract {
+  if (
+    schemaEnforcement !== "provider-strict" &&
+    schemaEnforcement !== "runtime-validated"
+  ) {
+    throw new ValidationError(
+      "Typed agent response contract has invalid schema enforcement",
+    );
+  }
+  const typed = resolveAgentTypedToolContract(schema);
+  const body = {
+    kind: "required-tool-set" as const,
+    version: MODEL_RESPONSE_CONTRACT_VERSION,
+    contractId: AGENT_TYPED_TOOL_CONTRACT_ID,
+    familyVersion: AGENT_TYPED_TOOL_CONTRACT_VERSION,
+    tools: typed.tools,
+    schemaEnforcement,
+    selection: MODEL_RESPONSE_CONTRACT_SELECTION,
+    supplementalText: MODEL_RESPONSE_CONTRACT_SUPPLEMENTAL_TEXT,
+    declaredSchema: typed.declaredSchema,
+    validatorId: DECLARED_SCHEMA_VALIDATOR_ID,
+    inlineResultByteLimit: MAX_DECLARED_INLINE_RESULT_BYTES,
+  };
+  return deepFreeze({
+    ...body,
+    contractDigest: canonicalJsonDigest(body),
+  });
+}
+
 export function validateModelResponseContract(
   value: unknown,
 ): ModelResponseContract {
@@ -334,6 +381,38 @@ export function validateModelResponseContract(
   }
   const contractId = record.contractId;
   const schemaEnforcement = record.schemaEnforcement;
+  if (contractId === AGENT_TYPED_TOOL_CONTRACT_ID) {
+    if (
+      schemaEnforcement !== "provider-strict" &&
+      schemaEnforcement !== "runtime-validated"
+    ) {
+      throw new ValidationError(
+        "Typed agent response contract has invalid schema enforcement",
+      );
+    }
+    const digest = record.contractDigest;
+    assertSha256Digest(digest, "Model response contract digest");
+    const { contractDigest: _digest, ...body } = record;
+    if (canonicalJsonDigest(body) !== digest) {
+      throw new ValidationError(
+        "Model response contract digest does not match its definition",
+      );
+    }
+    const declaredSchema = asRecord(
+      record.declaredSchema,
+      "Typed agent response schema",
+    );
+    const expected = resolveTypedAgentModelResponseContract(
+      declaredSchema.schema,
+      schemaEnforcement,
+    );
+    if (canonicalJsonStringify(record) !== canonicalJsonStringify(expected)) {
+      throw new ValidationError(
+        "Model response contract does not match its typed agent family",
+      );
+    }
+    return expected;
+  }
   if (contractId === DECLARED_DATA_CONTRACT_ID) {
     if (
       schemaEnforcement !== "provider-strict" &&
@@ -919,6 +998,12 @@ export function validateModelToolSubmission(
       { name: record.name, input: record.input },
       { encodedBytes: record.inputBytes as number },
     );
+  } else if (contract.contractId === AGENT_TYPED_TOOL_CONTRACT_ID) {
+    validateTypedAgentToolSubmissionValue(
+      { name: record.name, input: record.input },
+      contract.declaredSchema,
+      { encodedBytes: record.inputBytes as number },
+    );
   } else if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
     if (record.name !== REFINEMENT_REVIEW_TOOL_SET[0].name) {
       throw new ValidationError(
@@ -966,6 +1051,9 @@ export function modelResponseContractInputByteLimit(
   contract: RequiredToolSetModelResponseContract,
 ): number {
   if (contract.contractId === AGENT_TOOL_CONTRACT_ID) {
+    return MAX_AGENT_TOOL_INPUT_BYTES;
+  }
+  if (contract.contractId === AGENT_TYPED_TOOL_CONTRACT_ID) {
     return MAX_AGENT_TOOL_INPUT_BYTES;
   }
   if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {

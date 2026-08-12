@@ -1,4 +1,4 @@
-import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, HarnessKind, HarnessScope, ModelConfiguration, WorkingValue } from "../domain/index.ts";
+import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, HarnessKind, HarnessScope, ModelConfigurationInput, WorkingValue } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { InspectOptions, InspectPreview } from "./inspect.ts";
 import type { ScratchSdk } from "./scratch.ts";
@@ -147,16 +147,67 @@ export interface SpecsSdk { spawn(entryId: string, input?: JsonValue): Promise<J
 
 export interface ConsoleAgentSpawnInput {
   readonly task: string; readonly completionCriteria?: string; readonly name?: string;
-  readonly model?: ModelConfiguration; readonly budget?: BudgetLimits; readonly run?: boolean; readonly idempotencyKey?: string;
+  readonly model?: string | ModelConfigurationInput; readonly budget?: BudgetLimits; readonly idempotencyKey?: string;
+  readonly output?: { readonly schema: unknown };
 }
+export interface ConsoleAgentHandle<I = ConsoleAgentSpawnInput | string> {
+  readonly taskId: string;
+  readonly runId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly parentSessionId: string;
+  readonly parentBranchId: string;
+  readonly rootSessionId: string;
+  readonly depth: number;
+  readonly status: string;
+  readonly name?: string;
+  /** Type-only carrier for the invocation input; never serialized. */
+  readonly __input?: I;
+}
+export type ConsoleAgentRunOutput<I> =
+  I extends { readonly output: { readonly schema: infer S } }
+    ? { readonly kind: "object"; readonly object: InferConsoleSchema<S> }
+    : { readonly kind: "text"; readonly text: string };
+export interface ConsoleAgentRunResultBase {
+  readonly taskId: string;
+  readonly runId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly steps: number;
+  readonly reason?: string;
+  readonly final?: string;
+  readonly invocationContract?: JsonValue;
+}
+export type ConsoleAgentRunResult<I = ConsoleAgentSpawnInput | string> =
+  | ConsoleAgentRunResultBase & {
+      readonly status: "succeeded";
+      readonly final: string;
+      readonly output: ConsoleAgentRunOutput<I>;
+      readonly resultReference: JsonValue;
+    }
+  | ConsoleAgentRunResultBase & {
+      readonly status: "queued" | "running" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown";
+      readonly output?: never;
+      readonly resultReference?: never;
+    };
 export interface ConsoleAgentSendInput {
   readonly target: string; readonly content: string; readonly taskId?: string; readonly artifactIds?: readonly string[];
   readonly intentKey?: string; readonly replyToMessageId?: string;
 }
 export interface ConsoleAgentMessageOptions { readonly direction?: "inbound" | "outbound" | "all"; readonly limit?: number; readonly before?: string; readonly pendingOnly?: boolean; }
 export interface AgentsSdk {
-  spawn(input: ConsoleAgentSpawnInput | string): Promise<JsonValue>;
-  spawnMany(inputs: readonly (ConsoleAgentSpawnInput | string)[]): Promise<JsonValue>;
+  spawn<I extends ConsoleAgentSpawnInput | string>(input: I): Promise<ConsoleAgentHandle<I>>;
+  spawnMany<I extends readonly (ConsoleAgentSpawnInput | string)[]>(inputs: I): Promise<{
+    readonly [K in keyof I]: ConsoleAgentHandle<I[K]>;
+  }>;
+  run<I extends ConsoleAgentSpawnInput | string>(input: I): Promise<ConsoleAgentRunResult<I>>;
+  runMany<I extends readonly (ConsoleAgentSpawnInput | string)[]>(inputs: I): Promise<{
+    readonly [K in keyof I]: ConsoleAgentRunResult<I[K]>;
+  }>;
+  result<I extends ConsoleAgentSpawnInput | string>(
+    handle: string | ConsoleAgentHandle<I>,
+    options?: { readonly wait?: boolean; readonly timeoutMs?: number },
+  ): Promise<ConsoleAgentRunResult<I>>;
   get(target?: string): Promise<JsonValue>;
   proposeProfileUpdate(target: string | undefined, input: {
     readonly expectedProfileVersionId: string;
@@ -197,7 +248,7 @@ export interface ConsoleAiGenerationInput {
   readonly prompt?: string;
   readonly messages?: readonly { readonly role: "user" | "assistant"; readonly content: string }[];
   readonly context?: readonly ConsoleAiContext[];
-  readonly model?: string | ModelConfiguration;
+  readonly model?: string | ModelConfigurationInput;
   readonly budget?: ConsoleAiBudget;
   readonly idempotencyKey?: string;
 }

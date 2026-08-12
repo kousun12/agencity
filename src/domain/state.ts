@@ -1,5 +1,5 @@
 import type {
-  AgentRunActionSource, AgentRunGoalMode, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOrigin, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
+  AgentRunActionSource, AgentRunGoalMode, AgentRunStatus, AgentRunTypedFinishOutcome, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOrigin, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
   AiGenerationBudgetLimits, AiGenerationKind, AiGenerationStatus, CellLogStream, FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
   RefinementReviewLifecycleStatus, ScheduleStatus, SessionStatus, TaskStatus, ModelCallResult, ModelCallTermination, ModelUsageSource, Usage, WakeStatus, WorkingValue,
 } from "./events.ts";
@@ -9,8 +9,9 @@ import type { ProviderInputAdmission, ProviderInputCandidate } from "./provider-
 import type { AgentAction } from "./agent-action.ts";
 import type { AgentInvocationProfilePin, AgentProfileVersion, InvocationPromptProvenance } from "./agent-profile.ts";
 import type { JsonValue } from "./json.ts";
+import type { AgentInvocationContract, AgentRunResultReference } from "./agent-invocation-contract.ts";
 
-export const REDUCER_VERSION = 16 as const;
+export const REDUCER_VERSION = 18 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
@@ -101,13 +102,21 @@ export interface AgentRunModelAttemptState {
 export interface AgentRunStepState {
   readonly id: string; readonly ordinal: number; readonly contextId: string; readonly callId: string;
   readonly effectId: string; readonly actionId: string; readonly observationEventIds: string[]; readonly modelAttempts: AgentRunModelAttemptState[];
-  readonly action?: AgentAction; readonly actionSource?: AgentRunActionSource; readonly rejection?: string; readonly eventId: string;
+  readonly action?: AgentAction; readonly typedFinish?: AgentRunTypedFinishOutcome;
+  readonly typedFinishEventId?: string; readonly actionSource?: AgentRunActionSource;
+  readonly rejection?: string; readonly eventId: string;
 }
 export interface AgentRunGoalCheckState { readonly actionId: string; readonly goalId: string; readonly requestId: string; readonly status: "passed" | "failed" | "unknown"; readonly summary: string; readonly gateEvaluationEventIds: string[]; readonly eventId: string; }
 export interface AgentRunState {
   readonly id: string; readonly task: string; readonly requestKey: string; readonly profilePin: AgentInvocationProfilePin; readonly goalId: string | null; readonly goalMode: AgentRunGoalMode; readonly wakeId: string | null;
   readonly status: AgentRunStatus; readonly steps: AgentRunStepState[]; readonly goalChecks: Record<string, AgentRunGoalCheckState>;
   readonly cancellationRequested: boolean; readonly cancellationReason?: string; readonly reason?: string;
+  readonly invocationContract?: AgentInvocationContract;
+  readonly result?: {
+    readonly kind: "text" | "object"; readonly value: JsonValue; readonly valueDigest: string;
+    readonly resultBytes: number; readonly schemaDigest?: string; readonly finishEventId: string;
+    readonly messageId: string; readonly reference: AgentRunResultReference; readonly eventId: string;
+  };
   readonly finalMessageId?: string; readonly requestEventId: string; readonly eventId: string;
 }
 
@@ -121,6 +130,7 @@ export interface AgentState {
   readonly artifacts: Record<string, ArtifactReference>; readonly effects: Record<string, EffectState>; readonly effectReconciliations: Record<string, EffectReconciliationState>; readonly contexts: Record<string, ContextState>; readonly compactions: Record<string, ContextCompactionState>;
   readonly modelCalls: Record<string, ModelCallState>; readonly budget: BudgetState;
   readonly tasks: Record<string, TaskState>; readonly mailbox: Record<string, MailboxMessageState>;
+  readonly taskUsageAttributions: Record<string, string>;
   readonly terminalNotices: Record<string, TerminalNoticeState>; readonly documents: Record<string, DocumentState>;
   readonly inputSets: Record<string, InputSetState>; readonly goals: Record<string, GoalState>;
   readonly heartbeats: Record<string, HeartbeatState>; readonly schedules: Record<string, ScheduleState>; readonly wakes: Record<string, WakeState>; readonly recursiveModels: Record<string, RecursiveModelState>; readonly aiGenerations: Record<string, AiGenerationState>;

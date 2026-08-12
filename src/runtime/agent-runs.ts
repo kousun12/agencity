@@ -1,10 +1,15 @@
 import {
   AGENT_TOOL_CONTRACT_ID,
+  AGENT_TYPED_TOOL_CONTRACT_ID,
   AGENT_TOOL_CONTRACT_VERSION,
   AGENT_TOOL_SELECTION_POLICY,
   PROVIDER_INPUT_ESTIMATOR_ID,
   agentProfilePin,
   agentActionFromToolSubmission,
+  createAgentInvocationContract,
+  validateAgentInvocationResult,
+  canonicalJsonByteLength,
+  canonicalJsonDigest,
   assertNoReservedModelDispatchInputFields,
   assertProviderInputWithinProductLimit,
   estimateProviderInputCandidate,
@@ -16,9 +21,13 @@ import {
   reconstructProviderInputCandidate,
   resolveModelDispatch,
   resolveBuiltInModelResponseContract,
+  resolveTypedAgentModelResponseContract,
   STANDARD_UNVERIFIED_REASONING_LEVELS,
   ValidationError,
   type AgentAction,
+  type AgentInvocationContract,
+  type AgentRunResultReference,
+  type AgentRunTypedFinishOutcome,
   type AgentEvent,
   type AgentRunGoalMode,
   type AgentRunState,
@@ -31,6 +40,7 @@ import {
   type ModelDispatch,
   type ModelEffectFailureCode,
   type ModelEffectOutputV2,
+  validateTypedAgentToolSubmissionValue,
   validateModelEffectOutputV2,
   validateProviderInputCandidate,
 } from "../domain/index.ts";
@@ -65,6 +75,8 @@ export interface StartAgentRunInput {
   readonly requestedRunId?: string;
   /** Internal: the task is already a provenance-rich mailbox/session message. */
   readonly suppressTaskMessage?: boolean;
+  /** Host-resolved compact programmatic output. Omit for text. */
+  readonly output?: { readonly schema: JsonValue };
 }
 
 export interface AgentRunResult {
@@ -76,6 +88,15 @@ export interface AgentRunResult {
   readonly reason?: string;
   readonly final?: string;
   readonly finalMessageId?: string;
+  readonly output?: {
+    readonly kind: "text";
+    readonly text: string;
+  } | {
+    readonly kind: "object";
+    readonly object: JsonValue;
+  };
+  readonly resultReference?: AgentRunResultReference;
+  readonly invocationContract?: AgentInvocationContract;
 }
 
 type ExecuteCell = (
@@ -103,7 +124,8 @@ const OBSERVATION_TYPES = new Set([
   "MailboxMessageContextDelivered", "MailboxMessageDeliveryFailed", "MailboxMessageAcknowledged", "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered",
   "RecursiveModelStarted", "RecursiveModelStatusChanged", "SkillInvocationRecorded",
   "SubagentSpecInvoked", "AgentRunGoalCheckRecorded",
-  "AgentRunActionRejected", "RefinementObservationRecorded", "RefinementDecided",
+  "AgentRunActionRejected", "AgentRunTypedActionViolationCommitted",
+  "RefinementObservationRecorded", "RefinementDecided",
 ]);
 
 const MAX_ACTION_CORRECTION_ATTEMPTS = 1;
@@ -207,6 +229,15 @@ export class AgentRunService {
     if (normalized.wakeId !== undefined && (typeof normalized.wakeId !== "string" || !normalized.wakeId.trim())) throw new ValidationError("Agent run wakeId must be a non-empty string");
     if (normalized.requestedRunId !== undefined && (typeof normalized.requestedRunId !== "string" || !normalized.requestedRunId.trim())) throw new ValidationError("Agent run requestedRunId must be a non-empty string");
     if (normalized.suppressTaskMessage !== undefined && typeof normalized.suppressTaskMessage !== "boolean") throw new ValidationError("Agent run suppressTaskMessage must be boolean");
+    if (normalized.output !== undefined &&
+        (!normalized.output || typeof normalized.output !== "object" ||
+          Array.isArray(normalized.output) ||
+          Object.keys(normalized.output).length !== 1 ||
+          !Object.hasOwn(normalized.output, "schema"))) {
+      throw new ValidationError(
+        "Agent run output must contain only the declared schema",
+      );
+    }
     const requestedGoalMode: AgentRunGoalMode = normalized.goalId ? "current" : normalized.goalMode ?? "none";
     const requestKey = normalized.requestKey ?? `agent-run-request:${newId()}`;
     const result = await this.#runs.run(`${sessionId}/${branchId}`, async () => {
@@ -216,15 +247,42 @@ export class AgentRunService {
         if (existing.task !== task || existing.goalMode !== requestedGoalMode || existing.wakeId !== (normalized.wakeId ?? null) || (normalized.goalId !== undefined && existing.goalId !== normalized.goalId)) {
           throw new ValidationError("Agent run requestKey was reused with different durable meaning");
         }
+        if ((normalized.output !== undefined) !== (existing.invocationContract?.output.kind === "object")) {
+          throw new ValidationError("Agent run requestKey was reused with a different output contract");
+        }
+        if (normalized.output && existing.invocationContract?.output.kind === "object") {
+          const requested = createAgentInvocationContract({
+            runId: existing.id,
+            taskId: state.taskId,
+            output: { kind: "object", schema: normalized.output.schema },
+            model: state.model,
+            profile: await this.profiles.getVersion(sessionId, existing.profilePin.profileVersionId),
+            budget: state.budget.limits,
+          });
+          if (requested.output.kind !== "object" ||
+              requested.output.declaredSchema.schemaDigest !== existing.invocationContract.output.declaredSchema.schemaDigest) {
+            throw new ValidationError("Agent run requestKey was reused with a different output schema");
+          }
+        }
         return this.#result(state, existing);
       }
       const active = Object.values(state.agentRuns).find((run) => !isTerminal(run.status));
       if (active) throw new ValidationError(`Agent run ${active.id} is already ${active.status}`);
       // Resolve the required formal contract before goal preparation or any
       // initiating run event is allowed to become durable.
-      this.#agentDispatch(state);
       const profile = await this.profiles.active(sessionId);
       const runId = normalized.requestedRunId ?? newId();
+      const invocationContract = createAgentInvocationContract({
+        runId,
+        taskId: state.taskId,
+        output: normalized.output === undefined
+          ? { kind: "text" }
+          : { kind: "object", schema: normalized.output.schema },
+        model: state.model,
+        profile,
+        budget: state.budget.limits,
+      });
+      this.#agentDispatch(state, invocationContract);
       const currentGoal = Object.values(state.goals).find((goal) => !["completed", "failed", "cancelled"].includes(goal.status));
       let goalId = normalized.goalId;
       const atomic: any[] = [];
@@ -261,6 +319,12 @@ export class AgentRunService {
         payload: { messageId: `agent-run-task-${runId}`, role: "user", content: task },
       });
       atomic.push(requested);
+      atomic.push({
+        sessionId, branchId, type: "AgentInvocationContractPinned",
+        producer: "client",
+        idempotencyKey: `agent-invocation-contract:${runId}`,
+        payload: { runId, contract: invocationContract },
+      });
       await this.storage.appendEvents(atomic);
       state = await this.#state(sessionId, branchId);
       if (!state.agentRuns[runId]) throw new Error("Agent run request was not committed");
@@ -347,6 +411,17 @@ export class AgentRunService {
         continue;
       }
       let step = run.steps.at(-1);
+      if (step?.typedFinish && !this.#typedFinishApplied(state, run, step)) {
+        const progressed = await this.#applyTypedFinish(
+          sessionId,
+          branchId,
+          state,
+          run,
+          step,
+        );
+        if (!progressed) return this.get(sessionId, branchId, runId);
+        continue;
+      }
       if (step?.action && !this.#actionApplied(state, run, step.actionId, step.action)) {
         const action = step.action;
         const cell = action.type === "typescript" ? state.cells[`agent-run-cell-${step.actionId}`] : undefined;
@@ -385,7 +460,7 @@ export class AgentRunService {
         continue;
       }
 
-      if (!step || step.action !== undefined || step.rejection !== undefined) {
+      if (!step || step.action !== undefined || step.typedFinish !== undefined || step.rejection !== undefined) {
         if (this.#boundaryObserver) {
           await this.#boundaryObserver(sessionId, branchId, run.id);
           ({ state, events, run } = await this.#load(sessionId, branchId, runId));
@@ -407,7 +482,7 @@ export class AgentRunService {
         step = run.steps.at(-1)!;
       }
 
-      if (!step.action && !step.rejection) {
+      if (!step.action && !step.typedFinish && !step.rejection) {
         try {
           await this.#completeStepModel(sessionId, branchId, state, events, run, step);
         } catch (error) {
@@ -427,6 +502,7 @@ export class AgentRunService {
       if (isTerminal(run.status)) continue;
       if (run.cancellationRequested) continue;
       if (step.rejection) continue;
+      if (step.typedFinish) continue;
       const action = step.action!;
       // The already-admitted model action is retained at the exact budget
       // boundary. Only non-effect run-control actions may be processed there.
@@ -483,7 +559,7 @@ export class AgentRunService {
       return this.#completeStepModel(sessionId, branchId, loaded.state, loaded.events, loaded.run, loaded.run.steps.at(-1)!);
     }
     if (!attempt) {
-      const modelDispatch = this.#agentDispatch(state);
+      const modelDispatch = this.#agentDispatch(state, run.invocationContract);
       const window = this.#windowConfiguration(state);
       const prompt = await this.#runPrompt(sessionId, run, modelDispatch);
       let materialized;
@@ -713,7 +789,11 @@ export class AgentRunService {
       const providerToolCallId = output.result.violation.evidence.toolCalls
         .find((item) => item.callId !== undefined)?.callId;
       await this.storage.appendEvents([{
-        sessionId, branchId, type: "AgentRunActionRejected", producer: "supervisor",
+        sessionId, branchId,
+        type: run.invocationContract?.output.kind === "object"
+          ? "AgentRunTypedActionViolationCommitted"
+          : "AgentRunActionRejected",
+        producer: "supervisor",
         idempotencyKey: `agent-run-action-rejected:${step.actionId}`,
         payload: {
           runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId,
@@ -731,24 +811,398 @@ export class AgentRunService {
       throw new ValidationError("Agent run required-tool dispatch returned a text result");
     }
     const submission = output.result.submission;
+    const submissionSource = {
+      kind: "tool-submission" as const,
+      modelCallId: attempt.callId,
+      providerToolCallId: submission.providerToolCallId,
+      resultDigest: output.resultDigest,
+    };
+    const invocationOutput = run.invocationContract?.output;
+    if (invocationOutput?.kind === "object" &&
+        submission.name === "finish") {
+      const contract = run.invocationContract;
+      const parsedSubmission = validateTypedAgentToolSubmissionValue(
+        { name: submission.name, input: submission.input },
+        invocationOutput.declaredSchema,
+        { encodedBytes: submission.inputBytes },
+      );
+      if (parsedSubmission.name !== "finish") {
+        throw new ValidationError("Typed finish submission changed tool identity");
+      }
+      await this.#commitTypedFinish(
+        sessionId,
+        branchId,
+        run,
+        step,
+        submissionSource,
+        parsedSubmission.input.outcome,
+      );
+      return;
+    }
     const action: AgentAction = agentActionFromToolSubmission({
       name: submission.name,
       input: submission.input,
     } as unknown as Parameters<typeof agentActionFromToolSubmission>[0]);
+    if (invocationOutput?.kind === "text" && action.type === "final") {
+      try {
+        validateAgentInvocationResult(run.invocationContract!, "text", action.content);
+      } catch (error) {
+        const message = error instanceof Error
+          ? error.message
+          : "Text agent run result is invalid";
+        await this.storage.appendEvents([{
+          sessionId,
+          branchId,
+          type: "AgentRunTypedActionViolationCommitted",
+          producer: "supervisor",
+          idempotencyKey: `agent-run-action-rejected:${step.actionId}`,
+          payload: {
+            runId: run.id,
+            stepId: step.id,
+            ordinal: step.ordinal,
+            actionId: step.actionId,
+            source: submissionSource,
+            error: message,
+          },
+        }]);
+        return;
+      }
+    }
     await this.storage.appendEvents([{
       sessionId, branchId, type: "AgentRunActionCommitted", producer: "supervisor",
       idempotencyKey: `agent-run-action:${step.actionId}`,
       payload: {
         runId: run.id, stepId: step.id, ordinal: step.ordinal, actionId: step.actionId,
-        source: {
-          kind: "tool-submission", modelCallId: attempt.callId,
-          providerToolCallId: submission.providerToolCallId,
-          resultDigest: output.resultDigest,
-        },
+        source: submissionSource,
         action,
       },
     }]);
     acceptanceCrashAfterActionCommit(step.ordinal);
+  }
+
+  async #commitTypedFinish(
+    sessionId: string,
+    branchId: string,
+    run: AgentRunState,
+    step: AgentRunState["steps"][number],
+    source: Extract<EventPayloads["AgentRunTypedFinishCommitted"]["source"], {
+      kind: "tool-submission";
+    }>,
+    outcome: AgentRunTypedFinishOutcome,
+  ): Promise<void> {
+    const contract = run.invocationContract;
+    if (!contract || contract.output.kind !== "object") {
+      throw new ValidationError("Typed finish requires a pinned object invocation contract");
+    }
+    const finishEventId = `agent-run-typed-finish-${step.actionId}`;
+    const messageId = `agent-run-final-${run.id}`;
+    const events: any[] = [{
+      id: finishEventId,
+      sessionId,
+      branchId,
+      type: "AgentRunTypedFinishCommitted",
+      producer: "supervisor",
+      idempotencyKey: `agent-run-typed-finish:${step.actionId}`,
+      payload: {
+        runId: run.id,
+        stepId: step.id,
+        ordinal: step.ordinal,
+        actionId: step.actionId,
+        source,
+        outcome,
+      },
+    }];
+    // A goal-bound successful value remains provisional until its durable
+    // completion gates pass. The retained finish is the recovery boundary.
+    if (run.goalId) {
+      await this.storage.appendEvents(events);
+      return;
+    }
+    events.push({
+      sessionId,
+      branchId,
+      type: "MessageAppended",
+      producer: "supervisor",
+      idempotencyKey: `agent-run-final-message:${run.id}`,
+      payload: { messageId, role: "assistant", content: outcome.message },
+    });
+    if (outcome.status === "succeeded") {
+      const value = validateAgentInvocationResult(contract, "object", outcome.value);
+      const valueDigest = canonicalJsonDigest(value);
+      const resultEventId = `agent-run-result-${run.id}`;
+      const reference: AgentRunResultReference = {
+        protocol: "agencity.agent-run-result-reference",
+        version: 1,
+        runId: run.id,
+        resultEventId,
+        finishEventId,
+        messageId,
+        kind: "object",
+        valueDigest,
+        schemaDigest: contract.output.declaredSchema.schemaDigest,
+      };
+      events.push({
+        id: resultEventId,
+        sessionId,
+        branchId,
+        type: "AgentRunResultCommitted",
+        producer: "supervisor",
+        idempotencyKey: `agent-run-result:${run.id}`,
+        payload: {
+          runId: run.id,
+          finishEventId,
+          messageId,
+          kind: "object",
+          value,
+          valueDigest,
+          resultBytes: canonicalJsonByteLength(value),
+          schemaDigest: contract.output.declaredSchema.schemaDigest,
+          reference,
+        },
+      }, {
+        sessionId,
+        branchId,
+        type: "AgentRunStatusChanged",
+        producer: "supervisor",
+        idempotencyKey: `agent-run-succeeded:${run.id}`,
+        payload: { runId: run.id, status: "succeeded", finalMessageId: messageId },
+      });
+    } else {
+      events.push({
+        sessionId,
+        branchId,
+        type: "AgentRunStatusChanged",
+        producer: "supervisor",
+        idempotencyKey: `agent-run-terminal:${run.id}`,
+        payload: {
+          runId: run.id,
+          status: outcome.status,
+          reason: outcome.message,
+          finalMessageId: messageId,
+        },
+      });
+    }
+    await this.storage.appendEvents(events);
+  }
+
+  #typedFinishApplied(
+    state: AgentState,
+    run: AgentRunState,
+    step: AgentRunState["steps"][number],
+  ): boolean {
+    const finish = step.typedFinish;
+    if (!finish) return false;
+    const messageId = `agent-run-final-${run.id}`;
+    const message = state.messages.find((candidate) => candidate.id === messageId);
+    if (finish.status === "succeeded") {
+      const check = run.goalChecks[step.actionId];
+      return check?.status === "failed" ||
+        check?.status === "unknown" && run.status === "unknown" ||
+        run.status === "succeeded" &&
+          run.finalMessageId === messageId &&
+          run.result?.messageId === messageId &&
+          message?.content === finish.message;
+    }
+    const failedCheck = finish.status === "failed"
+      ? Object.values(run.goalChecks).at(-1)
+      : undefined;
+    const goalDerived = failedCheck?.status === "failed" &&
+      run.goalId !== null && state.goals[run.goalId]?.status === "blocked";
+    const expectedStatus = goalDerived ? "blocked" : finish.status;
+    const expectedReason = goalDerived
+      ? `Goal repair stopped after a failed required gate: ${failedCheck.summary}`
+      : finish.message;
+    return run.status === expectedStatus &&
+      run.finalMessageId === messageId &&
+      run.reason === expectedReason &&
+      message?.content === finish.message;
+  }
+
+  async #applyTypedFinish(
+    sessionId: string,
+    branchId: string,
+    state: AgentState,
+    run: AgentRunState,
+    step: AgentRunState["steps"][number],
+  ): Promise<boolean> {
+    const finish = step.typedFinish;
+    if (!finish) {
+      throw new ValidationError("Typed finish application requires a retained finish");
+    }
+    if (finish.status !== "succeeded") {
+      await this.#finishNonSuccess(
+        sessionId,
+        branchId,
+        run,
+        finish.status,
+        finish.message,
+      );
+      return true;
+    }
+    const contract = run.invocationContract;
+    if (!contract || contract.output.kind !== "object") {
+      throw new ValidationError(
+        "Successful typed finish requires a pinned object invocation contract",
+      );
+    }
+    validateAgentInvocationResult(contract, "object", finish.value);
+    if (run.goalId) {
+      const prior = run.goalChecks[step.actionId];
+      if (!prior) {
+        const goal = await this.goals.requestCompletion(
+          sessionId,
+          branchId,
+          run.goalId,
+        );
+        const requestId = goal.completionRequestId;
+        if (!requestId) {
+          throw new ValidationError(
+            "Gate-checked goal is missing its completion request ID",
+          );
+        }
+        const unknown = goal.gates.find((gate) =>
+          gate.required && gate.status === "unknown"
+        );
+        const status = unknown
+          ? "unknown" as const
+          : goal.status === "completed" ? "passed" as const : "failed" as const;
+        const summary = boundedGoalSummary(goal, status);
+        const gateEvaluationEventIds =
+          await this.goals.completionEvaluationEventIds(goal.goalId, requestId);
+        const check = {
+          sessionId,
+          branchId,
+          type: "AgentRunGoalCheckRecorded" as const,
+          producer: "supervisor" as const,
+          idempotencyKey: `agent-run-goal-check:${run.id}:${step.actionId}`,
+          payload: {
+            runId: run.id,
+            actionId: step.actionId,
+            goalId: goal.goalId,
+            requestId,
+            status,
+            summary,
+            gateEvaluationEventIds,
+          },
+        };
+        if (status === "failed") {
+          await this.storage.appendEvents([check, {
+            sessionId,
+            branchId,
+            type: "GoalStatusChanged",
+            producer: "supervisor",
+            idempotencyKey: `agent-run-goal-repair:${run.id}:${step.actionId}`,
+            payload: {
+              goalId: goal.goalId,
+              status: "active",
+              reason:
+                "Agent run continuing after required completion gates did not pass",
+            },
+          }]);
+          return true;
+        }
+        if (status === "unknown") {
+          await this.storage.appendEvents([check, {
+            sessionId,
+            branchId,
+            type: "AgentRunStatusChanged",
+            producer: "supervisor",
+            idempotencyKey: `agent-run-terminal:${run.id}`,
+            payload: { runId: run.id, status: "unknown", reason: summary },
+          }]);
+          return true;
+        }
+        await this.storage.appendEvents([
+          check,
+          ...this.#typedSuccessEvents(
+            sessionId,
+            branchId,
+            run,
+            step,
+            finish,
+          ),
+        ]);
+        return true;
+      }
+      if (prior.status === "failed") return true;
+      if (prior.status === "unknown") {
+        await this.#terminal(sessionId, branchId, run, "unknown", prior.summary);
+        return true;
+      }
+      // Recovery after a retained passed check but before terminal commit.
+    }
+    await this.storage.appendEvents(this.#typedSuccessEvents(
+      sessionId,
+      branchId,
+      run,
+      step,
+      finish,
+    ));
+    return true;
+  }
+
+  #typedSuccessEvents(
+    sessionId: string,
+    branchId: string,
+    run: AgentRunState,
+    step: AgentRunState["steps"][number],
+    finish: Extract<AgentRunTypedFinishOutcome, { readonly status: "succeeded" }>,
+  ): any[] {
+    const contract = run.invocationContract;
+    if (!contract || contract.output.kind !== "object" ||
+        !step.typedFinishEventId) {
+      throw new ValidationError(
+        "Typed success suffix requires an object contract and finish event",
+      );
+    }
+    const value = validateAgentInvocationResult(contract, "object", finish.value);
+    const valueDigest = canonicalJsonDigest(value);
+    const messageId = `agent-run-final-${run.id}`;
+    const resultEventId = `agent-run-result-${run.id}`;
+    const reference: AgentRunResultReference = {
+      protocol: "agencity.agent-run-result-reference",
+      version: 1,
+      runId: run.id,
+      resultEventId,
+      finishEventId: step.typedFinishEventId,
+      messageId,
+      kind: "object",
+      valueDigest,
+      schemaDigest: contract.output.declaredSchema.schemaDigest,
+    };
+    return [{
+      sessionId,
+      branchId,
+      type: "MessageAppended",
+      producer: "supervisor",
+      idempotencyKey: `agent-run-final-message:${run.id}`,
+      payload: { messageId, role: "assistant", content: finish.message },
+    }, {
+      id: resultEventId,
+      sessionId,
+      branchId,
+      type: "AgentRunResultCommitted",
+      producer: "supervisor",
+      idempotencyKey: `agent-run-result:${run.id}`,
+      payload: {
+        runId: run.id,
+        finishEventId: step.typedFinishEventId,
+        messageId,
+        kind: "object",
+        value,
+        valueDigest,
+        resultBytes: canonicalJsonByteLength(value),
+        schemaDigest: contract.output.declaredSchema.schemaDigest,
+        reference,
+      },
+    }, {
+      sessionId,
+      branchId,
+      type: "AgentRunStatusChanged",
+      producer: "supervisor",
+      idempotencyKey: `agent-run-succeeded:${run.id}`,
+      payload: { runId: run.id, status: "succeeded", finalMessageId: messageId },
+    }];
   }
 
   #actionApplied(state: AgentState, run: AgentRunState, actionId: string, action: AgentAction): boolean {
@@ -853,11 +1307,19 @@ export class AgentRunService {
           return true;
         }
         const messageId = `agent-run-final-${run.id}`;
+        const resultEvent = this.#textResultEvent(
+          sessionId,
+          branchId,
+          run,
+          run.steps.at(-1)!,
+          action.content,
+          messageId,
+        );
         await this.storage.appendEvents([check, {
           sessionId, branchId, type: "MessageAppended", producer: "supervisor",
           idempotencyKey: `agent-run-final-message:${run.id}`,
           payload: { messageId, role: "assistant", content: action.content },
-        }, {
+        }, ...(resultEvent ? [resultEvent] : []), {
           sessionId, branchId, type: "AgentRunStatusChanged", producer: "supervisor",
           idempotencyKey: `agent-run-succeeded:${run.id}`,
           payload: { runId: run.id, status: "succeeded", finalMessageId: messageId },
@@ -872,16 +1334,67 @@ export class AgentRunService {
       // Recovery after a retained passed check but before terminal commit.
     }
     const messageId = `agent-run-final-${run.id}`;
+    const resultEvent = this.#textResultEvent(
+      sessionId,
+      branchId,
+      run,
+      run.steps.at(-1)!,
+      action.content,
+      messageId,
+    );
     await this.storage.appendEvents([{
       sessionId, branchId, type: "MessageAppended", producer: "supervisor",
       idempotencyKey: `agent-run-final-message:${run.id}`,
       payload: { messageId, role: "assistant", content: action.content },
-    }, {
+    }, ...(resultEvent ? [resultEvent] : []), {
       sessionId, branchId, type: "AgentRunStatusChanged", producer: "supervisor",
       idempotencyKey: `agent-run-succeeded:${run.id}`,
       payload: { runId: run.id, status: "succeeded", finalMessageId: messageId },
     }]);
     return true;
+  }
+
+  #textResultEvent(
+    sessionId: string,
+    branchId: string,
+    run: AgentRunState,
+    step: AgentRunState["steps"][number],
+    value: string,
+    messageId: string,
+  ): any | null {
+    const contract = run.invocationContract;
+    if (!contract || contract.output.kind !== "text") return null;
+    const retained = validateAgentInvocationResult(contract, "text", value);
+    const valueDigest = canonicalJsonDigest(retained);
+    const resultEventId = `agent-run-result-${run.id}`;
+    const reference: AgentRunResultReference = {
+      protocol: "agencity.agent-run-result-reference",
+      version: 1,
+      runId: run.id,
+      resultEventId,
+      finishEventId: step.eventId,
+      messageId,
+      kind: "text",
+      valueDigest,
+    };
+    return {
+      id: resultEventId,
+      sessionId,
+      branchId,
+      type: "AgentRunResultCommitted",
+      producer: "supervisor",
+      idempotencyKey: `agent-run-result:${run.id}`,
+      payload: {
+        runId: run.id,
+        finishEventId: step.eventId,
+        messageId,
+        kind: "text",
+        value: retained,
+        valueDigest,
+        resultBytes: canonicalJsonByteLength(retained),
+        reference,
+      },
+    };
   }
 
   #windowConfiguration(state: AgentState): { configuration: ModelContextWindowConfiguration; provenance: ContextCapacityProvenance } {
@@ -895,11 +1408,23 @@ export class AgentRunService {
     return { configuration, provenance: { provider: resolved.provider, model: resolved.model, source, contextWindowTokens: resolved.contextWindowTokens, outputReserveTokens, estimatorId: configuration.estimatorId, triggerRatio: configuration.triggerRatio, targetRatio: configuration.targetRatio } };
   }
 
-  #agentDispatch(state: AgentState): ModelDispatch {
-    return this.modelExecutor
-      ? new ModelEffectAdmissionService(this.modelExecutor)
-          .requestBuiltInStructured(AGENT_TOOL_CONTRACT_ID, state.model).modelDispatch
-      : fallbackDispatch(state);
+  #agentDispatch(
+    state: AgentState,
+    contract?: AgentInvocationContract,
+  ): ModelDispatch {
+    if (this.modelExecutor) {
+      const admission = new ModelEffectAdmissionService(this.modelExecutor);
+      return contract?.output.kind === "object"
+        ? admission.requestTypedAgent(
+            contract.output.declaredSchema.schema,
+            state.model,
+          ).modelDispatch
+        : admission.requestBuiltInStructured(
+            AGENT_TOOL_CONTRACT_ID,
+            state.model,
+          ).modelDispatch;
+    }
+    return fallbackDispatch(state, contract);
   }
 
   async #runPrompt(sessionId: string, run: AgentRunState, modelDispatch: ModelDispatch) {
@@ -1118,12 +1643,30 @@ export class AgentRunService {
 
   #result(state: AgentState, run: AgentRunState): AgentRunResult {
     const finalMessage = run.finalMessageId ? state.messages.find((message) => message.id === run.finalMessageId) : undefined;
+    const retainedValue = run.result && run.invocationContract
+      ? validateAgentInvocationResult(
+          run.invocationContract,
+          run.result.kind,
+          run.result.value,
+        )
+      : undefined;
     return {
       runId: run.id, sessionId: state.sessionId, branchId: state.branch.id,
       status: run.status, steps: run.steps.length,
       ...(run.reason === undefined ? {} : { reason: run.reason }),
       ...(finalMessage === undefined ? {} : { final: finalMessage.content }),
       ...(run.finalMessageId === undefined ? {} : { finalMessageId: run.finalMessageId }),
+      ...(retainedValue === undefined || !run.result
+        ? {}
+        : {
+            output: run.result.kind === "text"
+              ? { kind: "text", text: retainedValue as string }
+              : { kind: "object", object: retainedValue },
+            resultReference: run.result.reference,
+          }),
+      ...(run.invocationContract === undefined
+        ? {}
+        : { invocationContract: run.invocationContract }),
     };
   }
 }
@@ -1291,7 +1834,10 @@ export function agentProviderContext(
     "terminalNotices", "recursiveModels", "documents", "inputSets", "heartbeats", "schedules", "wakes", "activeRuns",
     "harness", "compactions", "workingValues", "artifacts", "queryHints",
   ].filter((key) => durable[key] !== undefined).map((key) => [key, durable[key]]));
-  const correctingRejectedAction = observations.some((observation) => observation.type === "AgentRunActionRejected");
+  const correctingRejectedAction = observations.some((observation) =>
+    observation.type === "AgentRunActionRejected" ||
+    observation.type === "AgentRunTypedActionViolationCommitted"
+  );
   const recoveringFailedExecution = observations.some((observation) => {
     if (observation.type === "CellFailed") return true;
     if (observation.type !== "EffectOutcomeRecorded" ||
@@ -1644,11 +2190,22 @@ function providerClassification(
   return { provider, model, code: ProviderModelErrorCode.Generic };
 }
 
-function fallbackDispatch(state: AgentState): ModelDispatch {
+function fallbackDispatch(
+  state: AgentState,
+  contract?: AgentInvocationContract,
+): ModelDispatch {
   const hash = new Bun.CryptoHasher("sha256");
   hash.update(JSON.stringify({ provider: state.model.provider, model: state.model.model, fallback: true }));
   const catalogDigest = hash.digest("hex");
-  const responseContract = resolveBuiltInModelResponseContract(AGENT_TOOL_CONTRACT_ID, "runtime-validated");
+  const responseContract = contract?.output.kind === "object"
+    ? resolveTypedAgentModelResponseContract(
+        contract.output.declaredSchema.schema,
+        "runtime-validated",
+      )
+    : resolveBuiltInModelResponseContract(
+        AGENT_TOOL_CONTRACT_ID,
+        "runtime-validated",
+      );
   return resolveModelDispatch({
     configuration: state.model,
     capability: state.model.reasoningEffort === "provider-default"

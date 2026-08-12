@@ -290,8 +290,12 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   };
   const specs = { spawn: (entryId:string,input:JsonValue={}) => call("specs.spawn",[entryId,input]) };
   const agents = {
-    spawn: (input: unknown) => call("agents.spawn", [input]),
-    spawnMany: (inputs: unknown[]) => call("agents.spawnMany", [inputs]),
+    spawn: (input: unknown) => call("agents.spawn", [normalizeAgentInput(input)]),
+    spawnMany: (inputs: unknown[]) => call("agents.spawnMany", [inputs.map(normalizeAgentInput)]),
+    run: (input: unknown) => call("agents.run", [normalizeAgentInput(input)]),
+    runMany: (inputs: unknown[]) => call("agents.runMany", [inputs.map(normalizeAgentInput)]),
+    result: (handle: string | { taskId: string }, options: Record<string, unknown> = {}) =>
+      call("agents.result", [handle, options]),
     get: (target?: string) => call("agents.get", [target]),
     proposeProfileUpdate: (target: string | undefined, input: unknown, options: Record<string, unknown> = {}) =>
       call("agents.proposeProfileUpdate", [target, input, options]),
@@ -434,6 +438,23 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   warmScratch.temperature = "warm";
   evictScratchScopes();
   send(fitTerminalIpc({ ...response, logs: logs.values, logStreams: logs.streams }));
+}
+
+function normalizeAgentInput(input: unknown): unknown {
+  if (typeof input === "string") return input;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const record = input as Record<string, unknown>;
+  if (record.output === undefined) return input;
+  if (!record.output || typeof record.output !== "object" ||
+      Array.isArray(record.output)) return input;
+  const output = record.output as Record<string, unknown>;
+  return {
+    ...record,
+    output: {
+      ...output,
+      schema: schemaToPlainJsonSchema(output.schema),
+    },
+  };
 }
 
 async function control(requestId: string, operation: () => unknown | Promise<unknown>): Promise<void> {

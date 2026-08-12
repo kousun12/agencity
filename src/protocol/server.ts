@@ -427,6 +427,56 @@ export class ProtocolServer {
         }
         if (parts[2] === "specs" && parts[3] && parts[4] === "spawn" && branchId && request.method === "POST") return Response.json(await this.supervisor.specs.spawn(sessionId,branchId,parts[3],await jsonBody(request) as any));
 
+        if (parts[2] === "agent-invocations" && branchId) {
+          if (request.method === "GET" && parts[3] === "by-key") {
+            const key = url.searchParams.get("idempotencyKey");
+            if (!key) throw new ValidationError("Agent invocation lookup requires idempotencyKey");
+            return Response.json(await this.supervisor.agents.findInvocation(sessionId, branchId, key));
+          }
+          if (request.method === "POST" && parts[3] === "batch") {
+            const body = await jsonBody(request);
+            return Response.json(await this.supervisor.agents.spawnManyRunnable(
+              sessionId,
+              branchId,
+              Array.isArray(body.inputs) ? body.inputs as any[] : [],
+            ));
+          }
+          if (request.method === "POST" && parts.length === 3) {
+            return Response.json(await this.supervisor.agents.spawnRunnable(
+              sessionId,
+              branchId,
+              await jsonBody(request) as any,
+            ), { status: 202 });
+          }
+          if (parts[3]) {
+            const taskId = decodeURIComponent(parts[3]);
+            if (request.method === "GET" && parts[4] === "contract") {
+              return Response.json(await this.supervisor.agents.invocationContract(
+                sessionId,
+                branchId,
+                taskId,
+              ));
+            }
+            if (request.method === "GET" && parts[4] === "result") {
+              return Response.json(await this.supervisor.agents.result(
+                sessionId,
+                branchId,
+                taskId,
+                { wait: false },
+              ));
+            }
+            if (request.method === "POST" && parts[4] === "cancel") {
+              const body = await jsonBody(request);
+              return Response.json(await this.supervisor.agents.cancel(
+                sessionId,
+                branchId,
+                taskId,
+                typeof body.reason === "string" ? body.reason : undefined,
+              ));
+            }
+          }
+        }
+
         // Slice 2 commands remain branch-scoped and return durable JSON handles.
         if (parts[2] === "agents" && branchId) {
           if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.agents.listFamily(sessionId, branchId));

@@ -276,7 +276,7 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-function validateRetainedModelConfiguration(
+export function validateRetainedModelConfiguration(
   configuration: ModelConfiguration,
 ): void {
   const record = configuration as unknown as Record<string, unknown>;

@@ -42,6 +42,11 @@ import {
   type RepositoryInstructionDiscovery,
   type RepositoryInstructionOmission,
 } from "./repository-instructions.ts";
+import {
+  validateAgentInvocationContract,
+  type AgentInvocationContract,
+  type AgentRunResultReference,
+} from "./agent-invocation-contract.ts";
 
 export const EVENT_SCHEMA_VERSION = 5 as const;
 export const eventTypes = [
@@ -72,7 +77,8 @@ export const eventTypes = [
   "RefinementProposalTerminalNoticeDelivered", "RefinementRollbackApplied",
   "GovernedRefinementRollbackApplied",
   "SkillImported", "SkillAvailabilityChanged", "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
-  "AgentRunRequested", "AgentRunStepStarted", "AgentRunModelAttemptStarted", "AgentRunActionCommitted", "AgentRunActionRejected", "AgentRunGoalCheckRecorded",
+  "AgentRunRequested", "AgentInvocationContractPinned", "AgentRunStepStarted", "AgentRunModelAttemptStarted", "AgentRunActionCommitted", "AgentRunActionRejected",
+  "AgentRunTypedFinishCommitted", "AgentRunTypedActionViolationCommitted", "AgentRunResultCommitted", "AgentRunGoalCheckRecorded",
   "AgentRunCancellationRequested", "AgentRunStatusChanged",
 ] as const;
 export type EventType = (typeof eventTypes)[number];
@@ -159,6 +165,9 @@ export type ModelCallResult =
 export type AgentRunActionSource =
   | { readonly kind: "tool-submission"; readonly modelCallId: string; readonly providerToolCallId: string; readonly resultDigest: Sha256Digest }
   | { readonly kind: "contract-violation"; readonly modelCallId: string; readonly providerToolCallId?: string; readonly resultDigest: Sha256Digest };
+export type AgentRunTypedFinishOutcome =
+  | { readonly status: "succeeded"; readonly message: string; readonly value: JsonValue }
+  | { readonly status: "blocked" | "failed"; readonly message: string };
 export interface ArtifactReference { readonly artifactId: string; readonly digest: string; readonly mediaType: string; readonly size: number; }
 export type WorkingValue = { readonly kind: "json"; readonly value: JsonValue } | { readonly kind: "artifact"; readonly artifactId: string };
 export interface ContextRecordReference { readonly eventId: string; readonly type: EventType; readonly schemaVersion: number; readonly reason?: string; }
@@ -308,10 +317,18 @@ export interface EventPayloads {
   SubagentSpecInvoked: { entryId: string; versionId: string; taskId: string; childSessionId: string; childBranchId: string };
   SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
   AgentRunRequested: { runId: string; task: string; requestKey: string; profilePin: AgentInvocationProfilePin; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
+  AgentInvocationContractPinned: { runId: string; contract: AgentInvocationContract };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
   AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; providerInputVersion: typeof PROVIDER_INPUT_VERSION; providerInputDigest: Sha256Digest; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; retryOfCallId?: string };
   AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; action: AgentAction };
   AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "contract-violation" }>; error: string };
+  AgentRunTypedFinishCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; outcome: AgentRunTypedFinishOutcome };
+  AgentRunTypedActionViolationCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: AgentRunActionSource; error: string };
+  AgentRunResultCommitted: {
+    runId: string; finishEventId: string; messageId: string; kind: "text" | "object";
+    value: JsonValue; valueDigest: Sha256Digest; resultBytes: number; schemaDigest?: Sha256Digest;
+    reference: AgentRunResultReference;
+  };
   AgentRunGoalCheckRecorded: { runId: string; actionId: string; goalId: string; requestId: string; status: "passed" | "failed" | "unknown"; summary: string; gateEvaluationEventIds: string[] };
   AgentRunCancellationRequested: { runId: string; reason?: string };
   AgentRunStatusChanged: { runId: string; status: Exclude<AgentRunStatus, "queued" | "running">; reason?: string; finalMessageId?: string };
@@ -860,10 +877,35 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SubagentSpecInvoked: z.object({ entryId: id, versionId: id, taskId: id, childSessionId: id, childBranchId: id }),
   SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
   AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, profilePin: profilePinSchema, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
+  AgentInvocationContractPinned: z.object({
+    runId: id,
+    contract: z.custom<AgentInvocationContract>((value) => {
+      try { validateAgentInvocationContract(value); return true; } catch { return false; }
+    }),
+  }).strict(),
   AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
   AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), providerInputVersion: z.literal(PROVIDER_INPUT_VERSION), providerInputDigest: fingerprint, estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, retryOfCallId: id.optional() }).strict(),
   AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceSubmissionSchema, action: agentActionSchema }).strict(),
   AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceViolationSchema, error: z.string().min(1) }).strict(),
+  AgentRunTypedFinishCommitted: z.object({
+    runId: id, stepId: id, ordinal: positiveInteger, actionId: id,
+    source: actionSourceSubmissionSchema,
+    outcome: z.union([
+      z.object({ status: z.literal("succeeded"), message: z.string().min(1), value: jsonValueSchema }).strict(),
+      z.object({ status: z.enum(["blocked", "failed"]), message: z.string().min(1) }).strict(),
+    ]),
+  }).strict(),
+  AgentRunTypedActionViolationCommitted: z.object({
+    runId: id, stepId: id, ordinal: positiveInteger, actionId: id,
+    source: z.union([actionSourceSubmissionSchema, actionSourceViolationSchema]),
+    error: z.string().min(1),
+  }).strict(),
+  AgentRunResultCommitted: z.object({
+    runId: id, finishEventId: id, messageId: id, kind: z.enum(["text", "object"]),
+    value: jsonValueSchema, valueDigest: fingerprint, resultBytes: z.number().int().nonnegative(),
+    schemaDigest: fingerprint.optional(),
+    reference: jsonValueSchema,
+  }).strict(),
   AgentRunGoalCheckRecorded: z.object({ runId: id, actionId: id, goalId: id, requestId: id, status: z.enum(["passed", "failed", "unknown"]), summary: z.string().min(1).max(65536), gateEvaluationEventIds: z.array(id) }).strict(),
   AgentRunCancellationRequested: z.object({ runId: id, reason: z.string().optional() }).strict(),
   AgentRunStatusChanged: z.object({ runId: id, status: z.enum(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]), reason: z.string().optional(), finalMessageId: id.optional() }).strict(),
@@ -923,6 +965,13 @@ export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): 
   }
   if (event.type === "CellCommitted") {
     assertBoundedOutputs((event.payload as unknown as EventPayloads["CellCommitted"]).result);
+  }
+  if (event.type === "AgentInvocationContractPinned") {
+    const payload = event.payload as unknown as EventPayloads["AgentInvocationContractPinned"];
+    const contract = validateAgentInvocationContract(payload.contract);
+    if (contract.runId !== payload.runId) {
+      throw new ValidationError("Pinned agent invocation contract run ID disagrees with its event");
+    }
   }
 }
 
