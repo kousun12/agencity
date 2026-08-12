@@ -1121,6 +1121,7 @@ function renderLearningStatus(status: LearningStatusView): string {
 function renderLearningHistory(history: LearningHistoryView): string {
   return [
     `Automatic learning: ${history.automaticLearning}`,
+    `History response: ${history.truncated ? "truncated" : "complete"} · ${history.byteLimit} byte limit`,
     ...(history.activities.length
       ? history.activities.map((activity) => renderLearningActivity(activity, false))
       : ["No retained learning activity."]),

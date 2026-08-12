@@ -47,6 +47,8 @@ describe("terminal inspector view models", () => {
       },
       automaticLearning: "enabled",
       policyError: null,
+      byteLimit: 262_144,
+      truncated: true,
       activities: [
         {
           kind: "review", activityId: "review-no-change", effectiveStatus: "no_change",
@@ -79,6 +81,8 @@ describe("terminal inspector view models", () => {
     expect(output).toContain("Automatic learning — enabled");
     expect(output).toContain("Repeated success — enabled");
     expect(output).toContain("Threshold: 5 successful runs.");
+    expect(output).toContain("Learning history response — truncated");
+    expect(output).toContain("Serialized response limit: 262144 bytes.");
     expect(output).toContain("Learning activity · 4");
     expect(output).toContain("proposal-applied");
     expect(output).toContain("rollback-1");

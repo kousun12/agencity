@@ -299,13 +299,12 @@ export class RefinerService {
     return this.#queue.run("automatic-policy", () =>
       this.profile.withPreferenceLock(
         REFINEMENT_TRIGGER_POLICY_PREFERENCE,
-        async (stored, setValue) => {
-          const policy = {
-            ...this.#automaticPolicyStateFrom(stored).policy,
+        async (_stored, setValue) => {
+          await setValue(enabled);
+          return {
+            ...DEFAULT_REFINEMENT_TRIGGER_POLICY_V1,
             automatic: enabled,
-          } as RefinementTriggerPolicyV1;
-          await setValue(policy as unknown as JsonValue);
-          return policy;
+          };
         },
       ));
   }
@@ -316,6 +315,7 @@ export class RefinerService {
    * observation rather than authority to wedge the owning run or recovery.
    */
   async scanBoundary(sessionId: string, branchId: string, boundaryKey?: string): Promise<readonly RefinementReviewRecord[]> {
+    void boundaryKey;
     return this.#queue.run("automatic-policy", () =>
       this.profile.withPreferenceLock(
         REFINEMENT_TRIGGER_POLICY_PREFERENCE,
@@ -347,16 +347,16 @@ export class RefinerService {
           } catch (error) {
             // The observation is deliberately fixed-shape: malformed retained policy
             // values or error text are never copied into history.
-            await this.#recordBoundaryScanFailure(sessionId, branchId, boundaryKey, error).catch(() => {});
+            await this.#recordBoundaryScanFailure(sessionId, branchId, error).catch(() => {});
             return [];
           }
         },
       ));
   }
 
-  async #recordBoundaryScanFailure(sessionId: string, branchId: string, boundaryKey: string | undefined, error: unknown): Promise<void> {
+  async #recordBoundaryScanFailure(sessionId: string, branchId: string, error: unknown): Promise<void> {
     const category = error instanceof ValidationError ? "validation_failed" : "scan_unavailable";
-    const fingerprint = stableSha256({ sessionId, branchId, boundaryKey: boundaryKey ?? "direct-scan", category }).slice(0, 32);
+    const fingerprint = stableSha256({ sessionId, branchId, category }).slice(0, 32);
     await this.storage.appendEvents([{
       id: `refinement-scan-observation-${fingerprint}`,
       sessionId, branchId, type: "MessageAppended", producer: "supervisor",

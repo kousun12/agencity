@@ -1176,9 +1176,17 @@ describe("FU-016 durable RefinerService", () => {
         }]);
       }
       await supervisor.refiner.setAutomatic(false);
+      expect((await supervisor.profile.getPreference("refinement.trigger-policy.v1"))?.value).toBe(false);
       expect(await supervisor.refiner.scanBoundary(sessionId, branchId)).toEqual([]);
+      await supervisor.profile.setPreference("refinement.trigger-policy.v1", {
+        version: 1,
+        automatic: true,
+        scope: "local",
+      });
+      expect((await supervisor.refiner.setAutomatic(false)).automatic).toBe(false);
+      expect((await supervisor.profile.getPreference("refinement.trigger-policy.v1"))?.value).toBe(false);
       await supervisor.refiner.setAutomatic(true);
-      expect((await supervisor.profile.getPreference("refinement.trigger-policy.v1"))?.value).toMatchObject({ version: 1, automatic: true, scope: "local" });
+      expect((await supervisor.profile.getPreference("refinement.trigger-policy.v1"))?.value).toBe(true);
       const [[admitted], [duplicate]] = await Promise.all([
         supervisor.refiner.scanBoundary(sessionId, branchId),
         supervisor.refiner.scanBoundary(sessionId, branchId),
@@ -1750,6 +1758,8 @@ describe("FU-016 durable RefinerService", () => {
 
       reopened = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: true });
       expect(await reopened.runs.get(sessionId, branchId, admitted.runId)).toMatchObject({ status: "succeeded" });
+      expect(await reopened.refiner.scanBoundary(sessionId, branchId, "later-boundary-1")).toEqual([]);
+      expect(await reopened.refiner.scanBoundary(sessionId, branchId, "later-boundary-2")).toEqual([]);
       const events = await reopened.storage.loadEvents(sessionId, { branchId });
       const observations = events.filter((event) => event.type === "MessageAppended" && String((event.payload as any).messageId).startsWith("refinement-scan-observation-"));
       expect(observations).toHaveLength(1);

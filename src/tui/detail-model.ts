@@ -587,6 +587,19 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
       )],
     });
   }
+  if (command === "/refine-history" && typeof source.truncated === "boolean") {
+    const byteLimit = number(source.byteLimit);
+    sections.push({
+      title: "History bounds",
+      rows: [statusRow(
+        "Learning history response",
+        source.truncated ? "truncated" : "complete",
+        byteLimit === null
+          ? undefined
+          : `Serialized response limit: ${byteLimit} bytes.`,
+      )],
+    });
+  }
   if (activities.length) sections.push({
     title: `Learning activity · ${activities.length}`,
     rows: activities.map((item) => {
