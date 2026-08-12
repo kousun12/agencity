@@ -30,6 +30,8 @@ interface CommandResult {
 
 interface PtyResult {
   readonly providerPrompt: boolean;
+  readonly authenticatedStatus: boolean;
+  readonly unauthenticatedStatus: boolean;
   readonly keyPrompt: boolean;
   readonly catalogReady: boolean;
   readonly manualRow: boolean;
@@ -59,6 +61,7 @@ async function createWorld(
       ConstructorParameters<typeof StrictActionFixture>[0]
     >["catalogMode"]
   >,
+  credentialMode: "missing" | "openai-environment" = "missing",
 ): Promise<TestWorld> {
   const directory = await mkdtemp(
     join(tmpdir(), "agencity-first-run-picker-pty-"),
@@ -86,7 +89,9 @@ async function createWorld(
       ),
     ),
     HOME: home,
-    ...fixture.firstRunEnvironment(),
+    ...(credentialMode === "openai-environment"
+      ? fixture.environment()
+      : fixture.firstRunEnvironment()),
   };
   const world = { directory, workspace, home, fixture, environment };
   worlds.push(world);
@@ -123,7 +128,15 @@ async function command(
 
 async function runPty(
   world: TestWorld,
-  scenario: "unavailable" | "hostile" | "cancel" | "service-loss",
+  scenario:
+    | "unavailable"
+    | "hostile"
+    | "cancel"
+    | "cancel-provider"
+    | "cancel-credential"
+    | "service-loss"
+    | "authenticated-default"
+    | "authenticate-new",
   columns: number,
   controlPath = "",
 ): Promise<PtyResult> {
@@ -199,10 +212,23 @@ def owned_service_pid():
 
 provider_prompt = pump(10, "Choose a provider")
 if provider_prompt:
-    os.write(fd, b"openai\r")
-key_prompt = pump(5, "API key for OpenAI")
+    if scenario == "cancel-provider":
+        os.write(fd, b"\x1b")
+    elif scenario == "authenticated-default":
+        os.write(fd, b"\r")
+    elif scenario == "authenticate-new":
+        os.write(fd, b"vercel\r")
+    else:
+        os.write(fd, b"openai\r")
+authenticated_status = b"environment credential" in output or b"stored credential" in output
+unauthenticated_status = b"not authenticated" in output
+key_label = "API key for Vercel AI Gateway" if scenario == "authenticate-new" else "API key for OpenAI"
+key_prompt = False if scenario == "authenticated-default" or scenario == "cancel-provider" else pump(5, key_label)
 if key_prompt:
-    os.write(fd, b"acceptance-fixture-key\r")
+    if scenario == "cancel-credential":
+        os.write(fd, b"\x1b")
+    else:
+        os.write(fd, b"acceptance-fixture-key\r")
 
 catalog_ready = False
 manual_row = False
@@ -214,7 +240,9 @@ service_killed = False
 picker_start = len(output)
 picker_end = picker_start
 
-if scenario == "unavailable":
+if scenario == "cancel-provider" or scenario == "cancel-credential":
+    pass
+elif scenario == "unavailable":
     catalog_ready = pump(10, "Catalog unavailable", picker_start)
     if catalog_ready:
         pre_config = public_json(["config"])
@@ -241,6 +269,14 @@ elif scenario == "cancel":
     picker_end = len(output)
     if catalog_ready:
         os.write(fd, b"\x1b")
+elif scenario == "authenticated-default" or scenario == "authenticate-new":
+    catalog_ready = pump(10, "Fixture Reasoner", picker_start)
+    picker_end = len(output)
+    if catalog_ready:
+        pre_config = public_json(["config"])
+        pre_sessions = public_json(["sessions"])
+        os.write(fd, b"reasoner\r")
+        ready = pump(10, "Ask Agencity", picker_end)
 else:
     catalog_ready = pump(10, "Loading configured model catalog", picker_start)
     picker_end = len(output)
@@ -292,6 +328,8 @@ except OSError:
 
 print(json.dumps({
     "providerPrompt": provider_prompt,
+    "authenticatedStatus": authenticated_status,
+    "unauthenticatedStatus": unauthenticated_status,
     "keyPrompt": key_prompt,
     "catalogReady": catalog_ready,
     "manualRow": manual_row,
@@ -367,6 +405,76 @@ async function configAndSessions(world: TestWorld): Promise<{
     sessions: JSON.parse(sessions.stdout),
   };
 }
+
+test.skipIf(!python || process.platform === "win32")(
+  "defaults to the authenticated provider and still requires interactive model confirmation",
+  async () => {
+    const world = await createWorld("normal", "openai-environment");
+    const result = await runPty(world, "authenticated-default", 100);
+    expect(result, result.outputTail).toMatchObject({
+      providerPrompt: true,
+      authenticatedStatus: true,
+      unauthenticatedStatus: true,
+      keyPrompt: false,
+      catalogReady: true,
+      ready: true,
+      exitCode: 0,
+      preConfirmationConfig: expect.objectContaining({ defaultModel: null }),
+      preConfirmationSessions: [],
+    });
+
+    const durable = await configAndSessions(world);
+    expect(durable.config.defaultModel).toBe("openai:openai/fixture-v1");
+    expect(durable.sessions).toHaveLength(1);
+    expect(durable.sessions[0]?.model).toMatchObject({
+      provider: "openai",
+      model: "openai/fixture-v1",
+    });
+  },
+  30_000,
+);
+
+test.skipIf(!python || process.platform === "win32")(
+  "authenticates a newly selected provider before its filtered model picker",
+  async () => {
+    const world = await createWorld("normal", "openai-environment");
+    const result = await runPty(world, "authenticate-new", 100);
+    expect(result, result.outputTail).toMatchObject({
+      providerPrompt: true,
+      authenticatedStatus: true,
+      unauthenticatedStatus: true,
+      keyPrompt: true,
+      catalogReady: true,
+      ready: true,
+      exitCode: 0,
+      preConfirmationConfig: expect.objectContaining({ defaultModel: null }),
+      preConfirmationSessions: [],
+    });
+
+    const durable = await configAndSessions(world);
+    expect(durable.config.defaultModel).toBe("vercel:openai/fixture-v1");
+    expect(durable.sessions).toHaveLength(1);
+    expect(durable.sessions[0]?.model).toMatchObject({
+      provider: "vercel",
+      model: "openai/fixture-v1",
+    });
+    const doctor = await command(world, [
+      "doctor",
+      "--workspace",
+      world.workspace,
+      "--json",
+    ]);
+    expect(doctor.code, doctor.stderr).toBe(0);
+    expect(JSON.parse(doctor.stdout).providers).toContainEqual(
+      expect.objectContaining({
+        provider: "vercel",
+        usable: true,
+        credentialSource: "stored",
+      }),
+    );
+  },
+  30_000,
+);
 
 test.skipIf(!python || process.platform === "win32")(
   "selects an exact manual model when the configured catalog is unavailable without creating a placeholder root",
@@ -467,6 +575,30 @@ test.skipIf(!python || process.platform === "win32")(
     expect(durable.sessions[0]?.model.model).toBe("openai/fixture-v1");
     expect(JSON.stringify(durable)).not.toContain("Scarlet");
     expect(JSON.stringify(durable)).not.toContain("override");
+  },
+  30_000,
+);
+
+test.skipIf(!python || process.platform === "win32")(
+  "exits cleanly when provider or credential selection is cancelled",
+  async () => {
+    for (const scenario of ["cancel-provider", "cancel-credential"] as const) {
+      const world = await createWorld("normal");
+      const result = await runPty(world, scenario, 80);
+      expect(result, result.outputTail).toMatchObject({
+        providerPrompt: true,
+        keyPrompt: scenario === "cancel-credential",
+        catalogReady: false,
+        ready: false,
+        exitCode: 0,
+      });
+      expect(result.outputTail).not.toContain("Agencity error");
+      expect(result.outputTail).not.toContain("was cancelled");
+
+      const durable = await configAndSessions(world);
+      expect(durable.config.defaultModel).toBeNull();
+      expect(durable.sessions).toEqual([]);
+    }
   },
   30_000,
 );

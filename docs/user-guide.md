@@ -36,10 +36,10 @@ agencity -- run the benchmark and explain the result
 
 ## First-run provider setup
 
-New work requires an explicit model provider and canonical model ID. When interactive startup cannot resolve them from an explicit option, a valid retained default, or environment configuration, Agencity uses an inline keyboard picker:
+New work requires an explicit model provider and canonical model ID. An explicit `--model` or a valid retained workspace default bypasses setup. Otherwise, interactive startup always uses an inline keyboard picker, even when exactly one provider is authenticated or provider-specific model environment variables are set:
 
-1. type to search provider display names or stable IDs, use Up/Down to move, and press Enter to confirm;
-2. if the provider needs a credential, enter it through hidden input; and
+1. choose OpenAI, Anthropic, or Vercel AI Gateway by display name or stable ID; each row identifies stored credentials, environment credentials, or an unauthenticated provider, and the first authenticated provider in the stable OpenAI, Anthropic, Gateway order is selected by default;
+2. if the selected provider is unauthenticated, enter its credential through hidden input; and
 3. type to fuzzy-search model display names and canonical `creator/model` IDs, use Up/Down to move, and press Enter to confirm.
 
 Backspace edits either search. Escape cancels first-run setup, clears the picker, and returns to the shell without reporting an error. A syntactically valid unmatched canonical ID appears as an explicit `Use exact model ID` row ahead of fuzzy suggestions. This remains available when the configured catalog is unavailable or has no rows for the provider. Direct OpenAI accepts only `openai/...`; direct Anthropic accepts only `anthropic/...`; Vercel AI Gateway accepts any valid creator namespace.

@@ -132,12 +132,14 @@ For new work, selection order is:
 
 1. `--model PROVIDER:MODEL`
 2. the workspace-scoped model preference in the profile database
-3. the selected provider's model environment variable
-4. interactive provider/model selection
+3. interactive provider/model selection when a terminal is available
+4. a usable provider's model environment variable for non-interactive startup
 
 Model environment variables are `OPENAI_MODEL`, `ANTHROPIC_MODEL`, and `VERCEL_MODEL`. The Vercel provider uses `VERCEL_MODEL`, not `AI_GATEWAY_MODEL`.
 
-Interactive setup uses keyboard-driven provider and model typeahead. Provider search covers display names and stable IDs. Model search uses deterministic fuzzy matching across catalog display names and canonical IDs; Up/Down moves, Enter confirms, Backspace edits, and Escape cancels. A valid unmatched canonical ID becomes an explicit, initially selected manual row even when fuzzy catalog suggestions remain. Direct OpenAI rows and manual input are limited to `openai/...`, direct Anthropic to `anthropic/...`, and Gateway accepts any valid creator namespace. Display names are presentation only; persistence and dispatch use the confirmed canonical ID.
+Interactive setup always opens keyboard-driven provider typeahead before model typeahead when no explicit or valid retained model exists. It lists OpenAI, Anthropic, and Vercel AI Gateway whether or not they are authenticated, labels stored and environment credentials, and defaults to the first authenticated provider in the stable OpenAI, Anthropic, Gateway order. Selecting an unauthenticated provider opens hidden credential entry and refreshes its status before model selection. Interactive setup does not consume model environment variables as an implicit confirmation.
+
+Provider search covers display names and stable IDs. Model search uses deterministic fuzzy matching across catalog display names and canonical IDs; Up/Down moves, Enter confirms, Backspace edits, and Escape cancels. A valid unmatched canonical ID becomes an explicit, initially selected manual row even when fuzzy catalog suggestions remain. Direct OpenAI rows and manual input are limited to `openai/...`, direct Anthropic to `anthropic/...`, and Gateway accepts any valid creator namespace. Display names are presentation only; persistence and dispatch use the confirmed canonical ID.
 
 The model picker loads language-model metadata from the `/v1/models` route at the configured `AI_GATEWAY_BASE_URL` origin. This request is credential-free and makes no inference request. A successful refresh returns current rows; a failed refresh may return a visibly stale, digest-checked endpoint-specific cache; unavailable, rejected, malformed, or provider-filtered-empty results keep exact manual canonical-ID entry available. Catalog membership does not prove credentials, formal-tool support, reasoning support, provider availability, or successful execution, and catalog absence does not reject an otherwise valid manual ID.
 

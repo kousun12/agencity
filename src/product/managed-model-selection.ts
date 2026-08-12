@@ -14,6 +14,7 @@ import { providerAcceptsCanonicalModel } from "./model-selection.ts";
 import { formatModel, parseModel } from "./providers.ts";
 
 const PRODUCT_MODEL_TRANSPORTS = new Set(["openai", "anthropic", "vercel"]);
+const PRODUCT_PROVIDER_ORDER = ["openai", "anthropic", "vercel"] as const;
 
 interface ManagedModelCatalogResult {
   readonly endpointId?: string;
@@ -48,6 +49,7 @@ interface ManagedModelPrompter {
   readonly selectProvider: (
     providers: readonly ModelProviderDescriptor[],
     introduction?: string,
+    defaultProviderName?: string,
   ) => Promise<ModelProviderDescriptor>;
   readonly selectModel: (
     provider: ModelProviderDescriptor,
@@ -197,44 +199,42 @@ export async function chooseManagedModel(
       }
     }
   }
-  let usable = providers.filter(provider => provider.usable);
-  for (const provider of usable) {
-    const model = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`];
-    if (model?.trim()) {
-      return finish({
-        provider: provider.name,
-        model: model.trim(),
-        reasoningEffort: "provider-default",
-      }, true);
-    }
-  }
   if (!interactive) {
+    for (const provider of providers.filter(provider => provider.usable)) {
+      const model = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`];
+      if (model?.trim()) {
+        return finish({
+          provider: provider.name,
+          model: model.trim(),
+          reasoningEffort: "provider-default",
+        }, true);
+      }
+    }
     throw new ValidationError("No usable model is selected. Configure provider credentials and pass --model PROVIDER:MODEL, or run Agencity in an interactive terminal");
   }
-  if (!usable.length) {
-    const candidates = providers.filter(provider => ["openai", "anthropic", "vercel"].includes(provider.name));
-    const selected = await prompter.selectProvider(
-      candidates,
-      "No model provider is configured.\n",
-    );
+
+  const candidates = orderInteractiveProviders(providers);
+  const defaultProviderName = candidates.find(provider => provider.usable)?.name;
+  let provider = await prompter.selectProvider(
+    candidates,
+    "Choose a provider for this workspace.\n",
+    defaultProviderName,
+  );
+  if (!provider.usable) {
+    if (!PRODUCT_MODEL_TRANSPORTS.has(provider.name)) {
+      throw new ValidationError(
+        provider.remediation ??
+          `Model provider is unavailable: ${provider.name}`,
+      );
+    }
+    const selected = provider;
     const apiKey = await prompter.secret(`API key for ${selected.displayName} (input hidden): `);
     if (!apiKey) throw new ValidationError("Provider API key is required");
     await client.productSetProviderKey(selected.name, apiKey);
     const refreshed = (await client.modelProviders()).filter(provider => provider.name !== "echo");
     const configuredProvider = refreshed.find(provider => provider.name === selected.name);
     if (!configuredProvider?.usable) throw new ValidationError(configuredProvider?.remediation ?? `Credential unavailable for ${selected.name}`);
-    usable = [configuredProvider];
-  }
-  const provider = usable.length === 1
-    ? usable[0]!
-    : await prompter.selectProvider(usable);
-  const environmentModel = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`]?.trim();
-  if (environmentModel) {
-    return finish({
-      provider: provider.name,
-      model: environmentModel,
-      reasoningEffort: "provider-default",
-    }, true);
+    provider = configuredProvider;
   }
   const modelId = PRODUCT_MODEL_TRANSPORTS.has(provider.name)
     ? await prompter.selectModel(provider, modelCatalog())
@@ -244,6 +244,20 @@ export async function chooseManagedModel(
     model: modelId,
     reasoningEffort: "provider-default",
   }, true);
+}
+
+function orderInteractiveProviders(
+  providers: readonly ModelProviderDescriptor[],
+): readonly ModelProviderDescriptor[] {
+  const priority = new Map<string, number>(
+    PRODUCT_PROVIDER_ORDER.map((name, index) => [name, index]),
+  );
+  return Object.freeze([...providers].sort((left, right) => {
+    const leftPriority = priority.get(left.name) ?? PRODUCT_PROVIDER_ORDER.length;
+    const rightPriority = priority.get(right.name) ?? PRODUCT_PROVIDER_ORDER.length;
+    return leftPriority - rightPriority ||
+      (left.name === right.name ? 0 : left.name < right.name ? -1 : 1);
+  }));
 }
 
 export function normalizeSelectedManagedModel(

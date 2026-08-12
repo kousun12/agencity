@@ -40,12 +40,16 @@ class FakeOutput extends PassThrough {
 function provider(
   name: string,
   displayName: string,
+  options: {
+    usable?: boolean;
+    credentialSource?: ModelProviderDescriptor["credentialSource"];
+  } = {},
 ): ModelProviderDescriptor {
   return {
     name,
     displayName,
-    usable: true,
-    credentialSource: "stored",
+    usable: options.usable ?? true,
+    credentialSource: options.credentialSource ?? "stored",
     capabilities: {
       streaming: true,
       reasoningControl: "normalized",
@@ -144,6 +148,43 @@ describe("session-independent product prompter", () => {
     expect(output.text).toContain("\u001b[?25h");
   });
 
+  test("renders credential status and selects the requested authenticated default", async () => {
+    const { input, output, prompter } = harness();
+    const selection = prompter.selectProvider([
+      provider("openai", "OpenAI", {
+        usable: false,
+        credentialSource: "missing",
+      }),
+      provider("anthropic", "Anthropic", {
+        credentialSource: "environment",
+      }),
+      provider("vercel", "Vercel AI Gateway", {
+        credentialSource: "stored",
+      }),
+    ], "", "anthropic");
+
+    expect(output.text).toContain("openai · not authenticated");
+    expect(output.text).toContain(
+      "anthropic · authenticated · environment credential",
+    );
+    expect(output.text).toContain(
+      "vercel · authenticated · stored credential",
+    );
+    input.write("\r");
+    expect((await selection).name).toBe("anthropic");
+  });
+
+  test("shows the provider picker even when it has one option", async () => {
+    const { input, output, prompter } = harness();
+    const selection = prompter.selectProvider([
+      provider("openai", "OpenAI"),
+    ], "", "openai");
+    expect(output.text).toContain("Choose a provider");
+    expect(input.isRaw).toBe(true);
+    input.write("\r");
+    expect((await selection).name).toBe("openai");
+  });
+
   test("restores an initially unpaused input without leaving it paused", async () => {
     const { input, prompter } = harness();
     expect(input.isPaused()).toBe(false);
@@ -190,6 +231,29 @@ describe("session-independent product prompter", () => {
       expect(output.writes.at(-1)).toEndWith("\r");
       expect(output.writes.at(-1)).toContain("\u001b[2K");
     }
+  });
+
+  test("cancels provider and credential input on standalone Escape", async () => {
+    const providerHarness = harness();
+    const providerSelection = providerHarness.prompter.selectProvider([
+      provider("openai", "OpenAI"),
+      provider("anthropic", "Anthropic"),
+    ]);
+    providerHarness.input.write("\u001b");
+    await expect(providerSelection).rejects.toBeInstanceOf(
+      ProductPromptCancelledError,
+    );
+    expect(providerHarness.input.listenerCount("data")).toBe(0);
+    expect(providerHarness.input.isRaw).toBe(false);
+
+    const credentialHarness = harness();
+    const credential = credentialHarness.prompter.secret("Hidden key: ");
+    credentialHarness.input.write("\u001b");
+    await expect(credential).rejects.toBeInstanceOf(
+      ProductPromptCancelledError,
+    );
+    expect(credentialHarness.input.listenerCount("data")).toBe(0);
+    expect(credentialHarness.input.isRaw).toBe(false);
   });
 
   test("decodes split UTF-8 and selects the exact catalog identity", async () => {

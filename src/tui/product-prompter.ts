@@ -138,6 +138,12 @@ export class ProductPrompter {
         const decoder = new StringDecoder("utf8");
         let pending = "";
         let paste = false;
+        const cancel = (): void =>
+          owner.fail(
+            new ProductPromptCancelledError(
+              "Provider credential entry was cancelled",
+            ),
+          );
 
         const append = (value: string): void => {
           const printable = Array.from(value).filter((character) =>
@@ -151,6 +157,7 @@ export class ProductPrompter {
 
         return (chunk) => {
           pending += decodeChunk(decoder, chunk);
+          owner.clearEscapeTimer();
           while (pending) {
             if (paste) {
               const end = pending.indexOf(BRACKETED_PASTE_END);
@@ -173,7 +180,10 @@ export class ProductPrompter {
               paste = true;
               continue;
             }
-            if (isPrefixOf(pending, BRACKETED_PASTE_START)) return;
+            if (isPrefixOf(pending, BRACKETED_PASTE_START)) {
+              owner.setEscapeTimer(cancel);
+              return;
+            }
             const character = Array.from(pending)[0]!;
             pending = pending.slice(character.length);
             if (character === "\r" || character === "\n") {
@@ -181,11 +191,7 @@ export class ProductPrompter {
               return;
             }
             if (isCancellation(character)) {
-              owner.fail(
-                new ProductPromptCancelledError(
-                  "Provider credential entry was cancelled",
-                ),
-              );
+              cancel();
               return;
             }
             if (isBackspace(character)) {
@@ -204,22 +210,25 @@ export class ProductPrompter {
   async selectProvider(
     providers: readonly ModelProviderDescriptor[],
     introduction = "",
+    defaultProviderName?: string,
   ): Promise<ModelProviderDescriptor> {
     if (!providers.length) {
       throw new ValidationError("No supported model provider is available");
     }
-    if (providers.length === 1) return providers[0]!;
     const byName = new Map(providers.map((provider) => [provider.name, provider]));
     let state: PickerState<ProviderSelectionOption> = {
       query: "",
       options: rankProviderOptions(providers, ""),
       selectedIdentity: null,
     };
-    state.selectedIdentity = reconcileSelectedIdentity(
-      state.options,
-      null,
-      "query-edit",
-    );
+    const preferredIdentity = defaultProviderName === undefined
+      ? null
+      : `provider:${defaultProviderName}`;
+    state.selectedIdentity = state.options.some((option) =>
+        option.identity === preferredIdentity
+      )
+      ? preferredIdentity
+      : reconcileSelectedIdentity(state.options, null, "query-edit");
     const render = (): void => {
       const selected = state.selectedIdentity;
       this.#draw([
@@ -229,7 +238,9 @@ export class ProductPrompter {
         "",
         ...(state.options.length
           ? state.options.map((option) =>
-              `${option.identity === selected ? "›" : " "} ${option.displayName}    ${option.name}`
+              `${option.identity === selected ? "›" : " "} ${option.displayName}    ${option.name} · ${
+                providerCredentialLabel(byName.get(option.name))
+              }`
             )
           : ["  No matching providers"]),
         "",
@@ -620,6 +631,19 @@ export class ProductPrompter {
   #write(value: string): void {
     this.#output.write(value);
   }
+}
+
+function providerCredentialLabel(
+  provider: ModelProviderDescriptor | undefined,
+): string {
+  if (!provider?.usable) return "not authenticated";
+  if (provider.credentialSource === "stored") {
+    return "authenticated · stored credential";
+  }
+  if (provider.credentialSource === "environment") {
+    return "authenticated · environment credential";
+  }
+  return "authenticated";
 }
 
 interface PickerParserOptions<T extends { readonly identity: string }> {

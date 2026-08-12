@@ -9,12 +9,16 @@ import type { ModelProviderDescriptor } from "../../src/executors/index.ts";
 function provider(
   name: string,
   displayName: string,
+  options: {
+    usable?: boolean;
+    credentialSource?: ModelProviderDescriptor["credentialSource"];
+  } = {},
 ): ModelProviderDescriptor {
   return {
     name,
     displayName,
-    usable: true,
-    credentialSource: "programmatic",
+    usable: options.usable ?? true,
+    credentialSource: options.credentialSource ?? "programmatic",
     capabilities: {
       streaming: true,
       requiredToolSet: {
@@ -263,6 +267,172 @@ describe("managed model selection orchestration", () => {
     );
     expect(result.model).toBe("openai/private-preview");
     expect(writes).toEqual(["openai:openai/private-preview"]);
+  });
+
+  test("always asks for a provider and model interactively, defaulting to a deterministic authenticated provider", async () => {
+    const openai = provider("openai", "OpenAI", {
+      credentialSource: "environment",
+    });
+    const anthropic = provider("anthropic", "Anthropic", {
+      usable: false,
+      credentialSource: "missing",
+    });
+    const vercel = provider("vercel", "Vercel AI Gateway", {
+      usable: false,
+      credentialSource: "missing",
+    });
+    const writes: string[] = [];
+    let providerPickerCalls = 0;
+    let modelPickerCalls = 0;
+    const client = {
+      modelProviders: async () => [vercel, openai, anthropic],
+      productConfig: async () => ({
+        defaultModel: null,
+        selectedModelEffortPreference: null,
+      }),
+      modelCatalog: async () => ({
+        status: "refreshed" as const,
+        descriptors: [],
+      }),
+      agentToolCapability: async (model: { provider: string; model: string }) =>
+        capability(model.provider, model.model, "allowed"),
+      productSetModel: async (model: string) => {
+        writes.push(model);
+        return { defaultModel: model };
+      },
+      productSetProviderKey: async () => {
+        throw new Error("credential prompt should not run");
+      },
+    };
+    const prompter = {
+      secret: async () => {
+        throw new Error("credential prompt should not run");
+      },
+      selectProvider: async (
+        candidates: readonly ModelProviderDescriptor[],
+        _introduction: string,
+        defaultProviderName: string,
+      ) => {
+        providerPickerCalls += 1;
+        expect(candidates.map(candidate => candidate.name)).toEqual([
+          "openai",
+          "anthropic",
+          "vercel",
+        ]);
+        expect(defaultProviderName).toBe("openai");
+        return openai;
+      },
+      selectModel: async (selected: ModelProviderDescriptor) => {
+        modelPickerCalls += 1;
+        expect(selected).toBe(openai);
+        expect(writes).toEqual([]);
+        return "openai/picker-choice";
+      },
+      selectCustomModel: async () => {
+        throw new Error("custom picker should not run");
+      },
+    };
+    const retained = process.env.OPENAI_MODEL;
+    process.env.OPENAI_MODEL = "openai/environment-choice";
+    try {
+      const result = await chooseManagedModel(
+        client as any,
+        parseCliArgs(["new"]),
+        true,
+        prompter as any,
+      );
+      expect(result.model).toBe("openai/picker-choice");
+    } finally {
+      if (retained === undefined) delete process.env.OPENAI_MODEL;
+      else process.env.OPENAI_MODEL = retained;
+    }
+    expect(providerPickerCalls).toBe(1);
+    expect(modelPickerCalls).toBe(1);
+    expect(writes).toEqual(["openai:openai/picker-choice"]);
+  });
+
+  test("authenticates a selected unavailable provider before opening its model picker", async () => {
+    const openai = provider("openai", "OpenAI", {
+      credentialSource: "environment",
+    });
+    const missingVercel = provider("vercel", "Vercel AI Gateway", {
+      usable: false,
+      credentialSource: "missing",
+    });
+    const storedVercel = provider("vercel", "Vercel AI Gateway", {
+      credentialSource: "stored",
+    });
+    let providerReads = 0;
+    const writes: string[] = [];
+    const keys: Array<{ provider: string; secret: string }> = [];
+    const client = {
+      modelProviders: async () => {
+        providerReads += 1;
+        return providerReads === 1
+          ? [missingVercel, openai]
+          : [storedVercel, openai];
+      },
+      productConfig: async () => ({
+        defaultModel: null,
+        selectedModelEffortPreference: null,
+      }),
+      modelCatalog: async () => ({
+        status: "refreshed" as const,
+        descriptors: [],
+      }),
+      agentToolCapability: async (model: { provider: string; model: string }) =>
+        capability(model.provider, model.model, "allowed"),
+      productSetModel: async (model: string) => {
+        writes.push(model);
+        return { defaultModel: model };
+      },
+      productSetProviderKey: async (selected: string, secret: string) => {
+        keys.push({ provider: selected, secret });
+        return {};
+      },
+    };
+    const prompter = {
+      secret: async () => "saved-gateway-key",
+      selectProvider: async (
+        candidates: readonly ModelProviderDescriptor[],
+        _introduction: string,
+        defaultProviderName: string,
+      ) => {
+        expect(candidates.map(candidate => candidate.name)).toEqual([
+          "openai",
+          "vercel",
+        ]);
+        expect(defaultProviderName).toBe("openai");
+        return missingVercel;
+      },
+      selectModel: async (selected: ModelProviderDescriptor) => {
+        expect(selected).toBe(storedVercel);
+        expect(keys).toEqual([{
+          provider: "vercel",
+          secret: "saved-gateway-key",
+        }]);
+        expect(writes).toEqual([]);
+        return "openai/gateway-choice";
+      },
+      selectCustomModel: async () => {
+        throw new Error("custom picker should not run");
+      },
+    };
+    const result = await withoutModelEnvironment(
+      ["OPENAI_MODEL", "VERCEL_MODEL"],
+      () => chooseManagedModel(
+        client as any,
+        parseCliArgs(["new"]),
+        true,
+        prompter as any,
+      ),
+    );
+    expect(result).toMatchObject({
+      provider: "vercel",
+      model: "openai/gateway-choice",
+    });
+    expect(providerReads).toBe(2);
+    expect(writes).toEqual(["vercel:openai/gateway-choice"]);
   });
 
   test("uses bounded provider-specific input and server normalization for custom providers", async () => {
