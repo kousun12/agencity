@@ -313,7 +313,16 @@ export class AgentService {
     } = {},
   ): Promise<SubagentHandle[]> {
     return this.#admissions.run(`${parentSessionId}/${parentBranchId}`, async () => {
-      const inputs = rawInputs.map((input): SpawnAgentInput => typeof input === "string" ? { task: input } : input);
+      if (!Array.isArray(rawInputs)) {
+        throw new ValidationError("Subagent inputs must be an array");
+      }
+      const inputs = rawInputs.map((input): SpawnAgentInput => {
+        if (typeof input === "string") return { task: input };
+        if (!input || typeof input !== "object" || Array.isArray(input)) {
+          throw new ValidationError("Subagent input must be a task string or object");
+        }
+        return input;
+      });
       if (inputs.length === 0) return [];
       for (const input of inputs) {
         assertNoReservedModelDispatchInputFields(
@@ -332,8 +341,15 @@ export class AgentService {
         if (typeof input.task !== "string" || !input.task.trim()) {
           throw new ValidationError("Subagent task must be a non-empty string");
         }
-        if (input.idempotencyKey !== undefined && !input.idempotencyKey.trim()) throw new ValidationError("Subagent idempotencyKey cannot be empty");
-        if (input.name !== undefined && (!input.name.trim() || new TextEncoder().encode(input.name).byteLength > 128)) throw new ValidationError("Subagent name must be 1 to 128 UTF-8 bytes");
+        if (input.idempotencyKey !== undefined &&
+            (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim())) {
+          throw new ValidationError("Subagent idempotencyKey must be a non-empty string");
+        }
+        if (input.name !== undefined &&
+            (typeof input.name !== "string" || !input.name.trim() ||
+              new TextEncoder().encode(input.name).byteLength > 128)) {
+          throw new ValidationError("Subagent name must be 1 to 128 UTF-8 bytes");
+        }
         if (input.profile !== undefined && (!input.profile || typeof input.profile !== "object" || Array.isArray(input.profile))) throw new ValidationError("Subagent profile must be an object");
         if (input.output !== undefined) {
           if (!input.output || typeof input.output !== "object" ||
@@ -1337,6 +1353,9 @@ export class AgentService {
 function assertInvocationBatchSize(
   inputs: readonly (SpawnAgentInput | string)[],
 ): void {
+  if (!Array.isArray(inputs)) {
+    throw new ValidationError("Agent invocation inputs must be an array");
+  }
   if (inputs.length < 1 || inputs.length > MAX_AGENT_INVOCATION_BATCH_SIZE) {
     throw new ValidationError(
       `Agent invocation batch requires 1-${MAX_AGENT_INVOCATION_BATCH_SIZE} inputs`,

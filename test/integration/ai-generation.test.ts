@@ -336,6 +336,55 @@ describe("durable raw AI generation", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("rejects malformed scalar inputs and invalid client waits before admission", async () => {
+    const temp = await makeTempRuntime("agencity-ai-generation-admission-validation-"); temps.push(temp);
+    const provider = new TextGenerationProvider("admission-validation");
+    const supervisor = await open(temp, [provider]);
+    try {
+      const root = await supervisor.createSession({
+        workspaceId: "admission-validation",
+        model: { provider: provider.name, model: "fixture", maxOutputTokens: 16 },
+      });
+      await expect(supervisor.ai.admitText(root.sessionId, root.branchId, {
+        prompt: "invalid runtime key",
+        idempotencyKey: 42,
+      } as any)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      await expect(supervisor.agents.spawnRunnable(root.sessionId, root.branchId, {
+        task: "invalid child key",
+        idempotencyKey: 42,
+      } as any)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      await expect(supervisor.agents.spawnRunnable(root.sessionId, root.branchId, {
+        task: "invalid child name",
+        name: 42,
+      } as any)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      await expect(supervisor.agents.spawnManyRunnable(
+        root.sessionId,
+        root.branchId,
+        42 as any,
+      )).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+
+      const client = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+      await expect(client.admitTextGeneration(root.sessionId, root.branchId, {
+        prompt: "invalid protocol key",
+        idempotencyKey: 42,
+      } as any)).rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 400 });
+      await expect(client.generateText(root.sessionId, root.branchId, {
+        prompt: "invalid negative wait",
+      }, { timeoutMs: -1 })).rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 400 });
+      await expect(client.generateObject(root.sessionId, root.branchId, {
+        prompt: "invalid NaN wait",
+        schema: { type: "string" },
+      }, { timeoutMs: Number.NaN })).rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 400 });
+
+      expect(provider.calls).toBe(0);
+      expect(await supervisor.agents.listTasks(root.sessionId)).toHaveLength(0);
+      const events = await supervisor.storage.loadEvents(root.sessionId, { branchId: root.branchId });
+      expect(events.some(event =>
+        event.type === "AiGenerationRequested" ||
+        event.type === "EffectRequested")).toBe(false);
+    } finally { await supervisor.close(); }
+  });
+
   test("cancellation, timeout, and oversized inline output remain typed terminal failures", async () => {
     const temp = await makeTempRuntime("agencity-ai-generation-terminal-"); temps.push(temp);
     const slow = new TextGenerationProvider("slow-raw", "late", 1_000);
@@ -807,6 +856,24 @@ describe("durable raw AI generation", () => {
     try {
       await first.modelCatalog.refresh();
       await second.modelCatalog.refresh();
+      const unaffordable = await first.createSession({
+        workspaceId: "priced-unaffordable",
+        model: { provider: provider.name, model: "creator/priced", maxOutputTokens: 16 },
+        budget: { tokenLimit: 100_000, costLimitUsd: 0.00002, turnLimit: 10, wallTimeLimitMs: 100_000 },
+      });
+      await expect(first.ai.admitText(unaffordable.sessionId, unaffordable.branchId, {
+        prompt: "must fail before provider execution",
+        idempotencyKey: "priced-unaffordable",
+      })).rejects.toThrow(/catalog-priced reservation exceeds.*cost limit/i);
+      expect(provider.calls).toBe(0);
+      const unaffordableEvents = await first.storage.loadEvents(
+        unaffordable.sessionId,
+        { branchId: unaffordable.branchId },
+      );
+      expect(unaffordableEvents.some(event =>
+        event.type === "AiGenerationRequested" ||
+        event.type === "EffectRequested")).toBe(false);
+
       const root = await first.createSession({
         workspaceId: "priced-reservations",
         model: { provider: provider.name, model: "creator/priced", maxOutputTokens: 16 },

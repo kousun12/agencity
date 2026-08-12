@@ -438,7 +438,7 @@ export class ProtocolServer {
             return Response.json(await this.supervisor.agents.spawnManyRunnable(
               sessionId,
               branchId,
-              Array.isArray(body.inputs) ? body.inputs as any[] : [],
+              batchInputs(body, "Agent invocation"),
             ));
           }
           if (request.method === "POST" && parts.length === 3) {
@@ -480,7 +480,7 @@ export class ProtocolServer {
         // Slice 2 commands remain branch-scoped and return durable JSON handles.
         if (parts[2] === "agents" && branchId) {
           if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.agents.listFamily(sessionId, branchId));
-          if (request.method === "POST" && parts[3] === "batch") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.spawnMany(sessionId, branchId, Array.isArray(body.inputs) ? body.inputs as any[] : [])); }
+          if (request.method === "POST" && parts[3] === "batch") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.spawnMany(sessionId, branchId, batchInputs(body, "Subagent"))); }
           if (request.method === "POST" && parts[3] && parts[4] === "follow-up") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.followUp(sessionId, branchId, decodeURIComponent(parts[3]), String(body.content ?? ""), body as any)); }
           if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.cancelFamilyTarget(sessionId, branchId, decodeURIComponent(parts[3]), typeof body.reason === "string" ? body.reason : undefined)); }
           if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.agents.spawn(sessionId, branchId, await jsonBody(request) as any));
@@ -656,6 +656,17 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
   // semantic boundary for both transports.
   if (request.body === null) return {};
   return await request.json() as Record<string, unknown>;
+}
+
+function batchInputs(body: unknown, label: string): any[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError(`${label} batch body must be an object containing inputs`);
+  }
+  const inputs = (body as Record<string, unknown>).inputs;
+  if (!Array.isArray(inputs)) {
+    throw new ValidationError(`${label} batch inputs must be an array`);
+  }
+  return inputs;
 }
 
 function protocolErrorDetails(error: unknown): unknown {

@@ -1,6 +1,6 @@
 # Explicit AI generation and typed agent runs plan
 
-**Status:** In progress
+**Status:** Implemented and deterministically verified; external integrations remain unverified
 **Date:** August 11, 2026  
 **Last revised:** August 11, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
@@ -775,3 +775,9 @@ The refactor is complete when:
 - Validation: `bun test --timeout 30000 test/unit/ai-agent-guidance.test.ts test/unit/scratch-guidance.test.ts test/integration/recursive-console.test.ts test/integration/ai-generation.test.ts test/integration/console-execution-pool.test.ts` (38 passed, 0 failed, 0 skipped); `bun test --timeout 30000 test/integration/agent-runs.test.ts test/integration/family-agents-sdk.test.ts test/integration/managed-service.test.ts` (81 passed, 0 failed, 0 skipped); `bun test --timeout 120000 test/acceptance/explicit-ai-agents.test.ts test/acceptance/boundary-guard.test.ts` (6 passed, 0 failed, 0 skipped); `bun run typecheck`; `bun run check:architecture`; focused obsolete-name/current-doc searches; `git diff --check`.
 - Plan notes: Managed protocol revision 2 already contains the current raw-generation and agent-invocation HTTP lifecycle and remains an exact-match pre-release contract; this phase removed an unused TypeScript request discriminant and did not require revision 3. Gateway `/v1/models` references are provider-catalog transport, not an Agencity model-admission route. Historical `RecursiveModel*`, `recursive_model_handles`, migrations, tests, and sealed refinement/governance paths remain intentionally named.
 - Remaining: The parent final phase owns `bun run verify` and any independent final review. Live-provider, official Turso Sync server, and Turso Cloud checks were not run; they remain gated and unverified.
+
+### 2026-08-11 — Aggregate verification and independent final review
+- Completed: Reconciled the full plan against the five-phase implementation and fixed final-review findings: known-price raw generations reject unaffordable conservative reservations before durable effect admission, malformed public scalar and batch inputs fail with typed validation errors, invalid client generation waits fail before admission, the family benchmark uses the cut-over spawn contract, and the OpenTUI journey asserts explicit resident-worker keep-alive status.
+- Validation: `bun run verify` passed after the fixes: core unit/integration tests 1,113 passed, 2 external tests skipped, 0 failed; end-to-end tests 3 passed, 0 failed; installed acceptance tests 23 passed, 1 opt-in real-provider test skipped, 0 failed. Typecheck and architecture checks are included in the canonical gate. `git diff --check` passed.
+- Plan notes: Warm resident console workers are explicit service keep-alive reasons until quiescence retirement; they remain replaceable operational state rather than durable identity. Conservative exact-price cost admission rejects instead of clamping when the request cannot fit the effective cost limit.
+- Remaining: Live-provider, official Turso Sync server, and Turso Cloud checks were not run; they remain gated and unverified.

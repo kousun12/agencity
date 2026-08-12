@@ -801,7 +801,9 @@ function normalizeInput(input: AiGenerationInput): AiGenerationInput {
     if (total > MAX_AI_TOTAL_MESSAGE_BYTES) throw new ValidationError("AI generation messages exceed the total byte bound");
   }
   if (input.idempotencyKey !== undefined &&
-      (!input.idempotencyKey.trim() || bytes(input.idempotencyKey) > 256)) {
+      (typeof input.idempotencyKey !== "string" ||
+        !input.idempotencyKey.trim() ||
+        bytes(input.idempotencyKey) > 256)) {
     throw new ValidationError("AI generation idempotencyKey must contain 1-256 UTF-8 bytes");
   }
   return input;
@@ -906,7 +908,12 @@ function generationCostReservation(
   if (!Number.isFinite(estimated) || estimated < 0) {
     throw new ValidationError("AI generation catalog pricing produced an invalid cost reservation");
   }
-  return costLimitUsd === undefined ? estimated : Math.min(estimated, costLimitUsd);
+  if (costLimitUsd !== undefined && estimated > costLimitUsd) {
+    throw new ValidationError(
+      "AI generation conservative catalog-priced reservation exceeds the caller cost limit",
+    );
+  }
+  return estimated;
 }
 
 function generationBudgetExceeded(

@@ -286,7 +286,7 @@ print(json.dumps({
     "exitCode": exit_code,
     "resumeRoot": resume_root,
     "resumeExitCode": resume_exit_code,
-    "idleDetach": b"workspace service will stop automatically" in output,
+    "residentDetach": b"Service remains active: 2 resident workers" in output,
     "secretHidden": b"acceptance-fixture-key" not in output,
     "workspaceIdHidden": bool(workspace_id) and workspace_id not in output,
     "nativeSelectionAvailable": not any(sequence in output for sequence in (
@@ -351,7 +351,7 @@ print(json.dumps({
       exitCode: 0,
       resumeRoot: true,
       resumeExitCode: 0,
-      idleDetach: true,
+      residentDetach: true,
       secretHidden: true,
       workspaceIdHidden: true,
       nativeSelectionAvailable: true,

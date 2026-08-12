@@ -354,15 +354,7 @@ export class AgentClient {
     input: SpawnAgentInput | string,
     options: { readonly timeoutMs?: number } = {},
   ): Promise<AgentInvocationResult> {
-    if (options.timeoutMs !== undefined &&
-        (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0 ||
-          options.timeoutMs > MAX_AGENT_INVOCATION_WAIT_MS)) {
-      throw new ProtocolClientError(
-        "VALIDATION_ERROR",
-        `Agent invocation wait timeout must be from 0 to ${MAX_AGENT_INVOCATION_WAIT_MS}ms`,
-        400,
-      );
-    }
+    assertWaitTimeout(options.timeoutMs, "Agent invocation");
     const handle = await this.spawn(sessionId, branchId, input);
     const deadline = Date.now() + (options.timeoutMs ?? 120_000);
     for (;;) {
@@ -404,10 +396,12 @@ export class AgentClient {
     return this.#post(`/sessions/${sessionId}/ai/generations/${generationId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason });
   }
   async generateText(sessionId: string, branchId: string, input: AiGenerationInput, options: { readonly timeoutMs?: number } = {}): Promise<AiGenerationResult> {
+    assertWaitTimeout(options.timeoutMs, "AI generation");
     const handle = await this.admitTextGeneration(sessionId, branchId, input);
     return this.#waitForGeneration(sessionId, branchId, handle.generationId, options.timeoutMs);
   }
   async generateObject(sessionId: string, branchId: string, input: AiObjectGenerationInput, options: { readonly timeoutMs?: number } = {}): Promise<AiGenerationResult> {
+    assertWaitTimeout(options.timeoutMs, "AI generation");
     const handle = await this.admitObjectGeneration(sessionId, branchId, input);
     return this.#waitForGeneration(sessionId, branchId, handle.generationId, options.timeoutMs);
   }
@@ -535,6 +529,18 @@ export class AgentClient {
       release();
       throw error;
     }
+  }
+}
+
+function assertWaitTimeout(timeoutMs: number | undefined, operation: string): void {
+  if (timeoutMs === undefined) return;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 ||
+      timeoutMs > MAX_AGENT_INVOCATION_WAIT_MS) {
+    throw new ProtocolClientError(
+      "VALIDATION_ERROR",
+      `${operation} wait timeout must be from 0 to ${MAX_AGENT_INVOCATION_WAIT_MS}ms`,
+      400,
+    );
   }
 }
 

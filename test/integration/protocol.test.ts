@@ -73,6 +73,60 @@ describe("HTTP domain error mapping", () => {
     }
   });
 
+  test("rejects malformed public admission scalars and batches as validation errors", async () => {
+    const temp = await makeTempRuntime("agencity-protocol-admission-validation-");
+    temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const session = await supervisor.createSession({ workspaceId: "protocol-admission-validation" });
+    const protocol = new ProtocolServer(supervisor);
+    const server = protocol.listen(0);
+    const base = `http://${server.hostname}:${server.port}`;
+    const post = (path: string, body: unknown) => fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    try {
+      const responses = await Promise.all([
+        post(`/sessions/${session.sessionId}/ai/generations?branch=${session.branchId}`, {
+          kind: "text",
+          prompt: "invalid numeric generation key",
+          idempotencyKey: 42,
+        }),
+        post(`/sessions/${session.sessionId}/agent-invocations?branch=${session.branchId}`, {
+          task: "invalid numeric invocation key",
+          idempotencyKey: 42,
+        }),
+        post(`/sessions/${session.sessionId}/agent-invocations/batch?branch=${session.branchId}`, {
+          inputs: "not-an-array",
+        }),
+        post(`/sessions/${session.sessionId}/agents/batch?branch=${session.branchId}`, []),
+      ]);
+      for (const response of responses) {
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({
+          error: { code: "VALIDATION_ERROR" },
+        });
+      }
+      expect(await supervisor.agents.listTasks(session.sessionId)).toHaveLength(0);
+      const events = await supervisor.storage.loadEvents(
+        session.sessionId,
+        { branchId: session.branchId },
+      );
+      expect(events.some(event =>
+        event.type === "AiGenerationRequested" ||
+        event.type === "EffectRequested")).toBe(false);
+    } finally {
+      protocol.stop();
+      await supervisor.close();
+    }
+  });
+
   test("scrubs known credentials from protocol error responses", async () => {
     const prior = process.env.REVIEW_API_KEY;
     process.env.REVIEW_API_KEY = "protocol-secret-value";
