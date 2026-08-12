@@ -225,7 +225,9 @@ interface GateFailureEvidence {
 }
 interface CellFailureEvidence {
   readonly event: NormalizedRecord;
+  readonly cellId: string;
   readonly runId: string;
+  readonly normalizedError: string;
   readonly errorSignature: string;
 }
 interface CorrectionEvidence {
@@ -259,6 +261,101 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
   const allLocalById = new Map(localRecords.map((record) => [record.id, record] as const));
   const triggers: RefinementDetectedTrigger[] = [];
 
+  const repairChurnFailureByCellId = new Map<string, {
+    readonly event: NormalizedRecord;
+    readonly normalizedError: string;
+  }>();
+  const runByCellId = collectAgentRunCellOwners(localRecords);
+  // Retain deduplication for consumed and pending cell evidence regardless of
+  // the current cell-trigger policy or its window. Error text is irrelevant
+  // here, so old oversized errors do not make the current scan unavailable.
+  for (const record of localRecords) {
+    if (record.type !== "CellFailed") continue;
+    const payload = asRecord(record.payload);
+    const cellId = boundedPayloadId(payload?.cellId);
+    const runId = cellId === null ? undefined : runByCellId.get(cellId);
+    if (!runId || cellId === null) continue;
+    const normalizedError = normalizedErrorForDedupe(payload?.error, secrets);
+    if (normalizedError === null) continue;
+    const key = triggerKey("repeated_cell_failure", { runId });
+    const consumedThrough = consumptions.get(key);
+    const pending = nonterminalKeys.has(
+      refinementTriggerNonterminalKey(input.sessionId, input.branchId, key),
+    );
+    if (pending || (consumedThrough !== undefined &&
+        compareCursor(record.cursor, consumedThrough) <= 0)) {
+      repairChurnFailureByCellId.set(cellId, { event: record, normalizedError });
+    }
+  }
+
+  if (cellFailurePolicy.enabled) {
+    const cellFailureGroups = new Map<string, CellFailureEvidence[]>();
+    for (const record of trailingWindow(
+      localRecords,
+      cellFailurePolicy.windowRecords,
+    )) {
+      if (record.type !== "CellFailed") continue;
+      const payload = asRecord(record.payload);
+      const cellId = boundedPayloadId(payload?.cellId);
+      const error = boundedError(payload?.error);
+      const runId = cellId === null ? undefined : runByCellId.get(cellId);
+      if (!runId || cellId === null || error === null) continue;
+      const item: CellFailureEvidence = {
+        event: record,
+        cellId,
+        runId,
+        normalizedError: normalizedRefinementError(error, secrets),
+        errorSignature: normalizedRefinementErrorSignature(error, secrets),
+      };
+      const group = cellFailureGroups.get(runId);
+      if (group) group.push(item); else cellFailureGroups.set(runId, [item]);
+    }
+
+    for (const windowEvidence of cellFailureGroups.values()) {
+      const first = windowEvidence[0]!;
+      const key = triggerKey("repeated_cell_failure", { runId: first.runId });
+
+      // Effect failures that causally explain an admitted, pending, or consumed
+      // run-level repair-churn tranche belong to that cell trigger. Excluding
+      // them from the effect detector prevents a second review of the same
+      // durable failures at a later boundary.
+      if (windowEvidence.length >= cellFailurePolicy.threshold) {
+        for (const item of windowEvidence) {
+          repairChurnFailureByCellId.set(item.cellId, {
+            event: item.event,
+            normalizedError: item.normalizedError,
+          });
+        }
+      }
+
+      if (windowEvidence.length < cellFailurePolicy.threshold) continue;
+      const evidence = windowEvidence.slice(-MAX_REFINEMENT_TRIGGER_EVIDENCE_EVENTS);
+      const admitted = admitEvidence(
+        key,
+        evidence.map((item) => item.event),
+        cellFailurePolicy,
+        consumptions,
+        nonterminalKeys,
+        input.sessionId,
+        input.branchId,
+      );
+      if (!admitted) continue;
+      const errorSignatures = [...new Set(evidence.map((item) => item.errorSignature))].sort();
+      triggers.push(deepFreeze({
+        ...admitted,
+        policyVersion: REFINEMENT_TRIGGER_POLICY_VERSION,
+        kind: "repeated_cell_failure",
+        scope: "local",
+        scopeKey: input.sessionId,
+        sessionId: input.sessionId,
+        branchId: input.branchId,
+        summary: `Agent run ${first.runId} required repeated failed-cell repair (${evidence.length} failures across ${errorSignatures.length} error signature(s))`,
+        runId: first.runId,
+        errorSignatures,
+      }));
+    }
+  }
+
   if (policy.effectFailure.enabled) {
     const window = trailingWindow(localRecords, policy.effectFailure.windowRecords);
     const requests = collectEffectRequests(localRecords);
@@ -272,6 +369,18 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
       const error = boundedError(payload.error);
       const request = effectId === null ? undefined : requests.get(effectId);
       if (!request || error === null || compareCursor(request.cursor, record.cursor) >= 0) continue;
+      const repairChurnFailure = request.originCellId === undefined
+        ? undefined
+        : repairChurnFailureByCellId.get(request.originCellId);
+      const normalizedEffectError = normalizedRefinementError(error, secrets);
+      if (repairChurnFailure &&
+          compareCursor(record.cursor, repairChurnFailure.event.cursor) < 0 &&
+          cellErrorCausedByEffect(
+            repairChurnFailure.normalizedError,
+            normalizedEffectError,
+          )) {
+        continue;
+      }
       const errorSignature = normalizedRefinementErrorSignature(error, secrets);
       const identity = { executor: request.executor, operation: request.operation, errorSignature };
       const identityJson = canonicalJson(identity);
@@ -300,70 +409,6 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
         executor: first.executor,
         operation: first.operation,
         errorSignature: first.errorSignature,
-      }));
-    }
-  }
-
-  if (cellFailurePolicy.enabled) {
-    const window = trailingWindow(localRecords, cellFailurePolicy.windowRecords);
-    const runByCellId = collectAgentRunCellOwners(localRecords);
-    const requests = collectEffectRequests(localRecords);
-    const effectFailedCellIds = new Set<string>();
-    for (const record of localRecords) {
-      if (record.type !== "EffectOutcomeRecorded") continue;
-      const payload = asRecord(record.payload);
-      if (payload?.outcome !== "failed") continue;
-      const effectId = boundedPayloadId(payload.effectId);
-      const request = effectId === null ? undefined : requests.get(effectId);
-      if (request?.originCellId &&
-          compareCursor(request.cursor, record.cursor) < 0) {
-        effectFailedCellIds.add(request.originCellId);
-      }
-    }
-    const groups = new Map<string, CellFailureEvidence[]>();
-    for (const record of window) {
-      if (record.type !== "CellFailed") continue;
-      const payload = asRecord(record.payload);
-      const cellId = boundedPayloadId(payload?.cellId);
-      const error = boundedError(payload?.error);
-      const runId = cellId === null ? undefined : runByCellId.get(cellId);
-      if (!runId || error === null || effectFailedCellIds.has(cellId!)) continue;
-      const item: CellFailureEvidence = {
-        event: record,
-        runId,
-        errorSignature: normalizedRefinementErrorSignature(error, secrets),
-      };
-      const group = groups.get(runId);
-      if (group) group.push(item); else groups.set(runId, [item]);
-    }
-    for (const unboundedEvidence of groups.values()) {
-      if (unboundedEvidence.length < cellFailurePolicy.threshold) continue;
-      const evidence = unboundedEvidence.slice(-MAX_REFINEMENT_TRIGGER_EVIDENCE_EVENTS);
-      const first = evidence[0]!;
-      const identity = { runId: first.runId };
-      const key = triggerKey("repeated_cell_failure", identity);
-      const admitted = admitEvidence(
-        key,
-        evidence.map((item) => item.event),
-        cellFailurePolicy,
-        consumptions,
-        nonterminalKeys,
-        input.sessionId,
-        input.branchId,
-      );
-      if (!admitted) continue;
-      const errorSignatures = [...new Set(evidence.map((item) => item.errorSignature))].sort();
-      triggers.push(deepFreeze({
-        ...admitted,
-        policyVersion: REFINEMENT_TRIGGER_POLICY_VERSION,
-        kind: "repeated_cell_failure",
-        scope: "local",
-        scopeKey: input.sessionId,
-        sessionId: input.sessionId,
-        branchId: input.branchId,
-        summary: `Agent run ${first.runId} required repeated failed-cell repair (${evidence.length} failures across ${errorSignatures.length} error signature(s))`,
-        runId: first.runId,
-        errorSignatures,
       }));
     }
   }
@@ -708,16 +753,40 @@ function normalizeSecrets(inputs: readonly string[]): readonly string[] {
 }
 
 function normalizedRefinementErrorSignature(error: string, secrets: readonly string[]): string {
+  return sha256(normalizedRefinementError(error, secrets));
+}
+
+function normalizedRefinementError(error: string, secrets: readonly string[]): string {
   let scrubbed = error;
   for (const secret of secrets) scrubbed = scrubbed.split(secret).join("[REDACTED]");
   // Intentionally conservative: normalize representation, not semantic error codes.
-  const normalized = scrubbed
+  return scrubbed
     .normalize("NFKC")
     .replace(/\r\n?/g, "\n")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ");
-  return sha256(normalized);
+}
+
+function normalizedErrorForDedupe(
+  value: unknown,
+  secrets: readonly string[],
+): string | null {
+  if (typeof value !== "string") return null;
+  const bytes = utf8Bytes(value);
+  if (bytes === 0 || bytes > MAX_REFINEMENT_TRIGGER_ERROR_BYTES) return null;
+  return normalizedRefinementError(value, secrets) || null;
+}
+
+function cellErrorCausedByEffect(
+  normalizedCellError: string,
+  normalizedEffectError: string,
+): boolean {
+  if (!normalizedEffectError) return false;
+  if (normalizedCellError === normalizedEffectError) return true;
+  return normalizedCellError.startsWith(
+    `error: ${normalizedEffectError} at `,
+  );
 }
 
 function assertNoSecretOutput(triggers: readonly RefinementDetectedTrigger[], secrets: readonly string[]): void {

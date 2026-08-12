@@ -615,6 +615,18 @@ function selectTrajectoryEvents(
     const cellIds = new Set(anchors.map((event) =>
       optionalPayloadString(event.payload, "cellId")!
     ));
+    const effectIds = new Set<string>();
+    for (const event of events) {
+      if (event.type !== "EffectRequested") continue;
+      const payload = recordPayload(event.payload);
+      const origin = recordPayload(payload.origin);
+      const effectId = optionalPayloadString(payload, "effectId");
+      const originCellId = optionalPayloadString(origin, "cellId");
+      if (origin.kind === "cell" && effectId && originCellId &&
+          cellIds.has(originCellId)) {
+        effectIds.add(effectId);
+      }
+    }
     const runIds = new Set(
       [...agentRunCellOwners(events).entries()]
         .filter(([cellId]) => cellIds.has(cellId))
@@ -627,6 +639,10 @@ function selectTrajectoryEvents(
       }
       if (event.type === "AgentRunActionCommitted" &&
           runIds.has(optionalPayloadString(event.payload, "runId") ?? "")) {
+        add(event, "cluster", false, 1);
+      }
+      if (["EffectRequested", "EffectAttemptStarted", "EffectOutcomeRecorded"].includes(event.type) &&
+          effectIds.has(optionalPayloadString(event.payload, "effectId") ?? "")) {
         add(event, "cluster", false, 1);
       }
     }

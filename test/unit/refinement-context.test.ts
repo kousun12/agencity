@@ -199,25 +199,61 @@ describe("FU-016 pure refinement trajectory context", () => {
           actionId: "action-1",
           action: { type: "typescript" },
         }),
-        event("cell-1", "2", "CellFailed", {
+        event("effect-request-1", "2", "EffectRequested", {
+          effectId: "effect-1",
+          executor: "shell",
+          operation: "run",
+          origin: { kind: "cell", cellId: "agent-run-cell-action-1" },
+        }),
+        event("effect-outcome-1", "3", "EffectOutcomeRecorded", {
+          effectId: "effect-1",
+          attempt: 1,
+          outcome: "failed",
+          error: "shell failed",
+        }),
+        event("cell-1", "4", "CellFailed", {
           cellId: "agent-run-cell-action-1",
           error: "parse error",
         }),
-        event("action-2", "3", "AgentRunActionCommitted", {
+        event("action-2", "5", "AgentRunActionCommitted", {
           runId: "run-1",
           actionId: "action-2",
           action: { type: "typescript" },
         }),
-        event("cell-2", "4", "CellFailed", {
+        event("effect-request-2", "6", "EffectRequested", {
+          effectId: "effect-2",
+          executor: "file",
+          operation: "read",
+          origin: { kind: "cell", cellId: "agent-run-cell-action-2" },
+        }),
+        event("effect-outcome-2", "7", "EffectOutcomeRecorded", {
+          effectId: "effect-2",
+          attempt: 1,
+          outcome: "failed",
+          error: "file failed",
+        }),
+        event("cell-2", "8", "CellFailed", {
           cellId: "agent-run-cell-action-2",
           error: "shape error",
         }),
-        event("action-3", "5", "AgentRunActionCommitted", {
+        event("action-3", "9", "AgentRunActionCommitted", {
           runId: "run-1",
           actionId: "action-3",
           action: { type: "typescript" },
         }),
-        event("cell-3", "6", "CellFailed", {
+        event("effect-request-3", "10", "EffectRequested", {
+          effectId: "effect-3",
+          executor: "shell",
+          operation: "run",
+          origin: { kind: "cell", cellId: "agent-run-cell-action-3" },
+        }),
+        event("effect-outcome-3", "11", "EffectOutcomeRecorded", {
+          effectId: "effect-3",
+          attempt: 1,
+          outcome: "failed",
+          error: "another shell failure",
+        }),
+        event("cell-3", "12", "CellFailed", {
           cellId: "agent-run-cell-action-3",
           error: "verification error",
         }),
@@ -238,10 +274,16 @@ describe("FU-016 pure refinement trajectory context", () => {
     });
     expect(cells.sourceEventIds).toEqual([
       "action-1",
+      "effect-request-1",
+      "effect-outcome-1",
       "cell-1",
       "action-2",
+      "effect-request-2",
+      "effect-outcome-2",
       "cell-2",
       "action-3",
+      "effect-request-3",
+      "effect-outcome-3",
       "cell-3",
     ]);
 

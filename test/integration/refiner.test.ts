@@ -207,7 +207,7 @@ class CellRepairLoopProvider extends ReviewProvider {
               protocol: "agencity.agent-action",
               version: 1,
               type: "typescript",
-              code: `// Purpose: attempt repair ${this.runCalls}\nthrow new Error("repair-${this.runCalls}-failed");`,
+              code: `// Purpose: attempt repair ${this.runCalls}\nawait tools.shell("exit 1");`,
             }
           : {
               protocol: "agencity.agent-action",
@@ -1720,7 +1720,7 @@ describe("FU-016 durable RefinerService", () => {
     } finally { await supervisor.close(); }
   });
 
-  test("a committed failed-cell repair loop admits one automatic refinement", async () => {
+  test("effect-backed failed-cell repair admits one deduplicated automatic refinement", async () => {
     const provider = new CellRepairLoopProvider("review-cell-boundary");
     const { supervisor, sessionId, branchId } = await fixture(provider);
     try {
@@ -1740,6 +1740,18 @@ describe("FU-016 durable RefinerService", () => {
       const reviews = await supervisor.refiner.list({ sessionId, branchId });
       expect(reviews.filter((review) =>
         review.triggerKind === "repeated_cell_failure")).toHaveLength(1);
+      expect(JSON.stringify(provider.lastReviewContext))
+        .toContain("EffectRequested");
+      expect(JSON.stringify(provider.lastReviewContext))
+        .toContain("EffectOutcomeRecorded");
+      expect(await supervisor.refiner.scanBoundary(
+        sessionId,
+        branchId,
+        "post-repair-churn-dedupe",
+      )).toEqual([]);
+      expect((await supervisor.refiner.list({ sessionId, branchId }))
+        .filter((review) =>
+          review.triggerKind === "repeated_effect_failure")).toHaveLength(0);
       expect(provider.runCalls).toBe(4);
       expect(provider.calls).toBe(1);
     } finally { await supervisor.close(); }

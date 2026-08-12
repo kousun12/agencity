@@ -77,6 +77,7 @@ The detector:
 - suppresses a trigger while the same nonterminal review is running;
 - suppresses consumed evidence until enough newer evidence exists;
 - excludes successful, cancelled, and unknown effects from failure triggers;
+- counts every failed cell in one run, including effect-backed failures, and partitions causally linked effect outcomes away from duplicate repeated-effect review;
 - never infers a correction from message prose;
 - scrubs brokered credential values before deriving error signatures;
 - rejects oversized or malformed inputs.
@@ -250,7 +251,7 @@ The first default-on release retains the current thresholds:
 
 Changing the default and the thresholds in the same release would make trigger-volume regressions harder to interpret. Threshold tuning follows observed deterministic and real-provider behavior.
 
-The failed-cell trigger continues to exclude cells explained by failed effects so one failure mechanism does not create duplicate automatic reviews.
+The failed-cell trigger counts all failed cells in one exact run, including cells explained by failed effects. Effect outcomes causally linked to an eligible, pending, or consumed failed-cell repair tranche are excluded from repeated-effect detection so one durable failure tranche creates one automatic review. Matching effect failures spread across runs remain eligible for repeated-effect detection when no run reaches the failed-cell threshold.
 
 ### 5. Coarse positive reflection
 

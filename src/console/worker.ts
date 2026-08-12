@@ -234,6 +234,20 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     warn: (...args: unknown[]) => logs.push(args.map(printable).join(" "), "stderr"),
   };
   const call = (method: string, args: unknown[]) => rpc(message.executionId, method, args);
+  const callWithOptional = (
+    method: string,
+    required: unknown[],
+    optional: unknown,
+  ) => call(method, optional === undefined ? required : [...required, optional]);
+  const optionsObject = (
+    value: unknown,
+    name: string,
+  ): Record<string, unknown> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError(`${name} must be an object`);
+    }
+    return value as Record<string, unknown>;
+  };
   const state = {
     restored: message.restored,
     get: (name: string) => call("state.get", [name]),
@@ -246,7 +260,8 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   };
   const inspect = (value: unknown, options: InspectOptions = {}) => inspectValue(value, options);
   const artifacts = {
-    put: (content: string, mediaType?: string) => call("artifacts.put", [content, mediaType]),
+    put: (content: string, mediaType?: string) =>
+      callWithOptional("artifacts.put", [content], mediaType),
     readRange: async (artifactId: string, start: number, end: number) => {
       const envelope = await call("artifacts.readRange", [artifactId, start, end]) as any;
       if (envelope?.completeness !== "inline" || typeof envelope.value?.bytesBase64 !== "string") {
@@ -263,24 +278,29 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     },
   };
   const request = async (executor: string, operation: string, input: JsonValue, options?: unknown) =>
-    call("tools.request", [executor, operation, input, options]) as Promise<any>;
+    callWithOptional("tools.request", [executor, operation, input], options) as Promise<any>;
   const tools = {
     request,
-    shell: async (command: string, options: Record<string, unknown> = {}) => {
+    shell: async (command: string, rawOptions: Record<string, unknown> = {}) => {
+      const options = optionsObject(rawOptions, "shell options");
       const response = await request("shell", "run", { command, ...options }, options);
       if (response.outcome !== "succeeded") throw new Error(response.error ?? `shell: ${response.outcome}`);
       return response.output;
     },
-    readFile: async (path: string, options: Record<string, unknown> = {}) => {
+    readFile: async (path: string, rawOptions: Record<string, unknown> = {}) => {
+      const options = optionsObject(rawOptions, "readFile options");
       const response = await request("file", "read", { path, ...options }, { idempotent: true });
       if (response.outcome !== "succeeded") throw new Error(response.error ?? `readFile: ${response.outcome}`);
       return response.output;
     },
     writeFile: async (path: string, content: string, expectedSha256?: string) => {
+      if (expectedSha256 !== undefined && typeof expectedSha256 !== "string") {
+        throw new TypeError("writeFile expectedSha256 must be a string");
+      }
       const response = await request(
         "file",
         "write",
-        { path, content, ...(expectedSha256 ? { expectedSha256 } : {}) },
+        { path, content, ...(expectedSha256 === undefined ? {} : { expectedSha256 }) },
         { idempotent: true },
       );
       if (response.outcome !== "succeeded") throw new Error(response.error ?? `writeFile: ${response.outcome}`);
@@ -294,7 +314,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   };
   const harness = {
     review: (input?: string | HarnessReviewInput) =>
-      call("harness.review", [input as JsonValue | undefined]),
+      callWithOptional("harness.review", [], input),
     reviews: (options: JsonValue = {}) => call("harness.reviews", [options]),
     propose: (input: JsonValue) => call("harness.propose", [input]),
     list: (options: JsonValue = {}) => call("harness.list", [options]),
@@ -348,37 +368,58 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     run: (input: unknown) => call("agents.run", [normalizeAgentInput(input)]),
     runMany: (inputs: unknown[]) => call("agents.runMany", [inputs.map(normalizeAgentInput)]),
     result: agentResult,
-    get: (target?: string) => call("agents.get", [target]),
-    proposeProfileUpdate: (target: string | undefined, input: unknown, options: Record<string, unknown> = {}) =>
-      call("agents.proposeProfileUpdate", [target, input, options]),
-    rollbackProfile: (target: string | undefined, input: unknown) =>
-      call("agents.rollbackProfile", [target, input]),
+    get: (target?: string) => callWithOptional("agents.get", [], target),
+    proposeProfileUpdate: (
+      target: string | undefined,
+      input: unknown,
+      options: Record<string, unknown> = {},
+    ) => {
+      if (target !== undefined && typeof target !== "string") {
+        throw new TypeError("Agent profile target must be a string");
+      }
+      return call("agents.proposeProfileUpdate", [target ?? null, input, options]);
+    },
+    rollbackProfile: (target: string | undefined, input: unknown) => {
+      if (target !== undefined && typeof target !== "string") {
+        throw new TypeError("Agent profile target must be a string");
+      }
+      return call("agents.rollbackProfile", [target ?? null, input]);
+    },
     list: () => call("agents.list", []),
     send: (input: unknown, content?: string, options: Record<string, unknown> = {}) => call("agents.send", [input, content, options]),
     messages: (options: Record<string, unknown> = {}) => call("agents.messages", [options]),
     acknowledge: (messageId: string) => call("agents.acknowledge", [messageId]),
-    cancel: (target: string, reason?: string) => call("agents.cancel", [target, reason]),
+    cancel: (target: string, reason?: string) =>
+      callWithOptional("agents.cancel", [target], reason),
   };
   const goals = {
     current: () => call("goals.current", []),
     list: () => call("goals.list", []),
     get: (goalId: string) => call("goals.get", [goalId]),
-    evaluations: (goalId: string, gateId?: string) => call("goals.evaluations", [goalId, gateId]),
+    evaluations: (goalId: string, gateId?: string) =>
+      callWithOptional("goals.evaluations", [goalId], gateId),
   };
   const heartbeats = {
     create: (input: unknown) => call("heartbeats.create", [input]),
     list: () => call("heartbeats.list", []),
-    pause: (heartbeatId: string, reason?: string) => call("heartbeats.pause", [heartbeatId, reason]),
-    resume: (heartbeatId: string, nextTickAt?: string) => call("heartbeats.resume", [heartbeatId, nextTickAt]),
-    clear: (heartbeatId: string, reason?: string) => call("heartbeats.clear", [heartbeatId, reason]),
+    pause: (heartbeatId: string, reason?: string) =>
+      callWithOptional("heartbeats.pause", [heartbeatId], reason),
+    resume: (heartbeatId: string, nextTickAt?: string) =>
+      callWithOptional("heartbeats.resume", [heartbeatId], nextTickAt),
+    clear: (heartbeatId: string, reason?: string) =>
+      callWithOptional("heartbeats.clear", [heartbeatId], reason),
   };
   const schedules = {
     create: (input: unknown) => call("schedules.create", [input]),
     list: () => call("schedules.list", []),
-    wakes: (statuses?: string[]) => call("schedules.wakes", [statuses]),
-    pause: (scheduleId: string, reason?: string) => call("schedules.pause", [scheduleId, reason]),
-    resume: (scheduleId: string, nextTickAt?: string) => call("schedules.resume", [scheduleId, nextTickAt]),
-    clear: (scheduleId: string, reason?: string) => call("schedules.clear", [scheduleId, reason]),
+    wakes: (statuses?: string[]) =>
+      callWithOptional("schedules.wakes", [], statuses),
+    pause: (scheduleId: string, reason?: string) =>
+      callWithOptional("schedules.pause", [scheduleId], reason),
+    resume: (scheduleId: string, nextTickAt?: string) =>
+      callWithOptional("schedules.resume", [scheduleId], nextTickAt),
+    clear: (scheduleId: string, reason?: string) =>
+      callWithOptional("schedules.clear", [scheduleId], reason),
   };
   const context = {
     inspect: () => call("context.inspect", []),

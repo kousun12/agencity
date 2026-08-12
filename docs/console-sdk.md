@@ -10,6 +10,8 @@ An autonomous model request exposes exactly two declaration-only provider tools:
 
 The injected names in this document—`tools`, `sql`, `scratch`, `state`, `cells`, `artifacts`, `ai`, `sdk`, memory, agents, skills, goals, and related facades—exist only inside that later cell. They are not provider tools. Provider narration cannot invoke them, and Agencity has no assistant-text JSON or fenced-code fallback.
 
+The console and workspace tools are the general execution mechanism. Agencity keeps this core domain-general instead of adding a dedicated provider tool or framework API for each task category. Repeated specialized operations belong in inspectable skills when they need a reusable interface.
+
 ## Execution model
 
 A cell can use top-level `await` and is evaluated like an async notebook cell:
@@ -48,6 +50,8 @@ Every cell receives:
 | `console` | Cell-local `log`, `warn`, and `error`; output becomes bounded cell logs. |
 
 The direct `state`, `cells`, `artifacts`, `tools`, `inspect`, and `ai` names are the same implementations exposed under `sdk`. `scratch` is the direct object; its controls are `sdk.scratch`. `sql` and `session` are direct cell parameters rather than `sdk` properties.
+
+Optional arguments use their documented defaults only when omitted or explicitly `undefined`. A supplied value of the wrong runtime type is rejected instead of being treated as absent.
 
 ## Durability rules
 
@@ -233,7 +237,7 @@ if (first.completeness !== "inline") throw new Error("range unavailable");
 const text = new TextDecoder().decode(first.value.bytes);
 ```
 
-`put(content, mediaType?)` accepts strings, rejects known brokered secret values, and returns an immutable `ArtifactReference`. `readRange(artifactId, start, end)` can read only artifacts already registered in the branch or staged by the current cell. Ranges are zero-based, half-open `[start, end)`, and limited to 64 KiB. The inline envelope's `value` contains exact `Uint8Array` bytes plus `start`, `end`, immutable `size`, and `nextStart`. Decode or parse `value.bytes` inside the cell. Reads verify the complete object's digest and size before returning the requested bytes.
+`put(content, mediaType?)` accepts string content, rejects known brokered secret values, and returns an immutable `ArtifactReference`. Omitting `mediaType` uses `text/plain`; a supplied media type must be a string. Binary files remain ordinary workspace files unless their bytes are deliberately encoded as string content for this API. `readRange(artifactId, start, end)` can read only artifacts already registered in the branch or staged by the current cell. Ranges are zero-based, half-open `[start, end)`, and limited to 64 KiB. The inline envelope's `value` contains exact `Uint8Array` bytes plus `start`, `end`, immutable `size`, and `nextStart`. Decode or parse `value.bytes` inside the cell. Reads verify the complete object's digest and size before returning the requested bytes.
 
 Whole-object `resolve` remains an operator/internal artifact-store operation and is not exposed to generated cells. The default product uses a local CAS. A remote S3-compatible placement adapter also implements range reads, but artifact replication and garbage collection are not automatic.
 
