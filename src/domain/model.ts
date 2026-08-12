@@ -29,6 +29,33 @@ export interface ModelConfiguration {
   readonly reasoningEffort: ReasoningEffort;
 }
 
+export const MAX_PRODUCT_MODEL_ID_BYTES = 512;
+const PRODUCT_MODEL_ID =
+  /^[A-Za-z0-9][A-Za-z0-9._-]*\/[^\s/][^\s]*$/;
+const PRODUCT_MODEL_ID_FORBIDDEN =
+  /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+
+/**
+ * Product transports and configured catalog rows use the Gateway's canonical
+ * creator/model identity. This is deliberately not a ModelConfiguration
+ * invariant: retained identities and custom providers keep their own rules.
+ */
+export function isCanonicalProductModelId(value: unknown): value is string {
+  return typeof value === "string" &&
+    PRODUCT_MODEL_ID.test(value) &&
+    !PRODUCT_MODEL_ID_FORBIDDEN.test(value) &&
+    new TextEncoder().encode(value).byteLength <= MAX_PRODUCT_MODEL_ID_BYTES;
+}
+
+export function validateCanonicalProductModelId(value: unknown): string {
+  if (!isCanonicalProductModelId(value)) {
+    throw new ValidationError(
+      "Product models must use a bounded canonical creator/model catalog ID",
+    );
+  }
+  return value;
+}
+
 export type ModelConfigurationInput = Omit<ModelConfiguration, "reasoningEffort"> & {
   readonly reasoningEffort?: ReasoningEffort | "default" | "off";
 };

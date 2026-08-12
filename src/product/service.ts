@@ -341,7 +341,15 @@ export class ManagedWorkspaceService {
         productRename: async (sessionId: string, branchId: string | undefined, name: string) => { await catalog.rename(sessionId, branchId, name); return { renamed: true }; },
         productConfig: async (requestedModel?: string) => {
           const model = await supervisor.profile.getPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"));
-          const selected = typeof model?.value === "string" ? parseModel(model.value) : null;
+          let selected: ReturnType<typeof parseModel> | null = null;
+          if (typeof model?.value === "string") {
+            try {
+              selected = parseModel(model.value);
+            } catch {
+              // Retain malformed pre-boundary values for diagnostics. Product
+              // selection decides whether to warn interactively or fail closed.
+            }
+          }
           const preferenceModel = requestedModel?.trim() || selected?.model;
           const effortPreference = preferenceModel
             ? await supervisor.profile.getPreference(modelEffortPreferenceKey(normalized.workspace.workspaceId, supervisor.modelCatalog.endpointId, preferenceModel))
@@ -360,7 +368,9 @@ export class ManagedWorkspaceService {
         },
         productSetModel: async (model: string | null) => {
           if (model !== null && !model.trim()) throw new ValidationError("Model preference is required");
-          const normalizedModel = model === null ? null : formatModel(supervisor.normalizeModelConfiguration(parseModel(model)));
+          const normalizedModel = model === null
+            ? null
+            : formatModel(await supervisor.normalizeSelectedModelAdmission(parseModel(model)));
           await supervisor.profile.setPreference(workspacePreferenceKey(normalized.workspace.workspaceId, "model"), normalizedModel);
           return { defaultModel: normalizedModel };
         },

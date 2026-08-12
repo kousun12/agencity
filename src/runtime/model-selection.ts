@@ -2,6 +2,7 @@ import {
   ValidationError,
   assertNoReservedModelDispatchInputFields,
   canonicalJsonStringify,
+  validateCanonicalProductModelId,
   type JsonValue,
   type ModelConfiguration,
   type ModelConfigurationInput,
@@ -165,15 +166,7 @@ export function validateDelegatedModelAllowlist(
 
 export function canonicalModelId(value: string): string {
   const normalized = value.trim();
-  if (
-    byteLength(normalized) > 512 ||
-    !/^[a-z0-9][a-z0-9._-]*\/[^\s/]+$/i.test(normalized)
-  ) {
-    throw new ValidationError(
-      "Model selection strings must use canonical creator/model form",
-    );
-  }
-  return normalized;
+  return validateCanonicalProductModelId(normalized);
 }
 
 export function sameModelIdentity(
@@ -234,10 +227,6 @@ function assertModelConfigurationSelection(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function byteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
 }
 
 function deepFreeze<T>(value: T): T {

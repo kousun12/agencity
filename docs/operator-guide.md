@@ -16,7 +16,7 @@ agencity doctor --json
 
 Confirm:
 
-- Bun is version 1.2 or newer.
+- Bun is version 1.3.13 or newer.
 - The reported workspace root is the intended repository.
 - The mode says trusted-local and not sandboxed.
 - Required providers are usable.
@@ -146,17 +146,21 @@ Interactive setup:
 /model openai:openai/gpt-5.6-sol
 ```
 
-On first interactive launch with no usable provider, Agencity asks for OpenAI, Anthropic, or Vercel AI Gateway, accepts the key through hidden input, and asks for the exact model ID.
+When interactive startup needs a provider or model, Agencity uses searchable keyboard selectors. Provider search covers display names and stable IDs. Model search fuzzily matches catalog display names and canonical IDs, while an exact valid unlisted ID appears as an explicit manual row. Up/Down moves, Enter confirms, Backspace edits, and Escape cancels. Direct OpenAI is limited to `openai/...`, direct Anthropic to `anthropic/...`, and Gateway accepts any valid creator namespace. Catalog labels are presentation; the canonical ID is the durable identity.
+
+The picker loads the configured Gateway-compatible `/v1/models` catalog without provider credentials and without an inference request. `refreshed` rows are current; `cached-fallback` rows are visibly stale; `unavailable` and provider-filtered-empty results preserve manual canonical entry. A listed row is discovery metadata, not proof that provider execution or the fixed Agencity tools are supported.
 
 Saved keys take precedence over `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `AI_GATEWAY_API_KEY`. Endpoint overrides are `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `AI_GATEWAY_BASE_URL`. A service already running keeps its inherited environment; shut it down before relying on changed environment variables.
 
-Never place raw keys in events, prompts, task text, workspace files, artifacts, profile preferences, opaque-reference labels, or incident logs. The owner-only `auth.json` is a local credential file, not a hostile-code secret vault.
+Never place raw keys in events, prompts, task text, workspace files, artifacts, profile preferences, opaque-reference labels, or incident logs. The owner-only `auth.json` is a local credential file, not a hostile-code secret vault. Cancelling model selection after credential entry does not roll back the stored key.
 
-A resumed branch retains its committed model. If that provider is unavailable, restore the provider configuration or inspect the branch without running model work. Start `agencity new --model PROVIDER:MODEL` to use another model for new work.
+A resumed non-Echo branch retains its committed model. If that provider is unavailable, restore the provider configuration or inspect the branch without running model work. Start `agencity new --model PROVIDER:MODEL` to use another model for new work. Retained internal Echo branches use the explicit compatibility migration to a selected product model; they are not silently treated as ordinary product branches.
+
+If startup reports an invalid retained workspace default, leave it available for diagnosis. Interactive startup warns and opens reselection; non-interactive startup fails closed with guidance to pass `--model` or use an interactive terminal. A confirmed replacement is written before root creation. If root creation then fails, the preference may remain. If request transport fails after dispatch, treat the root as unconfirmed and inspect `agencity agents` before retrying.
 
 There is no product demo provider or automatic fake fallback. Internal deterministic providers are test-only.
 
-Agent-tool status is `provider-strict`, `runtime-validated`, `unknown`, or `unavailable`. Missing credentials are reported separately. Capability inspection does not call the provider. The shipped transports prove the formal primitives, but ordinary catalog models usually remain `unknown` because the public catalog has no authoritative exact-model support fields. A known unsupported model rejects before run or runnable-child admission; Agencity does not switch model, transport, schema enforcement, or response mode.
+Agent-tool status is `provider-strict`, `runtime-validated`, `unknown`, or `unavailable`. Missing credentials are reported separately. Capability inspection does not call the provider. The shipped transports prove the formal primitives, but ordinary catalog models usually remain `unknown` because the configured catalog has no authoritative exact-model support fields. New known-unsupported selections reject before a preference, root, branch model change, run, or runnable-child admission; unknown remains admissible under the strict runtime contract. Agencity does not switch model, transport, schema enforcement, or response mode.
 
 ## Recovery and unknown effects
 

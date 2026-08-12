@@ -86,6 +86,17 @@ class TimeoutCommitBarrierProvider implements ModelProvider {
 
 class KnownPricingProvider extends TextGenerationProvider {
   readonly productTransport = true;
+  readonly capabilities = {
+    streaming: false,
+    reasoningControl: "none",
+    requiredToolSet: {
+      status: "provider-strict",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "provider-disabled",
+      streaming: true,
+      adapter: "agencity.ai-generation-pricing-test.v1",
+    },
+  } as const;
 }
 
 class DeclaredObjectProvider implements ModelProvider {

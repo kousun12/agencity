@@ -8,6 +8,7 @@ import { ProfileStore } from "../../src/storage/index.ts";
 import { StrictActionFixture } from "../acceptance/strict-action-fixture.ts";
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
+const python = Bun.which("python3");
 const directories: string[] = [];
 const ownedFixtureRoots = new Set<string>();
 const modelFixtures: StrictActionFixture[] = [];
@@ -401,6 +402,237 @@ describe("product CLI", () => {
     const listed = await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home });
     expect(JSON.parse(listed.stdout)).toEqual([]);
   });
+
+  test("rejects model grammar and effort before writing a preference or root", async () => {
+    const value = await fixture();
+    const provider = new StrictActionFixture();
+    modelFixtures.push(provider);
+    const malformed = await cli([
+      "run",
+      "--workspace",
+      value.workspace,
+      "--model",
+      "openai:not-canonical",
+      "malformed selection",
+    ], {
+      home: value.home,
+      extraEnv: provider.environment(),
+    });
+    expect(malformed.code).not.toBe(0);
+    expect(malformed.stderr).toContain("canonical creator/model");
+
+    const invalidEffort = await cli([
+      "run",
+      "--workspace",
+      value.workspace,
+      "--model",
+      "openai:openai/fixture-v1",
+      "--effort",
+      "none",
+      "invalid effort",
+    ], {
+      home: value.home,
+      extraEnv: provider.environment(),
+    });
+    expect(invalidEffort.code).not.toBe(0);
+    expect(invalidEffort.stderr).toContain("Reasoning effort");
+
+    const configured = await cli([
+      "config",
+      "--workspace",
+      value.workspace,
+      "--json",
+    ], { home: value.home });
+    expect(configured.code).toBe(0);
+    expect(JSON.parse(configured.stdout).defaultModel).toBeNull();
+    const sessions = await cli([
+      "sessions",
+      "--workspace",
+      value.workspace,
+      "--json",
+    ], { home: value.home });
+    expect(JSON.parse(sessions.stdout)).toEqual([]);
+  });
+
+  test("retains malformed defaults for diagnostics and fails closed non-interactively", async () => {
+    const value = await fixture();
+    const provider = new StrictActionFixture();
+    modelFixtures.push(provider);
+    const workspace = await resolveWorkspace({ override: value.workspace });
+    const profileDirectory = join(value.home, ".agencity");
+    await mkdir(profileDirectory, { recursive: true });
+    const profile = await ProfileStore.open(
+      `file:${join(profileDirectory, "profile.db")}`,
+    );
+    await profile.setPreference(
+      workspacePreferenceKey(workspace.workspaceId, "model"),
+      "openai:retained-malformed",
+    );
+    profile.close();
+
+    const failed = await cli([
+      "run",
+      "--workspace",
+      value.workspace,
+      "must not replace retained default",
+    ], {
+      home: value.home,
+      extraEnv: provider.environment(),
+    });
+    expect(failed.code).not.toBe(0);
+    expect(failed.stderr).toContain(
+      "Stored workspace model preference is invalid",
+    );
+    expect(failed.stderr).toContain("pass --model PROVIDER:MODEL");
+
+    const inspected = await cli([
+      "config",
+      "--workspace",
+      value.workspace,
+      "--json",
+    ], { home: value.home });
+    expect(inspected.code).toBe(0);
+    expect(JSON.parse(inspected.stdout).defaultModel).toBe(
+      "openai:retained-malformed",
+    );
+    const sessions = await cli([
+      "sessions",
+      "--workspace",
+      value.workspace,
+      "--json",
+    ], { home: value.home });
+    expect(JSON.parse(sessions.stdout)).toEqual([]);
+  });
+
+  test.skipIf(!python || process.platform === "win32")(
+    "keeps a stored key but writes no model or root when first-run model selection is interrupted",
+    async () => {
+      const value = await fixture();
+      const provider = new StrictActionFixture();
+      modelFixtures.push(provider);
+      const secret = "acceptance-fixture-key";
+      const driver = String.raw`
+import fcntl, json, os, pty, select, signal, struct, sys, termios, time
+root, workspace = sys.argv[1:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(root)
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    os.execvp("bun", ["bun", os.path.join(root, "src/cli.ts"), "new", "--workspace", workspace])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+os.set_blocking(fd, False)
+output = bytearray()
+def pump(seconds, needle):
+    deadline = time.time() + seconds
+    target = needle.encode()
+    while time.time() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            try: chunk = os.read(fd, 65536)
+            except OSError: break
+            if not chunk: break
+            output.extend(chunk)
+            if target in output: return True
+    return target in output
+provider_prompt = pump(10, "Choose a provider")
+if provider_prompt: os.write(fd, b"openai\r")
+key_prompt = pump(5, "API key for OpenAI")
+if key_prompt: os.write(fd, b"acceptance-fixture-key\r")
+model_prompt = pump(10, "Fixture Reasoner")
+signal_sent = False
+if model_prompt:
+    time.sleep(0.1)
+    os.kill(pid, signal.SIGTERM)
+    signal_sent = True
+    pump(1, "__drain_without_match__")
+deadline = time.time() + 10
+exit_code = None
+while time.time() < deadline:
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        exit_code = os.waitstatus_to_exitcode(status)
+        break
+    time.sleep(0.05)
+print(json.dumps({
+    "providerPrompt": provider_prompt,
+    "keyPrompt": key_prompt,
+    "modelPrompt": model_prompt,
+    "signalSent": signal_sent,
+    "exitCode": exit_code,
+    "secretHidden": b"acceptance-fixture-key" not in output,
+    "outputTail": output.decode("utf-8", "replace")[-1200:],
+}))
+`;
+      const {
+        OPENAI_API_KEY: _openai,
+        OPENAI_MODEL: _openaiModel,
+        ANTHROPIC_API_KEY: _anthropic,
+        ANTHROPIC_MODEL: _anthropicModel,
+        AI_GATEWAY_API_KEY: _gateway,
+        VERCEL_MODEL: _vercelModel,
+        ...cleanEnvironment
+      } = process.env;
+      const driven = Bun.spawn(
+        [python!, "-c", driver, root, value.workspace],
+        {
+          cwd: root,
+          env: {
+            ...cleanEnvironment,
+            HOME: value.home,
+            WORKSPACE: value.workspace,
+            ...provider.firstRunEnvironment(),
+          },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [driverCode, driverOutput, driverError] = await Promise.all([
+        driven.exited,
+        new Response(driven.stdout).text(),
+        new Response(driven.stderr).text(),
+      ]);
+      expect(driverCode, driverError).toBe(0);
+      expect(JSON.parse(driverOutput)).toMatchObject({
+        providerPrompt: true,
+        keyPrompt: true,
+        modelPrompt: true,
+        signalSent: true,
+        exitCode: -15,
+        secretHidden: true,
+      });
+
+      const configured = await cli([
+        "config",
+        "--workspace",
+        value.workspace,
+        "--json",
+      ], { home: value.home });
+      expect(JSON.parse(configured.stdout).defaultModel).toBeNull();
+      const sessions = await cli([
+        "sessions",
+        "--workspace",
+        value.workspace,
+        "--json",
+      ], { home: value.home });
+      expect(JSON.parse(sessions.stdout)).toEqual([]);
+      const doctor = await cli([
+        "doctor",
+        "--workspace",
+        value.workspace,
+        "--json",
+      ], { home: value.home });
+      expect(JSON.parse(doctor.stdout).providers).toContainEqual(
+        expect.objectContaining({
+          provider: "openai",
+          usable: true,
+          credentialSource: "stored",
+        }),
+      );
+      expect(await allFileText(value.directory)).toContain(secret);
+    },
+    30_000,
+  );
 
   test("retained work remains selectable through the resident service after the originating client exits", async () => {
     const value = await fixture();

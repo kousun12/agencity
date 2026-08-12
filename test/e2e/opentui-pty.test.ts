@@ -110,15 +110,15 @@ def wait_exit(seconds):
         time.sleep(0.05)
     return None
 
-provider_prompt = pump(10, "Provider number or ID:")
+provider_prompt = pump(10, "Choose a provider")
 if provider_prompt:
     os.write(fd, b"openai\r")
 credential_prompt = pump(5, "API key for OpenAI")
 if credential_prompt:
     os.write(fd, b"acceptance-fixture-key\r")
-model_prompt = pump(5, "Model ID for OpenAI:")
+model_prompt = pump(10, "Fixture Reasoner")
 if model_prompt:
-    os.write(fd, b"openai/fixture-v1\r")
+    os.write(fd, b"fixture reasoner\r")
 ready = pump(10, "Ask Agencity")
 kitty_query = b"\x1b[?u" in output
 if kitty_query:
@@ -310,7 +310,12 @@ print(json.dumps({
     } = process.env;
     const processResult = Bun.spawn([python!, "-c", script, workspace, home, executable, task, childRunTask], {
       cwd: root,
-      env: { ...cleanEnvironment, HOME: home, OPENAI_BASE_URL: provider.baseUrl },
+      env: {
+        ...cleanEnvironment,
+        HOME: home,
+        OPENAI_BASE_URL: provider.baseUrl,
+        AI_GATEWAY_BASE_URL: provider.baseUrl,
+      },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -356,6 +361,9 @@ print(json.dumps({
       workspaceIdHidden: true,
       nativeSelectionAvailable: true,
     });
+    expect(provider.catalogRequests).toEqual([
+      expect.objectContaining({ authorization: null }),
+    ]);
 
     let history: any = null;
     let historyError = "";

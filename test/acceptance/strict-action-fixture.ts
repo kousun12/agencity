@@ -14,6 +14,51 @@ export interface FixtureProbe {
   readonly parallelToolCalls: boolean | null;
 }
 
+export type FixtureCatalogMode = "normal" | "delayed" | "unavailable" | "hostile";
+
+export interface FixtureCatalogRequestLog {
+  readonly receivedAt: string;
+  readonly authorization: string | null;
+}
+
+export interface StrictActionFixtureOptions {
+  readonly catalogMode?: FixtureCatalogMode;
+}
+
+export const FIXTURE_CATALOG_MODELS = [
+  {
+    id: "openai/fixture-v1",
+    name: "Fixture Reasoner",
+    type: "language",
+    context_window: 128_000,
+    max_tokens: 16_384,
+    pricing: { input: "0", output: "0" },
+    tags: ["reasoning"],
+    reasoning_options: [{ type: "effort", values: ["low", "medium", "high"] }],
+  },
+  {
+    id: "openai/fixture-mini-v1",
+    name: "Fixture Mini",
+    type: "language",
+    context_window: 64_000,
+    max_tokens: 8_192,
+    pricing: { input: "0", output: "0" },
+    tags: [],
+    reasoning_options: [],
+  },
+] as const;
+
+const HOSTILE_FIXTURE_CATALOG_MODELS = [
+  {
+    ...FIXTURE_CATALOG_MODELS[0],
+    name: "Fixture\n\u001b[31mScarlet\u001b[0m \u202eoverride\u2069 模型界🚀",
+  },
+  {
+    ...FIXTURE_CATALOG_MODELS[1],
+    name: "Mini\r\n\u001b[2J\u2066catalog\u2069 試験模型",
+  },
+] as const;
+
 type Reply = string | Record<string, unknown>;
 type ReplyFactory = (probe: FixtureProbe) => Reply;
 
@@ -29,16 +74,22 @@ interface Gate {
 
 export class StrictActionFixture {
   readonly requests: RequestLog[] = [];
+  readonly catalogRequests: FixtureCatalogRequestLog[] = [];
   readonly server: ReturnType<typeof Bun.serve>;
   readonly scripts = new Map<string, readonly (Reply | ReplyFactory)[]>();
   governanceScripts: readonly (Reply | ReplyFactory)[] = [];
   readonly gates = new Map<string, Gate>();
+  private catalogGate: Gate | null = null;
+  private currentCatalogMode: FixtureCatalogMode;
 
-  constructor() {
+  constructor(options: StrictActionFixtureOptions = {}) {
+    this.currentCatalogMode = options.catalogMode ?? "normal";
+    if (this.currentCatalogMode === "delayed") this.catalogGate = this.createGate();
     this.server = Bun.serve({ port: 0, fetch: request => this.handle(request) });
   }
 
   get baseUrl(): string { return `http://127.0.0.1:${this.server.port}`; }
+  get catalogMode(): FixtureCatalogMode { return this.currentCatalogMode; }
 
   environment(): Record<string, string> {
     return {
@@ -47,6 +98,33 @@ export class StrictActionFixture {
       OPENAI_MODEL: "openai/fixture-v1",
       AI_GATEWAY_BASE_URL: this.baseUrl,
     };
+  }
+
+  firstRunEnvironment(): Record<string, string> {
+    return {
+      OPENAI_BASE_URL: this.baseUrl,
+      AI_GATEWAY_BASE_URL: this.baseUrl,
+    };
+  }
+
+  setCatalogMode(mode: FixtureCatalogMode): void {
+    this.catalogGate?.release();
+    this.currentCatalogMode = mode;
+    this.catalogGate = mode === "delayed" ? this.createGate() : null;
+  }
+
+  releaseCatalog(): void {
+    this.catalogGate?.release();
+  }
+
+  async waitForCatalog(count = 1, timeoutMs = 10_000): Promise<FixtureCatalogRequestLog> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const found = this.catalogRequests[count - 1];
+      if (found) return found;
+      await Bun.sleep(25);
+    }
+    throw new Error(`fixture did not receive catalog request ${count}`);
   }
 
   script(task: string, replies: readonly (Reply | ReplyFactory)[]): void {
@@ -102,23 +180,35 @@ export class StrictActionFixture {
 
   close(): void {
     for (const gate of this.gates.values()) gate.release();
+    this.catalogGate?.release();
     this.server.stop(true);
   }
 
   private async handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/models") {
+      this.catalogRequests.push({
+        receivedAt: new Date().toISOString(),
+        authorization: request.headers.get("authorization"),
+      });
+      if (this.currentCatalogMode === "delayed" && this.catalogGate) {
+        await Promise.race([
+          this.catalogGate.promise,
+          new Promise<void>(resolve =>
+            request.signal.addEventListener("abort", () => resolve(), { once: true })),
+        ]);
+      }
+      if (request.signal.aborted) return new Response(null, { status: 499 });
+      if (this.currentCatalogMode === "unavailable") {
+        return Response.json(
+          { error: { message: "fixture catalog unavailable", type: "fixture_error" } },
+          { status: 503 },
+        );
+      }
       return Response.json({
-        data: [{
-          id: "openai/fixture-v1",
-          name: "OpenAI fixture v1",
-          type: "language",
-          context_window: 128_000,
-          max_tokens: 16_384,
-          pricing: { input: "0", output: "0" },
-          tags: ["reasoning"],
-          reasoning_options: [{ type: "effort", values: ["low", "medium", "high"] }],
-        }],
+        data: this.currentCatalogMode === "hostile"
+          ? HOSTILE_FIXTURE_CATALOG_MODELS
+          : FIXTURE_CATALOG_MODELS,
       });
     }
     if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
@@ -286,6 +376,12 @@ export class StrictActionFixture {
 
   private key(task: string, step: number): string { return `${task}\0${step}`; }
   private governanceKey(step: number): string { return `governance\0${step}`; }
+
+  private createGate(): Gate {
+    let release!: () => void;
+    const promise = new Promise<void>(resolve => { release = resolve; });
+    return { promise, release };
+  }
 }
 
 function messageText(value: unknown): string {
