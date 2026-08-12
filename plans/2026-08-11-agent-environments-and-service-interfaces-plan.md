@@ -9,7 +9,7 @@
 
 ## Summary
 
-Agencity should support durable agents that can own isolated, addressable compute environments and publish versioned service interfaces. An environment can contain files, installed software, supervised processes, private services, durable volumes, and separately managed application data. It can be stopped while its agent identity and declared interfaces remain durable, then started on demand when authorized work arrives.
+Agencity should support durable agents that can own addressable compute environments, with placement isolation only where the platform verifies it, and publish versioned service interfaces. An environment can contain files, installed software, supervised processes, private services, durable volumes, and separately managed application data. It can be stopped while its agent identity and declared interfaces remain durable, then started on demand when authorized work arrives.
 
 The long-term product model is a city of durable agents whose compute is idle by default:
 
@@ -162,7 +162,7 @@ A named interface owned by an agent. It consists of immutable service versions, 
 
 ### Procedure contract
 
-An immutable description of one callable operation: name, purpose, input and output schemas, bounds, effect class, idempotency rules, cancellation behavior, status-query support, required grants, and compatibility metadata.
+An immutable description of one callable operation: name, purpose, input and output schemas, bounds, mutation class, idempotency and retry rules, cancellation behavior, status-query support, required grants, and compatibility metadata.
 
 ### Service description
 
@@ -192,7 +192,7 @@ An environment-owned storage resource with explicit identity, attachment, snapsh
 
 ### Durable state owns identity
 
-Agent and environment meaning cannot depend on a live process, endpoint, scheduler, container, microVM, mount, or language object. Every required recovery identity must be canonical JSON or an immutable referenced artifact.
+Agent and environment meaning cannot depend on a live process, endpoint, scheduler, container, microVM, mount, or language object. Every required recovery identity must be a canonical event, validated durable record, typed working value, or immutable referenced artifact with documented ownership and rebuild semantics.
 
 ### Placement does not redefine semantics
 
@@ -200,7 +200,7 @@ Local process, container, microVM, and remote implementations share the same env
 
 ### Calls use the outbox
 
-An admitted RPC invocation commits its exact intent before request bytes cross a process or network boundary. The record pins caller, callee, service, procedure, contract digest, grant, input digest, effect class, idempotency key, timeout, and routing epoch.
+An admitted RPC invocation commits its exact intent before request bytes cross a process or network boundary. The record pins caller, callee, service, procedure, contract digest, grant, input digest, mutation class, idempotency and retry semantics, status-query and cancellation capabilities, idempotency key, timeout, and routing epoch.
 
 ### Uncertainty remains visible
 
@@ -255,7 +255,7 @@ The initial implementation should broker calls through the runtime rather than g
 
 ### Runtime ownership
 
-The workspace control plane remains the canonical execution owner. An agent environment may run the disposable Bun console worker and agent-owned services, but it does not receive raw canonical database credentials, provider credentials, or authority to append arbitrary events.
+The workspace control plane remains the canonical execution owner. An agent environment may run the disposable Bun console worker and agent-owned services. The platform does not intentionally provision raw canonical database credentials, provider credentials, or authority to append arbitrary events into that environment.
 
 The accepted runtime split should be:
 
@@ -268,6 +268,8 @@ The accepted runtime split should be:
 - provider keys and other owner credentials remain supervisor-side unless a narrower opaque credential binding is explicitly granted to a service.
 
 Phase 0 must decide whether any supervisor component can move into the environment. That decision cannot weaken canonical write validation, branch ownership, provider-secret isolation, execution fencing, or recovery. Moving the console worker is placement; moving canonical authority is a separate security and storage decision.
+
+Child-process and other trusted-local placements share the runtime OS user's ambient authority and may read accessible workspace or profile files. Keeping credentials supervisor-side is not an isolation guarantee in those tiers. Credential and filesystem isolation may be claimed only for a placement that enforces and verifies the required boundary.
 
 ## Proposed Console SDK
 
@@ -402,6 +404,8 @@ Its input includes a bounded message, optional task reference, optional artifact
 The existing mailbox remains the durable actor-to-actor communication substrate. The standard RPC procedure is a request/response facade over retained delivery and run semantics, not a second best-effort message system.
 
 An asynchronous option should return a durable invocation handle immediately. A waiting option may block only within an explicit timeout and must remain recoverable by handle after caller-cell loss.
+
+Only an explicitly authorized `agent.respond` invocation or retained `followUp` request can trigger a new autonomous run. An ordinary mailbox message remains durable delivery or steering and does not wake an idle agent merely because the sender can reach it.
 
 ### Invocation authority and accounting
 
@@ -541,7 +545,7 @@ Typical wake flow:
 authorized call accepted
   -> durable invocation queued
   -> placement capability selected
-  -> distributed lease acquired
+  -> placement-appropriate allocation and execution lease acquired
   -> environment generation provisioned or resumed
   -> workload identity issued
   -> services started
@@ -596,13 +600,15 @@ The same service contract can target multiple placements only when each placemen
 
 ## Networking and routing
 
-Agent environments should default to deny:
+Placements that advertise verified filesystem and network isolation should enforce a default-deny policy:
 
 - no public ingress;
 - no undeclared peer ingress;
 - bounded owner-approved egress;
 - no direct canonical database credentials;
 - no ambient access to other agents' volumes or secrets.
+
+Trusted-local in-process and child-process placements cannot enforce all of these boundaries against same-user code. Their descriptors must report filesystem, secret, and network isolation as unavailable, and product documentation must retain the trusted-local authority warning. The control plane should avoid intentionally routing ingress or provisioning credentials in those tiers, but that behavior is not an operating-system security boundary.
 
 Private service addressing uses stable logical identities rather than retained URLs:
 
@@ -705,7 +711,7 @@ Environment and service operations use explicit terminal states:
 - contract or identity handshake mismatch: `failed` and unavailable for calls;
 - request rejected before dispatch: deterministic typed failure;
 - procedure dispatched with lost response: `unknown` unless status-query semantics resolve it;
-- malformed or schema-invalid output after a state-changing dispatch: `unknown` unless status-query evidence proves the terminal result;
+- malformed or schema-invalid output after dispatch: `unknown` whenever the result cannot be proven and retry is unsafe, regardless of mutation class;
 - cancellation before dispatch: `cancelled`;
 - cancellation after dispatch: best effort and potentially `unknown`;
 - instance lost with reconnectable volume and status-queryable calls: recover according to pinned contracts;
@@ -713,7 +719,9 @@ Environment and service operations use explicit terminal states:
 
 Recovery preserves stable logical admission and never automatically redispatches an uncertain non-idempotent effect. It may recreate a lost instance only after placement status, lease fencing, or provider reconciliation proves that doing so cannot produce a second active owner. Stale or duplicate physical instances are fenced and enter explicit orphan-cleanup state. Agent runs and terminal deliveries retain stable identities and idempotent canonical commits, but the platform does not claim exactly-once execution of arbitrary remote procedures or provisioning operations.
 
-Distributed placement requires lease epochs, write fencing, provider-side idempotency where declared, status lookup, and explicit orphan cleanup that extend beyond current same-device process fencing.
+Remote distributed placement requires distributed lease epochs, write fencing, provider-side idempotency where declared, status lookup, and explicit orphan cleanup that extend beyond current same-device process fencing. Local placements may reuse same-device lease and process-fencing semantics when their capability descriptor makes that limit explicit.
+
+Later status or operator evidence is retained as reconciliation evidence. It does not rewrite an original `unknown` outcome or retroactively authorize an automatic retry.
 
 ## Branching and stateful environments
 
@@ -798,6 +806,8 @@ Exit condition: security and recovery semantics are specific enough that an impl
 - Add `sdk.agents.describe`.
 - Add `sdk.agents.rpc` through a managed local in-process or child-process test placement.
 - Implement the standard `agent.respond` procedure over durable mailboxes and agent runs.
+- Add proposal, deterministic validation, declared tests, exact implementation and contract digests, owner approval, compare-and-swap activation, conflict handling, revocation, retirement, and rollback for executable service publication.
+- Revalidate contract, implementation, authority, and tests immediately before activation; approval of documentation alone cannot activate executable code.
 - Add runtime input/output validation, version pins, bounds, and structured errors.
 - Add explicit narrow parent/child grants, target-branch rules, budget accounting, concurrency, cancellation, and terminal delivery; family reach alone grants nothing.
 - Implement the shared service contract and invocation substrate instead of a second connector-shaped catalog and envelope.
@@ -934,7 +944,7 @@ Architecture acceptance requires updates to:
 Model-facing documentation should include concise patterns for:
 
 - discovering procedures before calling;
-- reading exact schemas and effect classifications;
+- reading exact schemas, mutation class, idempotency, retry, status-query, and cancellation properties;
 - correcting deterministic validation errors;
 - preserving idempotency keys;
 - handling `unknown` without retry;
@@ -954,7 +964,7 @@ Model-facing documentation should include concise patterns for:
 9. How are workload identities issued, rotated, revoked, and bound to durable agents?
 10. Are peer grants limited to one workspace initially?
 11. Can agents delegate grants, and if so, under what depth and scope limits?
-12. Which procedure effect classes are accepted, and which require status-query support?
+12. Which combinations of mutation, idempotency, retry, status-query, and cancellation properties are accepted?
 13. How does `agent.respond` express structured output without conflating autonomous subagents with recursive-model calls?
 14. How are long-running, streaming, and bidirectional procedures represented without retaining sockets as identity?
 15. Which environment files belong in volumes, images, artifacts, or canonical working values?
