@@ -2,6 +2,7 @@
 
 **Status:** Proposed
 **Date:** August 10, 2026
+**Last updated:** August 11, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)
 **Related plans:** [Reasoning effort and model capabilities](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md), [Rich terminal rendering and layout](./2026-08-07-rich-terminal-rendering-and-layout-plan.md), and [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md)
 
@@ -9,9 +10,9 @@
 
 Agencity requires an explicit provider and canonical model before it creates a root session. The first interactive setup path presents a numbered provider prompt, reads a provider key through hidden input, and then asks the user to type an exact `creator/model` identifier. After session creation, the `/model` inspector provides a richer keyboard-driven catalog picker with model display names, Up/Down navigation, and Enter selection.
 
-Replace the first-run provider and model prompts with a session-independent inline typeahead. The provider picker searches visible provider names. The model picker loads the existing public Gateway catalog, searches both display names and canonical IDs with deterministic fuzzy ranking, and selects with Up/Down and Enter. Exact canonical model entry remains available when a model is absent from the catalog or catalog retrieval is unavailable.
+Replace the first-run provider and model prompts with a session-independent inline typeahead. The provider picker searches visible provider names. The model picker loads the existing configured Gateway catalog endpoint, searches both display names and canonical IDs with deterministic fuzzy ranking, and selects with Up/Down and Enter. Exact canonical model entry remains available when a model is absent from the catalog or catalog retrieval is unavailable.
 
-The work also extracts one pure provider-filtering and fuzzy-selection model for both first-run setup and the `/model` inspector. It does not add a provider list, model list, protocol endpoint, canonical event, table, or placeholder session.
+The work also extracts one pure fuzzy-selection model for both first-run setup and the `/model` inspector. Each surface remains responsible for projecting the providers it is allowed to show. The implementation adds product-transport model validation, safe bounded terminal presentation, and pre-admission rejection of models already known not to support the fixed agent tool contract. It does not add a provider list, model list, protocol endpoint, canonical event, table, or placeholder session.
 
 ## Architectural decision
 
@@ -19,8 +20,8 @@ First-run selection uses a small inline terminal picker owned by the existing pr
 
 The picker has two layers:
 
-1. **Pure selection model:** provider filtering, normalized search keys, fuzzy scores, deterministic ordering, selected-row reconciliation, visible-window calculation, and explicit manual-model rows.
-2. **TTY driver:** raw key input, bounded query editing, Up/Down/Enter/Escape handling, inline rendering, and unconditional terminal restoration.
+1. **Pure selection model:** provider-to-model filtering, normalized search keys, fuzzy scores, deterministic ordering, selected-row reconciliation, visible-window calculation, and explicit manual-model rows.
+2. **TTY driver:** raw key input, bounded query editing, Up/Down/Enter/Escape handling, inline rendering, and terminal restoration on every supported completion, error, cancellation, and catchable-signal path.
 
 The pure layer is shared with the full-screen `/model` inspector. Rendering remains specific to each surface: first-run setup is an inline prompt, while `/model` remains an OpenTUI inspector attached to an existing branch.
 
@@ -33,8 +34,12 @@ This boundary preserves the durable lifecycle. The final selected model is norma
 - Search model display names and canonical `creator/model` IDs with predictable fuzzy matching.
 - Persist the selected descriptor's canonical ID rather than its display name.
 - Preserve exact manual canonical-ID entry for unavailable, stale, incomplete, or custom catalogs.
+- Make a valid unmatched manual canonical ID the default selection even when fuzzy catalog matches exist.
 - Keep direct OpenAI and Anthropic choices within their matching creator namespace while allowing Vercel AI Gateway to show every catalog language model.
-- Share matching, filtering, ordering, and selection reconciliation between first-run setup and `/model`.
+- Share matching, provider-to-model filtering, ordering, and selection reconciliation between first-run setup and `/model`.
+- Keep first-run and branch-inspector provider visibility policies explicit and separate.
+- Reject new product-model selections that are already known not to support Agencity's fixed `bun_console` and `finish` contract before a new preference write, root, or model-change event is committed.
+- Render configured-catalog text through a single-line, control-safe, width-bounded terminal projection.
 - Keep provider credentials hidden, supervisor-side, and absent from terminal output, profile preferences, workspace history, artifacts, and catalog records.
 - Create no session until provider credentials and model selection have completed successfully.
 - Preserve explicit options, retained workspace defaults, environment configuration, reasoning-effort resolution, non-interactive failure, non-Echo resumed-branch model identity, and the existing explicit migration of retained internal Echo branches.
@@ -45,12 +50,13 @@ This boundary preserves the durable lifecycle. The final selected model is norma
 - Automatically choosing a provider, model, or reasoning level on the user's behalf.
 - Changing provider or model precedence for cases that already resolve without an interactive prompt.
 - Replacing canonical `creator/model` identity with display names or provider-native IDs.
-- Requiring a selected model to appear in the public catalog.
+- Requiring a selected model to appear in the configured Gateway catalog.
 - Adding a hand-maintained model allowlist, recommendation list, popularity ranking, or recency ranking.
 - Adding model aliases, typo correction that changes the submitted ID, or silent nearest-model selection.
 - Changing provider credentials, credential precedence, endpoint overrides, or credential storage.
-- Changing model capability admission, formal tool contracts, reasoning semantics, or model execution.
+- Changing formal tool schemas, reasoning semantics, model execution, or the policy that unknown capability remains admissible while known unsupported capability is rejected.
 - Changing an existing non-Echo branch's model during resume or removing the existing explicit Echo-branch migration.
+- Applying Gateway `creator/model` syntax as a universal invariant to Echo, embedded custom providers, or retained committed branches.
 - Adding protocol routes, canonical events, mutable tables, migrations, synchronization fields, or artifact data.
 - Turning first-run setup into a session-bearing full-screen terminal client.
 - Generalizing every terminal search surface onto one universal picker framework.
@@ -58,9 +64,9 @@ This boundary preserves the durable lifecycle. The final selected model is norma
 ## Terms
 
 - **Provider:** The durable model transport selected for a session. Product transports are `vercel`, `openai`, and `anthropic`; internal deterministic providers are excluded from product setup.
-- **Canonical model ID:** The public Gateway catalog's `creator/model` identifier retained in `ModelConfiguration.model`.
+- **Canonical model ID:** The configured Gateway catalog contract's `creator/model` identifier retained in `ModelConfiguration.model`.
 - **Display name:** Human-readable catalog metadata such as `GPT 5.6 Sol`. It is presentation only and is never persisted as model identity.
-- **Catalog result:** A normalized `ModelDescriptor` returned by the existing `/model-catalog` protocol surface.
+- **Catalog result:** A normalized `ModelDescriptor` returned by the existing `/model-catalog` protocol surface for the configured Gateway catalog endpoint. The endpoint may be the public Gateway or an explicit compatible origin.
 - **Manual model row:** An explicit selectable row that submits a syntactically valid canonical ID typed by the user even when no catalog descriptor has that exact ID.
 - **Fuzzy match:** A deterministic case-insensitive match across normalized display-name and canonical-ID fields. Fuzzy matching affects presentation order only; it never rewrites a model ID.
 - **Inline picker:** A bounded pre-session TTY interaction that redraws its own prompt rows without starting the branch-attached OpenTUI application.
@@ -80,7 +86,7 @@ The ordinary product path is:
 6. `finish` applies explicit or retained model-specific reasoning effort.
 7. `createSession` normalizes the complete model configuration and commits the initial model in `SessionCreated`.
 
-The interactive provider prompt accepts a number or provider ID. The model prompt accepts an unstructured line and relies on the existing model normalization boundary to enforce canonical identity and direct-provider namespace rules.
+The interactive provider prompt accepts a number or provider ID. The model prompt accepts an unstructured line. Product-transport normalization currently requires a slash, no whitespace, and the matching direct-provider namespace; it does not enforce the catalog's complete canonical grammar or the 512-byte retained-dispatch bound before every preference or root write.
 
 `ProductPrompter.secret` already closes readline, enters raw mode, bounds the input, restores the previous raw/paused state, and never echoes the credential. Its data listener is removed on recognized Enter or cancellation input rather than unconditionally in `finally`; the new shared driver must harden listener cleanup for aborts, stream errors, and every exceptional exit.
 
@@ -92,15 +98,15 @@ The branch-attached terminal already provides:
 - catalog loading through `TerminalUI.#showModelDetail` in `src/tui/index.ts`;
 - catalog display names, canonical IDs, context metadata, reasoning state, stale labels, and model-tool state;
 - Up/Down wrapping and Enter selection;
-- exact-ID fallback when no catalog row matches.
+- an exact catalog-ID preference when the query exactly matches a returned descriptor.
 
-Its catalog filter is a case-insensitive substring test in `catalogModelsForProvider`. It does not implement fuzzy ranking. The selected index is not reconciled when a query changes, and the renderer always shows the first eight results even when navigation moves selection beyond that window. Catalog request failures are collapsed to an empty descriptor list by `TerminalUI.#showModelDetail`, so the inspector cannot distinguish an unavailable catalog from a valid empty result.
+Its catalog filter is a case-insensitive substring test in `catalogModelsForProvider`. It does not implement fuzzy ranking. The selected index is not reconciled when a query changes, and the renderer always shows the first eight results even when navigation moves selection beyond that window. A typed unlisted ID is used only when no catalog result remains; if fuzzy or substring matches remain, Enter selects a catalog row instead of the typed ID. Catalog request failures are collapsed to an empty descriptor list by `TerminalUI.#showModelDetail`, so the inspector cannot distinguish an unavailable catalog from a valid empty result.
 
 ### Catalog and protocol
 
 `ModelCatalog` in `src/runtime/model-catalog.ts`:
 
-- fetches the public Gateway `/v1/models` endpoint without provider authentication;
+- fetches `/v1/models` from the configured Gateway catalog origin without provider authentication;
 - retains language models only;
 - normalizes display name, canonical ID, context/output limits, pricing, reasoning metadata, required-tool metadata, endpoint identity, digest, and stale state;
 - bounds the response to 8 MiB and 10,000 models;
@@ -108,7 +114,7 @@ Its catalog filter is a case-insensitive substring test in `catalogModelsForProv
 - reports `refreshed`, `cached-fallback`, or `unavailable`;
 - uses a 24-hour freshness window by default.
 
-`GET /model-catalog` calls `ensureFresh`, and `AgentClient.modelCatalog()` exposes the result. This is sufficient for first-run discovery. No new server capability is required.
+`GET /model-catalog` calls `ensureFresh`, and `AgentClient.modelCatalog()` exposes the result. This is sufficient for first-run discovery. A rejected client request is not itself a catalog result and currently requires a UI-side mapping before it can be shown as unavailable. No new server capability is required.
 
 Provider-to-model filtering is already defined by execution:
 
@@ -138,6 +144,8 @@ This work does not redefine the current provider-descriptor ordering used while 
 
 The same interactive provider/model picker is used when the Echo migration reaches a user choice. That path does not create a new root or rewrite `SessionCreated`; it commits the existing explicit `SessionModelChanged` through `selectModel`. Tests and user-facing wording must distinguish this compatibility path from first-run initialization.
 
+New product selections use the same pre-admission rule on every resolution path: explicit flag, valid retained default, environment model, first-run picker, Echo migration, and `/model`. A model whose fixed-tool capability is known unsupported is rejected before any new workspace model preference, `SessionCreated`, or `SessionModelChanged` write. An already retained default remains available for diagnostics but cannot admit a new root while known unsupported. Unknown capability remains admissible under the existing policy. Retained non-Echo branches are not reselected or rewritten merely because their committed model predates the stricter product-selection grammar.
+
 ### Provider picker
 
 When setup requires a provider choice, render:
@@ -153,7 +161,13 @@ Choose a provider
 Type to filter · ↑/↓ select · Enter continue · Esc cancel
 ```
 
-The exact order follows the visible provider descriptors supplied by the service. Echo is removed before options reach the picker.
+The exact empty-query order follows the visible provider descriptors supplied by the caller. Echo is removed before options reach either picker. Visibility remains surface-specific:
+
+- first run with no usable provider supplies the supported credential-managed product transports;
+- first run with several usable providers supplies only those usable providers;
+- `/model` supplies every non-Echo provider it already exposes, including embedded or programmatic providers.
+
+The shared selection model ranks the options it receives; it does not broaden or narrow a surface's provider set.
 
 Interaction:
 
@@ -184,7 +198,7 @@ Saving a credential before model selection finishes retains the existing semanti
 
 ### Catalog loading
 
-After a provider is resolved and has a usable credential, the model stage calls `AgentClient.modelCatalog()` once and renders a bounded loading message while the request is pending.
+After a provider is resolved and has a usable credential, the model stage calls `AgentClient.modelCatalog()` once and renders a bounded loading state while the request is pending. The TTY driver owns input during that state. Escape, Ctrl-C, or Ctrl-D cancels the selection; other buffered input is discarded rather than replayed into the model query. Cancellation races the catalog request and ignores any late result. The existing service-side timeout remains authoritative even when the client can no longer use the response.
 
 Result handling:
 
@@ -193,7 +207,7 @@ Result handling:
 - `unavailable`: show a truthful unavailable message and keep manual canonical-ID entry available;
 - empty provider-filtered catalog: explain that no catalog rows are available for the provider and keep manual entry available.
 
-Catalog failure never causes provider or model substitution.
+A rejected transport, protocol, or capability request maps to a local UI-facing `unavailable` result with a bounded, credential-scrubbed error and no invented origin. Catalog failure never causes provider or model substitution.
 
 ### Model picker
 
@@ -220,6 +234,8 @@ Required row content:
 
 When terminal width permits, the secondary line also includes bounded existing metadata such as context size and reasoning capability. Existing model-tool capability labels may remain informational; they do not replace final model admission.
 
+All catalog-originated labels pass through a presentation-only terminal sanitizer before rendering. It removes or visibly escapes line breaks, C0/C1 controls, DEL, ANSI escapes, and bidirectional-formatting controls, then truncates by terminal display cells. Missing or unusable terminal-width metadata uses a conservative 80-column fallback. Every emitted picker line fits its computed width so redraw accounting does not depend on uncontrolled wrapping. Sanitization never changes the selected canonical ID; invalid canonical IDs are rejected during catalog normalization rather than repaired for selection.
+
 Interaction:
 
 - Printable text and paste update the query.
@@ -227,7 +243,7 @@ Interaction:
 - Up and Down wrap through the complete ranked result set.
 - The renderer shows a bounded window of at most eight rows that always contains the highlighted row.
 - Enter selects the highlighted catalog descriptor and returns its canonical ID.
-- A query change reconciles selection to the first ranked result.
+- A query change selects the exact manual row when the query is a valid unmatched canonical ID; otherwise it selects the first ranked catalog result.
 - Escape, Ctrl-C, or Ctrl-D cancels setup.
 
 Catalog names are presentation data. The selected configuration always uses:
@@ -235,7 +251,7 @@ Catalog names are presentation data. The selected configuration always uses:
 ```ts
 {
   provider: selectedProvider.name,
-  model: selectedDescriptor.model,
+  model: selectedOption.model,
   reasoningEffort: "provider-default",
 }
 ```
@@ -246,7 +262,7 @@ The existing `finish` step remains responsible for explicit and retained reasoni
 
 Manual entry is represented as an explicit row rather than an accidental zero-match fallback.
 
-When the query is a valid bounded canonical ID and no catalog descriptor has that exact ID, append:
+When the query is a valid bounded canonical ID and no catalog descriptor has that exact ID, include:
 
 ```text
   Use exact model ID
@@ -255,13 +271,16 @@ When the query is a valid bounded canonical ID and no catalog descriptor has tha
 
 Rules:
 
-- canonical shape matches the catalog identity rule: a nonempty creator segment containing only letters, digits, `.`, `_`, or `-`, followed by `/` and a suffix whose first character is neither whitespace nor `/` and which contains no whitespace;
+- canonical shape matches the catalog identity rule: an ASCII alphanumeric creator first character, followed by zero or more ASCII letters, digits, `.`, `_`, or `-`, then `/`, then a suffix whose first character is neither whitespace nor `/`;
+- the suffix contains no whitespace, C0/C1 control, DEL, ANSI escape, or bidirectional-formatting character;
 - the complete ID is at most 512 UTF-8 bytes, matching retained model-dispatch identity bounds;
 - direct OpenAI enables the row only for `openai/...`;
 - direct Anthropic enables the row only for `anthropic/...`;
 - Vercel enables any valid `creator/model`;
 - an exact catalog ID selects the catalog row rather than duplicating it;
 - fuzzy text that is not a valid canonical ID never becomes a manual model implicitly;
+- a valid unmatched manual row uses a distinct stable identity such as `manual:<exact-query>`, appears before fuzzy suggestions, and becomes selected immediately after that query edit;
+- Up or Down may move from the selected manual row to a catalog suggestion before confirmation;
 - the existing supervisor normalization remains the final authority.
 
 When the catalog is unavailable, this row becomes the only selectable model option after the user types a valid canonical ID.
@@ -270,12 +289,13 @@ When the catalog is unavailable, this row becomes the only selectable model opti
 
 After Enter confirms a model:
 
-1. call `productSetModel` with `provider:creator/model`;
-2. apply existing model-specific effort resolution;
-3. create the root session with the normalized complete model;
-4. remember the route;
-5. close prompt input ownership;
-6. start the ordinary full-screen terminal client.
+1. normalize the product model and apply existing model-specific effort resolution;
+2. reject known-unsupported fixed-tool capability;
+3. call `productSetModel` with the validated `provider:creator/model`;
+4. create the root session with the normalized complete model;
+5. remember the route;
+6. close prompt input ownership;
+7. start the ordinary full-screen terminal client.
 
 Cancellation before model confirmation:
 
@@ -296,6 +316,7 @@ Search normalization is pure and locale-independent:
 - treat whitespace, `/`, `.`, `_`, and `-` as token boundaries;
 - collapse repeated boundaries;
 - retain both a compact form and token list.
+- limit each searchable display-name projection to 512 Unicode code points and 2 KiB UTF-8 after control-safe normalization; canonical IDs retain their complete validated value up to 512 UTF-8 bytes.
 
 The candidate search fields are:
 
@@ -308,22 +329,22 @@ Model descriptions, prices, capability explanations, and remediation text do not
 
 Candidates rank by the best matching field:
 
-1. exact normalized field match;
-2. exact canonical-ID or provider-name match;
-3. field prefix;
+1. case-insensitive exact stable identity: canonical model ID or provider name;
+2. exact normalized display-name match;
+3. normalized field prefix;
 4. token-prefix match in query-token order;
-5. contiguous substring;
+5. contiguous compact-form substring;
 6. ordered character subsequence.
 
 Within a tier, prefer:
 
 1. fewer unmatched characters;
 2. earlier first match;
-3. display-name match over canonical-ID match only when all score components are otherwise equal;
+3. display-name match over canonical-ID match only when all score components are otherwise equal outside the exact-stable-identity tier;
 4. normalized display name;
 5. canonical ID or provider stable name.
 
-The score must be deterministic and must not depend on original catalog response order. An empty query preserves the catalog's stable display-name/ID order.
+String tie-breaking uses Unicode code-point order, not host-locale `localeCompare`. The score must be deterministic and must not depend on original catalog response order. An empty model query sorts by normalized display name and then canonical ID with the same comparator. An empty provider query preserves the caller-projected provider order.
 
 No fuzzy score changes the selected ID. Enter always returns the exact option identity.
 
@@ -333,12 +354,17 @@ No fuzzy score changes the selected ID. Enter always returns the exact option id
 - Model search query: at most 512 Unicode characters.
 - Manual canonical ID: at most 512 UTF-8 bytes.
 - Candidate count: the catalog's existing 10,000-model bound.
-- Rendered rows: at most eight model rows and all supported provider rows.
-- Matching: linear over precomputed normalized candidate fields for each query update.
+- Rendered rows: at most eight model rows and all caller-supplied provider rows.
+- Searchable display-name field: at most 512 Unicode code points and 2 KiB UTF-8 after normalization.
+- Matching: one bounded linear scan over each precomputed candidate field for each query update; ordered-subsequence matching must not backtrack or allocate a candidate-by-query matrix.
 
 The implementation adds no fuzzy-search dependency.
 
-Add one shared canonical-model validator for picker eligibility and product model normalization. It applies the catalog-compatible shape and the 512-byte retained identity limit before a model preference or new root can be committed. Product-level selection adds direct-provider namespace rules. Private and newly released models remain supported without catalog membership when they satisfy this canonical shape. Existing valid canonical IDs do not require a catalog row.
+Add one shared product-catalog-model validator for picker eligibility, configured-catalog normalization, and product-transport normalization. Its base shape is `^[A-Za-z0-9][A-Za-z0-9._-]*\/[^\s/][^\s]*$`, followed by explicit control and bidirectional-formatting rejection and the 512-byte UTF-8 bound. The explicit upper- and lowercase ranges avoid locale or Unicode case-folding changes to identity validation. Product-level selection adds direct-provider namespace rules.
+
+This validator is not a universal `ModelConfiguration` invariant. Echo and embedded custom providers retain provider-specific model normalization, and retained committed branches are not rejected during projection solely because their model predates this boundary. New OpenAI, Anthropic, and Vercel preferences, roots, and branch model changes must pass it. Private and newly released models remain supported without catalog membership when they satisfy the product grammar.
+
+If a retained workspace default does not pass new product selection validation, interactive startup emits a bounded warning, leaves the retained preference unchanged for diagnostics, and continues to provider/model selection. Non-interactive startup fails with the invalid-default diagnostic and ordinary setup guidance. A later confirmed model replaces the invalid default through the normal preference write.
 
 ## Component design
 
@@ -346,18 +372,18 @@ Add one shared canonical-model validator for picker eligibility and product mode
 
 Add a focused pure module under `src/product/` or `src/tui/` with no terminal, client, storage, or network access. It owns:
 
-- product provider visibility and stable option projection;
+- stable option projection for the surface-supplied provider set;
 - `providerAcceptsCanonicalModel(provider, model)`;
 - catalog filtering by provider;
 - normalized searchable fields;
 - deterministic fuzzy scoring and ordering;
 - explicit manual-model row construction;
-- selected identity/index reconciliation after query changes;
+- selected-identity reconciliation after query changes and data refresh;
 - bounded visible-window calculation.
 
-The API uses stable option identities rather than array indices. Renderers may derive a display index, but query changes and catalog refreshes reconcile through identity.
+The API uses stable option identities rather than array indices. Renderers may derive a display index, but query changes and catalog refreshes reconcile through identity. Query edits deliberately reset selection to the valid unmatched manual row or first ranked catalog row. A data-only refresh preserves the selected identity when it remains present and otherwise applies the same default-selection rule.
 
-Provider/model filtering is product semantics and must not remain duplicated in `opentui.ts` and `detail-model.ts`.
+Provider-to-model namespace filtering is product semantics and must not remain duplicated in `opentui.ts` and `detail-model.ts`. Provider visibility is caller policy because setup and the branch inspector expose different provider universes.
 
 ### Inline TTY driver
 
@@ -369,13 +395,16 @@ The driver:
 - closes readline before entering raw selection;
 - has one active input listener;
 - preserves prior raw and paused state;
-- hides the cursor only while drawing;
-- redraws only its bounded prompt region;
+- owns a cancellable catalog-loading state and discards non-cancellation input received before model options are ready;
+- hides the cursor only while drawing and restores visibility after each draw and on exit;
+- sanitizes untrusted text, clips every line to the current terminal cell width, and redraws a fixed, tracked number of physical rows;
+- uses an 80-column fallback when output width is absent or invalid and handles resize before the next draw;
 - handles split escape sequences and multi-character input chunks;
 - decodes UTF-8 incrementally so a code point split across input chunks is not replaced or counted twice;
 - treats ordinary CR/LF as confirmation and strips bracketed-paste framing when a terminal sends it, without allowing pasted line endings to submit more than one value;
 - bounds all retained query and error text;
 - restores input state and cursor visibility in `finally`;
+- installs temporary handlers only for catchable setup-phase signals it explicitly supports, performs idempotent cleanup, removes those handlers, and preserves conventional signal termination; SIGKILL and equivalent uncatchable termination are outside the restoration guarantee;
 - exposes separate `selectProvider` and `selectModel` operations over the shared selection model;
 - keeps `secret` on the same exclusive input-ownership discipline.
 
@@ -397,16 +426,33 @@ Replace `chooseManagedProvider` and the final `ProductPrompter.question("Model I
 
 The retained Echo migration continues to call the same resolver and then `selectModel` on its existing route. New-root creation and Echo migration share discovery and validation but retain different durable terminal actions.
 
+Before any newly resolved product model is persisted or committed:
+
+1. validate and normalize the product transport and canonical model ID;
+2. resolve and validate the complete reasoning-effort configuration;
+3. evaluate the existing fixed-agent-tool capability;
+4. reject a known-unsupported selection with bounded remediation while allowing existing unknown-capability policy;
+5. persist the user-confirmed workspace default;
+6. create the new root, or commit the explicit Echo migration/model change.
+
+The authoritative admission check also runs at the supervisor root/model-change boundary so direct protocol or embedded callers cannot bypass it. The CLI-side check exists for early feedback, not as the sole invariant.
+
+Confirmation authorizes the workspace-default write. If the later session request fails after that write, the valid confirmed default remains. A definite pre-commit rejection reports that no root was created; transport loss after request dispatch reports that root creation is unconfirmed rather than inventing failure or success. The next session listing remains authoritative for reconciliation. No session is created and no new preference is written when validation, effort resolution, or known-unsupported admission fails. Credential persistence retains the separate semantics described above. Tests cover each boundary instead of implying a cross-store transaction that does not exist.
+
 ### `/model` convergence
 
 Update the existing OpenTUI model inspector to consume the shared selection model:
 
 - use fuzzy ranking instead of substring filtering;
-- reconcile selection when the query changes;
+- replace numeric selection with explicit `{ query, selectedIdentity }` entry state;
+- route typing, bounded single-line paste, Backspace, and navigation into that entry state rather than the ordinary multiline draft;
+- reconcile selection under the query-edit and data-refresh rules above;
 - render the visible window containing the selected row;
 - expose the same explicit manual-model row;
 - preserve provider navigation, login/logout, model mutation boundaries, and command forms;
-- carry catalog `status`, `error`, and origin into `TerminalModelDetail` instead of collapsing failures to an empty list.
+- preserve the ordinary composer draft across entry and Escape-back-to-provider navigation;
+- carry catalog `status`, bounded credential-scrubbed `error`, and origin into `TerminalModelDetail` instead of collapsing failures to an empty list;
+- map rejected catalog requests to a truthful local unavailable result.
 
 This gives setup and later model changes one discovery contract without sharing session-dependent rendering code.
 
@@ -416,6 +462,7 @@ No protocol change is required. The implementation reuses:
 
 - `GET /model-providers`;
 - `GET /model-catalog`;
+- `GET /capabilities?provider=...&model=...`;
 - `POST /product/config/provider-key`;
 - `POST /product/config/model`;
 - `POST /sessions`.
@@ -426,17 +473,19 @@ No canonical or profile schema change is required. Catalog cache and credential 
 
 - Echo is removed before rendering or matching.
 - Display names never enter model preferences, events, or model dispatch.
-- Catalog descriptors are untrusted bounded network data and remain subject to existing normalization and output truncation.
+- Catalog descriptors are untrusted bounded network data. Selectable IDs pass the shared product validator, and all catalog text passes the control-safe, single-line, display-width-bounded terminal projection.
 - Manual IDs pass through the same product model normalizer as flag, environment, and command input.
-- Canonical model validation rejects IDs over 512 UTF-8 bytes before writing a model preference or committing a new root.
+- Canonical product-model validation rejects malformed, control-bearing, or over-512-byte IDs before writing a new product model preference, root, or branch model change.
+- Echo, embedded custom providers, and retained committed model identities remain governed by their provider-specific and retained-state boundaries.
 - Direct-provider namespace validation runs before confirmation where possible and again at supervisor normalization.
 - A catalog row does not prove provider credentials, formal tool support, reasoning support, availability, or successful execution.
-- Provider/model selection does not make a provider API call.
-- The public catalog request contains no provider credential.
+- Known-unsupported fixed-tool capability rejects admission; unknown capability remains explicit and follows existing admission policy.
+- Provider/model selection makes no model-execution or inference request.
+- The configured Gateway catalog request contains no provider credential.
 - Secret input never enters picker queries, model rows, errors, logs, history, catalog cache, or renderer snapshots.
-- Terminal cleanup runs for success, validation failure, protocol failure, cancellation, and signal interruption.
+- Terminal cleanup runs for success, validation failure, protocol failure, recognized raw cancellation input, stream failure, and explicitly handled catchable signals. Uncatchable process termination is outside this guarantee.
 - Model selection is disposable client state. The canonical root session begins only after successful confirmation.
-- Existing workspace-default persistence and reasoning-effort ordering remain unchanged after confirmation.
+- Full configuration and known-unsupported admission validation precede the workspace-default write. A confirmed valid default may remain if a later cross-store session request fails or becomes unconfirmed, and that partial outcome remains explicit.
 
 ## Rejected alternatives
 
@@ -450,7 +499,7 @@ Rejected for this scope because the current full-screen application requires an 
 
 ### Keep separate first-run and `/model` matchers
 
-Rejected because provider filtering, fuzzy ranking, manual entry, and selected-row reconciliation would drift between setup and later model changes.
+Rejected because provider-to-model filtering, fuzzy ranking, manual entry, and selected-row reconciliation would drift between setup and later model changes. Surface-specific provider visibility remains separate by design.
 
 ### Add a prompt or fuzzy-search dependency
 
@@ -466,32 +515,38 @@ Rejected because catalog availability and completeness are not execution authori
 
 - Add pure provider/model option types and provider namespace filtering.
 - Add deterministic normalization, fuzzy scoring, tie-breaking, and empty-query ordering.
-- Add explicit manual canonical-ID rows.
+- Add the product-scoped canonical validator and consume it from configured-catalog normalization, product transport normalization, and manual-row eligibility.
+- Add explicit manual canonical-ID rows with default-selection precedence over fuzzy suggestions.
 - Add selected-identity reconciliation and visible-window calculation.
+- Add control-safe, single-line, display-cell-bounded presentation helpers.
+- Prove bounded work over the maximum candidate and query sizes.
 - Cover all pure behavior with table-driven unit tests.
 
 ### Phase B — Add the first-run inline picker
 
 - Extract or extend `ProductPrompter` with exclusive raw-input ownership.
 - Add provider and model picker renderers.
-- Wire provider selection, hidden credential entry, catalog loading, model confirmation, and cancellation into `chooseManagedModel`.
+- Wire provider selection, hidden credential entry, cancellable catalog loading, model confirmation, full-configuration validation, and cancellation into `chooseManagedModel`.
+- Enforce known-unsupported fixed-tool rejection at the authoritative root/model-change boundary and mirror it before client persistence for early feedback.
+- Handle invalid retained product defaults according to the explicit interactive and non-interactive policy.
 - Preserve explicit/default/environment/non-interactive paths byte-for-byte where behavior is unrelated to interaction.
-- Preserve model preference and reasoning-effort ordering after confirmation.
+- Validate effort and admission before model preference persistence; preserve the documented confirmed-default partial outcome if later root creation fails.
 
 ### Phase C — Align `/model`
 
 - Replace `catalogModelsForProvider` substring matching with the shared selection model.
-- Reconcile selection on every query change.
+- Add dedicated single-line query and stable selected-identity state without modifying the ordinary composer draft.
+- Apply explicit query-edit and data-refresh reconciliation.
 - Render the selected result inside the bounded visible window.
-- Add the explicit manual-ID row.
-- Propagate catalog status and bounded errors into `TerminalModelDetail`.
+- Add the explicit, default-selected manual-ID row.
+- Propagate catalog status and bounded errors into `TerminalModelDetail`, including rejected-request mapping.
 - Preserve existing model change, credential login/logout, and idle-boundary validation.
 
 ### Phase D — Product verification and documentation
 
 - Update deterministic OpenTUI frame/input tests.
 - Replace the old first-run line-prompt pseudo-terminal steps with typeahead key input.
-- Add catalog unavailable/manual-ID and cancellation pseudo-terminal paths.
+- Add catalog unavailable/manual-ID, loading cancellation, signal cleanup, malicious catalog text, and failure-boundary pseudo-terminal paths.
 - Verify secrets are absent from output and durable files.
 - Update public onboarding, configuration, capability, operator, and verification documentation.
 - Update `AGENTS.md` implementation status after the behavior ships.
@@ -502,9 +557,11 @@ Expected source changes:
 
 - `src/cli.ts` — retain resolution policy and invoke typed provider/model selection.
 - `src/tui/product-prompter.ts` or a focused equivalent — sessionless inline TTY input, rendering, cleanup, and hidden credential ownership.
-- `src/product/model-selection.ts` or a focused equivalent — pure provider filtering, fuzzy ranking, manual rows, reconciliation, and visible windows.
-- `src/domain/model.ts` — shared canonical shape and UTF-8 byte-bound validation.
-- `src/executors/model.ts` — consume shared canonical validation and preserve direct-provider namespace checks before durable creation.
+- `src/product/model-selection.ts` or a focused equivalent — pure surface-supplied option ranking, provider-to-model filtering, manual rows, reconciliation, visible windows, and bounded safe presentation.
+- `src/domain/model.ts` — product-catalog model shape, control, and UTF-8 byte-bound helper without changing the generic retained `ModelConfiguration` invariant.
+- `src/runtime/model-catalog.ts` — consume the shared product-catalog validator for fetched and cached selectable descriptors.
+- `src/executors/model.ts` — consume shared validation only for product transports and preserve custom-provider normalization.
+- `src/runtime/supervisor.ts` and the existing model-admission helper — reject known-unsupported new roots and branch model changes at the authoritative boundary.
 - `src/product/service.ts` — validate model defaults through the shared boundary before preference storage.
 - `src/tui/opentui.ts` — consume shared model selection state in `/model`.
 - `src/tui/detail-model.ts` — carry catalog status/error and consume shared provider filtering.
@@ -516,7 +573,7 @@ Expected test changes:
 - `test/unit/opentui.test.ts`;
 - `test/integration/product-cli.test.ts`;
 - `test/integration/managed-service.test.ts`;
-- `test/integration/model-catalog.test.ts` only where result propagation needs additional coverage;
+- `test/integration/model-catalog.test.ts` — shared grammar, controls, configured origins, stale/unavailable results, and hostile presentation inputs;
 - `test/e2e/opentui-pty.test.ts`;
 - the strict provider fixture when multiple searchable catalog rows or catalog-failure modes are required.
 
@@ -552,15 +609,19 @@ No changes should be required in:
 - model display-name and canonical-ID matching;
 - case, whitespace, punctuation, token-prefix, substring, and subsequence matches;
 - deterministic tie ordering independent of catalog response order;
+- deterministic code-point ordering independent of host locale;
 - empty-query catalog order;
-- query-change selection reconciliation;
+- query-edit reset and data-refresh identity reconciliation;
 - visible windows containing selections beyond the first eight results;
 - Up/Down wrapping;
 - OpenAI and Anthropic creator filtering;
 - Vercel all-creator behavior;
 - exact catalog IDs versus manual rows;
+- unmatched valid manual IDs default-selected ahead of fuzzy catalog matches;
 - invalid and cross-provider manual IDs;
-- input and result bounds.
+- invalid leading creator punctuation, UTF-8 overflow, C0/C1/DEL, ANSI escape, and bidirectional-formatting rejection;
+- product-only validation that leaves Echo and embedded custom-provider model IDs valid;
+- input, searchable-field, result, operation-count, and allocation bounds across 10,000 candidates.
 
 ### TTY driver coverage
 
@@ -568,20 +629,23 @@ No changes should be required in:
 - split ANSI arrow-key sequences;
 - split UTF-8 code points and bracketed/ordinary pasted line endings;
 - no-match and disabled-Enter behavior;
-- loading, stale fallback, unavailable, and empty-catalog rendering;
+- slow loading cancellation, late-result suppression, stale fallback, unavailable, rejected-request, and empty-catalog rendering;
 - raw mode, pause state, cursor, and listener restoration after every terminal path;
-- listener restoration after abort, input-stream error, protocol rejection, and renderer failure;
-- bounded redraw without leaking prior query rows;
+- listener restoration after abort, input-stream error, protocol rejection, renderer failure, and explicitly handled catchable signals;
+- bounded redraw without leaking prior query rows under narrow widths, width changes, missing width, wide Unicode, long labels, shrinking result sets, and catalog control characters;
+- proof that no catalog-originated ANSI, line break, or bidirectional formatting reaches terminal output;
 - hidden credential input and redaction.
 
 ### OpenTUI coverage
 
 - fuzzy search through `/model`;
-- selected-row reset after query changes;
+- selected-identity reset after query edits and preservation after data-only refresh;
 - navigation beyond the first visible result page;
-- explicit manual-ID selection while catalog matches also exist;
+- default and navigated manual-ID selection while fuzzy catalog matches also exist;
 - stale and unavailable catalog notices;
-- provider filtering and Echo exclusion;
+- rejected catalog requests mapped to unavailable notices;
+- surface-specific provider projection and Echo exclusion;
+- single-line paste/newline handling, query bounds, Escape-back behavior, and ordinary composer-draft preservation;
 - model selection persists the canonical ID and retained reasoning preference;
 - responsive narrow and minimum layouts keep the selected row and key hints usable.
 
@@ -596,6 +660,13 @@ No changes should be required in:
 - cancellation before model confirmation creates no session or model preference;
 - a stored credential remains after cancellation following successful key entry;
 - catalog fallback and unavailable states propagate truthfully;
+- malformed retained product defaults remain inspectable, warn and reopen setup interactively, and fail with guidance non-interactively;
+- new product-model writes reject malformed or over-bound IDs while retained non-Echo branches are not silently rewritten;
+- Echo and custom embedded provider roots remain valid under provider-specific normalization;
+- known-unsupported selections write no new workspace model preference, root, or branch model-change event, while an existing retained default remains inspectable and unknown capability follows existing admission policy;
+- validation, effort, and admission failures occur before preference persistence;
+- a confirmed valid default remains after later session creation failure; definite rejection reports no root, while post-dispatch transport loss reports an unconfirmed root outcome and relies on session listing for reconciliation;
+- managed-service loss after credential persistence and before model confirmation creates no session or model preference;
 - non-interactive missing configuration fails and creates no session;
 - non-Echo resumed branches ignore new defaults and do not open setup;
 - a retained Echo branch uses the picker when needed and commits the selected product model through the existing `SessionModelChanged` migration path.
@@ -613,9 +684,9 @@ The linked-executable pseudo-terminal journey must:
 7. enter the ordinary full-screen terminal and complete its existing task journey;
 8. confirm the credential is absent from captured terminal bytes and durable non-credential files.
 
-The test process sets both `OPENAI_BASE_URL` and `AI_GATEWAY_BASE_URL` to the local strict fixture. The fixture serves at least two deterministic language-model catalog rows and records catalog requests, so this path never contacts the public Gateway.
+The test process sets both `OPENAI_BASE_URL` and `AI_GATEWAY_BASE_URL` to the local strict fixture but deliberately omits `OPENAI_API_KEY`, `OPENAI_MODEL`, and other provider/model environment shortcuts so first-run selection is exercised. The hidden prompt supplies the fixture's accepted key. The fixture serves at least two deterministic language-model catalog rows and records catalog requests, so this path never contacts the public Gateway.
 
-Add a separate fixture mode where local `/v1/models` retrieval fails, an exact canonical model ID is selected through the manual row, and root creation succeeds without claiming catalog verification.
+Add a separate fixture mode where local `/v1/models` retrieval fails, an exact canonical model ID is selected through the manual row, and root creation succeeds without claiming catalog verification. Add hostile-label and known-unsupported fixture modes for terminal-safety and pre-admission coverage.
 
 ### Required gates
 
@@ -638,12 +709,16 @@ Public documentation must describe:
 - Up/Down, Enter, Backspace, Escape, and manual-ID controls;
 - display names as catalog presentation and canonical IDs as durable identity;
 - direct-provider creator filtering;
+- configured Gateway catalog origin and credential-free catalog retrieval;
 - cached stale and unavailable catalog behavior;
+- exact manual-ID precedence over fuzzy suggestions;
+- known-unsupported fixed-tool rejection and explicit unknown capability;
+- invalid retained-default behavior and the confirmed-default/session-outcome partial failure boundary;
 - hidden credential storage and precedence;
 - unchanged non-interactive setup requirements;
 - unchanged non-Echo resumed-branch identity and the explicit retained Echo migration.
 
-Do not claim that catalog presence proves model execution or formal-tool support. Do not claim that catalog absence makes a model unavailable.
+Do not claim that catalog presence proves model execution or formal-tool support. Do not claim that catalog absence makes a model unavailable. Do not call a configured custom origin the public Gateway or claim that selection makes no network request; it makes a credential-free catalog request but no inference request.
 
 ## Completion criteria
 
@@ -651,14 +726,18 @@ This plan is complete when:
 
 1. first interactive setup uses keyboard-driven provider and model selectors instead of numbered/raw line prompts;
 2. model discovery searches both catalog display names and canonical IDs with deterministic fuzzy ranking;
-3. Up/Down and Enter select from a bounded visible window, and selection remains visible after query changes and navigation;
-4. exact canonical IDs remain explicitly selectable when missing from the catalog or when the catalog is unavailable;
-5. OpenAI, Anthropic, and Vercel options obey their existing canonical namespace rules;
-6. for new roots, the selected canonical model and resolved effort are committed in the initial `SessionCreated`;
-7. new-root setup creates no placeholder session or follow-up model correction, while retained Echo migration preserves its explicit `SessionModelChanged` path;
-8. flags, workspace defaults, environment models, non-interactive failure, non-Echo resumed branches, and Echo migration retain their prior semantics;
-9. credential input remains hidden and absent from output and durable non-credential state;
-10. `/model` uses the same filtering, fuzzy ranking, manual-entry, and selection-reconciliation rules;
-11. catalog stale, unavailable, and empty states remain truthful and usable;
-12. unit, integration, OpenTUI, pseudo-terminal, architecture, and acceptance gates pass;
-13. public documentation, `AGENTS.md`, verification claims, and the plan index match the shipped behavior.
+3. Up/Down and Enter select from a bounded visible window, and selection remains visible after query edits, refresh, and navigation;
+4. exact canonical IDs remain explicitly selectable when missing from the catalog or when the catalog is unavailable, and a valid unmatched manual row is selected ahead of fuzzy suggestions;
+5. new OpenAI, Anthropic, and Vercel selections obey the shared product grammar, byte/control bounds, and namespace rules without changing Echo, custom-provider, or retained-branch identity semantics;
+6. configured-catalog labels and errors cannot inject controls or unbounded rows into either terminal surface;
+7. known-unsupported fixed-tool selections fail before a new model preference, root, or branch model-change event is written, while retained defaults remain inspectable and unknown capability remains explicit and admissible under existing policy;
+8. for new roots, the selected canonical model and resolved effort are committed in the initial `SessionCreated`;
+9. new-root setup creates no placeholder session or follow-up model correction, while retained Echo migration preserves its explicit `SessionModelChanged` path;
+10. flags, valid workspace defaults, valid environment models, non-interactive failure, non-Echo resumed branches, and Echo migration retain their prior semantics, while invalid retained defaults follow the documented warning/failure policy;
+11. credential input remains hidden and absent from output and durable non-credential state;
+12. `/model` uses the same provider-to-model filtering, fuzzy ranking, manual-entry, safe-presentation, and selection-reconciliation rules while retaining its surface-specific provider set and composer draft;
+13. catalog refreshed, stale fallback, rejected, unavailable, and empty states remain truthful and usable;
+14. setup restores terminal state on every supported completion, error, cancellation, and catchable-signal path and makes no guarantee for uncatchable termination;
+15. cross-store partial outcomes at credential, confirmed-default, and session boundaries are explicit and covered by tests;
+16. unit, integration, OpenTUI, pseudo-terminal, architecture, and acceptance gates pass;
+17. public documentation, `AGENTS.md`, verification claims, and the plan index match the shipped behavior.

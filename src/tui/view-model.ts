@@ -794,7 +794,8 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
   const { state, capabilities } = presentation;
   const provider = capabilities.providers.find(item => item.name === state.model.provider);
   const provisionalRunIds = new Set(presentation.provisionalRunIds);
-  const runs = Object.values(state.agentRuns).map(run => runView(state, run, provisionalRunIds)).slice(-12);
+  const runs = Object.values(state.agentRuns).slice(-12)
+    .map(run => runView(state, run, provisionalRunIds));
   const activeRun = [...runs].reverse().find(run => run.active);
   const familyChildren = buildTerminalFamilyChildren(presentation.family.children);
   const ancestry = presentation.family.ancestry.length

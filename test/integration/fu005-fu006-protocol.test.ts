@@ -188,6 +188,45 @@ describe("FU-005 protocol transport contract", () => {
     }
   });
 
+  test("large protocol stream bursts yield to other event-loop work", async () => {
+    const total = 96;
+    const records = Array.from({ length: total }, (_, sequence) =>
+      `event: progress\ndata: ${JSON.stringify({
+        type: "effect-progress",
+        effectId: "burst-effect",
+        sessionId: "burst-session",
+        branchId: "burst-branch",
+        executor: "model",
+        operation: "complete",
+        attempt: 1,
+        sequence,
+        kind: "model-output-delta",
+        value: { text: "x" },
+        observedAt: "2026-08-11T00:00:00.000Z",
+      })}\n\n`).join("");
+    const transport: ProtocolTransport = {
+      kind: "in-process",
+      request: async () => new Response(records, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    };
+    const client = new AgentClient(transport);
+    let handled = 0;
+    let handledWhenTimerRan = 0;
+    await client.stream("burst-session", "burst-branch", "0", {
+      onEvent: () => {},
+      onProgress: () => {
+        handled++;
+        if (handled === 1) {
+          setTimeout(() => { handledWhenTimerRan = handled; }, 0);
+        }
+      },
+    });
+    expect(handled).toBe(total);
+    expect(handledWhenTimerRan).toBeGreaterThan(0);
+    expect(handledWhenTimerRan).toBeLessThan(total);
+  });
+
   test("watchBranch retries from the last successfully applied cursor, deduplicates, and discards ephemeral progress", async () => {
     const { supervisor } = await fixture("agencity-watch-reconnect-");
     const session = await supervisor.createSession({ workspaceId: "watch" });

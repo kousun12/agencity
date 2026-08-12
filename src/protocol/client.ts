@@ -22,6 +22,8 @@ import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInpu
 import type { ProductBranchSummary } from "../product/index.ts";
 
 
+const PROTOCOL_STREAM_ITEMS_PER_TURN = 32;
+
 export interface ProtocolCapabilities {
   readonly protocol: "agencity.protocol";
   readonly version: 1;
@@ -502,8 +504,16 @@ async function readProtocolStream(
   let buffer = "";
   let eventName = "message";
   let dataLines: string[] = [];
+  let itemsSinceYield = 0;
   const dispatch = async (): Promise<void> => {
-    if (dataLines.length) await onItem(eventName, dataLines.join("\n"));
+    if (dataLines.length) {
+      await onItem(eventName, dataLines.join("\n"));
+      itemsSinceYield++;
+      if (itemsSinceYield >= PROTOCOL_STREAM_ITEMS_PER_TURN) {
+        itemsSinceYield = 0;
+        await yieldProtocolStreamTurn(signal);
+      }
+    }
     eventName = "message";
     dataLines = [];
   };
@@ -530,4 +540,17 @@ async function readProtocolStream(
     try { await reader.cancel(); } catch {}
     reader.releaseLock();
   }
+}
+
+async function yieldProtocolStreamTurn(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
+  await new Promise<void>((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, 0);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }

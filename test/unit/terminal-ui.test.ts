@@ -646,8 +646,32 @@ describe("FU-005 protocol-backed terminal UI", () => {
     const rawPrefix = '{"protocol":"agencity.agent-action","version":1,';
     const rawSuffix = '"type":"typescript","code":"secret-internal-command"}';
 
-    await handlers!.onProgress?.(progress(initialEffectId, rawPrefix));
+    let presentationUpdates = 0;
+    const unsubscribePresentation = ui.subscribePresentation(() => { presentationUpdates++; });
+    const updatesBeforeProgress = presentationUpdates;
+    for (let sequence = 0; sequence < 256; sequence++) {
+      await handlers!.onProgress?.(progress(
+        initialEffectId,
+        sequence === 0 ? rawPrefix : "ignored-agent-delta",
+        sequence,
+      ));
+    }
+    await Bun.sleep(10);
+    expect(presentationUpdates - updatesBeforeProgress).toBe(1);
+    unsubscribePresentation();
     await handlers!.onProgressDiscard?.([initialEffectId], "disconnect");
+
+    presentationUpdates = 0;
+    const unsubscribeBurstPresentation = ui.subscribePresentation(() => { presentationUpdates++; });
+    const updatesBeforeLegacyBurst = presentationUpdates;
+    for (let sequence = 0; sequence < 64; sequence++) {
+      await handlers!.onProgress?.(progress("legacy-burst-effect", "x", sequence));
+    }
+    await Bun.sleep(10);
+    expect(presentationUpdates - updatesBeforeLegacyBurst).toBe(1);
+    unsubscribeBurstPresentation();
+    await handlers!.onProgressDiscard?.(["legacy-burst-effect"], "committed");
+
     const beforeReconnect = output;
     await handlers!.onReconnect?.(2, "00000000000000000042");
     expect(output).toBe(beforeReconnect);

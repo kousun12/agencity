@@ -373,6 +373,7 @@ export class TerminalUI {
   readonly #manageSignals: boolean;
   readonly #interrupts = new TerminalInterruptPolicy();
   readonly #presentationListeners = new Set<TerminalPresentationListener>();
+  #presentationTimer: ReturnType<typeof setTimeout> | null = null;
   #sessionId = "";
   #branchId = "";
   #productCatalog = false;
@@ -1004,7 +1005,7 @@ export class TerminalUI {
             if (progressRunId === runId) this.#agentProgressRunByEffect.delete(effectId);
           }
         }
-        this.#publish();
+        this.#publishDeferred();
         if (FAMILY_REFRESH_EVENT_TYPES.has(event.type)) void this.#refreshFamily();
         if (REFINEMENT_REFRESH_EVENT_TYPES.has(event.type)) void this.#refreshRefinementReviews();
       },
@@ -1013,18 +1014,29 @@ export class TerminalUI {
         const text = progress.kind === "model-output-delta" && progress.value && typeof progress.value === "object" && "text" in progress.value
           ? String((progress.value as { text: string }).text)
           : "";
-        const runId = this.#agentRunIdForEffect(progress.effectId);
+        const runId = this.#agentProgressRunByEffect.get(progress.effectId)
+          ?? this.#agentRunIdForEffect(progress.effectId);
         if (runId !== null) {
+          let changed = false;
           if (this.#historicalCursor === null) {
-            this.#visibleProgressEffectIds.add(progress.effectId);
-            this.#agentProgressRunByEffect.set(progress.effectId, runId);
-            this.#agentWorkingRunIds.add(runId);
+            if (!this.#visibleProgressEffectIds.has(progress.effectId)) {
+              this.#visibleProgressEffectIds.add(progress.effectId);
+              changed = true;
+            }
+            if (this.#agentProgressRunByEffect.get(progress.effectId) !== runId) {
+              this.#agentProgressRunByEffect.set(progress.effectId, runId);
+              changed = true;
+            }
+            if (!this.#agentWorkingRunIds.has(runId)) {
+              this.#agentWorkingRunIds.add(runId);
+              changed = true;
+            }
             if (!this.#agentWorkingAnnouncementRunIds.has(runId)) {
               this.#agentWorkingAnnouncementRunIds.add(runId);
               this.#write("[agent working…]\n");
             }
           }
-          this.#publish();
+          if (changed) this.#publishDeferred();
           return;
         }
         if (!text || this.#historicalCursor !== null) return;
@@ -1033,7 +1045,7 @@ export class TerminalUI {
         this.#progress.set(progress.effectId, (this.#progress.get(progress.effectId) ?? "") + text);
         if (this.options.onProvisionalOutput) this.options.onProvisionalOutput(progress.effectId, text);
         else this.#write(text);
-        this.#publish();
+        this.#publishDeferred();
       },
       onProgressDiscard: (ids, reason) => {
         if (!currentRoute()) return;
@@ -1052,7 +1064,7 @@ export class TerminalUI {
         }
         this.options.onProvisionalDiscard?.(ids, reason);
         if (discardedVisibleProgress && !this.options.onProvisionalDiscard) this.#write("\n[provisional progress discarded after connection loss]\n");
-        this.#publish();
+        this.#publishDeferred();
       },
       onReconnect: () => {
         if (!currentRoute()) return;
@@ -1262,7 +1274,7 @@ export class TerminalUI {
     const branchId = this.#branchId;
     const generation = ++this.#refinementGeneration;
     this.#refinementRefresh = "refreshing";
-    this.#publish();
+    this.#publishDeferred();
     try {
       const records = await this.client.refinementReviews(sessionId, branchId);
       if (generation !== this.#refinementGeneration ||
@@ -1312,7 +1324,7 @@ export class TerminalUI {
     if (!state) return;
     const generation = ++this.#familyGeneration;
     this.#family = { ...this.#family, refresh: "refreshing", generation };
-    this.#publish();
+    this.#publishDeferred();
     try {
       const family = await this.client.agents(sessionId, branchId);
       const parent = family.items.find(item => item.relationship === "parent") ?? null;
@@ -1515,6 +1527,21 @@ export class TerminalUI {
   }
   #write(value:string):void{if(this.options.onOutput)this.options.onOutput(value);else this.#output.write(value);}
   #publish():void{
+    if(this.#presentationTimer!==null){
+      clearTimeout(this.#presentationTimer);
+      this.#presentationTimer=null;
+    }
+    this.#emitPresentation();
+  }
+  #publishDeferred():void{
+    if(!this.#viewState||!this.#capabilities||this.#presentationListeners.size===0||this.#presentationTimer!==null)return;
+    this.#presentationTimer=setTimeout(()=>{
+      this.#presentationTimer=null;
+      this.#emitPresentation();
+    },0);
+    this.#presentationTimer.unref?.();
+  }
+  #emitPresentation():void{
     if(!this.#viewState||!this.#capabilities)return;
     const presentation=this.presentation;
     for(const listener of this.#presentationListeners)listener(presentation);
