@@ -933,7 +933,11 @@ export class OpenTuiApp {
     } else {
       this.#leaveModelEntry();
     }
-    this.#resetDetailScroll = true;
+    this.#resetDetailScroll = this.#modelEntryProvider === null;
+    if (!this.#resetDetailScroll && this.#detailScrollTimer) {
+      clearTimeout(this.#detailScrollTimer);
+      this.#detailScrollTimer = null;
+    }
     this.#render();
   }
 

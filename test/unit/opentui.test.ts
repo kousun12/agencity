@@ -831,6 +831,9 @@ describe("OpenTUI interactive terminal", () => {
     const composer = setup.renderer.root.findDescendantById(
       "agencity-composer",
     ) as TextareaRenderable;
+    const details = setup.renderer.root.findDescendantById(
+      "agencity-details",
+    ) as ScrollBoxRenderable;
     const secret = "hidden-openai-provider-key-123456";
     try {
       await setup.mockInput.typeText("/model");
@@ -876,6 +879,11 @@ describe("OpenTUI interactive terminal", () => {
       frame = await setup.waitForFrame(value =>
         value.includes("> Catalog Model 10") && value.includes("Models 3–10 of 14"));
       expect(frame).not.toContain("Catalog Model 01");
+      expect(details.scrollTop).toBeGreaterThan(0);
+      await terminal.execute("/model");
+      await Bun.sleep(20);
+      await setup.waitForFrame(value => value.includes("> Catalog Model 10"));
+      expect(details.scrollTop).toBeGreaterThan(0);
       await setup.mockInput.typeText("Zero");
       frame = await setup.waitForFrame(value => value.includes("␛[31m Zero"));
       expect(frame).not.toContain("\u001b[31m");

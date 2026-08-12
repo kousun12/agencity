@@ -123,6 +123,15 @@ describe("session-independent product prompter", () => {
     input.write("\u001b");
     input.write("[B");
     input.write("\u001b[A");
+    for (const sequence of [
+      "\u001b[D",
+      "\u001b[C",
+      "\u001b[H",
+      "\u001b[F",
+      "\u001b[3~",
+    ]) {
+      input.write(sequence);
+    }
     input.write("\r");
 
     expect((await selection).name).toBe("openai");
@@ -317,6 +326,29 @@ describe("session-independent product prompter", () => {
     await settles();
     expect(output.text).toBe(outputAtCancellation);
     expect(input.listenerCount("data")).toBe(0);
+  });
+
+  test("clears a pending Escape timer when catalog loading completes", async () => {
+    const { input, prompter } = harness();
+    let resolveCatalog!: (value: ProductCatalogSelectionResult) => void;
+    const catalog = new Promise<ProductCatalogSelectionResult>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    const selection = prompter.selectModel(
+      provider("openai", "OpenAI"),
+      catalog,
+    );
+    input.write("\u001b");
+    resolveCatalog({
+      status: "refreshed",
+      descriptors: [descriptor("openai/model-v1", "Model")],
+    });
+    await settles();
+    await Bun.sleep(30);
+    expect(input.listenerCount("data")).toBe(1);
+    expect(input.isRaw).toBe(true);
+    input.write("openai/model-v1\r");
+    expect(await selection).toBe("openai/model-v1");
   });
 
   test("maps rejected and unavailable catalogs truthfully and sanitizes errors", async () => {

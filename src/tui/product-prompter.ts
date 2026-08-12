@@ -275,6 +275,7 @@ export class ProductPrompter {
         drawCurrent();
         void normalizeCatalogRequest(catalogRequest).then((result) => {
             if (!loading) return;
+            owner.clearEscapeTimer();
             loading = false;
             catalog = result;
             state.options = rankModelOptions(
@@ -665,22 +666,20 @@ function createPickerInputParser<T extends { readonly identity: string }>(
         paste = true;
         continue;
       }
-      if (isPrefixOf(pending, BRACKETED_PASTE_START)) return;
-      if (pending.startsWith("\u001b[A")) {
-        pending = pending.slice(3);
-        move(-1);
-        continue;
-      }
-      if (pending.startsWith("\u001b[B")) {
-        pending = pending.slice(3);
-        move(1);
-        continue;
-      }
-      if (pending === "\u001b" || pending === "\u001b[" ||
-          pending === "\u001b[2" || pending === "\u001b[20" ||
-          pending === "\u001b[200" || pending === "\u001b[200~") {
+      if (pending === "\u001b") {
         options.owner.setEscapeTimer(cancel);
         return;
+      }
+      const csi = takeCsiSequence(pending);
+      if (csi === "partial") {
+        options.owner.setEscapeTimer(cancel);
+        return;
+      }
+      if (csi !== null) {
+        pending = pending.slice(csi.length);
+        if (csi.sequence === "\u001b[A") move(-1);
+        else if (csi.sequence === "\u001b[B") move(1);
+        continue;
       }
       const character = Array.from(pending)[0]!;
       pending = pending.slice(character.length);
@@ -723,14 +722,18 @@ function createLoadingInputParser(
     pending += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
     owner.clearEscapeTimer();
     while (pending) {
-      if (pending.startsWith("\u001b[A") ||
-          pending.startsWith("\u001b[B")) {
-        pending = pending.slice(3);
-        continue;
-      }
-      if (pending === "\u001b" || pending === "\u001b[") {
+      if (pending === "\u001b") {
         owner.setEscapeTimer(cancel);
         return;
+      }
+      const csi = takeCsiSequence(pending);
+      if (csi === "partial") {
+        owner.setEscapeTimer(cancel);
+        return;
+      }
+      if (csi !== null) {
+        pending = pending.slice(csi.length);
+        continue;
       }
       const character = Array.from(pending)[0]!;
       pending = pending.slice(character.length);
@@ -869,4 +872,26 @@ function longestSuffixPrefix(value: string, complete: string): number {
     if (complete.startsWith(value.slice(-size))) return size;
   }
   return 0;
+}
+
+function takeCsiSequence(
+  value: string,
+): { readonly sequence: string; readonly length: number } | "partial" | null {
+  if (!value.startsWith("\u001b[")) return null;
+  for (let index = 2; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0x40 && code <= 0x7e) {
+      return {
+        sequence: value.slice(0, index + 1),
+        length: index + 1,
+      };
+    }
+    if (
+      !((code >= 0x20 && code <= 0x2f) ||
+        (code >= 0x30 && code <= 0x3f))
+    ) {
+      return null;
+    }
+  }
+  return "partial";
 }
