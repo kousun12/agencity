@@ -2,13 +2,13 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-07
-- **Scope:** Root agents, delegated agents, recursive model calls, tasks, and mailboxes
+- **Scope:** Root agents, delegated agent invocations, retained private recursive operations, raw generation distinction, tasks, and mailboxes
 - **Extends:** [ADR 0001](./0001-durable-local-runtime-foundations.md)
 - **Extended by:** [ADR 0012](./0012-durable-agent-profiles-automated-refinement-governance.md), which adds durable per-session behavioral profiles without changing relationship boundaries
 
 ## Context
 
-Delegated work and recursive model calls can outlive the cell or process that starts them. Returning an anonymous string from an in-memory helper would lose task ownership, budget attribution, cancellation state, provenance, and the ability to resume or follow up. Separate root-agent, subagent, and recursive-call runtimes would also create inconsistent recovery and authority rules.
+Delegated work can outlive the cell, client, or process that starts it. Returning only an anonymous string from an in-memory helper would lose task ownership, budget attribution, cancellation state, provenance, and the ability to resume or follow up. Separate root-agent, subagent, and sealed recursive-operation runtimes would also create inconsistent recovery and authority rules.
 
 ## Decision
 
@@ -16,7 +16,9 @@ Root agents, delegated subagents, and isolated recursive model calls use the sam
 
 One-request raw AI generation is not an agent relationship. `ai.generateText` and `ai.generateObject` belong to the calling session and branch, retain their own request, context, effect, result, usage, and budget events, and create no child session, task, profile, mailbox, or family edge. Supervisor-private recursive operations continue to use the durable child model when a sealed workflow requires retained agent identity.
 
-Child admission validates ancestry, model policy, child limits, budget reservations, and stable idempotency in one transaction. Batch admission is all-or-nothing. Child limits cannot widen parent limits, and terminal usage is attributed to ancestors exactly once. Unknown usage consumes unresolved reservations conservatively.
+Public full-agent calls use one typed invocation lifecycle. `run` waits for a child result, while `spawn` always starts detached-running work and returns the durable handle immediately. Both pin text or restricted declared-object output before model execution. Later `result` lookup, terminal notices, task state, and the calling cell resolve the same retained result reference. There is no public recursive-model admission alias and no spawn `run` boolean.
+
+Child admission validates ancestry, model policy, child limits, budget reservations, console capacity for awaited dependencies, and stable idempotency in one transaction. Batch admission is all-or-nothing. Child limits cannot widen parent limits, and terminal usage is attributed to ancestors exactly once. Unknown usage consumes unresolved reservations conservatively.
 
 Parent and child sessions communicate through durable mailboxes. Sends, recipient delivery, acknowledgements, and task terminal notices are retained across the relevant session streams. Messaging is limited to authorized relationships within one root family. Cancellation propagates through admitted descendants and recovery completes any committed cancellation or delivery prefix.
 
@@ -31,6 +33,7 @@ Retained children support bounded follow-up in the same session after terminal w
 - One family model enforces consistent ancestry, ownership, budget, and recovery semantics.
 - Durable admission and mailbox records add state and coordination overhead.
 - A parent can detach and later inspect or continue a retained child without recreating it.
+- Awaited and detached calls share one child lifecycle without making a parent-cell loop durable identity.
 - Recursive calls are not a bypass around provider limits, model policy, effect recovery, or task budgets.
 - Raw generation remains attributable and recoverable without manufacturing a child relationship.
 
@@ -41,5 +44,6 @@ Retained children support bounded follow-up in the same session after terminal w
 3. **Create a separate recursive-provider engine.** Rejected because it would bypass shared outbox, concurrency, budget, and recovery rules.
 4. **Allow arbitrary cross-session messaging.** Rejected because durable task ownership and root-family authority define the communication boundary.
 5. **Permit children to widen model or budget authority.** Rejected because delegation cannot expand the parent's authority.
+6. **Keep separate public recursive-model and agent APIs.** Rejected because overlapping names teach incompatible raw-generation, awaited-agent, and detached-agent semantics.
 
 The implementation does not provide distributed task stealing, global budget reservation, or automatic execution-owner failover. Durable relationships are retained runtime state, not a multi-tenant authorization boundary.

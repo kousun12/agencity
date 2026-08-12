@@ -1,6 +1,15 @@
 import type { JsonValue } from "../domain/json.ts";
 import type { CellLogStream } from "../domain/events.ts";
-import type { ConsoleSdk, HarnessReviewInput, SqlTag } from "./sdk.ts";
+import type {
+  ConsoleAgentHandle,
+  ConsoleAgentHandleIdentity,
+  ConsoleAgentResultOptions,
+  ConsoleAgentRunResult,
+  ConsoleAgentSpawnInput,
+  ConsoleSdk,
+  HarnessReviewInput,
+  SqlTag,
+} from "./sdk.ts";
 import {
   MAX_CELL_OBSERVATION_JSON_BYTES,
   encodeObservation,
@@ -299,13 +308,46 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     propose: (instructions:string,scope:"local"|"workspace"="workspace") => call("skills.propose",[instructions,scope]),
   };
   const specs = { spawn: (entryId:string,input:JsonValue={}) => call("specs.spawn",[entryId,input]) };
+  const agentResult = <I extends ConsoleAgentSpawnInput | string>(
+    handle: string | ConsoleAgentHandleIdentity<I>,
+    options: ConsoleAgentResultOptions = {},
+  ) =>
+    call("agents.result", [
+      typeof handle === "string" ? handle : { taskId: handle.taskId },
+      options,
+    ]) as Promise<ConsoleAgentRunResult<I>>;
+  const attachAgentHandle = <I extends ConsoleAgentSpawnInput | string>(
+    raw: unknown,
+  ): ConsoleAgentHandle<I> => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) ||
+        typeof (raw as Record<string, unknown>).taskId !== "string") {
+      throw new Error("Agent spawn returned an invalid handle");
+    }
+    const handle = raw as ConsoleAgentHandle<I>;
+    Object.defineProperty(handle, "result", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: (options: ConsoleAgentResultOptions = {}) =>
+        agentResult(handle.taskId, options),
+    });
+    return handle;
+  };
   const agents = {
-    spawn: (input: unknown) => call("agents.spawn", [normalizeAgentInput(input)]),
-    spawnMany: (inputs: unknown[]) => call("agents.spawnMany", [inputs.map(normalizeAgentInput)]),
+    spawn: async (input: unknown) =>
+      attachAgentHandle(await call("agents.spawn", [normalizeAgentInput(input)])),
+    spawnMany: async (inputs: unknown[]) => {
+      const raw = await call("agents.spawnMany", [
+        inputs.map(normalizeAgentInput),
+      ]);
+      if (!Array.isArray(raw)) {
+        throw new Error("Agent spawnMany returned invalid handles");
+      }
+      return raw.map((handle) => attachAgentHandle(handle));
+    },
     run: (input: unknown) => call("agents.run", [normalizeAgentInput(input)]),
     runMany: (inputs: unknown[]) => call("agents.runMany", [inputs.map(normalizeAgentInput)]),
-    result: (handle: string | { taskId: string }, options: Record<string, unknown> = {}) =>
-      call("agents.result", [handle, options]),
+    result: agentResult,
     get: (target?: string) => call("agents.get", [target]),
     proposeProfileUpdate: (target: string | undefined, input: unknown, options: Record<string, unknown> = {}) =>
       call("agents.proposeProfileUpdate", [target, input, options]),

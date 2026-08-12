@@ -70,9 +70,11 @@ Direct `Supervisor.open` and managed-service embedding support three console-cap
 
 All three values must be positive integers. Awaited `agents.run` and `runMany` reserve their immediate resident slots before child admission. Detached `spawn` does not reserve awaited capacity and may queue.
 
+Raw `ai.generateText`/`generateObject` and full `sdk.agents.run`/`spawn` accept the same optional model-selection shape: a canonical `provider:creator/model` string at product boundaries or `{ provider, model, reasoningEffort? }` in typed APIs. Selection may keep the caller's exact model or narrow to an owner-allowed delegated model; it cannot widen the configured allowlist, credentials, budget, provider concurrency, output bounds, or reasoning capability. Per-call budgets similarly narrow the caller's remaining token, cost, turn, wall-time, input, output, and inline-result limits.
+
 ### Initial agent profiles
 
-An agent profile is session-owned workspace state, not a profile-database preference. Ordinary product root creation uses the sealed repository-agent profile. The public TypeScript and HTTP APIs may instead supply a complete `{ role, purpose, instructions }` value when creating a root. Delegated and recursive spawn inputs may supply the same explicit shape and otherwise use the sealed task-specialist profile; specification spawn derives it from the exact specification version.
+An agent profile is session-owned workspace state, not a profile-database preference. Ordinary product root creation uses the sealed repository-agent profile. The public TypeScript and HTTP APIs may instead supply a complete `{ role, purpose, instructions }` value when creating a root. Delegated agent inputs may supply the same explicit shape and otherwise use the sealed task-specialist profile; specification spawn derives it from the exact specification version. Supervisor-private sealed recursive operations use the same profile rules but are not a public console admission surface.
 
 There is no environment variable or profile-database preference that changes initial-profile templates. Existing sessions retain the exact initial profile committed in workspace history. Route-relative `agencity profile` and `/profile` operations inspect and propose later immutable revisions or restore an exact earlier revision; they do not rewrite the initial version.
 

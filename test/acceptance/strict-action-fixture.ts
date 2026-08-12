@@ -5,6 +5,9 @@ export interface FixtureProbe {
   readonly proposalId: string | null;
   readonly streaming: boolean;
   readonly model: string;
+  readonly messageRoles: readonly string[];
+  readonly allMessageText: string;
+  readonly firstUserText: string;
   readonly lastUserText: string;
   readonly toolNames: readonly string[];
   readonly toolChoice: string | null;
@@ -131,6 +134,12 @@ export class StrictActionFixture {
     };
     if (typeof body.model !== "string" || !Array.isArray(body.messages)) return new Response("invalid request", { status: 400 });
     const lastUser = [...body.messages].reverse().find(item => item.role === "user");
+    const firstUser = body.messages.find(item => item.role === "user");
+    const messageRoles = body.messages.map(item => String(item.role ?? ""));
+    const allMessageText = body.messages.map(item =>
+      messageText(item.content)
+    ).join("\n");
+    const firstUserText = messageText(firstUser?.content);
     const lastUserText = messageText(lastUser?.content);
     const durable = this.readDurableStep(lastUserText);
     const toolNames = Array.isArray(body.tools)
@@ -154,6 +163,9 @@ export class StrictActionFixture {
       proposalId,
       streaming: body.stream === true,
       model: body.model,
+      messageRoles,
+      allMessageText,
+      firstUserText,
       lastUserText,
       toolNames,
       toolChoice: typeof body.tool_choice === "string" ? body.tool_choice : null,
@@ -170,10 +182,17 @@ export class StrictActionFixture {
     if (gate) await Promise.race([gate.promise, new Promise<void>(resolve => request.signal.addEventListener("abort", () => resolve(), { once: true }))]);
     if (request.signal.aborted) return new Response(null, { status: 499 });
 
+    const rawStep = durable || governanceStep !== null
+      ? null
+      : this.requests.filter(item =>
+          item.task === null &&
+          item.governanceStep === null &&
+          item.firstUserText === firstUserText
+        ).length;
     const selected = durable
       ? this.scripts.get(durable.task)?.[durable.stepOrdinal - 1]
       : governanceStep === null
-        ? undefined
+        ? this.scripts.get(firstUserText)?.[(rawStep ?? 1) - 1]
         : this.governanceScripts[governanceStep - 1];
     const reviewId = JSON.stringify(body.messages).match(/refinement-review-[a-f0-9]{32}/)?.[0];
     const fallback: Reply = durable
@@ -290,6 +309,7 @@ function split(text: string, parts: number): string[] {
 
 function formalToolCall(reply: Record<string, unknown>): { name: string; arguments: string } | null {
   if ((reply.name === "bun_console" || reply.name === "finish" ||
+      reply.name === "agencity_submit_object" ||
       reply.name === "agencity_submit_refinement_review" ||
       reply.name === "agencity_submit_refinement_governance_decision") &&
       reply.input && typeof reply.input === "object" && !Array.isArray(reply.input)) {

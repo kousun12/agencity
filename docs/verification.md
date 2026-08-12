@@ -41,7 +41,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 
 These are static constraints. They do not replace replay, recovery, protocol, security, or product behavior tests.
 
-`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-5 event replay and reducer-16 rebuild, typed effect origins, exact provider-input admission, bounded observation ownership, bounded shell/file/artifact/cell output, root and nested repository-instruction loading, durable initial agent profiles and prompt pins, branch-scoped warm scratch, bounded fenced local scratch checkpoints and recovery, disposable console behavior, outbox recovery, explicit raw text/object generation and its cancellation/budget/context boundaries, formal autonomous actions, structured refinement, retained terminal refinement outcomes across reopen, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, one-hour managed-service defaults and keep-alive behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
+`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-5 event replay and reducer-18 rebuild, typed effect origins, exact provider-input admission, bounded observation ownership, bounded shell/file/artifact/cell output, root and nested repository-instruction loading, durable initial agent profiles and prompt pins, branch-scoped warm scratch, bounded fenced local scratch checkpoints and recovery, branch-aware console capacity, outbox recovery, explicit raw text/object generation and its cancellation/budget/context boundaries, typed text/object child-agent results and retained lifecycle lookup, formal autonomous actions, structured refinement, retained terminal refinement outcomes across reopen, recursive sessions and mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, one-hour managed-service defaults and keep-alive behavior, model streaming semantics, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
 
 Those tests use local fixtures, temporary databases, deterministic providers, and in-process or loopback test services where appropriate. A pass supports the behaviors exercised by those tests. It does not establish hostile-code isolation, exactly-once external effects, automatic cross-device failover, or correctness at every possible machine-instruction crash boundary.
 
@@ -63,7 +63,10 @@ The suite uses a local OpenAI API fixture reached through the Vercel AI SDK tran
 - compact cell observations, bounded durable-state use, warm scratch across cells, and truthful same-device scratch restore/reconstruction after managed worker and service loss;
 - unexpected large shell output, bounded spill delivery, and focused exact artifact-range recovery before completion;
 - exact root and child provider tool sets, single-call cardinality, narration-plus-call acceptance, and no text-JSON fallback;
-- child agents, messages, retained follow-up, and the sealed recursive refinement path;
+- raw text generation, raw object generation through real worker-side Zod conversion, and explicit-context-only provider inputs;
+- awaited text/object child agents, detached spawn/result, nested child/grandchild execution, and pre-admission capacity failure;
+- typed child recovery across committed parent-worker/service loss and installed-client loss without duplicate admission;
+- child messages, retained follow-up, and the sealed recursive refinement path;
 - sealed structured refinement submission with a message-free typed child result;
 - failed completion-gate repair;
 - detach, client loss, managed-service recovery, one-hour typed and human status, resume, named branching, tree, status, and history;
@@ -82,6 +85,19 @@ The integration suite also verifies declaration-only AI SDK tools for OpenAI, An
 It records a focused family-projection benchmark with 25 relatives and branch histories expanded to 5,000 canonical event records at the storage boundary. It proves that a cold read projects each route once and that a warm refresh reuses current snapshots without replaying the 130,000 retained events. Controller tests separately prove that periodic family refresh requests are coalesced, never overlap, do not accumulate a timer backlog, and stop when the browser is closed and no child is actively working. Workspace Agents catalog tests cover explicit one-shot refresh, stale-row retention, superseded-response rejection, and exact product selection without adding a polling loop.
 
 The package is private. This verifies the documented source and `bun link` workflow; it is not evidence of a package-registry or standalone-binary release.
+
+### Explicit AI and typed-agent cutover evidence
+
+On August 11, 2026, focused Phase 5 verification passed:
+
+- prompt, raw-generation, retained private recursive-operation, and branch-aware console-pool tests: 38 passed, 0 failed, 0 skipped;
+- agent-run, family-agent, and managed-service integration tests: 81 passed, 0 failed, 0 skipped;
+- installed linked-executable Phase 5 acceptance plus the public-boundary source guard: 6 passed, 0 failed, 0 skipped;
+- TypeScript typecheck: passed.
+
+The installed cases use only `bun link`, the public CLI, managed loopback protocol, and generated console SDK. They cover one raw text request, one declared-object request with real Zod conversion, default text and schema-constrained child results, detached `handle.result` lookup with a JSON-compatible non-durable method, nested awaited child/grandchild execution, exact-once recovery after parent worker/service loss, continued awaited work after client loss, and `CONSOLE_CAPACITY_EXCEEDED` before grandchild admission. The provider fixture requires no external credential.
+
+The complete aggregate `bun run verify` gate is reserved for final repository verification and is not claimed by this phase entry. Live-provider, official Turso Sync server, and Turso Cloud checks were not run; they remain gated and unverified.
 
 ### Default automatic-learning verification
 

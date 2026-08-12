@@ -150,7 +150,11 @@ export interface ConsoleAgentSpawnInput {
   readonly model?: string | ModelConfigurationInput; readonly budget?: BudgetLimits; readonly idempotencyKey?: string;
   readonly output?: { readonly schema: unknown };
 }
-export interface ConsoleAgentHandle<I = ConsoleAgentSpawnInput | string> {
+export interface ConsoleAgentResultOptions {
+  readonly wait?: boolean;
+  readonly timeoutMs?: number;
+}
+export interface ConsoleAgentHandleIdentity<I = ConsoleAgentSpawnInput | string> {
   readonly taskId: string;
   readonly runId: string;
   readonly sessionId: string;
@@ -163,6 +167,14 @@ export interface ConsoleAgentHandle<I = ConsoleAgentSpawnInput | string> {
   readonly name?: string;
   /** Type-only carrier for the invocation input; never serialized. */
   readonly __input?: I;
+}
+export interface ConsoleAgentHandle<I = ConsoleAgentSpawnInput | string>
+  extends ConsoleAgentHandleIdentity<I> {
+  /**
+   * Worker-local convenience for retained result lookup. The method is
+   * non-enumerable and is not part of the durable or JSON-serialized handle.
+   */
+  result(options?: ConsoleAgentResultOptions): Promise<ConsoleAgentRunResult<I>>;
 }
 export type ConsoleAgentRunOutput<I> =
   I extends { readonly output: { readonly schema: infer S } }
@@ -205,8 +217,8 @@ export interface AgentsSdk {
     readonly [K in keyof I]: ConsoleAgentRunResult<I[K]>;
   }>;
   result<I extends ConsoleAgentSpawnInput | string>(
-    handle: string | ConsoleAgentHandle<I>,
-    options?: { readonly wait?: boolean; readonly timeoutMs?: number },
+    handle: string | ConsoleAgentHandleIdentity<I>,
+    options?: ConsoleAgentResultOptions,
   ): Promise<ConsoleAgentRunResult<I>>;
   get(target?: string): Promise<JsonValue>;
   proposeProfileUpdate(target: string | undefined, input: {
