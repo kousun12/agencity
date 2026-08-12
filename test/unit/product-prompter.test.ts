@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 import {
   ProductPrompter,
+  ProductPromptCancelledError,
   type ProductCatalogSelectionResult,
 } from "../../src/tui/product-prompter.ts";
 import type {
@@ -175,15 +176,19 @@ describe("session-independent product prompter", () => {
 
   test("cancels on Ctrl-C and Ctrl-D with complete cleanup", async () => {
     for (const key of ["\u0003", "\u0004"]) {
-      const { input, prompter } = harness();
+      const { input, output, prompter } = harness();
       const selection = prompter.selectProvider([
         provider("openai", "OpenAI"),
         provider("anthropic", "Anthropic"),
       ]);
       input.write(key);
-      await expect(selection).rejects.toThrow("cancelled");
+      await expect(selection).rejects.toBeInstanceOf(
+        ProductPromptCancelledError,
+      );
       expect(input.listenerCount("data")).toBe(0);
       expect(input.isRaw).toBe(false);
+      expect(output.writes.at(-1)).toEndWith("\r");
+      expect(output.writes.at(-1)).toContain("\u001b[2K");
     }
   });
 
@@ -317,7 +322,9 @@ describe("session-independent product prompter", () => {
       catalog,
     );
     input.write("\u001b");
-    await expect(selection).rejects.toThrow("cancelled");
+    await expect(selection).rejects.toBeInstanceOf(
+      ProductPromptCancelledError,
+    );
     const outputAtCancellation = output.text;
     resolveCatalog({
       status: "refreshed",

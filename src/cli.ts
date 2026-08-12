@@ -54,7 +54,10 @@ import {
 } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 import { OpenTerminalUI } from "./tui/opentui.ts";
-import { ProductPrompter } from "./tui/product-prompter.ts";
+import {
+  ProductPrompter,
+  ProductPromptCancelledError,
+} from "./tui/product-prompter.ts";
 
 const REQUIRED_BUN_VERSION = "1.3.13";
 const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact"]);
@@ -71,20 +74,27 @@ try {
     await main(activeParsed);
   }
 } catch (error) {
-  const canonical = activeParsed?.advanced?.source === "canonical"
-    ? { path: activeParsed.advanced.path, json: activeParsed.flags.has("json") }
-    : canonicalHint;
-  const code = error instanceof AgentRuntimeError ? error.code : canonical ? "VALIDATION_ERROR" : "CLI_ERROR";
-  const message = scrubText(error instanceof Error ? error.message : String(error));
-  if (canonical || (activeParsed?.command === "run" && activeParsed.flags.has("json"))) {
-    const command = canonical?.path ?? "run";
-    const plan = planCliOutput(createCliErrorEnvelope({ command, code, message }), canonical ? (canonical.json ? "json" : "human") : "json");
-    if (plan.stdout !== null) process.stdout.write(`${plan.stdout}\n`);
-    if (plan.stderr !== null) process.stderr.write(`${plan.stderr}\n`);
-    process.exitCode = plan.exitCode;
+  if (error instanceof ProductPromptCancelledError) {
+    // The raw picker restores the caller's input ownership. At the process
+    // boundary there is no next owner, so release stdin before exiting.
+    process.stdin.pause();
+    process.exitCode = 0;
   } else {
-    console.error(`Agencity error [${code}]: ${message}`);
-    process.exitCode = 1;
+    const canonical = activeParsed?.advanced?.source === "canonical"
+      ? { path: activeParsed.advanced.path, json: activeParsed.flags.has("json") }
+      : canonicalHint;
+    const code = error instanceof AgentRuntimeError ? error.code : canonical ? "VALIDATION_ERROR" : "CLI_ERROR";
+    const message = scrubText(error instanceof Error ? error.message : String(error));
+    if (canonical || (activeParsed?.command === "run" && activeParsed.flags.has("json"))) {
+      const command = canonical?.path ?? "run";
+      const plan = planCliOutput(createCliErrorEnvelope({ command, code, message }), canonical ? (canonical.json ? "json" : "human") : "json");
+      if (plan.stdout !== null) process.stdout.write(`${plan.stdout}\n`);
+      if (plan.stderr !== null) process.stderr.write(`${plan.stderr}\n`);
+      process.exitCode = plan.exitCode;
+    } else {
+      console.error(`Agencity error [${code}]: ${message}`);
+      process.exitCode = 1;
+    }
   }
 }
 

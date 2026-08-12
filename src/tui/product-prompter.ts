@@ -80,6 +80,14 @@ class SetupSignalError extends Error {
   }
 }
 
+/** Expected user cancellation of an interactive setup prompt. */
+export class ProductPromptCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProductPromptCancelledError";
+  }
+}
+
 /**
  * Session-independent product prompting. Raw operations exclusively own input
  * and restore terminal state before readline or the full-screen TUI resumes.
@@ -174,7 +182,9 @@ export class ProductPrompter {
             }
             if (isCancellation(character)) {
               owner.fail(
-                new ValidationError("Provider credential entry was cancelled"),
+                new ProductPromptCancelledError(
+                  "Provider credential entry was cancelled",
+                ),
               );
               return;
             }
@@ -451,6 +461,7 @@ export class ProductPrompter {
     let dataListener: ((chunk: Buffer | string) => void) | null = null;
     let escapeTimer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
+    let cancelled = false;
     const signalHandlers = new Map<CatchableSignal, () => void>();
     const onInputError = (error: unknown): void => failResult(error);
     const onOutputError = (error: unknown): void => failResult(error);
@@ -544,6 +555,7 @@ export class ProductPrompter {
       if (error instanceof SetupSignalError) {
         queueMicrotask(() => process.kill(process.pid, error.signal));
       }
+      cancelled = error instanceof ProductPromptCancelledError;
       throw error;
     } finally {
       if (escapeTimer !== null) clearTimeout(escapeTimer);
@@ -564,7 +576,8 @@ export class ProductPrompter {
         const drawnRows = this.#drawnRows;
         this.#drawnRows = 0;
         this.#write(CURSOR_SHOW);
-        if (drawnRows > 0) this.#write("\n");
+        if (cancelled && drawnRows > 0) this.#eraseDrawnRows(drawnRows);
+        else if (drawnRows > 0) this.#write("\n");
       }
     }
   }
@@ -587,6 +600,17 @@ export class ProductPrompter {
     redraw += padded.map((line) => `${CLEAR_LINE}\r${line}`).join("\n");
     this.#write(`${CURSOR_HIDE}${redraw}${CURSOR_SHOW}`);
     this.#drawnRows = rowCount;
+  }
+
+  #eraseDrawnRows(rowCount: number): void {
+    let clear = "\r";
+    if (rowCount > 1) clear += `\u001b[${rowCount - 1}A`;
+    for (let index = 0; index < rowCount; index += 1) {
+      clear += CLEAR_LINE;
+      if (index < rowCount - 1) clear += "\n";
+    }
+    if (rowCount > 1) clear += `\u001b[${rowCount - 1}A`;
+    this.#write(`${clear}\r`);
   }
 
   #columns(): number {
@@ -628,7 +652,7 @@ function createPickerInputParser<T extends { readonly identity: string }>(
     options.render();
   };
   const cancel = (): void =>
-    options.owner.fail(new ValidationError(options.cancellationMessage));
+    options.owner.fail(new ProductPromptCancelledError(options.cancellationMessage));
   const confirm = (): void => {
     const selected = options.state.options.find((option) =>
       option.identity === options.state.selectedIdentity
@@ -716,7 +740,7 @@ function createLoadingInputParser(
   let pending = "";
   const cancel = (): void => {
     onCancel();
-    owner.fail(new ValidationError(cancellationMessage));
+    owner.fail(new ProductPromptCancelledError(cancellationMessage));
   };
   return (chunk) => {
     pending += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;

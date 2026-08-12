@@ -123,7 +123,7 @@ async function command(
 
 async function runPty(
   world: TestWorld,
-  scenario: "unavailable" | "hostile" | "service-loss",
+  scenario: "unavailable" | "hostile" | "cancel" | "service-loss",
   columns: number,
   controlPath = "",
 ): Promise<PtyResult> {
@@ -236,6 +236,11 @@ elif scenario == "hostile":
     if manual_row:
         os.write(fd, b"\r")
         ready = pump(10, "Ask Agencity", picker_end)
+elif scenario == "cancel":
+    catalog_ready = pump(10, "Scarlet", picker_start)
+    picker_end = len(output)
+    if catalog_ready:
+        os.write(fd, b"\x1b")
 else:
     catalog_ready = pump(10, "Loading configured model catalog", picker_start)
     picker_end = len(output)
@@ -467,7 +472,29 @@ test.skipIf(!python || process.platform === "win32")(
 );
 
 test.skipIf(!python || process.platform === "win32")(
-  "retains the stored credential but no model or root after managed-service loss during catalog loading",
+  "exits cleanly when first-run model selection is cancelled",
+  async () => {
+    const world = await createWorld("hostile");
+    const result = await runPty(world, "cancel", 80);
+    expect(result, result.outputTail).toMatchObject({
+      providerPrompt: true,
+      keyPrompt: true,
+      catalogReady: true,
+      ready: false,
+      exitCode: 0,
+    });
+    expect(result.outputTail).not.toContain("Agencity error");
+    expect(result.outputTail).not.toContain("Model selection was cancelled");
+
+    const durable = await configAndSessions(world);
+    expect(durable.config.defaultModel).toBeNull();
+    expect(durable.sessions).toEqual([]);
+  },
+  30_000,
+);
+
+test.skipIf(!python || process.platform === "win32")(
+  "retains the stored credential but no model or root after service loss and clean picker cancellation",
   async () => {
     const world = await createWorld("delayed");
     const controlPath = join(world.directory, "service-loss-control");
@@ -487,9 +514,12 @@ test.skipIf(!python || process.platform === "win32")(
       serviceKilled: true,
     });
     expect(result.servicePid).toBeGreaterThan(0);
-    expect(result.exitCode).not.toBe(0);
+    expect(result.exitCode).toBe(0);
+    expect(result.outputTail).not.toContain("Agencity error");
+    expect(result.outputTail).not.toContain("Model selection was cancelled");
 
     world.fixture.releaseCatalog();
+    await Bun.sleep(5_500);
     const durable = await configAndSessions(world);
     expect(durable.config.defaultModel).toBeNull();
     expect(durable.sessions).toEqual([]);
