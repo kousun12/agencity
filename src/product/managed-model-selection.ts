@@ -217,7 +217,7 @@ export async function chooseManagedModel(
   const defaultProviderName = candidates.find(provider => provider.usable)?.name;
   let provider = await prompter.selectProvider(
     candidates,
-    "Choose a provider for this workspace.\n",
+    "Select a provider for this workspace.\n",
     defaultProviderName,
   );
   if (!provider.usable) {

@@ -28,6 +28,12 @@ import { scrubText } from "../security/index.ts";
 const CURSOR_HIDE = "\u001b[?25l";
 const CURSOR_SHOW = "\u001b[?25h";
 const CLEAR_LINE = "\u001b[2K";
+const ANSI_RESET = "\u001b[0m";
+const ANSI_BOLD = "\u001b[1m";
+const ANSI_DIM = "\u001b[2m";
+const ANSI_CYAN = "\u001b[36m";
+const ANSI_GREEN = "\u001b[32m";
+const ANSI_YELLOW = "\u001b[33m";
 const BRACKETED_PASTE_START = "\u001b[200~";
 const BRACKETED_PASTE_END = "\u001b[201~";
 const ESCAPE_SEQUENCE_DELAY_MS = 25;
@@ -133,7 +139,13 @@ export class ProductPrompter {
     }
     try {
       return await this.#ownRawInput<string>((owner) => {
-        owner.write(fitTerminalLine(question, this.#columns()));
+        owner.write(
+          ansiStyle(
+            fitTerminalLine(question, this.#columns()),
+            ANSI_BOLD,
+            ANSI_CYAN,
+          ),
+        );
         let answer = "";
         const decoder = new StringDecoder("utf8");
         let pending = "";
@@ -597,7 +609,9 @@ export class ProductPrompter {
 
   #draw(lines: readonly string[]): void {
     const columns = this.#columns();
-    const safe = lines.map((line) => fitTerminalLine(line, columns));
+    const safe = lines.map((line) =>
+      stylePickerLine(fitTerminalLine(line, columns))
+    );
     const rowCount = Math.max(safe.length, this.#drawnRows);
     const padded = [
       ...safe,
@@ -644,6 +658,51 @@ function providerCredentialLabel(
     return "authenticated · environment credential";
   }
   return "authenticated";
+}
+
+function stylePickerLine(line: string): string {
+  if (!line) return line;
+  const selected = line.startsWith("›");
+  if (line.includes(" · authenticated")) {
+    return ansiStyle(
+      line,
+      ...(selected ? [ANSI_BOLD, ANSI_GREEN] : [ANSI_GREEN]),
+    );
+  }
+  if (line.includes(" · not authenticated")) {
+    return ansiStyle(
+      line,
+      ...(selected ? [ANSI_BOLD, ANSI_YELLOW] : [ANSI_DIM]),
+    );
+  }
+  if (line.startsWith("Choose ")) {
+    return ansiStyle(line, ANSI_BOLD, ANSI_CYAN);
+  }
+  if (line.startsWith("Select ")) {
+    return ansiStyle(line, ANSI_DIM);
+  }
+  if (selected) {
+    return ansiStyle(line, ANSI_BOLD, ANSI_CYAN);
+  }
+  if (
+    line.startsWith("Catalog unavailable") ||
+    line.startsWith("Using cached catalog") ||
+    line.startsWith("No catalog models")
+  ) {
+    return ansiStyle(line, ANSI_YELLOW);
+  }
+  if (
+    line.startsWith("  ") ||
+    line.startsWith("Type ") ||
+    line === "Esc cancel"
+  ) {
+    return ansiStyle(line, ANSI_DIM);
+  }
+  return line;
+}
+
+function ansiStyle(line: string, ...styles: readonly string[]): string {
+  return line ? `${styles.join("")}${line}${ANSI_RESET}` : line;
 }
 
 interface PickerParserOptions<T extends { readonly identity: string }> {

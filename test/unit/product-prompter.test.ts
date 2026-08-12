@@ -170,6 +170,19 @@ describe("session-independent product prompter", () => {
     expect(output.text).toContain(
       "vercel · authenticated · stored credential",
     );
+    expect(output.text).toContain("\u001b[1m\u001b[36mChoose a provider");
+    expect(output.text).toContain(
+      "\u001b[1m\u001b[32m› Anthropic    anthropic · authenticated · environment credential",
+    );
+    expect(output.text).toContain(
+      "\u001b[2m  OpenAI    openai · not authenticated",
+    );
+    expect(output.text).toContain(
+      "\u001b[32m  Vercel AI Gateway    vercel · authenticated · stored credential",
+    );
+    expect(output.text).toContain(
+      "\u001b[2mType to filter · ↑/↓ select · Enter continue · Esc cancel",
+    );
     input.write("\r");
     expect((await selection).name).toBe("anthropic");
   });
@@ -455,6 +468,12 @@ describe("session-independent product prompter", () => {
     expect(await staleSelection).toBe("openai/stale");
     expect(stale.output.text).toContain("Using cached catalog");
     expect(stale.output.text).toContain("stale");
+    expect(stale.output.text).toContain(
+      "\u001b[33mUsing cached catalog",
+    );
+    expect(stale.output.text).toContain(
+      "\u001b[1m\u001b[36m› Stale Model",
+    );
 
     const empty = harness();
     const emptySelection = empty.prompter.selectModel(
@@ -479,6 +498,9 @@ describe("session-independent product prompter", () => {
     secretHarness.input.write(`${secret.slice(0, 8)}x\u007f${secret.slice(8)}\r`);
     expect(await value).toBe(secret);
     expect(secretHarness.output.text).not.toContain(secret);
+    expect(secretHarness.output.text).toContain(
+      "\u001b[1m\u001b[36mHidden key: ",
+    );
     expect(secretHarness.input.listenerCount("data")).toBe(0);
     expect(secretHarness.input.isRaw).toBe(false);
 
