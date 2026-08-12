@@ -370,8 +370,14 @@ function normalizePricing(value: unknown): ModelDescriptor["pricing"] {
   if (value === null || value === undefined) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ValidationError("Model pricing is invalid");
   const record = value as Record<string, unknown>;
-  const input = finiteNonnegative(record.inputUsdPerToken ?? record.input, "input price");
-  const output = finiteNonnegative(record.outputUsdPerToken ?? record.output, "output price");
+  const rawInput = record.inputUsdPerToken ?? record.input;
+  const rawOutput = record.outputUsdPerToken ?? record.output;
+  // The Gateway catalog also lists free and non-token-priced language models
+  // whose pricing object does not contain both token rates. Pricing is optional
+  // descriptor metadata, so an incomplete pair means "unknown".
+  if (rawInput === undefined || rawOutput === undefined) return null;
+  const input = finiteNonnegative(rawInput, "input price");
+  const output = finiteNonnegative(rawOutput, "output price");
   return Object.freeze({ inputUsdPerToken: input, outputUsdPerToken: output });
 }
 

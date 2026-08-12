@@ -284,6 +284,39 @@ describe("Vercel AI Gateway model catalog", () => {
     });
   });
 
+  test("keeps language models without complete token pricing", async () => {
+    directory = await mkdtemp(join(tmpdir(), "ag-model-catalog-optional-pricing-"));
+    profile = await ProfileStore.open(`file:${directory}/profile.db`);
+    const catalog = new ModelCatalog(profile, {
+      fetch: (async () => Response.json({
+        data: [
+          {
+            id: "provider/free-model",
+            name: "Free Model",
+            type: "language",
+            pricing: {},
+          },
+          {
+            id: "provider/search-priced-model",
+            name: "Search-priced Model",
+            type: "language",
+            pricing: { web_search: "0.005" },
+          },
+        ],
+      })) as unknown as typeof fetch,
+    });
+
+    const refreshed = await catalog.refresh();
+    expect(refreshed.status).toBe("refreshed");
+    expect(refreshed.descriptors.map(descriptor => ({
+      model: descriptor.model,
+      pricing: descriptor.pricing,
+    }))).toEqual([
+      { model: "provider/free-model", pricing: null },
+      { model: "provider/search-priced-model", pricing: null },
+    ]);
+  });
+
   test("discards a cache row whose retained descriptor bytes fail the revision digest", async () => {
     directory = await mkdtemp(join(tmpdir(), "ag-model-catalog-corrupt-"));
     const url = `file:${directory}/profile.db`;
