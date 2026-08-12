@@ -30,7 +30,7 @@ type Incoming =
   | { type: "scratch-record-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string; candidate: import("./scratch.ts").ScratchCheckpointCandidate }
   | { type: "scratch-record-cache-write"; requestId: string; scope: ScratchScope; status: "stored" | "cleared" | "unavailable" }
   | { type: "scratch-evict"; requestId: string; scope: ScratchScope }
-  | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string }
+  | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string; code?: string; details?: Record<string, unknown> }
   | { type: "shutdown" };
 
 const MAX_LOG_BYTES = 64 * 1024;
@@ -119,7 +119,17 @@ process.on("message", (raw: unknown) => {
     if (pending) {
       pendingRpc.delete(message.requestId);
       if (message.ok) pending.resolve(message.value);
-      else pending.reject(new Error(message.error ?? "RPC failed"));
+      else {
+        const error = new Error(message.error ?? "RPC failed") as Error & {
+          code?: string;
+          details?: Record<string, unknown>;
+        };
+        if (typeof message.code === "string") error.code = message.code;
+        if (message.details && typeof message.details === "object") {
+          error.details = message.details;
+        }
+        pending.reject(error);
+      }
     }
     return;
   }

@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 import { LocalArtifactStore } from "../artifacts/index.ts";
 import {
   ConsoleCellError,
+  ConsoleExecutionPool,
   ConsoleProcess,
+  DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
+  DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
   MAX_CELL_OBSERVATION_JSON_BYTES,
   SCRATCH_LIMITS,
   filterScratchCheckpoint,
@@ -122,6 +125,12 @@ export interface SupervisorOptions {
   /** Product composition opt-in for the private file-local scratch cache. */
   readonly enableLocalScratchCheckpoints?: boolean;
   readonly consoleRssRecycleThresholdBytes?: number;
+  /** Global bound for exact-branch resident Bun console workers (default 17). */
+  readonly maxConsoleResidentProcesses?: number;
+  /** Global bound for generated JavaScript that is actively running (default 4). */
+  readonly maxConsoleActiveExecutions?: number;
+  /** Awaited nested-agent depth; defaults to and cannot exceed maxSessionDepth. */
+  readonly maxAwaitedAgentDepth?: number;
   readonly modelProviders?: readonly ModelProvider[];
   /** Model-catalog transport controls; fetch injection is intended for deterministic conformance tests. */
   readonly modelCatalog?: ModelCatalogOptions;
@@ -313,7 +322,7 @@ export class Supervisor {
   readonly device: DeviceIdentity;
   readonly sync: SyncService;
   readonly artifacts: LocalArtifactStore;
-  readonly console: ConsoleProcess;
+  readonly console: ConsoleExecutionPool;
   readonly outbox: OutboxRunner;
   readonly projections: ProjectionService;
   readonly contexts: ContextMaterializer;
@@ -349,8 +358,8 @@ export class Supervisor {
   readonly consoleRssRecycleThresholdBytes: number;
   readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
   readonly #cells = new BranchQueue();
-  readonly #consoleLifecycle = new BranchQueue();
   readonly #sessionCreations = new BranchQueue();
+  readonly maxAwaitedAgentDepth: number;
   #closed = false;
 
   private constructor(
@@ -360,13 +369,14 @@ export class Supervisor {
     device: DeviceIdentity,
     sync: SyncService,
     artifacts: LocalArtifactStore,
-    consoleProcess: ConsoleProcess,
+    consoleProcess: ConsoleExecutionPool,
     outbox: OutboxRunner,
     restartConsoleAfterCell: boolean,
     scratchCheckpointHooks: ScratchCheckpointHooks | null,
     scratchStore: ScratchStore | null,
     consoleRssRecycleThresholdBytes: number,
     maxSessionDepth: number,
+    maxAwaitedAgentDepth: number,
     maxChildrenPerSession: number,
     userScopeKey: string,
     skillPermissionAllowlist: readonly string[],
@@ -450,6 +460,7 @@ export class Supervisor {
     this.scratchCheckpointHooks = scratchCheckpointHooks;
     this.#scratchStore = scratchStore;
     this.consoleRssRecycleThresholdBytes = consoleRssRecycleThresholdBytes;
+    this.maxAwaitedAgentDepth = maxAwaitedAgentDepth;
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), acceptanceAgentRunMaxSteps(), this.compactions, modelExecutor, this.agentProfiles);
     this.effectReconciliation = new EffectReconciliationService(storage);
     this.refiner = new RefinerService(
@@ -475,6 +486,12 @@ export class Supervisor {
     this.contexts.attachSkillCatalog(this.skillManagement);
     this.schedules.attachRunService(this.runs);
     this.agents.attachRunService(this.runs);
+    this.runs.setCancellationObserver((sessionId, branchId) =>
+      this.console.recycleScope(
+        { sessionId, branchId },
+        "branch-cancelled",
+      )
+    );
     this.runs.setBoundaryObserver(async (sessionId, branchId, runId) => { await this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId); await this.refiner.scanBoundary(sessionId, branchId, runId); });
   }
 
@@ -494,6 +511,25 @@ export class Supervisor {
         (!Number.isSafeInteger(options.consoleRssRecycleThresholdBytes) ||
          options.consoleRssRecycleThresholdBytes < 1)) {
       throw new ValidationError("Console RSS recycle threshold must be a positive integer");
+    }
+    const maxSessionDepth = options.maxSessionDepth ?? 8;
+    const maxAwaitedAgentDepth = options.maxAwaitedAgentDepth ?? maxSessionDepth;
+    for (const [value, label] of [
+      [options.maxConsoleResidentProcesses ??
+        DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES, "resident-process limit"],
+      [options.maxConsoleActiveExecutions ??
+        DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS, "active-execution limit"],
+      [maxSessionDepth, "session depth"],
+      [maxAwaitedAgentDepth, "awaited-agent depth"],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new ValidationError(`Console ${label} must be a positive integer`);
+      }
+    }
+    if (maxAwaitedAgentDepth > maxSessionDepth) {
+      throw new ValidationError(
+        "Awaited-agent depth cannot exceed the durable session depth",
+      );
     }
     const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
     const profileDatabaseUrl=options.profileDatabaseUrl??adjacentFileUrl(options.databaseUrl,".profile.db");
@@ -643,7 +679,11 @@ export class Supervisor {
       device,
       sync,
       artifacts,
-      new ConsoleProcess(undefined, {
+      new ConsoleExecutionPool({
+        maxResidentProcesses: options.maxConsoleResidentProcesses ??
+          DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
+        maxActiveExecutions: options.maxConsoleActiveExecutions ??
+          DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
         ...(options.scratchCheckpointTimeoutMs === undefined ? {} : {
           scratchCheckpointTimeoutMs: options.scratchCheckpointTimeoutMs,
         }),
@@ -659,7 +699,8 @@ export class Supervisor {
       scratchCheckpointHooks,
       scratchStore,
       options.consoleRssRecycleThresholdBytes ?? SCRATCH_LIMITS.rssRecycleBytes,
-      options.maxSessionDepth ?? 8,
+      maxSessionDepth,
+      maxAwaitedAgentDepth,
       options.maxChildrenPerSession ?? 32,
       options.userScopeKey ?? "default-user",
       options.skillPermissionAllowlist ?? [],
@@ -976,14 +1017,23 @@ export class Supervisor {
     if (session?.executionOwnerDeviceId && session.executionOwnerDeviceId !== this.device.deviceId) throw new CapabilityUnavailableError(`execution of session owned by device ${session.executionOwnerDeviceId}`, `device ${this.device.deviceId} (automatic ownership failover is unavailable)`);
     return this.#cells.run(
       `${sessionId}/${branchId}`,
-      () => this.#consoleLifecycle.run(
-        "shared-console-process",
-        () => this.#executeCell(sessionId, branchId, code, dependencies, stableCellId),
+      () => this.console.run(
+        { sessionId, branchId },
+        (consoleProcess) =>
+          this.#executeCell(
+            consoleProcess,
+            sessionId,
+            branchId,
+            code,
+            dependencies,
+            stableCellId,
+          ),
       ),
     );
   }
 
   async #executeCell(
+    consoleProcess: ConsoleProcess,
     sessionId: string,
     branchId: string,
     code: string,
@@ -1308,8 +1358,70 @@ export class Supervisor {
               : `${nextRpcKey(method)}:${index + 1}`,
           };
         });
-        const results = await this.agents.runMany(sessionId, branchId, inputs as any);
-        return method === "agents.run" ? results[0] : results;
+        const caller = await this.storage.getSession?.(sessionId);
+        if (!caller) throw new NotFoundError("session", sessionId);
+        if (caller.depth + 1 > this.maxAwaitedAgentDepth) {
+          throw new ValidationError(
+            `Maximum awaited agent depth ${this.maxAwaitedAgentDepth} exceeded`,
+            {
+              sessionId,
+              branchId,
+              callerDepth: caller.depth,
+              maxAwaitedAgentDepth: this.maxAwaitedAgentDepth,
+            },
+          );
+        }
+        let reservation:
+          Awaited<ReturnType<ConsoleExecutionPool["reserveAwaited"]>> | null =
+            null;
+        try {
+          const handles = await this.agents.spawnManyRunnable(
+            sessionId,
+            branchId,
+            inputs as any,
+            {
+              // AgentService invokes this only after complete batch validation
+              // and while holding its exact-parent admission queue, but before
+              // the atomic child/task append. Concurrent stable retries
+              // therefore share the same scope reservation instead of racing
+              // two speculative process counts.
+              beforeAdmission: async (items) => {
+                const awaitedScopes: ScratchScope[] = [];
+                for (const item of items) {
+                  if (item.existing) {
+                    const current = await this.agents.result(
+                      sessionId,
+                      branchId,
+                      item.handle.taskId,
+                      { wait: false },
+                    );
+                    if (["succeeded", "blocked", "failed", "cancelled",
+                      "budget_exceeded", "unknown"].includes(current.status)) {
+                      continue;
+                    }
+                  }
+                  awaitedScopes.push({
+                    sessionId: item.handle.sessionId,
+                    branchId: item.handle.branchId,
+                  });
+                }
+                reservation = awaitedScopes.length
+                  ? await this.console.reserveAwaited(awaitedScopes)
+                  : null;
+              },
+            },
+          );
+          const results = await Promise.all(handles.map((handle) =>
+            this.agents.result(sessionId, branchId, handle.taskId, {
+              wait: true,
+            })
+          ));
+          return method === "agents.run" ? results[0] : results;
+        } finally {
+          const heldReservation = reservation as
+            Awaited<ReturnType<ConsoleExecutionPool["reserveAwaited"]>> | null;
+          await heldReservation?.release();
+        }
       }
       if (method === "agents.result") {
         const handle = args[0];
@@ -1342,10 +1454,41 @@ export class Supervisor {
             typeof options.timeoutMs !== "number") {
           throw new ValidationError("agents.result timeoutMs must be a number");
         }
-        return this.agents.result(sessionId, branchId, taskId, {
-          wait: options.wait !== false,
-          ...(typeof options.timeoutMs === "number" ? { timeoutMs: options.timeoutMs } : {}),
-        });
+        if (options.wait === false) {
+          return this.agents.result(sessionId, branchId, taskId, {
+            wait: false,
+            ...(typeof options.timeoutMs === "number"
+              ? { timeoutMs: options.timeoutMs }
+              : {}),
+          });
+        }
+        const current = await this.agents.result(
+          sessionId,
+          branchId,
+          taskId,
+          { wait: false },
+        );
+        if (["succeeded", "blocked", "failed", "cancelled",
+          "budget_exceeded", "unknown"].includes(current.status)) {
+          return current;
+        }
+        const task = (await this.agents.listTasks(sessionId, branchId))
+          .find((candidate) => candidate.taskId === taskId);
+        if (!task) throw new NotFoundError("agent invocation", taskId);
+        const reservation = await this.console.reserveAwaited([{
+          sessionId: task.childSessionId,
+          branchId: task.childBranchId,
+        }]);
+        try {
+          return await this.agents.result(sessionId, branchId, taskId, {
+            wait: true,
+            ...(typeof options.timeoutMs === "number"
+              ? { timeoutMs: options.timeoutMs }
+              : {}),
+          });
+        } finally {
+          await reservation.release();
+        }
       }
       if (method === "agents.get") {
         const target = typeof args[0] === "string" && args[0] ? args[0] : sessionId;
@@ -1420,7 +1563,12 @@ export class Supervisor {
       if (method === "agents.cancel") {
         if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("agents.cancel requires a direct-child target");
         if (args[1] !== undefined && typeof args[1] !== "string") throw new ValidationError("agents.cancel reason must be a string");
-        return this.agents.cancelFamilyTarget(sessionId, branchId, args[0], args[1] as string | undefined);
+        return this.agents.cancelFamilyTarget(
+          sessionId,
+          branchId,
+          args[0],
+          args[1] as string | undefined,
+        );
       }
       if (method === "agents.followUp") {
         if (typeof args[0] !== "string" || !args[0] || typeof args[1] !== "string") throw new ValidationError("agents.followUp requires target and content strings");
@@ -1541,7 +1689,7 @@ export class Supervisor {
         status: "unavailable",
         reason: "placement_unavailable",
       };
-      if (this.scratchCheckpointHooks && !await this.console.hasScratch(scratchScope)) {
+      if (this.scratchCheckpointHooks && !await consoleProcess.hasScratch(scratchScope)) {
         loadResult = await this.scratchCheckpointHooks.load(scratchScope).catch(() => ({
           status: "unavailable",
           reason: "storage_error",
@@ -1556,12 +1704,18 @@ export class Supervisor {
           };
         }
       }
-      await this.console.prepareScratch(
+      await consoleProcess.prepareScratch(
         scratchScope,
         loadResult,
         this.scratchCheckpointHooks !== null,
       );
-      const execution = await this.console.execute(code, { id: sessionId, branchId }, restored, handler);
+      const execution = await this.console.execute(
+        consoleProcess,
+        code,
+        { id: sessionId, branchId },
+        restored,
+        handler,
+      );
       workerRssBytes = execution.rssBytes;
       const rawPreview = JSON.parse(JSON.stringify(execution.observation.preview)) as unknown;
       assertJsonValue(rawPreview);
@@ -1676,11 +1830,11 @@ export class Supervisor {
       acceptanceCrashAfterCellCommit(cellId);
       let checkpoint: ScratchCheckpointCandidate | null = null;
       try {
-        checkpoint = await this.console.checkpointScratch(scratchScope, cellId);
+        checkpoint = await consoleProcess.checkpointScratch(scratchScope, cellId);
         if (checkpoint) checkpoint = filterSensitiveScratchCheckpoint(checkpoint);
       } catch {
-        if (this.console.status().running) {
-          await this.console
+        if (consoleProcess.status().running) {
+          await consoleProcess
             .recycle("scratch-checkpoint-serialization-failed")
             .catch(() => {});
         }
@@ -1701,19 +1855,19 @@ export class Supervisor {
         } catch {
           // Scratch persistence is an optional operational cache. The warm
           // scope and committed cell remain valid when its storage is absent.
-          await this.console.recordScratchCacheWrite(
+          await consoleProcess.recordScratchCacheWrite(
             scratchScope,
             "unavailable",
           ).catch(() => {});
         }
         if (persisted) {
           try {
-            await this.console.recordScratchCheckpoint(
+            await consoleProcess.recordScratchCheckpoint(
               scratchScope,
               cellId,
               checkpoint,
             );
-            await this.console.recordScratchCacheWrite(
+            await consoleProcess.recordScratchCacheWrite(
               scratchScope,
               checkpoint.savedNames.length === 0 && checkpoint.skipped.length === 0
                 ? "cleared"
@@ -1749,21 +1903,21 @@ export class Supervisor {
       await unfinishedWriter?.abort();
       if (stagedObservationPath) await rm(stagedObservationPath, { force: true }).catch(() => {});
       if (!terminalCommitted) {
-        if (this.console.status().running) {
+        if (consoleProcess.status().running) {
           try {
-            await this.console.evictScratch(scratchScope);
+            await consoleProcess.evictScratch(scratchScope);
           } catch {
-            if (this.console.status().running) {
-              await this.console.recycle("failed-scope-eviction").catch(() => {});
+            if (consoleProcess.status().running) {
+              await consoleProcess.recycle("failed-scope-eviction").catch(() => {});
             }
           }
         }
       }
       if (workerRssBytes > this.consoleRssRecycleThresholdBytes &&
-          this.console.status().running) {
-        await this.console.recycle("rss-soft-threshold").catch(() => {});
+          consoleProcess.status().running) {
+        await consoleProcess.recycle("rss-soft-threshold").catch(() => {});
       }
-      if (this.restartConsoleAfterCell) await this.console.stop();
+      if (this.restartConsoleAfterCell) await consoleProcess.stop();
     }
   }
 }

@@ -182,6 +182,11 @@ export class AgentService {
     parentSessionId: string,
     parentBranchId: string,
     inputs: readonly (SpawnAgentInput | string)[],
+    options: {
+      readonly beforeAdmission?: (
+        items: readonly SpawnAdmissionItem[],
+      ) => Promise<void>;
+    } = {},
   ): Promise<SubagentHandle[]> {
     assertInvocationBatchSize(inputs);
     const contracts = new Map<string, AgentInvocationContract>();
@@ -251,6 +256,7 @@ export class AgentService {
               );
             }
           }
+          await options.beforeAdmission?.(items);
         },
       });
     for (const handle of handles) this.#scheduleSpawnAdvance(handle);

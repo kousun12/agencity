@@ -109,7 +109,7 @@ Structured requests use response-aware `agencity.model-dispatch.v2`, immutable `
 - `selectModel` normalizes provider shorthand, checks availability, requires an idle model boundary, and appends `SessionModelChanged`.
 - `appendMessage` scrubs known credentials and appends a message event.
 - `fork` creates a durable branch from a validated lineage cursor without changing the parent.
-- `executeCell` serializes cell execution per branch and through the shared console lifecycle queue, atomically commits its observation, staged working values, and artifact references, then independently attempts a nonfatal scratch checkpoint.
+- `executeCell` serializes cell execution per exact branch, runs different branches through the bounded branch-aware console pool, atomically commits its observation, staged working values, and artifact references, then independently attempts a nonfatal scratch checkpoint.
 - `resume` reconstructs and reattaches to a retained branch.
 
 Product tasks use the strict autonomous-run service:

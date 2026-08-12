@@ -58,7 +58,9 @@ export class ConsoleProcess {
   #process: ReturnType<typeof Bun.spawn> | null = null;
   #pending = new Map<string, PendingExecution>();
   #controls = new Map<string, PendingControl>();
+  #rpcOperations = new Set<Promise<void>>();
   #lastRecycleReason: string | null = null;
+  #closed = false;
 
   constructor(
     readonly workerUrl = new URL("./worker.ts", import.meta.url),
@@ -74,6 +76,7 @@ export class ConsoleProcess {
   }
 
   async start(): Promise<void> {
+    if (this.#closed) throw new Error("Console worker is closed");
     if (this.#process) return;
     const child = Bun.spawn([processExec(), "run", this.workerUrl.pathname], {
       stdin: "ignore",
@@ -212,6 +215,20 @@ export class ConsoleProcess {
     if (this.#process === child) this.#process = null;
   }
 
+  /** Permanently prevents this pool-owned worker from restarting. */
+  async close(): Promise<void> {
+    this.#closed = true;
+    await this.stop();
+  }
+
+  async drainRpcOperations(): Promise<void> {
+    // Flush handlers queued by the last IPC callback before observing the set.
+    await Promise.resolve();
+    while (this.#rpcOperations.size > 0) {
+      await Promise.allSettled([...this.#rpcOperations]);
+    }
+  }
+
   async #control(
     message: Record<string, unknown>,
     timeoutMs = 5_000,
@@ -309,15 +326,41 @@ export class ConsoleProcess {
       throw new Error("Console worker emitted an invalid RPC request");
     }
     queueMicrotask(() => {
-      void pending.handler(message.method, message.args).then(
-        (value) => this.#send({ type: "rpc-result", requestId: message.requestId, ok: true, value }),
-        (error) => this.#send({
-          type: "rpc-result",
-          requestId: message.requestId,
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
+      const operation = Promise.resolve().then(() =>
+        pending.handler(message.method, message.args)
+      ).then(
+        (value) => {
+          try {
+            this.#send({
+              type: "rpc-result",
+              requestId: message.requestId,
+              ok: true,
+              value,
+            });
+          } catch { /* Worker loss does not cancel durable RPC work. */ }
+        },
+        (error) => {
+          try {
+            this.#send({
+              type: "rpc-result",
+              requestId: message.requestId,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+              ...(error && typeof error === "object" &&
+                  typeof (error as { code?: unknown }).code === "string"
+                ? { code: (error as { code: string }).code }
+                : {}),
+              ...(error && typeof error === "object" &&
+                  (error as { details?: unknown }).details !== undefined
+                ? { details: (error as { details: unknown }).details }
+                : {}),
+            });
+          } catch { /* Worker loss does not cancel durable RPC work. */ }
+        },
+      ).finally(() => {
+        this.#rpcOperations.delete(operation);
+      });
+      this.#rpcOperations.add(operation);
     });
   }
 

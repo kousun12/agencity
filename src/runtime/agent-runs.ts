@@ -184,9 +184,16 @@ export class AgentRunService {
   readonly #runs = new RunQueue();
   #terminalObserver: ((result: AgentRunResult) => Promise<void>) | null = null;
   #boundaryObserver: ((sessionId: string, branchId: string, runId: string) => Promise<void>) | null = null;
+  #cancellationObserver:
+    ((sessionId: string, branchId: string) => Promise<void>) | null = null;
 
   setTerminalObserver(observer: (result: AgentRunResult) => Promise<void>): void { this.#terminalObserver = observer; }
   setBoundaryObserver(observer: (sessionId: string, branchId: string, runId: string) => Promise<void>): void { this.#boundaryObserver = observer; }
+  setCancellationObserver(
+    observer: (sessionId: string, branchId: string) => Promise<void>,
+  ): void {
+    this.#cancellationObserver = observer;
+  }
 
   constructor(
     readonly storage: AgentStorage,
@@ -365,6 +372,7 @@ export class AgentRunService {
       const effect = state.effects[effectId];
       if (effect?.status === "requested" || effect?.status === "started") this.outbox.cancel(effect.id);
     }
+    await this.#cancellationObserver?.(sessionId, branchId);
     return this.advance(sessionId, branchId, runId);
   }
 

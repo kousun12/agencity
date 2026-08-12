@@ -17,7 +17,9 @@ The Bun heap, console globals, scratch, open handles, child processes, notificat
 
 ### Best-effort console scratch
 
-Every cell receives a direct scratch object keyed by exact `(sessionId, branchId)`. One worker can keep arbitrary runtime values warm across successful cells. A process-wide lifecycle queue serializes exact-scope preparation, cell execution, canonical terminalization, post-commit checkpointing, eviction, and worker recycling so one branch cannot race another branch's shared console lifecycle.
+Every cell receives a direct scratch object keyed by exact `(sessionId, branchId)`. A bounded worker pool pins each resident Bun process to one exact branch, so siblings and descendants never share worker heap, stdout capture, or warm scratch. Cell boundaries remain serialized per branch, while different branches may execute concurrently.
+
+Resident-process permits are separate from active-execution permits. A generated cell suspended in an SDK RPC retains its exact worker and JavaScript stack but releases its active permit. Awaited child admission reserves all immediately required resident slots before creating any task or child; insufficient capacity returns `CONSOLE_CAPACITY_EXCEEDED` without partial batch admission. Detached children may queue because no suspended caller depends on them. Worker processes and permits are replaceable process-local capacity, not durable task identity or completion evidence.
 
 After `CellCommitted`, the supervisor independently requests a getter-free bounded JSON projection. The managed exact-file-local composition may write that projection through a private `ScratchStore` using the current process execution fence. `console_scratch_cache` is an overwriteable operational projection with same-device exact-key restore, source-event/cursor validation, integrity digests, seven-day expiry, 64-branch and 16 MiB workspace quotas, and least-recently-used eviction. It has no foreign key to rebuildable session projections and is excluded from generated SQL, canonical rebuild, synchronization, and export.
 

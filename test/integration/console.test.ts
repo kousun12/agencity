@@ -1084,6 +1084,7 @@ describe("disposable TypeScript console process", () => {
       artifactDirectory: temp.artifactDirectory,
       workspaceRoot: temp.workspaceRoot,
       scratchMaxWarmScopes: 2,
+      maxConsoleResidentProcesses: 2,
       consoleRssRecycleThresholdBytes: 1,
       recover: false,
     });
@@ -1099,7 +1100,7 @@ describe("disposable TypeScript console process", () => {
     expect(recycled.result).toMatchObject({ hasValue: false });
     expect((recycled.result as any).pid).not.toBe((initial.result as any).pid);
 
-    // Disable the injected recycle threshold to exercise process-local LRU.
+    // Disable the injected recycle threshold to exercise pool-level LRU.
     Object.defineProperty(supervisor, "consoleRssRecycleThresholdBytes", { value: Number.MAX_SAFE_INTEGER });
     const second = await supervisor.createSession({ workspaceId: "scratch-lru" });
     const third = await supervisor.createSession({ workspaceId: "scratch-lru" });
@@ -1144,7 +1145,7 @@ describe("disposable TypeScript console process", () => {
     await supervisor.close();
   });
 
-  test("holds the process lifecycle queue through the checkpoint hook", async () => {
+  test("keeps branch worker lifecycles independent through checkpoint hooks", async () => {
     const temp = await makeTempRuntime("agencity-console-scratch-queue-");
     temps.push(temp);
     let enterCheckpoint!: () => void;
@@ -1178,13 +1179,12 @@ describe("disposable TypeScript console process", () => {
       scratch.second = true;
       ({ second: true })
     `);
-    await Bun.sleep(30);
+    expect((await secondRun).result).toEqual({ second: true });
     expect((await supervisor.storage.loadEvents(second.sessionId, {
       branchId: second.branchId,
-    })).map((event) => event.type)).toEqual(["SessionCreated"]);
+    })).map((event) => event.type)).toContain("CellCommitted");
     releaseCheckpoint();
     expect((await firstRun).result).toEqual({ first: true });
-    expect((await secondRun).result).toEqual({ second: true });
     await supervisor.close();
   });
 
