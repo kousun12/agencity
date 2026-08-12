@@ -167,7 +167,7 @@ const retireEditSchema = z.object({
 }).strict();
 const harnessEditSchema = z.union([createEditSchema, replaceEditSchema, retireEditSchema]);
 
-const objectiveEvaluationSchema = z.object({
+export const objectiveEvaluationSchema = z.object({
   kind: z.literal("objective"),
   name: boundedName,
   metric: z.string().min(1).max(512).refine(nonBlank, "must not be blank"),
@@ -441,6 +441,36 @@ export function validateRefinementReviewValue(
   };
 }
 
+/** Shared strict validator for post-activation objective evaluation intent. */
+export function validateObjectiveEvaluation(value: unknown): ObjectiveEvaluation {
+  assertJsonValue(value);
+  const parsed = objectiveEvaluationSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new ValidationError("Objective evaluation does not match its strict contract", {
+      issues: parsed.error.issues,
+    });
+  }
+  if (byteLength(canonicalJson(parsed.data.target)) > MAX_REFINEMENT_TEXT_BYTES) {
+    throw new ValidationError(`Evaluation target exceeds ${MAX_REFINEMENT_TEXT_BYTES} bytes`);
+  }
+  if (parsed.data.baseline !== undefined &&
+      byteLength(canonicalJson(parsed.data.baseline)) > MAX_REFINEMENT_TEXT_BYTES) {
+    throw new ValidationError(`Evaluation baseline exceeds ${MAX_REFINEMENT_TEXT_BYTES} bytes`);
+  }
+  return {
+    kind: parsed.data.kind,
+    name: parsed.data.name,
+    metric: parsed.data.metric,
+    target: parsed.data.target,
+    ...(parsed.data.baseline === undefined
+      ? {}
+      : { baseline: parsed.data.baseline }),
+    ...(parsed.data.testCommand === undefined
+      ? {}
+      : { testCommand: parsed.data.testCommand }),
+  };
+}
+
 /**
  * Pure compare-and-swap/authority validation for an individual edit. It does
  * not read storage and therefore must be given the exact visible target set.
@@ -577,12 +607,7 @@ function validateProposalAgainstRequest(proposal: RefinementReviewPropose, reque
       }
     }
   }
-  if (byteLength(canonicalJson(proposal.evaluation.target)) > MAX_REFINEMENT_TEXT_BYTES) {
-    throw new ValidationError(`Evaluation target exceeds ${MAX_REFINEMENT_TEXT_BYTES} bytes`);
-  }
-  if (proposal.evaluation.baseline !== undefined && byteLength(canonicalJson(proposal.evaluation.baseline)) > MAX_REFINEMENT_TEXT_BYTES) {
-    throw new ValidationError(`Evaluation baseline exceeds ${MAX_REFINEMENT_TEXT_BYTES} bytes`);
-  }
+  validateObjectiveEvaluation(proposal.evaluation);
 }
 
 function assertRequest(input: CreateRefinementReviewRequest, sensitive: RefinementSensitiveValues): void {

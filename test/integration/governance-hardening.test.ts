@@ -3,6 +3,8 @@ import {
   SEALED_GOVERNANCE_REVIEWER_LIMITS,
   Supervisor,
   canonicalJsonDigest,
+  registerBrokeredSecret,
+  validateNewEvent,
   type GovernedRefinementProposal,
 } from "../../src/index.ts";
 import {
@@ -34,6 +36,152 @@ async function open(name: string, provider = new ApprovingGovernanceProvider(nam
 }
 
 describe("governance final-review hardening", () => {
+  test("freezes bounded redacted evidence for direct proposals", async () => {
+    const { supervisor, provider } = await open("governance-v3-evidence");
+    const secret = "governance-brokered-secret-value";
+    let releaseSecret: (() => void) | undefined;
+    try {
+      const root = await supervisor.createSession({
+        workspaceId: "v3-evidence",
+        model: { provider: provider.name, model: "fixture" },
+      });
+      const message = await supervisor.appendMessage(
+        root.sessionId,
+        root.branchId,
+        "user",
+        `Visible evidence with ${secret}`,
+      );
+      const [context] = await supervisor.storage.appendEvents([{
+        sessionId: root.sessionId,
+        branchId: root.branchId,
+        type: "ContextMaterialized",
+        producer: "supervisor",
+        idempotencyKey: "governance-v3-repository-instructions",
+        payload: {
+          contextId: "governance-v3-context",
+          records: [],
+          contentHash: "a".repeat(64),
+          context: {
+            messages: [{
+              role: "user",
+              content: "WORKSPACE ROOT INSTRUCTIONS\nmust-not-reach-reviewer",
+            }],
+            retained: "visible-context",
+          },
+        },
+      }]);
+      releaseSecret = registerBrokeredSecret(secret);
+      await expect(supervisor.refinementGovernance.proposeAutomatic(
+        root.sessionId,
+        root.branchId,
+        {
+          target: {
+            kind: "harness",
+            harnessKind: "prompt_note",
+            edits: [{
+              operation: "create",
+              kind: "prompt_note",
+              scope: "local",
+              scopeKey: root.sessionId,
+              name: "missing-objective-evaluation",
+              content: { kind: "prompt_note", text: "Must not be admitted." },
+            }],
+          },
+          reason: "Exercise automatic evaluation validation.",
+          predictedEffect: "No proposal is admitted.",
+          evidenceEventIds: [message.id],
+        },
+      )).rejects.toThrow(/require objective post-activation evaluation/i);
+      const active = await supervisor.agentProfiles.active(root.sessionId);
+      const record = await supervisor.refinementGovernance.proposeOwner(
+        root.sessionId,
+        root.branchId,
+        {
+          target: {
+            kind: "agent_profile",
+            agentSessionId: root.sessionId,
+            expectedProfileVersionId: active.profileVersionId,
+            replacement: {
+              role: active.role,
+              purpose: active.purpose,
+              instructions: "Use direct evidence with explicit provenance.",
+            },
+          },
+          reason: "Exercise V3 direct evidence freezing.",
+          predictedEffect: "Retain reviewer-visible evidence safely.",
+          evidenceEventIds: [message.id, context!.id],
+          wait: true,
+        },
+      );
+      expect(record.status).toBe("applied");
+      expect(record.proposal.evaluation).toBeUndefined();
+      expect(record.frozenInput?.version).toBe(3);
+      if (record.frozenInput?.version !== 3) {
+        throw new Error("expected governance input v3");
+      }
+      const excerpts = record.frozenInput.evidencePayloads.excerpts;
+      expect(excerpts.map((item) => item.eventId))
+        .toEqual([message.id, context!.id]);
+      expect(excerpts[0]!.redactions).toContain("credentials");
+      expect(excerpts[0]!.excerpt).toContain("[REDACTED]");
+      expect(excerpts[0]!.excerpt).not.toContain(secret);
+      expect(excerpts[1]!.redactions).toContain("repository_instructions");
+      expect(excerpts[1]!.excerpt).toContain("visible-context");
+      expect(excerpts[1]!.excerpt).not.toContain("must-not-reach-reviewer");
+      expect(record.frozenInput.evidencePayloads.usedBytes).toBe(
+        excerpts.reduce((total, item) => total + item.excerptBytes, 0),
+      );
+      for (const version of [1, 2] as const) {
+        const {
+          canonicalDigest: _v3Digest,
+          evidencePayloads: _evidencePayloads,
+          refinementGrounding: _refinementGrounding,
+          ...retainedBody
+        } = record.frozenInput;
+        const body = { ...retainedBody, version };
+        const retained = {
+          ...body,
+          canonicalDigest: canonicalJsonDigest(body),
+        };
+        expect(() => validateNewEvent({
+          sessionId: root.sessionId,
+          branchId: root.branchId,
+          type: "RefinementGovernanceReviewRequested",
+          producer: "supervisor",
+          payload: {
+            proposalId: record.proposalId,
+            reviewId: `retained-governance-v${version}`,
+            frozenInput: retained as any,
+            frozenInputDigest: retained.canonicalDigest,
+            expectedStatus: "validated",
+          },
+        })).not.toThrow();
+      }
+      const forged = structuredClone(record.frozenInput) as any;
+      forged.evidencePayloads.excerpts[0].excerptDigest =
+        `sha256:${"f".repeat(64)}`;
+      const { canonicalDigest: _canonicalDigest, ...forgedBody } = forged;
+      forged.canonicalDigest = canonicalJsonDigest(forgedBody);
+      await expect(supervisor.storage.appendEvents([{
+        sessionId: root.sessionId,
+        branchId: root.branchId,
+        type: "RefinementGovernanceReviewRequested",
+        producer: "supervisor",
+        idempotencyKey: "forged-governance-v3-excerpt",
+        payload: {
+          proposalId: record.proposalId,
+          reviewId: "forged-governance-v3-review",
+          frozenInput: forged,
+          frozenInputDigest: forged.canonicalDigest,
+          expectedStatus: "validated",
+        },
+      }])).rejects.toThrow(/Invalid RefinementGovernanceReviewRequested payload/i);
+    } finally {
+      releaseSecret?.();
+      await supervisor.close();
+    }
+  });
+
   test("pins sealed reviewer limits in frozen input and durable child admission", async () => {
     const { supervisor, provider } = await open("governance-limits");
     try {

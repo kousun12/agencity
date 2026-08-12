@@ -104,9 +104,9 @@ The existing automatic review path:
 1. freezes a bounded trajectory snapshot;
 2. starts a retained structured recursive refiner child;
 3. accepts `no_change` or one typed harness proposal;
-4. submits a candidate through automatic governance;
+4. submits a candidate and its required objective post-activation evaluation intent through automatic governance;
 5. runs deterministic validation;
-6. invokes one separate sealed reviewer;
+6. freezes version-3 evidence excerpts for every cited event under one 32 KiB aggregate budget, excluding repository instructions and credential material, then invokes one separate sealed reviewer;
 7. revalidates at application time;
 8. atomically applies approved content;
 9. compiles and tests approved skills before activation;
@@ -298,6 +298,8 @@ Automatic reflection remains constrained to local harness content:
 - subagent specification.
 
 Every proposal continues through the separate sealed reviewer. Skills also continue through compile and declared runtime tests.
+
+The objective evaluation produced by the trajectory refiner is retained in the governed proposal identity, reviewer input, inspection projection, and application history. It describes intended post-activation measurement and does not gate ordinary activation. Generated-skill compile and declared runtime tests remain the only additional activation-time check.
 
 The following targets remain excluded:
 
@@ -529,3 +531,10 @@ Each follow-up requires its own evidence model. None should introduce generalize
 - Completed: replaced prose-derived scan classification with a typed versioned `learningScan` payload and bounded learning history to compact summaries under a 256 KiB serialized ceiling with explicit truncation.
 - Validation: focused refiner and sync-lifecycle suites pass, including cross-connection pause/admission ordering, dead-owner and same-process stale-lease recovery, lease fencing, session-effective fork inspection with branch-route validation, review-linked pending counts, bounded history, typed scan observations, grouped rollback divergence, and grouped/direct skill rollback. The final aggregate suite passed with 1,028 tests, 3 gated skips, and 0 failures; independent final review reported no remaining actionable findings.
 - Remaining: live-provider, official Turso Sync, and Turso Cloud verification remain gated and unverified.
+
+### 2026-08-12 — Governance evidence and evaluation retention
+
+- Completed: automatic proposals retain their required objective evaluation through governed proposal identity, version-3 frozen review input, inspection, and application history. The evaluation remains post-activation intent rather than an activation gate.
+- Completed: every new governed review, including direct proposals, receives deterministic cited-event excerpts under one 32 KiB aggregate budget with payload/excerpt digests, byte counts, truncation, and redaction provenance. Repository instruction content and credential material are excluded. Retained frozen input versions 1 and 2 remain readable.
+- Validation: focused refinement-review, governance-hardening, and refiner suites passed with 128 passes, 0 failures, and 0 skips. Typecheck passed.
+- Remaining: aggregate verification and externally gated live-provider, official Turso Sync, and Turso Cloud checks were not run for this focused change.

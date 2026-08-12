@@ -19,7 +19,7 @@ import {
 import {
   containsBrokeredSecret,
   isSensitiveEnvironmentKey,
-  scrubCredentialText,
+  refinementVisibleEventPayload,
   scrubText,
 } from "../security/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
@@ -806,6 +806,7 @@ export class RefinerService {
         reason: decision.trigger,
         predictedEffect: decision.predictedEffect,
         evidenceEventIds: decision.evidenceEventIds,
+        evaluation: decision.evaluation,
         triggerId: record.triggerId,
         clientRequestId: record.reviewId,
         wait: record.waitForGovernance,
@@ -909,100 +910,6 @@ export class RefinerService {
       trigger, visibleHarnessVersions, memory, evaluationHistory, requestedScope, requestedScopeKey, allowedKinds,
     }, { brokeredCredentialValues: knownSecretValues() });
   }
-}
-
-function refinementVisibleEventPayload(type: string, value: JsonValue): JsonValue {
-  const cleaned = scrubRefinementCredentialEvidence(
-    stripRepositoryInstructionFields(value),
-  );
-  if (cleaned === null || Array.isArray(cleaned) || typeof cleaned !== "object") return cleaned;
-  const payload = cleaned as Record<string, JsonValue>;
-  if (type === "ContextMaterialized") {
-    return {
-      ...payload,
-      context: withoutRepositoryInstructionMessages(payload.context ?? null),
-    };
-  }
-  if (type === "ModelCallRequested") {
-    return {
-      ...payload,
-      providerInput: withoutRepositoryInstructionMessages(payload.providerInput ?? null),
-    };
-  }
-  if (type === "EffectRequested" && payload.executor === "model") {
-    const input = jsonRecord(payload.input ?? null);
-    return input
-      ? {
-          ...payload,
-          input: {
-            ...input,
-            providerInput: withoutRepositoryInstructionMessages(input.providerInput ?? null),
-          },
-        }
-      : payload;
-  }
-  return payload;
-}
-
-function scrubRefinementCredentialEvidence(value: JsonValue): JsonValue {
-  if (typeof value === "string") return scrubRefinementCredentialText(value);
-  if (value === null || typeof value === "boolean" ||
-      typeof value === "number") return value;
-  if (Array.isArray(value)) {
-    return value.map(scrubRefinementCredentialEvidence);
-  }
-  const result: Record<string, JsonValue> = {};
-  for (const [key, item] of Object.entries(value)) {
-    const scrubbedKey = scrubRefinementCredentialText(key);
-    if (Object.hasOwn(result, scrubbedKey)) {
-      throw new ValidationError(
-        "Credential redaction produced duplicate refinement evidence keys",
-      );
-    }
-    result[scrubbedKey] = scrubRefinementCredentialEvidence(item);
-  }
-  return result;
-}
-
-function scrubRefinementCredentialText(value: string): string {
-  return scrubCredentialText(value).replace(
-    /(?:password|passwd|secret|authorization|token|(?:access|refresh|auth|id)[_-]?token|api[_-]?key)\s*[:=]\s*\[REDACTED\]/gi,
-    "[REDACTED]",
-  );
-}
-
-function stripRepositoryInstructionFields(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) return value.map(stripRepositoryInstructionFields);
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) =>
-        key !== "repositoryInstructions" &&
-        key !== "repositoryInstructionOmission")
-      .map(([key, item]) => [key, stripRepositoryInstructionFields(item)]),
-  ) as JsonValue;
-}
-
-function withoutRepositoryInstructionMessages(value: JsonValue): JsonValue {
-  const record = jsonRecord(value);
-  if (!record || !Array.isArray(record.messages)) return value;
-  return {
-    ...record,
-    messages: record.messages.filter((message) => !repositoryInstructionMessage(message)),
-  };
-}
-
-function repositoryInstructionMessage(value: JsonValue): boolean {
-  if (value === null || Array.isArray(value) || typeof value !== "object") return false;
-  return value.role === "user" && typeof value.content === "string" &&
-    (value.content.startsWith("WORKSPACE ROOT INSTRUCTIONS\n") ||
-      value.content.startsWith("DISCOVERED DIRECTORY INSTRUCTIONS\n"));
-}
-
-function jsonRecord(value: JsonValue): Record<string, JsonValue> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, JsonValue>
-    : null;
 }
 
 function normalizeReviewInput(input: StartRefinementReviewInput): StartRefinementReviewInput {

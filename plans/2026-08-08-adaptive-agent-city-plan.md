@@ -295,7 +295,7 @@ interface AgentProfileRefinementTarget {
 }
 ```
 
-The proposal envelope continues to own proposer identity, source review, trigger, evidence, predicted effect, scope, and evaluation intent. The target owns only the exact profile replacement and compare-and-swap precondition.
+The proposal envelope owns proposer identity, source review, trigger, evidence, predicted effect, scope, and optional objective evaluation intent. Trajectory-refiner proposals require evaluation intent; direct owner or agent proposals may omit it. The target owns only the exact profile replacement and compare-and-swap precondition.
 
 Profiles remain session identity state. Memories, prompt notes, skills, and subagent specifications remain harness entries. They share refinement governance without sharing storage identity.
 
@@ -458,11 +458,12 @@ Siblings and unrelated agents cannot target one another. Proposal permission gra
 
 ### Reviewer inputs
 
-The governance reviewer receives one bounded, frozen input:
+The governance reviewer receives one bounded, frozen input. New freezes use version 3; retained versions 1 and 2 remain readable:
 
 - the exact proposal and proposed rendered agent prompt;
 - the target's exact current profile and expected version;
-- the proposal's retained evidence and source trajectory references;
+- every cited event identity plus a deterministic redacted canonical-JSON payload excerpt under one fixed 32 KiB aggregate budget, with canonical/redacted payload and excerpt digests, exact byte counts, truncation, and credential/repository-instruction redaction provenance;
+- source trajectory trigger, allowed kinds, review identity, and snapshot hash for refiner-produced proposals;
 - the proposer identity and relationship to the target;
 - the immutable Agencity base policy;
 - the exact product constitution and refinement-review policy;
@@ -471,6 +472,8 @@ The governance reviewer receives one bounded, frozen input:
 - relevant active harness versions and known conflicts selected through attributable context rules.
 
 Every component is referenced by immutable ID, version, digest, or retained event. Live files or mutable prose are not silently substituted during recovery.
+
+The trajectory refiner's objective evaluation is retained in the governed proposal fingerprint, frozen input, inspection projection, and application event. It is post-activation evaluation intent and does not block ordinary application. Generated-skill compile and declared runtime tests remain the only additional activation-time check.
 
 The proposal is data, not reviewer instruction. The sealed reviewer policy takes precedence over proposal text and rejects attempts to rewrite the charter, reviewer role, authority boundary, or required output contract.
 
@@ -1112,3 +1115,10 @@ The plan is complete when:
 - Validation: `bun run verify` passed with 893 deterministic core tests passing, 2 externally gated core skips, 15 installed acceptance tests passing, 1 credential-gated acceptance skip, and 0 failures. Aggregate evidence within the gate is 908 passes, 3 skips, and 0 failures. `bun run test:acceptance:matrix` reported 1 deterministic row passed, 3 external rows skipped, and 0 failures.
 - Plan notes: the installed recovery journey uses graceful managed-service shutdown and restart; lower-level lifecycle tests cover committed hard process-loss boundaries. Reviewer approval establishes policy consistency, not empirical improvement.
 - Remaining: live-provider, official Turso Sync, and Turso Cloud verification remains gated and unverified. Workspace-charter and user-constraint configuration remains unavailable and pinned as `null`; callers cannot select the reviewer. These are explicit product limits, not incomplete plan tasks.
+
+### 2026-08-12 — Evidence-complete governance freezing
+
+- Completed: changed new governance freezes to a strictly validated version-3 contract that gives every direct or refiner-produced proposal deterministic redacted evidence excerpts under one 32 KiB aggregate budget. The retained record carries canonical/redacted payload and excerpt digests, exact byte counts, truncation, and redaction provenance while excluding repository instruction content and brokered credentials. Version-1 and version-2 frozen inputs remain readable.
+- Completed: retained the trajectory refiner's required objective evaluation in governed proposal identity, frozen input, inspection, and application history. Direct proposals may omit evaluation. Evaluation remains post-activation intent and does not gate ordinary application; generated skills keep the existing compile and declared runtime-test requirement.
+- Validation: focused refinement-review, governance-hardening, and refiner suites passed with 128 passes, 0 failures, and 0 skips. Typecheck passed.
+- Remaining: aggregate verification and externally gated live-provider, official Turso Sync, and Turso Cloud checks were not run for this focused change.

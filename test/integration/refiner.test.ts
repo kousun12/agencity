@@ -773,27 +773,42 @@ describe("FU-016 durable RefinerService", () => {
       const proposal = await supervisor.refinementGovernance.get(review.proposalId!);
       expect(proposal.status).toBe("applied");
       expect(proposal.proposal.evidenceEventIds).toContain(evidence.id);
-      expect(proposal.frozenInput?.version).toBe(2);
-      if (proposal.frozenInput?.version !== 2) {
-        throw new Error("expected governance input v2");
+      expect(proposal.proposal.evaluation).toEqual({
+        kind: "objective",
+        name: "retained-evidence-check",
+        metric: "verification command succeeds",
+        target: true,
+      });
+      expect(proposal.frozenInput?.version).toBe(3);
+      if (proposal.frozenInput?.version !== 3) {
+        throw new Error("expected governance input v3");
       }
       expect(proposal.frozenInput.refinementGrounding).toMatchObject({
         reviewId: review.reviewId,
         sourceSnapshotHash: review.sourceSnapshotHash,
         allowedKinds: ["memory", "prompt_note", "skill", "subagent_spec"],
-        evidence: [{
-          eventId: evidence.id,
-          type: "MessageAppended",
-          truncated: false,
-          redacted: false,
-        }],
       });
-      expect(JSON.stringify(proposal.frozenInput.refinementGrounding))
+      expect(proposal.frozenInput.evidencePayloads.maximumBytes).toBe(32 * 1024);
+      expect(proposal.frozenInput.evidencePayloads.excerpts[0]).toMatchObject({
+        eventId: evidence.id,
+        truncated: false,
+        redactions: [],
+      });
+      expect(proposal.frozenInput.evidencePayloads.excerpts[0]!.excerpt)
         .toContain("Retained evidence for refinement");
       expect(provider.calls).toBe(1);
       expect(provider.governanceCalls).toBe(1);
       expect(proposal.reviewerSessionId).not.toBeNull();
       const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+      expect(events.find((event) =>
+        event.type === "GovernedRefinementApplied" &&
+        (event.payload as any).proposalId === proposal.proposalId)?.payload)
+        .toMatchObject({ evaluation: proposal.proposal.evaluation });
+      const proposedEvent = events.find((event) =>
+        event.type === "GovernedRefinementProposed" &&
+        (event.payload as any).proposalId === proposal.proposalId)!;
+      expect((proposedEvent.payload as any).proposalFingerprint)
+        .toBe(canonicalJsonDigest((proposedEvent.payload as any).proposal));
       const proposerLink = events.find((event) => event.type === "RefinementReviewChildLinked")!;
       const reviewerLink = events.find((event) => event.type === "RefinementGovernanceReviewChildLinked")!;
       expect((proposerLink.payload as any).childSessionId)
@@ -987,7 +1002,7 @@ describe("FU-016 durable RefinerService", () => {
     } finally { await supervisor.close(); }
   });
 
-  test("bounds cited trajectory payloads before sealed governance review", async () => {
+  test("bounds cited payload excerpts across sealed governance input", async () => {
     const provider = new ReviewProvider("review-bounded-grounding", "propose");
     const { supervisor, sessionId, branchId } = await fixture(provider);
     try {
@@ -996,7 +1011,7 @@ describe("FU-016 durable RefinerService", () => {
         sessionId,
         branchId,
         "user",
-        `${marker}:${"x".repeat(12_000)}`,
+        `${marker}:${"x".repeat(80_000)}`,
       );
       provider.evidenceEventId = evidence.id;
       const review = await supervisor.refiner.request(sessionId, branchId);
@@ -1004,17 +1019,22 @@ describe("FU-016 durable RefinerService", () => {
         (await supervisor.refinementGovernance.get(review.proposalId!)).status === "applied",
       "bounded grounding applied", 5_000);
       const governed = await supervisor.refinementGovernance.get(review.proposalId!);
-      if (governed.frozenInput?.version !== 2) {
-        throw new Error("expected governance input v2");
+      if (governed.frozenInput?.version !== 3) {
+        throw new Error("expected governance input v3");
       }
-      const item = governed.frozenInput.refinementGrounding?.evidence[0];
+      const item = governed.frozenInput.evidencePayloads.excerpts[0];
       expect(item).toMatchObject({
         eventId: evidence.id,
-        type: "MessageAppended",
         truncated: true,
+        redactions: [],
       });
-      expect(JSON.stringify(item?.payload)).toContain(marker);
-      expect(canonicalJsonByteLength(item?.payload ?? null)).toBeLessThan(2_300);
+      expect(item?.excerpt).toContain(marker);
+      expect(item).toBeDefined();
+      expect(item?.excerptBytes).toBeLessThanOrEqual(32 * 1024);
+      expect(governed.frozenInput.evidencePayloads.usedBytes)
+        .toBe(item!.excerptBytes);
+      expect(item?.canonicalPayloadBytes).toBeGreaterThan(item?.excerptBytes ?? 0);
+      expect(item?.excerptDigest).toBe(canonicalJsonDigest(item?.excerpt ?? ""));
     } finally { await supervisor.close(); }
   });
 
@@ -1978,9 +1998,17 @@ describe("FU-016 durable RefinerService", () => {
         reason: "Exercise the public profile proposal operation.",
         predictedEffect: "Future protocol runs use the revised profile.",
         evidenceEventIds: [evidence.id],
+        evaluation: {
+          kind: "objective",
+          name: "protocol-profile-evaluation",
+          metric: "later profile behavior improves",
+          target: true,
+        },
         wait: true,
       });
       expect(governed.status).toBe("applied");
+      expect(governed.proposal.evaluation?.name)
+        .toBe("protocol-profile-evaluation");
       expect((await client.governedRefinement(governed.proposalId)).status).toBe("applied");
       expect((await client.governedRefinements()).map((item) => item.proposalId))
         .toContain(governed.proposalId);
@@ -2752,6 +2780,12 @@ describe("FU-016 durable RefinerService", () => {
           reason: "Exercise automatic grouped rollback.",
           predictedEffect: "Apply three reversible local memory edits.",
           evidenceEventIds: [evidence.id],
+          evaluation: {
+            kind: "objective",
+            name: "grouped-rollback-evaluation",
+            metric: "local memory behavior improves",
+            target: true,
+          },
         },
       );
       const applied = await supervisor.refinementGovernance.wait(admitted.proposalId);
@@ -2870,6 +2904,12 @@ describe("FU-016 durable RefinerService", () => {
             reason: "Temporarily replace one tested skill.",
             predictedEffect: "Exercise tested skill restoration.",
             evidenceEventIds: [evidence.id],
+            evaluation: {
+              kind: "objective",
+              name: "skill-replacement-evaluation",
+              metric: "replacement behavior improves",
+              target: true,
+            },
           },
         );
       const replacement = await supervisor.refinementGovernance.wait(
@@ -2989,6 +3029,12 @@ describe("FU-016 durable RefinerService", () => {
             reason: "Create one temporary tested skill.",
             predictedEffect: "Exercise created-skill rollback.",
             evidenceEventIds: [evidence.id],
+            evaluation: {
+              kind: "objective",
+              name: "skill-creation-evaluation",
+              metric: "created skill improves behavior",
+              target: true,
+            },
           },
         );
       const created = await supervisor.refinementGovernance.wait(
@@ -3171,6 +3217,12 @@ describe("FU-016 durable RefinerService", () => {
           reason: "Attempt automatic workspace refinement.",
           predictedEffect: "Must be rejected before review.",
           evidenceEventIds: [],
+          evaluation: {
+            kind: "objective",
+            name: "workspace-denial-evaluation",
+            metric: "proposal remains local",
+            target: true,
+          },
         },
       );
       expect(automatic.status).toBe("deterministically_rejected");

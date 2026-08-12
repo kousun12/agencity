@@ -1,6 +1,7 @@
 import {
   PRODUCT_CONSTITUTION,
   PRODUCT_CONSTITUTION_REFERENCE,
+  MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
   REFINEMENT_GOVERNANCE_CONTRACT_ID,
   REFINEMENT_GOVERNANCE_POLICY,
   REFINEMENT_GOVERNANCE_POLICY_REFERENCE,
@@ -11,11 +12,13 @@ import {
   ValidationError,
   canonicalJsonByteLength,
   canonicalJsonDigest,
+  canonicalJsonStringify,
   newId,
   normalizeAgentProfileInput,
   projectEvents,
   refinementPrincipalToAgentPrincipal,
   renderExactAgentPrompt,
+  validateObjectiveEvaluation,
   validateRefinementGovernanceRecursiveResult,
   type GovernedRefinementProposal,
   type GovernedRefinementRecord,
@@ -24,6 +27,7 @@ import {
   type GovernedRefinementStatus,
   type JsonValue,
   type NewAgentEvent,
+  type ObjectiveEvaluation,
   type RefinementGovernanceDecision,
   type RefinementProposalPrincipal,
   type RefinementRollbackResult,
@@ -31,7 +35,12 @@ import {
   type RollbackGovernedRefinementInput,
   type RollbackRefinementInput,
 } from "../domain/index.ts";
-import { containsBrokeredSecret, scrubJson, scrubText } from "../security/index.ts";
+import {
+  containsBrokeredSecret,
+  sanitizeRefinementEvidencePayload,
+  scrubJson,
+  scrubText,
+} from "../security/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { AgentProfileService } from "./agent-profiles.ts";
 import type { HarnessService } from "./harness.ts";
@@ -50,7 +59,6 @@ const TERMINAL = new Set<GovernedRefinementStatus>([
 ]);
 const MAX_REASON_BYTES = 4 * 1024;
 const MAX_EVIDENCE = 32;
-const MAX_GOVERNANCE_GROUNDING_PAYLOAD_BYTES = 2 * 1024;
 const MAX_PENDING_PER_SESSION = 4;
 const MAX_PROPOSALS_PER_HOUR = 12;
 const RECOVERY_PAGE_SIZE = 200;
@@ -60,6 +68,7 @@ export interface SubmitGovernedRefinementInput {
   readonly reason: string;
   readonly predictedEffect: string;
   readonly evidenceEventIds: readonly string[];
+  readonly evaluation?: ObjectiveEvaluation;
   readonly revisesProposalId?: string;
   readonly originRunId?: string;
   readonly originTaskId?: string;
@@ -128,11 +137,16 @@ export class RefinementGovernanceService {
     );
   }
 
-  proposeAutomatic(
+  async proposeAutomatic(
     originSessionId: string,
     originBranchId: string,
     input: SubmitGovernedRefinementInput,
   ): Promise<GovernedRefinementRecord> {
+    if (input.evaluation === undefined) {
+      throw new ValidationError(
+        "Automatic refiner proposals require objective post-activation evaluation intent",
+      );
+    }
     return this.#admit(originSessionId, originBranchId, {
       kind: "automatic_refiner",
       componentId: "agencity.trajectory-refiner",
@@ -516,6 +530,7 @@ export class RefinementGovernanceService {
       reason: normalizeBounded(input.reason, "Refinement reason", MAX_REASON_BYTES),
       predictedEffect: normalizeBounded(input.predictedEffect, "Predicted effect", MAX_REASON_BYTES),
       evidenceEventIds: [...new Set(input.evidenceEventIds)],
+      ...(input.evaluation === undefined ? {} : { evaluation: input.evaluation }),
       ...(input.revisesProposalId ? { revisesProposalId: input.revisesProposalId } : {}),
     };
     const secretRejected = containsBrokeredSecret(rawProposal as unknown as JsonValue);
@@ -598,6 +613,15 @@ export class RefinementGovernanceService {
     }
     if (containsBrokeredSecret(proposal as unknown as JsonValue)) {
       throw new ValidationError("Brokered credentials cannot enter a refinement proposal");
+    }
+    if (proposal.evaluation !== undefined) {
+      validateObjectiveEvaluation(proposal.evaluation);
+    }
+    if (proposal.principal.kind === "automatic_refiner" &&
+        proposal.evaluation === undefined) {
+      throw new ValidationError(
+        "Automatic refiner proposals require objective post-activation evaluation intent",
+      );
     }
     const events = await this.storage.loadEvents(proposal.origin.sessionId, {
       branchId: proposal.origin.branchId,
@@ -697,12 +721,14 @@ export class RefinementGovernanceService {
         evidenceEventIds: previous.proposal.evidenceEventIds,
         reason: previous.proposal.reason,
         predictedEffect: previous.proposal.predictedEffect,
+        evaluation: previous.proposal.evaluation ?? null,
       };
       const nextComparable = {
         target: proposal.target,
         evidenceEventIds: proposal.evidenceEventIds,
         reason: proposal.reason,
         predictedEffect: proposal.predictedEffect,
+        evaluation: proposal.evaluation ?? null,
       };
       if (canonicalJsonDigest(priorComparable as unknown as JsonValue) ===
           canonicalJsonDigest(nextComparable as unknown as JsonValue)) {
@@ -1113,6 +1139,9 @@ export class RefinementGovernanceService {
         decisionId: record.reviewDecisionId!,
         status,
         appliedVersionIds: versionIds,
+        ...(record.proposal.evaluation === undefined
+          ? {}
+          : { evaluation: record.proposal.evaluation as unknown as JsonValue }),
         reason: bounded(reason, 16 * 1024),
         expectedStatus: "reviewed_approved",
       },
@@ -1137,6 +1166,9 @@ export class RefinementGovernanceService {
         decisionId,
         status,
         appliedVersionIds: versionIds,
+        ...(record.proposal.evaluation === undefined
+          ? {}
+          : { evaluation: record.proposal.evaluation as unknown as JsonValue }),
         reason: bounded(reason, 16 * 1024),
         expectedStatus: "reviewed_approved" as const,
       },
@@ -1249,18 +1281,63 @@ export class RefinementGovernanceService {
         } as unknown as JsonValue
       : proposal.target.edits as unknown as JsonValue;
     const evidence = [];
+    const payloadSources: Array<{
+      readonly eventId: string;
+      readonly canonicalPayloadDigest: `sha256:${string}`;
+      readonly canonicalPayloadBytes: number;
+      readonly redactedPayloadDigest: `sha256:${string}`;
+      readonly redactedPayloadBytes: number;
+      readonly redactedPayloadJson: string;
+      readonly redactions: readonly ("credentials" | "repository_instructions")[];
+    }> = [];
     for (const eventId of proposal.evidenceEventIds) {
       const event = await this.storage.getEvent(eventId);
       if (!event) throw new ValidationError("Frozen governance evidence is unavailable");
+      const canonicalPayload = event.payload as unknown as JsonValue;
+      const sanitized = sanitizeRefinementEvidencePayload(event.type, canonicalPayload);
+      const redactedPayloadJson = canonicalJsonStringify(sanitized.payload);
       evidence.push({
         eventId,
         sessionId: event.sessionId,
         branchId: event.branchId,
         cursor: event.cursor,
         type: event.type,
-        payloadDigest: canonicalJsonDigest(event.payload as unknown as JsonValue),
+        payloadDigest: canonicalJsonDigest(canonicalPayload),
+      });
+      payloadSources.push({
+        eventId,
+        canonicalPayloadDigest: canonicalJsonDigest(canonicalPayload),
+        canonicalPayloadBytes: canonicalJsonByteLength(canonicalPayload),
+        redactedPayloadDigest: canonicalJsonDigest(sanitized.payload),
+        redactedPayloadBytes: new TextEncoder().encode(redactedPayloadJson).byteLength,
+        redactedPayloadJson,
+        redactions: sanitized.redactions,
       });
     }
+    let remainingExcerptBytes =
+      MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES;
+    const evidenceExcerpts = payloadSources.map((source, index) => {
+      const remainingItems = payloadSources.length - index;
+      const allowance = Math.floor(remainingExcerptBytes / remainingItems);
+      const excerpt = truncateUtf8(source.redactedPayloadJson, allowance);
+      const excerptBytes = new TextEncoder().encode(excerpt).byteLength;
+      remainingExcerptBytes -= excerptBytes;
+      return {
+        eventId: source.eventId,
+        canonicalPayloadDigest: source.canonicalPayloadDigest,
+        canonicalPayloadBytes: source.canonicalPayloadBytes,
+        redactedPayloadDigest: source.redactedPayloadDigest,
+        redactedPayloadBytes: source.redactedPayloadBytes,
+        excerpt,
+        excerptDigest: canonicalJsonDigest(excerpt),
+        excerptBytes,
+        truncated: excerptBytes < source.redactedPayloadBytes,
+        redactions: source.redactions,
+      };
+    });
+    const usedEvidenceExcerptBytes =
+      MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES -
+      remainingExcerptBytes;
     const origin = await this.storage.readonlyQuery({
       sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
       args: [proposal.origin.sessionId],
@@ -1281,11 +1358,16 @@ export class RefinementGovernanceService {
     const refinementGrounding = await this.#refinementGrounding(proposal);
     const body = {
       protocol: "agencity.refinement-governance-input",
-      version: 2,
+      version: 3,
       proposal,
       currentTarget,
       renderedReplacement,
       evidence,
+      evidencePayloads: {
+        maximumBytes: MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
+        usedBytes: usedEvidenceExcerptBytes,
+        excerpts: evidenceExcerpts,
+      },
       ...(refinementGrounding === undefined ? {} : { refinementGrounding }),
       proposerRelationship: relationship,
       targetScope: proposal.target.kind === "agent_profile"
@@ -1341,33 +1423,17 @@ export class RefinementGovernanceService {
         snapshot.canonicalHash !== String(row.source_snapshot_hash)) {
       throw new ValidationError("Refinement governance source snapshot is unavailable or inconsistent");
     }
-    const snapshotByEventId = new Map(
-      snapshot.events.map((event) => [event.eventId, event] as const),
-    );
-    const evidence = proposal.evidenceEventIds.map((eventId) => {
-      const event = snapshotByEventId.get(eventId);
-      if (!event) {
+    const snapshotEventIds = new Set(snapshot.events.map((event) => event.eventId));
+    for (const eventId of proposal.evidenceEventIds) {
+      if (!snapshotEventIds.has(eventId)) {
         throw new ValidationError("Refinement governance evidence is absent from the frozen source snapshot");
       }
-      const bounded = boundedGovernanceGroundingPayload(
-        event.payload as unknown as JsonValue,
-      );
-      return {
-        eventId,
-        cursor: event.cursor,
-        type: event.type,
-        payload: bounded.payload,
-        payloadDigest: bounded.payloadDigest,
-        truncated: event.truncated || bounded.truncated,
-        redacted: event.redacted,
-      };
-    });
+    }
     return {
       reviewId,
       sourceSnapshotHash: snapshot.canonicalHash,
       allowedKinds: parseJson(row.allowed_kinds_json, []),
       trigger: snapshot.trigger as unknown as JsonValue,
-      evidence,
     };
   }
 
@@ -1672,35 +1738,18 @@ function parseJson<T>(value: unknown, fallback: T): T {
   return JSON.parse(String(value)) as T;
 }
 
-function boundedGovernanceGroundingPayload(value: JsonValue): {
-  readonly payload: JsonValue;
-  readonly payloadDigest: `sha256:${string}`;
-  readonly truncated: boolean;
-} {
-  const payload = scrubJson(value);
-  const payloadDigest = canonicalJsonDigest(payload);
-  const serialized = JSON.stringify(payload);
-  const utf8Bytes = new TextEncoder().encode(serialized).byteLength;
-  if (utf8Bytes <= MAX_GOVERNANCE_GROUNDING_PAYLOAD_BYTES) {
-    return { payload, payloadDigest, truncated: false };
-  }
-  return {
-    payload: {
-      truncated: true,
-      originalUtf8Bytes: utf8Bytes,
-      canonicalHash: payloadDigest,
-      preview: truncateUtf8(serialized, MAX_GOVERNANCE_GROUNDING_PAYLOAD_BYTES),
-    },
-    payloadDigest,
-    truncated: true,
-  };
-}
-
 function truncateUtf8(value: string, maximum: number): string {
-  const bytes = new TextEncoder().encode(value);
-  return bytes.byteLength <= maximum
-    ? value
-    : new TextDecoder().decode(bytes.slice(0, maximum));
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).byteLength <= maximum) return value;
+  let output = "";
+  let used = 0;
+  for (const character of value) {
+    const bytes = encoder.encode(character).byteLength;
+    if (used + bytes > maximum) break;
+    output += character;
+    used += bytes;
+  }
+  return output;
 }
 
 function normalizeBounded(value: string, label: string, maxBytes: number): string {

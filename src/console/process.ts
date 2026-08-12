@@ -6,6 +6,7 @@ import {
   validateScratchCheckpoint,
   type ScratchCheckpointCandidate,
   type ScratchCheckpointLoadResult,
+  type ScratchCheckpointWriteResult,
   type ScratchScope,
   type ScratchStatus,
 } from "./scratch.ts";
@@ -166,9 +167,10 @@ export class ConsoleProcess {
     scope: ScratchScope,
     sourceCellId: string,
     candidate: ScratchCheckpointCandidate,
+    result: ScratchCheckpointWriteResult,
   ): Promise<void> {
     await this.#control(
-      { type: "scratch-record-checkpoint", scope, sourceCellId, candidate },
+      { type: "scratch-record-checkpoint", scope, sourceCellId, candidate, result },
       5_000,
       "scratch-control-timeout",
     );
@@ -176,7 +178,7 @@ export class ConsoleProcess {
 
   async recordScratchCacheWrite(
     scope: ScratchScope,
-    status: "stored" | "cleared" | "unavailable",
+    status: ScratchCheckpointWriteResult["status"] | "unavailable",
   ): Promise<void> {
     await this.#control(
       { type: "scratch-record-cache-write", scope, status },

@@ -2,6 +2,7 @@ import type {
   ScratchCheckpointCandidate,
   ScratchCheckpointLoadResult,
   ScratchCheckpointSource,
+  ScratchCheckpointWriteResult,
   ScratchScope,
 } from "../console/scratch.ts";
 import type { ProcessExecutionWriteFence } from "./contract.ts";
@@ -13,8 +14,7 @@ export const SCRATCH_STORE_LIMITS = Object.freeze({
 });
 
 export type ScratchStoreWriteResult =
-  | { readonly status: "stored"; readonly unchangedPayload: boolean }
-  | { readonly status: "cleared" }
+  | ScratchCheckpointWriteResult
   | { readonly status: "stale" };
 
 /**

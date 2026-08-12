@@ -1,6 +1,6 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentProfileVersion, AgentState, EventPayloads, EventType, GovernedRefinementProposal, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, REFINEMENT_GOVERNANCE_CONTRACT_ID, ValidationError, canonicalJsonDigest, canonicalSkillDigest, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, newId, normalizeAgentProfileInput, projectEvents, reduceAgentState, refinementPrincipalToAgentPrincipal, validateEffectOrigin, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateProviderInputCandidate, validateRefinementGovernanceDecision, validateRefinementGovernanceRecursiveResult, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, REFINEMENT_GOVERNANCE_CONTRACT_ID, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, canonicalSkillDigest, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, newId, normalizeAgentProfileInput, projectEvents, reduceAgentState, refinementPrincipalToAgentPrincipal, validateEffectOrigin, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateProviderInputCandidate, validateRefinementGovernanceDecision, validateRefinementGovernanceRecursiveResult, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import {
   SCRATCH_CHECKPOINT_SCHEMA_VERSION,
@@ -826,6 +826,28 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
             frozen.canonicalDigest !== review.frozenInputDigest) {
           throw new ValidationError("Frozen governance input does not match its exact proposal");
         }
+        if (frozen.version === 3) {
+          for (const excerpt of frozen.evidencePayloads.excerpts as any[]) {
+            const sources = await tx.execute({
+              sql: "SELECT payload_json FROM events WHERE id=?",
+              args: [excerpt.eventId],
+            });
+            if (!sources.rows[0]) {
+              throw new ValidationError(
+                "Frozen governance V3 evidence payload is unavailable",
+              );
+            }
+            const payload = JSON.parse(
+              String(sources.rows[0].payload_json),
+            ) as JsonValue;
+            if (excerpt.canonicalPayloadDigest !== canonicalJsonDigest(payload) ||
+                excerpt.canonicalPayloadBytes !== canonicalJsonByteLength(payload)) {
+              throw new ValidationError(
+                "Frozen governance V3 canonical payload provenance does not match",
+              );
+            }
+          }
+        }
       }
       if (event.type === "RefinementGovernanceReviewChildLinked") {
         const link = event.payload as EventPayloads["RefinementGovernanceReviewChildLinked"];
@@ -883,6 +905,14 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         const application = event.payload as EventPayloads["GovernedRefinementApplied"];
         if (String(row.review_decision_id) !== application.decisionId) {
           throw new ValidationError("Governance application uses the wrong review decision");
+        }
+        if (!Bun.deepEquals(
+          application.evaluation ?? null,
+          proposal.evaluation ?? null,
+        )) {
+          throw new ValidationError(
+            "Governance application evaluation intent does not match its proposal",
+          );
         }
         if (proposal.target?.kind === "agent_profile") {
           if (application.status === "applied" && application.appliedVersionIds.length !== 1) {

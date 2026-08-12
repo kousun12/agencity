@@ -248,6 +248,9 @@ export class ProtocolServer {
                 reason: String(body.reason ?? ""),
                 predictedEffect: String(body.predictedEffect ?? ""),
                 evidenceEventIds: Array.isArray(body.evidenceEventIds) ? body.evidenceEventIds.map(String) : [],
+                ...(body.evaluation === undefined
+                  ? {}
+                  : { evaluation: body.evaluation }),
                 ...(typeof body.revisesProposalId === "string" ? { revisesProposalId: body.revisesProposalId } : {}),
                 ...(typeof body.clientRequestId === "string" ? { clientRequestId: body.clientRequestId } : {}),
                 wait: body.wait !== false,
@@ -286,6 +289,9 @@ export class ProtocolServer {
                 evidenceEventIds: Array.isArray(body.evidenceEventIds)
                   ? body.evidenceEventIds.map(String)
                   : [],
+                ...(body.evaluation === undefined
+                  ? {}
+                  : { evaluation: body.evaluation }),
                 ...(typeof body.revisesProposalId === "string"
                   ? { revisesProposalId: body.revisesProposalId }
                   : {}),

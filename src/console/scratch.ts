@@ -75,6 +75,11 @@ export interface ScratchCheckpointSource {
   readonly cursor: string;
 }
 
+export type ScratchCheckpointWriteResult =
+  | { readonly status: "stored" }
+  | { readonly status: "cleared" }
+  | { readonly status: "unchanged" };
+
 export interface ScratchCheckpointHooks {
   /** Phase-C storage may return only an exact session/branch restore. */
   load(scope: ScratchScope): Promise<ScratchCheckpointLoadResult>;
@@ -83,7 +88,7 @@ export interface ScratchCheckpointHooks {
     scope: ScratchScope,
     candidate: ScratchCheckpointCandidate,
     source: ScratchCheckpointSource,
-  ): Promise<void>;
+  ): Promise<ScratchCheckpointWriteResult>;
 }
 
 export type ScratchScopeTemperature = "warm" | "restored" | "cold";
@@ -113,7 +118,7 @@ export interface ScratchStatus {
     readonly restoreAttempted: boolean;
     readonly status: ScratchCheckpointLoadResult["status"];
     readonly reason: ScratchCacheUnavailableReason | ScratchCacheCorruptReason | null;
-    readonly lastWrite: "stored" | "cleared" | "unavailable" | null;
+    readonly lastWrite: ScratchCheckpointWriteResult["status"] | "unavailable" | null;
   };
   readonly limits: typeof SCRATCH_LIMITS;
 }

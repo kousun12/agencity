@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentInvocationContract, AgentProfileInput, AgentState, ModelConfigurationInput, ModelDescriptor, ReasoningEffort } from "../domain/index.ts";
+import type { AgentEvent, AgentInvocationContract, AgentProfileInput, AgentState, ModelConfigurationInput, ModelDescriptor, ObjectiveEvaluation, ReasoningEffort } from "../domain/index.ts";
 import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
@@ -172,6 +172,7 @@ export class AgentClient {
     readonly reason: string;
     readonly predictedEffect: string;
     readonly evidenceEventIds: readonly string[];
+    readonly evaluation?: ObjectiveEvaluation;
     readonly revisesProposalId?: string;
     readonly clientRequestId?: string;
     readonly wait?: boolean;

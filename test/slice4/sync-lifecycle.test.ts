@@ -209,6 +209,7 @@ describe("Slice 4 offline-first synchronization lifecycle",()=>{
     reason:"Create one reversible synchronized memory.",
     predictedEffect:"Exercise grouped rollback synchronization.",
     evidenceEventIds:[evidence.id],
+    evaluation:{kind:"objective",name:"synchronized-memory-evaluation",metric:"retained synchronized behavior improves",target:true},
   });
   const applied=await a.supervisor.refinementGovernance.wait(admitted.proposalId);expect(applied.status).toBe("applied");
   const createdVersion=await a.supervisor.harness.getVersion(applied.appliedVersionIds[0]!);expect(createdVersion).not.toBeNull();

@@ -1,7 +1,12 @@
 import { ulid } from "ulid";
 import { z } from "zod";
 import type { JsonValue, Sha256Digest } from "./json.ts";
-import { assertJsonValue, canonicalJsonDigest } from "./json.ts";
+import {
+  assertJsonValue,
+  canonicalJsonByteLength,
+  canonicalJsonDigest,
+  canonicalJsonStringify,
+} from "./json.ts";
 import { ValidationError } from "./errors.ts";
 import { agentActionSchema, type AgentAction } from "./agent-action.ts";
 import {
@@ -47,6 +52,13 @@ import {
   type AgentInvocationContract,
   type AgentRunResultReference,
 } from "./agent-invocation-contract.ts";
+import {
+  objectiveEvaluationSchema,
+  validateObjectiveEvaluation,
+} from "./refinement-review.ts";
+import {
+  MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
+} from "./refinement-governance.ts";
 
 export const EVENT_SCHEMA_VERSION = 5 as const;
 export const eventTypes = [
@@ -306,7 +318,7 @@ export interface EventPayloads {
   RefinementGovernanceReviewRequested: { proposalId: string; reviewId: string; frozenInput: JsonValue; frozenInputDigest: string; expectedStatus: "validated" };
   RefinementGovernanceReviewChildLinked: { proposalId: string; reviewId: string; handleId: string; childSessionId: string; childBranchId: string; expectedStatus: "validated" };
   RefinementGovernanceReviewDecided: { proposalId: string; reviewId: string; decisionId: string; status: "reviewed_rejected" | "review_failed" | "review_unknown" | "reviewed_approved"; decision?: JsonValue; reason: string; expectedStatus: "validated" | "reviewing" };
-  GovernedRefinementApplied: { proposalId: string; decisionId: string; status: "applied" | "apply_conflict" | "apply_failed"; appliedVersionIds: string[]; reason: string; expectedStatus: "reviewed_approved" };
+  GovernedRefinementApplied: { proposalId: string; decisionId: string; status: "applied" | "apply_conflict" | "apply_failed"; appliedVersionIds: string[]; evaluation?: JsonValue; reason: string; expectedStatus: "reviewed_approved" };
   RefinementProposalTerminalNoticeDelivered: { proposalId: string; noticeId: string; originSessionId: string; originBranchId: string; status: "deterministically_rejected" | "reviewed_rejected" | "review_failed" | "review_unknown" | "apply_conflict" | "apply_failed" | "applied"; result: JsonValue };
   RefinementRollbackApplied: { rollbackId: string; targetKind: "agent_profile" | "memory" | "prompt_note" | "skill" | "subagent_spec"; targetId: string; previousVersionId: string; restoreSourceVersionId: string; restorationVersionId: string; actor: JsonValue; reason: string; evidenceEventIds: string[] };
   GovernedRefinementRollbackApplied: { proposalId: string; rollbackId: string; actions: GovernedRefinementRollbackAction[]; actor: JsonValue; reason: string; evidenceEventIds: string[] };
@@ -455,6 +467,7 @@ const governedRefinementProposalSchema = z.object({
   reason: z.string().min(1).max(16_384),
   predictedEffect: z.string().min(1).max(16_384),
   evidenceEventIds: z.array(id).max(32),
+  evaluation: objectiveEvaluationSchema.optional(),
   revisesProposalId: id.optional(),
 }).strict();
 const reviewerLimitsSchema = z.object({
@@ -463,9 +476,42 @@ const reviewerLimitsSchema = z.object({
   turnLimit: z.number().int().positive(),
   wallTimeLimitMs: z.number().int().positive(),
 }).strict();
+const frozenGovernanceGroundingSchema = z.object({
+  reviewId: id,
+  sourceSnapshotHash: fingerprint,
+  allowedKinds: z.array(z.enum(["memory", "prompt_note", "skill", "subagent_spec"])).min(1).max(4),
+  trigger: jsonValueSchema,
+  evidence: z.array(z.object({
+    eventId: id,
+    cursor: z.string().regex(/^\d+$/),
+    type: id,
+    payload: jsonValueSchema,
+    payloadDigest: fingerprint,
+    truncated: z.boolean(),
+    redacted: z.boolean(),
+  }).strict()).max(32).optional(),
+}).strict();
+const frozenGovernanceEvidencePayloadsSchema = z.object({
+  maximumBytes: z.literal(MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES),
+  usedBytes: z.number().int().nonnegative().max(
+    MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
+  ),
+  excerpts: z.array(z.object({
+    eventId: id,
+    canonicalPayloadDigest: fingerprint,
+    canonicalPayloadBytes: z.number().int().nonnegative(),
+    redactedPayloadDigest: fingerprint,
+    redactedPayloadBytes: z.number().int().nonnegative(),
+    excerpt: z.string(),
+    excerptDigest: fingerprint,
+    excerptBytes: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+    redactions: z.array(z.enum(["credentials", "repository_instructions"])).max(2),
+  }).strict()).max(32),
+}).strict();
 const frozenGovernanceInputSchema = z.object({
   protocol: z.literal("agencity.refinement-governance-input"),
-  version: z.union([z.literal(1), z.literal(2)]),
+  version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   proposal: governedRefinementProposalSchema,
   currentTarget: jsonValueSchema,
   renderedReplacement: jsonValueSchema,
@@ -477,21 +523,8 @@ const frozenGovernanceInputSchema = z.object({
     type: id,
     payloadDigest: fingerprint,
   }).strict()).max(32),
-  refinementGrounding: z.object({
-    reviewId: id,
-    sourceSnapshotHash: fingerprint,
-    allowedKinds: z.array(z.enum(["memory", "prompt_note", "skill", "subagent_spec"])).min(1).max(4),
-    trigger: jsonValueSchema,
-    evidence: z.array(z.object({
-      eventId: id,
-      cursor: z.string().regex(/^\d+$/),
-      type: id,
-      payload: jsonValueSchema,
-      payloadDigest: fingerprint,
-      truncated: z.boolean(),
-      redacted: z.boolean(),
-    }).strict()).max(32),
-  }).strict().optional(),
+  evidencePayloads: frozenGovernanceEvidencePayloadsSchema.optional(),
+  refinementGrounding: frozenGovernanceGroundingSchema.optional(),
   proposerRelationship: z.enum(["self", "direct_parent", "workspace_owner", "automatic_refiner"]),
   targetScope: jsonValueSchema,
   runtimeBoundaries: z.array(z.string().min(1)).min(1).max(32),
@@ -509,6 +542,70 @@ const frozenGovernanceInputSchema = z.object({
   }
   if (value.version === 1 && value.refinementGrounding !== undefined) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "governance input v1 cannot contain refinement grounding" });
+  }
+  if (value.version < 3 && value.evidencePayloads !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "governance input v1/v2 cannot contain v3 evidence payloads" });
+  }
+  if (value.version === 2 && value.refinementGrounding !== undefined &&
+      value.refinementGrounding.evidence === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "governance input v2 grounding requires evidence excerpts" });
+  }
+  if (value.version === 3) {
+    if (value.evidencePayloads === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "governance input v3 requires bounded evidence payloads" });
+      return;
+    }
+    if (value.refinementGrounding?.evidence !== undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "governance input v3 grounding cannot duplicate evidence payloads" });
+    }
+    const evidenceIds = value.evidence.map((item) => item.eventId);
+    const excerptIds = value.evidencePayloads.excerpts.map((item) => item.eventId);
+    if (!Bun.deepEquals(evidenceIds, value.proposal.evidenceEventIds) ||
+        !Bun.deepEquals(excerptIds, value.proposal.evidenceEventIds)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "governance input v3 evidence order must match the proposal" });
+    }
+    const usedBytes = value.evidencePayloads.excerpts.reduce(
+      (total, item) => total + item.excerptBytes,
+      0,
+    );
+    if (usedBytes !== value.evidencePayloads.usedBytes) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "governance input v3 aggregate excerpt bytes do not match" });
+    }
+    for (const [index, item] of value.evidencePayloads.excerpts.entries()) {
+      const excerptBytes = new TextEncoder().encode(item.excerpt).byteLength;
+      if (item.excerptBytes !== excerptBytes ||
+          item.excerptDigest !== canonicalJsonDigest(item.excerpt) ||
+          item.excerptBytes > item.redactedPayloadBytes ||
+          item.truncated !== (item.excerptBytes < item.redactedPayloadBytes) ||
+          new Set(item.redactions).size !== item.redactions.length) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: `governance input v3 excerpt provenance does not match for ${item.eventId}` });
+      }
+      if (value.evidence[index]?.payloadDigest !==
+          item.canonicalPayloadDigest) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: `governance input v3 canonical evidence digest does not match for ${item.eventId}` });
+      }
+      if (item.redactions.length === 0 &&
+          (item.canonicalPayloadDigest !== item.redactedPayloadDigest ||
+            item.canonicalPayloadBytes !== item.redactedPayloadBytes)) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: `governance input v3 unredacted payload provenance does not match for ${item.eventId}` });
+      }
+      if (item.redactions.length > 0 &&
+          item.canonicalPayloadDigest === item.redactedPayloadDigest) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: `governance input v3 redaction provenance does not change the payload for ${item.eventId}` });
+      }
+      if (!item.truncated) {
+        try {
+          const parsedExcerpt = JSON.parse(item.excerpt) as JsonValue;
+          if (canonicalJsonStringify(parsedExcerpt) !== item.excerpt ||
+              canonicalJsonDigest(parsedExcerpt) !== item.redactedPayloadDigest ||
+              canonicalJsonByteLength(parsedExcerpt) !== item.redactedPayloadBytes) {
+            context.addIssue({ code: z.ZodIssueCode.custom, message: `governance input v3 complete redacted payload does not match for ${item.eventId}` });
+          }
+        } catch {
+          context.addIssue({ code: z.ZodIssueCode.custom, message: `governance input v3 complete excerpt is not canonical JSON for ${item.eventId}` });
+        }
+      }
+    }
   }
 });
 const immutablePromptComponentSchema = z.object({
@@ -816,6 +913,22 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
         value.proposalFingerprint !== canonicalJsonDigest(value.proposal as unknown as JsonValue)) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "governed proposal identity or fingerprint does not match" });
     }
+    if (value.proposal.principal.kind === "automatic_refiner" &&
+        value.proposal.evaluation === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "automatic governed proposals require objective evaluation intent" });
+    }
+    if (value.proposal.evaluation !== undefined) {
+      try {
+        validateObjectiveEvaluation(value.proposal.evaluation);
+      } catch (error) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: error instanceof Error
+            ? error.message
+            : "governed proposal objective evaluation is invalid",
+        });
+      }
+    }
   }),
   GovernedRefinementValidated: z.object({ proposalId: id, valid: z.boolean(), validation: jsonValueSchema, expectedStatus: z.literal("proposed") }).strict(),
   RefinementGovernanceReviewRequested: z.object({ proposalId: id, reviewId: id, frozenInput: frozenGovernanceInputSchema, frozenInputDigest: fingerprint, expectedStatus: z.literal("validated") }).strict().superRefine((value, context) => {
@@ -834,7 +947,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "validated governance failure must terminate as review_failed" });
     }
   }),
-  GovernedRefinementApplied: z.object({ proposalId: id, decisionId: id, status: z.enum(["applied", "apply_conflict", "apply_failed"]), appliedVersionIds: z.array(id), reason: z.string().min(1).max(16384), expectedStatus: z.literal("reviewed_approved") }).strict(),
+  GovernedRefinementApplied: z.object({ proposalId: id, decisionId: id, status: z.enum(["applied", "apply_conflict", "apply_failed"]), appliedVersionIds: z.array(id), evaluation: objectiveEvaluationSchema.optional(), reason: z.string().min(1).max(16384), expectedStatus: z.literal("reviewed_approved") }).strict(),
   RefinementProposalTerminalNoticeDelivered: z.object({ proposalId: id, noticeId: id, originSessionId: id, originBranchId: id, status: z.enum(["deterministically_rejected", "reviewed_rejected", "review_failed", "review_unknown", "apply_conflict", "apply_failed", "applied"]), result: jsonValueSchema }).strict(),
   RefinementRollbackApplied: z.object({ rollbackId: id, targetKind: z.enum(["agent_profile", "memory", "prompt_note", "skill", "subagent_spec"]), targetId: id, previousVersionId: id, restoreSourceVersionId: id, restorationVersionId: id, actor: jsonValueSchema, reason: z.string().min(1).max(1024), evidenceEventIds: z.array(id).max(32) }).strict(),
   GovernedRefinementRollbackApplied: z.object({

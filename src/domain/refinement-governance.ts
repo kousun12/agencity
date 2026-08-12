@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ValidationError } from "./errors.ts";
 import type { AgentPrincipalReference, AgentProfileInput } from "./agent-profile.ts";
 import type { GovernedRefinementRollbackAction } from "./events.ts";
-import type { HarnessEdit, HarnessKind } from "./harness.ts";
+import type { HarnessEdit, HarnessKind, ObjectiveEvaluation } from "./harness.ts";
 import {
   assertJsonValue,
   canonicalJsonByteLength,
@@ -111,6 +111,8 @@ export interface GovernedRefinementProposal {
   readonly reason: string;
   readonly predictedEffect: string;
   readonly evidenceEventIds: readonly string[];
+  /** Post-activation evaluation intent; required for automatic-refiner proposals. */
+  readonly evaluation?: ObjectiveEvaluation;
   readonly revisesProposalId?: string;
 }
 
@@ -193,9 +195,42 @@ export interface FrozenRefinementGovernanceInputV2
   };
 }
 
+export const MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES = 32 * 1024;
+
+export interface FrozenRefinementGovernanceEvidenceExcerpt {
+  readonly eventId: string;
+  readonly canonicalPayloadDigest: Sha256Digest;
+  readonly canonicalPayloadBytes: number;
+  readonly redactedPayloadDigest: Sha256Digest;
+  readonly redactedPayloadBytes: number;
+  /** A canonical-JSON prefix of the complete redacted payload. */
+  readonly excerpt: string;
+  readonly excerptDigest: Sha256Digest;
+  readonly excerptBytes: number;
+  readonly truncated: boolean;
+  readonly redactions: readonly ("credentials" | "repository_instructions")[];
+}
+
+export interface FrozenRefinementGovernanceInputV3
+  extends FrozenRefinementGovernanceInputBase {
+  readonly version: 3;
+  readonly evidencePayloads: {
+    readonly maximumBytes: typeof MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES;
+    readonly usedBytes: number;
+    readonly excerpts: readonly FrozenRefinementGovernanceEvidenceExcerpt[];
+  };
+  readonly refinementGrounding?: {
+    readonly reviewId: string;
+    readonly sourceSnapshotHash: Sha256Digest;
+    readonly allowedKinds: readonly ("memory" | "prompt_note" | "skill" | "subagent_spec")[];
+    readonly trigger: JsonValue;
+  };
+}
+
 export type FrozenRefinementGovernanceInput =
   | FrozenRefinementGovernanceInputV1
-  | FrozenRefinementGovernanceInputV2;
+  | FrozenRefinementGovernanceInputV2
+  | FrozenRefinementGovernanceInputV3;
 
 export interface GovernedRefinementRecord {
   readonly proposalId: string;
