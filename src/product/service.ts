@@ -27,7 +27,7 @@ import {
   type ServiceManifestV1,
 } from "./service-discovery.ts";
 
-export const MANAGED_SERVICE_PROTOCOL_VERSION = 1;
+export const MANAGED_SERVICE_PROTOCOL_VERSION = 2;
 export const MANAGED_SERVICE_CONFIG_ENV = "AGENCITY_SERVICE_CONFIG";
 export const DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 3_600_000;
 const MIN_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 100;

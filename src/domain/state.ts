@@ -1,6 +1,6 @@
 import type {
   AgentRunActionSource, AgentRunGoalMode, AgentRunStatus, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOrigin, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
-  CellLogStream, FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
+  AiGenerationBudgetLimits, AiGenerationKind, AiGenerationStatus, CellLogStream, FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
   RefinementReviewLifecycleStatus, ScheduleStatus, SessionStatus, TaskStatus, ModelCallResult, ModelCallTermination, ModelUsageSource, Usage, WakeStatus, WorkingValue,
 } from "./events.ts";
 import type { ModelConfiguration, ModelDispatch, ModelWarning, RecursiveResponseAdmission } from "./model.ts";
@@ -10,7 +10,7 @@ import type { AgentAction } from "./agent-action.ts";
 import type { AgentInvocationProfilePin, AgentProfileVersion, InvocationPromptProvenance } from "./agent-profile.ts";
 import type { JsonValue } from "./json.ts";
 
-export const REDUCER_VERSION = 15 as const;
+export const REDUCER_VERSION = 16 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
@@ -63,6 +63,18 @@ export interface HeartbeatState { readonly id: string; readonly intervalMs: numb
 export interface ScheduleState { readonly id: string; readonly kind: "once" | "interval"; readonly prompt: string; readonly intervalMs: number | null; readonly nextTickAt: string; readonly owner: AutonomyOwner; readonly goalMode: Exclude<AgentRunGoalMode, "none">; readonly status: ScheduleStatus; readonly tick: number; readonly lastFiredAt: string | null; readonly reason?: string; readonly eventId: string; }
 export interface WakeState { readonly id: string; readonly sourceType: "heartbeat" | "schedule"; readonly sourceId: string; readonly tick: number; readonly scheduledAt: string; readonly firedAt: string; readonly prompt: string; readonly goalId: string | null; readonly goalMode: AgentRunGoalMode; readonly status: WakeStatus; readonly claimId: string | null; readonly claimedAt: string | null; readonly runId: string | null; readonly deliveredAt: string | null; readonly reason?: string; readonly eventId: string; }
 export interface RecursiveModelState { readonly id: string; readonly taskId: string; readonly parentSessionId: string; readonly parentBranchId: string; readonly childSessionId: string; readonly childBranchId: string; readonly model: ModelConfiguration; readonly responseAdmission: RecursiveResponseAdmission; readonly profilePin: AgentInvocationProfilePin; readonly inputSetId: string | null; readonly input?: JsonValue; readonly inputProvenance?: JsonValue; readonly inputHash?: string; readonly status: RecursiveModelStatus; readonly outcome?: RecursiveModelOutcome; readonly resultMessageId?: string; readonly result?: JsonValue; readonly resultArtifactId?: string; readonly error?: string; readonly eventId: string; }
+export interface AiGenerationState {
+  readonly id: string; readonly kind?: AiGenerationKind; readonly status: AiGenerationStatus;
+  readonly context?: JsonValue; readonly contextProvenance?: JsonValue; readonly contextDigest?: string; readonly contextBytes?: number;
+  readonly effectId?: string; readonly idempotencyKey?: string; readonly requestDigest?: string; readonly cellId?: string; readonly runId?: string; readonly taskId?: string;
+  readonly ancestorTaskIds: string[]; readonly modelDispatch?: ModelDispatch; readonly providerInput?: ProviderInputCandidate;
+  readonly estimatedInputTokens?: number; readonly budget?: AiGenerationBudgetLimits;
+  readonly reservation?: { readonly tokens: number; readonly costUsd: number; readonly turns: 1; readonly wallTimeMs: number };
+  readonly value?: JsonValue; readonly resultDigest?: string; readonly resultBytes?: number; readonly finishReason?: string;
+  readonly usage?: Usage; readonly warnings?: ModelWarning[]; readonly usageSource?: ModelUsageSource;
+  readonly budgetDebited?: { readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number; readonly usageSource: ModelUsageSource; readonly eventId: string };
+  readonly error?: string; readonly requestEventId?: string; readonly resultEventId?: string; readonly eventId: string;
+}
 
 
 export interface UserCorrectionState { readonly id: string; readonly correctedEventIds: string[]; readonly correction: string; readonly eventId: string; }
@@ -111,6 +123,6 @@ export interface AgentState {
   readonly tasks: Record<string, TaskState>; readonly mailbox: Record<string, MailboxMessageState>;
   readonly terminalNotices: Record<string, TerminalNoticeState>; readonly documents: Record<string, DocumentState>;
   readonly inputSets: Record<string, InputSetState>; readonly goals: Record<string, GoalState>;
-  readonly heartbeats: Record<string, HeartbeatState>; readonly schedules: Record<string, ScheduleState>; readonly wakes: Record<string, WakeState>; readonly recursiveModels: Record<string, RecursiveModelState>;
+  readonly heartbeats: Record<string, HeartbeatState>; readonly schedules: Record<string, ScheduleState>; readonly wakes: Record<string, WakeState>; readonly recursiveModels: Record<string, RecursiveModelState>; readonly aiGenerations: Record<string, AiGenerationState>;
   readonly agentRuns: Record<string, AgentRunState>; readonly userCorrections: Record<string, UserCorrectionState>; readonly refinementReviews: Record<string, RefinementReviewState>; readonly refinementTriggerConsumptions: Record<string, RefinementTriggerConsumptionState>;
 }

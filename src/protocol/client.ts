@@ -2,9 +2,10 @@ import type { AgentEvent, AgentProfileInput, AgentState, ModelConfigurationInput
 import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
+  AiGenerationHandle, AiGenerationInput, AiGenerationResult, AiObjectGenerationInput,
   CreateGoalInput, CreateHeartbeatInput, CreateScheduleInput, CreateInputSetInput, DocumentHandle, GoalHandle,
-  HeartbeatHandle, ImportDocumentInput, InputSetHandle, RecursiveModelHandle, ScheduleHandle, SendMessageInput,
-  SpawnAgentInput, StartRecursiveModelInput, SubagentHandle, CreateMemoryInput,
+  HeartbeatHandle, ImportDocumentInput, InputSetHandle, ScheduleHandle, SendMessageInput,
+  SpawnAgentInput, SubagentHandle, CreateMemoryInput,
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
   StartAgentRunInput, AgentRunResult, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
@@ -345,13 +346,34 @@ export class AgentClient {
 
   importDocument(sessionId: string, branchId: string, input: ImportDocumentInput): Promise<DocumentHandle> { return this.#post(`/sessions/${sessionId}/documents?branch=${branchId}`, input); }
   createInputSet(sessionId: string, branchId: string, input: CreateInputSetInput): Promise<InputSetHandle> { return this.#post(`/sessions/${sessionId}/input-sets?branch=${branchId}`, input); }
-  async startModel(sessionId: string, branchId: string, input: StartRecursiveModelInput | string): Promise<RecursiveModelHandle> {
-    if (typeof input === "string") return this.#post(`/sessions/${sessionId}/models?branch=${branchId}`, { prompt: input });
-    const model = await this.#compatibleModel(input.model);
-    return this.#post(`/sessions/${sessionId}/models?branch=${branchId}`, { ...input, ...(model === undefined ? {} : { model }) });
+  async admitTextGeneration(sessionId: string, branchId: string, input: AiGenerationInput): Promise<AiGenerationHandle> {
+    const model = typeof input.model === "string" ? input.model : await this.#compatibleModel(input.model);
+    return this.#post(`/sessions/${sessionId}/ai/generations?branch=${branchId}`, { ...input, kind: "text", ...(model === undefined ? {} : { model }) });
   }
-  model(handleId: string): Promise<RecursiveModelHandle> { return this.#json(`/models/${handleId}`); }
-  cancelModel(handleId: string, reason?: string): Promise<RecursiveModelHandle> { return this.#post(`/models/${handleId}/cancel`, reason === undefined ? {} : { reason }); }
+  async admitObjectGeneration(sessionId: string, branchId: string, input: AiObjectGenerationInput): Promise<AiGenerationHandle> {
+    const model = typeof input.model === "string" ? input.model : await this.#compatibleModel(input.model);
+    return this.#post(`/sessions/${sessionId}/ai/generations?branch=${branchId}`, { ...input, kind: "object", ...(model === undefined ? {} : { model }) });
+  }
+  generation(sessionId: string, branchId: string, generationId: string): Promise<AiGenerationHandle> {
+    return this.#json(`/sessions/${sessionId}/ai/generations/${generationId}?branch=${branchId}`);
+  }
+  generationResult(sessionId: string, branchId: string, generationId: string): Promise<AiGenerationResult> {
+    return this.#json(`/sessions/${sessionId}/ai/generations/${generationId}/result?branch=${branchId}`);
+  }
+  findGeneration(sessionId: string, branchId: string, idempotencyKey: string): Promise<AiGenerationHandle | null> {
+    return this.#json(`/sessions/${sessionId}/ai/generations/by-key?branch=${branchId}&idempotencyKey=${encodeURIComponent(idempotencyKey)}`);
+  }
+  cancelGeneration(sessionId: string, branchId: string, generationId: string, reason?: string): Promise<AiGenerationHandle> {
+    return this.#post(`/sessions/${sessionId}/ai/generations/${generationId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason });
+  }
+  async generateText(sessionId: string, branchId: string, input: AiGenerationInput, options: { readonly timeoutMs?: number } = {}): Promise<AiGenerationResult> {
+    const handle = await this.admitTextGeneration(sessionId, branchId, input);
+    return this.#waitForGeneration(sessionId, branchId, handle.generationId, options.timeoutMs);
+  }
+  async generateObject(sessionId: string, branchId: string, input: AiObjectGenerationInput, options: { readonly timeoutMs?: number } = {}): Promise<AiGenerationResult> {
+    const handle = await this.admitObjectGeneration(sessionId, branchId, input);
+    return this.#waitForGeneration(sessionId, branchId, handle.generationId, options.timeoutMs);
+  }
 
   createGoal(sessionId: string, branchId: string, input: CreateGoalInput | string): Promise<GoalHandle> { return this.#post(`/sessions/${sessionId}/goals?branch=${branchId}`, typeof input === "string" ? { description: input } : input); }
   goals(sessionId: string, branchId: string): Promise<GoalHandle[]> { return this.#json(`/sessions/${sessionId}/goals?branch=${branchId}`); }
@@ -432,6 +454,16 @@ export class AgentClient {
   dataManifest(operation:"export"|"delete",scopeKind:"workspace"|"session"|"profile",scopeId:string,requestedBy:string):Promise<DataManifestRecord>{return this.#post("/sync/manifests",{operation,scopeKind,scopeId,requestedBy});}
   exportData(destination:string,scopeKind:"workspace"|"session"|"profile",scopeId:string,requestedBy:string):Promise<DataManifestRecord>{return this.#post("/sync/export",{destination,scopeKind,scopeId,requestedBy});}
   deleteOwnedData(input:DeleteOwnedDataInput):Promise<PhysicalDeletionReceipt>{return this.#post("/sync/delete",input);}
+
+  async #waitForGeneration(sessionId: string, branchId: string, generationId: string, timeoutMs = 120_000): Promise<AiGenerationResult> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const result = await this.generationResult(sessionId, branchId, generationId);
+      if (["succeeded", "failed", "cancelled", "unknown", "budget_exceeded"].includes(result.status) ||
+          Date.now() >= deadline) return result;
+      await Bun.sleep(25);
+    }
+  }
 
   #put<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "PUT", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }
   #post<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "POST", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }

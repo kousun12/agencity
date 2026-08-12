@@ -1,6 +1,16 @@
-import { EVENT_SCHEMA_VERSION, type AgentEvent, type EventPayloads, type ModelCallResult, type TaskStatus } from "./events.ts";
+import {
+  EVENT_SCHEMA_VERSION,
+  AI_GENERATION_SYSTEM_INSTRUCTION,
+  MAX_AI_GENERATIONS_PER_CELL,
+  MAX_CONCURRENT_AI_GENERATIONS_PER_CELL,
+  type AgentEvent,
+  type BudgetLimits,
+  type EventPayloads,
+  type ModelCallResult,
+  type TaskStatus,
+} from "./events.ts";
 import type {
-  AgentRunState, AgentRunStepState, AgentState, CellState, DocumentChunkState, EffectState, GoalGateState,
+  AgentRunState, AgentRunStepState, AgentState, AiGenerationState, CellState, DocumentChunkState, EffectState, GoalGateState,
   MailboxMessageState, ModelCallState, RecursiveModelState, TaskState, TerminalNoticeState,
 } from "./state.ts";
 import { REDUCER_VERSION } from "./state.ts";
@@ -19,6 +29,7 @@ import {
   validateRefinementGovernanceRecursiveResult,
 } from "./refinement-governance.ts";
 import { assertBoundedOutputs } from "./bounded-output.ts";
+import { canonicalJsonByteLength, canonicalJsonDigest } from "./json.ts";
 
 function withBase(state: AgentState, event: AgentEvent): AgentState {
   return { ...state, cursor: event.cursor, appliedEventIds: [...state.appliedEventIds, event.id] };
@@ -52,7 +63,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
       status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, contexts: {}, compactions: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
-      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, agentRuns: {}, userCorrections: {}, refinementReviews: {}, refinementTriggerConsumptions: {},
+      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, aiGenerations: {}, agentRuns: {}, userCorrections: {}, refinementReviews: {}, refinementTriggerConsumptions: {},
     };
   }
   if (state.sessionId !== event.sessionId) throw new ValidationError("Cannot reduce an event from another session");
@@ -357,6 +368,181 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
           },
         }),
         budget: { ...state.budget, tokens: state.budget.tokens + p.tokens, costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns, wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs },
+      };
+    }
+    case "AiGenerationContextFrozen": {
+      const p = event.payload as EventPayloads["AiGenerationContextFrozen"];
+      if (state.aiGenerations[p.generationId] ||
+          !Array.isArray(p.context) ||
+          canonicalJsonDigest(p.context) !== p.contextDigest ||
+          canonicalJsonByteLength(p.context) !== p.exactUtf8Bytes) {
+        throw new InvalidTransitionError("aiGeneration", state.aiGenerations[p.generationId]?.status ?? "invalid-context", "pending");
+      }
+      validateAiGenerationContextProvenance(p);
+      const generation: AiGenerationState = {
+        id: p.generationId, status: "pending", context: p.context,
+        contextProvenance: p.provenance, contextDigest: p.contextDigest,
+        contextBytes: p.exactUtf8Bytes, ancestorTaskIds: [], eventId: event.id,
+      };
+      return { ...next, aiGenerations: { ...state.aiGenerations, [p.generationId]: generation } };
+    }
+    case "AiGenerationRequested": {
+      const p = event.payload as EventPayloads["AiGenerationRequested"];
+      const old = state.aiGenerations[p.generationId];
+      validateModelDispatch(p.modelDispatch);
+      validateProviderInputCandidate(p.providerInput, {
+        context: { messages: p.providerInput.messages as unknown as import("./json.ts").JsonValue },
+        modelDispatch: p.modelDispatch,
+        capacity: p.providerInput.provenance.capacity,
+      });
+      validateAiGenerationProviderInput(old?.context, p.providerInput.messages);
+      if (!old || old.status !== "pending" || old.requestEventId ||
+          old.contextDigest !== p.contextDigest || old.eventId !== p.contextEventId ||
+          (p.kind === "text") !== (p.modelDispatch.responseContract.kind === "text")) {
+        throw new InvalidTransitionError("aiGeneration", old?.status ?? "missing", "requested");
+      }
+      const active = Object.values(state.aiGenerations).filter((generation) =>
+        generation.id !== p.generationId && ["pending", "running"].includes(generation.status));
+      if (p.cellId !== undefined) {
+        const fromCell = Object.values(state.aiGenerations).filter((generation) =>
+          generation.id !== p.generationId && generation.cellId === p.cellId);
+        const activeFromCell = active.filter((generation) => generation.cellId === p.cellId);
+        if (fromCell.length >= MAX_AI_GENERATIONS_PER_CELL ||
+            activeFromCell.length >= MAX_CONCURRENT_AI_GENERATIONS_PER_CELL) {
+          throw new ValidationError("AI generation exceeds the durable per-cell admission bound");
+        }
+      }
+      const reserved = active.reduce((sum, generation) => ({
+        tokens: sum.tokens + (generation.reservation?.tokens ?? 0),
+        costUsd: sum.costUsd + (generation.reservation?.costUsd ?? 0),
+        turns: sum.turns + (generation.reservation?.turns ?? 0),
+        wallTimeMs: sum.wallTimeMs + (generation.reservation?.wallTimeMs ?? 0),
+      }), { tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0 });
+      const activeChildReservations = Object.values(state.tasks)
+        .filter((task) => !["completed", "failed", "cancelled"].includes(task.status))
+        .map((task) => task.budget);
+      assertGenerationReservation(state, p.reservation, reserved, activeChildReservations);
+      return { ...next, aiGenerations: { ...state.aiGenerations, [p.generationId]: {
+        ...old, kind: p.kind, effectId: p.effectId, idempotencyKey: p.idempotencyKey, requestDigest: p.requestDigest,
+        ...(p.cellId === undefined ? {} : { cellId: p.cellId }),
+        ...(p.runId === undefined ? {} : { runId: p.runId }),
+        ...(p.taskId === undefined ? {} : { taskId: p.taskId }),
+        ancestorTaskIds: [...p.ancestorTaskIds], modelDispatch: p.modelDispatch,
+        providerInput: p.providerInput, estimatedInputTokens: p.estimatedInputTokens,
+        budget: p.budget, reservation: p.reservation, requestEventId: event.id, eventId: event.id,
+      } } };
+    }
+    case "AiGenerationStatusChanged": {
+      const p = event.payload as EventPayloads["AiGenerationStatusChanged"];
+      const old = state.aiGenerations[p.generationId];
+      const effect = old?.effectId ? state.effects[old.effectId] : undefined;
+      const allowed = old && (
+        p.status === "running" ? old.status === "pending" :
+        ["pending", "running"].includes(old.status)
+      );
+      const effectStatusAllowed =
+        p.status === "running" ? effect?.status === "requested" || effect?.status === "started" :
+        p.status === "failed" ? effect?.status === "failed" || effect?.status === "succeeded" :
+        p.status === "cancelled" ? effect?.status === "cancelled" :
+        p.status === "unknown" ? effect?.status === "unknown" :
+        effect?.status === "cancelled" || effect?.status === "succeeded";
+      if (!allowed || p.effectId !== old.effectId || !effectStatusAllowed) {
+        throw new InvalidTransitionError("aiGeneration", old?.status ?? "missing", p.status);
+      }
+      return { ...next, aiGenerations: { ...state.aiGenerations, [p.generationId]: {
+        ...old, status: p.status, ...(p.error === undefined ? {} : { error: p.error }), eventId: event.id,
+      } } };
+    }
+    case "AiGenerationResultCommitted": {
+      const p = event.payload as EventPayloads["AiGenerationResultCommitted"];
+      const old = state.aiGenerations[p.generationId];
+      const effect = old?.effectId ? state.effects[old.effectId] : undefined;
+      if (!old || !["pending", "running"].includes(old.status) || old.kind !== p.kind ||
+          old.effectId !== p.effectId || effect?.status !== "succeeded" ||
+          effect.eventId !== p.sourceOutcomeEventId || effect.output === undefined ||
+          canonicalJsonDigest(p.value) !== p.resultDigest ||
+          canonicalJsonByteLength(p.value) !== p.resultBytes ||
+          p.resultBytes > (old.budget?.inlineResultByteLimit ?? 0)) {
+        throw new InvalidTransitionError("aiGeneration", old?.status ?? "missing", "succeeded");
+      }
+      const output = validateModelEffectOutputV2(effect.output, {
+        responseContract: old.modelDispatch!.responseContract,
+        responseCapability: old.modelDispatch!.responseCapability,
+        configuredProvider: old.modelDispatch!.configuration.provider,
+      });
+      const expectedValue = output.result.kind === "text"
+        ? output.result.text
+        : output.result.kind === "tool-submission" &&
+            output.result.submission.input &&
+            typeof output.result.submission.input === "object" &&
+            !Array.isArray(output.result.submission.input)
+          ? output.result.submission.input.value
+          : undefined;
+      const expectedFinishReason =
+        ("rawReason" in output.response.termination
+          ? output.response.termination.rawReason?.trim()
+          : undefined) ||
+        output.response.termination.kind;
+      const expectedUsageSource = output.response.kind === "guard-aborted"
+        ? "conservative-guard-estimate"
+        : "provider-reported";
+      if (!Bun.deepEquals(expectedValue, p.value) ||
+          !Bun.deepEquals(output.response.usage, p.usage) ||
+          !Bun.deepEquals(output.response.warnings, p.warnings) ||
+          p.finishReason !== expectedFinishReason ||
+          p.usageSource !== expectedUsageSource) {
+        throw new ValidationError("AI generation result differs from its authoritative model effect");
+      }
+      return { ...next, aiGenerations: { ...state.aiGenerations, [p.generationId]: {
+        ...old, status: "succeeded", value: p.value, resultDigest: p.resultDigest,
+        resultBytes: p.resultBytes, finishReason: p.finishReason, usage: p.usage,
+        warnings: p.warnings.map((warning) => ({ ...warning })), usageSource: p.usageSource,
+        resultEventId: event.id, eventId: event.id,
+      } } };
+    }
+    case "AiGenerationBudgetDebited": {
+      const p = event.payload as EventPayloads["AiGenerationBudgetDebited"];
+      const old = state.aiGenerations[p.generationId];
+      if (!old || old.budgetDebited || !["succeeded", "failed", "cancelled", "unknown", "budget_exceeded"].includes(old.status) ||
+          p.sessionId !== state.sessionId || p.branchId !== event.branchId ||
+          p.runId !== old.runId || p.taskId !== old.taskId ||
+          !sameStrings(p.ancestorTaskIds, old.ancestorTaskIds) ||
+          p.sourceResultEventId !== (old.resultEventId ?? old.eventId)) {
+        throw new ValidationError("AI generation budget debit does not match its terminal generation");
+      }
+      let exactUsage: EventPayloads["AiGenerationResultCommitted"]["usage"] | undefined;
+      if (old.status === "succeeded" && old.usageSource === "provider-reported") {
+        exactUsage = old.usage;
+      } else if (p.usageSource === "provider-reported" && old.effectId && old.modelDispatch) {
+        const effect = state.effects[old.effectId];
+        if (effect?.status === "succeeded" && effect.output !== undefined) {
+          exactUsage = validateModelEffectOutputV2(effect.output, {
+            responseContract: old.modelDispatch.responseContract,
+            responseCapability: old.modelDispatch.responseCapability,
+            configuredProvider: old.modelDispatch.configuration.provider,
+          }).response.usage ?? undefined;
+        }
+      }
+      const expected = exactUsage
+        ? { tokens: exactUsage.inputTokens + exactUsage.outputTokens, costUsd: exactUsage.costUsd, turns: 1, usageSource: "provider-reported" as const }
+        : { tokens: old.reservation?.tokens ?? 0, costUsd: old.reservation?.costUsd ?? 0, turns: 1, usageSource: "conservative-guard-estimate" as const };
+      if (p.tokens !== expected.tokens || p.costUsd !== expected.costUsd ||
+          p.turns !== expected.turns || p.usageSource !== expected.usageSource) {
+        throw new ValidationError("AI generation budget debit disagrees with retained usage or reservation");
+      }
+      return {
+        ...next,
+        aiGenerations: { ...state.aiGenerations, [p.generationId]: {
+          ...old, budgetDebited: {
+            tokens: p.tokens, costUsd: p.costUsd, turns: p.turns,
+            wallTimeMs: p.wallTimeMs, usageSource: p.usageSource, eventId: event.id,
+          }, eventId: event.id,
+        } },
+        budget: {
+          ...state.budget, tokens: state.budget.tokens + p.tokens,
+          costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns,
+          wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs,
+        },
       };
     }
     case "BudgetExceeded": return { ...next, budget: { ...state.budget, exceeded: true }, status: "idle" };
@@ -808,13 +994,14 @@ function validateModelEffectRelation(
   const input = payload.input;
   const callId = typeof input.callId === "string" ? input.callId : undefined;
   const compactionId = typeof input.compactionId === "string" ? input.compactionId : undefined;
+  const generationId = typeof input.generationId === "string" ? input.generationId : undefined;
   const dispatch = input.modelDispatch;
   const providerInput = input.providerInput;
   if (!dispatch || typeof dispatch !== "object" || Array.isArray(dispatch)) {
     throw new ValidationError("Model effects require a complete immutable model dispatch");
   }
-  if ((callId === undefined) === (compactionId === undefined)) {
-    throw new ValidationError("Model effects must belong to exactly one admitted call or compaction");
+  if ([callId, compactionId, generationId].filter((value) => value !== undefined).length !== 1) {
+    throw new ValidationError("Model effects must belong to exactly one admitted call, compaction, or AI generation");
   }
   if (callId !== undefined) {
     const call = state.modelCalls[callId];
@@ -825,6 +1012,15 @@ function validateModelEffectRelation(
         !promptProvenance || typeof promptProvenance !== "object" || Array.isArray(promptProvenance) ||
         !Bun.deepEquals(call.promptProvenance, promptProvenance)) {
       throw new ValidationError("Model effect does not agree with its admitted model call");
+    }
+    return;
+  }
+  if (generationId !== undefined) {
+    const generation = state.aiGenerations[generationId];
+    if (!generation || generation.effectId !== payload.effectId ||
+        !generation.modelDispatch || !Bun.deepEquals(generation.modelDispatch, dispatch) ||
+        !generation.providerInput || !Bun.deepEquals(generation.providerInput, providerInput)) {
+      throw new ValidationError("Model effect does not agree with its admitted AI generation");
     }
     return;
   }
@@ -852,8 +1048,9 @@ function validateEffectOrigin(
   }
   if (effect.executor === "model" &&
       origin.kind !== "model-call" &&
+      origin.kind !== "ai-generation" &&
       origin.kind !== "context-compaction") {
-    throw new ValidationError("Model effects require a model-call or context-compaction origin");
+    throw new ValidationError("Model effects require a model-call, AI-generation, or context-compaction origin");
   }
   if (effect.executor === "skill" &&
       origin.kind !== "cell" &&
@@ -884,6 +1081,19 @@ function validateEffectOrigin(
     if (effect.executor !== "model" || effect.operation !== "complete" ||
         !call || call.effectId !== effect.effectId || inputCallId !== origin.callId) {
       throw new ValidationError("Model-call effect origin does not agree with its retained call");
+    }
+    return;
+  }
+  if (origin.kind === "ai-generation") {
+    const generation = state.aiGenerations[origin.generationId];
+    const inputGenerationId = effect.input && typeof effect.input === "object" &&
+      !Array.isArray(effect.input) && typeof effect.input.generationId === "string"
+      ? effect.input.generationId
+      : undefined;
+    if (effect.executor !== "model" || effect.operation !== "complete" ||
+        !generation || generation.effectId !== effect.effectId ||
+        inputGenerationId !== origin.generationId) {
+      throw new ValidationError("AI-generation effect origin does not agree with its retained generation");
     }
     return;
   }
@@ -925,6 +1135,96 @@ function validateEffectOrigin(
       effect.operation !== (origin.kind === "skill-invocation" ? "invoke" : "test") ||
       origin.entryId !== inputEntryId || origin.versionId !== inputVersionId) {
     throw new ValidationError("Skill effect origin does not agree with its retained immutable input");
+  }
+}
+
+function validateAiGenerationContextProvenance(
+  payload: EventPayloads["AiGenerationContextFrozen"],
+): void {
+  if (!Array.isArray(payload.context)) {
+    throw new ValidationError("AI generation frozen context must be an ordered array");
+  }
+  const context = payload.context;
+  const provenance = payload.provenance;
+  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) {
+    throw new ValidationError("AI generation context provenance must be an object");
+  }
+  const sources = provenance.sources;
+  const omissions = provenance.omissions;
+  if (provenance.version !== "agencity.explicit-context.v1" ||
+      provenance.ordered !== true ||
+      provenance.itemCount !== context.length ||
+      provenance.exactUtf8Bytes !== payload.exactUtf8Bytes ||
+      !Array.isArray(sources) || sources.length !== context.length ||
+      !Array.isArray(omissions)) {
+    throw new ValidationError("AI generation context provenance does not match its frozen values");
+  }
+  const incomplete = new Set<number>();
+  sources.forEach((source, position) => {
+    if (!source || typeof source !== "object" || Array.isArray(source) ||
+        source.position !== position || typeof source.complete !== "boolean") {
+      throw new ValidationError("AI generation context source provenance is malformed or out of order");
+    }
+    if (source.complete === false) incomplete.add(position);
+  });
+  const omitted = new Set<number>();
+  for (const omission of omissions) {
+    if (!omission || typeof omission !== "object" || Array.isArray(omission) ||
+        typeof omission.position !== "number" || !Number.isSafeInteger(omission.position) ||
+        omission.position < 0 || omission.position >= context.length ||
+        typeof omission.reason !== "string" || !omission.reason) {
+      throw new ValidationError("AI generation context omission provenance is malformed");
+    }
+    omitted.add(omission.position);
+  }
+  if (provenance.complete !== (incomplete.size === 0) ||
+      !sameStrings(
+        [...incomplete].sort((left, right) => left - right).map(String),
+        [...omitted].sort((left, right) => left - right).map(String),
+      )) {
+    throw new ValidationError("AI generation context completeness or omissions are inconsistent");
+  }
+}
+
+function validateAiGenerationProviderInput(
+  context: import("./json.ts").JsonValue | undefined,
+  messages: readonly import("./provider-input.ts").ProviderInputMessage[],
+): void {
+  if (messages.length < 2 ||
+      messages[0]?.role !== "system" ||
+      messages[0].content !== AI_GENERATION_SYSTEM_INSTRUCTION ||
+      messages.slice(1).some((message) => message.role === "system")) {
+    throw new ValidationError("AI generation provider input must contain only its fixed system instruction");
+  }
+  if (Array.isArray(context) && context.length > 0) {
+    const expected = `EXPLICIT CONTEXT (ordered JSON)\n${JSON.stringify(context)}`;
+    const last = messages.at(-1);
+    if (last?.role !== "user" || last.content !== expected) {
+      throw new ValidationError("AI generation provider input does not match its frozen explicit context");
+    }
+  }
+}
+
+function assertGenerationReservation(
+  state: AgentState,
+  requested: { readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number },
+  active: { readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number },
+  activeChildren: readonly BudgetLimits[],
+): void {
+  const checks = [
+    ["tokens", "tokenLimit", state.budget.limits.tokenLimit, state.budget.tokens, active.tokens, requested.tokens],
+    ["cost", "costLimitUsd", state.budget.limits.costLimitUsd, state.budget.costUsd, active.costUsd, requested.costUsd],
+    ["turns", "turnLimit", state.budget.limits.turnLimit, state.budget.turns, active.turns, requested.turns],
+    ["wallTime", "wallTimeLimitMs", state.budget.limits.wallTimeLimitMs, state.budget.wallTimeMs, active.wallTimeMs, requested.wallTimeMs],
+  ] as const;
+  for (const [dimension, key, limit, spent, reserved, next] of checks) {
+    const childReserved = limit === undefined ? 0 : activeChildren.reduce(
+      (sum, budget) => sum + (budget[key] ?? Math.max(0, limit - spent)),
+      0,
+    );
+    if (limit !== undefined && spent + reserved + childReserved + next > limit) {
+      throw new ValidationError(`AI generation ${dimension} reservation exceeds the caller budget`);
+    }
   }
 }
 

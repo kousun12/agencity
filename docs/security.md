@@ -32,6 +32,12 @@ Supplemental narration is diagnostic-only. There is no text-JSON or TypeScript f
 
 The built-in product transports validate and scrub normalized output before persistence. A custom provider's complete structured result is scanned across submission input, termination reasons, warnings, supplemental text, violation evidence, and every other retained field for registered brokered secrets or credential-shaped material. A match fails closed before the value is returned or persisted and does not echo the observed credential.
 
+### Raw AI generation
+
+`ai.generateText` and `ai.generateObject` receive only their fixed host instruction, explicit prompt or user/assistant messages, and explicitly selected bounded context. Context values are validated as plain acyclic JSON without invoking getters, and artifact ranges must be valid UTF-8. Known or credential-shaped secrets reject the operation; context is not silently scrubbed into different data. Model output is checked for registered and credential-shaped secrets and the hard inline byte bound inside the model executor before an `EffectOutcomeRecorded` success can persist it.
+
+Generation lookup, result, and cancellation routes require the exact owning session and branch. A guessed generation ID cannot cross that route boundary. This is product scope enforcement inside the trusted-local service, not multi-tenant network authorization. Read-only SQL references retain the shared-database diagnostic boundary described below; generated code already has the same trusted SQL surface.
+
 ### Generated SQL
 
 The injected `sql` template binds interpolations and accepts only a narrow single-statement read grammar. DDL/DML/transactions, dangerous file/extension functions, mutation-capable pragmas, private operational tables, and SQLite schema/engine tables are rejected. Results are capped at 1,000 rows, statements at 64 KiB, and execution at 2 seconds. A dedicated analytical LibSQL client additionally enables `PRAGMA query_only=ON` and is closed after each query. This protects the intended SDK path from accidental canonical mutation or unbounded reads; it does not turn arbitrary generated TypeScript with OS authority into untrusted code.

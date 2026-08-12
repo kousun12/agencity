@@ -174,9 +174,9 @@ An agent may target itself or its direct creation-family child; the workspace ow
 
 Profiles and non-skill harness content apply atomically after approval and application-time revalidation. Skills activate only after durable compile and declared runtime tests pass. `wait: true` returns at a terminal status. `wait: false` returns after durable admission and delivers one idempotent route notice later. Rejected proposals may be revised only through a new bounded proposal linked by `revisesProposalId`. `rollbackRefinement` restores exact earlier approved content through a new immutable version. Reviewer approval proves policy consistency, not improved outcomes.
 
-## Durable recursive work
+## Durable agent work and raw generation
 
-Root agents, delegated agents, and recursive model calls use retained sessions, tasks, budgets, mailboxes, and JSON handles.
+Root and delegated agents use retained sessions, tasks, budgets, mailboxes, and JSON handles. Raw generation is a separate one-provider-request service and does not create agent-family records.
 
 ```ts
 const child = await supervisor.agents.spawn(parentSessionId, parentBranchId, {
@@ -199,27 +199,20 @@ await supervisor.agents.sendMessage(parentSessionId, parentBranchId, {
 
 const family = await supervisor.agents.listFamily(parentSessionId, parentBranchId);
 
-const call = await supervisor.models.start(parentSessionId, parentBranchId, {
+const call = await supervisor.ai.admitText(parentSessionId, parentBranchId, {
   prompt: "Summarize the selected log ranges",
-  inputSetId,
-  profile: {
-    role: "Log summarizer",
-    purpose: "Summarize one bounded recursive input.",
-    instructions: "- Distinguish observations from inference.",
-  },
+  context: [{ kind: "document-range", documentId, start: 0, limit: 20 }],
   idempotencyKey: "summarize-log-v1",
 });
 
-const terminal = await supervisor.models.result(call.handleId, {
-  timeoutMs: 30_000,
-});
+const terminal = await supervisor.ai.result(call.generationId, { wait: true });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. Each input may supply `profile`; omission uses the sealed task-specialist profile. Recursive `models.start/startMany` use the same explicit-or-default rule and retain the resulting profile pin on the handle. Specification spawn materializes a profile from the exact active specification version and records those source IDs. Profile meaning participates in idempotent admission, so reusing an idempotency key with changed standing behavior is rejected.
+`agents.spawnMany` validates and admits the complete batch atomically. Each input may supply `profile`; omission uses the sealed task-specialist profile. Specification spawn materializes a profile from the exact active specification version and records those source IDs. Profile meaning participates in idempotent admission, so reusing an idempotency key with changed standing behavior is rejected. `ai.admitText` and `ai.admitObject` freeze only explicit prompt/messages and context references, reserve caller-narrowing budget, and return immediately; `ai.result`, `ai.get`, `ai.find`, and `ai.cancel` operate on durable generation identity.
 
 `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 
-Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
+Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Retained internal recursive handles preserve historical child, task, model, input, outcome, usage, and provenance. Raw generation results never spill; oversized output fails. Lost non-idempotent provider calls become `unknown` and are not replayed.
 
 Documents and input sets provide exact bounded inputs:
 
@@ -278,7 +271,7 @@ The database-driven coordinators create durable wakes. Missed intervals coalesce
 
 `memory.create/search/list` operate on scoped, attributable records. Search returns both ranked records and provenance for candidates, policy rejections, and selections. FTS5 is a candidate generator; scope, status, tags, conflicts, exposure, and limits remain authoritative service decisions.
 
-`refiner.request` freezes a bounded trajectory and runs a durable proposer child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Public recursive calls remain text operations, and no assistant JSON parser or prose fallback exists. A proposed change then enters the separate sealed governance reviewer, application-time validation, automatic application or rejection, and terminal delivery path.
+`refiner.request` freezes a bounded trajectory and runs a durable proposer child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Recursive-model admission remains private to sealed runtime workflows, and no assistant JSON parser or prose fallback exists. A proposed change then enters the separate sealed governance reviewer, application-time validation, automatic application or rejection, and terminal delivery path.
 
 `harness` still exposes ADR-0002 proposal, validation, activation, allocation, observation, decision, approval, history, and rollback operations for advanced and legacy-compatible candidate evaluation. They are not the ordinary activation path under ADR 0012. `skills` compiles, tests, and invokes immutable skill versions through the outbox. `specs.spawn` admits a version-pinned subagent through the normal task/session model. Skill permissions are an exact runtime allowlist and are not an OS sandbox.
 

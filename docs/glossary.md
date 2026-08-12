@@ -142,6 +142,10 @@ One model-decision cycle inside an agent run. A step materializes context, reque
 
 One profile-pinned unit of model-driven work: either an autonomous agent run or retained recursive-model execution. An invocation may contain multiple model calls or retries while preserving one profile pin.
 
+### Raw AI generation
+
+One text or declared-object provider request owned by the calling session and branch. It receives only a fixed host instruction plus explicit prompt/messages and explicit bounded context, retains exact request/effect/result/usage provenance, and creates no child session, task, profile, mailbox, or autonomous continuation.
+
 ### Agent action
 
 The validated, canonical decision submitted by the model for one run step. The formal action is either `bun_console`, containing a TypeScript cell, or `finish`, containing a typed successful, blocked, or failed outcome and exact user-facing message.

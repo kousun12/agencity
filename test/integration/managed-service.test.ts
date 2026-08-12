@@ -246,7 +246,7 @@ describe("managed workspace service", () => {
     expect((await fetch(`${service.manifest.url}/health`)).status).toBe(401);
     expect((await fetch(`${service.manifest.url}/service/status`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401);
     const health = await (await fetch(`${service.manifest.url}/health`, { headers: { authorization: `Bearer ${service.manifest.bearerToken}` } })).json() as any;
-    expect(health).toMatchObject({ authenticated: true, workspaceId: config.workspace.workspaceId, instanceId: service.manifest.instanceId, appVersion: "0.1.0-test", protocolMin: 1, protocolMax: 1, configHash: managedServiceConfigurationHash(config) });
+    expect(health).toMatchObject({ authenticated: true, workspaceId: config.workspace.workspaceId, instanceId: service.manifest.instanceId, appVersion: "0.1.0-test", protocolMin: 2, protocolMax: 2, configHash: managedServiceConfigurationHash(config) });
 
     const paths = serviceStatePaths(config.workspace.root);
     expect((await stat(paths.serviceDirectory)).mode & 0o077).toBe(0);

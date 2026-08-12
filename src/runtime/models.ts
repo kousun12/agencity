@@ -38,6 +38,7 @@ import {
 } from "./internal.ts";
 import type { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import type { OutboxRunner } from "./outbox.ts";
+import { ExplicitContextMaterializer } from "./explicit-context.ts";
 
 export const MAX_RECURSIVE_INPUT_BYTES = 256 * 1024;
 export const MAX_RECURSIVE_RESULT_BYTES = 64 * 1024;
@@ -134,6 +135,7 @@ const PUBLIC_RECURSIVE_RESPONSE_ADMISSION: RecursiveResponseAdmission = Object.f
 
 export class RecursiveModelService {
   readonly #recursive;
+  readonly #explicitContext;
   readonly #runs = new Set<Promise<void>>();
   readonly #runningHandles = new Set<string>();
 
@@ -148,6 +150,7 @@ export class RecursiveModelService {
     readonly memory?: MemoryService,
   ) {
     this.#recursive = requireRecursiveStorage(storage);
+    this.#explicitContext = new ExplicitContextMaterializer(storage, artifacts, memory);
     // Supervisor-only structured refinement start stays behind the non-barrel
     // internal capability registry; see src/runtime/internal.ts.
     registerRefinementReviewStarter(this, (parentSessionId, parentBranchId, input) =>
@@ -976,11 +979,16 @@ export class RecursiveModelService {
       values.push(chunks);
       provenance.push({ kind: "input-set", inputSetId: input.inputSetId, chunkIds: [...inputSet.chunkIds] });
     } else if (parts !== undefined) {
-      for (let index = 0; index < parts.length; index++) {
-        const resolved = await this.#resolvePart(parentSessionId, parentBranchId, rootSessionId, parts[index]);
-        values.push(resolved.value);
-        provenance.push({ position: index, ...resolved.provenance });
-      }
+      const frozen = await this.#explicitContext.materialize(
+        parentSessionId,
+        parentBranchId,
+        rootSessionId,
+        parts,
+      );
+      const frozenValues = frozen.value as JsonValue[];
+      values.push(...frozenValues);
+      const frozenProvenance = frozen.provenance as Record<string, JsonValue>;
+      if (Array.isArray(frozenProvenance.sources)) provenance.push(...frozenProvenance.sources);
     }
     if (values.length === 0 && input.input === undefined && input.inputs === undefined && input.inputSetId === undefined) return {};
     const value: JsonValue = input.inputs !== undefined || input.inputSetId !== undefined ? values : values[0]!;

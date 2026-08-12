@@ -13,6 +13,8 @@ export * from "./agent-profiles.ts";
 export * from "./agent-system-prompt.ts";
 export * from "./documents.ts";
 export * from "./models.ts";
+export * from "./explicit-context.ts";
+export * from "./ai-generation.ts";
 export * from "./goals.ts";
 export * from "./heartbeats.ts";
 export * from "./memory.ts";

@@ -12,7 +12,7 @@ import {
   type ScratchSkippedProperty,
 } from "../console/scratch.ts";
 import type {
-  AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
+  AgentStorage, AiGenerationRecord, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
   HeartbeatRecord, InputSetRecord, MailboxRecord, OutboxRecord, ReadonlyStatement,
   RecursiveModelRecord, ScheduleRecord, SessionRecord, StorageCapabilities, TaskRecord, WakeRecord,
   ProcessExecutionLeaseClaim, ProcessExecutionLeaseProof, ProcessExecutionLeaseRecord,
@@ -141,6 +141,20 @@ function rowToRecursiveModel(row: Row): RecursiveModelRecord {
   const contract = validateModelResponseContract(admission.responseContract);
   validateModelResponseContractCapability(contract, admission.responseCapability);
   return { handleId: String(row.handle_id), taskId: String(row.task_id), parentSessionId: String(row.parent_session_id), parentBranchId: String(row.parent_branch_id), childSessionId: String(row.child_session_id), childBranchId: String(row.child_branch_id), model: JSON.parse(String(row.model_json)), responseAdmission: admission, profilePin: profilePin as unknown as RecursiveModelRecord["profilePin"], inputSetId: row.input_set_id === null ? null : String(row.input_set_id), ...(input === undefined ? {} : { input }), ...(inputProvenance === undefined ? {} : { inputProvenance }), ...(row.input_hash === null || row.input_hash === undefined ? {} : { inputHash: String(row.input_hash) }), status: String(row.status) as RecursiveModelRecord["status"], ...(row.outcome === null || row.outcome === undefined ? {} : { outcome: String(row.outcome) as NonNullable<RecursiveModelRecord["outcome"]> }), ...(row.result_message_id === null ? {} : { resultMessageId: String(row.result_message_id) }), ...(result === undefined ? {} : { result }), ...(row.result_artifact_id === null || row.result_artifact_id === undefined ? {} : { resultArtifactId: String(row.result_artifact_id) }), ...(row.error === null ? {} : { error: String(row.error) }), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+}
+function rowToAiGeneration(row: Row): AiGenerationRecord {
+  const request = JSON.parse(String(row.request_json)) as EventPayloads["AiGenerationRequested"];
+  const result = optionalJson(row, "result_json") as EventPayloads["AiGenerationResultCommitted"] | undefined;
+  return {
+    generationId: String(row.generation_id), sessionId: String(row.session_id),
+    branchId: String(row.branch_id), idempotencyKey: String(row.idempotency_key),
+    kind: String(row.kind) as AiGenerationRecord["kind"],
+    status: String(row.status) as AiGenerationRecord["status"],
+    effectId: String(row.effect_id), executionOwned: Number(row.execution_owned) === 1, request,
+    ...(result === undefined ? {} : { result }),
+    ...(row.error === null || row.error === undefined ? {} : { error: String(row.error) }),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
 }
 function rowToReplicaStatus(row: Row): WorkspaceReplicaStatusRecord { return {
   replicaId:String(row.replica_id), replicaIncarnation:row.replica_incarnation===null?null:String(row.replica_incarnation),
@@ -338,6 +352,7 @@ export class LibSqlStorage implements AgentStorage {
         { version: 18, name: "governance-sync-projection", url: new URL("./migrations/018_governance_sync_projection.sql", import.meta.url) },
         { version: 19, name: "effect-origins", url: new URL("./migrations/019_effect_origins.sql", import.meta.url) },
         { version: 20, name: "console-scratch-cache", url: new URL("./migrations/020_console_scratch_cache.sql", import.meta.url) },
+        { version: 21, name: "ai-generations", url: new URL("./migrations/021_ai_generations.sql", import.meta.url) },
       ];
       for (const migration of migrations) {
         const script = await Bun.file(migration.url).text();
@@ -1734,6 +1749,18 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     }
     if (event.type === "RecursiveModelStarted" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStarted"]; await tx.execute({ sql: "INSERT INTO recursive_model_handles(handle_id,task_id,parent_session_id,parent_branch_id,child_session_id,child_branch_id,model_json,response_admission_json,profile_pin_json,input_set_id,input_json,input_provenance_json,input_hash,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", args: [p.handleId,p.taskId,p.parentSessionId,p.parentBranchId,p.childSessionId,p.childBranchId,json(p.model),json(p.responseAdmission),json(p.profilePin),p.inputSetId ?? null,p.input === undefined ? null : json(p.input),p.inputProvenance === undefined ? null : json(p.inputProvenance),p.inputHash ?? null,event.id,event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "RecursiveModelStatusChanged" && executionOwned) { const p = event.payload as EventPayloads["RecursiveModelStatusChanged"]; await tx.execute({ sql: "UPDATE recursive_model_handles SET status=?,outcome=COALESCE(?,outcome),result_message_id=COALESCE(?,result_message_id),result_json=COALESCE(?,result_json),result_artifact_id=COALESCE(?,result_artifact_id),error=COALESCE(?,error),last_event_id=?,updated_at=? WHERE handle_id=?", args: [p.status,p.outcome ?? null,p.resultMessageId ?? null,p.result === undefined ? null : json(p.result),p.resultArtifactId ?? null,p.error ?? null,event.id,event.committedAt,p.handleId] }); }
+    if (event.type === "AiGenerationRequested") {
+      const p = event.payload as EventPayloads["AiGenerationRequested"];
+      await tx.execute({
+        sql: "INSERT INTO ai_generations(generation_id,session_id,branch_id,idempotency_key,kind,status,effect_id,execution_owned,request_json,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,'pending',?,?,?,?,?,?,?)",
+        args: [p.generationId,event.sessionId,event.branchId,p.idempotencyKey,p.kind,p.effectId,executionOwned ? 1 : 0,json(p),event.id,event.id,event.committedAt,event.committedAt],
+      });
+    }
+      if (event.type === "AiGenerationStatusChanged") {
+        const p = event.payload as EventPayloads["AiGenerationStatusChanged"];
+        await tx.execute({ sql: "UPDATE ai_generations SET status=?,error=COALESCE(?,error),last_event_id=?,updated_at=? WHERE generation_id=?", args: [p.status,p.error ?? null,event.id,event.committedAt,p.generationId] });
+      }
+    if (event.type === "AiGenerationResultCommitted") { const p = event.payload as EventPayloads["AiGenerationResultCommitted"]; await tx.execute({ sql: "UPDATE ai_generations SET status='succeeded',result_json=?,last_event_id=?,updated_at=? WHERE generation_id=?", args: [json(p),event.id,event.committedAt,p.generationId] }); }
     if (event.type === "UserCorrection") { const p = event.payload as EventPayloads["UserCorrection"]; await tx.execute({ sql: "INSERT INTO user_corrections(correction_id,session_id,branch_id,corrected_event_ids_json,correction_text,event_id,created_at) VALUES(?,?,?,?,?,?,?)", args: [p.correctionId,event.sessionId,event.branchId,json(p.correctedEventIds),p.correction,event.id,event.committedAt] }); }
     if (event.type === "RefinementReviewRequested") { const p = event.payload as EventPayloads["RefinementReviewRequested"]; await tx.execute({ sql: "INSERT INTO refinement_reviews(review_id,session_id,branch_id,fingerprint,mode,governance_wait,requested_scope,requested_scope_key,allowed_kinds_json,trigger_id,trigger_kind,trigger_fingerprint,trigger_key,nonterminal_key,trigger_evidence_through_cursor,evidence_event_ids_json,source_event_ids_json,source_snapshot_hash,source_through_cursor,instructions,request_json,snapshot_json,status,created_event_id,last_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'requested',?,?,?,?)", args: [p.reviewId,event.sessionId,event.branchId,p.fingerprint,p.mode,p.waitForGovernance ? 1 : 0,p.requestedScope,p.requestedScopeKey,json(p.allowedKinds),p.triggerId,p.triggerKind,p.triggerFingerprint,p.triggerKey ?? null,p.nonterminalKey ?? null,p.triggerEvidenceThroughCursor ?? null,json(p.evidenceEventIds),json(p.sourceEventIds),p.sourceSnapshotHash,p.sourceThroughCursor,p.instructions ?? null,json(p.request),p.snapshot === undefined ? null : json(p.snapshot),event.id,event.id,event.committedAt,event.committedAt] }); }
     if (event.type === "RefinementReviewChildLinked" && executionOwned) { const p = event.payload as EventPayloads["RefinementReviewChildLinked"]; await tx.execute({ sql: "UPDATE refinement_reviews SET handle_id=?,child_session_id=?,child_branch_id=?,last_event_id=?,updated_at=? WHERE review_id=? AND status='requested' AND handle_id IS NULL", args: [p.handleId,p.childSessionId,p.childBranchId,event.id,event.committedAt,p.reviewId] }); }
@@ -2316,6 +2343,20 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     if (statuses?.length) { sql += ` WHERE status IN (${statuses.map(() => "?").join(",")})`; args.push(...statuses); }
     const result = await this.#execute({ sql: `${sql} ORDER BY created_at,handle_id`, args }); return result.rows.map(rowToRecursiveModel);
   }
+  async getAiGeneration(generationId: string): Promise<AiGenerationRecord | null> {
+    const result = await this.#execute({ sql: "SELECT * FROM ai_generations WHERE generation_id=?", args: [generationId] });
+    return result.rows[0] ? rowToAiGeneration(result.rows[0]) : null;
+  }
+  async findAiGeneration(sessionId: string, branchId: string, idempotencyKey: string): Promise<AiGenerationRecord | null> {
+    const result = await this.#execute({ sql: "SELECT * FROM ai_generations WHERE session_id=? AND branch_id=? AND idempotency_key=?", args: [sessionId, branchId, idempotencyKey] });
+    return result.rows[0] ? rowToAiGeneration(result.rows[0]) : null;
+  }
+  async listAiGenerations(statuses?: readonly AiGenerationRecord["status"][]): Promise<AiGenerationRecord[]> {
+    const args: InValue[] = []; let sql = "SELECT * FROM ai_generations";
+    if (statuses?.length) { sql += ` WHERE status IN (${statuses.map(() => "?").join(",")})`; args.push(...statuses); }
+    const result = await this.#execute({ sql: `${sql} ORDER BY created_at,generation_id`, args });
+    return result.rows.map(rowToAiGeneration);
+  }
 
   async rebuildMemoryCandidateIndex(): Promise<void> {
     await this.#writes.run(() => this.#withTransaction(async (tx) => {
@@ -2331,9 +2372,9 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
 
   async rebuildOperationalProjections(): Promise<void> {
     await this.#writes.run(() => this.#withTransaction(async (tx) => {
-      for (const table of ["refinement_restorations","governed_refinement_proposals","refinement_trigger_consumptions","user_corrections","refinement_reviews","memory_fts","subagent_spec_invocations","skill_executions","skill_availability_actions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","recursive_model_handles","tasks","workspace_agent_profiles","agent_profile_versions","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
+      for (const table of ["refinement_restorations","governed_refinement_proposals","refinement_trigger_consumptions","user_corrections","refinement_reviews","memory_fts","subagent_spec_invocations","skill_executions","skill_availability_actions","refinement_rollbacks","refinement_rollback_approvals","refinement_approvals","refinement_decisions","refinement_observations","candidate_allocations","refinement_proposals","harness_versions","harness_entries","input_set_chunks","input_sets","document_chunks","documents","terminal_notices","mailbox_messages","goal_gate_evaluations","goal_gates","goals","wake_queue","schedules","heartbeats","ai_generations","recursive_model_handles","tasks","workspace_agent_profiles","agent_profile_versions","branches","sessions"]) await tx.execute(`DELETE FROM ${table}`);
       const rows = await tx.execute("SELECT * FROM events ORDER BY sequence");
-      const selected = new Set(["SessionCreated","AgentProfileVersionCreated","AgentProfileActivated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","UserCorrection","RefinementReviewRequested","RefinementReviewChildLinked","RefinementReviewStatusChanged","RefinementTriggerConsumed","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","GovernedRefinementProposed","GovernedRefinementValidated","RefinementGovernanceReviewRequested","RefinementGovernanceReviewChildLinked","RefinementGovernanceReviewDecided","GovernedRefinementApplied","RefinementProposalTerminalNoticeDelivered","RefinementRollbackApplied","SkillAvailabilityChanged","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
+      const selected = new Set(["SessionCreated","AgentProfileVersionCreated","AgentProfileActivated","BranchCreated","BranchNamed","TaskCreated","SubagentAdmitted","TaskStatusChanged","SubagentCancellationRequested","MailboxMessageSent","MailboxMessageDelivered","MailboxMessageContextDelivered","MailboxMessageDeliveryFailed","MailboxMessageAcknowledged","TaskTerminalNoticeSent","TaskTerminalNoticeDelivered","DocumentImported","DocumentChunkAdded","InputSetCreated","GoalCreated","GoalCompletionRequested","GoalGateAdded","GoalGateStatusChanged","GoalGateEvaluationRecorded","GoalStatusChanged","HeartbeatCreated","HeartbeatTicked","HeartbeatStatusChanged","ScheduleCreated","ScheduleTicked","ScheduleStatusChanged","WakeQueued","WakeClaimed","WakeDelivered","WakeDeliveryUnknown","RecursiveModelStarted","RecursiveModelStatusChanged","AiGenerationRequested","AiGenerationStatusChanged","AiGenerationResultCommitted","UserCorrection","RefinementReviewRequested","RefinementReviewChildLinked","RefinementReviewStatusChanged","RefinementTriggerConsumed","HarnessVersionCreated","HarnessVersionStatusChanged","RefinementProposed","RefinementValidated","RefinementCandidateActivated","RefinementCandidateAllocated","RefinementCandidateExposed","RefinementObservationRecorded","RefinementDecided","RefinementApproved","RefinementRollbackApproved","RefinementRolledBack","GovernedRefinementProposed","GovernedRefinementValidated","RefinementGovernanceReviewRequested","RefinementGovernanceReviewChildLinked","RefinementGovernanceReviewDecided","GovernedRefinementApplied","RefinementProposalTerminalNoticeDelivered","RefinementRollbackApplied","SkillAvailabilityChanged","SkillInvocationRecorded","SkillTestRecorded","SubagentSpecInvoked","SyncConflictResolved"]);
       for (const row of rows.rows) { const event = rowToEvent(row); if (selected.has(event.type)) await this.#applyOperationalRows(tx,event); }
     }, { kind: "ordinary", operation: "rebuild operational projections" }));
   }
@@ -2479,7 +2520,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
         await remove("console_scratch_cache", "DELETE FROM console_scratch_cache WHERE session_id=?", [sessionId]);
         await remove("workspace_agent_profiles", "DELETE FROM workspace_agent_profiles WHERE agent_session_id=?", [sessionId]);
         await remove("agent_profile_versions", "DELETE FROM agent_profile_versions WHERE agent_session_id=?", [sessionId]);
-        for (const table of ["wake_queue", "schedules", "heartbeats", "goals", "input_sets", "documents", "outbox", "snapshots", "context_records", "branches"]) {
+        for (const table of ["wake_queue", "schedules", "heartbeats", "goals", "input_sets", "documents", "ai_generations", "outbox", "snapshots", "context_records", "branches"]) {
           await remove(table, `DELETE FROM ${table} WHERE session_id=?`, [sessionId]);
         }
         await remove("sessions", "DELETE FROM sessions WHERE session_id=?", [sessionId]);

@@ -14,6 +14,8 @@ Delegated work and recursive model calls can outlive the cell or process that st
 
 Root agents, delegated subagents, and isolated recursive model calls use the same durable `Session` model and canonical event stream. A child session records its parent session and branch, root session, depth, and owning task. A `Task` records why the child exists, its lifecycle, completion requirements, and budget relationship.
 
+One-request raw AI generation is not an agent relationship. `ai.generateText` and `ai.generateObject` belong to the calling session and branch, retain their own request, context, effect, result, usage, and budget events, and create no child session, task, profile, mailbox, or family edge. Supervisor-private recursive operations continue to use the durable child model when a sealed workflow requires retained agent identity.
+
 Child admission validates ancestry, model policy, child limits, budget reservations, and stable idempotency in one transaction. Batch admission is all-or-nothing. Child limits cannot widen parent limits, and terminal usage is attributed to ancestors exactly once. Unknown usage consumes unresolved reservations conservatively.
 
 Parent and child sessions communicate through durable mailboxes. Sends, recipient delivery, acknowledgements, and task terminal notices are retained across the relevant session streams. Messaging is limited to authorized relationships within one root family. Cancellation propagates through admitted descendants and recovery completes any committed cancellation or delivery prefix.
@@ -30,6 +32,7 @@ Retained children support bounded follow-up in the same session after terminal w
 - Durable admission and mailbox records add state and coordination overhead.
 - A parent can detach and later inspect or continue a retained child without recreating it.
 - Recursive calls are not a bypass around provider limits, model policy, effect recovery, or task budgets.
+- Raw generation remains attributable and recoverable without manufacturing a child relationship.
 
 ## Rejected alternatives and limitations
 

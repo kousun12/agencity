@@ -58,7 +58,7 @@ describe("reasoning-effort protocol negotiation", () => {
     await expect(client.spawnMany("session", "branch", [{ task: "child", model: explicitModel }])).rejects.toMatchObject({
       code: "CAPABILITY_UNAVAILABLE",
     });
-    await expect(client.startModel("session", "branch", { prompt: "child", model: explicitModel })).rejects.toMatchObject({
+    await expect(client.admitTextGeneration("session", "branch", { prompt: "child", model: explicitModel })).rejects.toMatchObject({
       code: "CAPABILITY_UNAVAILABLE",
     });
     expect(requests.filter(path => path.includes("/sessions/"))).toHaveLength(1);

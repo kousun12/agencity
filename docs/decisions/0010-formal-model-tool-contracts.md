@@ -27,7 +27,7 @@ Every autonomous model step declares exactly this fixed provider tool set and re
 
 These tools are declaration-only response channels. They have no AI SDK `execute` callbacks, do not run at the provider, and do not produce a provider-managed `tool_result` continuation or multi-step tool loop. The provider returns a candidate call; Agencity normalizes, bounds, validates, and durably records the response before applying it.
 
-Only an accepted `bun_console` call can lead to execution. Its cell is committed as a canonical action before a disposable Bun worker runs it. `tools`, `sql`, `state`, `cells`, `artifacts`, `rlm`, `sdk.memory`, `sdk.agents`, `sdk.harness`, skills, goals, and related names are APIs injected into that later cell. They are not provider tools.
+Only an accepted `bun_console` call can lead to execution. Its cell is committed as a canonical action before a disposable Bun worker runs it. `tools`, `sql`, `state`, `cells`, `artifacts`, `ai`, `sdk.memory`, `sdk.agents`, `sdk.harness`, skills, goals, and related names are APIs injected into that later cell. They are not provider tools.
 
 ### Cardinality and validation
 
@@ -63,7 +63,7 @@ The adapter distinguishes external cancellation from its own guard aborts. Exter
 
 Trajectory refinement uses a separate sealed internal contract, `agencity.refinement-review.v1`, with exactly one required `agencity_submit_refinement_review` tool. Its closed transport schema requires every field and preserves absence separately from null, empty arrays, and empty objects before normalization.
 
-This contract is supervisor-selected for a durable recursive child. Public recursive model calls remain text operations. `RecursiveModelStarted.responseAdmission` retains the exact contract and capability seed, and migration 015 adds that rebuildable projection field. A successful structured child writes no result assistant message. It returns a normalized typed recursive result bound to the response admission, exact child model completion, provider tool-call identity, model-result digest, transport-input digest, and byte count. Recovery reconstructs that result from the authoritative effect and retained admission. There is no assistant JSON parser or prose fallback.
+This contract is supervisor-selected for a durable recursive child. Recursive model admission is private to sealed runtime workflows; the public console uses explicit raw `ai` generation or full agent delegation. `RecursiveModelStarted.responseAdmission` retains the exact contract and capability seed, and migration 015 adds that rebuildable projection field. A successful structured child writes no result assistant message. It returns a normalized typed recursive result bound to the response admission, exact child model completion, provider tool-call identity, model-result digest, transport-input digest, and byte count. Recovery reconstructs that result from the authoritative effect and retained admission. There is no assistant JSON parser or prose fallback.
 
 ### Capability and security boundaries
 

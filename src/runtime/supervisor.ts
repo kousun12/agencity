@@ -104,6 +104,8 @@ import { ModelCatalog, type ModelCatalogOptions } from "./model-catalog.ts";
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import { ModelSelectionService } from "./model-selection.ts";
 import { RepositoryInstructionService } from "./repository-instructions.ts";
+import { AiGenerationService } from "./ai-generation.ts";
+import { ExplicitContextMaterializer } from "./explicit-context.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -322,6 +324,7 @@ export class Supervisor {
   readonly documents: DocumentService;
   readonly models: PublicRecursiveModelService;
   readonly #recursiveModels: RecursiveModelService;
+  readonly ai: AiGenerationService;
   readonly goals: GoalService;
   readonly heartbeats: HeartbeatService;
   readonly schedules: ScheduleService;
@@ -435,6 +438,14 @@ export class Supervisor {
       this.memory,
     );
     this.models = this.#recursiveModels;
+    this.ai = new AiGenerationService(
+      storage,
+      outbox,
+      modelExecutor,
+      this.modelEffectAdmission,
+      this.modelSelection,
+      new ExplicitContextMaterializer(storage, artifacts, this.memory),
+    );
     this.restartConsoleAfterCell = restartConsoleAfterCell;
     this.scratchCheckpointHooks = scratchCheckpointHooks;
     this.#scratchStore = scratchStore;
@@ -687,6 +698,7 @@ export class Supervisor {
     await this.modelLoop.recoverIncomplete();
     await this.modelLoop.reconcileRunningSessions();
     await this.goals.recoverIncomplete();
+    await this.ai.recoverIncomplete();
     await this.#recursiveModels.recoverIncomplete();
     await this.refiner.recoverIncomplete();
     await this.refinementGovernance.recoverIncomplete();
@@ -712,6 +724,7 @@ export class Supervisor {
     await this.console.stop();
     await this.refiner.close();
     await this.refinementGovernance.close();
+    await this.ai.close();
     await this.#recursiveModels.close();
     await this.sync.stop();
     await this.executionLeases?.close();
@@ -729,6 +742,7 @@ export class Supervisor {
     await this.console.stop();
     await this.refiner.close();
     await this.refinementGovernance.close();
+    await this.ai.close();
     await this.#recursiveModels.close();
     await this.outbox.quiesceForDeletion();
     this.#scratchStore?.close();
@@ -1363,36 +1377,26 @@ export class Supervisor {
         const input = (args[1] ?? {}) as Record<string, unknown>;
         return this.specs.spawn(sessionId,branchId,String(args[0]),{ ...input, idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method) } as any);
       }
-      if (method === "rlm.start") {
-        const raw = args[0]; const input = typeof raw === "string" ? { prompt: raw } : raw as Record<string, unknown>;
-        return this.models.start(sessionId, branchId, { ...input, idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method) } as any);
-      }
-      if (method === "rlm.startMany") {
-        if (!Array.isArray(args[0])) throw new ValidationError("rlm.startMany requires an input array");
-        return this.models.startMany(sessionId, branchId, args[0].map((raw, index) => {
-          const input = typeof raw === "string" ? { prompt: raw } : raw as Record<string, unknown>;
-          return { ...input, idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : `${nextRpcKey(method)}:${index + 1}` };
-        }) as any[]);
-      }
-      if (method === "rlm.get" || method === "rlm.result" || method === "rlm.cancel") {
-        if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("Recursive model handleId must be a non-empty string");
-        const handle = await this.models.get(args[0]);
-        if (handle.parentSessionId !== sessionId || handle.parentBranchId !== branchId) {
-          throw new ValidationError("Recursive model handle is outside the calling session branch scope");
+      if (method === "ai.generateText" || method === "ai.generateObject") {
+        const raw = args[0] as Record<string, unknown>;
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+          throw new ValidationError(`${method} requires an input object`);
         }
-        if (method === "rlm.get") return handle;
-        if (method === "rlm.cancel") {
-          if (args[1] !== undefined && typeof args[1] !== "string") throw new ValidationError("Recursive model cancellation reason must be a string");
-          return this.models.cancel(handle.handleId, args[1] as string | undefined);
-        }
-        const options = args[1] === undefined ? {} : args[1];
-        if (!options || typeof options !== "object" || Array.isArray(options)) throw new ValidationError("Recursive model result options must be an object");
-        return this.models.result(handle.handleId, options as any);
+        const input = {
+          ...raw,
+          idempotencyKey: typeof raw.idempotencyKey === "string"
+            ? raw.idempotencyKey
+            : nextRpcKey(method),
+        };
+        const admitted = method === "ai.generateText"
+          ? await this.ai.admitText(sessionId, branchId, input as any, { cellId })
+          : await this.ai.admitObject(sessionId, branchId, input as any, { cellId });
+        return this.ai.result(admitted.generationId, { wait: true });
       }
       if (method === "tools.request") {
         const [executor, operation, input, rawOptions] = args;
         if (typeof executor !== "string" || typeof operation !== "string") throw new ValidationError("Invalid tool request");
-        if (executor === "model") throw new CapabilityUnavailableError("generic model executor access", "use rlm.start or sdk.agents.spawn so model admission and dispatch provenance are retained");
+        if (executor === "model") throw new CapabilityUnavailableError("generic model executor access", "use ai.generateText, ai.generateObject, or sdk.agents.spawn so model admission and dispatch provenance are retained");
         assertJsonValue(input);
         const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
           ? rawOptions as Record<string, unknown>

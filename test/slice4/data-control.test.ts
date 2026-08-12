@@ -23,6 +23,8 @@ describe("ownership-aware physical data control",()=>{
       supervisor=await Supervisor.open({...options(directory),modelProviders:[provider]});
       const session=await supervisor.createSession({workspaceId:"workspace",model:{provider:provider.name,model:"fixture"}});
       await approveProfileRevision(supervisor,session.sessionId,session.branchId,"Retain complete governed export evidence.","export-profile");
+      const generation=await supervisor.ai.admitText(session.sessionId,session.branchId,{prompt:"export generation",idempotencyKey:"export-generation"});
+      expect(await supervisor.ai.result(generation.generationId,{wait:true,timeoutMs:5000})).toMatchObject({status:"succeeded"});
       const artifact=await supervisor.artifacts.put("missing export bytes",{mediaType:"text/plain"});
       await supervisor.storage.appendEvents([{sessionId:session.sessionId,branchId:session.branchId,type:"ArtifactRegistered",producer:"supervisor",idempotencyKey:"missing-export-artifact",payload:artifact}]);
       await rm(join(directory,"artifacts",artifact.digest.slice(0,2),artifact.digest.slice(2)));
@@ -31,6 +33,7 @@ describe("ownership-aware physical data control",()=>{
       expect(exported.status).toBe("partial");
       const events=(await Bun.file(join(destination,"events.jsonl")).text()).trim().split("\n").map(line=>JSON.parse(line));
       expect(events.filter(event=>event.type==="AgentProfileVersionCreated")).toHaveLength(1);
+      expect(events.filter(event=>event.type==="AiGenerationResultCommitted")).toHaveLength(1);
       const audit=JSON.parse(await Bun.file(join(destination,"export-audit.json")).text());
       expect(audit.complete).toBe(false);
       expect(audit.missing.some((item:string)=>item.startsWith("governed-proposal:"))).toBe(false);
@@ -46,6 +49,8 @@ describe("ownership-aware physical data control",()=>{
       supervisor=await Supervisor.open(options(directory));
       const doomed=await supervisor.createSession({workspaceId:"workspace"});const retained=await supervisor.createSession({workspaceId:"workspace"});
       await supervisor.appendMessage(doomed.sessionId,doomed.branchId,"user","delete me");await supervisor.appendMessage(retained.sessionId,retained.branchId,"user","retain me");
+      const generation=await supervisor.ai.admitText(doomed.sessionId,doomed.branchId,{prompt:"deletion projection",idempotencyKey:"delete-generation"});
+      expect(await supervisor.ai.result(generation.generationId,{wait:true,timeoutMs:5000})).toMatchObject({status:"succeeded"});
       await supervisor.contexts.materialize(doomed.sessionId,doomed.branchId);await supervisor.projections.rebuild(doomed.sessionId,doomed.branchId);
       const shared=await supervisor.artifacts.put("shared bytes",{mediaType:"text/plain"});const unique=await supervisor.artifacts.put("doomed bytes",{mediaType:"text/plain"});
       await supervisor.storage.appendEvents([
@@ -54,7 +59,7 @@ describe("ownership-aware physical data control",()=>{
         {sessionId:retained.sessionId,branchId:retained.branchId,type:"ArtifactRegistered",producer:"supervisor",idempotencyKey:"retained-shared",payload:shared},
       ]);
       const receipt=await supervisor.deleteOwnedData({scopeKind:"session",scopeId:doomed.sessionId,requestedBy:"owner",confirmation:`DELETE session ${doomed.sessionId}`,receiptDirectory:join(directory,"receipts")});supervisor=undefined;
-      expect(receipt.status).toBe("completed");expect(receipt.removed.rows.events).toBeGreaterThan(0);expect(receipt.retainedSharedArtifacts).toEqual([shared.artifactId]);
+      expect(receipt.status).toBe("completed");expect(receipt.removed.rows.events).toBeGreaterThan(0);expect(receipt.removed.rows.ai_generations).toBe(1);expect(receipt.retainedSharedArtifacts).toEqual([shared.artifactId]);
       expect(await exists(join(directory,"artifacts",shared.digest.slice(0,2),shared.digest.slice(2)))).toBe(true);
       expect(await exists(join(directory,"artifacts",unique.digest.slice(0,2),unique.digest.slice(2)))).toBe(false);
       const client=createClient({url:`file:${directory}/workspace.db`});

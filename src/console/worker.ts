@@ -9,6 +9,7 @@ import {
   type InspectOptions,
 } from "./inspect.ts";
 import { notebookCellBody } from "./notebook.ts";
+import { schemaToPlainJsonSchema } from "./schema-conversion.ts";
 import {
   SCRATCH_LIMITS,
   createScratchProxy,
@@ -364,29 +365,15 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       return scratchStatus();
     },
   };
-  const rlmId = (handle: string | { handleId?: unknown }): string => {
-    const id = typeof handle === "string" ? handle : handle?.handleId;
-    if (typeof id !== "string" || !id) throw new Error("Recursive model handle must contain a non-empty handleId");
-    return id;
-  };
-  let rlm: Record<string, unknown>;
-  const hydrateRlmHandle = (raw: any): any => {
-    const handle = { ...raw };
-    // Convenience functions are deliberately non-enumerable: the same object
-    // remains strict-JSON serializable as a durable identity between workers.
-    Object.defineProperties(handle, {
-      result: { enumerable: false, value: (options: Record<string, unknown> = {}) => call("rlm.result", [raw.handleId, options]) },
-      cancel: { enumerable: false, value: async (reason?: string) => hydrateRlmHandle(await call("rlm.cancel", [raw.handleId, reason])) },
-      refresh: { enumerable: false, value: async () => hydrateRlmHandle(await call("rlm.get", [raw.handleId])) },
-    });
-    return handle;
-  };
-  rlm = {
-    start: async (input: unknown) => hydrateRlmHandle(await call("rlm.start", [input])),
-    startMany: async (inputs: unknown[]) => (await call("rlm.startMany", [inputs]) as any[]).map(hydrateRlmHandle),
-    get: async (handle: string | { handleId?: unknown }) => hydrateRlmHandle(await call("rlm.get", [rlmId(handle)])),
-    result: (handle: string | { handleId?: unknown }, options: Record<string, unknown> = {}) => call("rlm.result", [rlmId(handle), options]),
-    cancel: async (handle: string | { handleId?: unknown }, reason?: string) => hydrateRlmHandle(await call("rlm.cancel", [rlmId(handle), reason])),
+  const ai = {
+    generateText: (input: unknown) => call("ai.generateText", [input]),
+    generateObject: (input: unknown) => {
+      if (!input || typeof input !== "object" || Array.isArray(input)) {
+        throw new Error("ai.generateObject requires an input object");
+      }
+      const { schema, ...rest } = input as Record<string, unknown>;
+      return call("ai.generateObject", [{ ...rest, schema: schemaToPlainJsonSchema(schema) }]);
+    },
   };
   const sql: SqlTag = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     let text = strings[0] ?? "";
@@ -398,7 +385,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   try {
     const transpiler = new Bun.Transpiler({ loader: "ts", target: "bun" });
     const body = notebookCellBody(message.code);
-    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools,inspect,cells,rlm,scratch){\n${body}\n}`;
+    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools,inspect,cells,ai,scratch){\n${body}\n}`;
     const javascript = transpiler.transformSync(source);
     const factory = new Function(`${javascript}\nreturn __cell;`)() as (
       sdk: ConsoleSdk,
@@ -410,11 +397,11 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       tools: unknown,
       inspect: typeof inspectValue,
       cells: unknown,
-      rlm: unknown,
+      ai: unknown,
       scratch: Record<string, unknown>,
     ) => Promise<unknown>;
-    const sdk = { scratch: scratchSdk, state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, rlm, inspect } as unknown as ConsoleSdk;
-    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm, warmScratch.proxy.object);
+    const sdk = { scratch: scratchSdk, state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, ai, inspect } as unknown as ConsoleSdk;
+    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, ai, warmScratch.proxy.object);
     const encoded = encodeObservation(value);
     const inlineTerminal = {
       type: "result",

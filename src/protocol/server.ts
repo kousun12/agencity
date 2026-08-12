@@ -189,10 +189,6 @@ export class ProtocolServer {
         const body = await request.json() as any;
         return Response.json(await this.supervisor.createSession({ workspaceId: String(body.workspaceId ?? "default"), ...(body.model ? { model: body.model } : {}), ...(body.budget ? { budget: body.budget } : {}), ...(body.agentProfile ? { agentProfile: body.agentProfile } : {}), ...(typeof body.sessionName === "string" ? { sessionName: body.sessionName } : {}), ...(typeof body.branchName === "string" ? { branchName: body.branchName } : {}) }));
       }
-      if (parts[0] === "models" && parts[1]) {
-        if (request.method === "GET") return Response.json(await this.supervisor.models.get(parts[1]));
-        if (request.method === "POST" && parts[2] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.models.cancel(parts[1], typeof body.reason === "string" ? body.reason : undefined)); }
-      }
       if (parts[0] === "heartbeats" && parts[1] && request.method === "POST") {
         const body = await jsonBody(request);
         if (parts[2] === "tick") return Response.json(await this.supervisor.heartbeats.tick(parts[1], typeof body.at === "string" ? body.at : new Date()));
@@ -448,7 +444,46 @@ export class ProtocolServer {
         if (parts[2] === "mailbox" && branchId && request.method === "POST") return Response.json(await this.supervisor.agents.sendMessage(sessionId, branchId, await jsonBody(request) as any));
         if (parts[2] === "documents" && branchId && request.method === "POST") return Response.json(await this.supervisor.documents.import(sessionId, branchId, await jsonBody(request) as any));
         if (parts[2] === "input-sets" && branchId && request.method === "POST") return Response.json(await this.supervisor.documents.createInputSet(sessionId, branchId, await jsonBody(request) as any));
-        if (parts[2] === "models" && branchId && request.method === "POST") return Response.json(await this.supervisor.models.start(sessionId, branchId, await jsonBody(request) as any));
+        if (parts[2] === "ai" && parts[3] === "generations" && branchId) {
+          if (request.method === "GET" && parts[4] === "by-key") {
+            const key = url.searchParams.get("idempotencyKey");
+            if (!key) throw new ValidationError("Generation lookup requires idempotencyKey");
+            return Response.json(await this.supervisor.ai.find(sessionId, branchId, key));
+          }
+          if (request.method === "POST" && parts.length === 4) {
+            const body = await jsonBody(request) as any;
+            if (body.kind !== "text" && body.kind !== "object") {
+              throw new ValidationError("Generation admission requires kind text or object");
+            }
+            const { kind, ...input } = body;
+            return Response.json(kind === "object"
+              ? await this.supervisor.ai.admitObject(sessionId, branchId, input)
+              : await this.supervisor.ai.admitText(sessionId, branchId, input));
+          }
+          if (parts[4]) {
+            const generationId = parts[4];
+            if (request.method === "GET" && parts.length === 5) {
+              return Response.json(await this.supervisor.ai.getFor(sessionId, branchId, generationId));
+            }
+            if (request.method === "GET" && parts[5] === "result") {
+              return Response.json(await this.supervisor.ai.resultFor(
+                sessionId,
+                branchId,
+                generationId,
+                { wait: false },
+              ));
+            }
+            if (request.method === "POST" && parts[5] === "cancel") {
+              const body = await jsonBody(request);
+              return Response.json(await this.supervisor.ai.cancelFor(
+                sessionId,
+                branchId,
+                generationId,
+                typeof body.reason === "string" ? body.reason : undefined,
+              ));
+            }
+          }
+        }
         if (parts[2] === "goals" && branchId) {
           if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.goals.list(sessionId, branchId));
           if (request.method === "GET" && parts[3] === "current") return Response.json(await this.supervisor.goals.current(sessionId, branchId));

@@ -115,9 +115,51 @@ class GatedSyncReviewProvider extends SyncReviewProvider {
   }
 }
 
+class GatedRawSyncProvider implements ModelProvider {
+  calls = 0;
+  #release!: () => void;
+  readonly #gate = new Promise<void>((resolve) => { this.#release = resolve; });
+  constructor(readonly name: string) {}
+  release(): void { this.#release(); }
+  async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
+    this.calls++;
+    await Promise.race([
+      this.#gate,
+      new Promise<never>((_, reject) => signal.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      )),
+    ]);
+    return { text: "synced raw result", finishReason: "stop", usage: { inputTokens: 2, outputTokens: 2, costUsd: 0 } };
+  }
+}
+
 describe("Slice 4 offline-first synchronization lifecycle",()=>{
  test("keeps working offline, reports failure honestly, and catches up on reconnect",async()=>{root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);b.transport.setOnline(false);await b.supervisor.appendMessage(session.sessionId,session.branchId,"user","offline B");await expect(b.supervisor.sync.sync()).rejects.toThrow("offline");const failed=await b.supervisor.sync.status();expect(failed.replica.lifecycle).toBe("error");expect(failed.replica.lastSuccessAt).not.toBeNull();expect(failed.replica.lastError).toContain("offline");expect((await b.supervisor.storage.loadEvents(session.sessionId,{branchId:session.branchId})).some(e=>(e.payload as any).content==="offline B")).toBe(true);b.transport.setOnline(true);await b.supervisor.sync.reconnect();await a.supervisor.sync.sync();expect((await a.supervisor.storage.loadEvents(session.sessionId)).some(e=>(e.payload as any).content==="offline B")).toBe(true);});
  test("preserves concurrent offline advancement as derived branches without losing either writer",async()=>{root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);await a.supervisor.appendMessage(session.sessionId,session.branchId,"user","from A");await b.supervisor.appendMessage(session.sessionId,session.branchId,"user","from B");await a.supervisor.sync.sync();await b.supervisor.sync.sync();await a.supervisor.sync.sync();const branches=await a.supervisor.storage.listBranches();expect(branches.length).toBe(2);const histories=await Promise.all(branches.map(x=>a!.supervisor.storage.loadEvents(x.sessionId,{branchId:x.branchId})));const texts=histories.flatMap(events=>events.filter(e=>e.type==="MessageAppended").map(e=>(e.payload as any).content));expect(new Set(texts)).toEqual(new Set(["from A","from B"]));expect(histories.some(events=>events.some(e=>e.type==="BranchCreated"&&e.producer==="sync-derived"))).toBe(true);expect((await a.supervisor.sync.conflicts("unresolved")).some(x=>x.kind==="divergent_session")).toBe(true);});
+ test("projects remote raw generations without executing them on the receiving replica",async()=>{
+  root=await makeRoot();const hub=new DeterministicSyncHub();const providerA=new GatedRawSyncProvider("sync-raw");const providerB=new GatedRawSyncProvider("sync-raw");
+  a=await openReplica(root,"a",hub,{modelProviders:[providerA]});b=await openReplica(root,"b",hub,{modelProviders:[providerB]});
+  const session=await a.supervisor.createSession({
+    workspaceId:"workspace",
+    model:{provider:providerA.name,model:"fixture",maxOutputTokens:256},
+    budget:{tokenLimit:100000},
+  });
+  await a.supervisor.sync.sync();await b.supervisor.sync.sync();
+  const admitted=await a.supervisor.ai.admitText(session.sessionId,session.branchId,{prompt:"sync raw",idempotencyKey:"sync-raw-v1"});
+  await waitFor(async()=>providerA.calls===1);
+  await a.supervisor.sync.sync();await b.supervisor.sync.sync();
+  const remote=await b.supervisor.storage.getAiGeneration?.(admitted.generationId);
+  expect(remote).toMatchObject({status:"running",executionOwned:false});
+  expect(await b.supervisor.ai.recoverIncomplete()).toBe(0);
+  expect(providerB.calls).toBe(0);
+  providerA.release();
+  expect(await a.supervisor.ai.result(admitted.generationId,{wait:true,timeoutMs:5000})).toMatchObject({status:"succeeded"});
+  await a.supervisor.sync.sync();await b.supervisor.sync.sync();
+  expect(await b.supervisor.ai.result(admitted.generationId)).toMatchObject({status:"succeeded",text:"synced raw result"});
+  expect(providerB.calls).toBe(0);
+ });
  test("synchronizes one complete governed owner profile revision without quarantine",async()=>{
   root=await makeRoot();const hub=new DeterministicSyncHub();const providerA=new SyncReviewProvider();const providerB=new SyncReviewProvider();a=await openReplica(root,"a",hub,{modelProviders:[providerA]});b=await openReplica(root,"b",hub,{modelProviders:[providerB]});const session=await seedBoth(a,b,{provider:providerA.name,model:"fixture"});
   const initial=await a.supervisor.agentProfiles.active(session.sessionId);

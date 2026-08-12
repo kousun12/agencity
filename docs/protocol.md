@@ -146,9 +146,11 @@ Reconciliation is evidence-only. It never rewrites an unknown effect, reports a 
 | `POST /sessions/:session/mailbox/:message/ack?branch=:branch` | Acknowledge a message. |
 | `POST /sessions/:session/documents?branch=:branch` | Import a chunked document. |
 | `POST /sessions/:session/input-sets?branch=:branch` | Create an exact ordered input set. |
-| `POST /sessions/:session/models?branch=:branch` | Start a retained recursive model call. |
-| `GET /models/:handle` | Read a recursive model handle. |
-| `POST /models/:handle/cancel` | `{ reason? }` → cancel a recursive model call. |
+| `POST /sessions/:session/ai/generations?branch=:branch` | Admit one raw text or declared-object generation and return its durable handle immediately. |
+| `GET /sessions/:session/ai/generations/by-key?branch=:branch&idempotencyKey=:key` | Recover a generation handle by caller idempotency key. |
+| `GET /sessions/:session/ai/generations/:generation?branch=:branch` | Read a generation handle within its exact calling route. |
+| `GET /sessions/:session/ai/generations/:generation/result?branch=:branch` | Read the current typed result within its exact calling route without holding an HTTP request open. |
+| `POST /sessions/:session/ai/generations/:generation/cancel?branch=:branch` | `{ reason? }` → durably cancel a generation within its exact calling route. |
 | `GET /sessions/:session/goals?branch=:branch` | List goals. |
 | `POST /sessions/:session/goals?branch=:branch` | Create a goal and gates. |
 | `GET /sessions/:session/goals/current?branch=:branch` | Current user-authoritative goal or `null`. |
@@ -274,7 +276,7 @@ The client exposes typed methods for all route groups:
 - autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`, `agentToolCapability`, and `modelContractDiagnostics`;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
-- agents and recursive work: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mailbox methods, follow-up/cancel methods, documents, input sets, recursive model methods;
+- agents and raw generation: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mailbox methods, follow-up/cancel methods, documents, input sets, and generation admission/lookup/result/wait/cancel methods;
 - goals and wakes: goal, heartbeat, schedule, and wake methods;
 - memory and refinement: memory, trajectory review, automatic policy, governed proposal/wait/detach/inspection/rollback, and advanced legacy-compatible candidate/evaluation methods;
 - skill management: `listSkills`, `getSkill`, `previewSkillImport`, `installSkill`, `proposeSkill`, `enableSkill`, `disableSkill`, `removeSkill`, `testSkill`, `invokeSkill`, and `spawnSpec`;

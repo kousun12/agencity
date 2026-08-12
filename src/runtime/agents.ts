@@ -333,7 +333,19 @@ export class AgentService {
       }
       const activeTasks = directTasks.filter((task) => task.parentBranchId === parentBranchId && !["completed", "failed", "cancelled"].includes(task.status));
       const activeReservations = await Promise.all(activeTasks.map((task) => this.#remainingTaskReservation(task)));
-      assertBudgetReservations(parentState.budget.limits, parentState.budget, [...activeReservations, ...novel.map((item) => item.budget)]);
+      const activeGenerationReservations = Object.values(parentState.aiGenerations)
+        .filter((generation) => ["pending", "running"].includes(generation.status) && generation.reservation)
+        .map((generation): BudgetLimits => ({
+          tokenLimit: generation.reservation!.tokens,
+          costLimitUsd: generation.reservation!.costUsd,
+          turnLimit: generation.reservation!.turns,
+          wallTimeLimitMs: generation.reservation!.wallTimeMs,
+        }));
+      assertBudgetReservations(parentState.budget.limits, parentState.budget, [
+        ...activeReservations,
+        ...activeGenerationReservations,
+        ...novel.map((item) => item.budget),
+      ]);
 
       const rootSessionId = parent.rootSessionId; const depth = parent.depth + 1;
       const handles = prepared.map((item, index): SubagentHandle => ({
@@ -986,12 +998,18 @@ export class AgentService {
     const childEvents = await this.storage.loadEvents(task.childSessionId, { branchId: task.childBranchId });
     const child = projectEvents(childEvents);
     const ownCalls = new Set(Object.keys(child.modelCalls));
+    const ownGenerations = new Set(Object.keys(child.aiGenerations));
     let tokens = 0; let costUsd = 0; let turns = 0; let wallTimeMs = 0;
     for (const event of childEvents) {
-      if (event.type !== "BudgetDebited") continue;
-      const payload = event.payload as EventPayloads["BudgetDebited"];
-      if (!ownCalls.has(payload.callId)) continue;
-      tokens += payload.tokens; costUsd += payload.costUsd; turns += payload.turns; wallTimeMs += payload.wallTimeMs;
+      if (event.type === "BudgetDebited") {
+        const payload = event.payload as EventPayloads["BudgetDebited"];
+        if (!ownCalls.has(payload.callId)) continue;
+        tokens += payload.tokens; costUsd += payload.costUsd; turns += payload.turns; wallTimeMs += payload.wallTimeMs;
+      } else if (event.type === "AiGenerationBudgetDebited") {
+        const payload = event.payload as EventPayloads["AiGenerationBudgetDebited"];
+        if (!ownGenerations.has(payload.generationId)) continue;
+        tokens += payload.tokens; costUsd += payload.costUsd; turns += payload.turns; wallTimeMs += payload.wallTimeMs;
+      }
     }
     const descendant = { tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0 };
     for (const event of childEvents) {
@@ -1000,7 +1018,10 @@ export class AgentService {
       descendant.tokens += payload.tokens; descendant.costUsd += payload.costUsd;
       descendant.turns += payload.turns; descendant.wallTimeMs += payload.wallTimeMs;
     }
-    const conservative = Object.values(child.modelCalls).some((call) => call.status === "unknown");
+    const conservative =
+      Object.values(child.modelCalls).some((call) => call.status === "unknown") ||
+      Object.values(child.aiGenerations).some((generation) =>
+        generation.budgetDebited?.usageSource === "conservative-guard-estimate");
     if (conservative) {
       tokens = Math.max(tokens, task.budget.tokenLimit === undefined ? tokens : Math.max(0, task.budget.tokenLimit - descendant.tokens));
       costUsd = Math.max(costUsd, task.budget.costLimitUsd === undefined ? costUsd : Math.max(0, task.budget.costLimitUsd - descendant.costUsd));

@@ -28,11 +28,13 @@ const failures = await sql`
   GROUP BY tool_name, error_code
 `;
 
-const investigations = await rlm.startMany(
-  failures.map((failure) => ({
-    task: "Investigate this repeated failure and return evidence.",
-    input: failure,
-  })),
+const investigations = await Promise.all(
+  failures.slice(0, 4).map((failure) =>
+    sdk.agents.spawn({
+      task: `Investigate this repeated failure and return evidence: ${JSON.stringify(failure)}`,
+      idempotencyKey: `failure-${failure.tool_name}-${failure.error_code}`,
+    })
+  ),
 );
 
 await state.set("failureInvestigations", investigations);

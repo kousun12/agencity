@@ -51,32 +51,17 @@ function open(temp: TempRuntime, providers: readonly ModelProvider[] = [], extra
   });
 }
 
-describe("FU-013 model-facing durable rlm API", () => {
-  test("console handles serialize through working state and resolve in a fresh worker", async () => {
+describe("FU-013 retained private recursive-model service", () => {
+  test("console removes public rlm admission while exposing raw ai", async () => {
     const temp = await makeTempRuntime("agencity-rlm-console-"); temps.push(temp);
-    const provider = new PromptProvider("console-rlm");
-    const supervisor = await open(temp, [provider], { restartConsoleAfterCell: true });
+    const supervisor = await open(temp, [], { restartConsoleAfterCell: true });
     try {
-      const root = await supervisor.createSession({ workspaceId: "rlm", model: { provider: provider.name, model: "m" } });
-      const admitted = await supervisor.executeCell(root.sessionId, root.branchId, `
-        const handle = await rlm.start({ task: "inspect", input: { position: 0, value: "alpha" }, idempotencyKey: "console-stable" });
-        await state.set("savedRlm", { handleId: handle.handleId });
-        return handle;
+      const root = await supervisor.createSession({ workspaceId: "rlm" });
+      const surface = await supervisor.executeCell(root.sessionId, root.branchId, `
+        return { rlm: typeof rlm, sdkRlm: typeof sdk.rlm, ai: typeof ai, sdkAi: typeof sdk.ai };
       `);
-      const admittedHandle = admitted.result as Record<string, any>;
-      expect(admittedHandle.handleId).toMatch(/^model-task-/);
-      expect(JSON.stringify(admitted.result)).not.toContain("function");
-
-      const resolved = await supervisor.executeCell(root.sessionId, root.branchId, `
-        const saved = await state.get("savedRlm");
-        if (!saved || saved.kind !== "json") throw new Error("missing handle");
-        const handle = await rlm.get(saved.value.handleId);
-        return await handle.result({ timeoutMs: 5000 });
-      `);
-      expect((resolved.result as any).status).toBe("succeeded");
-      expect((resolved.result as any).provenance.inputHash).toMatch(/^[a-f0-9]{64}$/);
-      expect(provider.calls).toBe(1);
-      expect((await supervisor.agents.listTasks(root.sessionId))).toHaveLength(1);
+      expect(surface.result).toEqual({ rlm: "undefined", sdkRlm: "undefined", ai: "object", sdkAi: "object" });
+      expect(await supervisor.agents.listTasks(root.sessionId)).toHaveLength(0);
     } finally { await supervisor.close(); }
   });
 
@@ -107,7 +92,7 @@ describe("FU-013 model-facing durable rlm API", () => {
 
       const stranger = await supervisor.createSession({ workspaceId: "inputs" });
       await expect(supervisor.models.start(stranger.sessionId, stranger.branchId, { task: "steal event", input: { kind: "event", eventId: sourceEvent.id }, run: false }))
-        .rejects.toThrow(/family scope/i);
+        .rejects.toThrow(/caller family/i);
     } finally { await supervisor.close(); }
   });
 
@@ -159,12 +144,10 @@ describe("FU-013 model-facing durable rlm API", () => {
         run: false,
         tools: [{ name: "shell" }],
       } as any)).rejects.toThrow(/reserved dispatch field tools/i);
-      await expect(supervisor.executeCell(root.sessionId, root.branchId, `
-        return await rlm.start({ task: "override", model: { provider: "other", model: "forbidden" } });
-      `)).rejects.toThrow(/parent model policy/i);
-      await expect(supervisor.executeCell(root.sessionId, root.branchId, `
-        return await rlm.start({ task: "arbitrary tools", responseCapability: { kind: "text" } });
-      `)).rejects.toThrow(/reserved dispatch field responseCapability/i);
+      const surface = await supervisor.executeCell(root.sessionId, root.branchId, `
+        return { rlm: typeof rlm, sdkRlm: typeof sdk.rlm };
+      `);
+      expect(surface.result).toEqual({ rlm: "undefined", sdkRlm: "undefined" });
       await expect(supervisor.executeCell(root.sessionId, root.branchId, `
         return await sdk.agents.spawn({ task: "arbitrary child tools", toolSchemas: [] });
       `)).rejects.toThrow(/reserved dispatch field toolSchemas/i);
