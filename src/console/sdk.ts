@@ -1,4 +1,4 @@
-import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, HarnessKind, HarnessScope, ModelConfiguration, WorkingValue } from "../domain/index.ts";
+import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, HarnessKind, HarnessScope, ModelConfigurationInput, WorkingValue } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { InspectOptions, InspectPreview } from "./inspect.ts";
 import type { ScratchSdk } from "./scratch.ts";
@@ -147,16 +147,79 @@ export interface SpecsSdk { spawn(entryId: string, input?: JsonValue): Promise<J
 
 export interface ConsoleAgentSpawnInput {
   readonly task: string; readonly completionCriteria?: string; readonly name?: string;
-  readonly model?: ModelConfiguration; readonly budget?: BudgetLimits; readonly run?: boolean; readonly idempotencyKey?: string;
+  readonly model?: string | ModelConfigurationInput; readonly budget?: BudgetLimits; readonly idempotencyKey?: string;
+  readonly output?: { readonly schema: unknown };
 }
+export interface ConsoleAgentResultOptions {
+  readonly wait?: boolean;
+  readonly timeoutMs?: number;
+}
+export interface ConsoleAgentHandleIdentity<I = ConsoleAgentSpawnInput | string> {
+  readonly taskId: string;
+  readonly runId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly parentSessionId: string;
+  readonly parentBranchId: string;
+  readonly rootSessionId: string;
+  readonly depth: number;
+  readonly status: string;
+  readonly name?: string;
+  /** Type-only carrier for the invocation input; never serialized. */
+  readonly __input?: I;
+}
+export interface ConsoleAgentHandle<I = ConsoleAgentSpawnInput | string>
+  extends ConsoleAgentHandleIdentity<I> {
+  /**
+   * Worker-local convenience for retained result lookup. The method is
+   * non-enumerable and is not part of the durable or JSON-serialized handle.
+   */
+  result(options?: ConsoleAgentResultOptions): Promise<ConsoleAgentRunResult<I>>;
+}
+export type ConsoleAgentRunOutput<I> =
+  I extends { readonly output: { readonly schema: infer S } }
+    ? { readonly kind: "object"; readonly object: InferConsoleSchema<S> }
+    : { readonly kind: "text"; readonly text: string };
+export interface ConsoleAgentRunResultBase {
+  readonly taskId: string;
+  readonly runId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly steps: number;
+  readonly reason?: string;
+  readonly final?: string;
+  readonly invocationContract?: JsonValue;
+}
+export type ConsoleAgentRunResult<I = ConsoleAgentSpawnInput | string> =
+  | ConsoleAgentRunResultBase & {
+      readonly status: "succeeded";
+      readonly final: string;
+      readonly output: ConsoleAgentRunOutput<I>;
+      readonly resultReference: JsonValue;
+    }
+  | ConsoleAgentRunResultBase & {
+      readonly status: "queued" | "running" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown";
+      readonly output?: never;
+      readonly resultReference?: never;
+    };
 export interface ConsoleAgentSendInput {
   readonly target: string; readonly content: string; readonly taskId?: string; readonly artifactIds?: readonly string[];
   readonly intentKey?: string; readonly replyToMessageId?: string; readonly mode?: "steer" | "queue";
 }
 export interface ConsoleAgentMessageOptions { readonly direction?: "inbound" | "outbound" | "all"; readonly limit?: number; readonly before?: string; readonly pendingOnly?: boolean; }
 export interface AgentsSdk {
-  spawn(input: ConsoleAgentSpawnInput | string): Promise<JsonValue>;
-  spawnMany(inputs: readonly (ConsoleAgentSpawnInput | string)[]): Promise<JsonValue>;
+  spawn<I extends ConsoleAgentSpawnInput | string>(input: I): Promise<ConsoleAgentHandle<I>>;
+  spawnMany<I extends readonly (ConsoleAgentSpawnInput | string)[]>(inputs: I): Promise<{
+    readonly [K in keyof I]: ConsoleAgentHandle<I[K]>;
+  }>;
+  run<I extends ConsoleAgentSpawnInput | string>(input: I): Promise<ConsoleAgentRunResult<I>>;
+  runMany<I extends readonly (ConsoleAgentSpawnInput | string)[]>(inputs: I): Promise<{
+    readonly [K in keyof I]: ConsoleAgentRunResult<I[K]>;
+  }>;
+  result<I extends ConsoleAgentSpawnInput | string>(
+    handle: string | ConsoleAgentHandleIdentity<I>,
+    options?: ConsoleAgentResultOptions,
+  ): Promise<ConsoleAgentRunResult<I>>;
   get(target?: string): Promise<JsonValue>;
   proposeProfileUpdate(target: string | undefined, input: {
     readonly expectedProfileVersionId: string;
@@ -180,67 +243,51 @@ export interface AgentsSdk {
   cancel(target: string, reason?: string): Promise<JsonValue>;
 }
 
-export type ConsoleRlmInputReference =
+export type ConsoleAiContextReference =
   | { readonly kind: "artifact"; readonly artifactId: string; readonly start?: number; readonly end?: number }
   | { readonly kind: "document-range"; readonly documentId: string; readonly start?: number; readonly limit?: number; readonly chunkIds?: readonly string[] }
   | { readonly kind: "event"; readonly eventId: string }
   | { readonly kind: "memory"; readonly entryId: string; readonly versionId?: string }
   | { readonly kind: "sql-row"; readonly query: string; readonly args?: readonly (string | number | boolean | null)[]; readonly row?: number }
   | { readonly kind: "sql-rows"; readonly query: string; readonly args?: readonly (string | number | boolean | null)[]; readonly limit?: number };
-export type ConsoleRlmInput = JsonValue | ConsoleRlmInputReference;
-export interface ConsoleRlmStartInput {
+export type ConsoleAiContext = JsonValue | ConsoleAiContextReference;
+export interface ConsoleAiBudget extends BudgetLimits {
+  readonly inputTokenLimit?: number;
+  readonly outputTokenLimit?: number;
+  readonly inlineResultByteLimit?: number;
+}
+export interface ConsoleAiGenerationInput {
   readonly prompt?: string;
-  readonly task?: string;
-  readonly input?: ConsoleRlmInput;
-  readonly inputs?: readonly ConsoleRlmInput[];
-  readonly inputSetId?: string;
-  readonly model?: ModelConfiguration;
-  readonly budget?: BudgetLimits;
-  readonly run?: boolean;
+  readonly messages?: readonly { readonly role: "user" | "assistant"; readonly content: string }[];
+  readonly context?: readonly ConsoleAiContext[];
+  readonly model?: string | ModelConfigurationInput;
+  readonly budget?: ConsoleAiBudget;
   readonly idempotencyKey?: string;
 }
-export type ConsoleRlmOutcome = "succeeded" | "failed" | "cancelled" | "budget-exceeded" | "unknown";
-export interface ConsoleRlmResult {
-  readonly handleId: string;
-  readonly taskId: string;
-  readonly status: "pending" | "running" | ConsoleRlmOutcome;
-  readonly outcome?: ConsoleRlmOutcome;
-  readonly value?: JsonValue;
-  readonly resultMessageId?: string;
-  readonly resultArtifactId?: string;
+export interface ConsoleAiGenerationResultBase {
+  readonly generationId: string;
+  readonly status: "pending" | "running" | "succeeded" | "failed" | "cancelled" | "unknown" | "budget_exceeded";
   readonly error?: string;
+  readonly finishReason?: string;
+  readonly usage?: { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number };
+  readonly warnings?: readonly { readonly kind: string; readonly message: string }[];
   readonly provenance: JsonValue;
 }
-export interface ConsoleRlmHandle {
-  readonly handleId: string;
-  readonly taskId: string;
-  readonly parentSessionId: string;
-  readonly parentBranchId: string;
-  readonly childSessionId: string;
-  readonly childBranchId: string;
-  readonly model: ModelConfiguration;
-  readonly inputSetId: string | null;
-  readonly input?: JsonValue;
-  readonly inputProvenance?: JsonValue;
-  readonly inputHash?: string;
-  readonly status: "pending" | "running" | "completed" | "failed" | "cancelled";
-  readonly outcome?: ConsoleRlmOutcome;
-  readonly resultMessageId?: string;
-  readonly resultArtifactId?: string;
-  readonly error?: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-  /** Convenience method; functions are omitted when the durable handle is serialized. */
-  result(options?: { readonly wait?: boolean; readonly timeoutMs?: number }): Promise<ConsoleRlmResult>;
-  cancel(reason?: string): Promise<ConsoleRlmHandle>;
-  refresh(): Promise<ConsoleRlmHandle>;
+export interface ConsoleAiTextResult extends ConsoleAiGenerationResultBase {
+  readonly kind: "text";
+  readonly text?: string;
 }
-export interface RlmSdk {
-  start(input: ConsoleRlmStartInput | string): Promise<ConsoleRlmHandle>;
-  startMany(inputs: readonly (ConsoleRlmStartInput | string)[]): Promise<ConsoleRlmHandle[]>;
-  get(handle: string | Pick<ConsoleRlmHandle, "handleId">): Promise<ConsoleRlmHandle>;
-  result(handle: string | Pick<ConsoleRlmHandle, "handleId">, options?: { readonly wait?: boolean; readonly timeoutMs?: number }): Promise<ConsoleRlmResult>;
-  cancel(handle: string | Pick<ConsoleRlmHandle, "handleId">, reason?: string): Promise<ConsoleRlmHandle>;
+export interface ConsoleAiObjectResult<T = JsonValue> extends ConsoleAiGenerationResultBase {
+  readonly kind: "object";
+  readonly object?: T;
+}
+export type InferConsoleSchema<S> =
+  S extends { readonly _zod: { readonly output: infer Output } } ? Output :
+  S extends { readonly "~standard": { readonly types?: { readonly output: infer Output } } } ? Output :
+  JsonValue;
+export interface AiSdk {
+  generateText(input: ConsoleAiGenerationInput): Promise<ConsoleAiTextResult>;
+  generateObject<S>(input: ConsoleAiGenerationInput & { readonly schema: S }): Promise<ConsoleAiObjectResult<InferConsoleSchema<S>>>;
 }
 export interface GoalsSdk {
   current(): Promise<JsonValue>;
@@ -286,7 +333,7 @@ export interface ConsoleSdk {
   readonly heartbeats: HeartbeatsSdk;
   readonly schedules: SchedulesSdk;
   readonly context: ContextSdk;
-  readonly rlm: RlmSdk;
+  readonly ai: AiSdk;
   inspect(value: unknown, options?: InspectOptions): InspectPreview;
 }
 export type SqlTag = (strings: TemplateStringsArray, ...values: Array<string | number | boolean | null>) => Promise<JsonValue[]>;

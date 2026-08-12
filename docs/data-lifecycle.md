@@ -201,13 +201,15 @@ A filesystem or administration failure produces a partial result. Workspace owne
 
 ## Upgrades and migrations
 
-- The current workspace format accepts event schema version 5, reducer version 16, provider input version 1, model dispatch version 2, bounded output version 1, and model effect output version 2.
+- The current workspace format accepts event schema version 5, reducer version 18, provider input version 1, model dispatch version 2, bounded output version 1, and model effect output version 2.
 - Workspaces containing event schema version 1, 2, 3, or 4 are rejected with reset guidance and are not decoded, upcast, synchronized, projected, or recovered. Profile model-catalog caches may be discarded and rebuilt.
 - Opening incompatible state fails before applying product migrations to its retained rows and reports reset guidance. The runtime does not delete the old database.
 - Before using this revision, back up or move aside each affected workspace's `.agencity` directory. Starting again creates a fresh version-5 workspace whose new sessions include complete initial profiles. The separate profile directory (normally `~/.agencity`) does not need to be reset unless startup reports a profile-specific incompatibility; resetting a workspace removes session-owned agent-profile history but not user/device profile state, and resetting the profile store does not remove workspace agent profiles.
 - Migration 016 creates rebuildable `agent_profile_versions` and `workspace_agent_profiles` projections, adds `profile_pin_json` to recursive handles, and adds `prompt_provenance_json` to immutable context records. Canonical `SessionCreated`, profile-control, invocation, context, and model-call events remain authoritative.
 - Migration 017 adds the `governance_wait` trajectory-review field plus rebuildable `governed_refinement_proposals` and `refinement_restorations` tables. Canonical proposal, validation, frozen-review, child-link, decision, application, notice, and restoration events remain authoritative.
 - Migration 019 adds `outbox.origin_json`. The canonical schema-5 `EffectRequested.origin` remains authoritative; rebuild and recovery copy and validate the exact closed origin rather than infer it from event order.
+- Migration 021 adds the rebuildable mailbox `message_mode` projection for `steer` and `queue`; canonical mailbox events remain authoritative and retained legacy follow-up fields remain readable.
+- Migration 022 creates the rebuildable `ai_generations` projection for raw text/object generation lookup, execution ownership, recovery, and results; canonical `AiGeneration*` and effect events remain authoritative.
 - Back up databases, sidecars, artifacts, profile data, and replicas before changing to a source revision with new migrations.
 - Run only one runtime version against a given writable workspace at a time.
 - Do not downgrade a migrated database unless that repository revision explicitly supports it.

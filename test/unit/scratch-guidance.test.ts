@@ -21,7 +21,7 @@ describe("scratch prompt doctrine", () => {
   test("activates scratch guidance with the cell runtime surface", () => {
     expect(AGENT_RUN_EXECUTION_GUIDANCE).toMatchObject({
       id: "agencity.agent-run.execution-guidance",
-      version: 7,
+      version: 9,
     });
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
       "Cell globals: sdk, sql, session, console, scratch, state",

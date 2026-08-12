@@ -130,13 +130,19 @@ Model-contract diagnostics always return three submission counters—`bun_consol
 
 Reconciliation is evidence-only. It never rewrites an unknown effect, reports a retry, or executes a successor operation.
 
-### Agents, mailboxes, documents, models, goals, and wakes
+### Agent invocations, mailboxes, documents, raw AI, goals, and wakes
 
 | Method and path | Meaning |
 |---|---|
+| `POST /sessions/:session/agent-invocations?branch=:branch` | Admit one runnable detached agent invocation and return HTTP 202 with its durable task/run handle. |
+| `POST /sessions/:session/agent-invocations/batch?branch=:branch` | Atomically admit `{ inputs }` as runnable detached invocations. |
+| `GET /sessions/:session/agent-invocations/by-key?branch=:branch&idempotencyKey=:key` | Recover an invocation handle after disconnect before handle delivery. |
+| `GET /sessions/:session/agent-invocations/:task/result?branch=:branch` | Read queued, running, or terminal text/object result without holding admission open. |
+| `GET /sessions/:session/agent-invocations/:task/contract?branch=:branch` | Inspect the immutable text or declared-object invocation contract. |
+| `POST /sessions/:session/agent-invocations/:task/cancel?branch=:branch` | `{ reason? }` → cancellation-reconciled task/run result. |
 | `GET /sessions/:session/agents?branch=:branch` | Nuclear-family roster and task state. |
-| `POST /sessions/:session/agents?branch=:branch` | Admit one `SpawnAgentInput`. |
-| `POST /sessions/:session/agents/batch?branch=:branch` | Atomically admit `{ inputs: SpawnAgentInput[] }`. |
+| `POST /sessions/:session/agents?branch=:branch` | Low-level family admission without the current public runnable-invocation composition. |
+| `POST /sessions/:session/agents/batch?branch=:branch` | Low-level atomic family admission. |
 | `POST /sessions/:session/agents/:target/cancel?branch=:branch` | Cancel a permitted family target. |
 | `GET /sessions/:session/tasks?branch=:branch` | Durable branch task records. |
 | `POST /sessions/:session/tasks/:task/cancel?branch=:branch` | Cascaded task cancellation. |
@@ -145,9 +151,11 @@ Reconciliation is evidence-only. It never rewrites an unknown effect, reports a 
 | `POST /sessions/:session/mailbox/:message/ack?branch=:branch` | Acknowledge a message. |
 | `POST /sessions/:session/documents?branch=:branch` | Import a chunked document. |
 | `POST /sessions/:session/input-sets?branch=:branch` | Create an exact ordered input set. |
-| `POST /sessions/:session/models?branch=:branch` | Start a retained recursive model call. |
-| `GET /models/:handle` | Read a recursive model handle. |
-| `POST /models/:handle/cancel` | `{ reason? }` → cancel a recursive model call. |
+| `POST /sessions/:session/ai/generations?branch=:branch` | Admit one raw text or declared-object generation and return its durable handle immediately. |
+| `GET /sessions/:session/ai/generations/by-key?branch=:branch&idempotencyKey=:key` | Recover a generation handle by caller idempotency key. |
+| `GET /sessions/:session/ai/generations/:generation?branch=:branch` | Read a generation handle within its exact calling route. |
+| `GET /sessions/:session/ai/generations/:generation/result?branch=:branch` | Read the current typed result within its exact calling route without holding an HTTP request open. |
+| `POST /sessions/:session/ai/generations/:generation/cancel?branch=:branch` | `{ reason? }` → durably cancel a generation within its exact calling route. |
 | `GET /sessions/:session/goals?branch=:branch` | List goals. |
 | `POST /sessions/:session/goals?branch=:branch` | Create a goal and gates. |
 | `GET /sessions/:session/goals/current?branch=:branch` | Current user-authoritative goal or `null`. |
@@ -163,6 +171,10 @@ Reconciliation is evidence-only. It never rewrites an unknown effect, reports a 
 | `POST /sessions/:session/schedules?branch=:branch` | Create a user-owned one-time or interval schedule. |
 | `GET /sessions/:session/schedules/wakes?branch=:branch&status=...` | Durable wake records. |
 | `POST /schedules/:id/tick\|pause\|resume\|clear` | Schedule lifecycle operation. |
+
+Agent-invocation admission is asynchronous and always runnable. The model-facing `spawn` input has no `run` boolean. Client `runAgent` composes admission with bounded result polling, while console `sdk.agents.run` and `runMany` use the same durable handle/result lifecycle over worker RPC. Text output is the default; object output uses a restricted declared schema. Structured validity proves shape only, not factual correctness, task completion, safety, or authority. Unsatisfiable awaited console capacity fails before child admission. The protocol has no public recursive-model or `/models` admission route; retained recursive-model events and handles remain available only through advanced historical inspection and supervisor-private sealed workflows.
+
+Raw generation similarly returns a durable handle immediately. `AgentClient.generateText` and `generateObject` compose admission and result waiting. A raw call receives only its fixed host instruction, explicit prompt/messages, and explicit bounded context. It cannot inspect files, call tools, use skills, read ambient branch context, or continue autonomously.
 
 The family roster is an additive deterministic read projection. Each item contains the exact `sessionId` and `branchId`, display name, relationship, depth, session status, related task identity and status, task summary, model configuration, cancellation-request flag, activity, and bounded activity reason. Activities are `working`, `idle`, `attention`, `ended`, or `unavailable`, with reasons `blocked`, `failed`, `budget_exceeded`, `unknown`, `cancellation_pending`, `cancelled`, `archived`, `missing_state`, or `null`.
 
@@ -273,7 +285,7 @@ The client exposes typed methods for all route groups:
 - autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`, `agentToolCapability`, and `modelContractDiagnostics`;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
-- agents and recursive work: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mode-aware mailbox methods, agent cancellation, documents, input sets, recursive model methods;
+- agents and raw generation: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mode-aware mailbox methods, agent cancellation, documents, input sets, and generation admission/lookup/result/wait/cancel methods;
 - goals and wakes: goal, heartbeat, schedule, and wake methods;
 - memory and refinement: memory, trajectory review, automatic policy, governed proposal/wait/detach/inspection/rollback, and advanced legacy-compatible candidate/evaluation methods;
 - skill management: `listSkills`, `getSkill`, `previewSkillImport`, `installSkill`, `proposeSkill`, `enableSkill`, `disableSkill`, `removeSkill`, `testSkill`, `invokeSkill`, and `spawnSpec`;
@@ -331,7 +343,7 @@ const run = "accepted" in admitted && admitted.accepted
 if (run.status === "blocked") {
   await client.startRun(session.sessionId, session.branchId, {
     task: "Here is the missing information: continue.",
-    requestKey: "protocol-example-follow-up",
+    requestKey: "protocol-example-continuation",
   });
 }
 ```
@@ -411,7 +423,7 @@ The exported `ProtocolRequest` and `ProtocolResponse` unions in `protocol/types.
 
 ## Security and compatibility limits
 
-- Protocol version 1 is trusted-local.
+- Managed service protocol revision 2 is a pre-release exact-match contract and is trusted-local. Incompatible client/service revisions fail discovery with `PROTOCOL_MISMATCH`; no old recursive-model or `/models` route is emulated.
 - Additive capabilities are negotiated through `/capabilities`; effort-aware clients must not send an effort field when `reasoningEffortSelection` is absent.
 - Managed authentication is owner-local bearer access, not multi-tenant authorization.
 - The embedded diagnostic server is unauthenticated.

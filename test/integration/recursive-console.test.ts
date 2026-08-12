@@ -51,32 +51,17 @@ function open(temp: TempRuntime, providers: readonly ModelProvider[] = [], extra
   });
 }
 
-describe("FU-013 model-facing durable rlm API", () => {
-  test("console handles serialize through working state and resolve in a fresh worker", async () => {
+describe("FU-013 retained private recursive-model service", () => {
+  test("console removes public rlm admission while exposing raw ai", async () => {
     const temp = await makeTempRuntime("agencity-rlm-console-"); temps.push(temp);
-    const provider = new PromptProvider("console-rlm");
-    const supervisor = await open(temp, [provider], { restartConsoleAfterCell: true });
+    const supervisor = await open(temp, [], { restartConsoleAfterCell: true });
     try {
-      const root = await supervisor.createSession({ workspaceId: "rlm", model: { provider: provider.name, model: "m" } });
-      const admitted = await supervisor.executeCell(root.sessionId, root.branchId, `
-        const handle = await rlm.start({ task: "inspect", input: { position: 0, value: "alpha" }, idempotencyKey: "console-stable" });
-        await state.set("savedRlm", { handleId: handle.handleId });
-        return handle;
+      const root = await supervisor.createSession({ workspaceId: "rlm" });
+      const surface = await supervisor.executeCell(root.sessionId, root.branchId, `
+        return { rlm: typeof rlm, sdkRlm: typeof sdk.rlm, ai: typeof ai, sdkAi: typeof sdk.ai };
       `);
-      const admittedHandle = admitted.result as Record<string, any>;
-      expect(admittedHandle.handleId).toMatch(/^model-task-/);
-      expect(JSON.stringify(admitted.result)).not.toContain("function");
-
-      const resolved = await supervisor.executeCell(root.sessionId, root.branchId, `
-        const saved = await state.get("savedRlm");
-        if (!saved || saved.kind !== "json") throw new Error("missing handle");
-        const handle = await rlm.get(saved.value.handleId);
-        return await handle.result({ timeoutMs: 5000 });
-      `);
-      expect((resolved.result as any).status).toBe("succeeded");
-      expect((resolved.result as any).provenance.inputHash).toMatch(/^[a-f0-9]{64}$/);
-      expect(provider.calls).toBe(1);
-      expect((await supervisor.agents.listTasks(root.sessionId))).toHaveLength(1);
+      expect(surface.result).toEqual({ rlm: "undefined", sdkRlm: "undefined", ai: "object", sdkAi: "object" });
+      expect(await supervisor.agents.listTasks(root.sessionId)).toHaveLength(0);
     } finally { await supervisor.close(); }
   });
 
@@ -107,7 +92,7 @@ describe("FU-013 model-facing durable rlm API", () => {
 
       const stranger = await supervisor.createSession({ workspaceId: "inputs" });
       await expect(supervisor.models.start(stranger.sessionId, stranger.branchId, { task: "steal event", input: { kind: "event", eventId: sourceEvent.id }, run: false }))
-        .rejects.toThrow(/family scope/i);
+        .rejects.toThrow(/caller family/i);
     } finally { await supervisor.close(); }
   });
 
@@ -156,20 +141,124 @@ describe("FU-013 model-facing durable rlm API", () => {
       } as any)).rejects.toThrow(/reserved dispatch field responseContract/i);
       await expect(supervisor.agents.spawn(root.sessionId, root.branchId, {
         task: "arbitrary child tools",
-        run: false,
         tools: [{ name: "shell" }],
       } as any)).rejects.toThrow(/reserved dispatch field tools/i);
-      await expect(supervisor.executeCell(root.sessionId, root.branchId, `
-        return await rlm.start({ task: "override", model: { provider: "other", model: "forbidden" } });
-      `)).rejects.toThrow(/parent model policy/i);
-      await expect(supervisor.executeCell(root.sessionId, root.branchId, `
-        return await rlm.start({ task: "arbitrary tools", responseCapability: { kind: "text" } });
-      `)).rejects.toThrow(/reserved dispatch field responseCapability/i);
+      await expect(supervisor.agents.spawn(root.sessionId, root.branchId, {
+        task: "obsolete run toggle",
+        run: false,
+      } as any)).rejects.toThrow(/spawn is always detached-running/i);
+      const surface = await supervisor.executeCell(root.sessionId, root.branchId, `
+        return { rlm: typeof rlm, sdkRlm: typeof sdk.rlm };
+      `);
+      expect(surface.result).toEqual({ rlm: "undefined", sdkRlm: "undefined" });
       await expect(supervisor.executeCell(root.sessionId, root.branchId, `
         return await sdk.agents.spawn({ task: "arbitrary child tools", toolSchemas: [] });
       `)).rejects.toThrow(/reserved dispatch field toolSchemas/i);
       expect((await supervisor.agents.listTasks(root.sessionId))).toHaveLength(1);
     } finally { await supervisor.close(); }
+  });
+
+  test("owner allowlist broadens only child model identity and preserves child limits", async () => {
+    const temp = await makeTempRuntime("agencity-child-model-allowlist-");
+    temps.push(temp);
+    const parentProvider = new PromptProvider("parent-route");
+    const delegatedProvider = new PromptProvider("delegated-route");
+    const supervisor = await open(temp, [parentProvider, delegatedProvider]);
+    try {
+      const root = await supervisor.createSession({
+        workspaceId: "child-model-allowlist",
+        model: {
+          provider: parentProvider.name,
+          model: "creator/base",
+          maxOutputTokens: 1_000,
+        },
+      });
+      await expect(supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        {
+          task: "not allowed",
+          model: {
+            provider: delegatedProvider.name,
+            model: "creator/delegated",
+          },
+        },
+      )).rejects.toThrow(/owner-managed delegated-model allowlist/i);
+
+      await supervisor.modelSelection.setAllowlist([
+        {
+          provider: delegatedProvider.name,
+          model: "creator/delegated",
+        },
+        {
+          provider: parentProvider.name,
+          model: "creator/alternate",
+        },
+      ]);
+      const child = await supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        {
+          task: "allowed",
+          model: {
+            provider: delegatedProvider.name,
+            model: "creator/delegated",
+            maxOutputTokens: 512,
+          },
+        },
+      );
+      const task = (await supervisor.agents.listTasks(root.sessionId))
+        .find((item) => item.taskId === child.taskId);
+      expect(task?.model).toMatchObject({
+        provider: delegatedProvider.name,
+        model: "creator/delegated",
+        maxOutputTokens: 512,
+      });
+
+      const stableInput = {
+        task: "stable string selection",
+        model: "creator/alternate",
+        idempotencyKey: "stable-string-selection",
+      } as const;
+      const stable = await supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        stableInput,
+      );
+      await supervisor.selectModel(root.sessionId, root.branchId, {
+        provider: parentProvider.name,
+        model: "creator/changed",
+        maxOutputTokens: 750,
+      });
+      const retried = await supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        stableInput,
+      );
+      expect(retried.taskId).toBe(stable.taskId);
+      expect((await supervisor.agents.listTasks(root.sessionId))
+        .find((item) => item.taskId === stable.taskId)?.model)
+        .toMatchObject({
+          provider: parentProvider.name,
+          model: "creator/alternate",
+          maxOutputTokens: 1_000,
+        });
+
+      await expect(supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        {
+          task: "too much output",
+          model: {
+            provider: delegatedProvider.name,
+            model: "creator/delegated",
+            maxOutputTokens: 1_001,
+          },
+        },
+      )).rejects.toThrow(/output limit cannot exceed/i);
+    } finally {
+      await supervisor.close();
+    }
   });
 
   test("large results spill to durable artifacts and wall-time exhaustion remains distinct", async () => {

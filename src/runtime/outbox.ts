@@ -7,6 +7,7 @@ import {
   projectEvents,
   type EffectOrigin,
   type EffectOutcome,
+  type NewAgentEvent,
 } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { EffectExecutionProgress, EffectExecutor, ExecutionResult } from "../executors/contract.ts";
@@ -65,13 +66,24 @@ export class OutboxRunner {
   }
 
   async request(request: EffectRequest): Promise<string> {
+    const event = this.requestEvent(request);
+    const [committed] = await this.storage.appendEvents([event]);
+    if (!committed) throw new Error("Effect request was not committed");
+    return (committed.payload as { effectId: string }).effectId;
+  }
+
+  /**
+   * Builds a validated EffectRequested event for a larger atomic admission
+   * batch. The caller must append the returned event before any execution.
+   */
+  requestEvent(request: EffectRequest): NewAgentEvent {
     if (this.#deletionQuiesced) throw new ValidationError("Outbox is quiesced for physical deletion");
     if (!request.idempotencyKey) throw new ValidationError("Effect requests require an idempotency key");
     if (containsBrokeredSecret(request.input)) throw new ValidationError("Brokered credentials cannot be stored in effect requests");
     // The durable handle is a pure function of the idempotency scope. A retry must
     // propose byte-identical event payload, while changed intent still conflicts.
     const effectId = stableEffectId(request.sessionId, request.idempotencyKey);
-    const [event] = await this.storage.appendEvents([{
+    return {
       sessionId: request.sessionId,
       branchId: request.branchId,
       type: "EffectRequested",
@@ -86,9 +98,7 @@ export class OutboxRunner {
         idempotencyKey: request.idempotencyKey,
         idempotent: request.idempotent,
       },
-    }]);
-    if (!event) throw new Error("Effect request was not committed");
-    return (event.payload as { effectId: string }).effectId;
+    };
   }
 
   run(effectId: string): Promise<ExecutionResult> {

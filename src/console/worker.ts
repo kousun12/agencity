@@ -1,6 +1,15 @@
 import type { JsonValue } from "../domain/json.ts";
 import type { CellLogStream } from "../domain/events.ts";
-import type { ConsoleSdk, HarnessReviewInput, SqlTag } from "./sdk.ts";
+import type {
+  ConsoleAgentHandle,
+  ConsoleAgentHandleIdentity,
+  ConsoleAgentResultOptions,
+  ConsoleAgentRunResult,
+  ConsoleAgentSpawnInput,
+  ConsoleSdk,
+  HarnessReviewInput,
+  SqlTag,
+} from "./sdk.ts";
 import {
   MAX_CELL_OBSERVATION_JSON_BYTES,
   encodeObservation,
@@ -9,6 +18,7 @@ import {
   type InspectOptions,
 } from "./inspect.ts";
 import { notebookCellBody } from "./notebook.ts";
+import { schemaToPlainJsonSchema } from "./schema-conversion.ts";
 import {
   SCRATCH_LIMITS,
   createScratchProxy,
@@ -29,7 +39,7 @@ type Incoming =
   | { type: "scratch-record-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string; candidate: import("./scratch.ts").ScratchCheckpointCandidate }
   | { type: "scratch-record-cache-write"; requestId: string; scope: ScratchScope; status: "stored" | "cleared" | "unavailable" }
   | { type: "scratch-evict"; requestId: string; scope: ScratchScope }
-  | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string }
+  | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string; code?: string; details?: Record<string, unknown> }
   | { type: "shutdown" };
 
 const MAX_LOG_BYTES = 64 * 1024;
@@ -118,7 +128,17 @@ process.on("message", (raw: unknown) => {
     if (pending) {
       pendingRpc.delete(message.requestId);
       if (message.ok) pending.resolve(message.value);
-      else pending.reject(new Error(message.error ?? "RPC failed"));
+      else {
+        const error = new Error(message.error ?? "RPC failed") as Error & {
+          code?: string;
+          details?: Record<string, unknown>;
+        };
+        if (typeof message.code === "string") error.code = message.code;
+        if (message.details && typeof message.details === "object") {
+          error.details = message.details;
+        }
+        pending.reject(error);
+      }
     }
     return;
   }
@@ -288,9 +308,46 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     propose: (instructions:string,scope:"local"|"workspace"="workspace") => call("skills.propose",[instructions,scope]),
   };
   const specs = { spawn: (entryId:string,input:JsonValue={}) => call("specs.spawn",[entryId,input]) };
+  const agentResult = <I extends ConsoleAgentSpawnInput | string>(
+    handle: string | ConsoleAgentHandleIdentity<I>,
+    options: ConsoleAgentResultOptions = {},
+  ) =>
+    call("agents.result", [
+      typeof handle === "string" ? handle : { taskId: handle.taskId },
+      options,
+    ]) as Promise<ConsoleAgentRunResult<I>>;
+  const attachAgentHandle = <I extends ConsoleAgentSpawnInput | string>(
+    raw: unknown,
+  ): ConsoleAgentHandle<I> => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) ||
+        typeof (raw as Record<string, unknown>).taskId !== "string") {
+      throw new Error("Agent spawn returned an invalid handle");
+    }
+    const handle = raw as ConsoleAgentHandle<I>;
+    Object.defineProperty(handle, "result", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: (options: ConsoleAgentResultOptions = {}) =>
+        agentResult(handle.taskId, options),
+    });
+    return handle;
+  };
   const agents = {
-    spawn: (input: unknown) => call("agents.spawn", [input]),
-    spawnMany: (inputs: unknown[]) => call("agents.spawnMany", [inputs]),
+    spawn: async (input: unknown) =>
+      attachAgentHandle(await call("agents.spawn", [normalizeAgentInput(input)])),
+    spawnMany: async (inputs: unknown[]) => {
+      const raw = await call("agents.spawnMany", [
+        inputs.map(normalizeAgentInput),
+      ]);
+      if (!Array.isArray(raw)) {
+        throw new Error("Agent spawnMany returned invalid handles");
+      }
+      return raw.map((handle) => attachAgentHandle(handle));
+    },
+    run: (input: unknown) => call("agents.run", [normalizeAgentInput(input)]),
+    runMany: (inputs: unknown[]) => call("agents.runMany", [inputs.map(normalizeAgentInput)]),
+    result: agentResult,
     get: (target?: string) => call("agents.get", [target]),
     proposeProfileUpdate: (target: string | undefined, input: unknown, options: Record<string, unknown> = {}) =>
       call("agents.proposeProfileUpdate", [target, input, options]),
@@ -363,29 +420,15 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       return scratchStatus();
     },
   };
-  const rlmId = (handle: string | { handleId?: unknown }): string => {
-    const id = typeof handle === "string" ? handle : handle?.handleId;
-    if (typeof id !== "string" || !id) throw new Error("Recursive model handle must contain a non-empty handleId");
-    return id;
-  };
-  let rlm: Record<string, unknown>;
-  const hydrateRlmHandle = (raw: any): any => {
-    const handle = { ...raw };
-    // Convenience functions are deliberately non-enumerable: the same object
-    // remains strict-JSON serializable as a durable identity between workers.
-    Object.defineProperties(handle, {
-      result: { enumerable: false, value: (options: Record<string, unknown> = {}) => call("rlm.result", [raw.handleId, options]) },
-      cancel: { enumerable: false, value: async (reason?: string) => hydrateRlmHandle(await call("rlm.cancel", [raw.handleId, reason])) },
-      refresh: { enumerable: false, value: async () => hydrateRlmHandle(await call("rlm.get", [raw.handleId])) },
-    });
-    return handle;
-  };
-  rlm = {
-    start: async (input: unknown) => hydrateRlmHandle(await call("rlm.start", [input])),
-    startMany: async (inputs: unknown[]) => (await call("rlm.startMany", [inputs]) as any[]).map(hydrateRlmHandle),
-    get: async (handle: string | { handleId?: unknown }) => hydrateRlmHandle(await call("rlm.get", [rlmId(handle)])),
-    result: (handle: string | { handleId?: unknown }, options: Record<string, unknown> = {}) => call("rlm.result", [rlmId(handle), options]),
-    cancel: async (handle: string | { handleId?: unknown }, reason?: string) => hydrateRlmHandle(await call("rlm.cancel", [rlmId(handle), reason])),
+  const ai = {
+    generateText: (input: unknown) => call("ai.generateText", [input]),
+    generateObject: (input: unknown) => {
+      if (!input || typeof input !== "object" || Array.isArray(input)) {
+        throw new Error("ai.generateObject requires an input object");
+      }
+      const { schema, ...rest } = input as Record<string, unknown>;
+      return call("ai.generateObject", [{ ...rest, schema: schemaToPlainJsonSchema(schema) }]);
+    },
   };
   const sql: SqlTag = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     let text = strings[0] ?? "";
@@ -397,7 +440,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   try {
     const transpiler = new Bun.Transpiler({ loader: "ts", target: "bun" });
     const body = notebookCellBody(message.code);
-    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools,inspect,cells,rlm,scratch){\n${body}\n}`;
+    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools,inspect,cells,ai,scratch){\n${body}\n}`;
     const javascript = transpiler.transformSync(source);
     const factory = new Function(`${javascript}\nreturn __cell;`)() as (
       sdk: ConsoleSdk,
@@ -409,11 +452,11 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       tools: unknown,
       inspect: typeof inspectValue,
       cells: unknown,
-      rlm: unknown,
+      ai: unknown,
       scratch: Record<string, unknown>,
     ) => Promise<unknown>;
-    const sdk = { scratch: scratchSdk, state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, rlm, inspect } as unknown as ConsoleSdk;
-    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, rlm, warmScratch.proxy.object);
+    const sdk = { scratch: scratchSdk, state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, ai, inspect } as unknown as ConsoleSdk;
+    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, ai, warmScratch.proxy.object);
     const encoded = encodeObservation(value);
     const inlineTerminal = {
       type: "result",
@@ -446,6 +489,23 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   warmScratch.temperature = "warm";
   evictScratchScopes();
   send(fitTerminalIpc({ ...response, logs: logs.values, logStreams: logs.streams }));
+}
+
+function normalizeAgentInput(input: unknown): unknown {
+  if (typeof input === "string") return input;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const record = input as Record<string, unknown>;
+  if (record.output === undefined) return input;
+  if (!record.output || typeof record.output !== "object" ||
+      Array.isArray(record.output)) return input;
+  const output = record.output as Record<string, unknown>;
+  return {
+    ...record,
+    output: {
+      ...output,
+      schema: schemaToPlainJsonSchema(output.schema),
+    },
+  };
 }
 
 async function control(requestId: string, operation: () => unknown | Promise<unknown>): Promise<void> {

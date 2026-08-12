@@ -16,7 +16,12 @@ import {
   type RefinementReviewRequest,
   type RefinementTriggerSeed,
 } from "../domain/index.ts";
-import { containsBrokeredSecret, isSensitiveEnvironmentKey, scrubText } from "../security/index.ts";
+import {
+  containsBrokeredSecret,
+  isSensitiveEnvironmentKey,
+  scrubCredentialText,
+  scrubText,
+} from "../security/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { ProfileDatabase, ProfilePreference } from "../sync/index.ts";
 import type { HarnessService } from "./harness.ts";
@@ -907,7 +912,9 @@ export class RefinerService {
 }
 
 function refinementVisibleEventPayload(type: string, value: JsonValue): JsonValue {
-  const cleaned = stripRepositoryInstructionFields(value);
+  const cleaned = scrubRefinementCredentialEvidence(
+    stripRepositoryInstructionFields(value),
+  );
   if (cleaned === null || Array.isArray(cleaned) || typeof cleaned !== "object") return cleaned;
   const payload = cleaned as Record<string, JsonValue>;
   if (type === "ContextMaterialized") {
@@ -935,6 +942,33 @@ function refinementVisibleEventPayload(type: string, value: JsonValue): JsonValu
       : payload;
   }
   return payload;
+}
+
+function scrubRefinementCredentialEvidence(value: JsonValue): JsonValue {
+  if (typeof value === "string") return scrubRefinementCredentialText(value);
+  if (value === null || typeof value === "boolean" ||
+      typeof value === "number") return value;
+  if (Array.isArray(value)) {
+    return value.map(scrubRefinementCredentialEvidence);
+  }
+  const result: Record<string, JsonValue> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const scrubbedKey = scrubRefinementCredentialText(key);
+    if (Object.hasOwn(result, scrubbedKey)) {
+      throw new ValidationError(
+        "Credential redaction produced duplicate refinement evidence keys",
+      );
+    }
+    result[scrubbedKey] = scrubRefinementCredentialEvidence(item);
+  }
+  return result;
+}
+
+function scrubRefinementCredentialText(value: string): string {
+  return scrubCredentialText(value).replace(
+    /(?:password|passwd|secret|authorization|token|(?:access|refresh|auth|id)[_-]?token|api[_-]?key)\s*[:=]\s*\[REDACTED\]/gi,
+    "[REDACTED]",
+  );
 }
 
 function stripRepositoryInstructionFields(value: JsonValue): JsonValue {

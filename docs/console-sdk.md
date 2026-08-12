@@ -8,7 +8,7 @@ This reference describes the model-facing cell environment and its private super
 
 An autonomous model request exposes exactly two declaration-only provider tools: `bun_console` and `finish`. Those tools have no execute callbacks and do not expose the SDK to the provider. An accepted `bun_console` call proposes source text; Agencity validates and durably commits the canonical action before creating the disposable cell described below.
 
-The injected names in this document—`tools`, `sql`, `scratch`, `state`, `cells`, `artifacts`, `rlm`, `sdk`, memory, agents, skills, goals, and related facades—exist only inside that later cell. They are not provider tools. Provider narration cannot invoke them, and Agencity has no assistant-text JSON or fenced-code fallback.
+The injected names in this document—`tools`, `sql`, `scratch`, `state`, `cells`, `artifacts`, `ai`, `sdk`, memory, agents, skills, goals, and related facades—exist only inside that later cell. They are not provider tools. Provider narration cannot invoke them, and Agencity has no assistant-text JSON or fenced-code fallback.
 
 ## Execution model
 
@@ -43,11 +43,11 @@ Every cell receives:
 | `tools` | Outbox-backed generic effects plus shell and file helpers. |
 | `sql` | Parameterized read-only tagged template. |
 | `inspect` | Bounded, getter-free, redacting preview function. |
-| `rlm` | Durable recursive-model calls. |
+| `ai` | Durable one-request raw text and declared-object generation. |
 | `sdk` | Namespaced access to the surfaces above, including `scratch.status/clear`, plus memory, harness, skills, specifications, agents, goals, heartbeats, schedules, and context. |
 | `console` | Cell-local `log`, `warn`, and `error`; output becomes bounded cell logs. |
 
-The direct `state`, `cells`, `artifacts`, `tools`, `inspect`, and `rlm` names are the same implementations exposed under `sdk`. `scratch` is the direct object; its controls are `sdk.scratch`. `sql` and `session` are direct cell parameters rather than `sdk` properties.
+The direct `state`, `cells`, `artifacts`, `tools`, `inspect`, and `ai` names are the same implementations exposed under `sdk`. `scratch` is the direct object; its controls are `sdk.scratch`. `sql` and `session` are direct cell parameters rather than `sdk` properties.
 
 ## Durability rules
 
@@ -359,7 +359,7 @@ The model view includes active entries authorized for the local/workspace/user/g
 
 `allowedKinds` accepts `memory`, `prompt_note`, `skill`, and `subagent_spec` and restricts the formal proposal schema for that review. The string form remains shorthand for `{ instructions }`. The SDK retains the runtime API's wait-by-default behavior unless `wait: false` is explicit.
 
-`review()` uses a supervisor-selected sealed recursive response contract with exactly one fully typed `agencity_submit_refinement_review` provider tool. The structured child result is retained without an assistant result message and is bound to the exact child model completion. This internal path does not change the public `rlm` methods below, which remain text-result calls.
+`review()` uses a supervisor-selected sealed recursive response contract with exactly one fully typed `agencity_submit_refinement_review` provider tool. The structured child result is retained without an assistant result message and is bound to the exact child model completion. This sealed recursive path is internal and does not expose a public recursive-model console API.
 
 `review()` is the ordinary trajectory-to-governance entrypoint: a durable proposer may return no change or one typed candidate, which then enters deterministic validation, a separate sealed reviewer, application-time revalidation, automatic application, and exact terminal delivery. `propose(input)` retains the ADR-0002 direct candidate API for advanced and legacy-compatible use; it is not the ordinary activation path. Generated code cannot choose either reviewer, approve its own content, widen scope, record owner authority, or use legacy evaluator operations as a shortcut around governance.
 
@@ -384,30 +384,44 @@ Generated code cannot import, install, enable, disable, or remove skills. Those 
 ## `sdk.agents`
 
 ```ts
-const child = await sdk.agents.spawn({
-  task: "Inspect the first failure",
-  completionCriteria: "Return root cause and evidence",
-  name: "investigator",
-  profile: {
-    role: "Test investigator",
-    purpose: "Investigate the admitted failing test.",
-    instructions: "- Stay within the admitted task.\n- Return attributable evidence.",
+const { z } = await import("zod");
+
+// Wait because the parent needs the child's conclusion as program data.
+const review = await sdk.agents.run({
+  task: "Inspect the implementation, run relevant tests, and assess readiness.",
+  output: {
+    schema: z.object({
+      ready: z.boolean(),
+      evidence: z.array(z.string()),
+      remainingWork: z.array(z.string()),
+    }),
   },
 });
 
+if (review.status === "succeeded" && review.output.kind === "object") {
+  if (!review.output.object.ready) {
+    return review.output.object.remainingWork;
+  }
+}
+
+// Detach because this cell does not need the result before continuing.
+const audit = await sdk.agents.spawn({
+  task: "Run the slow compatibility audit and report back to the parent.",
+});
 await sdk.agents.send(
-  child.sessionId,
+  audit.sessionId,
   "Prioritize the stack trace",
-  { taskId: child.taskId },
+  { taskId: audit.taskId },
 );
 
-await sdk.agents.send(child.sessionId, "Use the newest failure", {
+await sdk.agents.send(audit.sessionId, "Use the newest failure", {
   mode: "steer",
 });
 
-const family = await sdk.agents.list();
-const page = await sdk.agents.messages({ limit: 20 });
+return { auditTaskId: audit.taskId };
+```
 
+```ts
 const current = await sdk.agents.get();
 const proposal = await sdk.agents.proposeProfileUpdate(undefined, {
   expectedProfileVersionId: current.profileVersionId,
@@ -426,6 +440,9 @@ Methods:
 
 - `spawn(input | taskString)`
 - `spawnMany(inputs)`
+- `run(input | taskString)`
+- `runMany(inputs)`
+- `result(handleOrTaskId, { wait?, timeoutMs? })`
 - `get(target?)`
 - `proposeProfileUpdate(target, input, { wait? })`
 - `rollbackProfile(target, { expectedCurrentVersionId, restoreVersionId, reason, evidenceEventIds })`
@@ -441,9 +458,13 @@ The executing session and branch always supply sender identity. Targets are limi
 
 Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one authorized task reference and up to eight sender-registered artifact IDs. Intent keys provide stable deduplication. Rate and pending-queue bounds are enforced. Receipts include the exact `mode`, optional `contextRunId`, retained-history `legacyFollowUp` marker, and queued, delivered-to-context, acknowledged, or failed status.
 
+`run` admits a full autonomous child and waits for its terminal typed result. Omitting `output` returns a text result; `output.schema` requests compact programmatic object data and accepts the same supported Zod, Standard Schema, or restricted plain JSON Schema forms as raw object generation. `runMany` is all-or-nothing at admission and is intended only for bounded independent tasks. Awaited calls reserve console capacity before child admission, so an unsatisfiable nested dependency fails with `CONSOLE_CAPACITY_EXCEEDED` without creating the child.
+
+`spawn` and `spawnMany` always admit runnable detached children and return durable handles immediately. There is no model-facing `run` boolean. Use retained messaging and terminal notices, call `handle.result({ wait?, timeoutMs? })`, or call `sdk.agents.result(handleOrTaskId, options)` later. The bound method is a non-enumerable worker-local convenience over the same result operation; it is absent from JSON serialization, durable state, and a handle reconstructed after worker loss. A reconstructed handle or task ID remains usable through `sdk.agents.result`. A stable `idempotencyKey` recovers the same admission after disconnect or worker loss. `{ wait: false }` reports the current lifecycle; waiting is bounded and returns queued, running, succeeded, blocked, failed, cancelled, budget-exceeded, or unknown without fabricating output. Both result forms use the same validation, capacity reservation, timeout, and error semantics. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile.
+
 `send` defaults to `mode: "queue"`. Each queued message owns one separate durable run. An idle or stopped recipient starts that run immediately; a busy recipient retains queued messages in FIFO order and starts them one at a time after the active run and each earlier queued run terminate. Pending queued content is excluded from the recipient's model context until its run is admitted. `mode: "steer"` enters an active run at its next durable boundary. If the recipient is idle, it is delivered to retained context without waking the recipient.
 
-`spawn` runs the child by default; `{ run: false }` admits without immediate runnable execution. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile. The profile is committed atomically with child admission and participates in idempotency checks.
+Use `runMany` or `spawnMany` only for independent work; dependent steps must be sequenced. A long loop in one parent cell is not a durable coordinator across worker loss. Persist durable handles, state, messages, or artifacts at recovery boundaries. Every agent method uses the same canonical model IDs and owner-managed narrowing policy as raw generation. Returned model judgments are data, not objective evidence, factual correctness, task-completion proof, or expanded authority. Cross-agent callable behavior uses retained messaging and artifacts; versioned durable RPC remains unavailable until a separately advertised capability implements it.
 
 `get()` without a target returns the executing agent's full active profile; a permitted direct-child target returns that child's profile. Proposal targets are limited to self or a direct creation-family child. The executing session and branch supply proposer identity, so generated code cannot spoof owner authority, another relationship, or evidence origin.
 
@@ -451,42 +472,43 @@ Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one author
 
 `rollbackProfile` accepts only an exact earlier approved version of the same target and current-version compare-and-swap. It creates a new immutable restoration version; any content change requires a new reviewed proposal. Siblings, unrelated agents, and cross-root targets are rejected.
 
-## `rlm` and `sdk.rlm`
+## `ai` and `sdk.ai`
 
 ```ts
-const handle = await rlm.start({
-  prompt: "Summarize these sources",
-  profile: {
-    role: "Source summarizer",
-    purpose: "Summarize one bounded recursive input.",
-    instructions: "- Preserve source attribution and uncertainty.",
-  },
-  inputs: [
-    { kind: "artifact", artifactId },
-    { kind: "event", eventId },
-  ],
-  idempotencyKey: "summary-v1",
+// One raw text transformation over data already selected by this cell.
+const summary = await ai.generateText({
+  prompt: "Summarize these failures without inventing causes.",
+  context: failures,
 });
 
-const result = await handle.result({
-  wait: true,
-  timeoutMs: 30_000,
+// One raw judgment whose fields drive ordinary TypeScript control flow.
+const { z } = await import("zod");
+const verdict = await ai.generateObject({
+  prompt: "Decide whether this exact check evidence is complete.",
+  context: [{ task, checks }],
+  schema: z.object({
+    complete: z.boolean(),
+    missing: z.array(z.string()),
+  }),
 });
+
+if (!verdict.object?.complete) {
+  for (const item of verdict.object?.missing ?? []) {
+    // Handle each missing item in the surrounding program.
+  }
+}
 ```
 
 Methods:
 
-- `start(input | promptString)`
-- `startMany(inputs)`
-- `get(handleId | handle)`
-- `result(handleId | handle, { wait?, timeoutMs? })`
-- `cancel(handleId | handle, reason?)`
+- `generateText(input)`
+- `generateObject({ ...input, schema })`
 
-Inputs can contain inline JSON or attributable artifact ranges, document ranges, events, memories, SQL rows, and input-set IDs. `profile: { role, purpose, instructions }` supplies an explicit initial profile for the retained recursive child; omission uses the sealed task-specialist profile. Admission freezes input provenance, input hash, and the child profile pin. Inline materialized input is bounded.
+Exactly one of `prompt` or `messages` is required. `context` may contain bounded inline JSON or attributable artifact ranges, document ranges, events, memories, and read-only SQL rows. The worker converts supported Zod schemas to plain JSON Schema; the supervisor validates the restricted schema again before provider admission.
 
-Returned handles contain durable parent/child/task/model/input/status identity. Convenience `result`, `cancel`, and `refresh` functions are non-enumerable, so serializing the handle preserves only JSON identity. Save `handleId` in working state when another worker must resolve it.
+Each call freezes only the explicitly supplied prompt/messages and context. It cannot inspect files, run commands, call tools, use skills, read ambient branch messages, profiles, retrieved memory, or repository instructions, or continue autonomously. Raw generation makes exactly one provider request and creates no child session, task, profile, mailbox, or family relationship. Use ordinary TypeScript for deterministic work and `sdk.agents.run` or `spawn` for work that requires inspection, tools, iteration, or autonomous continuation.
 
-Handles are scoped to the executing parent session and branch. A child inherits the parent's model unless existing policy authorizes a narrower override; generated code cannot widen provider/model or budget authority. The handle's durable profile pin fixes the profile version, prompt digest, and prompt contract for the entire recursive invocation. Lost non-idempotent model execution becomes terminal `unknown` and is not replayed.
+Keep object schemas small and decision-oriented. Schema validity establishes shape, not factual correctness, objective evidence, completion, safety, or authority. Unsupported Zod refinements, transforms, recursive schemas, closures, external references, formats, and excessive depth or size fail rather than degrading silently. The result remains inline and below the configured hard byte limit; oversized text or object output fails instead of spilling or changing type. Model selection and budgets may only narrow caller authority. Admission, provider input, schema, result, usage, cancellation, timeout, and unknown recovery remain durable. The public console does not expose `rlm` or `sdk.rlm`; retained recursive-model operations remain internal for existing sealed workflows and historical recovery.
 
 ## `sdk.goals`
 

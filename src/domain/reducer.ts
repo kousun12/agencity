@@ -1,12 +1,26 @@
-import { EVENT_SCHEMA_VERSION, type AgentEvent, type EventPayloads, type ModelCallResult, type TaskStatus } from "./events.ts";
+import {
+  EVENT_SCHEMA_VERSION,
+  AI_GENERATION_SYSTEM_INSTRUCTION,
+  MAX_AI_GENERATIONS_PER_CELL,
+  MAX_CONCURRENT_AI_GENERATIONS_PER_CELL,
+  type AgentEvent,
+  type BudgetLimits,
+  type EventPayloads,
+  type ModelCallResult,
+  type TaskStatus,
+} from "./events.ts";
 import type {
-  AgentRunState, AgentRunStepState, AgentState, CellState, DocumentChunkState, EffectState, GoalGateState,
+  AgentRunState, AgentRunStepState, AgentState, AiGenerationState, CellState, DocumentChunkState, EffectState, GoalGateState,
   MailboxMessageState, ModelCallState, RecursiveModelState, TaskState, TerminalNoticeState,
 } from "./state.ts";
 import { REDUCER_VERSION } from "./state.ts";
 import { InvalidTransitionError, ValidationError } from "./errors.ts";
 import type { AgentAction } from "./agent-action.ts";
-import { agentActionFromToolSubmission } from "./agent-tool-contract.ts";
+import {
+  AGENT_TYPED_TOOL_CONTRACT_ID,
+  agentActionFromToolSubmission,
+  validateTypedAgentToolSubmissionValue,
+} from "./agent-tool-contract.ts";
 import {
   validateModelEffectOutputV2,
   type ModelEffectOutputV2,
@@ -19,6 +33,16 @@ import {
   validateRefinementGovernanceRecursiveResult,
 } from "./refinement-governance.ts";
 import { assertBoundedOutputs } from "./bounded-output.ts";
+import {
+  canonicalJsonByteLength,
+  canonicalJsonDigest,
+  type JsonValue,
+} from "./json.ts";
+import {
+  validateAgentInvocationContract,
+  validateAgentInvocationResult,
+  validateAgentRunResultReference,
+} from "./agent-invocation-contract.ts";
 
 function withBase(state: AgentState, event: AgentEvent): AgentState {
   return { ...state, cursor: event.cursor, appliedEventIds: [...state.appliedEventIds, event.id] };
@@ -52,7 +76,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
       status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, contexts: {}, compactions: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
-      tasks: {}, mailbox: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, agentRuns: {}, userCorrections: {}, refinementReviews: {}, refinementTriggerConsumptions: {},
+      tasks: {}, mailbox: {}, taskUsageAttributions: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, aiGenerations: {}, agentRuns: {}, userCorrections: {}, refinementReviews: {}, refinementTriggerConsumptions: {},
     };
   }
   if (state.sessionId !== event.sessionId) throw new ValidationError("Cannot reduce an event from another session");
@@ -359,6 +383,181 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         budget: { ...state.budget, tokens: state.budget.tokens + p.tokens, costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns, wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs },
       };
     }
+    case "AiGenerationContextFrozen": {
+      const p = event.payload as EventPayloads["AiGenerationContextFrozen"];
+      if (state.aiGenerations[p.generationId] ||
+          !Array.isArray(p.context) ||
+          canonicalJsonDigest(p.context) !== p.contextDigest ||
+          canonicalJsonByteLength(p.context) !== p.exactUtf8Bytes) {
+        throw new InvalidTransitionError("aiGeneration", state.aiGenerations[p.generationId]?.status ?? "invalid-context", "pending");
+      }
+      validateAiGenerationContextProvenance(p);
+      const generation: AiGenerationState = {
+        id: p.generationId, status: "pending", context: p.context,
+        contextProvenance: p.provenance, contextDigest: p.contextDigest,
+        contextBytes: p.exactUtf8Bytes, ancestorTaskIds: [], eventId: event.id,
+      };
+      return { ...next, aiGenerations: { ...state.aiGenerations, [p.generationId]: generation } };
+    }
+    case "AiGenerationRequested": {
+      const p = event.payload as EventPayloads["AiGenerationRequested"];
+      const old = state.aiGenerations[p.generationId];
+      validateModelDispatch(p.modelDispatch);
+      validateProviderInputCandidate(p.providerInput, {
+        context: { messages: p.providerInput.messages as unknown as import("./json.ts").JsonValue },
+        modelDispatch: p.modelDispatch,
+        capacity: p.providerInput.provenance.capacity,
+      });
+      validateAiGenerationProviderInput(old?.context, p.providerInput.messages);
+      if (!old || old.status !== "pending" || old.requestEventId ||
+          old.contextDigest !== p.contextDigest || old.eventId !== p.contextEventId ||
+          (p.kind === "text") !== (p.modelDispatch.responseContract.kind === "text")) {
+        throw new InvalidTransitionError("aiGeneration", old?.status ?? "missing", "requested");
+      }
+      const active = Object.values(state.aiGenerations).filter((generation) =>
+        generation.id !== p.generationId && ["pending", "running"].includes(generation.status));
+      if (p.cellId !== undefined) {
+        const fromCell = Object.values(state.aiGenerations).filter((generation) =>
+          generation.id !== p.generationId && generation.cellId === p.cellId);
+        const activeFromCell = active.filter((generation) => generation.cellId === p.cellId);
+        if (fromCell.length >= MAX_AI_GENERATIONS_PER_CELL ||
+            activeFromCell.length >= MAX_CONCURRENT_AI_GENERATIONS_PER_CELL) {
+          throw new ValidationError("AI generation exceeds the durable per-cell admission bound");
+        }
+      }
+      const reserved = active.reduce((sum, generation) => ({
+        tokens: sum.tokens + (generation.reservation?.tokens ?? 0),
+        costUsd: sum.costUsd + (generation.reservation?.costUsd ?? 0),
+        turns: sum.turns + (generation.reservation?.turns ?? 0),
+        wallTimeMs: sum.wallTimeMs + (generation.reservation?.wallTimeMs ?? 0),
+      }), { tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0 });
+      const activeChildReservations = Object.values(state.tasks)
+        .filter((task) => !["completed", "failed", "cancelled"].includes(task.status))
+        .map((task) => task.budget);
+      assertGenerationReservation(state, p.reservation, reserved, activeChildReservations);
+      return { ...next, aiGenerations: { ...state.aiGenerations, [p.generationId]: {
+        ...old, kind: p.kind, effectId: p.effectId, idempotencyKey: p.idempotencyKey, requestDigest: p.requestDigest,
+        ...(p.cellId === undefined ? {} : { cellId: p.cellId }),
+        ...(p.runId === undefined ? {} : { runId: p.runId }),
+        ...(p.taskId === undefined ? {} : { taskId: p.taskId }),
+        ancestorTaskIds: [...p.ancestorTaskIds], modelDispatch: p.modelDispatch,
+        providerInput: p.providerInput, estimatedInputTokens: p.estimatedInputTokens,
+        budget: p.budget, reservation: p.reservation, requestEventId: event.id, eventId: event.id,
+      } } };
+    }
+    case "AiGenerationStatusChanged": {
+      const p = event.payload as EventPayloads["AiGenerationStatusChanged"];
+      const old = state.aiGenerations[p.generationId];
+      const effect = old?.effectId ? state.effects[old.effectId] : undefined;
+      const allowed = old && (
+        p.status === "running" ? old.status === "pending" :
+        ["pending", "running"].includes(old.status)
+      );
+      const effectStatusAllowed =
+        p.status === "running" ? effect?.status === "requested" || effect?.status === "started" :
+        p.status === "failed" ? effect?.status === "failed" || effect?.status === "succeeded" :
+        p.status === "cancelled" ? effect?.status === "cancelled" :
+        p.status === "unknown" ? effect?.status === "unknown" :
+        effect?.status === "cancelled" || effect?.status === "succeeded";
+      if (!allowed || p.effectId !== old.effectId || !effectStatusAllowed) {
+        throw new InvalidTransitionError("aiGeneration", old?.status ?? "missing", p.status);
+      }
+      return { ...next, aiGenerations: { ...state.aiGenerations, [p.generationId]: {
+        ...old, status: p.status, ...(p.error === undefined ? {} : { error: p.error }), eventId: event.id,
+      } } };
+    }
+    case "AiGenerationResultCommitted": {
+      const p = event.payload as EventPayloads["AiGenerationResultCommitted"];
+      const old = state.aiGenerations[p.generationId];
+      const effect = old?.effectId ? state.effects[old.effectId] : undefined;
+      if (!old || !["pending", "running"].includes(old.status) || old.kind !== p.kind ||
+          old.effectId !== p.effectId || effect?.status !== "succeeded" ||
+          effect.eventId !== p.sourceOutcomeEventId || effect.output === undefined ||
+          canonicalJsonDigest(p.value) !== p.resultDigest ||
+          canonicalJsonByteLength(p.value) !== p.resultBytes ||
+          p.resultBytes > (old.budget?.inlineResultByteLimit ?? 0)) {
+        throw new InvalidTransitionError("aiGeneration", old?.status ?? "missing", "succeeded");
+      }
+      const output = validateModelEffectOutputV2(effect.output, {
+        responseContract: old.modelDispatch!.responseContract,
+        responseCapability: old.modelDispatch!.responseCapability,
+        configuredProvider: old.modelDispatch!.configuration.provider,
+      });
+      const expectedValue = output.result.kind === "text"
+        ? output.result.text
+        : output.result.kind === "tool-submission" &&
+            output.result.submission.input &&
+            typeof output.result.submission.input === "object" &&
+            !Array.isArray(output.result.submission.input)
+          ? output.result.submission.input.value
+          : undefined;
+      const expectedFinishReason =
+        ("rawReason" in output.response.termination
+          ? output.response.termination.rawReason?.trim()
+          : undefined) ||
+        output.response.termination.kind;
+      const expectedUsageSource = output.response.kind === "guard-aborted"
+        ? "conservative-guard-estimate"
+        : "provider-reported";
+      if (!Bun.deepEquals(expectedValue, p.value) ||
+          !Bun.deepEquals(output.response.usage, p.usage) ||
+          !Bun.deepEquals(output.response.warnings, p.warnings) ||
+          p.finishReason !== expectedFinishReason ||
+          p.usageSource !== expectedUsageSource) {
+        throw new ValidationError("AI generation result differs from its authoritative model effect");
+      }
+      return { ...next, aiGenerations: { ...state.aiGenerations, [p.generationId]: {
+        ...old, status: "succeeded", value: p.value, resultDigest: p.resultDigest,
+        resultBytes: p.resultBytes, finishReason: p.finishReason, usage: p.usage,
+        warnings: p.warnings.map((warning) => ({ ...warning })), usageSource: p.usageSource,
+        resultEventId: event.id, eventId: event.id,
+      } } };
+    }
+    case "AiGenerationBudgetDebited": {
+      const p = event.payload as EventPayloads["AiGenerationBudgetDebited"];
+      const old = state.aiGenerations[p.generationId];
+      if (!old || old.budgetDebited || !["succeeded", "failed", "cancelled", "unknown", "budget_exceeded"].includes(old.status) ||
+          p.sessionId !== state.sessionId || p.branchId !== event.branchId ||
+          p.runId !== old.runId || p.taskId !== old.taskId ||
+          !sameStrings(p.ancestorTaskIds, old.ancestorTaskIds) ||
+          p.sourceResultEventId !== (old.resultEventId ?? old.eventId)) {
+        throw new ValidationError("AI generation budget debit does not match its terminal generation");
+      }
+      let exactUsage: EventPayloads["AiGenerationResultCommitted"]["usage"] | undefined;
+      if (old.status === "succeeded" && old.usageSource === "provider-reported") {
+        exactUsage = old.usage;
+      } else if (p.usageSource === "provider-reported" && old.effectId && old.modelDispatch) {
+        const effect = state.effects[old.effectId];
+        if (effect?.status === "succeeded" && effect.output !== undefined) {
+          exactUsage = validateModelEffectOutputV2(effect.output, {
+            responseContract: old.modelDispatch.responseContract,
+            responseCapability: old.modelDispatch.responseCapability,
+            configuredProvider: old.modelDispatch.configuration.provider,
+          }).response.usage ?? undefined;
+        }
+      }
+      const expected = exactUsage
+        ? { tokens: exactUsage.inputTokens + exactUsage.outputTokens, costUsd: exactUsage.costUsd, turns: 1, usageSource: "provider-reported" as const }
+        : { tokens: old.reservation?.tokens ?? 0, costUsd: old.reservation?.costUsd ?? 0, turns: 1, usageSource: "conservative-guard-estimate" as const };
+      if (p.tokens !== expected.tokens || p.costUsd !== expected.costUsd ||
+          p.turns !== expected.turns || p.usageSource !== expected.usageSource) {
+        throw new ValidationError("AI generation budget debit disagrees with retained usage or reservation");
+      }
+      return {
+        ...next,
+        aiGenerations: { ...state.aiGenerations, [p.generationId]: {
+          ...old, budgetDebited: {
+            tokens: p.tokens, costUsd: p.costUsd, turns: p.turns,
+            wallTimeMs: p.wallTimeMs, usageSource: p.usageSource, eventId: event.id,
+          }, eventId: event.id,
+        } },
+        budget: {
+          ...state.budget, tokens: state.budget.tokens + p.tokens,
+          costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns,
+          wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs,
+        },
+      };
+    }
     case "BudgetExceeded": return { ...next, budget: { ...state.budget, exceeded: true }, status: "idle" };
     case "RecoveryPerformed": return next;
     case "SyncConflictResolved": return next;
@@ -377,6 +576,12 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "TaskStatusChanged": {
       const p = event.payload as EventPayloads["TaskStatusChanged"]; const old = state.tasks[p.taskId];
       if (!old || !taskCanTransition(old.status, p.status)) throw new InvalidTransitionError("task", old?.status ?? "missing", p.status);
+      const resultReference = projectedAgentRunResultReference(p.result);
+      if (resultReference && p.status !== "completed") {
+        throw new ValidationError(
+          "Agent invocation result references may only complete tasks",
+        );
+      }
       return { ...next, tasks: { ...state.tasks, [p.taskId]: { ...old, status: p.status, eventId: event.id, ...(p.result === undefined ? {} : { result: p.result }), ...(p.artifactIds === undefined ? {} : { artifactIds: p.artifactIds }), ...(p.error === undefined ? {} : { error: p.error }), ...(p.reason === undefined ? {} : { reason: p.reason }) } } };
     }
     case "SubagentCancellationRequested": {
@@ -386,7 +591,30 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     }
     case "TaskUsageAttributed": {
       const p = event.payload as EventPayloads["TaskUsageAttributed"];
-      return { ...next, budget: { ...state.budget, tokens: state.budget.tokens + p.tokens, costUsd: state.budget.costUsd + p.costUsd, turns: state.budget.turns + p.turns, wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs } };
+      const direct = state.tasks[p.taskId];
+      if (state.taskUsageAttributions[p.taskId] ||
+          direct && (direct.childSessionId !== p.childSessionId ||
+            !["completed", "failed", "cancelled"].includes(direct.status))) {
+        throw new InvalidTransitionError(
+          "taskUsageAttribution",
+          state.taskUsageAttributions[p.taskId] ? "attributed" : direct?.status ?? "invalid",
+          "attributed",
+        );
+      }
+      return {
+        ...next,
+        budget: {
+          ...state.budget,
+          tokens: state.budget.tokens + p.tokens,
+          costUsd: state.budget.costUsd + p.costUsd,
+          turns: state.budget.turns + p.turns,
+          wallTimeMs: state.budget.wallTimeMs + p.wallTimeMs,
+        },
+        taskUsageAttributions: {
+          ...state.taskUsageAttributions,
+          [p.taskId]: event.id,
+        },
+      };
     }
     case "MailboxMessageSent": {
       const p = event.payload as EventPayloads["MailboxMessageSent"]; if (state.mailbox[p.mailboxMessageId]) throw new InvalidTransitionError("mailboxMessage", "existing", "sent");
@@ -421,6 +649,42 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const p = event.payload as EventPayloads["TaskTerminalNoticeSent"] | EventPayloads["TaskTerminalNoticeDelivered"];
       if (state.terminalNotices[p.noticeId]) throw new InvalidTransitionError("terminalNotice", "existing", "delivered");
       const delivered = event.type === "TaskTerminalNoticeDelivered";
+      const resultReference = projectedAgentRunResultReference(p.result);
+      if (resultReference) {
+        if (p.status !== "completed") {
+          throw new ValidationError(
+            "Agent invocation result references may only appear on completed task notices",
+          );
+        }
+        if (!delivered) {
+          const run = state.agentRuns[resultReference.runId];
+          if (state.taskId !== p.taskId ||
+              state.sessionId !== p.childSessionId ||
+              state.parentSessionId !== p.parentSessionId ||
+              run?.status !== "succeeded" ||
+              !run.result ||
+              !Bun.deepEquals(run.result.reference, resultReference)) {
+            throw new InvalidTransitionError(
+              "terminalNotice",
+              run?.status ?? "missing-run",
+              "sent",
+            );
+          }
+        } else {
+          const task = state.tasks[p.taskId];
+          if (!task || task.status !== "completed" ||
+              task.parentSessionId !== p.parentSessionId ||
+              task.childSessionId !== p.childSessionId ||
+              task.eventId !== state.appliedEventIds.at(-1) ||
+              !Bun.deepEquals(task.result, resultReference)) {
+            throw new InvalidTransitionError(
+              "terminalNotice",
+              task?.status ?? "missing-task",
+              "delivered",
+            );
+          }
+        }
+      }
       const notice: TerminalNoticeState = { id: p.noticeId, taskId: p.taskId, parentSessionId: p.parentSessionId, childSessionId: p.childSessionId, status: p.status, direction: delivered ? "inbound" : "outbound", delivered, artifactIds: p.artifactIds ?? [], eventId: event.id, ...(p.result === undefined ? {} : { result: p.result }), ...(p.error === undefined ? {} : { error: p.error }), ...(p.reason === undefined ? {} : { reason: p.reason }) };
       return { ...next, terminalNotices: { ...state.terminalNotices, [p.noticeId]: notice } };
     }
@@ -594,12 +858,40 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: run } };
     }
+    case "AgentInvocationContractPinned": {
+      const p = event.payload as EventPayloads["AgentInvocationContractPinned"];
+      const run = state.agentRuns[p.runId];
+      const contract = validateAgentInvocationContract(p.contract);
+      if (!run || run.invocationContract ||
+          state.appliedEventIds.at(-1) !== run.requestEventId ||
+          contract.runId !== run.id ||
+          contract.taskId !== state.taskId ||
+          !Bun.deepEquals(contract.model, state.model) ||
+          !Bun.deepEquals(contract.budget, state.budget.limits) ||
+          contract.profilePin.profileVersionId !== run.profilePin.profileVersionId ||
+          contract.profilePin.agentPromptDigest !== run.profilePin.agentPromptDigest ||
+          contract.profilePin.promptContractId !== run.profilePin.promptContractId) {
+        throw new InvalidTransitionError(
+          "agentInvocationContract",
+          run?.invocationContract ? "pinned" : run?.status ?? "missing-run",
+          "pinned",
+        );
+      }
+      return {
+        ...next,
+        agentRuns: {
+          ...state.agentRuns,
+          [p.runId]: { ...run, invocationContract: contract, eventId: event.id },
+        },
+      };
+    }
     case "AgentRunStepStarted": {
       const p = event.payload as EventPayloads["AgentRunStepStarted"]; const run = state.agentRuns[p.runId];
       const expected = (run?.steps.at(-1)?.ordinal ?? 0) + 1;
       const prior = run?.steps.at(-1);
       if (!run || !["queued", "running"].includes(run.status) || p.ordinal !== expected ||
-          (prior !== undefined && prior.action === undefined && prior.rejection === undefined)) {
+          (prior !== undefined && prior.action === undefined &&
+            prior.typedFinish === undefined && prior.rejection === undefined)) {
         throw new InvalidTransitionError("agentRunStep", run?.status ?? "missing-run", "started");
       }
       const step: AgentRunStepState = { id: p.stepId, ordinal: p.ordinal, contextId: p.contextId, callId: p.callId, effectId: p.effectId, actionId: p.actionId, observationEventIds: [...p.observationEventIds], modelAttempts: [], eventId: event.id };
@@ -661,9 +953,199 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const updated = { ...step, rejection: p.error, actionSource: p.source, eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
     }
+    case "AgentRunTypedFinishCommitted": {
+      const p = event.payload as EventPayloads["AgentRunTypedFinishCommitted"];
+      const run = state.agentRuns[p.runId];
+      const step = run?.steps.at(-1);
+      const call = state.modelCalls[p.source.modelCallId];
+      const output = call ? completedModelOutput(state, call) : undefined;
+      const submission = output?.result.kind === "tool-submission"
+        ? output.result.submission
+        : undefined;
+      let expected: EventPayloads["AgentRunTypedFinishCommitted"]["outcome"] | undefined;
+      if (run?.invocationContract?.output.kind === "object" &&
+          submission?.name === "finish") {
+        const typed = validateTypedAgentToolSubmissionValue(
+          { name: submission.name, input: submission.input },
+          run.invocationContract.output.declaredSchema,
+          { encodedBytes: submission.inputBytes },
+        );
+        if (typed.name === "finish") expected = typed.input.outcome;
+      }
+      if (!run || run.status !== "running" || !run.invocationContract ||
+          !step || step.id !== p.stepId || step.ordinal !== p.ordinal ||
+          step.actionId !== p.actionId ||
+          (step.modelAttempts.at(-1)?.callId ?? step.callId) !== p.source.modelCallId ||
+          call?.status !== "succeeded" || step.action !== undefined ||
+          step.typedFinish !== undefined || step.rejection !== undefined ||
+          !submission || output!.resultDigest !== p.source.resultDigest ||
+          submission.providerToolCallId !== p.source.providerToolCallId ||
+          !expected || !Bun.deepEquals(expected, p.outcome)) {
+        throw new InvalidTransitionError(
+          "agentRunTypedFinish",
+          step?.typedFinish ? "committed" : run?.status ?? "missing-run",
+          "committed",
+        );
+      }
+      const updated = {
+        ...step,
+        typedFinish: p.outcome,
+        typedFinishEventId: event.id,
+        actionSource: p.source,
+        eventId: event.id,
+      };
+      return {
+        ...next,
+        agentRuns: {
+          ...state.agentRuns,
+          [p.runId]: {
+            ...run,
+            steps: [...run.steps.slice(0, -1), updated],
+            eventId: event.id,
+          },
+        },
+      };
+    }
+    case "AgentRunTypedActionViolationCommitted": {
+      const p = event.payload as EventPayloads["AgentRunTypedActionViolationCommitted"];
+      const run = state.agentRuns[p.runId];
+      const step = run?.steps.at(-1);
+      const call = state.modelCalls[p.source.modelCallId];
+      const output = call ? completedModelOutput(state, call) : undefined;
+      const violation = output?.result.kind === "contract-violation"
+        ? output.result.violation
+        : undefined;
+      const submission = output?.result.kind === "tool-submission"
+        ? output.result.submission
+        : undefined;
+      const diagnosticCallId = violation?.evidence.toolCalls
+        .find((item) => item.callId !== undefined)?.callId;
+      let retainedError: string | undefined;
+      let sourceMatches = false;
+      if (p.source.kind === "contract-violation" && violation) {
+        retainedError = violation.message;
+        sourceMatches = p.source.providerToolCallId === diagnosticCallId;
+      } else if (p.source.kind === "tool-submission" && submission &&
+          submission.providerToolCallId === p.source.providerToolCallId &&
+          run?.invocationContract?.output.kind === "text") {
+        const action = agentActionFromToolSubmission({
+          name: submission.name,
+          input: submission.input,
+        } as unknown as Parameters<typeof agentActionFromToolSubmission>[0]);
+        if (action.type === "final") {
+          try {
+            validateAgentInvocationResult(
+              run.invocationContract,
+              "text",
+              action.content,
+            );
+          } catch (error) {
+            retainedError = error instanceof Error
+              ? error.message
+              : "Text agent run result is invalid";
+            sourceMatches = true;
+          }
+        }
+      }
+      if (!run || run.status !== "running" || !run.invocationContract ||
+          !step || step.id !== p.stepId || step.ordinal !== p.ordinal ||
+          step.actionId !== p.actionId ||
+          (step.modelAttempts.at(-1)?.callId ?? step.callId) !== p.source.modelCallId ||
+          call?.status !== "succeeded" || step.action !== undefined ||
+          step.typedFinish !== undefined || step.rejection !== undefined ||
+          output!.resultDigest !== p.source.resultDigest ||
+          !sourceMatches || p.error !== retainedError) {
+        throw new InvalidTransitionError(
+          "agentRunTypedViolation",
+          step?.rejection ? "committed" : run?.status ?? "missing-run",
+          "committed",
+        );
+      }
+      const updated = {
+        ...step,
+        rejection: p.error,
+        actionSource: p.source,
+        eventId: event.id,
+      };
+      return {
+        ...next,
+        agentRuns: {
+          ...state.agentRuns,
+          [p.runId]: {
+            ...run,
+            steps: [...run.steps.slice(0, -1), updated],
+            eventId: event.id,
+          },
+        },
+      };
+    }
+    case "AgentRunResultCommitted": {
+      const p = event.payload as EventPayloads["AgentRunResultCommitted"];
+      const run = state.agentRuns[p.runId];
+      const step = run?.steps.at(-1);
+      const finish = step?.typedFinish;
+      const textFinish = step?.action?.type === "final" ? step.action : undefined;
+      const contract = run?.invocationContract;
+      const message = state.messages.find((candidate) => candidate.id === p.messageId);
+      const value = contract
+        ? validateAgentInvocationResult(contract, p.kind, p.value)
+        : undefined;
+      const reference = validateAgentRunResultReference(p.reference);
+      const schemaDigest = contract?.output.kind === "object"
+        ? contract.output.declaredSchema.schemaDigest
+        : undefined;
+      const successfulFinish = finish?.status === "succeeded" || textFinish !== undefined;
+      const expectedFinishEventId = step?.typedFinishEventId ?? step?.eventId;
+      const expectedMessage = finish?.message ?? textFinish?.content;
+      if (!run || !contract || run.result || !step || !successfulFinish ||
+          !expectedFinishEventId ||
+          p.finishEventId !== expectedFinishEventId ||
+          p.messageId !== `agent-run-final-${run.id}` ||
+          message?.role !== "assistant" || message.content !== expectedMessage ||
+          message.eventId !== state.appliedEventIds.at(-1) ||
+          value === undefined || canonicalJsonDigest(value) !== p.valueDigest ||
+          canonicalJsonByteLength(value) !== p.resultBytes ||
+          p.schemaDigest !== schemaDigest ||
+          reference.runId !== run.id ||
+          reference.resultEventId !== event.id ||
+          reference.finishEventId !== p.finishEventId ||
+          reference.messageId !== p.messageId ||
+          reference.kind !== p.kind ||
+          reference.valueDigest !== p.valueDigest ||
+          reference.schemaDigest !== p.schemaDigest) {
+        throw new InvalidTransitionError(
+          "agentRunResult",
+          run?.result ? "committed" : run?.status ?? "missing-run",
+          "committed",
+        );
+      }
+      return {
+        ...next,
+        agentRuns: {
+          ...state.agentRuns,
+          [p.runId]: {
+            ...run,
+            result: {
+              kind: p.kind,
+              value,
+              valueDigest: p.valueDigest,
+              resultBytes: p.resultBytes,
+              ...(p.schemaDigest === undefined ? {} : { schemaDigest: p.schemaDigest }),
+              finishEventId: p.finishEventId,
+              messageId: p.messageId,
+              reference,
+              eventId: event.id,
+            },
+            eventId: event.id,
+          },
+        },
+      };
+    }
     case "AgentRunGoalCheckRecorded": {
       const p = event.payload as EventPayloads["AgentRunGoalCheckRecorded"]; const run = state.agentRuns[p.runId]; const step = run?.steps.at(-1);
-      if (!run || run.status !== "running" || !step?.action || step.action.type !== "final" || step.actionId !== p.actionId || run.goalId !== p.goalId || run.goalChecks[p.actionId]) throw new InvalidTransitionError("agentRunGoalCheck", run?.status ?? "missing-run", p.status);
+      const successfulFinish = step?.action?.type === "final" ||
+        step?.typedFinish?.status === "succeeded";
+      if (!run || run.status !== "running" || !step || !successfulFinish || step.actionId !== p.actionId || run.goalId !== p.goalId || run.goalChecks[p.actionId]) throw new InvalidTransitionError("agentRunGoalCheck", run?.status ?? "missing-run", p.status);
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, goalChecks: { ...run.goalChecks, [p.actionId]: { actionId: p.actionId, goalId: p.goalId, requestId: p.requestId, status: p.status, summary: p.summary, gateEvaluationEventIds: [...p.gateEvaluationEventIds], eventId: event.id } }, eventId: event.id } } };
     }
     case "AgentRunCancellationRequested": {
@@ -676,8 +1158,10 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const terminal = ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"];
       const step = run?.steps.at(-1);
       const finalAction = step?.action;
+      const typedFinish = step?.typedFinish;
       const acceptedFinish = step?.actionSource?.kind === "tool-submission" &&
-        finalAction !== undefined && ["final", "blocked", "failed"].includes(finalAction.type);
+        ((finalAction !== undefined && ["final", "blocked", "failed"].includes(finalAction.type)) ||
+          typedFinish !== undefined);
       const expectedMessageId = run ? `agent-run-final-${run.id}` : "";
       const matchingMessages = p.finalMessageId === undefined
         ? []
@@ -686,7 +1170,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       const expectedContent = finalAction?.type === "final" ? finalAction.content
         : finalAction?.type === "blocked" ? finalAction.reason
         : finalAction?.type === "failed" ? finalAction.error
-        : undefined;
+        : typedFinish?.message;
       // A retained accepted finish action owns its blocked/failed terminal
       // meaning: a successful finish repairs failed gates or later maps to
       // goal-derived blocked, and blocked/failed finishes carry their exact
@@ -702,7 +1186,11 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
           finalMessage?.role === "assistant" &&
           finalMessage.modelCallId === null &&
           finalMessage.content === expectedContent &&
-          finalMessage.eventId === state.appliedEventIds.at(-1);
+          ((typedFinish?.status === "succeeded" ||
+              (finalAction?.type === "final" && run?.invocationContract !== undefined))
+            ? run?.result?.eventId === state.appliedEventIds.at(-1) &&
+              run?.result?.messageId === p.finalMessageId
+            : finalMessage.eventId === state.appliedEventIds.at(-1));
       const latestCheck = run ? Object.values(run.goalChecks).at(-1) : undefined;
       const unresolvedFailedGate = latestCheck?.status === "failed" &&
         run?.goalId !== null && run?.goalId !== undefined &&
@@ -714,7 +1202,19 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         ? `Goal repair stopped after a failed required gate: ${latestCheck.summary}`
         : undefined;
       const finishStatusValid = p.finalMessageId === undefined || (
-        finalAction?.type === "final"
+        typedFinish?.status === "succeeded"
+          ? p.status === "succeeded" && p.reason === undefined &&
+            run?.result !== undefined &&
+            (run.goalId === null || run.goalChecks[step!.actionId]?.status === "passed")
+          : typedFinish?.status === "blocked"
+            ? p.status === "blocked" && p.reason === typedFinish.message
+          : typedFinish?.status === "failed"
+            ? goalDerivedFailure
+              ? p.status === "blocked" && p.reason === goalDerivedReason &&
+                run?.goalId !== null
+              : !unresolvedFailedGate &&
+                p.status === "failed" && p.reason === typedFinish.message
+          : finalAction?.type === "final"
           ? p.status === "succeeded" && p.reason === undefined &&
             (run?.goalId === null || run?.goalChecks[step!.actionId]?.status === "passed")
           : finalAction?.type === "blocked"
@@ -808,13 +1308,14 @@ function validateModelEffectRelation(
   const input = payload.input;
   const callId = typeof input.callId === "string" ? input.callId : undefined;
   const compactionId = typeof input.compactionId === "string" ? input.compactionId : undefined;
+  const generationId = typeof input.generationId === "string" ? input.generationId : undefined;
   const dispatch = input.modelDispatch;
   const providerInput = input.providerInput;
   if (!dispatch || typeof dispatch !== "object" || Array.isArray(dispatch)) {
     throw new ValidationError("Model effects require a complete immutable model dispatch");
   }
-  if ((callId === undefined) === (compactionId === undefined)) {
-    throw new ValidationError("Model effects must belong to exactly one admitted call or compaction");
+  if ([callId, compactionId, generationId].filter((value) => value !== undefined).length !== 1) {
+    throw new ValidationError("Model effects must belong to exactly one admitted call, compaction, or AI generation");
   }
   if (callId !== undefined) {
     const call = state.modelCalls[callId];
@@ -825,6 +1326,15 @@ function validateModelEffectRelation(
         !promptProvenance || typeof promptProvenance !== "object" || Array.isArray(promptProvenance) ||
         !Bun.deepEquals(call.promptProvenance, promptProvenance)) {
       throw new ValidationError("Model effect does not agree with its admitted model call");
+    }
+    return;
+  }
+  if (generationId !== undefined) {
+    const generation = state.aiGenerations[generationId];
+    if (!generation || generation.effectId !== payload.effectId ||
+        !generation.modelDispatch || !Bun.deepEquals(generation.modelDispatch, dispatch) ||
+        !generation.providerInput || !Bun.deepEquals(generation.providerInput, providerInput)) {
+      throw new ValidationError("Model effect does not agree with its admitted AI generation");
     }
     return;
   }
@@ -852,8 +1362,9 @@ function validateEffectOrigin(
   }
   if (effect.executor === "model" &&
       origin.kind !== "model-call" &&
+      origin.kind !== "ai-generation" &&
       origin.kind !== "context-compaction") {
-    throw new ValidationError("Model effects require a model-call or context-compaction origin");
+    throw new ValidationError("Model effects require a model-call, AI-generation, or context-compaction origin");
   }
   if (effect.executor === "skill" &&
       origin.kind !== "cell" &&
@@ -884,6 +1395,19 @@ function validateEffectOrigin(
     if (effect.executor !== "model" || effect.operation !== "complete" ||
         !call || call.effectId !== effect.effectId || inputCallId !== origin.callId) {
       throw new ValidationError("Model-call effect origin does not agree with its retained call");
+    }
+    return;
+  }
+  if (origin.kind === "ai-generation") {
+    const generation = state.aiGenerations[origin.generationId];
+    const inputGenerationId = effect.input && typeof effect.input === "object" &&
+      !Array.isArray(effect.input) && typeof effect.input.generationId === "string"
+      ? effect.input.generationId
+      : undefined;
+    if (effect.executor !== "model" || effect.operation !== "complete" ||
+        !generation || generation.effectId !== effect.effectId ||
+        inputGenerationId !== origin.generationId) {
+      throw new ValidationError("AI-generation effect origin does not agree with its retained generation");
     }
     return;
   }
@@ -925,6 +1449,96 @@ function validateEffectOrigin(
       effect.operation !== (origin.kind === "skill-invocation" ? "invoke" : "test") ||
       origin.entryId !== inputEntryId || origin.versionId !== inputVersionId) {
     throw new ValidationError("Skill effect origin does not agree with its retained immutable input");
+  }
+}
+
+function validateAiGenerationContextProvenance(
+  payload: EventPayloads["AiGenerationContextFrozen"],
+): void {
+  if (!Array.isArray(payload.context)) {
+    throw new ValidationError("AI generation frozen context must be an ordered array");
+  }
+  const context = payload.context;
+  const provenance = payload.provenance;
+  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) {
+    throw new ValidationError("AI generation context provenance must be an object");
+  }
+  const sources = provenance.sources;
+  const omissions = provenance.omissions;
+  if (provenance.version !== "agencity.explicit-context.v1" ||
+      provenance.ordered !== true ||
+      provenance.itemCount !== context.length ||
+      provenance.exactUtf8Bytes !== payload.exactUtf8Bytes ||
+      !Array.isArray(sources) || sources.length !== context.length ||
+      !Array.isArray(omissions)) {
+    throw new ValidationError("AI generation context provenance does not match its frozen values");
+  }
+  const incomplete = new Set<number>();
+  sources.forEach((source, position) => {
+    if (!source || typeof source !== "object" || Array.isArray(source) ||
+        source.position !== position || typeof source.complete !== "boolean") {
+      throw new ValidationError("AI generation context source provenance is malformed or out of order");
+    }
+    if (source.complete === false) incomplete.add(position);
+  });
+  const omitted = new Set<number>();
+  for (const omission of omissions) {
+    if (!omission || typeof omission !== "object" || Array.isArray(omission) ||
+        typeof omission.position !== "number" || !Number.isSafeInteger(omission.position) ||
+        omission.position < 0 || omission.position >= context.length ||
+        typeof omission.reason !== "string" || !omission.reason) {
+      throw new ValidationError("AI generation context omission provenance is malformed");
+    }
+    omitted.add(omission.position);
+  }
+  if (provenance.complete !== (incomplete.size === 0) ||
+      !sameStrings(
+        [...incomplete].sort((left, right) => left - right).map(String),
+        [...omitted].sort((left, right) => left - right).map(String),
+      )) {
+    throw new ValidationError("AI generation context completeness or omissions are inconsistent");
+  }
+}
+
+function validateAiGenerationProviderInput(
+  context: import("./json.ts").JsonValue | undefined,
+  messages: readonly import("./provider-input.ts").ProviderInputMessage[],
+): void {
+  if (messages.length < 2 ||
+      messages[0]?.role !== "system" ||
+      messages[0].content !== AI_GENERATION_SYSTEM_INSTRUCTION ||
+      messages.slice(1).some((message) => message.role === "system")) {
+    throw new ValidationError("AI generation provider input must contain only its fixed system instruction");
+  }
+  if (Array.isArray(context) && context.length > 0) {
+    const expected = `EXPLICIT CONTEXT (ordered JSON)\n${JSON.stringify(context)}`;
+    const last = messages.at(-1);
+    if (last?.role !== "user" || last.content !== expected) {
+      throw new ValidationError("AI generation provider input does not match its frozen explicit context");
+    }
+  }
+}
+
+function assertGenerationReservation(
+  state: AgentState,
+  requested: { readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number },
+  active: { readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number },
+  activeChildren: readonly BudgetLimits[],
+): void {
+  const checks = [
+    ["tokens", "tokenLimit", state.budget.limits.tokenLimit, state.budget.tokens, active.tokens, requested.tokens],
+    ["cost", "costLimitUsd", state.budget.limits.costLimitUsd, state.budget.costUsd, active.costUsd, requested.costUsd],
+    ["turns", "turnLimit", state.budget.limits.turnLimit, state.budget.turns, active.turns, requested.turns],
+    ["wallTime", "wallTimeLimitMs", state.budget.limits.wallTimeLimitMs, state.budget.wallTimeMs, active.wallTimeMs, requested.wallTimeMs],
+  ] as const;
+  for (const [dimension, key, limit, spent, reserved, next] of checks) {
+    const childReserved = limit === undefined ? 0 : activeChildren.reduce(
+      (sum, budget) => sum + (budget[key] ?? Math.max(0, limit - spent)),
+      0,
+    );
+    if (limit !== undefined && spent + reserved + childReserved + next > limit) {
+      throw new ValidationError(`AI generation ${dimension} reservation exceeds the caller budget`);
+    }
   }
 }
 
@@ -990,4 +1604,15 @@ export function projectEvents(events: readonly AgentEvent[]): AgentState {
   for (const event of events) state = reduceAgentState(state, event);
   if (!state) throw new ValidationError("Cannot project an empty event stream");
   return state;
+}
+
+function projectedAgentRunResultReference(
+  value: JsonValue | undefined,
+): ReturnType<typeof validateAgentRunResultReference> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      (value as Record<string, JsonValue>).protocol !==
+        "agencity.agent-run-result-reference") {
+    return null;
+  }
+  return validateAgentRunResultReference(value);
 }

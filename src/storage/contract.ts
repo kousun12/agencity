@@ -1,5 +1,5 @@
 import type {
-  AgentEvent, AgentInvocationProfilePin, AgentRunGoalMode, AgentState, AutonomyOwner, BudgetLimits, EffectOrigin, EffectOutcome, GoalGateStatus, GoalStatus,
+  AgentEvent, AgentInvocationProfilePin, AgentRunGoalMode, AgentState, AiGenerationKind, AiGenerationStatus, AutonomyOwner, BudgetLimits, EffectOrigin, EffectOutcome, EventPayloads, GoalGateStatus, GoalStatus,
   HeartbeatStatus, MailboxMessageKind, ModelConfiguration, NewAgentEvent,
   RecursiveModelOutcome, RecursiveModelStatus, RecursiveResponseAdmission, ScheduleStatus, TaskStatus, WakeStatus,
 } from "../domain/index.ts";
@@ -85,6 +85,13 @@ export interface HeartbeatRecord { readonly heartbeatId: string; readonly sessio
 export interface ScheduleRecord { readonly scheduleId: string; readonly sessionId: string; readonly branchId: string; readonly kind: "once" | "interval"; readonly prompt: string; readonly intervalMs: number | null; readonly nextTickAt: string; readonly owner: AutonomyOwner; readonly goalMode: Exclude<AgentRunGoalMode, "none">; readonly status: ScheduleStatus; readonly tick: number; readonly lastFiredAt: string | null; readonly reason?: string; readonly createdAt: string; readonly updatedAt: string; }
 export interface WakeRecord { readonly wakeId: string; readonly sessionId: string; readonly branchId: string; readonly sourceType: "heartbeat" | "schedule"; readonly sourceId: string; readonly tick: number; readonly scheduledAt: string; readonly firedAt: string; readonly prompt: string; readonly goalId: string | null; readonly goalMode: AgentRunGoalMode; readonly status: WakeStatus; readonly claimId: string | null; readonly claimedAt: string | null; readonly runId: string | null; readonly deliveredAt: string | null; readonly reason?: string; readonly createdAt: string; readonly updatedAt: string; }
 export interface RecursiveModelRecord { readonly handleId: string; readonly taskId: string; readonly parentSessionId: string; readonly parentBranchId: string; readonly childSessionId: string; readonly childBranchId: string; readonly model: ModelConfiguration; readonly responseAdmission: RecursiveResponseAdmission; readonly profilePin: AgentInvocationProfilePin; readonly inputSetId: string | null; readonly input?: JsonValue; readonly inputProvenance?: JsonValue; readonly inputHash?: string; readonly status: RecursiveModelStatus; readonly outcome?: RecursiveModelOutcome; readonly resultMessageId?: string; readonly result?: JsonValue; readonly resultArtifactId?: string; readonly error?: string; readonly createdAt: string; readonly updatedAt: string; }
+export interface AiGenerationRecord {
+  readonly generationId: string; readonly sessionId: string; readonly branchId: string;
+  readonly idempotencyKey: string; readonly kind: AiGenerationKind; readonly status: AiGenerationStatus;
+  readonly effectId: string; readonly executionOwned: boolean; readonly request: EventPayloads["AiGenerationRequested"];
+  readonly result?: EventPayloads["AiGenerationResultCommitted"]; readonly error?: string;
+  readonly createdAt: string; readonly updatedAt: string;
+}
 
 /** Rebuildable Slice 2 projection reads. Optional for pre-Slice-2 third-party adapters. */
 export interface RecursiveStorageOperations {
@@ -112,6 +119,9 @@ export interface RecursiveStorageOperations {
   listWakes(sessionId: string, branchId?: string, statuses?: readonly WakeStatus[]): Promise<WakeRecord[]>;
   getRecursiveModel(handleId: string): Promise<RecursiveModelRecord | null>;
   listRecursiveModels(statuses?: readonly RecursiveModelStatus[]): Promise<RecursiveModelRecord[]>;
+  getAiGeneration(generationId: string): Promise<AiGenerationRecord | null>;
+  findAiGeneration(sessionId: string, branchId: string, idempotencyKey: string): Promise<AiGenerationRecord | null>;
+  listAiGenerations(statuses?: readonly AiGenerationStatus[]): Promise<AiGenerationRecord[]>;
   rebuildOperationalProjections(): Promise<void>;
 }
 
@@ -269,6 +279,9 @@ export interface AgentStorage {
  listWakes?: RecursiveStorageOperations["listWakes"];
  getRecursiveModel?: RecursiveStorageOperations["getRecursiveModel"];
  listRecursiveModels?: RecursiveStorageOperations["listRecursiveModels"];
+ getAiGeneration?: RecursiveStorageOperations["getAiGeneration"];
+ findAiGeneration?: RecursiveStorageOperations["findAiGeneration"];
+ listAiGenerations?: RecursiveStorageOperations["listAiGenerations"];
  rebuildOperationalProjections?: RecursiveStorageOperations["rebuildOperationalProjections"];
  /** Rebuilds the disposable FTS5 candidate index from harness projections. */
  rebuildMemoryCandidateIndex?: () => Promise<void>;
@@ -278,7 +291,7 @@ export interface AgentStorage {
 }
 
 export function requireRecursiveStorage(storage: AgentStorage): AgentStorage & RecursiveStorageOperations {
-  const required: Array<keyof RecursiveStorageOperations> = ["getSession", "listChildren", "getTask", "findTaskByChild", "listTasks", "getMailboxMessage", "listMailboxMessages", "getDocument", "getDocumentChunk", "readDocumentChunks", "getInputSet", "getGoal", "listGoalGates", "listGoalGateEvaluations", "getHeartbeat", "listHeartbeats", "listDueHeartbeats", "getSchedule", "listSchedules", "listDueSchedules", "getWake", "listWakes", "getRecursiveModel", "listRecursiveModels", "rebuildOperationalProjections"];
+  const required: Array<keyof RecursiveStorageOperations> = ["getSession", "listChildren", "getTask", "findTaskByChild", "listTasks", "getMailboxMessage", "listMailboxMessages", "getDocument", "getDocumentChunk", "readDocumentChunks", "getInputSet", "getGoal", "listGoalGates", "listGoalGateEvaluations", "getHeartbeat", "listHeartbeats", "listDueHeartbeats", "getSchedule", "listSchedules", "listDueSchedules", "getWake", "listWakes", "getRecursiveModel", "listRecursiveModels", "getAiGeneration", "findAiGeneration", "listAiGenerations", "rebuildOperationalProjections"];
   for (const method of required) if (typeof storage[method] !== "function") throw new Error(`${storage.name} does not implement recursive session storage operation ${method}`);
   return storage as AgentStorage & RecursiveStorageOperations;
 }

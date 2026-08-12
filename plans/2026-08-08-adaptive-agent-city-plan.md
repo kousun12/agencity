@@ -53,7 +53,7 @@ Review approval is not runtime authority. The reviewer cannot approve changes to
 
 ## Why this plan is narrower
 
-The runtime already supports durable root and child sessions, retained family relationships, delegation, follow-up, goals, gates, effects, recovery, and human-readable root selection. Those mechanisms are sufficient for the initial product.
+The runtime already supports durable root and child sessions, retained family relationships, delegation, queue/steer messaging, goals, gates, effects, recovery, and human-readable root selection. Those mechanisms are sufficient for the initial product.
 
 Cross-family reuse of an existing specialist is deferred. The initial product does not need:
 
@@ -76,7 +76,7 @@ The product's remembered root selection determines which root receives an ordina
 1. receive the user task;
 2. perform the work directly; or
 3. create a child through the existing durable `Task` path; or
-4. send an authorized follow-up to an existing child in its creation family; or
+4. queue authorized work for an existing child or steer its active run within the creation family; or
 5. finish blocked, failed, or successful through the existing typed model contract.
 
 No new coordinator role, pointer, system prompt, authority, or routing pass is required. Opening another root for inspection or explicitly selecting another root changes the product's remembered route through existing selection behavior.
@@ -88,7 +88,7 @@ The runtime provides:
 - `Session` as a durable actor with model configuration, budget, goals, conversation, branches, tasks, runs, and event history;
 - atomic child admission with parent and child identity, task intent, model, budget, initial prompt, and admission;
 - durable parent, child, and sibling mailboxes;
-- bounded child follow-up after terminal task work;
+- bounded queued child work after terminal task work and explicit active-run steering;
 - append-only canonical history and rebuildable projections;
 - attributable materialized model context;
 - immutable versioned prompt notes, memories, skills, and subagent specifications;

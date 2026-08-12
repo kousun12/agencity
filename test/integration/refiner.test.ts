@@ -1825,6 +1825,9 @@ describe("FU-016 durable RefinerService", () => {
       const admitted = await supervisor.refiner.scanBoundary(sessionId, branchId, "direct-credential-scan");
       expect(admitted).toHaveLength(1);
       await waitFor(async () => (await supervisor.refiner.get(admitted[0]!.reviewId)).status === "no_change", "credential-shaped review terminal", 5_000);
+      const visibleReview = JSON.stringify(provider.lastReviewContext);
+      expect(visibleReview).not.toContain("retained-credential-shaped-value");
+      expect(visibleReview).toContain("[REDACTED]");
       const run = await supervisor.runs.start(sessionId, branchId, { task: "continue with credential-shaped refinement evidence", goalMode: "none" });
       expect(run.status).toBe("succeeded");
       const events = await supervisor.storage.loadEvents(sessionId, { branchId });
@@ -1902,8 +1905,8 @@ describe("FU-016 durable RefinerService", () => {
           evidenceEventIds: [${JSON.stringify(evidence.id)}],
         });
         const children = await sdk.agents.spawnMany([
-          { task: "first batch child", run: false },
-          { task: "second batch child", run: false },
+          { task: "first batch child" },
+          { task: "second batch child" },
         ]);
         return { proposalStatus: proposal.status, restorationVersionId: restored.restorationVersionId, children: children.length };
       `);

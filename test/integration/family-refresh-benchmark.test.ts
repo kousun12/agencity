@@ -54,7 +54,6 @@ test("family refresh benchmark reuses projections for 25 relatives with 5,000 ev
       Array.from({ length: 25 }, (_, index) => ({
         task: `Benchmark child task ${index}`,
         name: `benchmark-child-${String(index).padStart(2, "0")}`,
-        run: false,
       })),
     );
     const work = {

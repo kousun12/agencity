@@ -710,12 +710,10 @@ describe("FU-005 protocol-backed terminal UI", () => {
     const child = await supervisor.agents.spawn(root.sessionId, root.branchId, {
       task: "Review the implementation",
       name: "Reviewer",
-      run: false,
     });
     await supervisor.agents.spawn(child.sessionId, child.branchId, {
       task: "Verify the review",
       name: "Verifier",
-      run: false,
     });
     const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
     let productSelections = 0;
@@ -799,7 +797,6 @@ describe("FU-005 protocol-backed terminal UI", () => {
     const child = await supervisor.agents.spawn(first.sessionId, first.branchId, {
       task: "Child is excluded from the workspace view",
       name: "Nested child",
-      run: false,
     });
     const row = (
       sessionId: string,
@@ -1028,7 +1025,6 @@ describe("FU-005 protocol-backed terminal UI", () => {
     const child = await supervisor.agents.spawn(root.sessionId, root.branchId, {
       task: "Unreachable child",
       name: "Child",
-      run: false,
     });
     const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
     let rejectChildSnapshot = false;
@@ -1075,7 +1071,6 @@ describe("FU-005 protocol-backed terminal UI", () => {
     await supervisor.agents.spawn(root.sessionId, root.branchId, {
       task: "Remain refreshable",
       name: "Refresh child",
-      run: false,
     });
     const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
     let block = false;

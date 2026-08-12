@@ -189,10 +189,6 @@ export class ProtocolServer {
         const body = await request.json() as any;
         return Response.json(await this.supervisor.createSession({ workspaceId: String(body.workspaceId ?? "default"), ...(body.model ? { model: body.model } : {}), ...(body.budget ? { budget: body.budget } : {}), ...(body.agentProfile ? { agentProfile: body.agentProfile } : {}), ...(typeof body.sessionName === "string" ? { sessionName: body.sessionName } : {}), ...(typeof body.branchName === "string" ? { branchName: body.branchName } : {}) }));
       }
-      if (parts[0] === "models" && parts[1]) {
-        if (request.method === "GET") return Response.json(await this.supervisor.models.get(parts[1]));
-        if (request.method === "POST" && parts[2] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.models.cancel(parts[1], typeof body.reason === "string" ? body.reason : undefined)); }
-      }
       if (parts[0] === "heartbeats" && parts[1] && request.method === "POST") {
         const body = await jsonBody(request);
         if (parts[2] === "tick") return Response.json(await this.supervisor.heartbeats.tick(parts[1], typeof body.at === "string" ? body.at : new Date()));
@@ -431,10 +427,60 @@ export class ProtocolServer {
         }
         if (parts[2] === "specs" && parts[3] && parts[4] === "spawn" && branchId && request.method === "POST") return Response.json(await this.supervisor.specs.spawn(sessionId,branchId,parts[3],await jsonBody(request) as any));
 
+        if (parts[2] === "agent-invocations" && branchId) {
+          if (request.method === "GET" && parts[3] === "by-key") {
+            const key = url.searchParams.get("idempotencyKey");
+            if (!key) throw new ValidationError("Agent invocation lookup requires idempotencyKey");
+            return Response.json(await this.supervisor.agents.findInvocation(sessionId, branchId, key));
+          }
+          if (request.method === "POST" && parts[3] === "batch") {
+            const body = await jsonBody(request);
+            return Response.json(await this.supervisor.agents.spawnManyRunnable(
+              sessionId,
+              branchId,
+              batchInputs(body, "Agent invocation"),
+            ));
+          }
+          if (request.method === "POST" && parts.length === 3) {
+            return Response.json(await this.supervisor.agents.spawnRunnable(
+              sessionId,
+              branchId,
+              await jsonBody(request) as any,
+            ), { status: 202 });
+          }
+          if (parts[3]) {
+            const taskId = decodeURIComponent(parts[3]);
+            if (request.method === "GET" && parts[4] === "contract") {
+              return Response.json(await this.supervisor.agents.invocationContract(
+                sessionId,
+                branchId,
+                taskId,
+              ));
+            }
+            if (request.method === "GET" && parts[4] === "result") {
+              return Response.json(await this.supervisor.agents.result(
+                sessionId,
+                branchId,
+                taskId,
+                { wait: false },
+              ));
+            }
+            if (request.method === "POST" && parts[4] === "cancel") {
+              const body = await jsonBody(request);
+              return Response.json(await this.supervisor.agents.cancel(
+                sessionId,
+                branchId,
+                taskId,
+                typeof body.reason === "string" ? body.reason : undefined,
+              ));
+            }
+          }
+        }
+
         // Slice 2 commands remain branch-scoped and return durable JSON handles.
         if (parts[2] === "agents" && branchId) {
           if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.agents.listFamily(sessionId, branchId));
-          if (request.method === "POST" && parts[3] === "batch") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.spawnMany(sessionId, branchId, Array.isArray(body.inputs) ? body.inputs as any[] : [])); }
+          if (request.method === "POST" && parts[3] === "batch") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.spawnMany(sessionId, branchId, batchInputs(body, "Subagent"))); }
           if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.cancelFamilyTarget(sessionId, branchId, decodeURIComponent(parts[3]), typeof body.reason === "string" ? body.reason : undefined)); }
           if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.agents.spawn(sessionId, branchId, await jsonBody(request) as any));
         }
@@ -447,7 +493,46 @@ export class ProtocolServer {
         if (parts[2] === "mailbox" && branchId && request.method === "POST") return Response.json(await this.supervisor.agents.sendMessage(sessionId, branchId, await jsonBody(request) as any));
         if (parts[2] === "documents" && branchId && request.method === "POST") return Response.json(await this.supervisor.documents.import(sessionId, branchId, await jsonBody(request) as any));
         if (parts[2] === "input-sets" && branchId && request.method === "POST") return Response.json(await this.supervisor.documents.createInputSet(sessionId, branchId, await jsonBody(request) as any));
-        if (parts[2] === "models" && branchId && request.method === "POST") return Response.json(await this.supervisor.models.start(sessionId, branchId, await jsonBody(request) as any));
+        if (parts[2] === "ai" && parts[3] === "generations" && branchId) {
+          if (request.method === "GET" && parts[4] === "by-key") {
+            const key = url.searchParams.get("idempotencyKey");
+            if (!key) throw new ValidationError("Generation lookup requires idempotencyKey");
+            return Response.json(await this.supervisor.ai.find(sessionId, branchId, key));
+          }
+          if (request.method === "POST" && parts.length === 4) {
+            const body = await jsonBody(request) as any;
+            if (body.kind !== "text" && body.kind !== "object") {
+              throw new ValidationError("Generation admission requires kind text or object");
+            }
+            const { kind, ...input } = body;
+            return Response.json(kind === "object"
+              ? await this.supervisor.ai.admitObject(sessionId, branchId, input)
+              : await this.supervisor.ai.admitText(sessionId, branchId, input));
+          }
+          if (parts[4]) {
+            const generationId = parts[4];
+            if (request.method === "GET" && parts.length === 5) {
+              return Response.json(await this.supervisor.ai.getFor(sessionId, branchId, generationId));
+            }
+            if (request.method === "GET" && parts[5] === "result") {
+              return Response.json(await this.supervisor.ai.resultFor(
+                sessionId,
+                branchId,
+                generationId,
+                { wait: false },
+              ));
+            }
+            if (request.method === "POST" && parts[5] === "cancel") {
+              const body = await jsonBody(request);
+              return Response.json(await this.supervisor.ai.cancelFor(
+                sessionId,
+                branchId,
+                generationId,
+                typeof body.reason === "string" ? body.reason : undefined,
+              ));
+            }
+          }
+        }
         if (parts[2] === "goals" && branchId) {
           if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.goals.list(sessionId, branchId));
           if (request.method === "GET" && parts[3] === "current") return Response.json(await this.supervisor.goals.current(sessionId, branchId));
@@ -570,6 +655,17 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
   // semantic boundary for both transports.
   if (request.body === null) return {};
   return await request.json() as Record<string, unknown>;
+}
+
+function batchInputs(body: unknown, label: string): any[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError(`${label} batch body must be an object containing inputs`);
+  }
+  const inputs = (body as Record<string, unknown>).inputs;
+  if (!Array.isArray(inputs)) {
+    throw new ValidationError(`${label} batch inputs must be an array`);
+  }
+  return inputs;
 }
 
 function protocolErrorDetails(error: unknown): unknown {

@@ -14,7 +14,7 @@ The package is private and is consumed from a source checkout or Bun link. It is
 | `@prime-agent/runtime/artifacts` | `ArtifactStore` and `LocalArtifactStore`. |
 | `@prime-agent/runtime/executors` | Effect contracts and file, shell, model, and skill executors. |
 | `@prime-agent/runtime/console` | Generated-cell SDK and scratch types, observation helpers, and the private worker-process host. |
-| `@prime-agent/runtime/runtime` | `Supervisor` and its run, outbox, projection, context, recursive-agent, memory, harness, skill, goal, schedule, and recovery services. |
+| `@prime-agent/runtime/runtime` | `Supervisor` and its run, outbox, projection, context, agent, raw-generation, retained private recursive-operation, memory, harness, skill, goal, schedule, and recovery services. |
 | `@prime-agent/runtime/protocol` | `ProtocolServer`, `AgentClient`, HTTP and in-process transports, and wire-facing types. |
 | `@prime-agent/runtime/security` | Secret filtering, scrubbing, and model-credential helpers. |
 | `@prime-agent/runtime/tui` | The protocol-backed full-screen terminal client and plain-transcript fallback. |
@@ -71,7 +71,7 @@ async function usingRuntime() {
 }
 ```
 
-`Supervisor.open` migrates the local stores, opens the content-addressed artifact store and profile-owned credential store, installs the standard executors, and optionally performs recovery. Every supervisor supports warm exact-branch scratch. `enableLocalScratchCheckpoints: true` is a product-composition opt-in that additionally requires an exact local `file:` workspace database and managed execution fencing; direct diagnostic and remote placements remain warm-only. Custom embeddings may instead supply explicit `scratchCheckpointHooks`. `close` stops local schedulers, drains local recursive runners, stops the console worker, releases registered credential-redaction values, and closes storage.
+`Supervisor.open` migrates the local stores, opens the content-addressed artifact store and profile-owned credential store, installs the standard executors, and optionally performs recovery. Every supervisor supports warm exact-branch scratch. `enableLocalScratchCheckpoints: true` is a product-composition opt-in that additionally requires an exact local `file:` workspace database and managed execution fencing; direct diagnostic and remote placements remain warm-only. Custom embeddings may instead supply explicit `scratchCheckpointHooks`. `close` stops local schedulers, drains admitted recursive and agent work, stops the branch-aware console pool, releases registered credential-redaction values, and closes storage.
 
 An embedded supervisor does not by itself provide the managed product service's discovery manifest, bearer authentication, resident run queue, process fencing, or idle shutdown. If an embedded host creates a `ProtocolServer`, it also owns network exposure and authentication policy.
 
@@ -109,7 +109,7 @@ Structured requests use response-aware `agencity.model-dispatch.v2`, immutable `
 - `selectModel` normalizes provider shorthand, checks availability, requires an idle model boundary, and appends `SessionModelChanged`.
 - `appendMessage` scrubs known credentials and appends a message event.
 - `fork` creates a durable branch from a validated lineage cursor without changing the parent.
-- `executeCell` serializes cell execution per branch and through the shared console lifecycle queue, atomically commits its observation, staged working values, and artifact references, then independently attempts a nonfatal scratch checkpoint.
+- `executeCell` serializes cell execution per exact branch, runs different branches through the bounded branch-aware console pool, atomically commits its observation, staged working values, and artifact references, then independently attempts a nonfatal scratch checkpoint.
 - `resume` reconstructs and reattaches to a retained branch.
 
 Product tasks use the strict autonomous-run service:
@@ -174,9 +174,9 @@ An agent may target itself or its direct creation-family child; the workspace ow
 
 Profiles and non-skill harness content apply atomically after approval and application-time revalidation. Skills activate only after durable compile and declared runtime tests pass. `wait: true` returns at a terminal status. `wait: false` returns after durable admission and delivers one idempotent route notice later. Rejected proposals may be revised only through a new bounded proposal linked by `revisesProposalId`. `rollbackRefinement` restores exact earlier approved content through a new immutable version. Reviewer approval proves policy consistency, not improved outcomes.
 
-## Durable recursive work
+## Durable agent work and raw generation
 
-Root agents, delegated agents, and recursive model calls use retained sessions, tasks, budgets, mailboxes, and JSON handles.
+Root and delegated agents use retained sessions, tasks, budgets, mailboxes, and JSON handles. Raw generation is a separate one-provider-request service and does not create agent-family records.
 
 ```ts
 const child = await supervisor.agents.spawn(parentSessionId, parentBranchId, {
@@ -200,29 +200,26 @@ await supervisor.agents.sendMessage(parentSessionId, parentBranchId, {
 
 const family = await supervisor.agents.listFamily(parentSessionId, parentBranchId);
 
-const call = await supervisor.models.start(parentSessionId, parentBranchId, {
+const call = await supervisor.ai.admitText(parentSessionId, parentBranchId, {
   prompt: "Summarize the selected log ranges",
-  inputSetId,
-  profile: {
-    role: "Log summarizer",
-    purpose: "Summarize one bounded recursive input.",
-    instructions: "- Distinguish observations from inference.",
-  },
+  context: [{ kind: "document-range", documentId, start: 0, limit: 20 }],
   idempotencyKey: "summarize-log-v1",
 });
 
-const terminal = await supervisor.models.result(call.handleId, {
-  timeoutMs: 30_000,
-});
+const terminal = await supervisor.ai.result(call.generationId, { wait: true });
 ```
 
-`agents.spawnMany` validates and admits the complete batch atomically. Each input may supply `profile`; omission uses the sealed task-specialist profile. Recursive `models.start/startMany` use the same explicit-or-default rule and retain the resulting profile pin on the handle. Specification spawn materializes a profile from the exact active specification version and records those source IDs. Profile meaning participates in idempotent admission, so reusing an idempotency key with changed standing behavior is rejected.
+`agents.run` and `runMany` admit runnable children and await terminal text or declared-object results. `agents.spawnRunnable` and `spawnManyRunnable` are the supervisor-level detached-running admissions used by the public protocol; the lower-level `spawn` methods remain available for internal admission composition. Batch admission validates and commits the complete batch atomically. Each input may supply `profile`; omission uses the sealed task-specialist profile. Specification spawn materializes a profile from the exact active specification version and records those source IDs. Profile meaning participates in idempotent admission, so reusing an idempotency key with changed standing behavior is rejected. `agents.result`, `invocationContract`, `findInvocation`, and `cancel` operate on the retained task/run lifecycle.
 
-`agents.sendMessage` defaults to `mode: "queue"`. A busy recipient consumes queued work at its next durable boundary; an idle or stopped recipient starts one run. `mode: "steer"` enters an active run at its next boundary but never wakes an idle recipient. The mode participates in idempotent message meaning.
+The public `AgentClient` exposes `spawn`, `spawnMany`, `runAgent`, `agentInvocationResult`, `agentInvocationContract`, `findAgentInvocation`, and `cancelAgentInvocation` over `/agent-invocations`. `spawn` is detached-running and has no `run` boolean. `runAgent` is a convenience composition of admission plus bounded result polling; HTTP admission itself returns a durable handle immediately. Generation methods are `admitTextGeneration`, `admitObjectGeneration`, `generateText`, `generateObject`, `generation`, `generationResult`, `findGeneration`, and `cancelGeneration` over `/ai/generations`. The client has no public `startModel`, `model`, `cancelModel`, or recursive-model admission method.
+
+`ai.admitText` and `ai.admitObject` freeze only explicit prompt/messages and context references, reserve caller-narrowing budget, and return immediately; `ai.result`, `ai.get`, `ai.find`, and `ai.cancel` operate on durable generation identity. Raw calls cannot inspect files, use tools or skills, read ambient branch context, or continue autonomously. Declared schemas constrain returned JSON shape and do not establish factual correctness, completion, safety, or authority.
+
+`agents.sendMessage` defaults to `mode: "queue"`. Each queued message owns a separate durable run. An idle or stopped recipient starts that run immediately; a busy recipient retains queued messages in FIFO order and starts them one at a time after the active run and each earlier queued run terminate. `mode: "steer"` enters an active run at its next boundary but never wakes an idle recipient. The mode participates in idempotent message meaning.
 
 `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 
-Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Recursive handles retain the child, task, model, input, outcome, usage, and provenance needed after restart. Large results spill to the artifact store. Lost non-idempotent model calls become `unknown` and are not replayed.
+Mail is limited to the same root family. Cancellation walks an admitted descendant tree. Retained internal recursive handles preserve historical child, task, model, input, outcome, usage, and provenance. Raw generation results never spill; oversized output fails. Lost non-idempotent provider calls become `unknown` and are not replayed.
 
 Documents and input sets provide exact bounded inputs:
 
@@ -281,7 +278,7 @@ The database-driven coordinators create durable wakes. Missed intervals coalesce
 
 `memory.create/search/list` operate on scoped, attributable records. Search returns both ranked records and provenance for candidates, policy rejections, and selections. FTS5 is a candidate generator; scope, status, tags, conflicts, exposure, and limits remain authoritative service decisions.
 
-`refiner.request` freezes a bounded trajectory and runs a durable proposer child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Public recursive calls remain text operations, and no assistant JSON parser or prose fallback exists. A proposed change then enters the separate sealed governance reviewer, application-time validation, automatic application or rejection, and terminal delivery path.
+`refiner.request` freezes a bounded trajectory and runs a durable proposer child under the sealed internal `agencity.refinement-review.v1` contract. The child must call the single fully typed `agencity_submit_refinement_review` tool. Its `responseAdmission` is retained before execution; successful output becomes a message-free typed result bound to the exact child model completion and transport digests. Recursive-model admission remains private to sealed runtime workflows, and no assistant JSON parser or prose fallback exists. A proposed change then enters the separate sealed governance reviewer, application-time validation, automatic application or rejection, and terminal delivery path.
 
 `harness` still exposes ADR-0002 proposal, validation, activation, allocation, observation, decision, approval, history, and rollback operations for advanced and legacy-compatible candidate evaluation. They are not the ordinary activation path under ADR 0012. `skills` compiles, tests, and invokes immutable skill versions through the outbox. `specs.spawn` admits a version-pinned subagent through the normal task/session model. Skill permissions are an exact runtime allowlist and are not an OS sandbox.
 

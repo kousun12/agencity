@@ -80,7 +80,7 @@ The ordinary provider action surface remains exactly `bun_console` and `finish`.
 Agencity currently provides:
 
 - durable root and child sessions, tasks, budgets, cancellation, and family relationships;
-- `sdk.agents.spawn`, family inspection, retained messaging, acknowledgement, follow-up, and cancellation;
+- `sdk.agents.spawn`, family inspection, retained queue/steer messaging, acknowledgement, and cancellation;
 - durable mailboxes that deliver terminal child outcomes to parents;
 - recursive-model handles backed by child sessions and attributable model effects;
 - a managed workspace service that owns detached execution, recovery, schedules, wakes, workers, and quiescent exit;
@@ -569,7 +569,7 @@ Admission must define:
 
 - caller and target session and branch;
 - allowed call direction, exact grant revision, authority view, and live revocation generation;
-- target task or follow-up identity;
+- target task or queued-message identity;
 - who pays model, compute, storage, network, and service usage;
 - caller and callee budget reservations;
 - target concurrency and queue bounds;

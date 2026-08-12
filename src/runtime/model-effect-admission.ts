@@ -1,7 +1,12 @@
 import {
   TEXT_MODEL_RESPONSE_CONTRACT,
+  ValidationError,
+  canonicalJsonStringify,
+  resolveDeclaredSchema,
   modelDispatchWithResponseAdmission,
   resolveBuiltInModelResponseContract,
+  resolveDeclaredDataModelResponseContract,
+  resolveTypedAgentModelResponseContract,
   type BuiltInStructuredContractId,
   type ModelConfigurationInput,
   type ModelDispatch,
@@ -9,6 +14,10 @@ import {
   type ResolvedModelExecutionDescriptor,
 } from "../domain/index.ts";
 import type { ModelExecutor } from "../executors/index.ts";
+import {
+  containsBrokeredSecret,
+  containsCredentialMaterial,
+} from "../security/index.ts";
 
 export interface ModelEffectAdmission {
   readonly modelDispatch: ModelDispatch;
@@ -68,6 +77,79 @@ export class ModelEffectAdmissionService {
         responseContract,
         responseCapability,
       },
+    );
+    return Object.freeze({ modelDispatch, execution });
+  }
+
+  requestDeclaredData(
+    schema: unknown,
+    configuration: ModelConfigurationInput,
+  ): ModelEffectAdmission {
+    const checkedSchema = resolveDeclaredSchema(schema);
+    if (
+      containsBrokeredSecret(checkedSchema.schema) ||
+      containsCredentialMaterial(canonicalJsonStringify(checkedSchema.schema))
+    ) {
+      throw new ValidationError(
+        "Declared JSON Schema contains credential material",
+      );
+    }
+    const execution = this.modelExecutor.resolveExecutionDescriptor(
+      configuration,
+    );
+    this.modelExecutor.assertRequiredToolSetAdmission(execution);
+    const capability = execution.requiredAgentToolSet;
+    const responseContract = resolveDeclaredDataModelResponseContract(
+      checkedSchema.schema,
+      capability.status === "provider-strict"
+        ? "provider-strict"
+        : "runtime-validated",
+    );
+    const responseCapability = Object.freeze({
+      kind: "required-tool-set" as const,
+      capability,
+    });
+    const modelDispatch = modelDispatchWithResponseAdmission(
+      this.modelExecutor.resolveDispatch(configuration),
+      {
+        responseContract,
+        responseCapability,
+      },
+    );
+    return Object.freeze({ modelDispatch, execution });
+  }
+
+  requestTypedAgent(
+    schema: unknown,
+    configuration: ModelConfigurationInput,
+  ): ModelEffectAdmission {
+    const checkedSchema = resolveDeclaredSchema(schema);
+    if (
+      containsBrokeredSecret(checkedSchema.schema) ||
+      containsCredentialMaterial(canonicalJsonStringify(checkedSchema.schema))
+    ) {
+      throw new ValidationError(
+        "Declared JSON Schema contains credential material",
+      );
+    }
+    const execution = this.modelExecutor.resolveExecutionDescriptor(
+      configuration,
+    );
+    this.modelExecutor.assertRequiredToolSetAdmission(execution);
+    const capability = execution.requiredAgentToolSet;
+    const responseContract = resolveTypedAgentModelResponseContract(
+      checkedSchema.schema,
+      capability.status === "provider-strict"
+        ? "provider-strict"
+        : "runtime-validated",
+    );
+    const responseCapability = Object.freeze({
+      kind: "required-tool-set" as const,
+      capability,
+    });
+    const modelDispatch = modelDispatchWithResponseAdmission(
+      this.modelExecutor.resolveDispatch(configuration),
+      { responseContract, responseCapability },
     );
     return Object.freeze({ modelDispatch, execution });
   }

@@ -58,13 +58,23 @@ The profile default is intentionally not derived from the workspace database. Th
 
 `--db`, `--artifacts`, and `--profile` do not move the workspace identity marker or managed-service discovery files.
 
-The one-hour timeout begins whenever the managed service becomes quiescent. It is not a task timeout or scratch-retention promise. Attached clients, resident managed run-queue work, active runs, pending effects, queued wakes, active schedules, and active heartbeats defer shutdown; warm scratch and an idle console worker do not. Human `service status` formats the default as `1 hour`, while `service status --json` returns exact milliseconds.
+The one-hour timeout begins whenever the managed service becomes quiescent. It is not a task timeout or scratch-retention promise. Attached clients, resident managed run-queue work, active runs, pending effects, queued wakes, active schedules, and active heartbeats defer shutdown. Service status reports resident console workers and active console executions while they exist. At the final idle check, replaceable idle console workers are retired before quiescence is decided, so warm scratch is not a durable keep-alive or retention promise. Human `service status` formats the default as `1 hour`, while `service status --json` returns exact milliseconds.
 
 There is no product CLI override for the idle timeout. Embedding and deterministic lifecycle tests may set `ManagedServiceConfiguration.idleShutdownMs` within the accepted bounds. The normalized value is included in the service discovery configuration hash. A client using a different default receives `CONFIG_MISMATCH` while the existing owner is live rather than taking ownership or deleting its manifest.
 
+Direct `Supervisor.open` and managed-service embedding support three console-capacity options:
+
+- `maxConsoleResidentProcesses`, default `17`, bounds one caller plus the maximum 16-member `runMany` batch without retaining dozens of Bun worker processes;
+- `maxConsoleActiveExecutions`, default `4`, bounds generated JavaScript that is actively running; a cell waiting in an SDK RPC does not consume this permit; and
+- `maxAwaitedAgentDepth`, default `8`, bounds nested awaited agent calls and cannot exceed the durable `maxSessionDepth`.
+
+All three values must be positive integers. Awaited `agents.run` and `runMany` reserve their immediate resident slots before child admission. Detached `spawn` does not reserve awaited capacity and may queue.
+
+Raw `ai.generateText`/`generateObject` and full `sdk.agents.run`/`spawn` accept the same optional model-selection shape: a canonical `provider:creator/model` string at product boundaries or `{ provider, model, reasoningEffort? }` in typed APIs. Selection may keep the caller's exact model or narrow to an owner-allowed delegated model; it cannot widen the configured allowlist, credentials, budget, provider concurrency, output bounds, or reasoning capability. Per-call budgets similarly narrow the caller's remaining token, cost, turn, wall-time, input, output, and inline-result limits.
+
 ### Initial agent profiles
 
-An agent profile is session-owned workspace state, not a profile-database preference. Ordinary product root creation uses the sealed repository-agent profile. The public TypeScript and HTTP APIs may instead supply a complete `{ role, purpose, instructions }` value when creating a root. Delegated and recursive spawn inputs may supply the same explicit shape and otherwise use the sealed task-specialist profile; specification spawn derives it from the exact specification version.
+An agent profile is session-owned workspace state, not a profile-database preference. Ordinary product root creation uses the sealed repository-agent profile. The public TypeScript and HTTP APIs may instead supply a complete `{ role, purpose, instructions }` value when creating a root. Delegated agent inputs may supply the same explicit shape and otherwise use the sealed task-specialist profile; specification spawn derives it from the exact specification version. Supervisor-private sealed recursive operations use the same profile rules but are not a public console admission surface.
 
 There is no environment variable or profile-database preference that changes initial-profile templates. Existing sessions retain the exact initial profile committed in workspace history. Route-relative `agencity profile` and `/profile` operations inspect and propose later immutable revisions or restore an exact earlier revision; they do not rewrite the initial version.
 

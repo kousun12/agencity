@@ -4,6 +4,11 @@ import { spawn } from "node:child_process";
 import { REASONING_EFFORTS, ValidationError, newId, projectEvents, type ReasoningEffort } from "../domain/index.ts";
 import { AgentClient, ProtocolServer } from "../protocol/index.ts";
 import { Supervisor, type AgentRunResult, type StartAgentRunInput, type SupervisorOptions } from "../runtime/index.ts";
+import {
+  DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
+  DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
+  type ConsoleExecutionPoolStatus,
+} from "../console/index.ts";
 import { LibSqlStorage } from "../storage/index.ts";
 import { scrubText } from "../security/index.ts";
 import { ProductCatalog } from "./catalog.ts";
@@ -27,7 +32,7 @@ import {
   type ServiceManifestV1,
 } from "./service-discovery.ts";
 
-export const MANAGED_SERVICE_PROTOCOL_VERSION = 1;
+export const MANAGED_SERVICE_PROTOCOL_VERSION = 2;
 export const MANAGED_SERVICE_CONFIG_ENV = "AGENCITY_SERVICE_CONFIG";
 export const DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 3_600_000;
 const MIN_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 100;
@@ -40,6 +45,9 @@ export interface ManagedServiceConfiguration {
   readonly artifactDirectory: string;
   readonly profileDatabasePath: string;
   readonly restartConsoleAfterCell?: boolean;
+  readonly maxConsoleResidentProcesses?: number;
+  readonly maxConsoleActiveExecutions?: number;
+  readonly maxAwaitedAgentDepth?: number;
   /** Internal/test override; production defaults to a five-second local lease. */
   readonly leaseMs?: number;
   /** Internal/test override for bounded shutdown after the workspace becomes quiescent. */
@@ -58,6 +66,9 @@ interface SerializedManagedServiceConfiguration {
   readonly artifactDirectory: string;
   readonly profileDatabasePath: string;
   readonly restartConsoleAfterCell: boolean;
+  readonly maxConsoleResidentProcesses: number;
+  readonly maxConsoleActiveExecutions: number;
+  readonly maxAwaitedAgentDepth: number;
   readonly leaseMs: number;
   readonly idleShutdownMs: number;
   readonly sync: {
@@ -86,10 +97,11 @@ export interface ManagedServiceStatus {
   readonly idleShutdownAt: string;
   readonly attachedClients: number;
   readonly keepAliveReasons: readonly {
-    readonly kind: "attached_clients" | "resident_workers" | "active_runs" | "pending_effects" | "queued_wakes" | "active_schedules" | "active_heartbeats";
+    readonly kind: "attached_clients" | "resident_workers" | "active_executions" | "active_runs" | "pending_effects" | "queued_wakes" | "active_schedules" | "active_heartbeats";
     readonly count: number;
     readonly summary: string;
   }[];
+  readonly console: ConsoleExecutionPoolStatus;
   readonly roots: readonly {
     readonly sessionId: string;
     readonly branchId: string;
@@ -115,6 +127,11 @@ function normalizedConfiguration(input: ManagedServiceConfiguration): ManagedSer
     artifactDirectory: resolve(input.artifactDirectory),
     profileDatabasePath: resolve(input.profileDatabasePath),
     restartConsoleAfterCell: input.restartConsoleAfterCell ?? false,
+    maxConsoleResidentProcesses: input.maxConsoleResidentProcesses ??
+      DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
+    maxConsoleActiveExecutions: input.maxConsoleActiveExecutions ??
+      DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
+    maxAwaitedAgentDepth: input.maxAwaitedAgentDepth ?? 8,
     leaseMs: input.leaseMs ?? 5_000,
     idleShutdownMs: normalizedIdleShutdownMs(input.idleShutdownMs),
     sync: {
@@ -139,6 +156,11 @@ function serializedConfiguration(input: ManagedServiceConfiguration): Serialized
     artifactDirectory: resolve(normalized.artifactDirectory),
     profileDatabasePath: resolve(normalized.profileDatabasePath),
     restartConsoleAfterCell: normalized.restartConsoleAfterCell ?? false,
+    maxConsoleResidentProcesses: normalized.maxConsoleResidentProcesses ??
+      DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
+    maxConsoleActiveExecutions: normalized.maxConsoleActiveExecutions ??
+      DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
+    maxAwaitedAgentDepth: normalized.maxAwaitedAgentDepth ?? 8,
     leaseMs: normalized.leaseMs ?? 5_000,
     idleShutdownMs: normalized.idleShutdownMs ?? DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS,
     sync: {
@@ -171,6 +193,9 @@ export function decodeManagedServiceConfiguration(value: string): ManagedService
   return normalizedConfiguration({
     workspace: serialized.workspace!, databasePath: serialized.databasePath!, artifactDirectory: serialized.artifactDirectory!, profileDatabasePath: serialized.profileDatabasePath!,
     restartConsoleAfterCell: serialized.restartConsoleAfterCell,
+    maxConsoleResidentProcesses: serialized.maxConsoleResidentProcesses,
+    maxConsoleActiveExecutions: serialized.maxConsoleActiveExecutions,
+    maxAwaitedAgentDepth: serialized.maxAwaitedAgentDepth,
     leaseMs: serialized.leaseMs,
     idleShutdownMs: serialized.idleShutdownMs,
     sync: {
@@ -264,6 +289,11 @@ export class ManagedWorkspaceService {
       workspaceRoot: normalized.workspace.root,
       profileDatabaseUrl: `file:${normalized.profileDatabasePath}`,
       restartConsoleAfterCell: normalized.restartConsoleAfterCell ?? false,
+      maxConsoleResidentProcesses: normalized.maxConsoleResidentProcesses ??
+        DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
+      maxConsoleActiveExecutions: normalized.maxConsoleActiveExecutions ??
+        DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
+      maxAwaitedAgentDepth: normalized.maxAwaitedAgentDepth ?? 8,
       recover: false,
       startWakeSchedulers: false,
       enableLocalScratchCheckpoints: true,
@@ -448,6 +478,7 @@ export class ManagedWorkspaceService {
       idleShutdownAt: new Date(this.#lastActivityAt + idleShutdownMs).toISOString(),
       attachedClients,
       keepAliveReasons,
+      console: this.supervisor.console.capacityStatus(),
       roots: summaries.filter(summary => summary.root && summary.initialBranch).map(summary => ({
         sessionId: summary.sessionId,
         branchId: summary.branchId,
@@ -568,6 +599,10 @@ export class ManagedWorkspaceService {
       return;
     }
     try {
+      // Warm workers are replaceable operational caches. Retire idle workers
+      // before the final quiescence decision; active/suspended workers remain
+      // visible and keep the service alive until they settle.
+      await this.supervisor.console.retireIdleWorkers();
       if (this.#attachmentProbe() || await this.#hasOutstandingWork()) {
         this.#recordActivity();
         return;
@@ -587,6 +622,11 @@ export class ManagedWorkspaceService {
 
   async #hasOutstandingWork(): Promise<boolean> {
     if (this.#workers.busy) return true;
+    const console = this.supervisor.console.capacityStatus();
+    if (console.residentProcesses > 0 || console.activeExecutions > 0 ||
+        console.reservedProcesses > 0 || console.queuedExecutions > 0) {
+      return true;
+    }
     const storage = this.supervisor.storage;
     for (const route of await this.#ownedRoutes()) {
       const events = await storage.loadEvents(route.sessionId, { branchId: route.branchId });
@@ -611,6 +651,9 @@ export class ManagedWorkspaceService {
     };
     if (attachedClients > 0) add("attached_clients", attachedClients);
     if (this.#workers.busy) add("resident_workers");
+    const console = this.supervisor.console.capacityStatus();
+    add("resident_workers", console.residentProcesses);
+    add("active_executions", console.activeExecutions);
     const storage = this.supervisor.storage;
     for (const route of await this.#ownedRoutes()) {
       const events = await storage.loadEvents(route.sessionId, { branchId: route.branchId });
@@ -626,6 +669,7 @@ export class ManagedWorkspaceService {
     const labels: Record<ManagedServiceStatus["keepAliveReasons"][number]["kind"], [string, string]> = {
       attached_clients: ["attached client", "attached clients"],
       resident_workers: ["resident worker", "resident workers"],
+      active_executions: ["active console execution", "active console executions"],
       active_runs: ["active run", "active runs"],
       pending_effects: ["pending effect", "pending effects"],
       queued_wakes: ["queued wake", "queued wakes"],

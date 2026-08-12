@@ -80,7 +80,7 @@ Every ticket in this document inherits the original PRD. In particular, follow-u
 | FU-009 | Add product-level end-to-end acceptance coverage | Done | FU-001–FU-008, FU-011–FU-019 |
 | FU-010 | Add repository-level purpose and implementation guidance | Done | — |
 | FU-011 | Give TypeScript cells notebook-style observation and inspection semantics | Done | — |
-| FU-012 | Expose durable family messaging and retained subagent follow-up to the model | Done | FU-004 |
+| FU-012 | Expose durable family queue/steer messaging to the model | Done | FU-004 |
 | FU-013 | Add first-class recursive model calls with durable handles | Done | FU-003 |
 | FU-014 | Drive goals, completion gates, heartbeats, and schedules through product runs | Done | FU-004 |
 | FU-015 | Keep detached sessions executing in a background service | Done | FU-001, FU-004 |
@@ -538,7 +538,7 @@ Use a deterministic structured-action provider for the default suite and an opt-
 
 - Commits: `6d552da`, `616a61b`, `713b23e`, `e95cb7f`, `f14bf44`, and `bcb70ac`.
 - Implementation: `test/acceptance/` creates a fresh isolated `HOME`, Bun install root, and external repository per case; runs `bun link`; and invokes only the installed `agencity`. A source guard rejects implementation imports, direct runtime/storage clients, opaque diagnostic coordinates, and process-launch bypasses. The external OpenAI-compatible fixture is keyed by durable task/step, emits SSE, retains request logs, and supports deterministic barriers.
-- Primary transcript: truthful missing-provider failure without Echo, explicit persisted fixture model, repository coding cells/tools, executed durable recursive call/result plus retained child follow-up, failed shell completion-gate feedback and repair, distinct JSON result, tree/status/history, named head branch/resume, installed TUI `/quit` with no cancellation, detach, and resident continuation.
+- Primary transcript: truthful missing-provider failure without Echo, explicit persisted fixture model, repository coding cells/tools, executed durable recursive call/result plus retained queued child work, failed shell completion-gate feedback and repair, distinct JSON result, tree/status/history, named head branch/resume, installed TUI `/quit` with no cancellation, detach, and resident continuation.
 - Recovery/outcomes: succeeded, failed, blocked, budget-exceeded, cancelled, and unknown have documented distinct process statuses; client loss does not stop service work; acceptance-only post-commit failpoints prove committed-action recovery plus ambiguous model/shell ownership becoming unknown without retry; `reconcile latest` appends evidence without changing the unknown outcome.
 - Satellites and external matrix: actual refinement review, local skill inspection/installation/testing, streaming, compaction/context, and schedule delivery are black-box. `test:acceptance:matrix` reports deterministic, real-provider, official Turso, and Cloud rows as `PASS`, `FAIL`, or `SKIP`. The real-provider test remains opt-in and was skipped in the deterministic completion run.
 - Product fixes demanded by black-box evidence: no-ID `branch head`, `history current`, `tree`, `status current`, `--completion-gate`, strict `agencity.run-result` output, detached output without opaque coordinates, `reconcile latest`, same-batch child-session execution fencing, and narrowly gated acceptance crash controls.
@@ -656,15 +656,15 @@ TypeScript cells provide explicit, bounded notebook semantics. A model can assig
 
 ---
 
-## FU-012 — Expose durable family messaging and retained subagent follow-up to the model
+## FU-012 — Expose durable family queue/steer messaging to the model
 
 **Status:** Done
 
 ### Gap
 
-Agencity already persists child sessions, tasks, mailbox delivery, acknowledgements, cancellation, and terminal notices. The TypeScript console exposes version-pinned `specs.spawn`, but it does not expose the general agent roster or mailbox operations. A model executing a cell therefore cannot discover retained children, send a follow-up into an existing child context, reply to its parent, or acknowledge received work through the same programmatic surface.
+Agencity already persists child sessions, tasks, mailbox delivery, acknowledgements, cancellation, and terminal notices. The TypeScript console exposes version-pinned `specs.spawn`, but it does not expose the general agent roster or mailbox operations. A model executing a cell therefore cannot discover retained children, queue new work for an existing child, steer an active child run, reply to its parent, or acknowledge received work through the same programmatic surface.
 
-Prime Agent's agent-to-agent mechanism does not require a complex interoperability protocol. Its useful behavior is direct string messaging plus trusted sender identity, family-scoped routing, persistent target context, queue/delivery state, and follow-up execution. Agencity should preserve that small contract over its relational task and mailbox model.
+Prime Agent's agent-to-agent mechanism does not require a complex interoperability protocol. Its useful behavior is direct string messaging plus trusted sender identity, family-scoped routing, persistent target context, queue/delivery state, and attributable queued execution. Agencity should preserve that small contract over its relational task and mailbox model.
 
 ### Outcome
 
@@ -672,7 +672,7 @@ The TypeScript SDK gives every session a durable family roster and plain-text me
 
 ### Scope
 
-- Add `sdk.agents` operations for `spawn`, `list`, `send`, `messages`, `acknowledge`, `cancel`, and retained-child follow-up.
+- Add `sdk.agents` operations for `spawn`, `list`, `send`, `messages`, `acknowledge`, `cancel`, and retained-child queue/steer messaging.
 - Derive sender session and branch from the executing cell; generated code cannot supply or spoof them.
 - Route direct messages to the unique parent, named direct child, or sibling. Deeper relatives communicate through the intervening session.
 - Keep the primary payload a bounded UTF-8 string. Permit optional task and artifact references without requiring a general A2A content protocol.
@@ -685,11 +685,11 @@ The TypeScript SDK gives every session a durable family roster and plain-text me
 
 ### Acceptance criteria
 
-- A parent spawns a child, receives its result, sends a follow-up after the child becomes idle, and receives a second reply from the same retained session.
+- A parent spawns a child, receives its result, queues new work after the child becomes idle, and receives a second reply from the same retained session.
 - A child replies to its unique parent without naming or spoofing the sender.
 - A sibling message resolves by stable name or ID and rejects ambiguous targets.
 - A model-facing send to a grandchild or unrelated root family is rejected with a typed reach error.
-- Busy-target delivery is queued without blocking the sender; idle-target delivery schedules at most one attributable follow-up turn.
+- Queue delivery gives each message one FIFO run without blocking the sender; steer delivery enters an active run at its next durable boundary or remains retained context without waking an idle target.
 - Restarting the supervisor after send, delivery, or acknowledgement preserves the exact next state without duplicate messages or turns.
 - Message size, rate, queue, cancellation, and unavailable-target behavior have deterministic tests.
 - The TUI can show sender relationship, message text, task/artifact links, and receipt state from committed events.
@@ -776,7 +776,7 @@ The ergonomic `rlm` API is backed by the ordinary recursive-agent and outbox ser
 ### Exclusions
 
 - Stateless provider calls that bypass sessions, tree budgets, or the outbox.
-- Long-lived family steering and follow-up messaging, which belongs to FU-012.
+- Long-lived family queue/steer messaging, which belongs to FU-012.
 - PostgreSQL coordination or cross-device task stealing.
 
 
@@ -818,7 +818,7 @@ A normal run with a goal continues until its required completion gates pass agai
 
 - A run with a configured required gate does not report success while the gate fails, and the failed gate's bounded output appears in the next model context.
 - An unchanged workspace does not re-execute an identical completion gate; the blocked state names the stale reason.
-- A heartbeat wakes an idle session into exactly one attributable follow-up turn; restarting between the tick and the turn duplicates neither.
+- A heartbeat wakes an idle session into exactly one attributable autonomous run; restarting between the tick and the run duplicates neither.
 - A one-time schedule fires once, survives supervisor restart before firing, and never fires twice after recovery.
 - Goal completion is recorded only through gate-checked completion events, never from assistant text alone.
 - Goal, gate, heartbeat, and schedule records remain queryable with event provenance.
@@ -1183,7 +1183,7 @@ Add dated review and implementation evidence here.
 - CLI session creation defaults to the echo provider.
 - The model loop records a single response rather than driving the full typed autonomous TypeScript action loop described above.
 - TypeScript cells require explicit `return`; final expressions are discarded, and the SDK has no direct cell-history or working-value discovery operations.
-- The retained mailbox and subagent runtime is not exposed through the model-facing TypeScript SDK, so agents cannot yet perform Prime Agent-style family messaging and follow-up.
+- The retained mailbox and subagent runtime is not exposed through the model-facing TypeScript SDK, so agents cannot yet perform Prime Agent-style family queue/steer messaging.
 - `ConsoleSdk` has no first-class recursive model-call API; a generic executor request is not an ergonomic or durable RLM contract.
 - No root or nested `AGENTS.md` existed at the time of the initial review.
 - These observations seeded FU-001 through FU-013; they are findings, not completion evidence.
@@ -1215,7 +1215,7 @@ Add dated review and implementation evidence here.
 
 - Every indexed follow-up ticket is `Done` with ticket-local commit, implementation, verification, and limitation evidence. No ticket was silently deferred.
 - Final installed acceptance was independently reviewed as genuinely black-box: isolated `bun link`, fresh external repository and home, installed executable only, external OpenAI-compatible fixture, out-of-process managed service, no internal runtime/storage imports, and no opaque diagnostic IDs fed between commands.
-- The reproduced product journey covers missing-provider truthfulness, explicit model setup, autonomous coding cells/tools, executed recursive result, retained same-child follow-up, failed-gate repair, installed TUI `/quit`, detach and client loss, resident completion, no-ID reattach/status/tree/history, named branch/resume, distinct terminal outcomes, post-commit crash recovery, unknown/no-retry reconciliation, refinement, skills, streaming, compaction, and schedules.
+- The reproduced product journey covers missing-provider truthfulness, explicit model setup, autonomous coding cells/tools, executed recursive result, retained same-child queued work, failed-gate repair, installed TUI `/quit`, detach and client loss, resident completion, no-ID reattach/status/tree/history, named branch/resume, distinct terminal outcomes, post-commit crash recovery, unknown/no-retry reconciliation, refinement, skills, streaming, compaction, and schedules.
 - Final `bun run verify` after the last hardening commit passed typecheck and architecture checks, 593 core tests with 2 external skips, and 12 installed acceptance tests with 1 opt-in real-provider skip. `bun run test:acceptance:matrix` reported deterministic `PASS` and real-provider, official Turso server, and Turso Cloud rows as `SKIP` with prerequisite names only.
 - External live-provider and Turso rows remain unverified in this environment; source/link installation is proven, while registry or standalone packaging is not claimed. Trusted-local OS authority, no cross-device automatic failover, and the basic readline presentation remain explicit limitations.
 

@@ -27,7 +27,7 @@ Every autonomous model step declares exactly this fixed provider tool set and re
 
 These tools are declaration-only response channels. They have no AI SDK `execute` callbacks, do not run at the provider, and do not produce a provider-managed `tool_result` continuation or multi-step tool loop. The provider returns a candidate call; Agencity normalizes, bounds, validates, and durably records the response before applying it.
 
-Only an accepted `bun_console` call can lead to execution. Its cell is committed as a canonical action before a disposable Bun worker runs it. `tools`, `sql`, `state`, `cells`, `artifacts`, `rlm`, `sdk.memory`, `sdk.agents`, `sdk.harness`, skills, goals, and related names are APIs injected into that later cell. They are not provider tools.
+Only an accepted `bun_console` call can lead to execution. Its cell is committed as a canonical action before a disposable Bun worker runs it. `tools`, `sql`, `state`, `cells`, `artifacts`, `ai`, `sdk.memory`, `sdk.agents`, `sdk.harness`, skills, goals, and related names are APIs injected into that later cell. They are not provider tools.
 
 ### Cardinality and validation
 
@@ -49,9 +49,17 @@ Blocked and failed `finish` calls atomically materialize their exact submitted a
 
 Missing user information is stated in a blocked message. A later user message starts an ordinary new run on the same branch. There is no pending-input protocol, clarification or permission model action, request-input route, or waiting-for-user state.
 
+### Declared data and parameterized agent output
+
+Raw `ai.generateObject` uses the host-owned `agencity.declared-data.v1` response-contract family. The caller supplies only a restricted data schema. Agencity owns the provider tool name, envelope, selection policy, schema-enforcement decision, dispatch, limits, and result validation. Supported Zod and Standard Schema values are converted to the restricted plain JSON Schema profile before durable admission; unsupported semantics fail rather than being approximated.
+
+Full agent invocations pin text output by default. When the caller supplies `output.schema`, the autonomous contract keeps `bun_console` and `finish` as the only provider tools and parameterizes only the successful `finish.outcome.value` data shape. Blocked and failed finishes carry no object. The pinned contract, typed finish or violation, final result, task result, terminal notice, protocol lookup, and calling cell remain digest-linked to the same value.
+
+Declared schemas cannot select a sealed contract, provider tool, tool policy, dispatch, model capability, permission, or runtime authority. Schema-valid output is model-generated data, not objective evidence, factual proof, completion proof, or permission to act.
+
 ### Durable schema and recovery
 
-The accepted workspace event schema is version 3. Version-1 and version-2 workspaces are rejected with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. Projection snapshots are rebuildable and are discarded whenever their reducer version differs from the runtime; the current reducer version belongs in the event reference rather than this decision record.
+The accepted workspace event schema is version 5. Version-1 through version-4 workspaces are rejected with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. Projection snapshots are rebuildable and are discarded whenever their reducer version differs from the runtime; the current reducer version belongs in the event reference rather than this decision record.
 
 The retained model dispatch is `agencity.model-dispatch.v2`, and the authoritative successful effect output is `agencity.model-effect-output.v2`. One complete accepted tool input is retained in that effect output. `ModelCallCompleted`, `AgentRunActionCommitted`, and `AgentRunActionRejected` use result and input digests, provider call identity, and model-call references instead of copying the input. Rejected raw arguments are never retained in events, logs, artifacts, diagnostics, or progress.
 
@@ -63,7 +71,7 @@ The adapter distinguishes external cancellation from its own guard aborts. Exter
 
 Trajectory refinement uses a separate sealed internal contract, `agencity.refinement-review.v1`, with exactly one required `agencity_submit_refinement_review` tool. Its closed transport schema requires every field and preserves absence separately from null, empty arrays, and empty objects before normalization.
 
-This contract is supervisor-selected for a durable recursive child. Public recursive model calls remain text operations. `RecursiveModelStarted.responseAdmission` retains the exact contract and capability seed, and migration 015 adds that rebuildable projection field. A successful structured child writes no result assistant message. It returns a normalized typed recursive result bound to the response admission, exact child model completion, provider tool-call identity, model-result digest, transport-input digest, and byte count. Recovery reconstructs that result from the authoritative effect and retained admission. There is no assistant JSON parser or prose fallback.
+This contract is supervisor-selected for a durable recursive child. Recursive model admission is private to sealed runtime workflows; the public console uses explicit raw `ai` generation or full agent delegation. `RecursiveModelStarted.responseAdmission` retains the exact contract and capability seed, and migration 015 adds that rebuildable projection field. A successful structured child writes no result assistant message. It returns a normalized typed recursive result bound to the response admission, exact child model completion, provider tool-call identity, model-result digest, transport-input digest, and byte count. Recovery reconstructs that result from the authoritative effect and retained admission. There is no assistant JSON parser or prose fallback.
 
 ### Capability and security boundaries
 
@@ -82,6 +90,7 @@ Formal declarations are not a sandbox. Generated TypeScript retains the trusted-
 - The accepted input has one durable full copy; derivative records and diagnostics stay bounded and digest-linked.
 - Pre-release schema changes use an explicit reset boundary instead of compatibility code.
 - Strict provider schemas improve reliability where authoritatively supported, while Agencity validation remains authoritative.
+- Caller-declared schemas parameterize result data only and do not expand the executable contract or authority.
 - Capability truth may remain `unknown` for an exact model even when the transport is usable.
 - Structured refinement is recoverable without creating a synthetic assistant message.
 

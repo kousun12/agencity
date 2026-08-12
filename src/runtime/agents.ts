@@ -1,20 +1,28 @@
 import {
-  FamilyReachError, NotFoundError, ValidationError, assertJsonValue, assertNoReservedModelDispatchInputFields, newId, projectEvents,
+  FamilyReachError, NotFoundError, ValidationError, assertJsonValue, assertNoReservedModelDispatchInputFields, canonicalJsonStringify, createAgentInvocationContract, newId, projectEvents,
   SEALED_TASK_SPECIALIST_PROFILE, agentProfilePin, sameAgentProfileAdmissionMeaning,
-  type AgentProfileInput, type AgentProfileVersion, type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type ModelConfigurationInput, type NewAgentEvent, type TaskStatus,
+  type AgentInvocationContract, type AgentProfileInput, type AgentProfileVersion, type AgentRunResultReference, type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type ModelConfigurationInput, type NewAgentEvent, type TaskStatus,
 } from "../domain/index.ts";
 import {
   requireRecursiveStorage, type AgentStorage, type MailboxRecord, type SessionRecord, type TaskRecord,
 } from "../storage/index.ts";
+import {
+  containsBrokeredSecret,
+  containsCredentialMaterial,
+} from "../security/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
 import type { AgentRunResult, AgentRunService } from "./agent-runs.ts";
 import { ProjectionService } from "./projection.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
+import type { ModelSelectionInput } from "./model-selection.ts";
+
+export const MAX_AGENT_INVOCATION_BATCH_SIZE = 16;
+export const MAX_AGENT_INVOCATION_WAIT_MS = 86_400_000;
 
 export interface SpawnAgentInput {
   readonly task: string;
   readonly completionCriteria?: string;
-  readonly model?: ModelConfigurationInput;
+  readonly model?: ModelSelectionInput;
   readonly budget?: BudgetLimits;
   readonly profile?: AgentProfileInput;
   /** Stable command identity. Reusing it with the same request returns the original handle. */
@@ -23,13 +31,17 @@ export interface SpawnAgentInput {
   readonly branchId?: string;
   /** Stable, human-readable family address. Names need not be unique. */
   readonly name?: string;
-  /** Model-facing spawns normally run autonomously; raw admissions may opt out. */
-  readonly run?: boolean;
+  /** Compact host-validated programmatic output. Omit for normal text. */
+  readonly output?: { readonly schema: JsonValue };
 }
 export interface SubagentHandle {
   readonly taskId: string; readonly sessionId: string; readonly branchId: string;
   readonly parentSessionId: string; readonly parentBranchId: string; readonly rootSessionId: string;
   readonly depth: number; readonly status: TaskStatus; readonly name?: string;
+  readonly runId?: string;
+}
+export interface AgentInvocationResult extends AgentRunResult {
+  readonly taskId: string;
 }
 export interface SpawnAdmissionItem { readonly input: SpawnAgentInput; readonly handle: SubagentHandle; readonly model: ModelConfiguration; readonly budget: BudgetLimits; readonly profile: AgentProfileVersion; readonly existing: boolean; }
 export interface SendMessageInput {
@@ -119,6 +131,27 @@ export class AgentService {
     }),
     readonly normalizeModelIdentity: (model: ModelConfigurationInput) => ModelConfiguration = normalizeModel,
     readonly assertRunnableModel: (model: ModelConfiguration) => void = () => {},
+    readonly selectModel: (
+      caller: ModelConfiguration,
+      selection: ModelSelectionInput,
+      mode: "admit" | "identity",
+    ) => Promise<ModelConfiguration> = async (caller, selection, mode) => {
+      const normalize = mode === "identity"
+        ? normalizeModelIdentity
+        : normalizeModel;
+      const model = typeof selection === "string"
+        ? normalize({ ...caller, model: selection })
+        : normalize(selection);
+      if (
+        model.provider !== caller.provider ||
+        model.model !== caller.model
+      ) {
+        throw new ValidationError(
+          "Child model provider/model must remain within the parent model policy",
+        );
+      }
+      return model;
+    },
   ) {
     this.#recursive = requireRecursiveStorage(storage);
     this.#projections = new ProjectionService(storage);
@@ -144,11 +177,33 @@ export class AgentService {
    * AgentRunRequested event if this process exits immediately after admission.
    */
   async spawnRunnable(parentSessionId: string, parentBranchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> {
-    const [handle] = await this.spawnManyWithEvents(parentSessionId, parentBranchId, [input], (items) => items
+    const [handle] = await this.spawnManyRunnable(parentSessionId, parentBranchId, [input]);
+    return handle!;
+  }
+
+  async spawnManyRunnable(
+    parentSessionId: string,
+    parentBranchId: string,
+    inputs: readonly (SpawnAgentInput | string)[],
+    options: {
+      readonly beforeAdmission?: (
+        items: readonly SpawnAdmissionItem[],
+      ) => Promise<void>;
+    } = {},
+  ): Promise<SubagentHandle[]> {
+    assertInvocationBatchSize(inputs);
+    const contracts = new Map<string, AgentInvocationContract>();
+    const handles = await this.spawnManyWithEvents(parentSessionId, parentBranchId, inputs, (items) => items
       .filter((item) => !item.existing)
-      .map((item): NewAgentEvent<"AgentRunRequested"> => {
+      .flatMap((item): NewAgentEvent[] => {
         const runId = spawnRunId(item.handle.taskId);
-        return {
+        const contract = contracts.get(item.handle.taskId);
+        if (!contract) {
+          throw new ValidationError(
+            "Agent invocation contract was not prepared before admission",
+          );
+        }
+        return [{
           sessionId: item.handle.sessionId,
           branchId: item.handle.branchId,
           type: "AgentRunRequested",
@@ -160,15 +215,86 @@ export class AgentService {
             requestKey: `agent-spawn:${item.handle.taskId}`,
             profilePin: agentProfilePin(item.profile),
           },
-        };
-      }), { requireAgentToolSet: true });
-    this.#scheduleSpawnAdvance(handle!);
-    return handle!;
+        }, {
+          sessionId: item.handle.sessionId,
+          branchId: item.handle.branchId,
+          type: "AgentInvocationContractPinned",
+          producer: "client",
+          idempotencyKey: `agent-invocation-contract:${runId}`,
+          payload: { runId, contract },
+        }];
+      }), {
+        requireAgentToolSet: true,
+        validateItems: async (items) => {
+          for (const item of items) {
+            const runId = spawnRunId(item.handle.taskId);
+            const expected = createAgentInvocationContract({
+              runId,
+              taskId: item.handle.taskId,
+              output: item.input.output === undefined
+                ? { kind: "text" }
+                : { kind: "object", schema: item.input.output.schema },
+              model: item.model,
+              profile: item.profile,
+              budget: item.budget,
+            });
+            assertInvocationContractSecretFree(expected);
+            contracts.set(item.handle.taskId, expected);
+            if (!item.existing) continue;
+            const state = projectEvents(await this.storage.loadEvents(
+              item.handle.sessionId,
+              { branchId: item.handle.branchId },
+            ));
+            const retained =
+              state.agentRuns[runId]?.invocationContract;
+            if (!retained) {
+              if (item.input.output === undefined) continue;
+              throw new ValidationError(
+                "Subagent idempotency key names a legacy text run without an object output contract",
+              );
+            }
+            if (retained.contractDigest !== expected.contractDigest) {
+              throw new ValidationError(
+                "Subagent idempotency key was reused with a different invocation contract",
+              );
+            }
+          }
+          await options.beforeAdmission?.(items);
+        },
+      });
+    for (const handle of handles) this.#scheduleSpawnAdvance(handle);
+    return handles.map((handle) => ({ ...handle, runId: spawnRunId(handle.taskId) }));
   }
 
   /** Compatibility spelling for callers that prefer an explicit action name. */
   spawnAndRun(parentSessionId: string, parentBranchId: string, input: SpawnAgentInput | string): Promise<SubagentHandle> {
     return this.spawnRunnable(parentSessionId, parentBranchId, input);
+  }
+
+  async run(
+    parentSessionId: string,
+    parentBranchId: string,
+    input: SpawnAgentInput | string,
+  ): Promise<AgentInvocationResult> {
+    const handle = await this.spawnRunnable(parentSessionId, parentBranchId, input);
+    return this.result(parentSessionId, parentBranchId, handle.taskId, {
+      wait: true,
+    });
+  }
+
+  async runMany(
+    parentSessionId: string,
+    parentBranchId: string,
+    inputs: readonly (SpawnAgentInput | string)[],
+  ): Promise<AgentInvocationResult[]> {
+    const handles = await this.spawnManyRunnable(
+      parentSessionId,
+      parentBranchId,
+      inputs,
+    );
+    return Promise.all(handles.map((handle) =>
+      this.result(parentSessionId, parentBranchId, handle.taskId, { wait: true })
+    ));
   }
 
   /**
@@ -184,24 +310,60 @@ export class AgentService {
     options: {
       readonly requireAgentToolSet?: boolean;
       readonly profileSources?: readonly ({ readonly entryId: string; readonly versionId: string } | null)[];
+      readonly validateItems?: (
+        items: readonly SpawnAdmissionItem[],
+      ) => Promise<void>;
     } = {},
   ): Promise<SubagentHandle[]> {
     return this.#admissions.run(`${parentSessionId}/${parentBranchId}`, async () => {
-      const inputs = rawInputs.map((input): SpawnAgentInput => typeof input === "string" ? { task: input } : input);
+      if (!Array.isArray(rawInputs)) {
+        throw new ValidationError("Subagent inputs must be an array");
+      }
+      const inputs = rawInputs.map((input): SpawnAgentInput => {
+        if (typeof input === "string") return { task: input };
+        if (!input || typeof input !== "object" || Array.isArray(input)) {
+          throw new ValidationError("Subagent input must be a task string or object");
+        }
+        return input;
+      });
       if (inputs.length === 0) return [];
       for (const input of inputs) {
         assertNoReservedModelDispatchInputFields(
           input,
           "Public subagent input",
         );
+        if (Object.hasOwn(input, "run")) {
+          throw new ValidationError(
+            "Subagent input no longer accepts run; spawn is always detached-running",
+          );
+        }
         assertNoReservedModelDispatchInputFields(
           input.model,
           "Public model configuration",
         );
-        if (!input.task.trim()) throw new ValidationError("Subagent task cannot be empty");
-        if (input.idempotencyKey !== undefined && !input.idempotencyKey.trim()) throw new ValidationError("Subagent idempotencyKey cannot be empty");
-        if (input.name !== undefined && (!input.name.trim() || new TextEncoder().encode(input.name).byteLength > 128)) throw new ValidationError("Subagent name must be 1 to 128 UTF-8 bytes");
+        if (typeof input.task !== "string" || !input.task.trim()) {
+          throw new ValidationError("Subagent task must be a non-empty string");
+        }
+        if (input.idempotencyKey !== undefined &&
+            (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim())) {
+          throw new ValidationError("Subagent idempotencyKey must be a non-empty string");
+        }
+        if (input.name !== undefined &&
+            (typeof input.name !== "string" || !input.name.trim() ||
+              new TextEncoder().encode(input.name).byteLength > 128)) {
+          throw new ValidationError("Subagent name must be 1 to 128 UTF-8 bytes");
+        }
         if (input.profile !== undefined && (!input.profile || typeof input.profile !== "object" || Array.isArray(input.profile))) throw new ValidationError("Subagent profile must be an object");
+        if (input.output !== undefined) {
+          if (!input.output || typeof input.output !== "object" ||
+              Array.isArray(input.output) ||
+              Object.keys(input.output).length !== 1 ||
+              !Object.hasOwn(input.output, "schema")) {
+            throw new ValidationError(
+              "Subagent output must contain only the declared schema",
+            );
+          }
+        }
       }
       if (options.profileSources !== undefined && options.profileSources.length !== inputs.length) {
         throw new ValidationError("Subagent profile source count must match admissions");
@@ -249,12 +411,26 @@ export class AgentService {
       for (let index = 0; index < existing.length; index++) {
         const task = existing[index]; const item = prepared[index]!;
         if (task && item.input.model !== undefined) {
-          if (!Bun.deepEquals(this.normalizeModelIdentity(item.input.model), task.model)) {
+          const selected = await this.selectModel(
+            // String selections inherit route and token options. Reconstruct
+            // those omitted fields from the original durable task so a retry
+            // is not reinterpreted after the parent changes models.
+            task.model,
+            item.input.model,
+            "identity",
+          );
+          if (!Bun.deepEquals(selected, task.model)) {
             throw new ValidationError("Subagent idempotency key was reused with a different model configuration");
           }
           item.model = task.model;
         } else if (task) item.model = task.model;
-        else if (item.input.model !== undefined) item.model = this.normalizeModel(item.input.model);
+        else if (item.input.model !== undefined) {
+          item.model = await this.selectModel(
+            parentState.model,
+            item.input.model,
+            "admit",
+          );
+        }
         if (task && item.input.budget === undefined) item.budget = task.budget;
       }
       for (let index = 0; index < existing.length; index++) {
@@ -287,13 +463,32 @@ export class AgentService {
       const activeDirect = directTasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status));
       if (activeDirect.length + novel.length > this.maxChildren) throw new ValidationError(`Maximum active child count ${this.maxChildren} exceeded`);
 
-      for (const item of novel) assertChildPolicy(parentState.model, parentState.budget.limits, item.model, item.budget);
+      for (const item of novel) {
+        assertChildLimits(
+          parentState.model,
+          parentState.budget.limits,
+          item.model,
+          item.budget,
+        );
+      }
       if (options.requireAgentToolSet) {
         for (const item of novel) this.assertRunnableModel(item.model);
       }
       const activeTasks = directTasks.filter((task) => task.parentBranchId === parentBranchId && !["completed", "failed", "cancelled"].includes(task.status));
       const activeReservations = await Promise.all(activeTasks.map((task) => this.#remainingTaskReservation(task)));
-      assertBudgetReservations(parentState.budget.limits, parentState.budget, [...activeReservations, ...novel.map((item) => item.budget)]);
+      const activeGenerationReservations = Object.values(parentState.aiGenerations)
+        .filter((generation) => ["pending", "running"].includes(generation.status) && generation.reservation)
+        .map((generation): BudgetLimits => ({
+          tokenLimit: generation.reservation!.tokens,
+          costLimitUsd: generation.reservation!.costUsd,
+          turnLimit: generation.reservation!.turns,
+          wallTimeLimitMs: generation.reservation!.wallTimeMs,
+        }));
+      assertBudgetReservations(parentState.budget.limits, parentState.budget, [
+        ...activeReservations,
+        ...activeGenerationReservations,
+        ...novel.map((item) => item.budget),
+      ]);
 
       const rootSessionId = parent.rootSessionId; const depth = parent.depth + 1;
       const handles = prepared.map((item, index): SubagentHandle => ({
@@ -302,6 +497,7 @@ export class AgentService {
         ...(prepared[index]!.input.name === undefined ? {} : { name: prepared[index]!.input.name!.trim() }),
       }));
       const admissionItems = prepared.map((item, index): SpawnAdmissionItem => ({ input: item.input, handle: handles[index]!, model: item.model, budget: item.budget, profile: item.profile, existing: existing[index] !== null }));
+      await options.validateItems?.(admissionItems);
       const events: NewAgentEvent[] = [];
       for (let index = 0; index < prepared.length; index++) {
         if (existing[index]) continue;
@@ -395,7 +591,7 @@ export class AgentService {
         if (!sameMailboxMeaning(existing, common)) throw new ValidationError("Family message intentKey was reused with different durable meaning");
         let recovered = existing;
         if (existing.receiptStatus === "queued" && !existing.delivered) recovered = await this.#recoverAcceptedDelivery(existing);
-        if (recovered.receiptStatus === "queued") await this.#routeAcceptedMessage(recovered);
+        if (recovered.receiptStatus === "queued") await this.#routeAcceptedMessageAfterAcceptance(recovered);
         const updated = await this.#recursive.getMailboxMessage(mailboxMessageId);
         return this.#messageHandle(updated ?? recovered, true);
       }
@@ -404,35 +600,38 @@ export class AgentService {
       if (outbound.filter((message) => Date.parse(message.sentAt) >= minuteAgo).length >= this.maxMessagesPerMinute) {
         throw new ValidationError(`Family message rate limit of ${this.maxMessagesPerMinute} per minute exceeded`);
       }
-      const targetMessages = await this.#recursive.listMailboxMessages(resolved.session.sessionId, "inbound");
-      if (targetMessages.filter((message) => message.receiptStatus === "queued").length >= this.maxPendingMessages) {
-        throw new ValidationError(`Family target pending queue limit of ${this.maxPendingMessages} exceeded`);
-      }
       const sentEventId = `mailbox-sent-${stableId(mailboxMessageId)}`;
-      const targetState = projectEvents(await this.storage.loadEvents(resolved.session.sessionId, { branchId: toBranchId }));
-      if (["archived", "failed"].includes(targetState.status)) {
-        const error = `Target session is ${targetState.status} and unavailable for family delivery`;
-        await this.storage.appendEvents([{
-          id: sentEventId, sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageSent", producer: "client",
-          idempotencyKey: `mailbox-sent:${mailboxMessageId}`, payload: common,
-        }, {
-          sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageDeliveryFailed", producer: "supervisor",
-          idempotencyKey: `mailbox-failed:${mailboxMessageId}`, payload: { mailboxMessageId, failedAt: new Date().toISOString(), error },
-        }]);
-        const failed = await this.#recursive.getMailboxMessage(mailboxMessageId);
-        if (!failed) throw new Error("Failed family delivery receipt was not projected");
-        return this.#messageHandle(failed, false);
+      const accepted = await this.#targetDispatch.run(`${resolved.session.sessionId}/${toBranchId}`, async () => {
+        const targetMessages = await this.#recursive.listMailboxMessages(resolved.session.sessionId, "inbound");
+        if (targetMessages.filter((message) => message.toBranchId === toBranchId && message.receiptStatus === "queued").length >= this.maxPendingMessages) {
+          throw new ValidationError(`Family target pending queue limit of ${this.maxPendingMessages} exceeded`);
+        }
+        const targetState = projectEvents(await this.storage.loadEvents(resolved.session.sessionId, { branchId: toBranchId }));
+        if (["archived", "failed"].includes(targetState.status)) {
+          const error = `Target session is ${targetState.status} and unavailable for family delivery`;
+          await this.storage.appendEvents([{
+            id: sentEventId, sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageSent", producer: "client",
+            idempotencyKey: `mailbox-sent:${mailboxMessageId}`, payload: common,
+          }, {
+            sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageDeliveryFailed", producer: "supervisor",
+            idempotencyKey: `mailbox-failed:${mailboxMessageId}`, payload: { mailboxMessageId, failedAt: new Date().toISOString(), error },
+          }]);
+        } else {
+          await this.storage.appendEvents([{
+            id: sentEventId, sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageSent", producer: "client",
+            idempotencyKey: `mailbox-sent:${mailboxMessageId}`, payload: common,
+          }, {
+            sessionId: resolved.session.sessionId, branchId: toBranchId, type: "MailboxMessageDelivered", producer: "supervisor",
+            idempotencyKey: `mailbox-delivered:${mailboxMessageId}`, payload: { ...common, sentEventId, senderRelationship: inverseRelationship(resolved.relationship) },
+          }]);
+        }
+        const receipt = await this.#recursive.getMailboxMessage(mailboxMessageId);
+        if (!receipt) throw new Error("Accepted family message was not projected");
+        return receipt;
+      });
+      if (accepted.receiptStatus === "queued") {
+        await this.#routeAcceptedMessageAfterAcceptance(accepted);
       }
-      await this.storage.appendEvents([{
-        id: sentEventId, sessionId: fromSessionId, branchId: fromBranchId, type: "MailboxMessageSent", producer: "client",
-        idempotencyKey: `mailbox-sent:${mailboxMessageId}`, payload: common,
-      }, {
-        sessionId: resolved.session.sessionId, branchId: toBranchId, type: "MailboxMessageDelivered", producer: "supervisor",
-        idempotencyKey: `mailbox-delivered:${mailboxMessageId}`, payload: { ...common, sentEventId, senderRelationship: inverseRelationship(resolved.relationship) },
-      }]);
-      const accepted = await this.#recursive.getMailboxMessage(mailboxMessageId);
-      if (!accepted) throw new Error("Accepted family message was not projected");
-      await this.#routeAcceptedMessage(accepted);
       const updated = await this.#recursive.getMailboxMessage(mailboxMessageId);
       return this.#messageHandle(updated ?? accepted, false);
     });
@@ -571,10 +770,28 @@ export class AgentService {
     if (!run) return;
     const task = await this.#recursive.findTaskByChild(result.sessionId);
     if (task && run.requestKey === `agent-spawn:${task.taskId}`) {
-      if (!["completed", "failed", "cancelled"].includes(task.status)) {
-        if (result.status === "succeeded") await this.completeTask(task.taskId, { result: result.final ?? "" });
-        else if (result.status === "cancelled") await this.cancel(task.taskId, result.reason);
-        else await this.failTask(task.taskId, result.reason ?? `Child run ${result.status}`);
+      if (result.status === "succeeded") {
+        if (!result.resultReference && result.invocationContract) {
+          throw new ValidationError(
+            "Successful agent invocation is missing its retained result reference",
+          );
+        }
+        await this.completeTask(task.taskId, {
+          result: (result.resultReference ?? result.final ?? "") as unknown as JsonValue,
+        });
+      } else if (result.status === "cancelled") {
+        if (task.status === "cancelled") {
+          await this.#terminal(task, "cancelled", {
+            ...(result.reason === undefined ? {} : { reason: result.reason }),
+          });
+        } else {
+          await this.cancel(task.taskId, result.reason);
+        }
+      } else {
+        await this.failTask(
+          task.taskId,
+          result.reason ?? `Child run ${result.status}`,
+        );
       }
       const reply = result.status === "succeeded" ? result.final ?? "Child task completed." : `Child task ${result.status}: ${result.reason ?? "no reason supplied"}`;
       await this.sendMessage(result.sessionId, result.branchId, { toSessionId: task.parentSessionId, toBranchId: task.parentBranchId, content: reply, taskId: task.taskId, mode: "steer", intentKey: `automatic-task-reply:${task.taskId}:${result.runId}` });
@@ -618,6 +835,87 @@ export class AgentService {
     if (!this.#runs) return;
     const runs = this.#runs;
     queueMicrotask(() => { void runs.advance(handle.sessionId, handle.branchId, spawnRunId(handle.taskId)).catch(() => {}); });
+  }
+
+  async result(
+    parentSessionId: string,
+    parentBranchId: string,
+    taskId: string,
+    options: { readonly wait?: boolean; readonly timeoutMs?: number } = {},
+  ): Promise<AgentInvocationResult> {
+    if (!this.#runs) throw new ValidationError("Agent run service is unavailable");
+    if (options.wait !== undefined && typeof options.wait !== "boolean") {
+      throw new ValidationError("Agent invocation result wait must be boolean");
+    }
+    if (options.timeoutMs !== undefined &&
+        (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0 ||
+          options.timeoutMs > MAX_AGENT_INVOCATION_WAIT_MS)) {
+      throw new ValidationError(
+        `Agent invocation wait timeout must be from 0 to ${MAX_AGENT_INVOCATION_WAIT_MS}ms`,
+      );
+    }
+    const task = await this.#recursive.getTask(taskId);
+    if (!task || task.parentSessionId !== parentSessionId ||
+        task.parentBranchId !== parentBranchId) {
+      throw new NotFoundError("agent invocation", taskId);
+    }
+    const runId = spawnRunId(task.taskId);
+    const deadline = options.timeoutMs === undefined
+      ? Number.POSITIVE_INFINITY
+      : Date.now() + options.timeoutMs;
+    for (;;) {
+      const result = await this.#runs.get(
+        task.childSessionId,
+        task.childBranchId,
+        runId,
+      );
+      if (!options.wait ||
+          ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(result.status) ||
+          Date.now() >= deadline) {
+        return { ...result, taskId: task.taskId };
+      }
+      await Bun.sleep(Math.min(25, Math.max(1, deadline - Date.now())));
+    }
+  }
+
+  async invocationContract(
+    parentSessionId: string,
+    parentBranchId: string,
+    taskId: string,
+  ) {
+    const result = await this.result(parentSessionId, parentBranchId, taskId, {
+      wait: false,
+    });
+    if (!result.invocationContract) {
+      throw new ValidationError("Agent invocation has no pinned contract");
+    }
+    return result.invocationContract;
+  }
+
+  async findInvocation(
+    parentSessionId: string,
+    parentBranchId: string,
+    idempotencyKey: string,
+  ): Promise<SubagentHandle | null> {
+    if (!idempotencyKey.trim()) {
+      throw new ValidationError("Agent invocation idempotencyKey cannot be empty");
+    }
+    const taskId = `task-${stableId(`${parentSessionId}/${parentBranchId}/${idempotencyKey}`)}`;
+    const task = await this.#recursive.getTask(taskId);
+    if (!task || task.parentSessionId !== parentSessionId ||
+        task.parentBranchId !== parentBranchId) return null;
+    const child = await this.#recursive.getSession(task.childSessionId);
+    return {
+      taskId: task.taskId,
+      sessionId: task.childSessionId,
+      branchId: task.childBranchId,
+      parentSessionId,
+      parentBranchId,
+      rootSessionId: child?.rootSessionId ?? parentSessionId,
+      depth: child?.depth ?? 0,
+      status: task.status,
+      runId: spawnRunId(task.taskId),
+    };
   }
 
   async cancelFamilyTarget(sessionId: string, branchId: string, target: string, reason?: string): Promise<TaskRecord | AgentRunResult> {
@@ -671,6 +969,20 @@ export class AgentService {
     });
   }
 
+  /**
+   * Routing follows canonical acceptance and is recoverable. Admission may
+   * legitimately lose to a concurrent ordinary run; the retained queued
+   * receipt must still be returned and terminal-run dispatch or recovery will
+   * advance it later.
+   */
+  async #routeAcceptedMessageAfterAcceptance(message: MailboxRecord): Promise<void> {
+    try {
+      await this.#routeAcceptedMessage(message);
+    } catch {
+      // The accepted receipt remains the source of truth for later recovery.
+    }
+  }
+
   async #dispatchNextQueuedMessageLocked(sessionId: string, branchId: string): Promise<void> {
     if (!this.#runs) return;
     const events = await this.storage.loadEvents(sessionId, { branchId });
@@ -694,12 +1006,26 @@ export class AgentService {
     }
     const message = pending[0]!;
     const runId = retainedMessageRunId(message);
-    await this.#runs.admit(message.toSessionId, message.toBranchId, {
-      task: message.content,
-      requestKey: retainedMessageRequestKey(message),
-      requestedRunId: runId,
-      suppressTaskMessage: true,
-    });
+    try {
+      await this.#runs.admit(message.toSessionId, message.toBranchId, {
+        task: message.content,
+        requestKey: retainedMessageRequestKey(message),
+        requestedRunId: runId,
+        suppressTaskMessage: true,
+      });
+    } catch (error) {
+      const racedState = projectEvents(await this.storage.loadEvents(sessionId, { branchId }));
+      const retained = racedState.agentRuns[runId];
+      if (retained) {
+        if (!isTerminalRunStatus(retained.status)) {
+          await this.#deliverToContext(message, retained.id);
+          this.#scheduleQueuedRunAdvance(message, retained.id);
+        }
+        return;
+      }
+      if (activeRun(racedState)) return;
+      throw error;
+    }
     await this.#deliverToContext(message, runId);
     this.#scheduleQueuedRunAdvance(message, runId);
   }
@@ -714,12 +1040,28 @@ export class AgentService {
         return;
       }
       if (activeRun(state)) return;
-      await this.#runs.admit(message.toSessionId, message.toBranchId, {
-        task: message.content,
-        requestKey: retainedMessageRequestKey(message),
-        requestedRunId: message.contextRunId,
-        suppressTaskMessage: true,
-      });
+      try {
+        await this.#runs.admit(message.toSessionId, message.toBranchId, {
+          task: message.content,
+          requestKey: retainedMessageRequestKey(message),
+          requestedRunId: message.contextRunId,
+          suppressTaskMessage: true,
+        });
+      } catch (error) {
+        const racedState = projectEvents(await this.storage.loadEvents(
+          message.toSessionId,
+          { branchId: message.toBranchId },
+        ));
+        const racedRetained = racedState.agentRuns[message.contextRunId];
+        if (racedRetained) {
+          if (!isTerminalRunStatus(racedRetained.status)) {
+            this.#scheduleQueuedRunAdvance(message, racedRetained.id);
+          }
+          return;
+        }
+        if (activeRun(racedState)) return;
+        throw error;
+      }
       this.#scheduleQueuedRunAdvance(message, message.contextRunId);
     });
   }
@@ -982,13 +1324,39 @@ export class AgentService {
   }
 
   async #terminal(task: TaskRecord, status: "completed" | "failed" | "cancelled", detail: { result?: JsonValue; artifactIds?: string[]; error?: string; reason?: string }): Promise<TaskRecord> {
+    let terminalDetail = detail;
     if (["completed", "failed", "cancelled"].includes(task.status)) {
-      if (task.status === status) return task;
-      throw new ValidationError(`Task is already ${task.status}`);
+      if (task.status === status) {
+        // Re-append the stable terminal transaction so recovery can complete a
+        // child/parent delivery prefix. Existing events are true idempotent
+        // no-ops; any missing suffix is committed exactly once.
+        const retained = (await this.storage.loadEvents(task.parentSessionId, {
+          branchId: task.parentBranchId,
+        })).filter((event) =>
+          event.type === "TaskStatusChanged" &&
+          (event.payload as EventPayloads["TaskStatusChanged"]).taskId ===
+            task.taskId &&
+          (event.payload as EventPayloads["TaskStatusChanged"]).status === status
+        ).at(-1);
+        if (retained) {
+          const payload =
+            retained.payload as EventPayloads["TaskStatusChanged"];
+          terminalDetail = {
+            ...(payload.result === undefined ? {} : { result: payload.result }),
+            ...(payload.artifactIds === undefined
+              ? {}
+              : { artifactIds: [...payload.artifactIds] }),
+            ...(payload.error === undefined ? {} : { error: payload.error }),
+            ...(payload.reason === undefined ? {} : { reason: payload.reason }),
+          };
+        }
+      } else {
+        throw new ValidationError(`Task is already ${task.status}`);
+      }
     }
     const noticeId = `notice-${task.taskId}`; const sentEventId = `terminal-sent-${task.taskId}`;
-    const terminal = { noticeId, taskId: task.taskId, parentSessionId: task.parentSessionId, childSessionId: task.childSessionId, status, ...detail };
-    const change = { taskId: task.taskId, status, ...detail };
+    const terminal = { noticeId, taskId: task.taskId, parentSessionId: task.parentSessionId, childSessionId: task.childSessionId, status, ...terminalDetail };
+    const change = { taskId: task.taskId, status, ...terminalDetail };
     const events: NewAgentEvent[] = [{
       id: sentEventId, sessionId: task.childSessionId, branchId: task.childBranchId, type: "TaskTerminalNoticeSent", producer: "supervisor", idempotencyKey: `task-terminal-sent:${task.taskId}`, payload: terminal,
     }, {
@@ -1009,12 +1377,18 @@ export class AgentService {
     const childEvents = await this.storage.loadEvents(task.childSessionId, { branchId: task.childBranchId });
     const child = projectEvents(childEvents);
     const ownCalls = new Set(Object.keys(child.modelCalls));
+    const ownGenerations = new Set(Object.keys(child.aiGenerations));
     let tokens = 0; let costUsd = 0; let turns = 0; let wallTimeMs = 0;
     for (const event of childEvents) {
-      if (event.type !== "BudgetDebited") continue;
-      const payload = event.payload as EventPayloads["BudgetDebited"];
-      if (!ownCalls.has(payload.callId)) continue;
-      tokens += payload.tokens; costUsd += payload.costUsd; turns += payload.turns; wallTimeMs += payload.wallTimeMs;
+      if (event.type === "BudgetDebited") {
+        const payload = event.payload as EventPayloads["BudgetDebited"];
+        if (!ownCalls.has(payload.callId)) continue;
+        tokens += payload.tokens; costUsd += payload.costUsd; turns += payload.turns; wallTimeMs += payload.wallTimeMs;
+      } else if (event.type === "AiGenerationBudgetDebited") {
+        const payload = event.payload as EventPayloads["AiGenerationBudgetDebited"];
+        if (!ownGenerations.has(payload.generationId)) continue;
+        tokens += payload.tokens; costUsd += payload.costUsd; turns += payload.turns; wallTimeMs += payload.wallTimeMs;
+      }
     }
     const descendant = { tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0 };
     for (const event of childEvents) {
@@ -1023,12 +1397,29 @@ export class AgentService {
       descendant.tokens += payload.tokens; descendant.costUsd += payload.costUsd;
       descendant.turns += payload.turns; descendant.wallTimeMs += payload.wallTimeMs;
     }
-    const conservative = Object.values(child.modelCalls).some((call) => call.status === "unknown");
+    let conservative =
+      Object.values(child.modelCalls).some((call) => call.status === "unknown") ||
+      Object.values(child.aiGenerations).some((generation) =>
+        generation.budgetDebited?.usageSource === "conservative-guard-estimate");
     if (conservative) {
       tokens = Math.max(tokens, task.budget.tokenLimit === undefined ? tokens : Math.max(0, task.budget.tokenLimit - descendant.tokens));
       costUsd = Math.max(costUsd, task.budget.costLimitUsd === undefined ? costUsd : Math.max(0, task.budget.costLimitUsd - descendant.costUsd));
       turns = Math.max(turns, task.budget.turnLimit === undefined ? turns : Math.max(0, task.budget.turnLimit - descendant.turns));
       wallTimeMs = Math.max(wallTimeMs, task.budget.wallTimeLimitMs === undefined ? wallTimeMs : Math.max(0, task.budget.wallTimeLimitMs - descendant.wallTimeMs));
+    }
+    const retainedUsage = (await this.storage.loadEvents(task.parentSessionId, {
+      branchId: task.parentBranchId,
+    })).filter((event) =>
+      event.type === "TaskUsageAttributed" &&
+      (event.payload as EventPayloads["TaskUsageAttributed"]).taskId ===
+        task.taskId
+    ).at(-1)?.payload as EventPayloads["TaskUsageAttributed"] | undefined;
+    if (retainedUsage) {
+      tokens = retainedUsage.tokens;
+      costUsd = retainedUsage.costUsd;
+      turns = retainedUsage.turns;
+      wallTimeMs = retainedUsage.wallTimeMs;
+      conservative = retainedUsage.conservative;
     }
     const usage = { taskId: task.taskId, childSessionId: task.childSessionId, tokens, costUsd, turns, wallTimeMs, conservative };
     const result: NewAgentEvent[] = [];
@@ -1038,18 +1429,31 @@ export class AgentService {
       const ancestorEvents = await this.storage.loadEvents(sessionId, { branchId });
       if (!ancestorEvents.length) throw new NotFoundError("ancestor branch", `${sessionId}/${branchId}`);
       const ancestor = projectEvents(ancestorEvents);
-      result.push({
-        sessionId, branchId, type: "TaskUsageAttributed", producer: "supervisor",
-        idempotencyKey: `task-usage:${task.taskId}`, payload: usage,
-      });
-      const exceeded = budgetReached(ancestor.budget.limits, {
-        tokens: ancestor.budget.tokens + tokens, costUsd: ancestor.budget.costUsd + costUsd,
-        turns: ancestor.budget.turns + turns, wallTimeMs: ancestor.budget.wallTimeMs + wallTimeMs,
-      });
-      if (exceeded) result.push({
-        sessionId, branchId, type: "BudgetExceeded", producer: "supervisor",
-        idempotencyKey: `task-usage-exceeded:${task.taskId}:${exceeded.dimension}`, payload: exceeded,
-      });
+      const existingAttribution = ancestorEvents.find((event) =>
+        event.type === "TaskUsageAttributed" &&
+        (event.payload as EventPayloads["TaskUsageAttributed"]).taskId ===
+          task.taskId
+      );
+      if (existingAttribution) {
+        if (!Bun.deepEquals(existingAttribution.payload, usage)) {
+          throw new ValidationError(
+            `Task usage attribution disagrees across ancestors for ${task.taskId}`,
+          );
+        }
+      } else {
+        result.push({
+          sessionId, branchId, type: "TaskUsageAttributed", producer: "supervisor",
+          idempotencyKey: `task-usage:${task.taskId}`, payload: usage,
+        });
+        const exceeded = budgetReached(ancestor.budget.limits, {
+          tokens: ancestor.budget.tokens + tokens, costUsd: ancestor.budget.costUsd + costUsd,
+          turns: ancestor.budget.turns + turns, wallTimeMs: ancestor.budget.wallTimeMs + wallTimeMs,
+        });
+        if (exceeded) result.push({
+          sessionId, branchId, type: "BudgetExceeded", producer: "supervisor",
+          idempotencyKey: `task-usage-exceeded:${task.taskId}:${exceeded.dimension}`, payload: exceeded,
+        });
+      }
       const record = await this.#recursive.getSession(sessionId);
       sessionId = record?.parentSessionId ?? null;
       branchId = record?.parentBranchId ?? null;
@@ -1057,6 +1461,34 @@ export class AgentService {
     return result;
   }
 
+}
+
+function assertInvocationBatchSize(
+  inputs: readonly (SpawnAgentInput | string)[],
+): void {
+  if (!Array.isArray(inputs)) {
+    throw new ValidationError("Agent invocation inputs must be an array");
+  }
+  if (inputs.length < 1 || inputs.length > MAX_AGENT_INVOCATION_BATCH_SIZE) {
+    throw new ValidationError(
+      `Agent invocation batch requires 1-${MAX_AGENT_INVOCATION_BATCH_SIZE} inputs`,
+    );
+  }
+}
+
+function assertInvocationContractSecretFree(
+  contract: AgentInvocationContract,
+): void {
+  if (contract.output.kind !== "object") return;
+  const schema = contract.output.declaredSchema.schema;
+  if (
+    containsBrokeredSecret(schema) ||
+    containsCredentialMaterial(canonicalJsonStringify(schema))
+  ) {
+    throw new ValidationError(
+      "Declared JSON Schema contains credential material",
+    );
+  }
 }
 
 interface FamilyCandidate {
@@ -1179,10 +1611,7 @@ function stableId(value: string): string {
   const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex").slice(0, 32);
 }
 
-function assertChildPolicy(parentModel: ModelConfiguration, parentBudget: BudgetLimits, model: ModelConfiguration, budget: BudgetLimits): void {
-  if (model.provider !== parentModel.provider || model.model !== parentModel.model) {
-    throw new ValidationError("Child model provider/model must remain within the parent model policy");
-  }
+function assertChildLimits(parentModel: ModelConfiguration, parentBudget: BudgetLimits, model: ModelConfiguration, budget: BudgetLimits): void {
   if (parentModel.maxOutputTokens !== undefined && (model.maxOutputTokens ?? parentModel.maxOutputTokens) > parentModel.maxOutputTokens) {
     throw new ValidationError("Child model output limit cannot exceed the parent model limit");
   }

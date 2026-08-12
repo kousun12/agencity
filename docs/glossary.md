@@ -140,7 +140,15 @@ One model-decision cycle inside an agent run. A step materializes context, reque
 
 ### Invocation
 
-One profile-pinned unit of model-driven work: either an autonomous agent run or retained recursive-model execution. An invocation may contain multiple model calls or retries while preserving one profile pin.
+One profile-pinned unit of model-driven work. Current public agent invocations are full autonomous child runs; retained supervisor-private recursive-model executions continue to support sealed operations and historical recovery. An invocation may contain multiple model calls or retries while preserving one profile pin.
+
+### Agent invocation
+
+One durable child task and autonomous run admitted from a parent branch. The invocation pins text or declared-object output, returns a durable handle, and ends as succeeded, blocked, failed, cancelled, budget-exceeded, or unknown. Awaited `run` returns its retained result; detached `spawn` returns the handle immediately and `result` retrieves lifecycle or terminal output later.
+
+### Raw AI generation
+
+One text or declared-object provider request owned by the calling session and branch. It receives only a fixed host instruction plus explicit prompt/messages and explicit bounded context, retains exact request/effect/result/usage provenance, and creates no child session, task, profile, mailbox, or autonomous continuation.
 
 ### Agent action
 

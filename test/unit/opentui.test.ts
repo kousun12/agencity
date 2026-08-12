@@ -1088,12 +1088,10 @@ describe("OpenTUI interactive terminal", () => {
     const child = await supervisor.agents.spawn(root.sessionId, root.branchId, {
       task: "Review the implementation",
       name: "Reviewer",
-      run: false,
     });
     await supervisor.agents.spawn(child.sessionId, child.branchId, {
       task: "Verify the review",
       name: "Verifier",
-      run: false,
     });
     const branchesBefore = (await supervisor.storage.listBranches()).length;
     const client = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
@@ -1210,7 +1208,6 @@ describe("OpenTUI interactive terminal", () => {
     const child = await supervisor.agents.spawn(first.sessionId, first.branchId, {
       task: "Nested route command entry",
       name: "Nested child",
-      run: false,
     });
     const catalogRow = (
       sessionId: string,

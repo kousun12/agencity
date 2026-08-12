@@ -51,6 +51,27 @@ export class CapabilityUnavailableError extends AgentRuntimeError {
   }
 }
 
+/** An awaited agent dependency cannot be admitted without risking deadlock. */
+export class ConsoleCapacityError extends AgentRuntimeError {
+  constructor(details: {
+    readonly requestedResidentProcesses: number;
+    readonly availableResidentProcesses: number;
+    readonly maxResidentProcesses: number;
+    readonly residentProcesses: number;
+    readonly reservedProcesses: number;
+  }) {
+    super(
+      "CONSOLE_CAPACITY_EXCEEDED",
+      `Awaited agent execution requires ${details.requestedResidentProcesses} resident console ${
+        details.requestedResidentProcesses === 1 ? "slot" : "slots"
+      }, but only ${details.availableResidentProcesses} ${
+        details.availableResidentProcesses === 1 ? "is" : "are"
+      } available`,
+      details,
+    );
+  }
+}
+
 /** A selected model transport cannot prove the requested response contract. */
 export class ModelResponseContractUnavailableError extends AgentRuntimeError {
   constructor(

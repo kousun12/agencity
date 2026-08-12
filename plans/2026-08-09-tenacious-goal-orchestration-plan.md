@@ -2,9 +2,9 @@
 
 **Status:** Proposed  
 **Date:** August 9, 2026  
-**Last revised:** August 9, 2026
+**Last revised:** August 11, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
-**Related planning:** [Prime Agent rewrite follow-up plan](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md), [Formal model-tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), and [Durable agent profiles and automated refinement review](./2026-08-08-adaptive-agent-city-plan.md)  
+**Related planning:** [Prime Agent rewrite follow-up plan](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md), [Formal model-tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), [Durable agent profiles and automated refinement review](./2026-08-08-adaptive-agent-city-plan.md), and [Explicit AI generation and typed agent runs](./2026-08-11-explicit-ai-generation-and-typed-agent-runs-plan.md)
 **Governing decisions:** [Durable local runtime foundations](../docs/decisions/0001-durable-local-runtime-foundations.md), [Durable agent relationships](../docs/decisions/0006-durable-agent-relationships.md), [Managed workspace execution](../docs/decisions/0007-managed-workspace-execution.md), [Formal model-tool contracts](../docs/decisions/0010-formal-model-tool-contracts.md), and [Durable agent profiles and automated refinement governance](../docs/decisions/0012-durable-agent-profiles-automated-refinement-governance.md)
 
 ## Summary
@@ -40,6 +40,8 @@ The default product path creates no required completion gate. In that path, a su
 The existing `GoalCreated.maxTurns` field is validated and retained but is not enforced. The name is also ambiguous because current session-budget `turns` debit successful provider model completions, while product discussions may use “turn” to mean a complete top-level autonomous episode.
 
 Prime Agent's `/goal` behavior does not create another durable agent identity or an independent judge. It attaches goal state to the current thread and injects another goal prompt after each ordinary assistant turn until the model explicitly calls `goal.complete()`, a token bound is reached, or the user stops it. Agencity needs equivalent tenacity without adopting process or thread state as identity and without weakening its existing gate, outbox, and recovery semantics.
+
+The current console can await bounded full child agents through `sdk.agents.run`/`runMany` and retrieve detached child results through durable handles. These primitives simplify bounded orchestration inside one committed cell. They do not replace this plan: a long parent-cell loop is not a durable coordinator across worker loss, and typed child results do not own cross-run episode state, successor admission, aggregate goal bounds, quiescent child waiting, or supervisor recovery after the parent run becomes terminal.
 
 ## Product decision
 

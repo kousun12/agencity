@@ -2,7 +2,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGateway } from "@ai-sdk/gateway";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, streamText, type LanguageModel, type ModelMessage } from "ai";
-import { canonicalJsonDigest, canonicalJsonStringify, type JsonValue } from "../domain/json.ts";
+import { canonicalJsonByteLength, canonicalJsonDigest, canonicalJsonStringify, type JsonValue } from "../domain/json.ts";
 import {
   AGENT_ACTION_PROTOCOL,
   AGENT_ACTION_VERSION,
@@ -640,7 +640,7 @@ function boundedText(value: string, maximum: number): string {
   return bounded;
 }
 
-function parse(input: JsonValue): { providerInput: ProviderInputCandidate; modelDispatch: ModelDispatch; callId?: string; compactionId?: string } {
+function parse(input: JsonValue): { providerInput: ProviderInputCandidate; modelDispatch: ModelDispatch; callId?: string; compactionId?: string; generationId?: string; maxInlineResultBytes?: number } {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("Model input must be an object");
   const providerInput = input.providerInput;
   const rawDispatch = input.modelDispatch;
@@ -654,6 +654,8 @@ function parse(input: JsonValue): { providerInput: ProviderInputCandidate; model
     modelDispatch,
     ...(typeof input.callId === "string" ? { callId: input.callId } : {}),
     ...(typeof input.compactionId === "string" ? { compactionId: input.compactionId } : {}),
+    ...(typeof input.generationId === "string" ? { generationId: input.generationId } : {}),
+    ...(typeof input.maxInlineResultBytes === "number" ? { maxInlineResultBytes: input.maxInlineResultBytes } : {}),
   };
 }
 
@@ -1080,7 +1082,7 @@ export class ModelExecutor implements EffectExecutor {
   async execute(request: Parameters<EffectExecutor["execute"]>[0], context: Parameters<EffectExecutor["execute"]>[1]): Promise<ExecutionResult> {
     if (request.operation !== "complete") return result("failed", undefined, `Unsupported model operation: ${request.operation}`, "provider-request-failed");
     try {
-      const { providerInput, modelDispatch, callId } = parse(request.input);
+      const { providerInput, modelDispatch, callId, generationId, maxInlineResultBytes } = parse(request.input);
       const output = await this.executeResponseAware(
         providerInput as unknown as JsonValue,
         modelDispatch,
@@ -1110,6 +1112,37 @@ export class ModelExecutor implements EffectExecutor {
           });
         },
       );
+      if (generationId !== undefined) {
+        if (!Number.isSafeInteger(maxInlineResultBytes) || maxInlineResultBytes! < 1) {
+          throw new ValidationError("AI generation model effect requires a positive inline result bound");
+        }
+        const generated = output.result.kind === "text"
+          ? output.result.text
+          : output.result.kind === "tool-submission" &&
+              output.result.submission.input &&
+              typeof output.result.submission.input === "object" &&
+              !Array.isArray(output.result.submission.input)
+            ? output.result.submission.input.value
+            : undefined;
+        if (generated !== undefined &&
+            (containsBrokeredSecret(generated) ||
+              containsCredentialMaterial(canonicalJsonStringify(generated)))) {
+          throw new ModelProviderResponseFailureError(
+            "stream-failed",
+            modelDispatch.configuration.provider,
+            modelDispatch.configuration.model,
+            "AI generation output contained credential material",
+          );
+        }
+        if (generated !== undefined && canonicalJsonByteLength(generated) > maxInlineResultBytes!) {
+          throw new ModelProviderResponseFailureError(
+            "stream-failed",
+            modelDispatch.configuration.provider,
+            modelDispatch.configuration.model,
+            "AI generation output exceeded the hard inline result bound",
+          );
+        }
+      }
       return result("succeeded", output as unknown as JsonValue);
     } catch (error) {
       if (context.signal.aborted || error instanceof DOMException && error.name === "AbortError") return result("cancelled", undefined, "Model call cancelled");

@@ -11,6 +11,8 @@ import {
   DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS,
   ManagedWorkspaceService,
   connectManagedService,
+  decodeManagedServiceConfiguration,
+  encodeManagedServiceConfiguration,
   managedServiceConfigurationHash,
   readServiceManifest,
   resolveWorkspace,
@@ -177,6 +179,27 @@ class ManagedGovernanceProvider implements ModelProvider {
 }
 
 describe("managed workspace service", () => {
+  test("managed configuration defaults preserve old wire compatibility", async () => {
+    const config = await configuration("agencity-managed-config-compatibility-");
+    const serialized = JSON.parse(
+      Buffer.from(encodeManagedServiceConfiguration(config), "base64url")
+        .toString("utf8"),
+    ) as Record<string, unknown>;
+    delete serialized.maxConsoleResidentProcesses;
+    delete serialized.maxConsoleActiveExecutions;
+    delete serialized.maxAwaitedAgentDepth;
+    const decoded = decodeManagedServiceConfiguration(
+      Buffer.from(JSON.stringify(serialized)).toString("base64url"),
+    );
+    expect(decoded).toMatchObject({
+      maxConsoleResidentProcesses: 17,
+      maxConsoleActiveExecutions: 4,
+      maxAwaitedAgentDepth: 8,
+    });
+    expect(managedServiceConfigurationHash(decoded))
+      .toBe(managedServiceConfigurationHash(config));
+  });
+
   test("brokers stored provider keys and durable model selection through the public client", async () => {
     const config = await configuration("agencity-managed-model-config-");
     const service = await opened(config);
@@ -246,7 +269,7 @@ describe("managed workspace service", () => {
     expect((await fetch(`${service.manifest.url}/health`)).status).toBe(401);
     expect((await fetch(`${service.manifest.url}/service/status`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401);
     const health = await (await fetch(`${service.manifest.url}/health`, { headers: { authorization: `Bearer ${service.manifest.bearerToken}` } })).json() as any;
-    expect(health).toMatchObject({ authenticated: true, workspaceId: config.workspace.workspaceId, instanceId: service.manifest.instanceId, appVersion: "0.1.0-test", protocolMin: 1, protocolMax: 1, configHash: managedServiceConfigurationHash(config) });
+    expect(health).toMatchObject({ authenticated: true, workspaceId: config.workspace.workspaceId, instanceId: service.manifest.instanceId, appVersion: "0.1.0-test", protocolMin: 2, protocolMax: 2, configHash: managedServiceConfigurationHash(config) });
 
     const paths = serviceStatePaths(config.workspace.root);
     expect((await stat(paths.serviceDirectory)).mode & 0o077).toBe(0);
@@ -636,7 +659,7 @@ describe("managed workspace service", () => {
     } finally { raw.close(); }
   });
 
-  test("warm scratch is not a keep-alive reason and idle shutdown stops its worker", async () => {
+  test("status reports warm workers and idle shutdown retires them before exit", async () => {
     const config = {
       ...(await configuration("agencity-managed-warm-scratch-idle-")),
       idleShutdownMs: 2_000,
@@ -652,9 +675,15 @@ describe("managed workspace service", () => {
       "scratch.warmOnly = () => 42; ({ warm: typeof scratch.warmOnly === 'function' })",
     );
     expect(service.supervisor.console.status().running).toBe(true);
-    expect((await service.status()).keepAliveReasons).not.toContainEqual(
-      expect.objectContaining({ kind: "resident_workers" }),
-    );
+    expect(await service.status()).toMatchObject({
+      console: {
+        residentProcesses: 1,
+        activeExecutions: 0,
+      },
+      keepAliveReasons: [
+        expect.objectContaining({ kind: "resident_workers", count: 1 }),
+      ],
+    });
 
     await waitFor(
       async () => !(await Bun.file(serviceStatePaths(config.workspace.root).manifestPath).exists()),

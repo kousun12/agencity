@@ -261,7 +261,8 @@ function reducedType(type: string): {
 function requiredObservation(observation: AgentProviderObservation): boolean {
   if (CELL_TERMINAL_TYPES.has(observation.type)) return true;
   if (observation.type.endsWith("Failed") || observation.type.endsWith("Unknown") ||
-      observation.type === "AgentRunActionRejected") return true;
+      observation.type === "AgentRunActionRejected" ||
+      observation.type === "AgentRunTypedActionViolationCommitted") return true;
   if (!observation.payload || typeof observation.payload !== "object" || Array.isArray(observation.payload)) return false;
   const payload = observation.payload as Record<string, JsonValue>;
   if (payload.outcome === "unknown") return true;
@@ -288,7 +289,9 @@ function terminalFact(observation: AgentProviderObservation): string {
     }
   }
   if (observation.type.endsWith("Unknown")) return "unknown";
-  if (observation.type.endsWith("Failed") || observation.type === "AgentRunActionRejected") return "failed";
+  if (observation.type.endsWith("Failed") ||
+      observation.type === "AgentRunActionRejected" ||
+      observation.type === "AgentRunTypedActionViolationCommitted") return "failed";
   return "terminal";
 }
 

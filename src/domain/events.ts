@@ -42,6 +42,11 @@ import {
   type RepositoryInstructionDiscovery,
   type RepositoryInstructionOmission,
 } from "./repository-instructions.ts";
+import {
+  validateAgentInvocationContract,
+  type AgentInvocationContract,
+  type AgentRunResultReference,
+} from "./agent-invocation-contract.ts";
 
 export const EVENT_SCHEMA_VERSION = 5 as const;
 export const eventTypes = [
@@ -59,6 +64,8 @@ export const eventTypes = [
   "HeartbeatCreated", "HeartbeatTicked", "HeartbeatStatusChanged",
   "ScheduleCreated", "ScheduleTicked", "ScheduleStatusChanged", "WakeQueued", "WakeClaimed", "WakeDelivered", "WakeDeliveryUnknown",
   "RecursiveModelStarted", "RecursiveModelStatusChanged",
+  "AiGenerationContextFrozen", "AiGenerationRequested", "AiGenerationStatusChanged",
+  "AiGenerationResultCommitted", "AiGenerationBudgetDebited",
   "HarnessVersionCreated", "HarnessVersionStatusChanged",
   "UserCorrection", "RefinementReviewRequested", "RefinementReviewChildLinked", "RefinementReviewStatusChanged", "RefinementTriggerConsumed",
   "RefinementProposed", "RefinementValidated", "RefinementCandidateActivated",
@@ -70,7 +77,8 @@ export const eventTypes = [
   "RefinementProposalTerminalNoticeDelivered", "RefinementRollbackApplied",
   "GovernedRefinementRollbackApplied",
   "SkillImported", "SkillAvailabilityChanged", "SkillInvocationRecorded", "SkillTestRecorded", "SubagentSpecInvoked", "SyncConflictResolved",
-  "AgentRunRequested", "AgentRunStepStarted", "AgentRunModelAttemptStarted", "AgentRunActionCommitted", "AgentRunActionRejected", "AgentRunGoalCheckRecorded",
+  "AgentRunRequested", "AgentInvocationContractPinned", "AgentRunStepStarted", "AgentRunModelAttemptStarted", "AgentRunActionCommitted", "AgentRunActionRejected",
+  "AgentRunTypedFinishCommitted", "AgentRunTypedActionViolationCommitted", "AgentRunResultCommitted", "AgentRunGoalCheckRecorded",
   "AgentRunCancellationRequested", "AgentRunStatusChanged",
 ] as const;
 export type EventType = (typeof eventTypes)[number];
@@ -107,6 +115,7 @@ export type GovernedRefinementRollbackAction =
 export type EffectOrigin =
   | { readonly kind: "cell"; readonly cellId: string }
   | { readonly kind: "model-call"; readonly callId: string }
+  | { readonly kind: "ai-generation"; readonly generationId: string }
   | { readonly kind: "context-compaction"; readonly compactionId: string }
   | { readonly kind: "goal-gate"; readonly goalId: string; readonly gateId: string; readonly requestId: string }
   | { readonly kind: "skill-invocation"; readonly entryId: string; readonly versionId: string }
@@ -126,6 +135,16 @@ export type WakeStatus = "queued" | "claimed" | "delivered" | "unknown";
 export type AgentRunGoalMode = "none" | "auto" | "current" | "create";
 export type RecursiveModelStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type RecursiveModelOutcome = "succeeded" | "failed" | "cancelled" | "budget-exceeded" | "unknown";
+export type AiGenerationKind = "text" | "object";
+export type AiGenerationStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled" | "unknown" | "budget_exceeded";
+export const MAX_AI_GENERATIONS_PER_CELL = 16;
+export const MAX_CONCURRENT_AI_GENERATIONS_PER_CELL = 4;
+export const AI_GENERATION_SYSTEM_INSTRUCTION = "Perform exactly one bounded generation using only the explicit messages and context below. Do not assume branch conversation, files, tools, memory, profile, skills, or repository instructions.";
+export interface AiGenerationBudgetLimits extends BudgetLimits {
+  readonly inputTokenLimit?: number;
+  readonly outputTokenLimit?: number;
+  readonly inlineResultByteLimit: number;
+}
 export type AgentRunStatus = "queued" | "running" | "succeeded" | "blocked" | "failed" | "cancelled" | "budget_exceeded" | "unknown";
 export type RefinementReviewLifecycleStatus = "requested" | "running" | "no_change" | "candidate" | "revision_required" | "failed" | "cancelled" | "unknown";
 export type ContextCompactionStrategy = "deterministic-extractive-v1" | "model-summary-v1";
@@ -146,6 +165,9 @@ export type ModelCallResult =
 export type AgentRunActionSource =
   | { readonly kind: "tool-submission"; readonly modelCallId: string; readonly providerToolCallId: string; readonly resultDigest: Sha256Digest }
   | { readonly kind: "contract-violation"; readonly modelCallId: string; readonly providerToolCallId?: string; readonly resultDigest: Sha256Digest };
+export type AgentRunTypedFinishOutcome =
+  | { readonly status: "succeeded"; readonly message: string; readonly value: JsonValue }
+  | { readonly status: "blocked" | "failed"; readonly message: string };
 export interface ArtifactReference { readonly artifactId: string; readonly digest: string; readonly mediaType: string; readonly size: number; }
 export type WorkingValue = { readonly kind: "json"; readonly value: JsonValue } | { readonly kind: "artifact"; readonly artifactId: string };
 export interface ContextRecordReference { readonly eventId: string; readonly type: EventType; readonly schemaVersion: number; readonly reason?: string; }
@@ -242,6 +264,26 @@ export interface EventPayloads {
   WakeDeliveryUnknown: { wakeId: string; claimId: string; reason: string; observedAt: string };
   RecursiveModelStarted: { handleId: string; taskId: string; parentSessionId: string; parentBranchId: string; childSessionId: string; childBranchId: string; model: ModelConfiguration; responseAdmission: RecursiveResponseAdmission; profilePin: AgentInvocationProfilePin; inputSetId?: string; input?: JsonValue; inputProvenance?: JsonValue; inputHash?: string };
   RecursiveModelStatusChanged: { handleId: string; status: Exclude<RecursiveModelStatus, "pending">; outcome?: RecursiveModelOutcome; resultMessageId?: string; result?: JsonValue; resultArtifactId?: string; error?: string };
+  AiGenerationContextFrozen: { generationId: string; context: JsonValue; provenance: JsonValue; contextDigest: Sha256Digest; exactUtf8Bytes: number };
+  AiGenerationRequested: {
+    generationId: string; kind: AiGenerationKind; effectId: string; idempotencyKey: string; requestDigest: Sha256Digest;
+    cellId?: string; runId?: string; taskId?: string; ancestorTaskIds: string[];
+    modelDispatch: ModelDispatch; providerInput: ProviderInputCandidate; estimatedInputTokens: number;
+    contextEventId: string; contextDigest: Sha256Digest;
+    budget: AiGenerationBudgetLimits;
+    reservation: { tokens: number; costUsd: number; turns: 1; wallTimeMs: number };
+  };
+  AiGenerationStatusChanged: { generationId: string; status: "running" | "failed" | "cancelled" | "unknown" | "budget_exceeded"; effectId: string; error?: string };
+  AiGenerationResultCommitted: {
+    generationId: string; effectId: string; sourceOutcomeEventId: string;
+    kind: AiGenerationKind; value: JsonValue; resultDigest: Sha256Digest; resultBytes: number;
+    finishReason: string; usage: Usage; warnings: ModelWarning[]; usageSource: ModelUsageSource;
+  };
+  AiGenerationBudgetDebited: {
+    generationId: string; sessionId: string; branchId: string; runId?: string; taskId?: string; ancestorTaskIds: string[];
+    tokens: number; costUsd: number; turns: number; wallTimeMs: number; usageSource: ModelUsageSource;
+    sourceResultEventId: string;
+  };
   HarnessVersionCreated: { entryId: string; versionId: string; version: number; kind: "memory" | "prompt_note" | "skill" | "subagent_spec"; scope: "local" | "workspace" | "user" | "global"; scopeKey: string; name: string; content: JsonValue; tags: string[]; confidence: number; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; evidenceEventIds: string[]; conflictEntryIds: string[]; supersedesVersionId?: string; proposalId?: string; createdBy: string; lastConfirmedAt: string };
   HarnessVersionStatusChanged: { entryId: string; versionId: string; status: "candidate" | "active" | "retired" | "rejected" | "rolled_back"; reason: string; proposalId?: string };
   UserCorrection: { correctionId: string; correctedEventIds: string[]; correction: string };
@@ -275,10 +317,18 @@ export interface EventPayloads {
   SubagentSpecInvoked: { entryId: string; versionId: string; taskId: string; childSessionId: string; childBranchId: string };
   SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
   AgentRunRequested: { runId: string; task: string; requestKey: string; profilePin: AgentInvocationProfilePin; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
+  AgentInvocationContractPinned: { runId: string; contract: AgentInvocationContract };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
   AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; providerInputVersion: typeof PROVIDER_INPUT_VERSION; providerInputDigest: Sha256Digest; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; retryOfCallId?: string };
   AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; action: AgentAction };
   AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "contract-violation" }>; error: string };
+  AgentRunTypedFinishCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; outcome: AgentRunTypedFinishOutcome };
+  AgentRunTypedActionViolationCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: AgentRunActionSource; error: string };
+  AgentRunResultCommitted: {
+    runId: string; finishEventId: string; messageId: string; kind: "text" | "object";
+    value: JsonValue; valueDigest: Sha256Digest; resultBytes: number; schemaDigest?: Sha256Digest;
+    reference: AgentRunResultReference;
+  };
   AgentRunGoalCheckRecorded: { runId: string; actionId: string; goalId: string; requestId: string; status: "passed" | "failed" | "unknown"; summary: string; gateEvaluationEventIds: string[] };
   AgentRunCancellationRequested: { runId: string; reason?: string };
   AgentRunStatusChanged: { runId: string; status: Exclude<AgentRunStatus, "queued" | "running">; reason?: string; finalMessageId?: string };
@@ -485,6 +535,7 @@ const workingValueSchema = z.discriminatedUnion("kind", [z.object({ kind: z.lite
 const effectOriginSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cell"), cellId: id }).strict(),
   z.object({ kind: z.literal("model-call"), callId: id }).strict(),
+  z.object({ kind: z.literal("ai-generation"), generationId: id }).strict(),
   z.object({ kind: z.literal("context-compaction"), compactionId: id }).strict(),
   z.object({ kind: z.literal("goal-gate"), goalId: id, gateId: id, requestId: id }).strict(),
   z.object({ kind: z.literal("skill-invocation"), entryId: id, versionId: id }).strict(),
@@ -712,6 +763,37 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   WakeDeliveryUnknown: z.object({ wakeId: id, claimId: id, reason: z.string().min(1), observedAt: dateTime }).strict(),
   RecursiveModelStarted: z.object({ handleId: id, taskId: id, parentSessionId: id, parentBranchId: id, childSessionId: id, childBranchId: id, model: modelSchema, responseAdmission: responseAdmissionSchema, profilePin: profilePinSchema, inputSetId: id.optional(), input: jsonValueSchema.optional(), inputProvenance: jsonValueSchema.optional(), inputHash: digest.optional() }).strict(),
   RecursiveModelStatusChanged: z.object({ handleId: id, status: z.enum(["running", "completed", "failed", "cancelled"]), outcome: z.enum(["succeeded", "failed", "cancelled", "budget-exceeded", "unknown"]).optional(), resultMessageId: id.optional(), result: jsonValueSchema.optional(), resultArtifactId: id.optional(), error: z.string().optional() }),
+  AiGenerationContextFrozen: z.object({ generationId: id, context: jsonValueSchema, provenance: jsonValueSchema, contextDigest: fingerprint, exactUtf8Bytes: z.number().int().nonnegative() }).strict(),
+  AiGenerationRequested: z.object({
+    generationId: id, kind: z.enum(["text", "object"]), effectId: id, idempotencyKey: id, requestDigest: fingerprint,
+    cellId: id.optional(), runId: id.optional(), taskId: id.optional(), ancestorTaskIds: z.array(id).max(32),
+    modelDispatch: modelDispatchSchema, providerInput: z.custom<ProviderInputCandidate>((value) => {
+      try { validateProviderInputCandidate(value); return true; } catch { return false; }
+    }), estimatedInputTokens: z.number().int().nonnegative(),
+    contextEventId: id, contextDigest: fingerprint,
+    budget: budgetSchema.extend({
+      inputTokenLimit: positiveInteger.optional(),
+      outputTokenLimit: positiveInteger.optional(),
+      inlineResultByteLimit: positiveInteger,
+    }).strict(),
+    reservation: z.object({ tokens: nonnegative, costUsd: nonnegative, turns: z.literal(1), wallTimeMs: nonnegative }).strict(),
+  }).strict(),
+  AiGenerationStatusChanged: z.object({
+    generationId: id, status: z.enum(["running", "failed", "cancelled", "unknown", "budget_exceeded"]),
+    effectId: id, error: z.string().optional(),
+  }).strict(),
+  AiGenerationResultCommitted: z.object({
+    generationId: id, effectId: id, sourceOutcomeEventId: id, kind: z.enum(["text", "object"]),
+    value: jsonValueSchema, resultDigest: fingerprint, resultBytes: z.number().int().nonnegative(),
+    finishReason: z.string().min(1).max(256), usage: usageSchema, warnings: z.array(modelWarningSchema).max(8),
+    usageSource: usageSourceSchema,
+  }).strict(),
+  AiGenerationBudgetDebited: z.object({
+    generationId: id, sessionId: id, branchId: id, runId: id.optional(), taskId: id.optional(),
+    ancestorTaskIds: z.array(id).max(32), tokens: nonnegative, costUsd: nonnegative,
+    turns: nonnegative, wallTimeMs: nonnegative, usageSource: usageSourceSchema,
+    sourceResultEventId: id,
+  }).strict(),
   HarnessVersionCreated: z.object({ entryId: id, versionId: id, version: positiveInteger, kind: z.enum(["memory", "prompt_note", "skill", "subagent_spec"]), scope: z.enum(["local", "workspace", "user", "global"]), scopeKey: id, name: z.string().min(1), content: jsonValueSchema, tags: z.array(z.string()), confidence: z.number().finite().min(0).max(1), status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), evidenceEventIds: z.array(id), conflictEntryIds: z.array(id), supersedesVersionId: id.optional(), proposalId: id.optional(), createdBy: id, lastConfirmedAt: dateTime }),
   HarnessVersionStatusChanged: z.object({ entryId: id, versionId: id, status: z.enum(["candidate", "active", "retired", "rejected", "rolled_back"]), reason: z.string().min(1), proposalId: id.optional() }),
   UserCorrection: z.object({ correctionId: id, correctedEventIds: z.array(id).min(1).max(64), correction: z.string().min(1).max(8192) }).strict(),
@@ -795,10 +877,35 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SubagentSpecInvoked: z.object({ entryId: id, versionId: id, taskId: id, childSessionId: id, childBranchId: id }),
   SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
   AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, profilePin: profilePinSchema, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
+  AgentInvocationContractPinned: z.object({
+    runId: id,
+    contract: z.custom<AgentInvocationContract>((value) => {
+      try { validateAgentInvocationContract(value); return true; } catch { return false; }
+    }),
+  }).strict(),
   AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
   AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), providerInputVersion: z.literal(PROVIDER_INPUT_VERSION), providerInputDigest: fingerprint, estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, retryOfCallId: id.optional() }).strict(),
   AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceSubmissionSchema, action: agentActionSchema }).strict(),
   AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceViolationSchema, error: z.string().min(1) }).strict(),
+  AgentRunTypedFinishCommitted: z.object({
+    runId: id, stepId: id, ordinal: positiveInteger, actionId: id,
+    source: actionSourceSubmissionSchema,
+    outcome: z.union([
+      z.object({ status: z.literal("succeeded"), message: z.string().min(1), value: jsonValueSchema }).strict(),
+      z.object({ status: z.enum(["blocked", "failed"]), message: z.string().min(1) }).strict(),
+    ]),
+  }).strict(),
+  AgentRunTypedActionViolationCommitted: z.object({
+    runId: id, stepId: id, ordinal: positiveInteger, actionId: id,
+    source: z.union([actionSourceSubmissionSchema, actionSourceViolationSchema]),
+    error: z.string().min(1),
+  }).strict(),
+  AgentRunResultCommitted: z.object({
+    runId: id, finishEventId: id, messageId: id, kind: z.enum(["text", "object"]),
+    value: jsonValueSchema, valueDigest: fingerprint, resultBytes: z.number().int().nonnegative(),
+    schemaDigest: fingerprint.optional(),
+    reference: jsonValueSchema,
+  }).strict(),
   AgentRunGoalCheckRecorded: z.object({ runId: id, actionId: id, goalId: id, requestId: id, status: z.enum(["passed", "failed", "unknown"]), summary: z.string().min(1).max(65536), gateEvaluationEventIds: z.array(id) }).strict(),
   AgentRunCancellationRequested: z.object({ runId: id, reason: z.string().optional() }).strict(),
   AgentRunStatusChanged: z.object({ runId: id, status: z.enum(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]), reason: z.string().optional(), finalMessageId: id.optional() }).strict(),
@@ -858,6 +965,13 @@ export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): 
   }
   if (event.type === "CellCommitted") {
     assertBoundedOutputs((event.payload as unknown as EventPayloads["CellCommitted"]).result);
+  }
+  if (event.type === "AgentInvocationContractPinned") {
+    const payload = event.payload as unknown as EventPayloads["AgentInvocationContractPinned"];
+    const contract = validateAgentInvocationContract(payload.contract);
+    if (contract.runId !== payload.runId) {
+      throw new ValidationError("Pinned agent invocation contract run ID disagrees with its event");
+    }
   }
 }
 

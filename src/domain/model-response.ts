@@ -2,8 +2,12 @@ import {
   AGENT_TOOL_CONTRACT_ID,
   AGENT_TOOL_CONTRACT_VERSION,
   AGENT_TOOL_SET,
+  AGENT_TYPED_TOOL_CONTRACT_ID,
+  AGENT_TYPED_TOOL_CONTRACT_VERSION,
   MAX_AGENT_TOOL_INPUT_BYTES,
+  resolveAgentTypedToolContract,
   validateAgentToolSubmissionValue,
+  validateTypedAgentToolSubmissionValue,
 } from "./agent-tool-contract.ts";
 import {
   REFINEMENT_REVIEW_CONTRACT_ID,
@@ -21,6 +25,13 @@ import {
 } from "./refinement-governance.ts";
 import { MAX_AGENT_ACTION_BYTES } from "./agent-action.ts";
 import { CapabilityUnavailableError, ValidationError } from "./errors.ts";
+import {
+  DECLARED_SCHEMA_VALIDATOR_ID,
+  MAX_DECLARED_INLINE_RESULT_BYTES,
+  resolveDeclaredSchema,
+  validateDeclaredSchemaValue,
+  type ResolvedDeclaredSchema,
+} from "./declared-schema.ts";
 import {
   assertJsonValue,
   canonicalJsonByteLength,
@@ -54,6 +65,17 @@ export type RegisteredBuiltInStructuredContractId =
   | typeof AGENT_TOOL_CONTRACT_ID
   | typeof REFINEMENT_REVIEW_CONTRACT_ID
   | typeof REFINEMENT_GOVERNANCE_CONTRACT_ID;
+export const DECLARED_DATA_CONTRACT_ID = "agencity.declared-data.v1" as const;
+export const DECLARED_DATA_CONTRACT_FAMILY =
+  "agencity.declared-data" as const;
+export const DECLARED_DATA_CONTRACT_VERSION = 1 as const;
+export const DECLARED_DATA_TOOL_NAME = "agencity_submit_object" as const;
+export const DECLARED_DATA_TOOL_DESCRIPTION =
+  "Submit exactly one JSON value matching the host-pinned declared schema.";
+export type ModelStructuredContractId =
+  | BuiltInStructuredContractId
+  | typeof DECLARED_DATA_CONTRACT_ID
+  | typeof AGENT_TYPED_TOOL_CONTRACT_ID;
 export type ModelSchemaEnforcement = "provider-strict" | "runtime-validated";
 
 export interface TextModelResponseContract {
@@ -68,16 +90,44 @@ export interface ModelResponseToolDefinition {
   readonly schemaDigest: Sha256Digest;
 }
 
-export interface RequiredToolSetModelResponseContract {
+interface RequiredToolSetModelResponseContractBase {
   readonly kind: "required-tool-set";
   readonly version: typeof MODEL_RESPONSE_CONTRACT_VERSION;
-  readonly contractId: BuiltInStructuredContractId;
   readonly tools: readonly ModelResponseToolDefinition[];
   readonly schemaEnforcement: ModelSchemaEnforcement;
   readonly selection: typeof MODEL_RESPONSE_CONTRACT_SELECTION;
   readonly supplementalText: typeof MODEL_RESPONSE_CONTRACT_SUPPLEMENTAL_TEXT;
   readonly contractDigest: Sha256Digest;
 }
+
+export interface BuiltInRequiredToolSetModelResponseContract
+  extends RequiredToolSetModelResponseContractBase {
+  readonly contractId: BuiltInStructuredContractId;
+}
+
+export interface DeclaredDataModelResponseContract
+  extends RequiredToolSetModelResponseContractBase {
+  readonly contractId: typeof DECLARED_DATA_CONTRACT_ID;
+  readonly contractFamily: typeof DECLARED_DATA_CONTRACT_FAMILY;
+  readonly familyVersion: typeof DECLARED_DATA_CONTRACT_VERSION;
+  readonly declaredSchema: ResolvedDeclaredSchema;
+  readonly validatorId: typeof DECLARED_SCHEMA_VALIDATOR_ID;
+  readonly inlineResultByteLimit: typeof MAX_DECLARED_INLINE_RESULT_BYTES;
+}
+
+export interface TypedAgentModelResponseContract
+  extends RequiredToolSetModelResponseContractBase {
+  readonly contractId: typeof AGENT_TYPED_TOOL_CONTRACT_ID;
+  readonly familyVersion: typeof AGENT_TYPED_TOOL_CONTRACT_VERSION;
+  readonly declaredSchema: ResolvedDeclaredSchema;
+  readonly validatorId: typeof DECLARED_SCHEMA_VALIDATOR_ID;
+  readonly inlineResultByteLimit: typeof MAX_DECLARED_INLINE_RESULT_BYTES;
+}
+
+export type RequiredToolSetModelResponseContract =
+  | BuiltInRequiredToolSetModelResponseContract
+  | DeclaredDataModelResponseContract
+  | TypedAgentModelResponseContract;
 
 export type ModelResponseContract =
   | TextModelResponseContract
@@ -209,7 +259,7 @@ const RESOLVED_STRUCTURED_CONTRACT_REGISTRY = deepFreeze({
 export function resolveBuiltInModelResponseContract(
   contractId: BuiltInStructuredContractId,
   schemaEnforcement: ModelSchemaEnforcement,
-): RequiredToolSetModelResponseContract {
+): BuiltInRequiredToolSetModelResponseContract {
   const template = (
     STRUCTURED_CONTRACT_REGISTRY as Partial<
       Record<BuiltInStructuredContractId, StructuredContractTemplate>
@@ -224,6 +274,90 @@ export function resolveBuiltInModelResponseContract(
   return RESOLVED_STRUCTURED_CONTRACT_REGISTRY[template.contractId][
     schemaEnforcement
   ];
+}
+
+export function resolveDeclaredDataModelResponseContract(
+  schema: unknown,
+  schemaEnforcement: ModelSchemaEnforcement,
+): DeclaredDataModelResponseContract {
+  if (
+    schemaEnforcement !== "provider-strict" &&
+    schemaEnforcement !== "runtime-validated"
+  ) {
+    throw new ValidationError(
+      "Declared-data response contract has invalid schema enforcement",
+    );
+  }
+  const declaredSchema = resolveDeclaredSchema(schema);
+  const root = declaredSchema.schema as Record<string, JsonValue>;
+  const {
+    $schema: _draft,
+    $defs,
+    ...valueSchema
+  } = root;
+  const envelope = resolveDeclaredSchema({
+    type: "object",
+    properties: { value: valueSchema },
+    required: ["value"],
+    additionalProperties: false,
+    ...($defs === undefined ? {} : { $defs }),
+  });
+  const toolDefinition: ModelResponseToolDefinition = deepFreeze({
+    name: DECLARED_DATA_TOOL_NAME,
+    description: DECLARED_DATA_TOOL_DESCRIPTION,
+    inputSchema: envelope.schema,
+    schemaDigest: envelope.schemaDigest,
+  });
+  const body = {
+    kind: "required-tool-set" as const,
+    version: MODEL_RESPONSE_CONTRACT_VERSION,
+    contractId: DECLARED_DATA_CONTRACT_ID,
+    contractFamily: DECLARED_DATA_CONTRACT_FAMILY,
+    familyVersion: DECLARED_DATA_CONTRACT_VERSION,
+    tools: [toolDefinition] as const,
+    schemaEnforcement,
+    selection: MODEL_RESPONSE_CONTRACT_SELECTION,
+    supplementalText: MODEL_RESPONSE_CONTRACT_SUPPLEMENTAL_TEXT,
+    declaredSchema,
+    validatorId: DECLARED_SCHEMA_VALIDATOR_ID,
+    inlineResultByteLimit: MAX_DECLARED_INLINE_RESULT_BYTES,
+  };
+  return deepFreeze({
+    ...body,
+    contractDigest: canonicalJsonDigest(body),
+  });
+}
+
+export function resolveTypedAgentModelResponseContract(
+  schema: unknown,
+  schemaEnforcement: ModelSchemaEnforcement,
+): TypedAgentModelResponseContract {
+  if (
+    schemaEnforcement !== "provider-strict" &&
+    schemaEnforcement !== "runtime-validated"
+  ) {
+    throw new ValidationError(
+      "Typed agent response contract has invalid schema enforcement",
+    );
+  }
+  const typed = resolveAgentTypedToolContract(schema);
+  const body = {
+    kind: "required-tool-set" as const,
+    version: MODEL_RESPONSE_CONTRACT_VERSION,
+    contractId: AGENT_TYPED_TOOL_CONTRACT_ID,
+    familyVersion: AGENT_TYPED_TOOL_CONTRACT_VERSION,
+    tools: typed.tools,
+    schemaEnforcement,
+    selection: MODEL_RESPONSE_CONTRACT_SELECTION,
+    supplementalText: MODEL_RESPONSE_CONTRACT_SUPPLEMENTAL_TEXT,
+    declaredSchema: typed.declaredSchema,
+    validatorId: DECLARED_SCHEMA_VALIDATOR_ID,
+    inlineResultByteLimit: MAX_DECLARED_INLINE_RESULT_BYTES,
+  };
+  return deepFreeze({
+    ...body,
+    contractDigest: canonicalJsonDigest(body),
+  });
 }
 
 export function validateModelResponseContract(
@@ -247,6 +381,72 @@ export function validateModelResponseContract(
   }
   const contractId = record.contractId;
   const schemaEnforcement = record.schemaEnforcement;
+  if (contractId === AGENT_TYPED_TOOL_CONTRACT_ID) {
+    if (
+      schemaEnforcement !== "provider-strict" &&
+      schemaEnforcement !== "runtime-validated"
+    ) {
+      throw new ValidationError(
+        "Typed agent response contract has invalid schema enforcement",
+      );
+    }
+    const digest = record.contractDigest;
+    assertSha256Digest(digest, "Model response contract digest");
+    const { contractDigest: _digest, ...body } = record;
+    if (canonicalJsonDigest(body) !== digest) {
+      throw new ValidationError(
+        "Model response contract digest does not match its definition",
+      );
+    }
+    const declaredSchema = asRecord(
+      record.declaredSchema,
+      "Typed agent response schema",
+    );
+    const expected = resolveTypedAgentModelResponseContract(
+      declaredSchema.schema,
+      schemaEnforcement,
+    );
+    if (canonicalJsonStringify(record) !== canonicalJsonStringify(expected)) {
+      throw new ValidationError(
+        "Model response contract does not match its typed agent family",
+      );
+    }
+    return expected;
+  }
+  if (contractId === DECLARED_DATA_CONTRACT_ID) {
+    if (
+      schemaEnforcement !== "provider-strict" &&
+      schemaEnforcement !== "runtime-validated"
+    ) {
+      throw new ValidationError(
+        "Declared-data response contract has invalid schema enforcement",
+      );
+    }
+    const digest = record.contractDigest;
+    assertSha256Digest(digest, "Model response contract digest");
+    const { contractDigest: _digest, ...body } = record;
+    if (canonicalJsonDigest(body) !== digest) {
+      throw new ValidationError(
+        "Model response contract digest does not match its definition",
+      );
+    }
+    const declaredSchema = asRecord(
+      record.declaredSchema,
+      "Declared-data response schema",
+    );
+    const expected = resolveDeclaredDataModelResponseContract(
+      declaredSchema.schema,
+      schemaEnforcement,
+    );
+    if (
+      canonicalJsonStringify(record) !== canonicalJsonStringify(expected)
+    ) {
+      throw new ValidationError(
+        "Model response contract does not match its declared-data family",
+      );
+    }
+    return expected;
+  }
   if (
     typeof contractId !== "string" ||
     !isBuiltInStructuredContractId(contractId)
@@ -581,7 +781,7 @@ export interface ModelToolSubmission {
    */
   readonly inputBytes: number;
   readonly responseContract: {
-    readonly contractId: BuiltInStructuredContractId;
+    readonly contractId: ModelStructuredContractId;
     readonly version: number;
     readonly contractDigest: Sha256Digest;
   };
@@ -798,6 +998,12 @@ export function validateModelToolSubmission(
       { name: record.name, input: record.input },
       { encodedBytes: record.inputBytes as number },
     );
+  } else if (contract.contractId === AGENT_TYPED_TOOL_CONTRACT_ID) {
+    validateTypedAgentToolSubmissionValue(
+      { name: record.name, input: record.input },
+      contract.declaredSchema,
+      { encodedBytes: record.inputBytes as number },
+    );
   } else if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
     if (record.name !== REFINEMENT_REVIEW_TOOL_SET[0].name) {
       throw new ValidationError(
@@ -814,6 +1020,8 @@ export function validateModelToolSubmission(
       );
     }
     validateRefinementGovernanceDecision(record.input);
+  } else if (contract.contractId === DECLARED_DATA_CONTRACT_ID) {
+    validateDeclaredDataSubmissionInput(contract, record.name, record.input);
   } else {
     throw new CapabilityUnavailableError(
       `tool submission validation for ${contract.contractId}`,
@@ -845,16 +1053,38 @@ export function modelResponseContractInputByteLimit(
   if (contract.contractId === AGENT_TOOL_CONTRACT_ID) {
     return MAX_AGENT_TOOL_INPUT_BYTES;
   }
+  if (contract.contractId === AGENT_TYPED_TOOL_CONTRACT_ID) {
+    return MAX_AGENT_TOOL_INPUT_BYTES;
+  }
   if (contract.contractId === REFINEMENT_REVIEW_CONTRACT_ID) {
     return MAX_REFINEMENT_REVIEW_BYTES;
   }
   if (contract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID) {
     return MAX_REFINEMENT_GOVERNANCE_OUTPUT_BYTES;
   }
+  if (contract.contractId === DECLARED_DATA_CONTRACT_ID) {
+    return MAX_DECLARED_INLINE_RESULT_BYTES + 64;
+  }
   throw new CapabilityUnavailableError(
     `tool input limit for ${contract.contractId}`,
     "the current sealed contract registry",
   );
+}
+
+export function validateDeclaredDataSubmissionInput(
+  contract: DeclaredDataModelResponseContract,
+  name: unknown,
+  input: unknown,
+): JsonValue {
+  if (name !== DECLARED_DATA_TOOL_NAME) {
+    throw new ValidationError(
+      "Declared-data submission has the wrong host-owned tool name",
+    );
+  }
+  assertJsonValue(input);
+  const record = asRecord(input, "Declared-data submission");
+  assertExactKeys(record, ["value"], [], "Declared-data submission");
+  return validateDeclaredSchemaValue(contract.declaredSchema, record.value);
 }
 
 export function validateModelContractViolation(
@@ -1734,7 +1964,7 @@ function isBuiltInStructuredContractId(
 function buildStructuredContract(
   template: StructuredContractTemplate,
   schemaEnforcement: ModelSchemaEnforcement,
-): RequiredToolSetModelResponseContract {
+): BuiltInRequiredToolSetModelResponseContract {
   const body = {
     kind: "required-tool-set" as const,
     version: MODEL_RESPONSE_CONTRACT_VERSION,

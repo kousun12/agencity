@@ -2,7 +2,7 @@ import type { AgentEvent, AgentState, NewAgentEvent } from "../domain/index.ts";
 import { CapabilityUnavailableError, DependencyFailureError } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type {
-  AgentStorage, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateRecord, GoalRecord,
+  AgentStorage, AiGenerationRecord, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateRecord, GoalRecord,
   HeartbeatRecord, InputSetRecord, MailboxRecord, OutboxRecord, ReadonlyStatement,
   RecursiveModelRecord, RecursiveStorageOperations, SessionRecord, StorageCapabilities, TaskRecord,
 } from "../storage/index.ts";
@@ -54,7 +54,8 @@ const recursiveMethodNames = [
   "getSession", "listChildren", "getTask", "findTaskByChild", "listTasks",
   "getMailboxMessage", "listMailboxMessages", "getDocument", "getDocumentChunk",
   "readDocumentChunks", "getInputSet", "getGoal", "listGoalGates", "getHeartbeat",
-  "listDueHeartbeats", "getRecursiveModel", "listRecursiveModels", "rebuildOperationalProjections",
+  "listDueHeartbeats", "getRecursiveModel", "listRecursiveModels",
+  "getAiGeneration", "findAiGeneration", "listAiGenerations", "rebuildOperationalProjections",
 ] as const satisfies readonly (keyof RecursiveStorageOperations)[];
 
 const remotelyCallable = new Set<string>([
@@ -254,6 +255,9 @@ export class HttpRelationalStateStore implements AgentStorage {
   listDueHeartbeats(at: string): Promise<HeartbeatRecord[]> { return this.#recursive("listDueHeartbeats", [at]); }
   getRecursiveModel(handleId: string): Promise<RecursiveModelRecord | null> { return this.#recursive("getRecursiveModel", [handleId]); }
   listRecursiveModels(statuses?: readonly RecursiveModelRecord["status"][]): Promise<RecursiveModelRecord[]> { return this.#recursive("listRecursiveModels", [statuses]); }
+  getAiGeneration(generationId: string): Promise<AiGenerationRecord | null> { return this.#recursive("getAiGeneration", [generationId]); }
+  findAiGeneration(sessionId: string, branchId: string, idempotencyKey: string): Promise<AiGenerationRecord | null> { return this.#recursive("findAiGeneration", [sessionId, branchId, idempotencyKey]); }
+  listAiGenerations(statuses?: readonly AiGenerationRecord["status"][]): Promise<AiGenerationRecord[]> { return this.#recursive("listAiGenerations", [statuses]); }
   rebuildOperationalProjections(): Promise<void> { return this.#recursive("rebuildOperationalProjections"); }
   rebuildMemoryCandidateIndex(): Promise<void> {
     requireCapability(this.name, "memoryCandidateIndexRebuild", this.placement.capabilities.memoryCandidateIndexRebuild);
