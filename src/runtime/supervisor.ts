@@ -11,9 +11,11 @@ import {
   MAX_CELL_OBSERVATION_JSON_BYTES,
   SCRATCH_LIMITS,
   filterScratchCheckpoint,
+  validateScratchCheckpoint,
   type ScratchCheckpointCandidate,
   type ScratchCheckpointHooks,
   type ScratchCheckpointLoadResult,
+  type ScratchCheckpointWriteResult,
   type ScratchScope,
   type CellHistoryEntry,
   type CellHistoryStatus,
@@ -740,6 +742,7 @@ export class Supervisor {
               "Scratch checkpoint was superseded before local cache persistence",
             );
           }
+          return result;
         },
       };
     }
@@ -2059,7 +2062,11 @@ export class Supervisor {
       let checkpoint: ScratchCheckpointCandidate | null = null;
       try {
         checkpoint = await consoleProcess.checkpointScratch(scratchScope, cellId);
-        if (checkpoint) checkpoint = filterSensitiveScratchCheckpoint(checkpoint);
+        if (checkpoint) {
+          checkpoint = validateScratchCheckpoint(
+            filterSensitiveScratchCheckpoint(checkpoint),
+          );
+        }
       } catch {
         if (consoleProcess.status().running) {
           await consoleProcess
@@ -2068,9 +2075,9 @@ export class Supervisor {
         }
       }
       if (checkpoint && this.scratchCheckpointHooks) {
-        let persisted = false;
+        let persisted: ScratchCheckpointWriteResult | null = null;
         try {
-          await this.scratchCheckpointHooks.checkpoint(
+          const result = await this.scratchCheckpointHooks.checkpoint(
             scratchScope,
             checkpoint,
             {
@@ -2079,7 +2086,12 @@ export class Supervisor {
               cursor: committedCellEvent.cursor,
             },
           );
-          persisted = true;
+          if (result.status !== "stored" &&
+              result.status !== "cleared" &&
+              result.status !== "unchanged") {
+            throw new ValidationError("Scratch checkpoint hook returned an invalid result");
+          }
+          persisted = result;
         } catch {
           // Scratch persistence is an optional operational cache. The warm
           // scope and committed cell remain valid when its storage is absent.
@@ -2094,12 +2106,11 @@ export class Supervisor {
               scratchScope,
               cellId,
               checkpoint,
+              persisted,
             );
             await consoleProcess.recordScratchCacheWrite(
               scratchScope,
-              checkpoint.savedNames.length === 0 && checkpoint.skipped.length === 0
-                ? "cleared"
-                : "stored",
+              persisted.status,
             );
           } catch { /* Status bookkeeping never invalidates committed warm scratch. */ }
         }

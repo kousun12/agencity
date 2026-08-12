@@ -918,7 +918,12 @@ describe("disposable TypeScript console process", () => {
       workspaceRoot: temp.workspaceRoot,
       scratchCheckpointHooks: {
         async load() { return { status: "cold" }; },
-        async checkpoint() { checkpointCalls++; },
+        async checkpoint(_scope, candidate) {
+          checkpointCalls++;
+          return candidate.savedNames.length === 0 && candidate.skipped.length === 0
+            ? { status: "cleared" as const }
+            : { status: "stored" as const };
+        },
       },
       recover: false,
     });
@@ -1058,6 +1063,7 @@ describe("disposable TypeScript console process", () => {
           sourceCellId: source.cellId,
           checkpointedAt: "2026-08-11T00:00:00.000Z",
         });
+        return { status: "stored" as const };
       },
     };
     const supervisor = await Supervisor.open({
@@ -1142,7 +1148,10 @@ describe("disposable TypeScript console process", () => {
             },
           };
         },
-        async checkpoint(_scope, candidate) { received = candidate; },
+        async checkpoint(_scope, candidate) {
+          received = candidate;
+          return { status: "stored" as const };
+        },
       },
       recover: false,
     });
@@ -1310,10 +1319,11 @@ describe("disposable TypeScript console process", () => {
       scratchCheckpointHooks: {
         async load() { return { status: "cold" }; },
         async checkpoint() {
-          if (held) return;
+          if (held) return { status: "stored" as const };
           held = true;
           enterCheckpoint();
           await checkpointReleased;
+          return { status: "stored" as const };
         },
       },
       recover: false,

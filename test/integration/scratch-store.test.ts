@@ -181,6 +181,59 @@ describe("file-local scratch store", () => {
       );
       expect(unchanged.rows).toHaveLength(1);
       expect(String(unchanged.rows[0]!.source_cell_id)).toBe(changed.cellId);
+
+      const objectChanged = await supervisor.executeCell(
+        session.sessionId,
+        session.branchId,
+        `scratch.index = { files: ["a.ts"] }; null`,
+      );
+      const beforeMutableRead = (await raw.execute({
+        sql: "SELECT * FROM console_scratch_cache WHERE session_id=? AND branch_id=?",
+        args: [session.sessionId, session.branchId],
+      })).rows[0]!;
+      const priorDigest = String(beforeMutableRead.content_digest);
+
+      const mutableRead = await supervisor.executeCell(
+        session.sessionId,
+        session.branchId,
+        `const index = scratch.index; ({ files: index.files, status: await sdk.scratch.status() })`,
+      );
+      expect(mutableRead.result).toMatchObject({
+        files: ["a.ts"],
+        status: {
+          lastCheckpointCellId: objectChanged.cellId,
+          cache: { lastWrite: "stored" },
+        },
+      });
+      const afterMutableRead = (await raw.execute({
+        sql: "SELECT * FROM console_scratch_cache WHERE session_id=? AND branch_id=?",
+        args: [session.sessionId, session.branchId],
+      })).rows[0]!;
+      expect(afterMutableRead).toEqual(beforeMutableRead);
+
+      const acknowledged = await supervisor.executeCell(
+        session.sessionId,
+        session.branchId,
+        `await sdk.scratch.status()`,
+      );
+      expect(acknowledged.result).toMatchObject({
+        lastCheckpointCellId: objectChanged.cellId,
+        lastCheckpointAt: (mutableRead.result as any).status.lastCheckpointAt,
+        cache: { lastWrite: "unchanged" },
+      });
+
+      const nestedChanged = await supervisor.executeCell(
+        session.sessionId,
+        session.branchId,
+        `scratch.index.files.push("b.ts"); null`,
+      );
+      const afterNestedMutation = (await raw.execute({
+        sql: `SELECT source_cell_id,content_digest
+          FROM console_scratch_cache WHERE session_id=? AND branch_id=?`,
+        args: [session.sessionId, session.branchId],
+      })).rows[0]!;
+      expect(String(afterNestedMutation.source_cell_id)).toBe(nestedChanged.cellId);
+      expect(String(afterNestedMutation.content_digest)).not.toBe(priorDigest);
     } finally {
       raw.close();
       await supervisor.close();
@@ -325,7 +378,7 @@ describe("file-local scratch store", () => {
     }
   });
 
-  test("migrates idempotently and restores only an exact, intact source checkpoint", async () => {
+  test("restores intact checkpoints and leaves unchanged rows byte-for-byte untouched", async () => {
     const value = await fixture();
     await value.storage.migrate();
     const source = await commitCell(
@@ -341,7 +394,7 @@ describe("file-local scratch store", () => {
       candidate,
       source,
       value.writeFence,
-    )).toEqual({ status: "stored", unchangedPayload: false });
+    )).toEqual({ status: "stored" });
     expect(await value.store.load(value, value.writeFence)).toMatchObject({
       status: "restored",
       restore: {
@@ -359,12 +412,31 @@ describe("file-local scratch store", () => {
       "cell-2",
       value.writeFence,
     );
-    expect(await value.store.write(
+    value.store.close();
+    closeables.splice(closeables.indexOf(value.store), 1);
+    const constrainedStore = new LibSqlScratchStore({
+      url: value.temp.databaseUrl,
+      deviceId: "device-1",
+      maxWorkspaceBytes: 1,
+    });
+    closeables.push(constrainedStore);
+    const raw = createClient({ url: value.temp.databaseUrl });
+    closeables.push(raw);
+    const before = (await raw.execute({
+      sql: "SELECT * FROM console_scratch_cache WHERE session_id=? AND branch_id=?",
+      args: [value.sessionId, value.branchId],
+    })).rows[0]!;
+    expect(await constrainedStore.write(
       value,
       candidate,
       source2,
       value.writeFence,
-    )).toEqual({ status: "stored", unchangedPayload: true });
+    )).toEqual({ status: "unchanged" });
+    const after = (await raw.execute({
+      sql: "SELECT * FROM console_scratch_cache WHERE session_id=? AND branch_id=?",
+      args: [value.sessionId, value.branchId],
+    })).rows[0]!;
+    expect(after).toEqual(before);
     await expect(value.storage.readonlyQuery({
       sql: "SELECT * FROM console_scratch_cache",
       args: [],
@@ -449,7 +521,7 @@ describe("file-local scratch store", () => {
       candidate,
       source4,
       value.writeFence,
-    )).toEqual({ status: "stored", unchangedPayload: false });
+    )).toEqual({ status: "stored" });
     expect((await value.store.load(value, value.writeFence)).status).toBe("restored");
   });
 

@@ -2722,25 +2722,8 @@ export class LibSqlScratchStore implements ScratchStore {
         }
         let candidate: ScratchCheckpointCandidate;
         try {
-          const parsed = JSON.parse(row.checkpointJson) as {
-            values?: Readonly<Record<string, JsonValue>>;
-            skipped?: readonly ScratchSkippedProperty[];
-          };
-          candidate = validateScratchCheckpoint({
-            schemaVersion: row.schemaVersion as typeof SCRATCH_CHECKPOINT_SCHEMA_VERSION,
-            values: parsed.values ?? {},
-            canonicalJson: row.checkpointJson,
-            byteLength: row.checkpointByteLength,
-            digest: row.contentDigest,
-            savedNames: JSON.parse(row.savedNamesJson) as string[],
-            skipped: JSON.parse(row.skippedJson) as ScratchSkippedProperty[],
-          });
+          candidate = scratchCheckpointFromRow(row);
         } catch {
-          await this.#discard(tx, scope);
-          return { status: "corrupt", reason: "checkpoint_integrity" };
-        }
-        if (new TextEncoder().encode(row.checkpointJson).byteLength !==
-            row.checkpointByteLength) {
           await this.#discard(tx, scope);
           return { status: "corrupt", reason: "checkpoint_integrity" };
         }
@@ -2806,6 +2789,7 @@ export class LibSqlScratchStore implements ScratchStore {
         });
         let current = selected.rows[0] ? scratchCacheRow(selected.rows[0]) : null;
         if (current && (
+          current.deviceId !== this.#deviceId ||
           !isStructurallyValidScratchRow(current, scope, workspaceId) ||
           current.encodedRowBytes !== encodedScratchRowBytes(current) ||
           current.rowIntegrityDigest !== scratchRowIntegrityDigest(current)
@@ -2825,11 +2809,24 @@ export class LibSqlScratchStore implements ScratchStore {
             current = null;
           }
         }
+        if (current) {
+          try {
+            scratchCheckpointFromRow(current);
+          } catch {
+            await this.#discard(tx, scope);
+            current = null;
+          }
+        }
         if (Math.max(
           current?.sourceCursor ?? 0,
           this.#latestSourceCursors.get(scratchScopeKey(scope)) ?? 0,
         ) >= sourceCursor) {
           return { status: "stale" } as const;
+        }
+        if (current &&
+            current.schemaVersion === checkpoint.schemaVersion &&
+            current.contentDigest === checkpoint.contentDigest) {
+          return { status: "unchanged" } as const;
         }
         if (checkpoint.empty) {
           await this.#discard(tx, scope);
@@ -2859,63 +2856,40 @@ export class LibSqlScratchStore implements ScratchStore {
           throw new ValidationError("Scratch checkpoint exceeds the workspace cache quota");
         }
         await this.#evictForUpsert(tx, row);
-        const unchangedPayload = current !== null &&
-          current.deviceId === row.deviceId &&
-          current.schemaVersion === row.schemaVersion &&
-          current.checkpointJson === row.checkpointJson &&
-          current.contentDigest === row.contentDigest &&
-          current.checkpointByteLength === row.checkpointByteLength &&
-          current.savedNamesJson === row.savedNamesJson &&
-          current.skippedJson === row.skippedJson;
-        if (current && unchangedPayload) {
-          await tx.execute({
-            sql: `UPDATE console_scratch_cache SET
-              workspace_id=?,device_id=?,schema_version=?,content_digest=?,
-              row_integrity_digest=?,checkpoint_byte_length=?,encoded_row_bytes=?,
-              source_cell_id=?,source_event_id=?,source_cursor=?,created_at=?,
-              updated_at=?,accessed_at=?,expires_at=?
-              WHERE session_id=? AND branch_id=?`,
-            args: [
-              row.workspaceId, row.deviceId, row.schemaVersion, row.contentDigest,
-              row.rowIntegrityDigest, row.checkpointByteLength, row.encodedRowBytes,
-              row.sourceCellId, row.sourceEventId, row.sourceCursor, row.createdAt,
-              row.updatedAt, row.accessedAt, row.expiresAt, row.sessionId, row.branchId,
-            ],
-          });
-        } else {
-          await tx.execute({
-            sql: `INSERT INTO console_scratch_cache(
-              session_id,branch_id,workspace_id,device_id,schema_version,
-              checkpoint_json,content_digest,row_integrity_digest,
-              checkpoint_byte_length,encoded_row_bytes,source_cell_id,source_event_id,
-              source_cursor,saved_names_json,skipped_json,created_at,updated_at,
-              accessed_at,expires_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(session_id,branch_id) DO UPDATE SET
-              workspace_id=excluded.workspace_id,device_id=excluded.device_id,
-              schema_version=excluded.schema_version,checkpoint_json=excluded.checkpoint_json,
-              content_digest=excluded.content_digest,
-              row_integrity_digest=excluded.row_integrity_digest,
-              checkpoint_byte_length=excluded.checkpoint_byte_length,
-              encoded_row_bytes=excluded.encoded_row_bytes,
-              source_cell_id=excluded.source_cell_id,source_event_id=excluded.source_event_id,
-              source_cursor=excluded.source_cursor,saved_names_json=excluded.saved_names_json,
-              skipped_json=excluded.skipped_json,created_at=excluded.created_at,
-              updated_at=excluded.updated_at,accessed_at=excluded.accessed_at,
-              expires_at=excluded.expires_at`,
-            args: [
-              row.sessionId, row.branchId, row.workspaceId, row.deviceId,
-              row.schemaVersion, row.checkpointJson, row.contentDigest,
-              row.rowIntegrityDigest, row.checkpointByteLength, row.encodedRowBytes,
-              row.sourceCellId, row.sourceEventId, row.sourceCursor,
-              row.savedNamesJson, row.skippedJson, row.createdAt, row.updatedAt,
-              row.accessedAt, row.expiresAt,
-            ],
-          });
-        }
-        return { status: "stored", unchangedPayload } as const;
+        await tx.execute({
+          sql: `INSERT INTO console_scratch_cache(
+            session_id,branch_id,workspace_id,device_id,schema_version,
+            checkpoint_json,content_digest,row_integrity_digest,
+            checkpoint_byte_length,encoded_row_bytes,source_cell_id,source_event_id,
+            source_cursor,saved_names_json,skipped_json,created_at,updated_at,
+            accessed_at,expires_at
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(session_id,branch_id) DO UPDATE SET
+            workspace_id=excluded.workspace_id,device_id=excluded.device_id,
+            schema_version=excluded.schema_version,checkpoint_json=excluded.checkpoint_json,
+            content_digest=excluded.content_digest,
+            row_integrity_digest=excluded.row_integrity_digest,
+            checkpoint_byte_length=excluded.checkpoint_byte_length,
+            encoded_row_bytes=excluded.encoded_row_bytes,
+            source_cell_id=excluded.source_cell_id,source_event_id=excluded.source_event_id,
+            source_cursor=excluded.source_cursor,saved_names_json=excluded.saved_names_json,
+            skipped_json=excluded.skipped_json,created_at=excluded.created_at,
+            updated_at=excluded.updated_at,accessed_at=excluded.accessed_at,
+            expires_at=excluded.expires_at`,
+          args: [
+            row.sessionId, row.branchId, row.workspaceId, row.deviceId,
+            row.schemaVersion, row.checkpointJson, row.contentDigest,
+            row.rowIntegrityDigest, row.checkpointByteLength, row.encodedRowBytes,
+            row.sourceCellId, row.sourceEventId, row.sourceCursor,
+            row.savedNamesJson, row.skippedJson, row.createdAt, row.updatedAt,
+            row.accessedAt, row.expiresAt,
+          ],
+        });
+        return { status: "stored" } as const;
       }, "write scratch checkpoint");
-      if (result.status !== "stale") this.#rememberSourceCursor(scope, sourceCursor);
+      if (result.status === "stored" || result.status === "cleared") {
+        this.#rememberSourceCursor(scope, sourceCursor);
+      }
       return result;
     });
   }
@@ -3280,6 +3254,29 @@ function scratchCacheRow(row: Row): EncodedScratchCacheRow {
     accessedAt: String(row.accessed_at),
     expiresAt: String(row.expires_at),
   };
+}
+
+function scratchCheckpointFromRow(
+  row: EncodedScratchCacheRow,
+): ScratchCheckpointCandidate {
+  const parsed = JSON.parse(row.checkpointJson) as {
+    values?: Readonly<Record<string, JsonValue>>;
+    skipped?: readonly ScratchSkippedProperty[];
+  };
+  const candidate = validateScratchCheckpoint({
+    schemaVersion: row.schemaVersion as typeof SCRATCH_CHECKPOINT_SCHEMA_VERSION,
+    values: parsed.values ?? {},
+    canonicalJson: row.checkpointJson,
+    byteLength: row.checkpointByteLength,
+    digest: row.contentDigest,
+    savedNames: JSON.parse(row.savedNamesJson) as string[],
+    skipped: JSON.parse(row.skippedJson) as ScratchSkippedProperty[],
+  });
+  if (new TextEncoder().encode(row.checkpointJson).byteLength !==
+      row.checkpointByteLength) {
+    throw new ValidationError("Scratch checkpoint row byte length is invalid");
+  }
+  return candidate;
 }
 
 function isStructurallyValidScratchRow(

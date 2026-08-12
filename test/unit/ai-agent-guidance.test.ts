@@ -5,11 +5,14 @@ describe("explicit AI and typed agent guidance", () => {
   const guidance = AGENT_RUN_EXECUTION_GUIDANCE.text;
 
   test("keeps the deterministic, raw, awaited, and detached choices distinct", () => {
-    expect(AGENT_RUN_EXECUTION_GUIDANCE.version).toBe(9);
+    expect(AGENT_RUN_EXECUTION_GUIDANCE.version).toBe(10);
     expect(guidance).toContain("Use ordinary TypeScript for deterministic work");
     expect(guidance).toContain("Use ai.generateText only when every required fact is already in the explicit prompt/context");
     expect(guidance).toContain("Use ai.generateObject under the same explicit-context constraint");
-    expect(guidance).toContain("Use sdk.agents.run when a child must inspect the workspace");
+    expect(guidance).toContain("Use sdk.agents.run when a strictly narrower child task must inspect the workspace");
+    expect(guidance).toContain("Do not hand off your entire assigned task");
+    expect(guidance).toContain("sdk.agents.list() is an on-demand nuclear-family snapshot");
+    expect(guidance).toContain("do not poll it on every step");
     expect(guidance).toContain("Use sdk.agents.spawn when a child should work independently");
     expect(guidance).toContain("handle.result(options)");
     expect(guidance).toContain("sdk.agents.result(handle, options)");
@@ -26,6 +29,16 @@ describe("explicit AI and typed agent guidance", () => {
     expect(guidance).toContain("not objective evidence, factual proof, completion proof, or expanded runtime authority");
     expect(guidance).toContain("A long parent-cell loop is not a durable coordinator across worker loss");
     expect(guidance).toContain("durable versioned RPC is available only when a separately advertised capability implements it");
+  });
+
+  test("states exact artifact and bounded shell-result contracts", () => {
+    expect(guidance).toContain("tools.shell(command, options?) returns agencity.bounded-output.v1");
+    expect(guidance).toContain("inline has result.value with { exitCode, stdout, stderr }");
+    expect(guidance).toContain("only spilled has result.artifact");
+    expect(guidance).toContain("never copy protocol/completeness onto a partial wrapper");
+    expect(guidance).toContain("artifacts.put(content: string, mediaType?: string)");
+    expect(guidance).toContain("end <= the artifact's known immutable size");
+    expect(guidance).toContain("end - start <= 64 KiB");
   });
 
   test("retains representative text, object, awaited-agent, and detached-agent examples", () => {

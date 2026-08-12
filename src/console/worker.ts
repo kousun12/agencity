@@ -26,6 +26,7 @@ import {
   serializeScratch,
   validateScratchCheckpoint,
   type ScratchCheckpointLoadResult,
+  type ScratchCheckpointWriteResult,
   type ScratchProxyState,
   type ScratchScope,
   type ScratchStatus,
@@ -36,8 +37,8 @@ type Incoming =
   | { type: "scratch-prepare"; requestId: string; scope: ScratchScope; loadResult: ScratchCheckpointLoadResult; cacheAvailable: boolean; idleScopeMs: number; maxWarmScopes: number }
   | { type: "scratch-probe"; requestId: string; scope: ScratchScope }
   | { type: "scratch-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string }
-  | { type: "scratch-record-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string; candidate: import("./scratch.ts").ScratchCheckpointCandidate }
-  | { type: "scratch-record-cache-write"; requestId: string; scope: ScratchScope; status: "stored" | "cleared" | "unavailable" }
+  | { type: "scratch-record-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string; candidate: import("./scratch.ts").ScratchCheckpointCandidate; result: ScratchCheckpointWriteResult }
+  | { type: "scratch-record-cache-write"; requestId: string; scope: ScratchScope; status: ScratchCheckpointWriteResult["status"] | "unavailable" }
   | { type: "scratch-evict"; requestId: string; scope: ScratchScope }
   | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string; code?: string; details?: Record<string, unknown> }
   | { type: "shutdown" };
@@ -98,7 +99,7 @@ interface WarmScratchScope {
   cacheStatus: ScratchCheckpointLoadResult["status"];
   cacheReason: import("./scratch.ts").ScratchCacheUnavailableReason |
     import("./scratch.ts").ScratchCacheCorruptReason | null;
-  lastCacheWrite: "stored" | "cleared" | "unavailable" | null;
+  lastCacheWrite: ScratchCheckpointWriteResult["status"] | "unavailable" | null;
   lastUsedAt: number;
   lastCheckpointAt: string | null;
   lastCheckpointCellId: string | null;
@@ -657,6 +658,11 @@ function recordScratchCheckpoint(
   const warm = scratchScopes.get(scopeKey(message.scope));
   if (!warm) throw new Error("Scratch scope is not warm");
   const candidate = validateScratchCheckpoint(message.candidate);
+  if (message.result.status === "unchanged") {
+    warm.proxy.markClean();
+    warm.lastUsedAt = Date.now();
+    return { recorded: true };
+  }
   warm.lastCheckpointAt = new Date().toISOString();
   warm.lastCheckpointCellId = message.sourceCellId;
   warm.savedNames = [...candidate.savedNames];

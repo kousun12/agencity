@@ -2,6 +2,7 @@
 
 **Status:** Complete for deterministic local verification; external integrations remain unverified
 **Date:** August 10, 2026  
+**Last revised:** August 12, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Agent context and observation efficiency](./2026-08-09-agent-context-efficiency-plan.md), [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), and [Durable tenacious goal orchestration](./2026-08-09-tenacious-goal-orchestration-plan.md)
 
@@ -345,7 +346,7 @@ Initial store policy:
 - when a row exists, its source cursor must also be newer than the retained source cursor; older or equal candidates are no-ops;
 - runtime writes, clears, expiry pruning, and LRU eviction require a current execution fence and never continue detached after the process lifecycle queue advances;
 - corrupt rows are discarded and reported as unavailable;
-- unchanged content digests avoid rewriting payload bytes while still advancing newer source metadata and the full-row integrity digest;
+- after supervisor-side sensitive filtering and candidate validation, matching schema versions and serialized content digests return a distinct `unchanged` result without modifying payload, source metadata, timestamps, TTL, access time, integrity metadata, or quota position;
 - expired rows are never restored and are pruned opportunistically during fenced load and upsert operations;
 - expiry, pruning, corruption, lock contention, and unavailable placement never fail a cell.
 
@@ -557,7 +558,7 @@ No scratch feature should require changes to:
 - digest and byte-length mismatch discard corrupt rows;
 - older or equal source cursors cannot replace a newer checkpoint;
 - stale writes cannot resurrect a checkpoint after clear, expiry, or LRU deletion;
-- unchanged snapshots avoid payload rewrites;
+- unchanged snapshots leave the complete valid row and prior checkpoint provenance untouched, acknowledge the worker so it becomes clean, and do not run quota eviction;
 - expiry and LRU enforce branch-count and byte quotas;
 - operational projection rebuild neither needs nor recreates scratch;
 - synchronization and product export omit scratch;
@@ -612,7 +613,8 @@ This plan is complete when:
 9. the effective model prompt clearly distinguishes locals, scratch, state, artifacts, cell history, and final observations;
 10. state guidance explains permanent event-history accretion and discourages transient or repetitive writes;
 11. the default managed-service quiescent timeout is one hour while scratch remains a non-keep-alive cache;
-12. public documentation, `AGENTS.md`, architecture checks, recovery tests, and installed-product acceptance match the implemented behavior.
+12. conservatively dirty mutable reads serialize after success, unchanged filtered snapshots do not refresh the cache row, and nested mutations persist a changed digest;
+13. public documentation, `AGENTS.md`, architecture checks, recovery tests, and installed-product acceptance match the implemented behavior.
 
 ## Implementation log
 
@@ -641,3 +643,8 @@ This plan is complete when:
 - Corrected: Supervisor-side checkpoint filtering rejects credential-shaped content as well as registered credential values, and omits secret-bearing property names from checkpoint metadata.
 - Corrected: Known skipped-binding metadata now survives later successful checkpoints until the binding is rebuilt, deleted, or cleared.
 - Validation: Focused scratch unit, console integration, and scratch-store integration suites passed 40 tests; typecheck, architecture checking, and diff checking passed.
+
+### 2026-08-12 — Unchanged checkpoint preservation
+- Completed: Added a distinct `unchanged` store and hook result after supervisor-side filtering and candidate validation. A matching schema version and serialized digest now bypass row writes and quota eviction, retain prior cache provenance and metadata, and acknowledge the worker so conservatively dirty mutable reads become clean.
+- Coverage: Storage tests compare every cache column before and after an unchanged write under an otherwise impossible byte quota. Managed supervisor coverage proves unchanged status and provenance retention, while a later nested mutation changes the digest and persists the newer source cell.
+- Validation: Focused scratch, prompt-guidance, console integration, and scratch-store integration suites passed 51 tests; typecheck, architecture checking, and diff checking passed.
