@@ -455,7 +455,7 @@ export class Supervisor {
     this.contexts.attachSkillCatalog(this.skillManagement);
     this.schedules.attachRunService(this.runs);
     this.agents.attachRunService(this.runs);
-    this.runs.setBoundaryObserver(async (sessionId, branchId, runId) => { await this.agents.deliverQueuedAtBoundary(sessionId, branchId, runId); await this.refiner.scanBoundary(sessionId, branchId, runId); });
+    this.runs.setBoundaryObserver(async (sessionId, branchId, runId) => { await this.agents.deliverSteeringAtBoundary(sessionId, branchId, runId); await this.refiner.scanBoundary(sessionId, branchId, runId); });
   }
 
   static async open(options: SupervisorOptions): Promise<Supervisor> {
@@ -1354,7 +1354,8 @@ export class Supervisor {
       if (method === "agents.list") return this.agents.listFamily(sessionId, branchId);
       if (method === "agents.send") {
         const raw = args[0];
-        const input = typeof raw === "string" ? { target: raw, content: args[1] } : raw as Record<string, unknown>;
+        const options = args[2] && typeof args[2] === "object" && !Array.isArray(args[2]) ? args[2] as Record<string, unknown> : {};
+        const input = typeof raw === "string" ? { ...options, target: raw, content: args[1] } : raw as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.send requires a target/content object");
         return this.agents.sendMessage(sessionId, branchId, { ...input, intentKey: typeof input.intentKey === "string" ? input.intentKey : nextRpcKey(method) } as any);
       }
@@ -1367,11 +1368,6 @@ export class Supervisor {
         if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("agents.cancel requires a direct-child target");
         if (args[1] !== undefined && typeof args[1] !== "string") throw new ValidationError("agents.cancel reason must be a string");
         return this.agents.cancelFamilyTarget(sessionId, branchId, args[0], args[1] as string | undefined);
-      }
-      if (method === "agents.followUp") {
-        if (typeof args[0] !== "string" || !args[0] || typeof args[1] !== "string") throw new ValidationError("agents.followUp requires target and content strings");
-        const options = args[2] && typeof args[2] === "object" && !Array.isArray(args[2]) ? args[2] as Record<string, unknown> : {};
-        return this.agents.followUp(sessionId, branchId, args[0], args[1], { ...options, intentKey: typeof options.intentKey === "string" ? options.intentKey : nextRpcKey(method) } as any);
       }
       if (method === "specs.spawn") {
         const input = (args[1] ?? {}) as Record<string, unknown>;

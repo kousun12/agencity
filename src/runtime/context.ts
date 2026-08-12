@@ -91,6 +91,7 @@ export class ContextMaterializer {
     const legacyContext = legacyEvent ? (legacyEvent.payload as EventPayloads["ContextMaterialized"]).context as Record<string,JsonValue> : undefined;
     const coveredMessageIds = new Set<string>(effective?.sourceEventIds ?? (Array.isArray(legacyContext?.sourceEventIds) ? legacyContext.sourceEventIds.filter((value): value is string => typeof value === "string") : []));
     const messages = state.messages.filter((message) => !coveredMessageIds.has(message.eventId));
+    const mailbox = Object.values(state.mailbox).filter((message) => message.direction === "outbound" || message.deliveredToContext);
     const compactions: JsonValue[] = effective && effectiveContext?.derivation
       ? [{ eventId: effectiveContext.eventId, contextId: effectiveContext.id, ...effectiveContext.derivation } as unknown as JsonValue]
       : legacyEvent && legacyContext ? [{ eventId: legacyEvent.id, ...legacyContext } as JsonValue] : [];
@@ -115,7 +116,7 @@ export class ContextMaterializer {
     for (const artifact of Object.values(state.artifacts)) add([...events].reverse().find((event) => event.type === "ArtifactRegistered" && (event.payload as {artifactId?:string}).artifactId === artifact.artifactId), "active artifact reference");
     for (const event of events) if (["BudgetDebited","TaskUsageAttributed","BudgetExceeded"].includes(event.type)) add(event,"current budget projection");
     for (const task of Object.values(state.tasks)) add(events.find((event) => event.id === task.eventId),"current child task");
-    for (const message of Object.values(state.mailbox)) add(events.find((event) => event.id === message.eventId),"session mailbox");
+    for (const message of mailbox) add(events.find((event) => event.id === message.eventId),"session mailbox");
     for (const notice of Object.values(state.terminalNotices)) add(events.find((event) => event.id === notice.eventId),"child terminal notice");
     for (const goal of Object.values(state.goals)) add(events.find((event) => event.id === goal.eventId),"current autonomous goal");
     for (const heartbeat of Object.values(state.heartbeats)) add(events.find((event) => event.id === heartbeat.eventId),"scheduled heartbeat");
@@ -202,7 +203,7 @@ export class ContextMaterializer {
       session: { id:sessionId,branchId,status:state.status,model:state.model,parentSessionId:state.parentSessionId,parentBranchId:state.parentBranchId,rootSessionId:state.rootSessionId,depth:state.depth,taskId:state.taskId },
       budget: state.budget,
       goal: Object.values(state.goals).find((goal) => !["completed","failed","cancelled"].includes(goal.status)) ?? null,
-      tasks:Object.values(state.tasks),mailbox:Object.values(state.mailbox),terminalNotices:Object.values(state.terminalNotices),recursiveModels:Object.values(state.recursiveModels),
+      tasks:Object.values(state.tasks),mailbox,terminalNotices:Object.values(state.terminalNotices),recursiveModels:Object.values(state.recursiveModels),
       unknownEffectReconciliations:Object.values(state.effectReconciliations),
       documents:Object.values(state.documents).map((document)=>({id:document.id,name:document.name,mediaType:document.mediaType,size:document.size,digest:document.digest,chunkCount:document.chunkCount})),
       inputSets:Object.values(state.inputSets),heartbeats:Object.values(state.heartbeats),schedules:Object.values(state.schedules),wakes:Object.values(state.wakes),

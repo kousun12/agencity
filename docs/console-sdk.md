@@ -395,10 +395,14 @@ const child = await sdk.agents.spawn({
   },
 });
 
-await sdk.agents.send({
-  target: child.sessionId,
-  content: "Prioritize the stack trace",
-  taskId: child.taskId,
+await sdk.agents.send(
+  child.sessionId,
+  "Prioritize the stack trace",
+  { taskId: child.taskId },
+);
+
+await sdk.agents.send(child.sessionId, "Use the newest failure", {
+  mode: "steer",
 });
 
 const family = await sdk.agents.list();
@@ -426,19 +430,20 @@ Methods:
 - `proposeProfileUpdate(target, input, { wait? })`
 - `rollbackProfile(target, { expectedCurrentVersionId, restoreVersionId, reason, evidenceEventIds })`
 - `list()`
-- `send(input)` or `send(target, content)`
+- `send(input)` or `send(target, content, options?)`
 - `messages(options?)`
 - `acknowledge(messageId)`
 - `cancel(target, reason?)`
-- `followUp(target, content, options?)`
 
 `list()` returns the same additive family projection as the public protocol. Every row includes exact session and branch identity, relationship, name, depth, session and task status, task summary, model configuration, cancellation-request state, derived activity, and a bounded activity reason. Direct children are scoped to task edges admitted from the executing branch. An admitted child without an active run is idle. Parent activity reflects the parent route, while the retained task fields describe the edge that relates the current child to that parent. Missing required state is returned as `unavailable` with `missing_state`; it is not omitted or redirected.
 
 The executing session and branch always supply sender identity. Targets are limited to the unique parent, direct children, or siblings; deeper and cross-root targets are rejected. The literal `parent` selects the unique parent. Ambiguous names fail.
 
-Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one authorized task reference and up to eight sender-registered artifact IDs. Intent keys provide stable deduplication. Rate and pending-queue bounds are enforced. Receipts distinguish queued, delivered to context, acknowledged, and failed.
+Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one authorized task reference and up to eight sender-registered artifact IDs. Intent keys provide stable deduplication. Rate and pending-queue bounds are enforced. Receipts include the exact `mode`, optional `contextRunId`, retained-history `legacyFollowUp` marker, and queued, delivered-to-context, acknowledged, or failed status.
 
-`spawn` runs the child by default; `{ run: false }` admits without immediate runnable execution. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile. The profile is committed atomically with child admission and participates in idempotency checks. `followUp` reuses an idle or stopped retained child session and schedules a normal durable run.
+`send` defaults to `mode: "queue"`. Each queued message owns one separate durable run. An idle or stopped recipient starts that run immediately; a busy recipient retains queued messages in FIFO order and starts them one at a time after the active run and each earlier queued run terminate. Pending queued content is excluded from the recipient's model context until its run is admitted. `mode: "steer"` enters an active run at its next durable boundary. If the recipient is idle, it is delivered to retained context without waking the recipient.
+
+`spawn` runs the child by default; `{ run: false }` admits without immediate runnable execution. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile. The profile is committed atomically with child admission and participates in idempotency checks.
 
 `get()` without a target returns the executing agent's full active profile; a permitted direct-child target returns that child's profile. Proposal targets are limited to self or a direct creation-family child. The executing session and branch supply proposer identity, so generated code cannot spoof owner authority, another relationship, or evidence origin.
 

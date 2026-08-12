@@ -63,7 +63,7 @@ The suite uses a local OpenAI API fixture reached through the Vercel AI SDK tran
 - compact cell observations, bounded durable-state use, warm scratch across cells, and truthful same-device scratch restore/reconstruction after managed worker and service loss;
 - unexpected large shell output, bounded spill delivery, and focused exact artifact-range recovery before completion;
 - exact root and child provider tool sets, single-call cardinality, narration-plus-call acceptance, and no text-JSON fallback;
-- durable recursive calls, child agents, messages, and retained follow-up;
+- durable recursive calls, child agents, mode-aware messages, and retained queued work;
 - sealed structured refinement submission with a message-free typed child result;
 - failed completion-gate repair;
 - detach, client loss, managed-service recovery, one-hour typed and human status, resume, named branching, tree, status, and history;
