@@ -36,6 +36,7 @@ export type RefinementAutomaticTriggerKind =
   | "repeated_effect_failure"
   | "repeated_cell_failure"
   | "repeated_gate_failure"
+  | "repeated_success"
   | "explicit_user_correction";
 
 export interface RefinementTriggerThresholdPolicyV1 {
@@ -49,7 +50,7 @@ export interface RefinementTriggerThresholdPolicyV1 {
 
 export interface RefinementTriggerPolicyV1 {
   readonly version: typeof REFINEMENT_TRIGGER_POLICY_VERSION;
-  /** Automatic invocation is deliberately opt-in. */
+  /** Automatic invocation is enabled unless a retained preference explicitly disables it. */
   readonly automatic: boolean;
   /** Version 1 cannot automatically widen authority beyond the owning session. */
   readonly scope: "local";
@@ -58,11 +59,13 @@ export interface RefinementTriggerPolicyV1 {
   readonly cellFailure?: RefinementTriggerThresholdPolicyV1;
   readonly completionGateFailure: RefinementTriggerThresholdPolicyV1;
   readonly explicitUserCorrection: RefinementTriggerThresholdPolicyV1;
+  /** Added compatibly to v1; omitted retained policies use the default threshold. */
+  readonly repeatedSuccess?: RefinementTriggerThresholdPolicyV1;
 }
 
 export const DEFAULT_REFINEMENT_TRIGGER_POLICY_V1: RefinementTriggerPolicyV1 = deepFreeze({
   version: REFINEMENT_TRIGGER_POLICY_VERSION,
-  automatic: false,
+  automatic: true,
   scope: "local",
   effectFailure: {
     enabled: true,
@@ -87,6 +90,12 @@ export const DEFAULT_REFINEMENT_TRIGGER_POLICY_V1: RefinementTriggerPolicyV1 = d
     threshold: 1,
     windowRecords: 128,
     refireAfterNewEvidence: 1,
+  },
+  repeatedSuccess: {
+    enabled: true,
+    threshold: 5,
+    windowRecords: 2_048,
+    refireAfterNewEvidence: 5,
   },
 });
 
@@ -166,10 +175,17 @@ export interface RefinementExplicitUserCorrectionTrigger extends RefinementDetec
   readonly correctedEventIds: readonly string[];
 }
 
+export interface RefinementRepeatedSuccessTrigger extends RefinementDetectedTriggerBase {
+  readonly kind: "repeated_success";
+  /** Exact distinct successful agent runs represented by the evidence events. */
+  readonly runIds: readonly string[];
+}
+
 export type RefinementDetectedTrigger =
   | RefinementRepeatedEffectFailureTrigger
   | RefinementRepeatedCellFailureTrigger
   | RefinementRepeatedGateFailureTrigger
+  | RefinementRepeatedSuccessTrigger
   | RefinementExplicitUserCorrectionTrigger;
 
 export type RefinementTriggerInputErrorCode =
@@ -216,6 +232,10 @@ interface CorrectionEvidence {
   readonly event: NormalizedRecord;
   readonly correctedEventIds: readonly string[];
 }
+interface SuccessEvidence {
+  readonly event: NormalizedRecord;
+  readonly runId: string;
+}
 
 /**
  * Scans canonical event-like records in cursor order. The return is immutable,
@@ -226,6 +246,8 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
   const policy = validatePolicy(input.policy ?? DEFAULT_REFINEMENT_TRIGGER_POLICY_V1);
   const cellFailurePolicy = policy.cellFailure ??
     DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.cellFailure!;
+  const repeatedSuccessPolicy = policy.repeatedSuccess ??
+    DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.repeatedSuccess!;
   const secrets = normalizeSecrets(input.brokeredCredentialValues ?? []);
   const records = normalizeRecords(input.records, input.sessionId, input.branchId);
   const consumptions = normalizeConsumptions(input.consumptions ?? []);
@@ -422,6 +444,53 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
         summary: `Explicit typed user correction of ${first.correctedEventIds.length} retained event(s)`,
         correctedEventIds: first.correctedEventIds,
       }));
+    }
+  }
+
+  if (repeatedSuccessPolicy.enabled) {
+    const window = trailingWindow(localRecords, repeatedSuccessPolicy.windowRecords);
+    const latestSuccessByRunId = new Map<string, SuccessEvidence>();
+    for (const record of window) {
+      if (record.type !== "AgentRunStatusChanged") continue;
+      const payload = asRecord(record.payload);
+      if (payload?.status !== "succeeded") continue;
+      const runId = boundedPayloadId(payload.runId);
+      if (runId === null) continue;
+      const current = latestSuccessByRunId.get(runId);
+      if (!current || compareRecords(current.event, record) < 0) {
+        latestSuccessByRunId.set(runId, { event: record, runId });
+      }
+    }
+    const qualifying = [...latestSuccessByRunId.values()]
+      .sort((left, right) => compareRecords(left.event, right.event));
+    if (qualifying.length >= repeatedSuccessPolicy.threshold) {
+      const evidence = qualifying.slice(-repeatedSuccessPolicy.threshold);
+      const key = triggerKey("repeated_success", {
+        sessionId: input.sessionId,
+        branchId: input.branchId,
+      });
+      const admitted = admitEvidence(
+        key,
+        evidence.map((item) => item.event),
+        repeatedSuccessPolicy,
+        consumptions,
+        nonterminalKeys,
+        input.sessionId,
+        input.branchId,
+      );
+      if (admitted) {
+        triggers.push(deepFreeze({
+          ...admitted,
+          policyVersion: REFINEMENT_TRIGGER_POLICY_VERSION,
+          kind: "repeated_success",
+          scope: "local",
+          scopeKey: input.sessionId,
+          sessionId: input.sessionId,
+          branchId: input.branchId,
+          summary: `${evidence.length} recent agent runs succeeded on branch ${input.branchId}`,
+          runIds: evidence.map((item) => item.runId),
+        }));
+      }
     }
   }
 
@@ -712,6 +781,12 @@ function validatePolicy(policy: RefinementTriggerPolicyV1): RefinementTriggerPol
   }
   validateThresholdPolicy(policy.completionGateFailure, "completionGateFailure");
   validateThresholdPolicy(policy.explicitUserCorrection, "explicitUserCorrection");
+  if (policy.repeatedSuccess !== undefined) {
+    validateThresholdPolicy(policy.repeatedSuccess, "repeatedSuccess");
+    if (policy.repeatedSuccess.refireAfterNewEvidence > policy.repeatedSuccess.threshold) {
+      unsupported("repeatedSuccess.refireAfterNewEvidence cannot exceed repeatedSuccess.threshold");
+    }
+  }
   return policy;
 }
 

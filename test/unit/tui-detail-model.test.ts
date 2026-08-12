@@ -19,8 +19,8 @@ describe("terminal inspector view models", () => {
     ["/schedules", [{ kind: "once", prompt: "Run checks", nextTickAt: "2026-08-07T12:00:00.000Z", status: "active" }], "Run checks"],
     ["/memory", [{ name: "Testing preference", kind: "memory", scope: "workspace", current: { status: "active", content: { text: "Run focused tests first" } } }], "Run focused tests first"],
     ["/skills", [{ name: "verify", availability: "enabled", scope: "workspace", source: "harness", description: "Run verification", permissions: ["shell"] }], "Permissions: shell"],
-    ["/refine", { reviews: [{ mode: "manual", status: "completed", sourceEventIds: [] }], proposals: [{ predictedEffect: "Reduce repeated failures", status: "validated", edits: [], authority: "agent" }] }, "Proposals"],
-    ["/refine", { automatic: true, scope: "local", effectFailure: { enabled: true }, completionGateFailure: { enabled: true } }, "Automatic refinement — enabled"],
+    ["/refine", { reviews: [{ mode: "manual", status: "completed", sourceEventIds: [] }], proposals: [{ predictedEffect: "Reduce repeated failures", status: "validated", edits: [], authority: "agent" }] }, "Governed change activity"],
+    ["/refine", { automatic: true, scope: "local", effectFailure: { enabled: true }, completionGateFailure: { enabled: true } }, "Automatic learning — enabled"],
     ["/context", { canonicalEventCount: 20, messageCount: 5, uncoveredMessageCount: 2, estimatedUncompactedNarrativeTokens: 300, capacity: { source: "model-catalog" }, effective: null }, "Uncovered narrative"],
     ["/sync-status", { capabilities: { configured: false, networkSync: false }, replica: { lifecycle: "local_only", stagedEnvelopes: 0, quarantinedEnvelopes: 0 }, conflicts: [], quarantineCount: 0 }, "Local-only"],
     ["/conflicts", [{ conflictId: "conflict-needed-for-resolution", kind: "task_claim", status: "unresolved", detectedAt: "2026-08-07T12:00:00.000Z" }], "Conflict ID"],
@@ -31,6 +31,65 @@ describe("terminal inspector view models", () => {
     expect(output).toContain(expected);
     expect(output.trimStart().startsWith("{")).toBe(false);
     expect(output).not.toContain('"sessionId"');
+  });
+
+  test("learning history shows automatic policy and terminal audit activity", () => {
+    const value = {
+      automaticPolicy: {
+        version: 1,
+        automatic: true,
+        scope: "local",
+        repeatedSuccess: { enabled: true, threshold: 5, windowRecords: 2_048, refireAfterNewEvidence: 5 },
+        effectFailure: { enabled: true, threshold: 3, windowRecords: 128, refireAfterNewEvidence: 3 },
+        cellFailure: { enabled: true, threshold: 3, windowRecords: 128, refireAfterNewEvidence: 3 },
+        completionGateFailure: { enabled: true, threshold: 2, windowRecords: 128, refireAfterNewEvidence: 2 },
+        explicitUserCorrection: { enabled: true, threshold: 1, windowRecords: 128, refireAfterNewEvidence: 1 },
+      },
+      automaticLearning: "enabled",
+      policyError: null,
+      byteLimit: 262_144,
+      truncated: true,
+      activities: [
+        {
+          kind: "review", activityId: "review-no-change", effectiveStatus: "no_change",
+          review: { triggerKind: "repeated_success", evidenceEventIds: ["e1", "e2"], reason: "No durable lesson was supported." },
+          governance: null, rollback: null,
+        },
+        {
+          kind: "review", activityId: "review-applied", effectiveStatus: "applied",
+          review: { triggerKind: "repeated_effect_failure", evidenceEventIds: ["e3"] },
+          governance: { proposalId: "proposal-applied", status: "applied", appliedVersionIds: ["v1"] },
+          rollback: null,
+        },
+        {
+          kind: "review", activityId: "review-rollback", effectiveStatus: "rolled_back",
+          review: { triggerKind: "explicit_user_correction", evidenceEventIds: ["e4"] },
+          governance: { proposalId: "proposal-rollback", status: "applied", appliedVersionIds: ["v2"] },
+          rollback: { rollbackId: "rollback-1" },
+        },
+        {
+          kind: "scan_observation", activityId: "scan-1", effectiveStatus: "scan_unavailable",
+          message: "Automatic learning scan was unavailable.",
+        },
+      ],
+    };
+    const detail = buildTerminalDetail("/refine-history", value);
+    const output = formatTerminalDetail(detail, { footer: false });
+
+    expect(detail.title).toBe("Learning history");
+    expect(output).toContain("Automatic learning policy");
+    expect(output).toContain("Automatic learning — enabled");
+    expect(output).toContain("Repeated success — enabled");
+    expect(output).toContain("Threshold: 5 successful runs.");
+    expect(output).toContain("Learning history response — truncated");
+    expect(output).toContain("Serialized response limit: 262144 bytes.");
+    expect(output).toContain("Learning activity · 4");
+    expect(output).toContain("proposal-applied");
+    expect(output).toContain("rollback-1");
+    for (const status of ["no change", "applied", "scan unavailable", "rolled back"]) {
+      expect(output).toContain(status);
+    }
+    expect(output).not.toContain("action queue");
   });
 
   test("model status uses human provider and credential labels", () => {

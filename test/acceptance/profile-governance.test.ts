@@ -36,6 +36,61 @@ function proposal(
 }
 
 describe("installed profile governance", () => {
+  test("fresh installed work admits default-on repeated-success learning", async () => {
+    const fixture = new StrictActionFixture(); fixtures.push(fixture);
+    const world = await AcceptanceWorld.create("default-automatic-learning"); worlds.push(world);
+    const environment = fixture.environment();
+    expect((await world.command([
+      "config", "set-model", "openai:openai/fixture-v1", "--json",
+    ], environment)).code).toBe(0);
+    for (let index = 1; index <= 6; index += 1) {
+      const task = `default learning success ${index}`;
+      fixture.script(task, [action("final", `Completed success ${index}.`)]);
+      expect(await world.command(["run", "--json", task], environment))
+        .toMatchObject({ code: 0, stderr: "" });
+    }
+    const history = await eventually(async () => {
+      const result = await world.command(["refine", "history", "--json"], environment);
+      if (result.code !== 0) return undefined;
+      const payload = json(result);
+      const activity = payload.activities?.find((item: any) =>
+        item.kind === "review" &&
+        item.review?.mode === "automatic" &&
+        item.review?.triggerKind === "repeated_success" &&
+        item.effectiveStatus === "no_change");
+      return activity ? payload : undefined;
+    });
+    expect(history).toMatchObject({
+      automaticLearning: "enabled",
+      automaticPolicy: { automatic: true, scope: "local" },
+    });
+    const activity = history.activities.find((item: any) =>
+      item.review?.triggerKind === "repeated_success");
+    expect(activity).toMatchObject({
+      kind: "review",
+      effectiveStatus: "no_change",
+      review: {
+        mode: "automatic",
+        triggerKind: "repeated_success",
+      },
+    });
+    expect(json(await world.command([
+      "refine", "inspect", activity.activityId, "--json",
+    ], environment))).toMatchObject({
+      activityId: activity.activityId,
+      effectiveStatus: "no_change",
+    });
+    expect((await world.command([
+      "refine", "pause",
+    ], environment)).stdout).toContain("Automatic learning paused.");
+    expect(json(await world.command([
+      "refine", "status", "--json",
+    ], environment))).toMatchObject({ automaticLearning: "paused" });
+    expect((await world.command([
+      "refine", "resume",
+    ], environment)).stdout).toContain("Automatic learning enabled.");
+  }, 30_000);
+
   test("governs, restores, restarts, and inspects a retained child through no-ID product routes", async () => {
     const fixture = new StrictActionFixture(); fixtures.push(fixture);
     const world = await AcceptanceWorld.create("profile-governance"); worlds.push(world);
@@ -96,6 +151,26 @@ describe("installed profile governance", () => {
       status: "succeeded",
       steps: 2,
       final: "Created the retained profile-governance child.",
+    });
+    const freshLearningStatus = json(await world.command([
+      "refine", "status", "--json",
+    ], environment));
+    expect(freshLearningStatus.automaticPolicy).toMatchObject({
+      version: 1,
+      automatic: true,
+      scope: "local",
+      repeatedSuccess: {
+        enabled: true,
+        threshold: 5,
+        windowRecords: 2_048,
+        refireAfterNewEvidence: 5,
+      },
+    });
+    expect(json(await world.command([
+      "refine", "auto", "off", "--json",
+    ], environment))).toMatchObject({
+      automatic: false,
+      scope: "local",
     });
     const rootProfileResult = await world.command(["profile", "show", "--json"], environment);
     expect(rootProfileResult.code).toBe(0);
@@ -372,6 +447,12 @@ describe("installed profile governance", () => {
     });
     const afterRestart = json(await world.command(["service", "status", "--json"], environment));
     expect(afterRestart.instanceId).not.toBe(beforeRestart.instanceId);
+    expect(json(await world.command([
+      "refine", "status", "--json",
+    ], environment)).automaticPolicy).toMatchObject({
+      automatic: false,
+      scope: "local",
+    });
 
     const finalProfile = json(await world.command(["profile", "show", "--json"], environment));
     expect(finalProfile).toMatchObject({

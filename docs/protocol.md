@@ -184,14 +184,18 @@ Family targets are URL-decoded and restricted to the caller's parent, direct chi
 | `GET /sessions/:session/refinement-reviews?branch=:branch&status=...` | List branch review records. |
 | `GET /sessions/:session/refinement-reviews/:review?branch=:branch` | Read one branch-owned review. |
 | `GET /refinement-reviews?status=...` | Workspace-wide review diagnostics. |
+| `GET /sessions/:session/learning/status?branch=:branch` | Effective device policy, review-linked pending count, and latest session learning activity. Malformed retained policy is reported as `automaticLearning: "unavailable"` with `policyError: "validation_failed"` rather than hiding retained activity. |
+| `GET /sessions/:session/learning/history?branch=:branch&limit=...` | Newest-first session audit log joining bounded reflection summaries, governed decision/application, grouped rollback, and typed nonfatal scan-observation provenance. `limit` is 1–100, the serialized view has a 256 KiB ceiling, and `{ byteLimit, truncated }` reports the bound. The route branch is retained for uniform addressing; local learned content and this log are session-scoped. |
+| `GET /sessions/:session/learning/activities/:activity?branch=:branch` | Inspect one session-owned reflection or scan observation by activity ID. |
 | `POST /sessions/:session/user-corrections?branch=:branch` | Append a typed correction citing earlier branch event IDs. |
-| `GET /refinement-policy` | Read the profile-owned automatic-trigger policy. |
-| `PUT /refinement-policy` | `{ enabled: boolean }`. |
+| `GET /refinement-policy` | Read the device-wide automatic-learning enablement flag and the complete effective local trigger policy, including repeated-success defaults. |
+| `PUT /refinement-policy` | `{ enabled: boolean }`. `false` persists a device-wide pause; `true` resumes automatic learning. |
 | `GET /refinement-capabilities` | Reports sealed automatic governance, supported target kinds, wait/detach/rollback, and `reviewerSelectableByCaller: false`. |
 | `GET /governed-refinements?status=...&limit=...` | Bounded workspace governance records. |
 | `GET /governed-refinements/:proposal` | One exact governed proposal, validation, frozen input, reviewer link/decision, terminal reason, versions, and notice state. |
 | `POST /sessions/:session/governed-refinements?branch=:branch` | Owner proposal for an agent-profile or harness target. `wait` defaults to `true`; `false` returns after durable admission and later delivers a terminal notice. |
 | `GET /sessions/:session/governed-refinements?branch=:branch&status=...&limit=...` | Route-scoped governed proposal records. |
+| `POST /sessions/:session/governed-refinements/:proposal/rollback?branch=:branch` | Owner reversal of one applied automatic local proposal. The server derives and atomically applies exact inverse actions for create, replace, retire, and multi-edit proposals; callers provide only reason and evidence IDs. |
 | `POST /sessions/:session/refinements?branch=:branch` | Submit a governed raw proposal. |
 | `POST .../refinements/:proposal/validate` | Validate shape, evidence, authority, conflicts, and compare-and-swap targets. |
 | `POST .../refinements/:proposal/activate` | Create/test candidates and set bounded exposure. |
@@ -266,7 +270,7 @@ The client exposes typed methods for all route groups:
 
 - discovery and service: `health`, `capabilities`, `serviceStatus`, `shutdownService`, `serviceAgents`;
 - product catalog/configuration: `productSessions`, `productSelect`, `productRename`, `productConfig`, `productSetModel`, `productSetReasoningEffort`, `productSetProviderKey`, `productCredentialReference`, `modelProviders`, `modelCatalog`;
-- session lifecycle and profile governance: `createSession`, `agentProfile`, `agentProfiles`, `proposeProfileUpdate`, `governedRefinement`, `proposeGovernedRefinement`, `governedRefinements`, `rollbackRefinement`, `refinementCapabilities`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
+- session lifecycle, learning, and profile governance: `createSession`, `agentProfile`, `agentProfiles`, `proposeProfileUpdate`, `governedRefinement`, `proposeGovernedRefinement`, `governedRefinements`, `rollbackRefinement`, `rollbackGovernedRefinement`, `learningStatus`, `learningHistory`, `learningActivity`, `pauseAutomaticLearning`, `resumeAutomaticLearning`, `refinementCapabilities`, `snapshot`, `history`, `message`, `selectModel`, `fork`, `resume`, `stopSession`;
 - autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`, `agentToolCapability`, and `modelContractDiagnostics`;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;

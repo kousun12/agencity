@@ -339,6 +339,31 @@ describe("product CLI", () => {
       proposals: [],
     });
 
+    const learningStatus = await cli(["refine", "status", "--workspace", value.workspace, "--json"], { home: value.home });
+    const learningHistory = await cli(["refine", "history", "--workspace", value.workspace, "--json"], { home: value.home });
+    expect(learningStatus).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(learningStatus.stdout)).toMatchObject({
+      automaticLearning: "enabled",
+      automaticPolicy: {
+        automatic: true,
+        scope: "local",
+        repeatedSuccess: { enabled: true, threshold: 5 },
+      },
+      pendingActivityCount: 0,
+      latestActivity: null,
+    });
+    expect(learningHistory).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(learningHistory.stdout)).toMatchObject({
+      automaticLearning: "enabled",
+      activities: [],
+    });
+    const pausedLearning = await cli(["refine", "pause", "--workspace", value.workspace], { home: value.home });
+    expect(pausedLearning).toMatchObject({ code: 0, stderr: "" });
+    expect(pausedLearning.stdout).toContain("Automatic learning paused.");
+    const resumedLearning = await cli(["refine", "resume", "--workspace", value.workspace], { home: value.home });
+    expect(resumedLearning).toMatchObject({ code: 0, stderr: "" });
+    expect(resumedLearning.stdout).toContain("Automatic learning enabled.");
+
     const renamed = await cli(["sessions", "--workspace", value.workspace, "--session", rows[0]!.sessionId, "--name", "Repository inspection", "--json"], { home: value.home });
     expect(renamed.code).toBe(0);
     expect((JSON.parse(renamed.stdout) as Array<{ sessionName: string }>)[0]!.sessionName).toBe("Repository inspection");

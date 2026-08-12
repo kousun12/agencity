@@ -117,6 +117,7 @@ export type RefinementTrajectoryTriggerInput =
   | { readonly kind: "repeated_effect_failure"; readonly failureEventIds: readonly string[] }
   | { readonly kind: "repeated_cell_failure"; readonly failureEventIds: readonly string[] }
   | { readonly kind: "repeated_gate_failure"; readonly failureEventIds: readonly string[] }
+  | { readonly kind: "repeated_success"; readonly successEventIds: readonly string[] }
   | { readonly kind: "explicit_user_correction"; readonly correctionEventIds: readonly string[] };
 
 export interface BuildRefinementTrajectorySnapshotInput {
@@ -290,6 +291,10 @@ interface SelectedEvent extends NormalizedEvent {
   mandatory: boolean;
   priority: number;
 }
+interface SelectedTrajectoryEvents {
+  readonly events: SelectedEvent[];
+  readonly candidateCount: number;
+}
 interface Sanitized<T> { readonly value: T; readonly redacted: boolean }
 interface MutableSnapshotState {
   events: RefinementTrajectorySnapshotEvent[];
@@ -329,7 +334,8 @@ export function buildRefinementTrajectorySnapshot(
   if (events.length === 0) throw new RefinementContextError("missing-evidence", "No branch events exist at or before throughCursor");
   const byId = new Map(events.map((event) => [event.eventId, event]));
   const trigger = validateAndDescribeTrigger(input.trigger, events, byId, secrets);
-  const selected = selectTrajectoryEvents(input.trigger, events, byId, options);
+  const selection = selectTrajectoryEvents(input.trigger, events, byId, options);
+  const selected = selection.events;
 
   const maxBytes = options.maxBytes ?? MAX_REFINEMENT_TRAJECTORY_SNAPSHOT_BYTES;
   const sectionBudget = sectionBudgets(maxBytes);
@@ -363,7 +369,7 @@ export function buildRefinementTrajectorySnapshot(
   const counts: SnapshotCounts = {
     eventsAfterCursor,
     eventsOutsideBranch,
-    selectedEventCandidates: selected.length,
+    selectedEventCandidates: selection.candidateCount,
     eligibleHarness: harnessEligible.length,
     excludedHarness: input.visibleHarnessVersions.length - harnessEligible.length,
     eligibleMemory: memoryEligible.length,
@@ -515,6 +521,24 @@ function validateAndDescribeTrigger(
       throw new RefinementContextError("invalid-trigger", "Repeated gate failures must reference one exact goal/gate cluster");
     }
     cluster = { kind: "repeated_gate_failure", goalId: gates[0]!.goalId, gateId: gates[0]!.gateId };
+  } else if (triggerInput.kind === "repeated_success") {
+    evidenceEventIds = normalizedEvidenceIds(triggerInput.successEventIds, true);
+    const successes = evidenceEventIds.map((id) => {
+      const event = requireEvent(byId, id);
+      const payload = recordPayload(event.payload);
+      if (event.type !== "AgentRunStatusChanged" || payload.status !== "succeeded") {
+        throw new RefinementContextError(
+          "invalid-trigger",
+          `Success evidence ${event.eventId} is not a typed succeeded AgentRunStatusChanged event`,
+        );
+      }
+      return { runId: payloadString(payload, "runId", event.eventId) };
+    });
+    const runIds = sortedUnique(successes.map((success) => success.runId));
+    if (runIds.length !== successes.length) {
+      throw new RefinementContextError("invalid-trigger", "Repeated success evidence must reference distinct agent runs");
+    }
+    cluster = { kind: "repeated_success", runIds };
   } else if (triggerInput.kind === "explicit_user_correction") {
     evidenceEventIds = normalizedEvidenceIds(triggerInput.correctionEventIds, false, true);
     for (const id of evidenceEventIds) {
@@ -565,7 +589,7 @@ function selectTrajectoryEvents(
   events: readonly NormalizedEvent[],
   byId: ReadonlyMap<string, NormalizedEvent>,
   options: BuildRefinementTrajectorySnapshotOptions,
-): SelectedEvent[] {
+): SelectedTrajectoryEvents {
   const selected = new Map<string, SelectedEvent>();
   const add = (event: NormalizedEvent, reason: RefinementEventSelectionReason, mandatory: boolean, priority: number): void => {
     const current = selected.get(event.eventId);
@@ -576,6 +600,7 @@ function selectTrajectoryEvents(
 
   const evidenceIds = trigger.kind === "manual" ? trigger.focusEventIds ?? []
     : trigger.kind === "explicit_user_correction" ? trigger.correctionEventIds
+    : trigger.kind === "repeated_success" ? trigger.successEventIds
     : trigger.failureEventIds;
   const anchors = evidenceIds.map((id) => requireEvent(byId, id));
   for (const event of anchors) add(event, "trigger", true, 0);
@@ -615,6 +640,11 @@ function selectTrajectoryEvents(
         add(event, "cluster", false, 1);
       }
     }
+  } else if (trigger.kind === "repeated_success") {
+    const runIds = new Set(anchors.map((event) => optionalPayloadString(event.payload, "runId")!));
+    for (const eventId of agentRunOwnedEventIds(events, runIds)) {
+      add(requireEvent(byId, eventId), "cluster", false, 1);
+    }
   } else if (trigger.kind === "explicit_user_correction") {
     for (const anchor of anchors) {
       if (anchor.type !== "UserCorrection") continue;
@@ -628,7 +658,7 @@ function selectTrajectoryEvents(
     const recent = options.manualRecentEventCount ?? 32;
     const chosen = events.slice(-recent);
     chosen.forEach((event, index) => add(event, "recent", index === chosen.length - 1, 2 + (chosen.length - index)));
-  } else {
+  } else if (trigger.kind !== "repeated_success") {
     const radius = options.eventWindowRadius ?? DEFAULT_REFINEMENT_EVENT_WINDOW_RADIUS;
     const positions = new Map(events.map((event, index) => [event.eventId, index]));
     for (const anchor of anchors) {
@@ -645,7 +675,83 @@ function selectTrajectoryEvents(
   const kept = ranked.slice(0, MAX_SELECTED_EVENTS);
   const mandatoryCount = ranked.filter((item) => item.mandatory).length;
   if (mandatoryCount > MAX_SELECTED_EVENTS) throw new RefinementContextError("snapshot-too-large", "Trigger evidence exceeds the selected-event hard count");
-  return kept.sort(compareEvents);
+  return {
+    events: kept.sort(compareEvents),
+    candidateCount: ranked.length,
+  };
+}
+
+function agentRunOwnedEventIds(
+  events: readonly NormalizedEvent[],
+  runIds: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const selected = new Set<string>();
+  const cellIds = new Set<string>();
+  const effectIds = new Set<string>();
+  const contextIds = new Set<string>();
+  const callIds = new Set<string>();
+  const messageIds = new Set<string>();
+  const referencedEventIds = new Set<string>();
+  const availableEventIds = new Set(events.map((event) => event.eventId));
+
+  for (const event of events) {
+    const payload = optionalRecordPayload(event.payload);
+    if (!payload || !runIds.has(optionalPayloadString(payload, "runId") ?? "")) continue;
+    selected.add(event.eventId);
+    const actionId = optionalPayloadString(payload, "actionId");
+    if (event.type === "AgentRunActionCommitted" && actionId) {
+      cellIds.add(`agent-run-cell-${actionId}`);
+    }
+    const effectId = optionalPayloadString(payload, "effectId");
+    if (effectId) effectIds.add(effectId);
+    const contextId = optionalPayloadString(payload, "contextId");
+    if (contextId) contextIds.add(contextId);
+    const callId = optionalPayloadString(payload, "callId");
+    if (callId) callIds.add(callId);
+    const finalMessageId = optionalPayloadString(payload, "finalMessageId");
+    if (finalMessageId) messageIds.add(finalMessageId);
+    const gateEvaluationEventIds = payload.gateEvaluationEventIds;
+    if (Array.isArray(gateEvaluationEventIds)) {
+      for (const id of gateEvaluationEventIds) {
+        if (typeof id === "string") referencedEventIds.add(id);
+      }
+    }
+  }
+
+  for (const event of events) {
+    const payload = optionalRecordPayload(event.payload);
+    if (!payload) continue;
+    const cellId = optionalPayloadString(payload, "cellId");
+    if (cellId && cellIds.has(cellId)) selected.add(event.eventId);
+    const messageId = optionalPayloadString(payload, "messageId");
+    if (messageId && messageIds.has(messageId)) selected.add(event.eventId);
+    const effectId = optionalPayloadString(payload, "effectId");
+    if (effectId && effectIds.has(effectId)) selected.add(event.eventId);
+    const contextId = optionalPayloadString(payload, "contextId");
+    if (contextId && contextIds.has(contextId)) selected.add(event.eventId);
+    const callId = optionalPayloadString(payload, "callId");
+    if (callId && callIds.has(callId)) {
+      selected.add(event.eventId);
+      const responseMessageId = optionalPayloadString(payload, "responseMessageId");
+      if (responseMessageId) messageIds.add(responseMessageId);
+    }
+    if (event.type === "EffectRequested") {
+      const origin = optionalRecordPayload(payload.origin);
+      const originCellId = origin ? optionalPayloadString(origin, "cellId") : undefined;
+      if (origin?.kind === "cell" && originCellId && cellIds.has(originCellId) && effectId) {
+        effectIds.add(effectId);
+        selected.add(event.eventId);
+      }
+    }
+  }
+  for (const event of events) {
+    const effectId = optionalPayloadString(event.payload, "effectId");
+    if (effectId && effectIds.has(effectId)) selected.add(event.eventId);
+    const messageId = optionalPayloadString(event.payload, "messageId");
+    if (messageId && messageIds.has(messageId)) selected.add(event.eventId);
+  }
+  for (const eventId of referencedEventIds) if (availableEventIds.has(eventId)) selected.add(eventId);
+  return selected;
 }
 
 function materializeEvents(selected: readonly SelectedEvent[], budget: number, secrets: readonly string[]): RefinementTrajectorySnapshotEvent[] {
@@ -1061,6 +1167,11 @@ function requireEvent(byId: ReadonlyMap<string, NormalizedEvent>, id: string): N
 function recordPayload(payload: unknown): Record<string, unknown> {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new RefinementContextError("invalid-trigger", "Typed trigger evidence has a malformed payload");
   return payload as Record<string, unknown>;
+}
+function optionalRecordPayload(payload: unknown): Record<string, unknown> | undefined {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : undefined;
 }
 function payloadString(payload: Record<string, unknown>, key: string, eventId: string): string {
   const value = payload[key];

@@ -170,6 +170,9 @@ function rowToWorkspace(row: Row): WorkspaceCatalogEntry { return {
 class ProfileWriteQueue { #tail=Promise.resolve();async run<T>(operation:()=>Promise<T>):Promise<T>{const previous=this.#tail;let release!:()=>void;this.#tail=new Promise<void>((resolve)=>{release=resolve});await previous.catch(()=>{});try{return await operation();}finally{release();}} }
 const profileMigrationQueues=new Map<string,ProfileWriteQueue>();
 function profileMigrationQueue(url:string):ProfileWriteQueue{let queue=profileMigrationQueues.get(url);if(!queue){queue=new ProfileWriteQueue();profileMigrationQueues.set(url,queue);}return queue;}
+const profilePreferenceQueues=new Map<string,ProfileWriteQueue>();
+function profilePreferenceQueue(url:string,key:string):ProfileWriteQueue{const identity=`${url}\0${key}`;let queue=profilePreferenceQueues.get(identity);if(!queue){queue=new ProfileWriteQueue();profilePreferenceQueues.set(identity,queue);}return queue;}
+function processIsAlive(pid:number):boolean{if(!Number.isSafeInteger(pid)||pid<1)return false;try{process.kill(pid,0);return true;}catch(error){return (error as NodeJS.ErrnoException).code==="EPERM";}}
 
 export interface ProfileModelCatalogCacheRecord {
   readonly endpointId: string;
@@ -262,7 +265,70 @@ export class ProfileStore implements ProfileDatabase {
     return {deviceId,profileId,displayName:name,createdAt};
   }
   async getPreference(key:string):Promise<ProfilePreference|null>{const r=await this.#client.execute({sql:"SELECT * FROM preferences WHERE key=?",args:[key]});const row=r.rows[0];return row?{key:String(row.key),value:parseJson(row.value_json),updatedAt:String(row.updated_at)}:null;}
-  async setPreference(key:string,value:JsonValue):Promise<ProfilePreference>{if(!key.trim())throw new ValidationError("Preference key is required");const updatedAt=new Date().toISOString();await this.#client.execute({sql:"INSERT INTO preferences(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",args:[key,JSON.stringify(value),updatedAt]});return{key,value,updatedAt};}
+  async setPreference(key:string,value:JsonValue):Promise<ProfilePreference>{
+    return this.withPreferenceLock(key,async(_current,setValue)=>setValue(value));
+  }
+  async withPreferenceLock<T>(
+    key:string,
+    operation:(current:ProfilePreference|null,setValue:(value:JsonValue)=>Promise<ProfilePreference>,assertOwner:()=>Promise<void>)=>Promise<T>,
+  ):Promise<T>{
+    if(!key.trim())throw new ValidationError("Preference key is required");
+    return profilePreferenceQueue(this.url,key).run(async()=>{
+      const owner=newId();
+      const acquireDeadline=Date.now()+30_000;
+      while(true){
+        const now=new Date().toISOString();
+        const expiresAt=new Date(Date.now()+5_000).toISOString();
+        await this.#client.execute({
+          sql:"INSERT INTO preference_leases(key,owner_id,process_id,expires_at) VALUES(?,?,?,?) ON CONFLICT(key) DO NOTHING",
+          args:[key,owner,process.pid,expiresAt],
+        });
+        const retained=await this.#client.execute({sql:"SELECT owner_id,process_id,expires_at FROM preference_leases WHERE key=?",args:[key]});
+        const row=retained.rows[0];
+        if(String(row?.owner_id)===owner)break;
+        const retainedOwner=String(row?.owner_id??"");
+        const retainedPid=Number(row?.process_id);
+        if(row&&String(row.expires_at)<now&&
+            (retainedPid===process.pid||!processIsAlive(retainedPid))){
+          await this.#client.execute({
+            sql:"UPDATE preference_leases SET owner_id=?,process_id=?,expires_at=? WHERE key=? AND owner_id=?",
+            args:[owner,process.pid,expiresAt,key,retainedOwner],
+          });
+          continue;
+        }
+        if(Date.now()>=acquireDeadline)throw new ConflictError("Timed out waiting for a device preference update",{key});
+        await Bun.sleep(10);
+      }
+      const heartbeat=setInterval(()=>{
+        void this.#client.execute({
+          sql:"UPDATE preference_leases SET expires_at=? WHERE key=? AND owner_id=?",
+          args:[new Date(Date.now()+5_000).toISOString(),key,owner],
+        }).catch(()=>{});
+      },1_000);
+      try{
+        const selected=await this.#client.execute({sql:"SELECT * FROM preferences WHERE key=?",args:[key]});
+        const row=selected.rows[0];
+        const current=row?{key:String(row.key),value:parseJson(row.value_json),updatedAt:String(row.updated_at)}:null;
+        const assertOwner=async():Promise<void>=>{
+          const retained=await this.#client.execute({sql:"SELECT owner_id,process_id FROM preference_leases WHERE key=?",args:[key]});
+          const lease=retained.rows[0];
+          if(String(lease?.owner_id)!==owner||Number(lease?.process_id)!==process.pid){
+            throw new ConflictError("Device preference lease ownership was lost",{key});
+          }
+        };
+        const setValue=async(value:JsonValue):Promise<ProfilePreference>=>{
+          await assertOwner();
+          const updatedAt=new Date().toISOString();
+          await this.#client.execute({sql:"INSERT INTO preferences(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",args:[key,JSON.stringify(value),updatedAt]});
+          return{key,value,updatedAt};
+        };
+        return await operation(current,setValue,assertOwner);
+      }finally{
+        clearInterval(heartbeat);
+        await this.#client.execute({sql:"DELETE FROM preference_leases WHERE key=? AND owner_id=?",args:[key,owner]}).catch(()=>{});
+      }
+    });
+  }
   async listPreferences():Promise<ProfilePreference[]>{const r=await this.#client.execute("SELECT * FROM preferences ORDER BY key");return r.rows.map(row=>({key:String(row.key),value:parseJson(row.value_json),updatedAt:String(row.updated_at)}));}
   async getModelCatalogCache(endpointId:string):Promise<ProfileModelCatalogCacheRecord|null>{
     if(!/^[a-f0-9]{64}$/.test(endpointId))throw new ValidationError("Model catalog endpoint ID is invalid");

@@ -1,5 +1,5 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
-import type { AgentEvent, AgentProfileVersion, AgentState, EventPayloads, EventType, NewAgentEvent } from "../domain/index.ts";
+import type { AgentEvent, AgentProfileVersion, AgentState, EventPayloads, EventType, GovernedRefinementProposal, NewAgentEvent } from "../domain/index.ts";
 import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, REFINEMENT_GOVERNANCE_CONTRACT_ID, ValidationError, canonicalJsonDigest, canonicalSkillDigest, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, newId, normalizeAgentProfileInput, projectEvents, reduceAgentState, refinementPrincipalToAgentPrincipal, validateEffectOrigin, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateProviderInputCandidate, validateRefinementGovernanceDecision, validateRefinementGovernanceRecursiveResult, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import {
@@ -911,7 +911,7 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
             notice.originBranchId !== proposal.origin?.branchId) {
           throw new ValidationError("Refinement terminal notice does not match a terminal proposal");
         }
-        const expected = {
+        const expectedLegacy = {
           proposalId: notice.proposalId,
           status: String(row.status),
           reviewDecisionId: row.review_decision_id === null ? null : String(row.review_decision_id),
@@ -919,7 +919,14 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
           appliedVersionIds: JSON.parse(String(row.applied_version_ids_json)),
           ...(row.decision_json === null ? {} : { decision: JSON.parse(String(row.decision_json)) }),
         };
-        if (!Bun.deepEquals(notice.result, expected)) {
+        const expected = {
+          ...expectedLegacy,
+          targetKind: proposal.target?.kind === "agent_profile"
+            ? "agent_profile"
+            : proposal.target?.harnessKind,
+        };
+        if (!Bun.deepEquals(notice.result, expected) &&
+            !Bun.deepEquals(notice.result, expectedLegacy)) {
           throw new ValidationError("Refinement terminal notice result does not equal canonical terminal state");
         }
       }
@@ -1240,6 +1247,36 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       const request = validateRefinementReviewRequest(payload.request);
       const mismatches = [request.reviewId !== payload.reviewId && "reviewId", request.fingerprint !== payload.fingerprint && "fingerprint", request.sessionId !== event.sessionId && "sessionId", request.branchId !== event.branchId && "branchId", request.requestedScope !== payload.requestedScope && "requestedScope", request.trigger.triggerId !== payload.triggerId && "triggerId", request.trigger.fingerprint !== payload.triggerFingerprint && "triggerFingerprint", !Bun.deepEquals(request.visibleSourceEventIds, payload.sourceEventIds) && "sourceEventIds", !Bun.deepEquals(request.trigger.evidenceEventIds, payload.evidenceEventIds) && "evidenceEventIds", (payload.snapshot !== undefined && (!payload.snapshot || typeof payload.snapshot !== "object" || Array.isArray(payload.snapshot) || (payload.snapshot as Record<string, JsonValue>).canonicalHash !== payload.sourceSnapshotHash)) && "snapshotHash"].filter(Boolean);
       if (mismatches.length) throw new ValidationError("Refinement review request event does not match its strict request envelope", { mismatches });
+      if (payload.mode === "automatic") {
+        if (!payload.triggerKey || !payload.nonterminalKey ||
+            payload.triggerEvidenceThroughCursor === undefined) {
+          throw new ValidationError("Automatic refinement review requires exact trigger deduplication identity");
+        }
+        const stale = await tx.execute({
+          sql: `SELECT review_id FROM refinement_trigger_consumptions
+            WHERE session_id=? AND branch_id=? AND trigger_key=?
+              AND CAST(last_consumed_evidence_cursor AS INTEGER)>=CAST(? AS INTEGER)
+            UNION ALL
+            SELECT review_id FROM refinement_reviews
+            WHERE session_id=? AND branch_id=? AND nonterminal_key=?
+              AND status IN ('requested','running')
+            LIMIT 1`,
+          args: [
+            event.sessionId,
+            event.branchId,
+            payload.triggerKey,
+            payload.triggerEvidenceThroughCursor,
+            event.sessionId,
+            event.branchId,
+            payload.nonterminalKey,
+          ],
+        });
+        if (stale.rows.length) {
+          throw new ConflictError("Automatic refinement trigger is already pending or consumed", {
+            reviewId: String(stale.rows[0]!.review_id),
+          });
+        }
+      }
       const duplicate = await tx.execute({ sql: "SELECT review_id,fingerprint FROM refinement_reviews WHERE review_id=? OR (session_id=? AND branch_id=? AND fingerprint=?)", args: [payload.reviewId,event.sessionId,event.branchId,payload.fingerprint] });
       if (duplicate.rows.length) throw new ConflictError("Refinement review request identity already exists", { reviewId: payload.reviewId });
     }
@@ -1314,6 +1351,46 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
       if (!row || String(row.kind) !== "skill" || String(row.scope) !== payload.scope || String(row.current_version_id) !== payload.versionId) throw new ConflictError("Skill import provenance requires the current workspace skill version", { entryId: payload.entryId, versionId: payload.versionId });
       if (canonicalSkillDigest(JSON.parse(String(row.content_json)) as JsonValue) !== payload.digest) throw new ConflictError("Skill import provenance digest does not match the immutable version", { entryId: payload.entryId, versionId: payload.versionId });
     }
+    if (event.type === "SkillTestRecorded") {
+      const payload = event.payload as EventPayloads["SkillTestRecorded"];
+      const report = payload.report && typeof payload.report === "object" &&
+        !Array.isArray(payload.report)
+        ? payload.report as Record<string, JsonValue>
+        : {};
+      const exactSourceVersionId = report.exactTestSourceVersionId;
+      if (exactSourceVersionId !== undefined) {
+        if (typeof exactSourceVersionId !== "string" || !payload.passed) {
+          throw new ValidationError("Transferred skill test evidence is malformed");
+        }
+        const target = await tx.execute({
+          sql: "SELECT kind,content_json FROM harness_versions WHERE entry_id=? AND version_id=?",
+          args: [payload.entryId, payload.versionId],
+        });
+        const targetRow = target.rows[0];
+        if (!targetRow || String(targetRow.kind) !== "skill") {
+          throw new ValidationError("Transferred skill test evidence requires an exact skill version");
+        }
+        const source = await tx.execute({
+          sql: "SELECT entry_id,kind,content_json FROM harness_versions WHERE version_id=?",
+          args: [exactSourceVersionId],
+        });
+        const sourceRow = source.rows[0];
+        const prior = await tx.execute({
+          sql: `SELECT event_id FROM skill_executions
+            WHERE entry_id=? AND version_id=? AND effect_id=?
+              AND execution_kind='test' AND passed=1 LIMIT 1`,
+          args: [payload.entryId, exactSourceVersionId, payload.effectId],
+        });
+        if (!sourceRow ||
+            String(sourceRow.entry_id) !== payload.entryId ||
+            String(sourceRow.kind) !== "skill" ||
+            canonicalSkillDigest(JSON.parse(String(sourceRow.content_json)) as JsonValue) !==
+              canonicalSkillDigest(JSON.parse(String(targetRow.content_json)) as JsonValue) ||
+            !prior.rows.length) {
+          throw new ValidationError("Transferred skill test evidence requires an exact same-content passing source test");
+        }
+      }
+    }
     if (event.type === "SkillAvailabilityChanged") {
       const payload = event.payload as EventPayloads["SkillAvailabilityChanged"];
       const found = await tx.execute({ sql: "SELECT v.kind,v.content_json,e.current_version_id FROM harness_versions v JOIN harness_entries e ON e.entry_id=v.entry_id WHERE v.version_id=? AND v.entry_id=?", args: [payload.versionId,payload.entryId] });
@@ -1381,6 +1458,137 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
             String(row.kind) !== payload.targetKind ||
             String(row.supersedes_version_id) !== payload.previousVersionId) {
           throw new ValidationError("Harness rollback provenance requires its exact restoration version");
+        }
+      }
+    }
+    if (event.type === "GovernedRefinementRollbackApplied") {
+      const payload = event.payload as EventPayloads["GovernedRefinementRollbackApplied"];
+      const selected = await tx.execute({
+        sql: "SELECT session_id,branch_id,status,proposal_json,created_event_id FROM governed_refinement_proposals WHERE proposal_id=?",
+        args: [payload.proposalId],
+      });
+      const proposalRow = selected.rows[0];
+      const proposalBranchId = proposalRow ? String(proposalRow.branch_id) : "";
+      let proposalVisible = proposalBranchId === event.branchId;
+      if (proposalRow && !proposalVisible) {
+        const lineage = await this.#lineage(tx, event.sessionId, event.branchId);
+        const ancestor = lineage.find((entry) => entry.branchId === proposalBranchId);
+        if (ancestor) {
+          const created = await tx.execute({
+            sql: "SELECT sequence FROM events WHERE id=?",
+            args: [String(proposalRow.created_event_id)],
+          });
+          const createdSequence = Number(created.rows[0]?.sequence);
+          proposalVisible = Number.isSafeInteger(createdSequence) &&
+            (ancestor.upper === null || createdSequence <= ancestor.upper);
+        }
+      }
+      if (!proposalRow || String(proposalRow.status) !== "applied" ||
+          String(proposalRow.session_id) !== event.sessionId ||
+          !proposalVisible) {
+        throw new ValidationError("Governed rollback requires its applied origin proposal in branch lineage");
+      }
+      const proposal = JSON.parse(String(proposalRow.proposal_json)) as GovernedRefinementProposal;
+      if (proposal.principal.kind !== "automatic_refiner" ||
+          proposal.target.kind !== "harness" ||
+          !payload.actor || typeof payload.actor !== "object" ||
+          Array.isArray(payload.actor) ||
+          (payload.actor as Record<string, JsonValue>).kind !== "owner") {
+        throw new ValidationError("Grouped rollback is restricted to owner reversal of automatic harness refinement");
+      }
+      const prior = await tx.execute({
+        sql: "SELECT id FROM events WHERE type='GovernedRefinementRollbackApplied' AND json_extract(payload_json,'$.proposalId')=? LIMIT 1",
+        args: [payload.proposalId],
+      });
+      if (prior.rows.length) {
+        throw new ConflictError("Governed refinement proposal was already rolled back", {
+          proposalId: payload.proposalId,
+        });
+      }
+      const edits = proposal.target.edits;
+      if (payload.actions.length !== edits.length ||
+          payload.actions.some((action, index) => action.editIndex !== index)) {
+        throw new ValidationError("Governed rollback actions must exactly cover proposal edits in order");
+      }
+      for (const [index, action] of payload.actions.entries()) {
+        const edit = edits[index]!;
+        if (action.targetKind !== proposal.target.harnessKind) {
+          throw new ValidationError("Governed rollback action kind does not match its proposal");
+        }
+        if (edit.operation === "retire") {
+          const target = await tx.execute({
+            sql: `SELECT e.entry_id,e.current_version_id,e.status,v.kind
+              FROM harness_entries e JOIN harness_versions v
+                ON v.version_id=e.current_version_id
+              WHERE e.entry_id=?`,
+            args: [edit.entryId],
+          });
+          const targetRow = target.rows[0];
+          if (action.operation !== "reactivate" ||
+              action.targetId !== edit.entryId ||
+              action.reactivatedVersionId !== edit.expectedVersionId ||
+              !targetRow ||
+              String(targetRow.current_version_id) !== edit.expectedVersionId ||
+              String(targetRow.status) !== "active" ||
+              String(targetRow.kind) !== action.targetKind) {
+            throw new ValidationError("Governed retirement rollback does not match its exact reactivation");
+          }
+          continue;
+        }
+        if (edit.operation === "create") {
+          if (action.operation !== "deactivate") {
+            throw new ValidationError("Governed create rollback requires deactivation");
+          }
+        } else if (action.operation !== "restore") {
+          throw new ValidationError("Governed replacement rollback requires restoration");
+        }
+        const version = await tx.execute({
+          sql: "SELECT entry_id,kind,proposal_id,supersedes_version_id,status FROM harness_versions WHERE version_id=?",
+          args: [action.appliedVersionId],
+        });
+        const versionRow = version.rows[0];
+        if (!versionRow ||
+            String(versionRow.entry_id) !== action.targetId ||
+            String(versionRow.kind) !== action.targetKind ||
+            String(versionRow.proposal_id ?? "") !== payload.proposalId) {
+          throw new ValidationError("Governed rollback action does not reference an applied proposal version");
+        }
+        if (edit.operation === "create") {
+          if (action.operation !== "deactivate") {
+            throw new ValidationError("Governed create rollback requires deactivation");
+          }
+          if (versionRow.supersedes_version_id !== null ||
+              String(versionRow.status) !== "rolled_back") {
+            throw new ValidationError("Governed create rollback does not match its exact deactivation");
+          }
+          continue;
+        }
+        if (action.operation !== "restore") {
+          throw new ValidationError("Governed replacement rollback requires restoration");
+        }
+        const restoration = await tx.execute({
+          sql: `SELECT target_id,previous_version_id,restore_source_version_id,
+            restoration_version_id FROM refinement_restorations WHERE rollback_id=?`,
+          args: [action.restorationRollbackId],
+        });
+        const restorationRow = restoration.rows[0];
+        if (String(versionRow.supersedes_version_id ?? "") !== edit.expectedVersionId ||
+            action.restoreSourceVersionId !== edit.expectedVersionId ||
+            !restorationRow ||
+            String(restorationRow.target_id) !== action.targetId ||
+            String(restorationRow.previous_version_id) !== action.appliedVersionId ||
+            String(restorationRow.restore_source_version_id) !== edit.expectedVersionId ||
+            String(restorationRow.restoration_version_id) !== action.restorationVersionId) {
+          throw new ValidationError("Governed replacement rollback does not match its exact restoration");
+        }
+      }
+      for (const evidenceId of payload.evidenceEventIds) {
+        const evidence = await tx.execute({
+          sql: "SELECT id FROM events WHERE id=?",
+          args: [evidenceId],
+        });
+        if (!evidence.rows.length) {
+          throw new ValidationError("Governed rollback evidence event is missing");
         }
       }
     }

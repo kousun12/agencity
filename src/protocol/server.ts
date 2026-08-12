@@ -267,6 +267,17 @@ export class ProtocolServer {
           ));
         }
         if (parts[2] === "governed-refinements" && branchId) {
+          if (request.method === "POST" && parts[3] && parts[4] === "rollback") {
+            return Response.json(
+              await this.supervisor.refinementGovernance
+                .rollbackAutomaticProposalOwner(
+                  sessionId,
+                  branchId,
+                  parts[3],
+                  await jsonBody(request) as any,
+                ),
+            );
+          }
           if (request.method === "POST") {
             const body = await jsonBody(request) as any;
             return Response.json(await this.supervisor.refinementGovernance.proposeOwner(
@@ -366,6 +377,27 @@ export class ProtocolServer {
           if (request.method === "POST") return Response.json(await this.supervisor.refiner.request(sessionId, branchId, await jsonBody(request) as any));
           if (request.method === "GET" && parts[3]) return Response.json(await this.supervisor.refiner.getForBranch(sessionId, branchId, parts[3]));
           if (request.method === "GET") return Response.json(await this.supervisor.refiner.list({ sessionId, branchId, ...(url.searchParams.has("status") ? { status: url.searchParams.get("status") as any } : {}) }));
+        }
+        if (parts[2] === "learning" && branchId && request.method === "GET") {
+          if (parts[3] === "status") {
+            return Response.json(await this.supervisor.refiner.learningStatus(sessionId, branchId));
+          }
+          if (parts[3] === "history") {
+            return Response.json(await this.supervisor.refiner.learningHistory(
+              sessionId,
+              branchId,
+              url.searchParams.has("limit")
+                ? Number(url.searchParams.get("limit"))
+                : 50,
+            ));
+          }
+          if (parts[3] === "activities" && parts[4]) {
+            return Response.json(await this.supervisor.refiner.learningActivity(
+              sessionId,
+              branchId,
+              parts[4],
+            ));
+          }
         }
         if (parts[2] === "user-corrections" && branchId && request.method === "POST") { const body = await jsonBody(request); return Response.json({ correctionId: await this.supervisor.refiner.correct(sessionId, branchId, String(body.correction ?? ""), Array.isArray(body.correctedEventIds) ? body.correctedEventIds.map(String) : []) }); }
         if (parts[2] === "refinements" && branchId) {

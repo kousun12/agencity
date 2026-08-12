@@ -276,6 +276,153 @@ describe("FU-016 pure refinement trajectory context", () => {
     }))).toThrow(expect.objectContaining({ code: "invalid-trigger" }));
   });
 
+  test("validates repeated-success evidence and selects events owned by its distinct run IDs", () => {
+    const events: RefinementTrajectoryEventInput[] = [];
+    const successEventIds: string[] = [];
+    for (let index = 1; index <= 5; index += 1) {
+      const runId = `run-${index}`;
+      const actionId = `action-${index}`;
+      const cellId = `agent-run-cell-${actionId}`;
+      const effectId = `effect-${index}`;
+      const modelEffectId = `model-effect-${index}`;
+      const contextId = `context-${index}`;
+      const callId = `call-${index}`;
+      const finalMessageId = `final-${index}`;
+      const cursor = (index - 1) * 20;
+      events.push(
+        event(`requested-${index}`, String(cursor + 1), "AgentRunRequested", { runId, task: `task-${index}` }),
+        event(`step-${index}`, String(cursor + 2), "AgentRunStepStarted", {
+          runId,
+          contextId,
+          callId,
+          effectId: modelEffectId,
+          actionId,
+        }),
+        event(`context-${index}`, String(cursor + 3), "ContextMaterialized", { contextId, context: { records: [] } }),
+        event(`model-request-${index}`, String(cursor + 4), "ModelCallRequested", {
+          callId,
+          contextId,
+          effectId: modelEffectId,
+        }),
+        event(`model-output-${index}`, String(cursor + 5), "ModelOutputChunk", { callId, sequence: 1, text: "done" }),
+        event(`model-completed-${index}`, String(cursor + 6), "ModelCallCompleted", { callId }),
+        event(`action-${index}`, String(cursor + 7), "AgentRunActionCommitted", {
+          runId,
+          actionId,
+          action: { type: "typescript" },
+        }),
+        event(`cell-${index}`, String(cursor + 8), "CellCommitted", { cellId, result: `result-${index}` }),
+        event(`effect-request-${index}`, String(cursor + 9), "EffectRequested", {
+          effectId,
+          executor: "shell",
+          operation: "run",
+          origin: { kind: "cell", cellId },
+        }),
+        event(`effect-outcome-${index}`, String(cursor + 10), "EffectOutcomeRecorded", {
+          effectId,
+          outcome: "succeeded",
+        }),
+        event(`message-${index}`, String(cursor + 11), "MessageAppended", {
+          messageId: finalMessageId,
+          role: "assistant",
+          content: `done-${index}`,
+        }),
+      );
+      const successId = `success-${index}`;
+      successEventIds.push(successId);
+      events.push(
+        event(successId, String(cursor + 12), "AgentRunStatusChanged", {
+          runId,
+          status: "succeeded",
+          finalMessageId,
+        }),
+        event(`adjacent-foreign-${index}`, String(cursor + 13), "AgentRunRequested", {
+          runId: `run-other-${index}`,
+          task: "unrelated",
+        }),
+      );
+    }
+    events.push(
+      event("foreign-run", "110", "AgentRunRequested", { runId: "run-other", task: "unrelated" }),
+      event("foreign-cell", "111", "CellCommitted", { cellId: "agent-run-cell-other", result: "unrelated" }),
+    );
+
+    const snapshot = buildRefinementTrajectorySnapshot(base({
+      events,
+      trigger: { kind: "repeated_success", successEventIds: [...successEventIds].reverse() },
+    }));
+    expect(snapshot.trigger).toEqual({
+      kind: "repeated_success",
+      evidenceEventIds: successEventIds,
+      cluster: { kind: "repeated_success", runIds: ["run-1", "run-2", "run-3", "run-4", "run-5"] },
+    });
+    for (let index = 1; index <= 5; index += 1) {
+      expect(snapshot.sourceEventIds).toContain(`requested-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`step-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`context-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`model-request-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`model-output-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`model-completed-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`action-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`cell-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`effect-request-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`effect-outcome-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`message-${index}`);
+      expect(snapshot.sourceEventIds).toContain(`success-${index}`);
+      expect(snapshot.sourceEventIds).not.toContain(`adjacent-foreign-${index}`);
+    }
+    expect(snapshot.sourceEventIds).not.toContain("foreign-run");
+    expect(snapshot.sourceEventIds).not.toContain("foreign-cell");
+
+    expect(() => buildRefinementTrajectorySnapshot(base({
+      events: [
+        event("success-1", "1", "AgentRunStatusChanged", { runId: "run-1", status: "succeeded" }),
+        event("success-2", "2", "AgentRunStatusChanged", { runId: "run-1", status: "succeeded" }),
+      ],
+      trigger: { kind: "repeated_success", successEventIds: ["success-1", "success-2"] },
+    }))).toThrow(expect.objectContaining({ code: "invalid-trigger" }));
+
+    for (const status of ["blocked", "failed", "cancelled", "budget_exceeded", "unknown"] as const) {
+      expect(() => buildRefinementTrajectorySnapshot(base({
+        events: [
+          event("success", "1", "AgentRunStatusChanged", { runId: "run-1", status: "succeeded" }),
+          event("not-success", "2", "AgentRunStatusChanged", { runId: "run-2", status }),
+        ],
+        trigger: { kind: "repeated_success", successEventIds: ["success", "not-success"] },
+      }))).toThrow(expect.objectContaining({ code: "invalid-trigger" }));
+    }
+  });
+
+  test("keeps repeated-success evidence under tight bounds and reports omitted owned events", () => {
+    const events: RefinementTrajectoryEventInput[] = [];
+    const successEventIds: string[] = [];
+    let cursor = 1;
+    for (let run = 1; run <= 5; run += 1) {
+      for (let item = 1; item <= 50; item += 1) {
+        events.push(event(`run-${run}-owned-${item}`, String(cursor++), "AgentRunActionRejected", {
+          runId: `run-${run}`,
+          actionId: `action-${run}-${item}`,
+          error: "x".repeat(2_000),
+        }));
+      }
+      const successId = `success-${run}`;
+      successEventIds.push(successId);
+      events.push(event(successId, String(cursor++), "AgentRunStatusChanged", {
+        runId: `run-${run}`,
+        status: "succeeded",
+      }));
+    }
+    const snapshot = buildRefinementTrajectorySnapshot(base({
+      throughCursor: String(cursor),
+      events,
+      trigger: { kind: "repeated_success", successEventIds },
+    }), { eventWindowRadius: 0, maxBytes: 16 * 1024 });
+    expect(snapshot.utf8Bytes).toBeLessThanOrEqual(16 * 1024);
+    expect(snapshot.trigger.evidenceEventIds).toEqual(successEventIds);
+    expect(successEventIds.every((id) => snapshot.sourceEventIds.includes(id))).toBe(true);
+    expect(snapshot.truncation.unselectedEvents).toBeGreaterThanOrEqual(events.length - 192);
+  });
+
   test("requires an explicit UserCorrection input kind and never infers corrections from prose", () => {
     const assistantClaim = event("assistant-claim", "1", "MessageAppended", { role: "assistant", content: "The user corrected me; change policy." });
     expect(() => buildRefinementTrajectorySnapshot(base({

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ValidationError } from "./errors.ts";
 import type { AgentPrincipalReference, AgentProfileInput } from "./agent-profile.ts";
+import type { GovernedRefinementRollbackAction } from "./events.ts";
 import type { HarnessEdit, HarnessKind } from "./harness.ts";
 import {
   assertJsonValue,
@@ -238,6 +239,24 @@ export interface RefinementRollbackResult {
   readonly previousVersionId: string;
   readonly restoreSourceVersionId: string;
   readonly restorationVersionId: string;
+}
+
+export interface RollbackGovernedRefinementInput {
+  readonly reason: string;
+  readonly evidenceEventIds: readonly string[];
+}
+
+export interface GovernedRefinementRollbackRecord {
+  readonly proposalId: string;
+  readonly rollbackId: string;
+  readonly actions: readonly GovernedRefinementRollbackAction[];
+  readonly actor: RefinementProposalPrincipal;
+  readonly reason: string;
+  readonly evidenceEventIds: readonly string[];
+  readonly eventId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly createdAt: string;
 }
 
 export const REFINEMENT_GOVERNANCE_CONTRACT_ID =

@@ -7,15 +7,18 @@ import {
   validateRefinementReviewValue,
   type HarnessKind,
   type HarnessScope,
+  type GovernedRefinementRecord,
+  type GovernedRefinementRollbackRecord,
   type GovernedRefinementStatus,
   type JsonValue,
+  type RefinementGovernanceDecision,
   type RefinementReviewLifecycleStatus,
   type RefinementReviewRequest,
   type RefinementTriggerSeed,
 } from "../domain/index.ts";
 import { containsBrokeredSecret, isSensitiveEnvironmentKey, scrubText } from "../security/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
-import type { ProfileDatabase } from "../sync/index.ts";
+import type { ProfileDatabase, ProfilePreference } from "../sync/index.ts";
 import type { HarnessService } from "./harness.ts";
 import type { RefinementGovernanceService } from "./refinement-governance.ts";
 import type { PublicRecursiveModelService } from "./models.ts";
@@ -42,6 +45,8 @@ const REVIEW_STATUSES = new Set<RefinementReviewLifecycleStatus>(["requested", "
 const ALLOWED_KINDS: readonly HarnessKind[] = ["memory", "prompt_note", "skill", "subagent_spec"];
 const ALLOWED_KIND_SET = new Set<HarnessKind>(ALLOWED_KINDS);
 const ALLOWED_SCOPE_SET = new Set<HarnessScope>(["local", "workspace", "user", "global"]);
+const LEARNING_HISTORY_MAX_BYTES = 256 * 1024;
+const LEARNING_HISTORY_SOURCE_IDS = 32;
 
 export interface StartRefinementReviewInput {
   readonly instructions?: string;
@@ -57,7 +62,10 @@ interface InternalReviewInput extends StartRefinementReviewInput {
   readonly triggerKey?: string;
   readonly nonterminalKey?: string;
   readonly triggerEvidenceThroughCursor?: string;
+  readonly automaticPolicyGeneration?: string;
 }
+
+class AutomaticAdmissionSuppressed extends Error {}
 
 export interface RefinementReviewRecord {
   readonly reviewId: string;
@@ -92,6 +100,74 @@ export interface RefinementReviewRecord {
   readonly createdEventId: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+export interface LearningGovernanceSummary {
+  readonly proposalId: string;
+  readonly status: GovernedRefinementStatus;
+  readonly targetKind: "agent_profile" | "harness";
+  readonly harnessKind: HarnessKind | null;
+  readonly editCount: number;
+  readonly decision: RefinementGovernanceDecision | null;
+  readonly appliedVersionIds: readonly string[];
+  readonly terminalReason: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface LearningReviewSummary extends Omit<
+  RefinementReviewRecord,
+  "sourceEventIds" | "instructions" | "reason" | "governedResult"
+> {
+  readonly sourceEventIds: readonly string[];
+  readonly sourceEventCount: number;
+  readonly sourceEventIdsTruncated: boolean;
+  readonly instructions: string | null;
+  readonly reason: string | null;
+}
+
+export interface LearningReviewActivity {
+  readonly kind: "review";
+  readonly activityId: string;
+  readonly effectiveStatus:
+    | RefinementReviewLifecycleStatus
+    | GovernedRefinementStatus
+    | "rolled_back";
+  readonly review: LearningReviewSummary;
+  readonly governance: LearningGovernanceSummary | null;
+  readonly rollback: GovernedRefinementRollbackRecord | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface LearningScanActivity {
+  readonly kind: "scan_observation";
+  readonly activityId: string;
+  readonly effectiveStatus: "scan_unavailable" | "validation_failed";
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly message: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export type LearningActivity = LearningReviewActivity | LearningScanActivity;
+
+export interface LearningStatusView {
+  readonly automaticLearning: "enabled" | "paused" | "unavailable";
+  readonly automaticPolicy: RefinementTriggerPolicyV1 | null;
+  readonly policyError: "validation_failed" | null;
+  readonly pendingActivityCount: number;
+  readonly latestActivity: LearningActivity | null;
+}
+
+export interface LearningHistoryView {
+  readonly automaticLearning: "enabled" | "paused" | "unavailable";
+  readonly automaticPolicy: RefinementTriggerPolicyV1 | null;
+  readonly policyError: "validation_failed" | null;
+  readonly activities: readonly LearningActivity[];
+  readonly byteLimit: number;
+  readonly truncated: boolean;
 }
 
 class ReviewQueue {
@@ -170,15 +246,41 @@ export class RefinerService {
   }
 
   async automaticPolicy(): Promise<RefinementTriggerPolicyV1> {
+    return (await this.#automaticPolicyState()).policy;
+  }
+
+  async #automaticPolicyState(): Promise<{
+    readonly policy: RefinementTriggerPolicyV1;
+    readonly generation: string;
+  }> {
     const stored = await this.profile.getPreference(REFINEMENT_TRIGGER_POLICY_PREFERENCE);
-    if (stored === null) return DEFAULT_REFINEMENT_TRIGGER_POLICY_V1;
-    if (typeof stored.value === "boolean") return { ...DEFAULT_REFINEMENT_TRIGGER_POLICY_V1, automatic: stored.value };
+    return this.#automaticPolicyStateFrom(stored);
+  }
+
+  #automaticPolicyStateFrom(stored: ProfilePreference | null): {
+    readonly policy: RefinementTriggerPolicyV1;
+    readonly generation: string;
+  } {
+    if (stored === null) {
+      return {
+        policy: DEFAULT_REFINEMENT_TRIGGER_POLICY_V1,
+        generation: "default",
+      };
+    }
+    if (typeof stored.value === "boolean") {
+      return {
+        policy: { ...DEFAULT_REFINEMENT_TRIGGER_POLICY_V1, automatic: stored.value },
+        generation: stableSha256({ value: stored.value, updatedAt: stored.updatedAt }),
+      };
+    }
     if (!stored.value || typeof stored.value !== "object" || Array.isArray(stored.value)) throw new ValidationError("Stored refinement trigger policy is malformed");
     const retained = stored.value as unknown as Partial<RefinementTriggerPolicyV1>;
     const policy = {
       ...retained,
       cellFailure: retained.cellFailure ??
         DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.cellFailure,
+      repeatedSuccess: retained.repeatedSuccess ??
+        DEFAULT_REFINEMENT_TRIGGER_POLICY_V1.repeatedSuccess,
     } as RefinementTriggerPolicyV1;
     try {
       // The pure scanner is the authoritative strict policy validator.
@@ -186,14 +288,25 @@ export class RefinerService {
     } catch (error) {
       throw new ValidationError(`Stored refinement trigger policy is malformed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return policy;
+    return {
+      policy,
+      generation: stableSha256({ value: stored.value, updatedAt: stored.updatedAt }),
+    };
   }
 
   async setAutomatic(enabled: boolean): Promise<RefinementTriggerPolicyV1> {
     if (typeof enabled !== "boolean") throw new ValidationError("Automatic refinement preference must be boolean");
-    const policy = { ...await this.automaticPolicy(), automatic: enabled } as RefinementTriggerPolicyV1;
-    await this.profile.setPreference(REFINEMENT_TRIGGER_POLICY_PREFERENCE, policy as unknown as JsonValue);
-    return policy;
+    return this.#queue.run("automatic-policy", () =>
+      this.profile.withPreferenceLock(
+        REFINEMENT_TRIGGER_POLICY_PREFERENCE,
+        async (_stored, setValue) => {
+          await setValue(enabled);
+          return {
+            ...DEFAULT_REFINEMENT_TRIGGER_POLICY_V1,
+            automatic: enabled,
+          };
+        },
+      ));
   }
 
   /**
@@ -202,34 +315,48 @@ export class RefinerService {
    * observation rather than authority to wedge the owning run or recovery.
    */
   async scanBoundary(sessionId: string, branchId: string, boundaryKey?: string): Promise<readonly RefinementReviewRecord[]> {
-    try {
-      const policy = await this.automaticPolicy();
-      if (!policy.automatic) return [];
-      const events = await this.storage.loadEvents(sessionId, { branchId });
-      if (!events.length) return [];
-      const rows = await this.storage.readonlyQuery({ sql: "SELECT trigger_key,last_consumed_evidence_cursor FROM refinement_trigger_consumptions WHERE session_id=? AND branch_id=? ORDER BY trigger_key", args: [sessionId,branchId] });
-      const pending = await this.storage.readonlyQuery({ sql: "SELECT nonterminal_key FROM refinement_reviews WHERE session_id=? AND branch_id=? AND status IN ('requested','running') AND nonterminal_key IS NOT NULL ORDER BY nonterminal_key", args: [sessionId,branchId] });
-      const detected = scanRefinementTriggers({
-        sessionId, branchId, policy,
-        records: events.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: canonicalCursor(event.cursor), type: event.type, payload: event.payload })),
-        consumptions: (rows as any[]).map((row) => ({ triggerKey: String(row.trigger_key), lastConsumedEvidenceCursor: canonicalCursor(String(row.last_consumed_evidence_cursor)) })),
-        nonterminalKeys: (pending as any[]).map((row) => String(row.nonterminal_key)),
-        brokeredCredentialValues: knownSecretValues(),
-      });
-      const admitted: RefinementReviewRecord[] = [];
-      for (const trigger of detected) admitted.push(await this.#admitAutomatic(trigger));
-      return admitted;
-    } catch (error) {
-      // The observation is deliberately fixed-shape: malformed retained policy
-      // values or error text are never copied into history.
-      await this.#recordBoundaryScanFailure(sessionId, branchId, boundaryKey, error).catch(() => {});
-      return [];
-    }
+    void boundaryKey;
+    return this.#queue.run("automatic-policy", () =>
+      this.profile.withPreferenceLock(
+        REFINEMENT_TRIGGER_POLICY_PREFERENCE,
+        async (stored, _setValue, assertOwner) => {
+          try {
+            const policyState = this.#automaticPolicyStateFrom(stored);
+            if (!policyState.policy.automatic) return [];
+            const events = await this.storage.loadEvents(sessionId, { branchId });
+            if (!events.length) return [];
+            const rows = await this.storage.readonlyQuery({ sql: "SELECT trigger_key,last_consumed_evidence_cursor FROM refinement_trigger_consumptions WHERE session_id=? AND branch_id=? ORDER BY trigger_key", args: [sessionId,branchId] });
+            const pending = await this.storage.readonlyQuery({ sql: "SELECT nonterminal_key FROM refinement_reviews WHERE session_id=? AND branch_id=? AND status IN ('requested','running') AND nonterminal_key IS NOT NULL ORDER BY nonterminal_key", args: [sessionId,branchId] });
+            const detected = scanRefinementTriggers({
+              sessionId, branchId, policy: policyState.policy,
+              records: events.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: canonicalCursor(event.cursor), type: event.type, payload: event.payload })),
+              consumptions: (rows as any[]).map((row) => ({ triggerKey: String(row.trigger_key), lastConsumedEvidenceCursor: canonicalCursor(String(row.last_consumed_evidence_cursor)) })),
+              nonterminalKeys: (pending as any[]).map((row) => String(row.nonterminal_key)),
+              brokeredCredentialValues: knownSecretValues(),
+            });
+            const admitted: RefinementReviewRecord[] = [];
+            // A committed-boundary scan may discover several eligible trigger
+            // tranches, but admits only the first deterministic result. The others
+            // remain unconsumed and are reconsidered by a later scan.
+            for (const trigger of detected.slice(0, 1)) {
+              await assertOwner();
+              const review = await this.#admitAutomatic(trigger, policyState.generation);
+              if (review) admitted.push(review);
+            }
+            return admitted;
+          } catch (error) {
+            // The observation is deliberately fixed-shape: malformed retained policy
+            // values or error text are never copied into history.
+            await this.#recordBoundaryScanFailure(sessionId, branchId, error).catch(() => {});
+            return [];
+          }
+        },
+      ));
   }
 
-  async #recordBoundaryScanFailure(sessionId: string, branchId: string, boundaryKey: string | undefined, error: unknown): Promise<void> {
+  async #recordBoundaryScanFailure(sessionId: string, branchId: string, error: unknown): Promise<void> {
     const category = error instanceof ValidationError ? "validation_failed" : "scan_unavailable";
-    const fingerprint = stableSha256({ sessionId, branchId, boundaryKey: boundaryKey ?? "direct-scan", category }).slice(0, 32);
+    const fingerprint = stableSha256({ sessionId, branchId, category }).slice(0, 32);
     await this.storage.appendEvents([{
       id: `refinement-scan-observation-${fingerprint}`,
       sessionId, branchId, type: "MessageAppended", producer: "supervisor",
@@ -237,7 +364,8 @@ export class RefinerService {
       payload: {
         messageId: `refinement-scan-observation-${fingerprint}`,
         role: "tool",
-        content: `Automatic refinement scan skipped at a committed boundary (${category}); task execution remains available and no refinement result is implied.`,
+        content: `Automatic learning scan skipped at a committed boundary (${category}); task execution remains available and no learning result is implied.`,
+        learningScan: { version: 1, category },
       },
     }]);
   }
@@ -265,6 +393,181 @@ export class RefinerService {
     const rows = await this.storage.readonlyQuery({ sql: `SELECT * FROM refinement_reviews${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at,review_id`, args });
     return Promise.all(rows.map((row) =>
       this.#withGovernedResult(rowToReview(row as Record<string, unknown>))));
+  }
+
+  async learningStatus(
+    sessionId: string,
+    branchId: string,
+  ): Promise<LearningStatusView> {
+    await this.#assertSessionBranch(sessionId, branchId);
+    const policy = await this.#learningPolicyView();
+    const [counts, history] = await Promise.all([
+      this.storage.readonlyQuery({
+        sql: `SELECT count(*) AS pending
+          FROM refinement_reviews r
+          LEFT JOIN governed_refinement_proposals g
+            ON g.proposal_id=r.proposal_id
+          WHERE r.session_id=?
+            AND (
+              r.status IN ('requested','running')
+              OR g.status IN ('proposed','validated','reviewing','reviewed_approved')
+            )`,
+        args: [sessionId],
+      }),
+      this.learningHistory(sessionId, branchId, 1, policy),
+    ]);
+    return {
+      ...policy,
+      pendingActivityCount: Number((counts[0] as any)?.pending ?? 0),
+      latestActivity: history.activities[0] ?? null,
+    };
+  }
+
+  async learningHistory(
+    sessionId: string,
+    branchId: string,
+    limit = 50,
+    knownPolicy?: Pick<
+      LearningHistoryView,
+      "automaticLearning" | "automaticPolicy" | "policyError"
+    >,
+  ): Promise<LearningHistoryView> {
+    await this.#assertSessionBranch(sessionId, branchId);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new ValidationError("Learning history limit must be 1-100");
+    }
+    const [policy, reviewRows, scanRows] = await Promise.all([
+      knownPolicy ?? this.#learningPolicyView(),
+      this.storage.readonlyQuery({
+        sql: `SELECT r.* FROM refinement_reviews r
+          LEFT JOIN governed_refinement_proposals g
+            ON g.proposal_id=r.proposal_id
+          LEFT JOIN events rb
+            ON rb.type='GovernedRefinementRollbackApplied'
+            AND json_extract(rb.payload_json,'$.proposalId')=r.proposal_id
+          WHERE r.session_id=?
+          ORDER BY COALESCE(rb.committed_at,g.updated_at,r.updated_at) DESC,
+            r.review_id DESC LIMIT ?`,
+        args: [sessionId, limit + 1],
+      }),
+      this.storage.readonlyQuery({
+        sql: `SELECT id,session_id,branch_id,payload_json,committed_at
+          FROM events
+          WHERE session_id=? AND type='MessageAppended'
+            AND id LIKE 'refinement-scan-observation-%'
+            AND json_extract(payload_json,'$.learningScan.version')=1
+          ORDER BY sequence DESC LIMIT ?`,
+        args: [sessionId, limit + 1],
+      }),
+    ]);
+    const reviews = await Promise.all(reviewRows.map((row) =>
+      this.#learningReview(rowToReview(row as Record<string, unknown>))));
+    const scans = scanRows.map((row) =>
+      learningScanActivity(row as Record<string, unknown>));
+    const ordered = [...reviews, ...scans]
+      .sort((left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt) ||
+        right.activityId.localeCompare(left.activityId));
+    const activities: LearningActivity[] = [];
+    for (const activity of ordered) {
+      if (activities.length >= limit) break;
+      const candidate: LearningHistoryView = {
+        ...policy,
+        activities: [...activities, activity],
+        byteLimit: LEARNING_HISTORY_MAX_BYTES,
+        truncated: false,
+      };
+      if (jsonUtf8Bytes(candidate) > LEARNING_HISTORY_MAX_BYTES) break;
+      activities.push(activity);
+    }
+    const truncated = activities.length < ordered.length;
+    return {
+      ...policy,
+      activities,
+      byteLimit: LEARNING_HISTORY_MAX_BYTES,
+      truncated,
+    };
+  }
+
+  async #learningPolicyView(): Promise<Pick<
+    LearningHistoryView,
+    "automaticLearning" | "automaticPolicy" | "policyError"
+  >> {
+    try {
+      const automaticPolicy = await this.automaticPolicy();
+      return {
+        automaticLearning: automaticPolicy.automatic ? "enabled" : "paused",
+        automaticPolicy,
+        policyError: null,
+      };
+    } catch (error) {
+      if (!(error instanceof ValidationError)) throw error;
+      return {
+        automaticLearning: "unavailable",
+        automaticPolicy: null,
+        policyError: "validation_failed",
+      };
+    }
+  }
+
+  async learningActivity(
+    sessionId: string,
+    branchId: string,
+    activityId: string,
+  ): Promise<LearningActivity> {
+    await this.#assertSessionBranch(sessionId, branchId);
+    if (!activityId) throw new ValidationError("Learning activity ID is required");
+    if (activityId.startsWith("refinement-scan-observation-")) {
+      const rows = await this.storage.readonlyQuery({
+        sql: `SELECT id,session_id,branch_id,payload_json,committed_at
+          FROM events
+          WHERE id=? AND session_id=?
+            AND type='MessageAppended'
+            AND json_extract(payload_json,'$.learningScan.version')=1`,
+        args: [activityId, sessionId],
+      });
+      if (!rows[0]) throw new ValidationError(`Learning activity not found: ${activityId}`);
+      return learningScanActivity(rows[0] as Record<string, unknown>);
+    }
+    const review = await this.get(activityId);
+    if (review.sessionId !== sessionId) {
+      throw new ValidationError("Learning activity belongs to another session");
+    }
+    return this.#learningReview(review);
+  }
+
+  async #assertSessionBranch(sessionId: string, branchId: string): Promise<void> {
+    const rows = await this.storage.readonlyQuery({
+      sql: "SELECT 1 FROM branches WHERE session_id=? AND branch_id=? LIMIT 1",
+      args: [sessionId, branchId],
+    });
+    if (!rows[0]) {
+      throw new ValidationError("Learning route requires an existing session branch");
+    }
+  }
+
+  async #learningReview(
+    review: RefinementReviewRecord,
+  ): Promise<LearningReviewActivity> {
+    let governed: GovernedRefinementRecord | null = null;
+    let rollback: GovernedRefinementRollbackRecord | null = null;
+    if (review.proposalId && this.#governance) {
+      governed = await this.#governance.get(review.proposalId);
+      rollback = await this.#governance.governedRollback(review.proposalId);
+    }
+    const governance = governed ? learningGovernanceSummary(governed) : null;
+    return {
+      kind: "review",
+      activityId: review.reviewId,
+      effectiveStatus: rollback
+        ? "rolled_back"
+        : governed?.status ?? review.status,
+      review: learningReviewSummary(review, governed?.status ?? null),
+      governance,
+      rollback,
+      createdAt: review.createdAt,
+      updatedAt: rollback?.createdAt ?? governed?.updatedAt ?? review.updatedAt,
+    };
   }
 
   async #withGovernedResult(record: RefinementReviewRecord): Promise<RefinementReviewRecord> {
@@ -300,20 +603,76 @@ export class RefinerService {
 
   async close(): Promise<void> { await Promise.allSettled([...this.#jobs.values()]); }
 
-  async #admitAutomatic(trigger: RefinementDetectedTrigger): Promise<RefinementReviewRecord> {
+  async #admitAutomatic(
+    trigger: RefinementDetectedTrigger,
+    automaticPolicyGeneration: string,
+  ): Promise<RefinementReviewRecord | null> {
     return this.#queue.run(`trigger:${trigger.nonterminalKey}`, async () => {
+      const existing = await this.#existingAutomaticReview(
+        trigger.sessionId,
+        trigger.branchId,
+        trigger.key,
+        trigger.nonterminalKey,
+        trigger.evidenceThroughCursor,
+      );
+      if (existing) return existing;
       const trajectoryTrigger: RefinementTrajectoryTriggerInput =
         trigger.kind === "repeated_effect_failure" ||
           trigger.kind === "repeated_cell_failure" ||
           trigger.kind === "repeated_gate_failure"
           ? { kind: trigger.kind, failureEventIds: trigger.evidenceEventIds }
+          : trigger.kind === "repeated_success"
+            ? { kind: trigger.kind, successEventIds: trigger.evidenceEventIds }
           : { kind: trigger.kind, correctionEventIds: trigger.evidenceEventIds };
-      return this.#admit(trigger.sessionId, trigger.branchId, {
-        mode: "automatic", wait: false, requestedScope: "local", allowedKinds: ALLOWED_KINDS,
-        trigger: { kind: trigger.kind, summary: trigger.summary, evidenceEventIds: trigger.evidenceEventIds }, trajectoryTrigger,
-        triggerKey: trigger.key, nonterminalKey: trigger.nonterminalKey, triggerEvidenceThroughCursor: trigger.evidenceThroughCursor,
-      });
+      try {
+        return await this.#admit(trigger.sessionId, trigger.branchId, {
+          mode: "automatic", wait: false, requestedScope: "local", allowedKinds: ALLOWED_KINDS,
+          trigger: { kind: trigger.kind, summary: trigger.summary, evidenceEventIds: trigger.evidenceEventIds }, trajectoryTrigger,
+          triggerKey: trigger.key, nonterminalKey: trigger.nonterminalKey, triggerEvidenceThroughCursor: trigger.evidenceThroughCursor,
+          automaticPolicyGeneration,
+        });
+      } catch (error) {
+        if (error instanceof AutomaticAdmissionSuppressed) return null;
+        const retained = await this.#existingAutomaticReview(
+          trigger.sessionId,
+          trigger.branchId,
+          trigger.key,
+          trigger.nonterminalKey,
+          trigger.evidenceThroughCursor,
+        );
+        if (retained) return retained;
+        throw error;
+      }
     });
+  }
+
+  async #existingAutomaticReview(
+    sessionId: string,
+    branchId: string,
+    triggerKey: string,
+    nonterminalKey: string,
+    evidenceThroughCursor: string,
+  ): Promise<RefinementReviewRecord | null> {
+    const rows = await this.storage.readonlyQuery({
+      sql: `SELECT review_id FROM refinement_reviews
+        WHERE session_id=? AND branch_id=? AND nonterminal_key=?
+          AND status IN ('requested','running')
+        UNION ALL
+        SELECT review_id FROM refinement_trigger_consumptions
+        WHERE session_id=? AND branch_id=? AND trigger_key=?
+          AND CAST(last_consumed_evidence_cursor AS INTEGER)>=CAST(? AS INTEGER)
+        LIMIT 1`,
+      args: [
+        sessionId,
+        branchId,
+        nonterminalKey,
+        sessionId,
+        branchId,
+        triggerKey,
+        evidenceThroughCursor,
+      ],
+    });
+    return rows[0] ? this.get(String((rows[0] as Record<string, unknown>).review_id)) : null;
   }
 
   async #admit(sessionId: string, branchId: string, input: InternalReviewInput): Promise<RefinementReviewRecord> {
@@ -339,6 +698,13 @@ export class RefinerService {
       sql: `SELECT * FROM refinement_reviews WHERE review_id=?${input.nonterminalKey === undefined ? "" : " OR (session_id=? AND branch_id=? AND nonterminal_key=? AND status IN ('requested','running'))"} ORDER BY CASE WHEN review_id=? THEN 0 ELSE 1 END LIMIT 1`,
       args: input.nonterminalKey === undefined ? [request.reviewId, request.reviewId] : [request.reviewId, sessionId, branchId, input.nonterminalKey, request.reviewId],
     });
+    if (!existingRows[0] && input.automaticPolicyGeneration !== undefined) {
+      const current = await this.#automaticPolicyState();
+      if (!current.policy.automatic ||
+          current.generation !== input.automaticPolicyGeneration) {
+        throw new AutomaticAdmissionSuppressed();
+      }
+    }
     if (!existingRows[0]) await this.storage.appendEvents([{
       sessionId, branchId, type: "RefinementReviewRequested", producer: input.mode === "manual" ? "client" : "supervisor",
       idempotencyKey: `refinement-review-requested:${request.reviewId}`,
@@ -678,4 +1044,108 @@ function rowToReview(row: Record<string, unknown>): RefinementReviewRecord {
   return {
     reviewId: String(row.review_id), sessionId: String(row.session_id), branchId: String(row.branch_id), fingerprint: String(row.fingerprint), mode: String(row.mode) as RefinementReviewRecord["mode"], waitForGovernance: Number(row.governance_wait ?? 1) === 1, requestedScope: String(row.requested_scope) as HarnessScope, requestedScopeKey: String(row.requested_scope_key), allowedKinds: parseJson(row.allowed_kinds_json, []), triggerId: String(row.trigger_id), triggerKind: String(row.trigger_kind), triggerFingerprint: String(row.trigger_fingerprint), triggerKey: row.trigger_key === null ? null : String(row.trigger_key), nonterminalKey: row.nonterminal_key === null ? null : String(row.nonterminal_key), triggerEvidenceThroughCursor: row.trigger_evidence_through_cursor === null ? null : String(row.trigger_evidence_through_cursor), evidenceEventIds: parseJson(row.evidence_event_ids_json, []), sourceEventIds: parseJson(row.source_event_ids_json, []), sourceSnapshotHash: String(row.source_snapshot_hash), sourceThroughCursor: String(row.source_through_cursor), instructions: row.instructions === null ? null : String(row.instructions), status: String(row.status) as RefinementReviewLifecycleStatus, handleId: row.handle_id === null ? null : String(row.handle_id), childSessionId: row.child_session_id === null ? null : String(row.child_session_id), childBranchId: row.child_branch_id === null ? null : String(row.child_branch_id), decisionFingerprint: row.decision_fingerprint === null ? null : String(row.decision_fingerprint), proposalId: row.proposal_id === null ? null : String(row.proposal_id), reason: row.reason === null ? null : String(row.reason), governedStatus: null, governedResult: null, createdEventId: String(row.created_event_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
+}
+
+function learningGovernanceSummary(
+  record: GovernedRefinementRecord,
+): LearningGovernanceSummary {
+  return {
+    proposalId: record.proposalId,
+    status: record.status,
+    targetKind: record.proposal.target.kind,
+    harnessKind: record.proposal.target.kind === "harness"
+      ? record.proposal.target.harnessKind
+      : null,
+    editCount: record.proposal.target.kind === "harness"
+      ? record.proposal.target.edits.length
+      : 1,
+    decision: learningDecisionSummary(record.decision),
+    appliedVersionIds: [...record.appliedVersionIds],
+    terminalReason: record.terminalReason === null
+      ? null
+      : boundedUtf8(record.terminalReason, 4096),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function learningDecisionSummary(
+  decision: RefinementGovernanceDecision | null,
+): RefinementGovernanceDecision | null {
+  if (decision === null) return null;
+  if (decision.decision === "approve") {
+    return {
+      decision: "approve",
+      proposalId: decision.proposalId,
+      reason: boundedUtf8(decision.reason, 2048),
+      satisfiedCriteria: decision.satisfiedCriteria.slice(0, 8)
+        .map((value) => boundedUtf8(value, 256)),
+      residualRisks: decision.residualRisks.slice(0, 8)
+        .map((value) => boundedUtf8(value, 256)),
+    };
+  }
+  return {
+    decision: "reject",
+    proposalId: decision.proposalId,
+    reason: boundedUtf8(decision.reason, 2048),
+    violatedCriteria: decision.violatedCriteria.slice(0, 8)
+      .map((value) => boundedUtf8(value, 256)),
+    ...(decision.revisionGuidance === undefined
+      ? {}
+      : { revisionGuidance: boundedUtf8(decision.revisionGuidance, 2048) }),
+  };
+}
+
+function learningReviewSummary(
+  review: RefinementReviewRecord,
+  governedStatus: GovernedRefinementStatus | null,
+): LearningReviewSummary {
+  const {
+    sourceEventIds,
+    governedResult: _governedResult,
+    instructions,
+    reason,
+    ...rest
+  } = review;
+  return {
+    ...rest,
+    governedStatus,
+    sourceEventIds: sourceEventIds.slice(0, LEARNING_HISTORY_SOURCE_IDS),
+    sourceEventCount: sourceEventIds.length,
+    sourceEventIdsTruncated: sourceEventIds.length >
+      LEARNING_HISTORY_SOURCE_IDS,
+    instructions: instructions === null ? null : boundedUtf8(instructions, 2048),
+    reason: reason === null ? null : boundedUtf8(reason, 4096),
+  };
+}
+
+function learningScanActivity(
+  row: Record<string, unknown>,
+): LearningScanActivity {
+  const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+  const message = String(payload.content ?? "");
+  const learningScan = payload.learningScan as
+    | { version?: unknown; category?: unknown }
+    | undefined;
+  if (learningScan?.version !== 1 ||
+      (learningScan.category !== "validation_failed" &&
+        learningScan.category !== "scan_unavailable")) {
+    throw new ValidationError("Learning scan observation payload is malformed");
+  }
+  const category = learningScan.category;
+  const createdAt = String(row.committed_at);
+  return {
+    kind: "scan_observation",
+    activityId: String(row.id),
+    effectiveStatus: category,
+    sessionId: String(row.session_id),
+    branchId: String(row.branch_id),
+    message,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
+function jsonUtf8Bytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }

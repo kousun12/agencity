@@ -209,7 +209,7 @@ describe("OpenTUI interactive terminal", () => {
     expect(structuredReview.conversation.at(-1)).toEqual({
       id: "structured-result:review-call",
       role: "runtime",
-      content: "Structured trajectory review submitted agencity_submit_refinement_review. The decision is retained on the parent session.",
+      content: "Structured learning reflection submitted agencity_submit_refinement_review. The decision is retained on the parent session.",
     });
     const displayProfile = fixtureAgentProfile(session.sessionId);
     const proposedFinal = buildTerminalScreen({
@@ -1253,7 +1253,7 @@ describe("OpenTUI interactive terminal", () => {
           cell: {
             id: "agent-run-cell-action-1",
             language: "typescript",
-            code: "const value = 42;\nreturn { value };",
+            code: "// Purpose: Compute the retained value.\nconst value = 42;\nreturn { value };",
             status: "committed",
             attempts: 1,
             logs: ["computed log", "failed log"],
@@ -1317,9 +1317,10 @@ describe("OpenTUI interactive terminal", () => {
       expect(details.screenX).toBeGreaterThan(cellRoot.screenX);
       expect((await setup.captureCharFrame()).toString()).toContain("╭");
       expect(compactSource.filetype).toBe("typescript");
+      expect(compactSource.content).toBe("Compute the retained value. …");
       expect(compactSource.content).toEndWith("…");
       expect(message.content).toBe(view.conversation[1]!.content);
-      expect(source.content).toBe(view.runs[0]!.steps[0]!.cell!.code);
+      expect(source.content).toBe("// Compute the retained value.\nconst value = 42;\nreturn { value };");
       expect(host.getChildren().map(child => child.id)).toEqual([
         "agencity-transcript-message-agent-run-task-run-1",
         "agencity-transcript-run-run-1",

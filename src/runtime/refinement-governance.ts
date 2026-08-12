@@ -19,12 +19,16 @@ import {
   validateRefinementGovernanceRecursiveResult,
   type GovernedRefinementProposal,
   type GovernedRefinementRecord,
+  type GovernedRefinementRollbackAction,
+  type GovernedRefinementRollbackRecord,
   type GovernedRefinementStatus,
   type JsonValue,
+  type NewAgentEvent,
   type RefinementGovernanceDecision,
   type RefinementProposalPrincipal,
   type RefinementRollbackResult,
   type RefinementTarget,
+  type RollbackGovernedRefinementInput,
   type RollbackRefinementInput,
 } from "../domain/index.ts";
 import { containsBrokeredSecret, scrubJson, scrubText } from "../security/index.ts";
@@ -236,6 +240,238 @@ export class RefinementGovernanceService {
       { kind: "agent", sessionId: originSessionId, branchId: originBranchId },
       input,
     );
+  }
+
+  async governedRollback(
+    proposalId: string,
+  ): Promise<GovernedRefinementRollbackRecord | null> {
+    const rows = await this.storage.readonlyQuery({
+      sql: `SELECT id,session_id,branch_id,payload_json,committed_at
+        FROM events
+        WHERE type='GovernedRefinementRollbackApplied'
+          AND json_extract(payload_json,'$.proposalId')=?
+        ORDER BY sequence DESC LIMIT 1`,
+      args: [proposalId],
+    });
+    return rows[0]
+      ? rowToGovernedRollback(rows[0] as Record<string, unknown>)
+      : null;
+  }
+
+  async rollbackAutomaticProposalOwner(
+    originSessionId: string,
+    originBranchId: string,
+    proposalId: string,
+    input: RollbackGovernedRefinementInput,
+  ): Promise<GovernedRefinementRollbackRecord> {
+    normalizeBounded(proposalId, "Governed refinement proposal ID", 256);
+    const normalizedReason = normalizeBounded(input.reason, "Rollback reason", 1024);
+    if (!Array.isArray(input.evidenceEventIds) ||
+        input.evidenceEventIds.length > MAX_EVIDENCE) {
+      throw new ValidationError("Rollback evidence exceeds 32 events");
+    }
+    const evidenceEventIds = [...new Set(input.evidenceEventIds)].sort();
+    const principal: RefinementProposalPrincipal = {
+      kind: "owner",
+      profileId: this.ownerProfileId,
+    };
+    const rollbackId = stableId(
+      "governed-refinement-rollback",
+      canonicalJsonDigest({
+        proposalId,
+        principal,
+        reason: normalizedReason,
+        evidenceEventIds,
+      } as unknown as JsonValue),
+    );
+    return this.#queue.run(`governed-rollback:${proposalId}`, async () => {
+      const record = await this.get(proposalId);
+      if (record.sessionId !== originSessionId ||
+          record.branchId !== originBranchId) {
+        throw new ValidationError("Governed refinement rollback must use its originating session branch");
+      }
+      const existing = await this.governedRollback(proposalId);
+      if (existing) {
+        if (existing.rollbackId !== rollbackId ||
+            existing.reason !== normalizedReason ||
+            !Bun.deepEquals(existing.evidenceEventIds, evidenceEventIds) ||
+            !Bun.deepEquals(existing.actor, principal)) {
+          throw new ConflictError("Governed refinement was already rolled back with different meaning");
+        }
+        return existing;
+      }
+      if (record.status !== "applied" ||
+          record.proposal.principal.kind !== "automatic_refiner" ||
+          record.proposal.target.kind !== "harness") {
+        throw new ValidationError("Only an applied automatic harness refinement can use grouped rollback");
+      }
+      await this.#assertWorkspaceEvidence(originSessionId, evidenceEventIds);
+      const targetKind = record.proposal.target.harnessKind;
+      const events: NewAgentEvent[] = [];
+      const actions: GovernedRefinementRollbackAction[] = [];
+
+      for (const [editIndex, edit] of record.proposal.target.edits.entries()) {
+        if (edit.operation === "retire") {
+          const entry = await this.harness.get(edit.entryId);
+          if (!entry || entry.kind !== targetKind ||
+              entry.scope !== "local" || entry.scopeKey !== originSessionId ||
+              entry.currentVersionId !== edit.expectedVersionId ||
+              entry.status !== "retired") {
+            throw new ConflictError("Governed retirement rollback compare-and-swap failed", {
+              proposalId,
+              editIndex,
+            });
+          }
+          actions.push({
+            operation: "reactivate",
+            editIndex,
+            targetKind,
+            targetId: entry.entryId,
+            reactivatedVersionId: edit.expectedVersionId,
+          });
+          events.push({
+            sessionId: originSessionId,
+            branchId: originBranchId,
+            type: "HarnessVersionStatusChanged",
+            producer: "client",
+            idempotencyKey: `governed-refinement-reactivate:${rollbackId}:${editIndex}`,
+            payload: {
+              entryId: entry.entryId,
+              versionId: edit.expectedVersionId,
+              status: "active",
+              reason: normalizedReason,
+              proposalId,
+            },
+          });
+          continue;
+        }
+
+        const appliedVersionId = stableId(
+          "version",
+          `governed:${proposalId}:${editIndex}`,
+        );
+        const version = await this.harness.getVersion(appliedVersionId);
+        const entry = version ? await this.harness.get(version.entryId) : null;
+        if (!version || !entry || version.proposalId !== proposalId ||
+            version.kind !== targetKind ||
+            entry.scope !== "local" || entry.scopeKey !== originSessionId ||
+            entry.currentVersionId !== appliedVersionId ||
+            entry.status !== "active") {
+          throw new ConflictError("Governed refinement rollback compare-and-swap failed", {
+            proposalId,
+            editIndex,
+          });
+        }
+        if (edit.operation === "create") {
+          if (version.supersedesVersionId !== null) {
+            throw new ValidationError("Governed create rollback found unexpected prior content");
+          }
+          actions.push({
+            operation: "deactivate",
+            editIndex,
+            targetKind,
+            targetId: entry.entryId,
+            appliedVersionId,
+          });
+          events.push({
+            sessionId: originSessionId,
+            branchId: originBranchId,
+            type: "HarnessVersionStatusChanged",
+            producer: "client",
+            idempotencyKey: `governed-refinement-deactivate:${rollbackId}:${editIndex}`,
+            payload: {
+              entryId: entry.entryId,
+              versionId: appliedVersionId,
+              status: "rolled_back",
+              reason: normalizedReason,
+              proposalId,
+            },
+          });
+          continue;
+        }
+        if (version.supersedesVersionId !== edit.expectedVersionId) {
+          throw new ValidationError("Governed replacement rollback source does not match the proposal");
+        }
+        const restorationRollbackId = stableId(
+          "refinement-restoration",
+          `${rollbackId}:${editIndex}`,
+        );
+        const prepared = await this.harness.prepareRestoreGoverned(
+          originSessionId,
+          originBranchId,
+          {
+            targetId: entry.entryId,
+            expectedCurrentVersionId: appliedVersionId,
+            restoreVersionId: edit.expectedVersionId,
+            rollbackId: restorationRollbackId,
+            reason: normalizedReason,
+            evidenceEventIds,
+            createdBy: principalLabel(principal),
+            evidenceAuthority: "workspace_owner",
+          },
+        );
+        actions.push({
+          operation: "restore",
+          editIndex,
+          targetKind,
+          targetId: entry.entryId,
+          appliedVersionId,
+          restoreSourceVersionId: edit.expectedVersionId,
+          restorationVersionId: prepared.version.versionId,
+          restorationRollbackId,
+        });
+        events.push(...prepared.events);
+        if (targetKind === "skill") {
+          const restoreSource = await this.harness.getVersion(
+            edit.expectedVersionId,
+          );
+          if (!restoreSource) {
+            throw new ValidationError("Skill rollback source is unavailable");
+          }
+          events.push(await this.harness.preserveExactSkillTest(
+            originSessionId,
+            originBranchId,
+            restoreSource,
+            prepared.version,
+          ));
+        }
+        events.push({
+          sessionId: originSessionId,
+          branchId: originBranchId,
+          type: "RefinementRollbackApplied",
+          producer: "client",
+          idempotencyKey: `refinement-restoration:${restorationRollbackId}`,
+          payload: {
+            rollbackId: restorationRollbackId,
+            targetKind,
+            targetId: entry.entryId,
+            previousVersionId: appliedVersionId,
+            restoreSourceVersionId: edit.expectedVersionId,
+            restorationVersionId: prepared.version.versionId,
+            actor: principal as unknown as JsonValue,
+            reason: normalizedReason,
+            evidenceEventIds,
+          },
+        });
+      }
+      events.push({
+        sessionId: originSessionId,
+        branchId: originBranchId,
+        type: "GovernedRefinementRollbackApplied",
+        producer: "client",
+        idempotencyKey: `governed-refinement-rollback:${rollbackId}`,
+        payload: {
+          proposalId,
+          rollbackId,
+          actions,
+          actor: principal as unknown as JsonValue,
+          reason: normalizedReason,
+          evidenceEventIds,
+        },
+      });
+      await this.storage.appendEvents(events);
+      return (await this.governedRollback(proposalId))!;
+    });
   }
 
   async close(): Promise<void> {
@@ -956,6 +1192,9 @@ export class RefinementGovernanceService {
       reviewDecisionId: record.reviewDecisionId,
       reason: record.terminalReason,
       appliedVersionIds: [...record.appliedVersionIds],
+      targetKind: record.proposal.target.kind === "agent_profile"
+        ? "agent_profile"
+        : record.proposal.target.harnessKind,
       ...(record.decision === null ? {} : { decision: record.decision as unknown as JsonValue }),
     };
     const noticeId = stableId("refinement-terminal-notice", record.proposalId);
@@ -1191,6 +1430,31 @@ export class RefinementGovernanceService {
     }
   }
 
+  async #assertWorkspaceEvidence(
+    originSessionId: string,
+    evidenceEventIds: readonly string[],
+  ): Promise<void> {
+    const originRows = await this.storage.readonlyQuery({
+      sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
+      args: [originSessionId],
+    });
+    const workspaceId = String((originRows[0] as any)?.workspace_id ?? "");
+    if (!workspaceId) throw new ValidationError("Rollback origin session does not exist");
+    for (const evidenceId of evidenceEventIds) {
+      const event = await this.storage.getEvent(evidenceId);
+      const sourceRows = event
+        ? await this.storage.readonlyQuery({
+            sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
+            args: [event.sessionId],
+          })
+        : [];
+      if (!event ||
+          String((sourceRows[0] as any)?.workspace_id ?? "") !== workspaceId) {
+        throw new ValidationError("Rollback evidence is outside the authorized workspace");
+      }
+    }
+  }
+
   async #rollback(
     originSessionId: string,
     originBranchId: string,
@@ -1294,7 +1558,21 @@ export class RefinementGovernanceService {
         throw new ValidationError("Rollback target kind does not match the harness entry");
       }
       restorationVersionId = prepared.version.versionId;
-      restorationEvents = prepared.events;
+      restorationEvents = [...prepared.events];
+      if (input.targetKind === "skill") {
+        const restoreSource = await this.harness.getVersion(
+          input.restoreVersionId,
+        );
+        if (!restoreSource) {
+          throw new ValidationError("Skill rollback source is unavailable");
+        }
+        restorationEvents.push(await this.harness.preserveExactSkillTest(
+          originSessionId,
+          originBranchId,
+          restoreSource,
+          prepared.version,
+        ));
+      }
     }
     await this.storage.appendEvents([...restorationEvents, {
       sessionId: originSessionId,
@@ -1368,6 +1646,24 @@ function rowToRecord(row: Record<string, unknown>): GovernedRefinementRecord {
     createdEventId: String(row.created_event_id),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  };
+}
+
+function rowToGovernedRollback(
+  row: Record<string, unknown>,
+): GovernedRefinementRollbackRecord {
+  const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+  return {
+    proposalId: String(payload.proposalId),
+    rollbackId: String(payload.rollbackId),
+    actions: (payload.actions ?? []) as GovernedRefinementRollbackAction[],
+    actor: payload.actor as RefinementProposalPrincipal,
+    reason: String(payload.reason),
+    evidenceEventIds: (payload.evidenceEventIds ?? []) as string[],
+    eventId: String(row.id),
+    sessionId: String(row.session_id),
+    branchId: String(row.branch_id),
+    createdAt: String(row.committed_at),
   };
 }
 

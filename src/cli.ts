@@ -48,6 +48,9 @@ import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./proto
 import {
   Supervisor,
   type AgentRunResult,
+  type LearningActivity,
+  type LearningHistoryView,
+  type LearningStatusView,
   type ModelContractDiagnosticsView,
   type SelectedAgentToolCapabilityView,
 } from "./runtime/index.ts";
@@ -166,7 +169,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const reconciliationCommand = parsed.command === "unknown" || parsed.command === "reconcile";
     if (reconciliationCommand && existing.length === 0) throw new ValidationError("No retained session is available for effect reconciliation");
     if ((parsed.command === "branch" || parsed.command === "history") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command}`);
-    if ((parsed.command === "profile" || parsed.command === "refine") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command === "profile" ? "profile management" : "trajectory refinement"}`);
+    if ((parsed.command === "profile" || parsed.command === "refine") && existing.length === 0) throw new ValidationError(`No retained session is available for ${parsed.command === "profile" ? "profile management" : "learning activity"}`);
     if (parsed.command === "skills" && existing.length === 0) throw new ValidationError("No retained session is available for skill management");
     if ((parsed.command === "context" || parsed.command === "compact") && existing.length === 0) throw new ValidationError("No retained session is available for context management");
     const forceNew = parsed.command === "new" || parsed.flags.has("new");
@@ -286,12 +289,42 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     }
     if (parsed.command === "refine") {
       const [mode, ...rest] = parsed.positionals;
-      if (mode === "status" || mode === "history") {
+      if (mode === "status") {
+        if (rest.length) throw new ValidationError("refine status accepts no additional arguments");
+        const status = await client.learningStatus(selection.sessionId, selection.branchId);
+        if (parsed.flags.has("json")) await printValue(status, true);
+        else console.log(renderLearningStatus(status));
+      } else if (mode === "history") {
+        if (rest.length) throw new ValidationError("refine history accepts no additional arguments");
+        const history = await client.learningHistory(selection.sessionId, selection.branchId);
+        if (parsed.flags.has("json")) await printValue(history, true);
+        else console.log(renderLearningHistory(history));
+      } else if (mode === "inspect") {
+        if (rest.length !== 1) throw new ValidationError("refine inspect requires one activity ID");
+        const activity = await client.learningActivity(selection.sessionId, selection.branchId, rest[0]!);
+        if (parsed.flags.has("json")) await printValue(activity, true);
+        else console.log(renderLearningActivity(activity, true));
+      } else if (mode === "pause" || mode === "resume") {
         if (rest.length) throw new ValidationError(`refine ${mode} accepts no additional arguments`);
-        await printValue({ reviews: await client.refinementReviews(selection.sessionId, selection.branchId), proposals: (await client.refinements()).filter((item) => item.sessionId === selection.sessionId && item.branchId === selection.branchId) }, parsed.flags.has("json"));
+        const policy = mode === "pause"
+          ? await client.pauseAutomaticLearning()
+          : await client.resumeAutomaticLearning();
+        if (parsed.flags.has("json")) await printValue(policy, true);
+        else console.log(`Automatic learning ${policy.automatic ? "enabled" : "paused"}.`);
       } else if (mode === "auto") {
         if (rest.length !== 1 || (rest[0] !== "on" && rest[0] !== "off")) throw new ValidationError("refine auto requires on or off");
-        await printValue(await client.setAutomaticRefinement(rest[0] === "on"), parsed.flags.has("json"));
+        const policy = await client.setAutomaticRefinement(rest[0] === "on");
+        if (parsed.flags.has("json")) await printValue(policy, true);
+        else console.log(`Automatic learning ${policy.automatic ? "enabled" : "paused"}.`);
+      } else if (mode === "rollback") {
+        if (rest.length < 2) throw new ValidationError("refine rollback requires PROPOSAL_ID REASON");
+        const rollback = await client.rollbackGovernedRefinement(
+          selection.sessionId,
+          selection.branchId,
+          rest[0]!,
+          { reason: rest.slice(1).join(" "), evidenceEventIds: [] },
+        );
+        await printValue(rollback, parsed.flags.has("json"));
       } else if (mode === "propose-json") { const proposed = await client.refine(selection.sessionId, selection.branchId, parseJsonValue(rest.join(" "), "refinement proposal") as any); await printValue(await client.validateRefinement(selection.sessionId, selection.branchId, proposed.proposalId), parsed.flags.has("json")); }
       else {
         if (parsed.flags.has("wait") && parsed.flags.has("detach")) {
@@ -307,7 +340,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
         });
         await printValue(review, parsed.flags.has("json"));
         if (!parsed.flags.has("wait") && !parsed.flags.has("json")) {
-          console.log("Refinement accepted (detached; use `agencity refine status` to inspect progress)");
+          console.log("Learning reflection accepted (detached; use `agencity refine status` to inspect activity)");
         }
       }
       return;
@@ -1071,6 +1104,59 @@ function printProductRunResult(
     }
   }
   process.exitCode = exitCode;
+}
+
+function renderLearningStatus(status: LearningStatusView): string {
+  const latest = status.latestActivity
+    ? renderLearningActivity(status.latestActivity, false)
+    : "No retained learning activity.";
+  return [
+    `Automatic learning: ${status.automaticLearning}`,
+    `Scope: ${status.automaticPolicy?.scope ?? "unavailable"}`,
+    `Pending activity: ${status.pendingActivityCount}`,
+    `Latest: ${latest}`,
+  ].join("\n");
+}
+
+function renderLearningHistory(history: LearningHistoryView): string {
+  return [
+    `Automatic learning: ${history.automaticLearning}`,
+    `History response: ${history.truncated ? "truncated" : "complete"} · ${history.byteLimit} byte limit`,
+    ...(history.activities.length
+      ? history.activities.map((activity) => renderLearningActivity(activity, false))
+      : ["No retained learning activity."]),
+  ].join("\n");
+}
+
+function renderLearningActivity(
+  activity: LearningActivity,
+  detailed: boolean,
+): string {
+  if (activity.kind === "scan_observation") {
+    return detailed
+      ? [
+          `${activity.createdAt} ${activity.effectiveStatus} ${activity.activityId}`,
+          activity.message,
+        ].join("\n")
+      : `${activity.createdAt} ${activity.effectiveStatus} ${activity.activityId}`;
+  }
+  const summary = `${activity.updatedAt} ${activity.effectiveStatus} ${activity.activityId} trigger=${activity.review.triggerKind} evidence=${activity.review.evidenceEventIds.length}`;
+  if (!detailed) return summary;
+  return [
+    summary,
+    `Result: ${activity.review.reason ?? "pending"}`,
+    `Evidence events: ${activity.review.evidenceEventIds.join(", ") || "none"}`,
+    `Source events: ${activity.review.sourceEventIds.join(", ")}`,
+    activity.governance
+      ? `Governance: ${activity.governance.status} proposal=${activity.governance.proposalId} target=${activity.governance.harnessKind ?? activity.governance.targetKind} edits=${activity.governance.editCount} applied=${activity.governance.appliedVersionIds.join(", ") || "none"}`
+      : "Governance: none",
+    activity.governance?.decision
+      ? `Sealed decision: ${activity.governance.decision.decision} — ${activity.governance.decision.reason}`
+      : "Sealed decision: none",
+    activity.rollback
+      ? `Rollback: ${activity.rollback.rollbackId} actions=${activity.rollback.actions.length} reason=${activity.rollback.reason}`
+      : "Rollback: none",
+  ].join("\n");
 }
 
 async function printValue(value: unknown, json: boolean): Promise<void> {

@@ -118,6 +118,8 @@ describe("FU-005 protocol-backed terminal UI", () => {
       "/memory", "/skills", "/profile", "/refine", "/sync", "/conflicts", "/unknown", "/reconcile",
     ]) expect(names.has(required), required).toBe(true);
     expect(new Set(TERMINAL_COMMAND_REGISTRY.map((item) => item.name)).size).toBe(TERMINAL_COMMAND_REGISTRY.length);
+    expect(TERMINAL_COMMAND_REGISTRY.find(item => item.name === "/refine")?.summary)
+      .toContain("automatic learning");
   });
 
   test("manual refinement is detached by default and accepts explicit wait and target kinds", () => {
@@ -140,6 +142,119 @@ describe("FU-005 protocol-backed terminal UI", () => {
       .toThrow("memory, prompt_note, skill, or subagent_spec");
     expect(() => parseTerminalRefinementRequest("--wait --detach improve edits"))
       .toThrow("--wait or --detach");
+  });
+
+  test("learning status and history include automatic policy and route activity", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-learning-"); temps.push(temp);
+    const supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, recover: false });
+    const session = await supervisor.createSession({ workspaceId: "terminal-learning", sessionName: "Learning status", branchName: "main" });
+    const base = new AgentClient(new InProcessProtocolTransport(new ProtocolServer(supervisor)));
+    const automaticPolicy = {
+      version: 1,
+      automatic: true,
+      scope: "local",
+      repeatedSuccess: { enabled: true, threshold: 5, windowRecords: 2_048, refireAfterNewEvidence: 5 },
+      effectFailure: { enabled: true, threshold: 3, windowRecords: 128, refireAfterNewEvidence: 3 },
+      cellFailure: { enabled: true, threshold: 3, windowRecords: 128, refireAfterNewEvidence: 3 },
+      completionGateFailure: { enabled: true, threshold: 2, windowRecords: 128, refireAfterNewEvidence: 2 },
+      explicitUserCorrection: { enabled: true, threshold: 1, windowRecords: 128, refireAfterNewEvidence: 1 },
+    };
+    const activity = {
+      kind: "review",
+      activityId: "review-learning",
+      effectiveStatus: "applied",
+      review: {
+        triggerKind: "repeated_success",
+        evidenceEventIds: ["evidence-1"],
+        sourceEventIds: ["event-1"],
+        reason: "Evidence-backed local behavior retained.",
+      },
+      governance: {
+        proposalId: "proposal-learning",
+        status: "applied",
+        harnessKind: "memory",
+        appliedVersionIds: ["version-learning"],
+      },
+      rollback: null,
+      createdAt: "2026-08-11T00:00:00.000Z",
+      updatedAt: "2026-08-11T00:00:01.000Z",
+    };
+    const actions: string[] = [];
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "learningStatus") return async () => ({
+          automaticLearning: "enabled",
+          automaticPolicy,
+          policyError: null,
+          pendingActivityCount: 0,
+          latestActivity: activity,
+        });
+        if (property === "learningHistory") return async () => ({
+          automaticLearning: "enabled",
+          automaticPolicy,
+          policyError: null,
+          activities: [activity],
+        });
+        if (property === "learningActivity") return async (_sessionId: string, _branchId: string, activityId: string) => {
+          actions.push(`inspect:${activityId}`);
+          return activity;
+        };
+        if (property === "pauseAutomaticLearning") return async () => {
+          actions.push("pause");
+          return { ...automaticPolicy, automatic: false };
+        };
+        if (property === "resumeAutomaticLearning") return async () => {
+          actions.push("resume");
+          return automaticPolicy;
+        };
+        if (property === "rollbackGovernedRefinement") return async (_sessionId: string, _branchId: string, proposalId: string, input: any) => {
+          actions.push(`rollback:${proposalId}:${input.reason}`);
+          return { proposalId, rollbackId: "rollback-learning", actions: [], reason: input.reason };
+        };
+        const current = Reflect.get(target, property, target);
+        return typeof current === "function" ? current.bind(target) : current;
+      },
+    });
+    const details: any[] = [];
+    const ui = new TerminalUI(client, {
+      interactive: false,
+      manageSignals: false,
+      onDetail: detail => { if (detail) details.push(detail); },
+    });
+    await ui.attach(session.sessionId, session.branchId, false);
+    await ui.execute("/refine status");
+    await ui.execute("/refine history");
+    await ui.execute("/refine inspect review-learning");
+    await ui.execute("/refine pause");
+    await ui.execute("/refine resume");
+    await ui.execute("/refine rollback proposal-learning restore prior behavior");
+
+    expect(details.map(detail => detail.title)).toEqual([
+      "Learning status",
+      "Learning history",
+      "Learning activity",
+      "Automatic learning",
+      "Automatic learning",
+      "Learning rollback",
+    ]);
+    expect(details[0]!.raw).toMatchObject({
+      automaticLearning: "enabled",
+      automaticPolicy: { automatic: true, repeatedSuccess: { enabled: true, threshold: 5 } },
+      latestActivity: { activityId: "review-learning", effectiveStatus: "applied" },
+    });
+    expect(details[1]!.raw).toMatchObject({
+      activities: [{ activityId: "review-learning", governance: { proposalId: "proposal-learning" } }],
+    });
+    expect(actions).toEqual([
+      "inspect:review-learning",
+      "pause",
+      "resume",
+      "rollback:proposal-learning:restore prior behavior",
+    ]);
+    expect(JSON.stringify(details)).toContain("Repeated success");
+    expect(JSON.stringify(details)).toContain("Threshold: 5 successful runs.");
+    await ui.detach(false);
+    await supervisor.close();
   });
 
   test("summarizes retained refinement outcomes without implying an unapplied change", () => {
@@ -327,13 +442,13 @@ describe("FU-005 protocol-backed terminal UI", () => {
     expect(renderEvent(event("RefinementReviewRequested", {
       reviewId: "review",
       instructions: "inspect repeated failures",
-    }))).toBe("[refinement requested] inspect repeated failures");
+    }))).toBe("[learning reflection requested] inspect repeated failures");
     expect(renderEvent(event("RefinementReviewChildLinked", {
       reviewId: "review",
-    }))).toBe("[refinement reviewer started]");
+    }))).toBe("[learning reflection started]");
     expect(renderEvent(event("RefinementGovernanceReviewRequested", {
       reviewId: "governance",
-    }))).toBe("[refinement governance requested]");
+    }))).toBe("[learning governance requested]");
   });
 
   test("the TUI imports only public client/domain contracts, not Supervisor or storage", async () => {

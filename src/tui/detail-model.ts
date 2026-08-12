@@ -514,12 +514,125 @@ function skillsDetail(command: string, value: unknown): TerminalInspectionDetail
 
 function refinementDetail(command: string, value: unknown): TerminalInspectionDetail {
   const source = record(value);
+  const nestedPolicy = record(source.automaticPolicy);
+  const policy = typeof nestedPolicy.automatic === "boolean"
+    ? nestedPolicy
+    : typeof source.automatic === "boolean"
+      ? source
+      : null;
   const reviews = records(source.reviews);
   const proposals = records(source.proposals);
-  const items = reviews.length || proposals.length ? [...reviews, ...proposals] : Array.isArray(value) ? records(value) : [source];
+  const activities = Array.isArray(source.activities)
+    ? records(source.activities)
+    : source.kind === "review" || source.kind === "scan_observation"
+      ? [source]
+      : source.latestActivity
+        ? [record(source.latestActivity)]
+        : [];
+  const activityPayload = "reviews" in source || "proposals" in source ||
+    "activities" in source || "latestActivity" in source;
+  const items = reviews.length || proposals.length
+    ? [...reviews, ...proposals]
+    : Array.isArray(value)
+      ? records(value)
+      : [source];
   const sections: TerminalDetailSection[] = [];
+  if (policy) {
+    const triggerRows = [
+      ["Repeated success", policy.repeatedSuccess, "successful runs"],
+      ["Effect failures", policy.effectFailure, "matching failures"],
+      ["Cell failures", policy.cellFailure, "failed cells"],
+      ["Completion-gate failures", policy.completionGateFailure, "distinct evidence pins"],
+      ["Typed user corrections", policy.explicitUserCorrection, "corrections"],
+    ] as const;
+    sections.push({
+      title: "Automatic learning policy",
+      rows: [
+        statusRow(
+          "Automatic learning",
+          policy.automatic ? "enabled" : "paused",
+          `Scope: ${displayStatus(policy.scope)}. Use /refine ${policy.automatic ? "pause" : "resume"}.`,
+        ),
+        ...triggerRows.flatMap(([label, input, unit]) => {
+          const trigger = record(input);
+          if (typeof trigger.enabled !== "boolean") return [];
+          const threshold = number(trigger.threshold);
+          return [statusRow(
+            label,
+            trigger.enabled ? "enabled" : "disabled",
+            threshold === null ? undefined : `Threshold: ${threshold} ${unit}.`,
+          )];
+        }),
+      ],
+    });
+  } else if (typeof source.automaticLearning === "string") {
+    sections.push({
+      title: "Automatic learning policy",
+      rows: [statusRow(
+        "Automatic learning",
+        source.automaticLearning,
+        source.policyError
+          ? `Policy status: ${displayStatus(source.policyError)}. Retained activity remains inspectable.`
+          : undefined,
+      )],
+    });
+  }
+  if (typeof source.pendingActivityCount === "number") {
+    sections.push({
+      title: "Current activity",
+      rows: [statusRow(
+        "Pending learning activity",
+        source.pendingActivityCount > 0 ? "running" : "none",
+        `${source.pendingActivityCount} pending review or governed change.`,
+      )],
+    });
+  }
+  if (command === "/refine-history" && typeof source.truncated === "boolean") {
+    const byteLimit = number(source.byteLimit);
+    sections.push({
+      title: "History bounds",
+      rows: [statusRow(
+        "Learning history response",
+        source.truncated ? "truncated" : "complete",
+        byteLimit === null
+          ? undefined
+          : `Serialized response limit: ${byteLimit} bytes.`,
+      )],
+    });
+  }
+  if (activities.length) sections.push({
+    title: `Learning activity · ${activities.length}`,
+    rows: activities.map((item) => {
+      if (item.kind === "scan_observation") {
+        return statusRow(
+          string(item.activityId, "Automatic scan"),
+          item.effectiveStatus,
+          sentence(item.message, 220),
+        );
+      }
+      const review = record(item.review);
+      const governance = record(item.governance);
+      const rollback = record(item.rollback);
+      return statusRow(
+        string(item.activityId, "Learning reflection"),
+        item.effectiveStatus,
+        [
+          review.triggerKind ? `Trigger: ${displayStatus(review.triggerKind)}` : "",
+          `${Array.isArray(review.evidenceEventIds) ? review.evidenceEventIds.length : 0} evidence events`,
+          governance.proposalId ? `Proposal: ${governance.proposalId}` : "",
+          Array.isArray(governance.appliedVersionIds)
+            ? `${governance.appliedVersionIds.length} applied versions`
+            : "",
+          rollback.rollbackId
+            ? `Rollback: ${rollback.rollbackId}`
+            : "",
+          review.reason ? `Reason: ${sentence(review.reason, 180)}` : "",
+        ].filter(Boolean).join(" · "),
+      );
+    }),
+  });
   if (reviews.length) sections.push({
-    title: `Reviews · ${reviews.length}`,
+    title: `Reflection activity · ${reviews.length}`,
     rows: reviews.map(item => {
       const summary = summarizeTerminalRefinement(item as unknown as RefinementReviewRecord);
       return {
@@ -535,31 +648,40 @@ function refinementDetail(command: string, value: unknown): TerminalInspectionDe
     }),
   });
   if (proposals.length) sections.push({
-    title: `Proposals · ${proposals.length}`,
+    title: `Governed change activity · ${proposals.length}`,
     rows: proposals.map(item => statusRow(
       sentence(item.predictedEffect, 140),
       item.status,
       `${Array.isArray(item.edits) ? item.edits.length : 0} edits · authority ${displayStatus(item.authority)}`,
     )),
   });
+  if (activityPayload && reviews.length === 0 && proposals.length === 0 &&
+      activities.length === 0) {
+    sections.push(emptySection("Learning activity", "No retained learning activity."));
+  }
   if (!sections.length) sections.push({
     title: "Result",
     rows: items.map(item => {
-      const policy = typeof item.automatic === "boolean";
       return statusRow(
-        policy ? "Automatic refinement" : string(item.predictedEffect, string(item.instructions, string(item.mode, "Refinement"))),
-        item.status ?? (policy ? item.automatic ? "enabled" : "disabled" : item.enabled === undefined ? "recorded" : item.enabled ? "enabled" : "disabled"),
-        policy
-          ? `Scope: ${displayStatus(item.scope)} · effect failures ${bool(record(item.effectFailure).enabled) ? "enabled" : "disabled"} · cell failures ${bool(record(item.cellFailure).enabled) ? "enabled" : "disabled"} · gate failures ${bool(record(item.completionGateFailure).enabled) ? "enabled" : "disabled"}`
-          : item.reason ?? (item.correctionId ? "User correction recorded." : undefined),
+        string(item.predictedEffect, string(item.instructions, string(item.mode, "Learning activity"))),
+        item.status ?? (item.enabled === undefined ? "recorded" : item.enabled ? "enabled" : "disabled"),
+        item.reason ?? (item.correctionId ? "User correction recorded." : undefined),
       );
     }),
   });
   return {
     kind: "inspection",
     command,
-    title: "Refinement",
-    summary: "Governed behavioral-harness review state. Code, repository, and runtime implementation remain normal agent tasks.",
+    title: command === "/refine-status"
+      ? "Learning status"
+      : command === "/refine-history"
+        ? "Learning history"
+        : command === "/refine-rollback"
+          ? "Learning rollback"
+          : policy
+            ? "Automatic learning"
+            : "Learning activity",
+    summary: "Automatic learning policy and attributable learning activity.",
     sections,
     raw: value,
   };
@@ -996,7 +1118,7 @@ export function buildTerminalDetail(command: string, value: unknown): TerminalIn
   if (command === "/memory") return memoryDetail(value);
   if (command.startsWith("/profile")) return profileDetail(command, value);
   if (command.startsWith("/skill")) return skillsDetail(command, value);
-  if (command === "/refine" || command === "/rollback") return refinementDetail(command, value);
+  if (command.startsWith("/refine") || command === "/rollback") return refinementDetail(command, value);
   if (command === "/context" || command === "/compact") return contextDetail(command, value);
   if (["/sync", "/sync-status", "/conflicts", "/resolve-conflict"].includes(command)) return syncDetail(command, value);
   if (command === "/unknown" || command === "/reconcile") return unknownEffectsDetail(command, value);

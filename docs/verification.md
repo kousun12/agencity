@@ -83,6 +83,37 @@ It records a focused family-projection benchmark with 25 relatives and branch hi
 
 The package is private. This verifies the documented source and `bun link` workflow; it is not evidence of a package-registry or standalone-binary release.
 
+### Default automatic-learning verification
+
+Verification of default automatic learning must cover:
+
+- default-on behavior for a device profile with no explicit preference;
+- persistent device-wide pause and resume across workspaces and restart;
+- local-only memory, prompt-note, tested-skill, and subagent-specification targets;
+- deterministic validation and one separate sealed reviewer for every proposal;
+- one admitted trigger per scan attempt with deferred evidence left available;
+- unchanged thresholds of three effect failures, three failed cells in one run, two distinct-pin gate failures, and one typed correction;
+- five successful terminal runs within a 2,048-record window, refiring only after five newer qualifying successes;
+- delayed consideration of the fifth success until the next committed boundary;
+- `no_change` as a normal terminal audit outcome rather than a behavioral update;
+- truthful `scan_unavailable` history when full-history loading supplies more than 10,000 records;
+- pause/admission ordering and transaction-time stale-trigger rejection under concurrency;
+- joined status, history, and activity inspection across reflection, governance, application, scan failure, and rollback;
+- atomic proposal-level rollback for automatic create, replace, retire, and multi-edit changes; and
+- absence of a separate learning spend budget, aggregate review-rate limit, scheduler, or semantic grouping mechanism.
+
+The focused checks are:
+
+```sh
+bun run typecheck
+bun run check:architecture
+bun test --timeout 30000 test/unit/refinement-triggers.test.ts
+bun test --timeout 30000 test/integration/refiner.test.ts
+bun test --timeout 30000 test/acceptance/profile-governance.test.ts
+```
+
+On August 11, 2026, the default automatic-learning change passed `bun run verify`: 1,007 core tests passed with 2 gated skips, 3 end-to-end tests passed, and 18 installed acceptance tests passed with 1 credential-gated skip. Aggregate evidence was 1,028 passes, 3 skips, and 0 failures. Typecheck, architecture checks, focused cross-service lease, divergent-sync, bounded-history, typed-scan, and skill-rollback tests, independent review, and `git diff --check` also passed. The release acceptance matrix reported 1 deterministic row passed, 3 external rows skipped, and 0 failures. The live-provider, official Turso Sync, and Turso Cloud checks remain gated and unverified because their prerequisites were not supplied.
+
 ### Adaptive-profile governance evidence
 
 The core profile/governance implementation was verified on August 9, 2026:

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { terminalCellReturnedOutput } from "../../src/tui/transcript.ts";
+import {
+  terminalCellReturnedOutput,
+  terminalCompactCellSource,
+  terminalDisplayCellSource,
+} from "../../src/tui/transcript.ts";
 import {
   terminalCellTone,
   terminalFamilyTone,
@@ -57,6 +61,16 @@ describe("structured terminal transcript", () => {
       streams: ["stderr"],
     });
     expect(terminalCellReturnedOutput({ value: 42 }, [])).toEqual({ values: [], streams: [] });
+  });
+
+  test("shows declared cell purposes without the source-code label", () => {
+    const code = "// Purpose: Inspect the focused canvas paint routine.\nconst html = await sdk.files.read(...);";
+    expect(terminalCompactCellSource(code)).toBe("Inspect the focused canvas paint routine. …");
+    expect(terminalDisplayCellSource(code)).toBe(
+      "// Inspect the focused canvas paint routine.\nconst html = await sdk.files.read(...);",
+    );
+    expect(terminalCompactCellSource("const value = 42;")).toBe("const value = 42; …");
+    expect(terminalDisplayCellSource("const value = 42;")).toBe("const value = 42;");
   });
 
   test("selects deterministic normal, compact, and minimum height modes", () => {

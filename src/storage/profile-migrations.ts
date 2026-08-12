@@ -77,4 +77,16 @@ export const PROFILE_SCHEMA_MIGRATIONS: readonly ProfileSchemaMigration[] = Obje
       )`,
     ]),
   }),
+  Object.freeze({
+    version: 3,
+    name: "preference-leases",
+    statements: Object.freeze([
+      `CREATE TABLE IF NOT EXISTS preference_leases(
+        key TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        process_id INTEGER NOT NULL,
+        expires_at TEXT NOT NULL
+      )`,
+    ]),
+  }),
 ]);
