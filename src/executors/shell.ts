@@ -36,7 +36,10 @@ export class ShellExecutor implements EffectExecutor {
     const command = input.command;
     if (typeof command !== "string") throw new ValidationError("shell.run requires command");
     const cwd = await this.#cwd(input.cwd);
-    const timeout = typeof input.timeoutMs === "number" ? input.timeoutMs : 120_000;
+    if (input.timeoutMs !== undefined && typeof input.timeoutMs !== "number") {
+      throw new ValidationError("Shell timeout must be a number");
+    }
+    const timeout = input.timeoutMs ?? 120_000;
     if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 3_600_000) throw new ValidationError("Invalid shell timeout");
     if (context.signal.aborted) return result("cancelled", undefined, "Shell command cancelled");
 

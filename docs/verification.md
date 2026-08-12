@@ -123,7 +123,8 @@ Verification of default automatic learning must cover:
 - local-only memory, prompt-note, tested-skill, and subagent-specification targets;
 - deterministic validation and one separate sealed reviewer for every proposal;
 - one admitted trigger per scan attempt with deferred evidence left available;
-- unchanged thresholds of three effect failures, three failed cells in one run, two distinct-pin gate failures, and one typed correction;
+- thresholds of three effect failures, three failed cells in one run, two distinct-pin gate failures, and one typed correction;
+- effect-backed cell failures included in run-level repair churn, with their causally linked effect outcomes excluded from duplicate repeated-effect review;
 - five successful terminal runs within a 2,048-record window, refiring only after five newer qualifying successes;
 - delayed consideration of the fifth success until the next committed boundary;
 - `no_change` as a normal terminal audit outcome rather than a behavioral update;

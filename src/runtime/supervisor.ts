@@ -297,8 +297,11 @@ const CELL_HISTORY_STATUSES: readonly CellHistoryStatus[] = ["proposed", "runnin
 function cellListOptions(raw: unknown): Required<Pick<CellListOptions, "limit">> & { statuses: ReadonlySet<CellHistoryStatus>; beforeCursor: string | null } {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new ValidationError("Cell list options must be an object");
   const options = raw as Record<string, unknown>;
-  const limit = options.limit === undefined ? 20 : Number(options.limit);
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ValidationError("Cell list limit must be an integer from 1 to 100");
+  const limit = options.limit === undefined ? 20 : options.limit;
+  if (typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+      limit < 1 || limit > 100) {
+    throw new ValidationError("Cell list limit must be an integer from 1 to 100");
+  }
   const requested = options.status === undefined
     ? ["committed", "failed", "abandoned"]
     : Array.isArray(options.status) ? options.status : [options.status];
@@ -313,6 +316,74 @@ function cellListOptions(raw: unknown): Required<Pick<CellListOptions, "limit">>
     beforeCursor = Number(options.beforeCursor).toString().padStart(20, "0");
   }
   return { limit, statuses: new Set(requested), beforeCursor };
+}
+
+function optionalRecordArgument(
+  value: unknown,
+  name: string,
+): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ValidationError(`${name} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function optionalStringArgument(
+  value: unknown,
+  name: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new ValidationError(`${name} must be a string`);
+  }
+  return value;
+}
+
+function optionalArrayArgument(
+  value: unknown,
+  name: string,
+): unknown[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new ValidationError(`${name} must be an array`);
+  }
+  return value;
+}
+
+function optionalBooleanArgument(
+  value: unknown,
+  name: string,
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new ValidationError(`${name} must be a boolean`);
+  }
+  return value;
+}
+
+function assertOptionalPropertyType(
+  value: Record<string, unknown>,
+  property: string,
+  type: "boolean" | "number" | "string",
+  name: string,
+): void {
+  if (value[property] !== undefined && typeof value[property] !== type) {
+    throw new ValidationError(`${name} must be a ${type}`);
+  }
+}
+
+function assertOptionalStringArrayProperty(
+  value: Record<string, unknown>,
+  property: string,
+  name: string,
+): void {
+  const candidate = value[property];
+  if (candidate === undefined) return;
+  if (!Array.isArray(candidate) ||
+      candidate.some((item) => typeof item !== "string")) {
+    throw new ValidationError(`${name} must be an array of strings`);
+  }
 }
 
 export class Supervisor {
@@ -1216,7 +1287,7 @@ export class Supervisor {
         });
       }
       if (method === "cells.list") {
-        const options = cellListOptions(args[0] ?? {});
+        const options = cellListOptions(optionalRecordArgument(args[0], "Cell list options"));
         const available = cellHistory(await this.storage.loadEvents(sessionId, { branchId }))
           .filter(({ entry, cursor }) => options.statuses.has(entry.status) &&
             (options.beforeCursor === null || cursor < options.beforeCursor));
@@ -1250,9 +1321,11 @@ export class Supervisor {
       }
       if (method === "artifacts.put") {
         if (typeof args[0] !== "string") throw new ValidationError("Artifact content must be a string");
+        const mediaType = optionalStringArgument(args[1], "Artifact media type") ??
+          "text/plain";
         if (containsBrokeredSecret(args[0])) throw new ValidationError("Brokered credentials cannot enter artifacts");
         const reference = await this.artifacts.put(scrubText(args[0]), {
-          mediaType: typeof args[1] === "string" ? args[1] : "text/plain",
+          mediaType,
         });
         stagedArtifacts.set(reference.artifactId, reference);
         return reference;
@@ -1293,56 +1366,168 @@ export class Supervisor {
         return this.storage.readonlyQuery({ sql, args: sqlArgs });
       }
       if (method === "context.inspect") return this.inspectContext(sessionId, branchId);
-      if (method === "context.compact") return this.compact(sessionId, branchId, { ...((args[0] ?? {}) as CompactContextInput), reason: "agent-request", requestedBy: "agent" });
+      if (method === "context.compact") {
+        const options = optionalRecordArgument(args[0], "Context compaction options");
+        assertOptionalPropertyType(options, "strategy", "string", "Context compaction strategy");
+        assertOptionalPropertyType(options, "instructions", "string", "Context compaction instructions");
+        assertOptionalPropertyType(options, "idempotencyKey", "string", "Context compaction idempotency key");
+        assertOptionalPropertyType(options, "rematerializeFromContextId", "string", "Context compaction source context");
+        return this.compact(sessionId, branchId, {
+          ...(options as CompactContextInput),
+          reason: "agent-request",
+          requestedBy: "agent",
+        });
+      }
       if (method === "goals.current") return this.goals.current(sessionId, branchId);
       if (method === "goals.list") return this.goals.list(sessionId, branchId);
       if (method === "goals.get") return this.goals.get(sessionId, branchId, String(args[0] ?? ""));
       if (method === "goals.evaluations") {
         const goal = await this.goals.get(sessionId, branchId, String(args[0] ?? ""));
-        const gateId = typeof args[1] === "string" ? args[1] : undefined;
+        const gateId = optionalStringArgument(args[1], "Goal gate id");
         if (gateId && !goal.gates.some((gate) => gate.gateId === gateId)) throw new ValidationError("Goal gate is outside the calling session branch scope");
         return this.storage.listGoalGateEvaluations!(goal.goalId, gateId);
       }
-      if (method === "heartbeats.create") return this.heartbeats.createAgent(sessionId, branchId, args[0] as any);
+      if (method === "heartbeats.create") {
+        if (typeof args[0] === "number") {
+          return this.heartbeats.createAgent(sessionId, branchId, args[0]);
+        }
+        const input = optionalRecordArgument(args[0], "Heartbeat input");
+        assertOptionalPropertyType(input, "intervalMs", "number", "Heartbeat interval");
+        assertOptionalPropertyType(input, "nextTickAt", "string", "Heartbeat next tick");
+        assertOptionalPropertyType(input, "goalId", "string", "Heartbeat goal id");
+        assertOptionalPropertyType(input, "prompt", "string", "Heartbeat prompt");
+        return this.heartbeats.createAgent(sessionId, branchId, input as any);
+      }
       if (method === "heartbeats.list") return (await this.heartbeats.list(sessionId, branchId)).filter((heartbeat) => heartbeat.owner === "agent");
-      if (method === "heartbeats.pause") return this.heartbeats.pauseAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
-      if (method === "heartbeats.resume") return this.heartbeats.resumeAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
-      if (method === "heartbeats.clear") return this.heartbeats.cancelAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
-      if (method === "schedules.create") return this.schedules.createAgent(sessionId, branchId, args[0] as any);
+      if (method === "heartbeats.pause") return this.heartbeats.pauseAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Heartbeat pause reason"));
+      if (method === "heartbeats.resume") return this.heartbeats.resumeAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Heartbeat next tick"));
+      if (method === "heartbeats.clear") return this.heartbeats.cancelAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Heartbeat clear reason"));
+      if (method === "schedules.create") {
+        const input = optionalRecordArgument(args[0], "Schedule input");
+        assertOptionalPropertyType(input, "prompt", "string", "Schedule prompt");
+        assertOptionalPropertyType(input, "at", "string", "Schedule time");
+        assertOptionalPropertyType(input, "nextTickAt", "string", "Schedule next tick");
+        assertOptionalPropertyType(input, "intervalMs", "number", "Schedule interval");
+        assertOptionalPropertyType(input, "goalMode", "string", "Schedule goal mode");
+        return this.schedules.createAgent(sessionId, branchId, input as any);
+      }
       if (method === "schedules.list") return (await this.schedules.list(sessionId, branchId)).filter((schedule) => schedule.owner === "agent");
       if (method === "schedules.wakes") {
-        const statuses = Array.isArray(args[0]) ? args[0] as any : undefined;
+        const statuses = optionalArrayArgument(args[0], "Schedule wake statuses");
+        if (statuses?.some((status) =>
+          typeof status !== "string" ||
+          !["queued", "claimed", "delivered", "unknown"].includes(status)
+        )) {
+          throw new ValidationError("Schedule wake statuses contain an invalid value");
+        }
         const owned = new Set((await this.schedules.list(sessionId, branchId)).filter((schedule) => schedule.owner === "agent").map((schedule) => schedule.scheduleId));
-        return (await this.schedules.wakes(sessionId, branchId, statuses)).filter((wake) => wake.sourceType === "schedule" ? owned.has(wake.sourceId) : false);
+        return (await this.schedules.wakes(sessionId, branchId, statuses as any)).filter((wake) => wake.sourceType === "schedule" ? owned.has(wake.sourceId) : false);
       }
-      if (method === "schedules.pause") return this.schedules.pauseAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
-      if (method === "schedules.resume") return this.schedules.resumeAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
-      if (method === "schedules.clear") return this.schedules.clearAgent(sessionId, branchId, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined);
-      if (method === "memory.search") return this.memory.search(sessionId,branchId,String(args[0] ?? ""),(args[1] ?? {}) as any);
-      if (method === "memory.create") return this.memory.create(sessionId,branchId,args[0] as any,"agent");
-      if (method === "memory.list") return this.memory.list(sessionId,branchId,(args[0] ?? {}) as any);
+      if (method === "schedules.pause") return this.schedules.pauseAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Schedule pause reason"));
+      if (method === "schedules.resume") return this.schedules.resumeAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Schedule next tick"));
+      if (method === "schedules.clear") return this.schedules.clearAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Schedule clear reason"));
+      if (method === "memory.search") {
+        const options = optionalRecordArgument(args[1], "Memory search options");
+        for (const [property, name] of [
+          ["scopes", "Memory search scopes"],
+          ["statuses", "Memory search statuses"],
+          ["tags", "Memory search tags"],
+          ["linkedEntryIds", "Memory search linked entry ids"],
+        ] as const) {
+          assertOptionalStringArrayProperty(options, property, name);
+        }
+        assertOptionalPropertyType(options, "limit", "number", "Memory search limit");
+        assertOptionalPropertyType(options, "since", "string", "Memory search recency boundary");
+        return this.memory.search(sessionId,branchId,String(args[0] ?? ""),options as any);
+      }
+      if (method === "memory.create") {
+        if (typeof args[0] === "string") {
+          return this.memory.create(sessionId,branchId,args[0],"agent");
+        }
+        const input = optionalRecordArgument(args[0], "Memory input");
+        if (typeof input.text !== "string") {
+          throw new ValidationError("Memory text must be a string");
+        }
+        for (const [property, name] of [
+          ["name", "Memory name"],
+          ["memoryKind", "Memory kind"],
+          ["scope", "Memory scope"],
+          ["scopeKey", "Memory scope key"],
+          ["status", "Memory status"],
+        ] as const) {
+          assertOptionalPropertyType(input, property, "string", name);
+        }
+        for (const [property, name] of [
+          ["tags", "Memory tags"],
+          ["evidenceEventIds", "Memory evidence event ids"],
+          ["conflictEntryIds", "Memory conflict entry ids"],
+        ] as const) {
+          assertOptionalStringArrayProperty(input, property, name);
+        }
+        assertOptionalPropertyType(input, "confidence", "number", "Memory confidence");
+        return this.memory.create(sessionId,branchId,input as any,"agent");
+      }
+      if (method === "memory.list") {
+        const options = optionalRecordArgument(args[0], "Memory list options");
+        for (const [property, name] of [
+          ["scopes", "Memory list scopes"],
+          ["statuses", "Memory list statuses"],
+          ["tags", "Memory list tags"],
+        ] as const) {
+          assertOptionalStringArrayProperty(options, property, name);
+        }
+        return this.memory.list(sessionId,branchId,options as any);
+      }
       if (method === "harness.review") {
         const input = typeof args[0] === "string"
           ? { instructions: args[0] }
-          : (args[0] ?? {});
+          : optionalRecordArgument(args[0], "Harness review input");
         return this.refiner.request(sessionId,branchId,input as any);
       }
-      if (method === "harness.reviews") return this.refiner.list({ sessionId, branchId, ...((args[0] ?? {}) as any) });
+      if (method === "harness.reviews") {
+        const options = optionalRecordArgument(args[0], "Harness review list options");
+        assertOptionalPropertyType(options, "status", "string", "Harness review status");
+        return this.refiner.list({ ...options as any, sessionId, branchId });
+      }
       if (method === "harness.propose") return this.harness.propose(sessionId,branchId,{...(args[0] as any),authority:"agent"});
-      if (method === "harness.list") return this.harness.modelList(sessionId,branchId,(args[0] ?? {}) as any);
+      if (method === "harness.list") {
+        const options = optionalRecordArgument(args[0], "Harness list options");
+        for (const [property, name] of [
+          ["kind", "Harness kind"],
+          ["scope", "Harness scope"],
+          ["scopeKey", "Harness scope key"],
+          ["status", "Harness status"],
+        ] as const) {
+          assertOptionalPropertyType(options, property, "string", name);
+        }
+        return this.harness.modelList(sessionId,branchId,options as any);
+      }
       if (method === "harness.history") return this.harness.modelHistory(sessionId,branchId,String(args[0]));
-      if (method === "skills.list") return this.skillManagement.list(sessionId,branchId,(args[0] ?? {}) as any);
+      if (method === "skills.list") {
+        const options = optionalRecordArgument(args[0], "Skill list options");
+        assertOptionalPropertyType(options, "includeUnavailable", "boolean", "Skill list include-unavailable");
+        return this.skillManagement.list(sessionId,branchId,options as any);
+      }
       if (method === "skills.get") return this.skillManagement.get(sessionId,branchId,String(args[0] ?? ""));
-      if (method === "skills.propose") return this.skillManagement.propose(sessionId,branchId,String(args[0] ?? ""),(args[1] === "local" ? "local" : "workspace"));
+      if (method === "skills.propose") {
+        const scope = args[1] === undefined ? "workspace" : args[1];
+        if (scope !== "local" && scope !== "workspace") {
+          throw new ValidationError("Skill proposal scope must be local or workspace");
+        }
+        return this.skillManagement.propose(sessionId,branchId,String(args[0] ?? ""),scope);
+      }
       if (method === "skills.invoke") {
-        const options = (args[2] ?? {}) as Record<string, unknown>;
-        return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: typeof options.idempotencyKey === "string" ? options.idempotencyKey : nextRpcKey(method), effectOrigin: { kind: "cell", cellId } } as any);
+        const options = optionalRecordArgument(args[2], "Skill invocation options");
+        assertOptionalPropertyType(options, "versionId", "string", "Skill invocation version");
+        assertOptionalPropertyType(options, "idempotencyKey", "string", "Skill invocation idempotency key");
+        return this.skills.invoke(sessionId,branchId,String(args[0]),args[1] as JsonValue,{ ...options, idempotencyKey: options.idempotencyKey ?? nextRpcKey(method), effectOrigin: { kind: "cell", cellId } } as any);
       }
       if (method === "skills.test") return this.skillManagement.test(sessionId,branchId,String(args[0]),{ kind: "cell", cellId });
       if (method === "agents.spawn") {
         const raw = args[0]; const input = typeof raw === "string" ? { task: raw } : raw as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.spawn requires a task string or object");
-        const idempotencyKey = typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method);
+        assertOptionalPropertyType(input, "idempotencyKey", "string", "Agent spawn idempotency key");
+        const idempotencyKey = input.idempotencyKey ?? nextRpcKey(method);
         return this.agents.spawnRunnable(sessionId, branchId, { ...input, idempotencyKey } as any);
       }
       if (method === "agents.spawnMany") {
@@ -1354,9 +1539,10 @@ export class Supervisor {
           if (!input || typeof input !== "object" || Array.isArray(input)) {
             throw new ValidationError("agents.spawnMany inputs must be task strings or objects");
           }
+          assertOptionalPropertyType(input, "idempotencyKey", "string", `Agent spawnMany input ${index + 1} idempotency key`);
           const normalized = {
             ...input,
-            idempotencyKey: typeof input.idempotencyKey === "string"
+            idempotencyKey: input.idempotencyKey !== undefined
               ? input.idempotencyKey
               : `${nextRpcKey(method)}:${index + 1}`,
           };
@@ -1374,9 +1560,10 @@ export class Supervisor {
           if (!input || typeof input !== "object" || Array.isArray(input)) {
             throw new ValidationError(`${method} inputs must be task strings or objects`);
           }
+          assertOptionalPropertyType(input, "idempotencyKey", "string", `${method} input ${index + 1} idempotency key`);
           return {
             ...input,
-            idempotencyKey: typeof input.idempotencyKey === "string"
+            idempotencyKey: input.idempotencyKey !== undefined
               ? input.idempotencyKey
               : `${nextRpcKey(method)}:${index + 1}`,
           };
@@ -1514,7 +1701,9 @@ export class Supervisor {
         }
       }
       if (method === "agents.get") {
-        const target = typeof args[0] === "string" && args[0] ? args[0] : sessionId;
+        const suppliedTarget = optionalStringArgument(args[0], "Agent profile target");
+        if (suppliedTarget === "") throw new ValidationError("Agent profile target must be non-empty");
+        const target = suppliedTarget ?? sessionId;
         if (target !== sessionId) {
           const rows = await this.storage.readonlyQuery({
             sql: "SELECT parent_session_id,parent_branch_id FROM sessions WHERE session_id=?",
@@ -1528,14 +1717,18 @@ export class Supervisor {
         return this.agentProfiles.get(target, { includePrompt: true });
       }
       if (method === "agents.proposeProfileUpdate") {
-        const target = typeof args[0] === "string" && args[0] ? args[0] : sessionId;
+        const suppliedTarget = args[0] === null
+          ? undefined
+          : optionalStringArgument(args[0], "Agent profile target");
+        if (suppliedTarget === "") throw new ValidationError("Agent profile target must be non-empty");
+        const target = suppliedTarget ?? sessionId;
         const input = args[1] as Record<string, unknown>;
-        const options = args[2] && typeof args[2] === "object" && !Array.isArray(args[2])
-          ? args[2] as Record<string, unknown>
-          : {};
+        const options = optionalRecordArgument(args[2], "Agent profile proposal options");
+        assertOptionalPropertyType(options, "wait", "boolean", "Agent profile proposal wait");
         if (!input || typeof input !== "object" || Array.isArray(input)) {
           throw new ValidationError("agents.proposeProfileUpdate requires typed input");
         }
+        assertOptionalPropertyType(input, "revisesProposalId", "string", "Agent profile revised proposal id");
         return this.refinementGovernance.proposeAgent(sessionId, branchId, {
           target: {
             kind: "agent_profile",
@@ -1555,7 +1748,11 @@ export class Supervisor {
         });
       }
       if (method === "agents.rollbackProfile") {
-        const target = typeof args[0] === "string" && args[0] ? args[0] : sessionId;
+        const suppliedTarget = args[0] === null
+          ? undefined
+          : optionalStringArgument(args[0], "Agent profile target");
+        if (suppliedTarget === "") throw new ValidationError("Agent profile target must be non-empty");
+        const target = suppliedTarget ?? sessionId;
         const input = args[1] as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) {
           throw new ValidationError("agents.rollbackProfile requires typed input");
@@ -1574,12 +1771,20 @@ export class Supervisor {
       if (method === "agents.list") return this.agents.listFamily(sessionId, branchId);
       if (method === "agents.send") {
         const raw = args[0];
-        const options = args[2] && typeof args[2] === "object" && !Array.isArray(args[2]) ? args[2] as Record<string, unknown> : {};
+        const options = optionalRecordArgument(args[2], "Agent send options");
         const input = typeof raw === "string" ? { ...options, target: raw, content: args[1] } : raw as Record<string, unknown>;
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("agents.send requires a target/content object");
+        assertOptionalPropertyType(input, "intentKey", "string", "Agent message intent key");
         return this.agents.sendMessage(sessionId, branchId, { ...input, intentKey: typeof input.intentKey === "string" ? input.intentKey : nextRpcKey(method) } as any);
       }
-      if (method === "agents.messages") return this.agents.messages(sessionId, branchId, (args[0] ?? {}) as any);
+      if (method === "agents.messages") {
+        const options = optionalRecordArgument(args[0], "Agent message options");
+        assertOptionalPropertyType(options, "direction", "string", "Agent message direction");
+        assertOptionalPropertyType(options, "limit", "number", "Agent message limit");
+        assertOptionalPropertyType(options, "before", "string", "Agent message cursor");
+        assertOptionalPropertyType(options, "pendingOnly", "boolean", "Agent message pending-only filter");
+        return this.agents.messages(sessionId, branchId, options as any);
+      }
       if (method === "agents.acknowledge") {
         if (typeof args[0] !== "string" || !args[0]) throw new ValidationError("agents.acknowledge requires a message ID");
         return this.agents.acknowledgeMessage(sessionId, branchId, args[0]);
@@ -1595,17 +1800,21 @@ export class Supervisor {
         );
       }
       if (method === "specs.spawn") {
-        const input = (args[1] ?? {}) as Record<string, unknown>;
-        return this.specs.spawn(sessionId,branchId,String(args[0]),{ ...input, idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : nextRpcKey(method) } as any);
+        const input = optionalRecordArgument(args[1], "Subagent specification input");
+        assertOptionalPropertyType(input, "versionId", "string", "Subagent specification version");
+        assertOptionalPropertyType(input, "task", "string", "Subagent specification task");
+        assertOptionalPropertyType(input, "idempotencyKey", "string", "Subagent specification idempotency key");
+        return this.specs.spawn(sessionId,branchId,String(args[0]),{ ...input, idempotencyKey: input.idempotencyKey ?? nextRpcKey(method) } as any);
       }
       if (method === "ai.generateText" || method === "ai.generateObject") {
         const raw = args[0] as Record<string, unknown>;
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
           throw new ValidationError(`${method} requires an input object`);
         }
+        assertOptionalPropertyType(raw, "idempotencyKey", "string", `${method} idempotency key`);
         const input = {
           ...raw,
-          idempotencyKey: typeof raw.idempotencyKey === "string"
+          idempotencyKey: raw.idempotencyKey !== undefined
             ? raw.idempotencyKey
             : nextRpcKey(method),
         };
@@ -1619,15 +1828,15 @@ export class Supervisor {
         if (typeof executor !== "string" || typeof operation !== "string") throw new ValidationError("Invalid tool request");
         if (executor === "model") throw new CapabilityUnavailableError("generic model executor access", "use ai.generateText, ai.generateObject, or sdk.agents.spawn so model admission and dispatch provenance are retained");
         assertJsonValue(input);
-        const options = rawOptions && typeof rawOptions === "object" && !Array.isArray(rawOptions)
-          ? rawOptions as Record<string, unknown>
-          : {};
-        const idempotencyKey = typeof options.idempotencyKey === "string"
-          ? options.idempotencyKey
-          : nextRpcKey(`tools.${executor}.${operation}`);
-        const idempotent = typeof options.idempotent === "boolean"
-          ? options.idempotent
-          : executor === "file" && operation !== "replace";
+        const options = optionalRecordArgument(rawOptions, "Tool request options");
+        const idempotencyKey = optionalStringArgument(
+          options.idempotencyKey,
+          "Tool request idempotency key",
+        ) ?? nextRpcKey(`tools.${executor}.${operation}`);
+        const idempotent = optionalBooleanArgument(
+          options.idempotent,
+          "Tool request idempotent",
+        ) ?? (executor === "file" && operation !== "replace");
         const effectId = await this.outbox.request({
           sessionId,
           branchId,

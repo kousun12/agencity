@@ -114,6 +114,39 @@ function failedCells(
   });
 }
 
+function effectBackedFailedCells(
+  runId = "run-1",
+  errors = ["missing dependency", "invalid shell syntax", "invalid workspace"],
+  startCursor = 1,
+  startIndex = 1,
+): RefinementTriggerRecordInput[] {
+  return errors.flatMap((error, offset) => {
+    const index = startIndex + offset;
+    const actionId = `${runId}-action-${index}`;
+    const cellId = `agent-run-cell-${actionId}`;
+    const effectId = `${runId}-effect-${index}`;
+    const cursor = startCursor + offset * 4;
+    return [
+      record(`action-event-${runId}-${index}`, cursor, "AgentRunActionCommitted", {
+        runId,
+        actionId,
+        action: { type: "typescript" },
+      }),
+      record(`cell-effect-request-${runId}-${index}`, cursor + 1, "EffectRequested", {
+        effectId,
+        executor: "shell",
+        operation: "run",
+        origin: { kind: "cell", cellId },
+      }),
+      outcome(effectId, cursor + 2, "failed", error),
+      record(`cell-failed-${runId}-${index}`, cursor + 3, "CellFailed", {
+        cellId,
+        error: `Error: ${error}\n    at generated-cell:${index}:1`,
+      }),
+    ];
+  });
+}
+
 function runStatus(
   runId: string,
   cursor: number,
@@ -223,12 +256,33 @@ describe("FU-016 deterministic refinement trigger policy", () => {
     expect(scan(splitRuns)).toEqual([]);
   });
 
-  test("does not duplicate failed cell refinement when failed cell effects explain it", () => {
-    const cells = failedCells();
+  test("treats effect-backed failed cells as one run-level repair-churn trigger", () => {
+    const records = effectBackedFailedCells();
+    const triggers = scan(records);
+    expect(triggers.map((trigger) => trigger.kind))
+      .toEqual(["repeated_cell_failure"]);
+    expect(triggers[0]!.evidenceEventIds).toEqual([
+      "cell-failed-run-1-1",
+      "cell-failed-run-1-2",
+      "cell-failed-run-1-3",
+    ]);
+  });
+
+  test("keeps repeated effect detection across runs without repair churn", () => {
+    const records = [
+      ...effectBackedFailedCells("run-1", ["same effect failure"], 1),
+      ...effectBackedFailedCells("run-2", ["same effect failure"], 5),
+      ...effectBackedFailedCells("run-3", ["same effect failure"], 9),
+    ];
+    expect(scan(records).map((trigger) => trigger.kind))
+      .toEqual(["repeated_effect_failure"]);
+  });
+
+  test("keeps effect failures that occur after their cells already failed", () => {
     const effects = Array.from({ length: 3 }, (_, index) => {
-      const effectId = `cell-effect-${index + 1}`;
+      const effectId = `post-cell-effect-${index + 1}`;
       return [
-        record(`cell-effect-request-${index + 1}`, 7 + index * 2, "EffectRequested", {
+        record(`post-cell-request-${index + 1}`, 7 + index * 2, "EffectRequested", {
           effectId,
           executor: "shell",
           operation: "run",
@@ -237,11 +291,106 @@ describe("FU-016 deterministic refinement trigger policy", () => {
             cellId: `agent-run-cell-run-1-action-${index + 1}`,
           },
         }),
-        outcome(effectId, 8 + index * 2, "failed", "same effect failure"),
+        outcome(effectId, 8 + index * 2, "failed", "post-cell failure"),
       ];
     }).flat();
-    expect(scan([...cells, ...effects]).map((trigger) => trigger.kind))
-      .toEqual(["repeated_effect_failure"]);
+    expect(scan([...failedCells(), ...effects]).map((trigger) => trigger.kind))
+      .toEqual(["repeated_cell_failure", "repeated_effect_failure"]);
+  });
+
+  test("does not treat a handled failed effect as the cause of an unrelated cell error", () => {
+    const handled = effectBackedFailedCells(
+      "run-1",
+      ["error", "error", "error"],
+    ).map((item) => item.type === "CellFailed"
+      ? {
+          ...item,
+          payload: {
+            ...(item.payload as Record<string, unknown>),
+            error: "Error: unrelated parsing bug",
+          },
+        }
+      : item);
+    expect(scan(handled).map((trigger) => trigger.kind))
+      .toEqual(["repeated_effect_failure", "repeated_cell_failure"]);
+  });
+
+  test("does not emit a later effect trigger for consumed repair-churn evidence", () => {
+    const initialRecords = effectBackedFailedCells(
+      "run-1",
+      ["same effect failure", "same effect failure", "same effect failure"],
+    );
+    const initial = scan(initialRecords)[0]!;
+    expect(initial.kind).toBe("repeated_cell_failure");
+    const consumption = refinementTriggerConsumption(initial);
+
+    const twoNew = effectBackedFailedCells(
+      "run-1",
+      ["same effect failure", "same effect failure"],
+      13,
+      4,
+    );
+    expect(scan([...initialRecords, ...twoNew], { consumptions: [consumption] }))
+      .toEqual([]);
+
+    const thirdNew = effectBackedFailedCells(
+      "run-1",
+      ["same effect failure"],
+      21,
+      6,
+    );
+    const refired = scan(
+      [...initialRecords, ...twoNew, ...thirdNew],
+      { consumptions: [consumption] },
+    );
+    expect(refired.map((trigger) => trigger.kind))
+      .toEqual(["repeated_cell_failure"]);
+    expect(refired[0]!.newEvidenceEventIds).toEqual([
+      "cell-failed-run-1-4",
+      "cell-failed-run-1-5",
+      "cell-failed-run-1-6",
+    ]);
+  });
+
+  test("deduplicates pending repair churn after cell evidence leaves its window", () => {
+    const records = effectBackedFailedCells(
+      "run-1",
+      ["same effect failure", "same effect failure", "same effect failure"],
+    );
+    const initial = scan(records)[0]!;
+    expect(initial.kind).toBe("repeated_cell_failure");
+    const unequalWindows = policy({
+      cellFailure: {
+        enabled: true,
+        threshold: 3,
+        windowRecords: 3,
+        refireAfterNewEvidence: 3,
+      },
+    });
+    expect(scan(records, {
+      policy: unequalWindows,
+      nonterminalKeys: [initial.nonterminalKey],
+    })).toEqual([]);
+  });
+
+  test("does not reuse consumed repair evidence when cell detection is disabled", () => {
+    const records = effectBackedFailedCells(
+      "run-1",
+      ["same effect failure", "same effect failure", "same effect failure"],
+    );
+    const initial = scan(records)[0]!;
+    const disabledCellPolicy = policy({
+      cellFailure: {
+        enabled: false,
+        threshold: 3,
+        windowRecords: 128,
+        refireAfterNewEvidence: 3,
+      },
+    });
+    expect(scan(records, {
+      policy: disabledCellPolicy,
+      consumptions: [refinementTriggerConsumption(initial)],
+    })).toEqual([]);
   });
 
   test("fires repeated effect failure at exactly three matching failed outcomes", () => {

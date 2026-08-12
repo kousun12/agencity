@@ -62,17 +62,23 @@ interface PreviewBudget {
   readonly ancestors: Set<object>;
 }
 
-function boundedInteger(value: unknown, fallback: number, maximum: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+function boundedInteger(value: unknown, fallback: number, maximum: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`inspect ${name} must be a finite number`);
+  }
   return Math.max(1, Math.min(maximum, Math.floor(value)));
 }
 
 function limits(options: InspectOptions = {}): InspectPreview["limits"] {
+  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("inspect options must be an object");
+  }
   return {
-    depth: boundedInteger(options.depth, INSPECT_DEFAULT_LIMITS.depth, INSPECT_HARD_LIMITS.depth),
-    entries: boundedInteger(options.entries, INSPECT_DEFAULT_LIMITS.entries, INSPECT_HARD_LIMITS.entries),
-    lines: boundedInteger(options.lines, INSPECT_DEFAULT_LIMITS.lines, INSPECT_HARD_LIMITS.lines),
-    bytes: boundedInteger(options.bytes, INSPECT_DEFAULT_LIMITS.bytes, INSPECT_HARD_LIMITS.bytes),
+    depth: boundedInteger(options.depth, INSPECT_DEFAULT_LIMITS.depth, INSPECT_HARD_LIMITS.depth, "depth"),
+    entries: boundedInteger(options.entries, INSPECT_DEFAULT_LIMITS.entries, INSPECT_HARD_LIMITS.entries, "entries"),
+    lines: boundedInteger(options.lines, INSPECT_DEFAULT_LIMITS.lines, INSPECT_HARD_LIMITS.lines, "lines"),
+    bytes: boundedInteger(options.bytes, INSPECT_DEFAULT_LIMITS.bytes, INSPECT_HARD_LIMITS.bytes, "bytes"),
     getters: 0,
   };
 }
@@ -230,6 +236,11 @@ function previewValue(value: unknown, depth: number, budget: PreviewBudget): Jso
  */
 export function inspectValue(value: unknown, options: InspectOptions = {}): InspectPreview {
   const resolved = limits(options);
+  if (options.redact !== undefined &&
+      (!Array.isArray(options.redact) ||
+        !options.redact.every((item) => typeof item === "string"))) {
+    throw new TypeError("inspect redact must be an array of strings");
+  }
   const budget: PreviewBudget = {
     entries: 0,
     redacted: 0,
@@ -237,8 +248,8 @@ export function inspectValue(value: unknown, options: InspectOptions = {}): Insp
     truncated: false,
     limits: resolved,
     additionalRedactions: new Set(
-      Array.isArray(options.redact)
-        ? options.redact.filter((item): item is string => typeof item === "string").slice(0, 32).map((item) => item.toLowerCase())
+      options.redact
+        ? options.redact.slice(0, 32).map((item) => item.toLowerCase())
         : [],
     ),
     ancestors: new Set(),

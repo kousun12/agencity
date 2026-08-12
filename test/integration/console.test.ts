@@ -232,6 +232,156 @@ describe("disposable TypeScript console process", () => {
     await supervisor.close();
   });
 
+  test("defaults omitted artifact media type to text/plain", async () => {
+    const { supervisor, sessionId, branchId } = await open(true);
+    const defaulted = await supervisor.executeCell(sessionId, branchId, `
+      return await artifacts.put("default media type");
+    `);
+    expect(defaulted.result).toMatchObject({ mediaType: "text/plain" });
+    await supervisor.close();
+  });
+
+  test("rejects explicitly invalid Console SDK optional argument types", async () => {
+    const { supervisor, sessionId, branchId } = await open(true);
+    const invalidCalls = [
+      {
+        source: `return await (artifacts as any).put("body", null);`,
+        error: /Artifact media type must be a string/,
+      },
+      {
+        source: `return await (cells as any).list(null);`,
+        error: /Cell list options must be an object/,
+      },
+      {
+        source: `return await (cells as any).list({ limit: "20" });`,
+        error: /Cell list limit must be an integer/,
+      },
+      {
+        source: `return await (sdk.context as any).compact(null);`,
+        error: /Context compaction options must be an object/,
+      },
+      {
+        source: `return await (sdk.context as any).compact({ strategy: 42 });`,
+        error: /Context compaction strategy must be a string/,
+      },
+      {
+        source: `return await (sdk.schedules as any).wakes("queued");`,
+        error: /Schedule wake statuses must be an array/,
+      },
+      {
+        source: `return await (sdk.schedules as any).wakes([42]);`,
+        error: /Schedule wake statuses contain an invalid value/,
+      },
+      {
+        source: `return await (sdk.skills as any).propose("proposal", 42);`,
+        error: /Skill proposal scope must be local or workspace/,
+      },
+      {
+        source: `return await (sdk.skills as any).list({ includeUnavailable: "yes" });`,
+        error: /Skill list include-unavailable must be a boolean/,
+      },
+      {
+        source: `return await (sdk.harness as any).review(null);`,
+        error: /Harness review input must be an object/,
+      },
+      {
+        source: `return await (sdk.memory as any).search("query", { scopes: null });`,
+        error: /Memory search scopes must be an array of strings/,
+      },
+      {
+        source: `return await (sdk.memory as any).create({ text: "fact", scope: null });`,
+        error: /Memory scope must be a string/,
+      },
+      {
+        source: `return await (sdk.heartbeats as any).create({ intervalMs: 1000, nextTickAt: null });`,
+        error: /Heartbeat next tick must be a string/,
+      },
+      {
+        source: `return await (sdk.schedules as any).create({ prompt: "later", at: 42 });`,
+        error: /Schedule time must be a string/,
+      },
+      {
+        source: `return await (sdk.schedules as any).create({ prompt: "later", goalMode: null });`,
+        error: /Schedule goal mode must be a string/,
+      },
+      {
+        source: `return await (sdk.agents as any).get({});`,
+        error: /Agent profile target must be a string/,
+      },
+      {
+        source: `return await (sdk.agents as any).messages(null);`,
+        error: /Agent message options must be an object/,
+      },
+      {
+        source: `return await (sdk.agents as any).messages({ pendingOnly: "yes" });`,
+        error: /Agent message pending-only filter must be a boolean/,
+      },
+      {
+        source: `return await (sdk.agents as any).spawn({ task: "x", idempotencyKey: 42 });`,
+        error: /Agent spawn idempotency key must be a string/,
+      },
+      {
+        source: `return await (sdk.skills as any).invoke("missing", {}, { versionId: 42 });`,
+        error: /Skill invocation version must be a string/,
+      },
+      {
+        source: `return await (sdk.specs as any).spawn("missing", { task: 42 });`,
+        error: /Subagent specification task must be a string/,
+      },
+      {
+        source: `return await (sdk.ai as any).generateText({ prompt: "x", idempotencyKey: 42 });`,
+        error: /ai.generateText idempotency key must be a string/,
+      },
+      {
+        source: `return await (tools as any).request("shell", "run", { command: "true" }, null);`,
+        error: /Tool request options must be an object/,
+      },
+      {
+        source: `return await (tools as any).request("shell", "run", { command: "true" }, { idempotent: "yes" });`,
+        error: /Tool request idempotent must be a boolean/,
+      },
+      {
+        source: `return await (tools as any).writeFile("invalid.txt", "body", 42);`,
+        error: /writeFile expectedSha256 must be a string/,
+      },
+      {
+        source: `return await (tools as any).readFile("missing.txt", null);`,
+        error: /readFile options must be an object/,
+      },
+      {
+        source: `return await (tools as any).shell("true", { timeoutMs: "forever" });`,
+        error: /Shell timeout must be a number/,
+      },
+      {
+        source: `return inspect({ ok: true }, { depth: "deep" } as any);`,
+        error: /inspect depth must be a finite number/,
+      },
+    ];
+    for (const { source, error } of invalidCalls) {
+      await expect(supervisor.executeCell(sessionId, branchId, source))
+        .rejects.toBeInstanceOf(ConsoleCellError);
+      const latestFailure = (await supervisor.storage.loadEvents(sessionId, {
+        branchId,
+      })).filter((event) => event.type === "CellFailed").at(-1);
+      expect(String((latestFailure?.payload as { error?: unknown })?.error))
+        .toMatch(error);
+    }
+
+    const state = projectEvents(
+      await supervisor.storage.loadEvents(sessionId, { branchId }),
+    );
+    expect(Object.values(state.artifacts)).toHaveLength(0);
+    expect(Object.values(state.effects)).toHaveLength(1);
+    expect(Object.values(state.effects)[0]).toMatchObject({
+      executor: "shell",
+      operation: "run",
+      status: "failed",
+    });
+    expect(Object.values(state.cells).filter((cell) => cell.status === "failed"))
+      .toHaveLength(invalidCalls.length);
+    await supervisor.close();
+  });
+
 
   test("isolates arbitrary stdout from IPC, bounds it as logs, and keeps the worker usable", async () => {
     const { supervisor, sessionId, branchId } = await open(false);
