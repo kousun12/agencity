@@ -342,7 +342,7 @@ const handle = await sdk.agents.spawn({
 });
 ```
 
-`handle.result({ wait, timeoutMs })` and `sdk.agents.result(handle, options)` resolve the retained output contract. `sdk.agents.cancel`, messaging, acknowledgement, and follow-up continue to operate on the same retained child.
+`handle.result({ wait, timeoutMs })` and `sdk.agents.result(handle, options)` resolve the retained output contract. `sdk.agents.cancel`, mode-aware messaging, acknowledgement, and queued work continue to operate on the same retained child.
 
 The current `run` boolean on `spawn` is removed from the model-facing API:
 
@@ -694,7 +694,7 @@ Reassess the tenacious-goal plan after this primitive lands. Typed agent calls c
 - blocked, failed, cancelled, budget-exceeded, and unknown without fabricated output;
 - child filesystem, shell, skills, memory, family messaging, and recursive delegation remain available;
 - result propagation to task, terminal notice, handle, protocol, and calling cell;
-- run, runMany, spawn, spawnMany, result, follow-up, and cancel;
+- run, runMany, spawn, spawnMany, result, queued messaging, and cancel;
 - parent worker loss while waiting;
 - supervisor loss before admission, after admission, during provider execution, during child cell execution, after result commit, and before terminal delivery;
 - exact-once usage attribution and terminal delivery;

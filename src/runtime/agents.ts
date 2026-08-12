@@ -46,12 +46,14 @@ export interface SendMessageInput {
   readonly artifactIds?: readonly string[];
   readonly intentKey?: string;
   readonly idempotencyKey?: string;
-  readonly followUp?: boolean;
+  /** Queue work by default; steer delivers without waking an idle target. */
+  readonly mode?: "steer" | "queue";
   readonly replyToMessageId?: string;
 }
 export interface MailboxMessageHandle {
   readonly mailboxMessageId: string; readonly fromSessionId: string; readonly fromBranchId: string;
   readonly toSessionId: string; readonly toBranchId: string; readonly delivered: boolean;
+  readonly mode: "steer" | "queue";
   readonly receiptStatus: MailboxReceiptStatus; readonly queued: boolean; readonly existing: boolean;
   readonly error?: string;
 }
@@ -99,6 +101,7 @@ export class AgentService {
   readonly profiles: AgentProfileService;
   readonly #admissions = new AdmissionQueue();
   readonly #deliveries = new AdmissionQueue();
+  readonly #targetDispatch = new AdmissionQueue();
   #runs: AgentRunService | null = null;
   readonly maxMessageBytes = 32 * 1024;
   readonly maxPendingMessages = 100;
@@ -352,7 +355,9 @@ export class AgentService {
       if (typeof content !== "string" || !content.trim()) throw new ValidationError("Family message content cannot be empty");
       if (input.taskId !== undefined && (typeof input.taskId !== "string" || !input.taskId.trim())) throw new ValidationError("Family message taskId must be a non-empty string");
       if (input.replyToMessageId !== undefined && (typeof input.replyToMessageId !== "string" || !input.replyToMessageId.trim())) throw new ValidationError("Family message replyToMessageId must be a non-empty string");
-      if (input.followUp !== undefined && typeof input.followUp !== "boolean") throw new ValidationError("Family message followUp must be boolean");
+      if ("followUp" in input) throw new ValidationError("Family message followUp is unsupported; use mode: \"queue\"");
+      const mode = input.mode ?? "queue";
+      if (!["steer", "queue"].includes(mode)) throw new ValidationError("Family message mode must be steer or queue");
       const contentBytes = new TextEncoder().encode(content).byteLength;
       if (contentBytes > this.maxMessageBytes) throw new ValidationError(`Family message exceeds ${this.maxMessageBytes} UTF-8 bytes`);
       const artifactIds = input.artifactIds === undefined ? [] : [...input.artifactIds];
@@ -383,7 +388,7 @@ export class AgentService {
         ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
         ...(artifactIds.length ? { artifactIds } : {}),
         intentKey,
-        ...(input.followUp ? { followUp: true } : {}),
+        mode,
         ...(input.replyToMessageId === undefined ? {} : { replyToMessageId: input.replyToMessageId }),
       };
       if (existing) {
@@ -431,11 +436,6 @@ export class AgentService {
       const updated = await this.#recursive.getMailboxMessage(mailboxMessageId);
       return this.#messageHandle(updated ?? accepted, false);
     });
-  }
-
-  /** Explicit retained-child follow-up. The send returns at the durable queue boundary. */
-  followUp(sessionId: string, branchId: string, target: string, content: string, options: Omit<SendMessageInput, "target" | "content" | "followUp"> = {}): Promise<MailboxMessageHandle> {
-    return this.sendMessage(sessionId, branchId, { ...options, target, content, followUp: true });
   }
 
   async listFamily(sessionId: string, branchId: string): Promise<FamilyListResult> {
@@ -525,15 +525,15 @@ export class AgentService {
     return { items, nextCursor: records.length > page.length && page.length ? encodeMessageCursor(page.at(-1)!) : null };
   }
 
-  /** Delivers queued steering inputs at an AgentRun durable step boundary. */
-  async deliverQueuedAtBoundary(sessionId: string, branchId: string, runId: string): Promise<number> {
+  /** Delivers active-run steering inputs at an AgentRun durable step boundary. */
+  async deliverSteeringAtBoundary(sessionId: string, branchId: string, runId: string): Promise<number> {
     const messages = (await this.#recursive.listMailboxMessages(sessionId, "inbound"))
-      .filter((message) => message.toBranchId === branchId && message.receiptStatus === "queued");
+      .filter((message) => message.toBranchId === branchId && message.receiptStatus === "queued" && (message.mode === "steer" || message.legacyFollowUp));
     for (const message of messages) await this.#deliverToContext(message, runId);
     return messages.length;
   }
 
-  /** Completes crash prefixes between durable acceptance, context delivery, and follow-up run admission. */
+  /** Completes crash prefixes between durable acceptance, context delivery, and queued-run admission. */
   async recoverDeliveries(): Promise<number> {
     const seen = new Set<string>(); let recovered = 0;
     for (const branch of await this.storage.listBranches()) {
@@ -546,9 +546,9 @@ export class AgentService {
           recovered++;
           continue;
         }
-        if (message.followUp && message.deliveredToContext && message.followUpRunId) {
-          const state = projectEvents(await this.storage.loadEvents(message.toSessionId, { branchId: message.toBranchId }));
-          if (!state.agentRuns[message.followUpRunId]) { this.#scheduleRetainedRun(message, message.followUpRunId); recovered++; }
+        if (message.mode === "queue" && message.deliveredToContext && message.contextRunId) {
+          await this.#ensureQueuedRun(message);
+          recovered++;
         }
       }
     }
@@ -577,26 +577,34 @@ export class AgentService {
         else await this.failTask(task.taskId, result.reason ?? `Child run ${result.status}`);
       }
       const reply = result.status === "succeeded" ? result.final ?? "Child task completed." : `Child task ${result.status}: ${result.reason ?? "no reason supplied"}`;
-      await this.sendMessage(result.sessionId, result.branchId, { toSessionId: task.parentSessionId, toBranchId: task.parentBranchId, content: reply, taskId: task.taskId, intentKey: `automatic-task-reply:${task.taskId}:${result.runId}` });
+      await this.sendMessage(result.sessionId, result.branchId, { toSessionId: task.parentSessionId, toBranchId: task.parentBranchId, content: reply, taskId: task.taskId, mode: "steer", intentKey: `automatic-task-reply:${task.taskId}:${result.runId}` });
     }
     const inbound = (await this.#recursive.listMailboxMessages(result.sessionId, "inbound"))
-      .filter((message) => message.followUpRunId === result.runId && message.followUp && !message.replyToMessageId);
+      .filter((message) => message.contextRunId === result.runId && message.mode === "queue" && !message.replyToMessageId);
     for (const message of inbound) {
       const outbound = await this.#recursive.listMailboxMessages(result.sessionId, "outbound");
       if (outbound.some((candidate) => candidate.replyToMessageId === message.mailboxMessageId)) continue;
-      const content = result.status === "succeeded" ? result.final ?? "Follow-up completed." : `Follow-up ${result.status}: ${result.reason ?? "no reason supplied"}`;
+      const content = result.status === "succeeded" ? result.final ?? "Queued message completed." : `Queued message ${result.status}: ${result.reason ?? "no reason supplied"}`;
       await this.sendMessage(result.sessionId, result.branchId, {
         toSessionId: message.fromSessionId, toBranchId: message.fromBranchId, content,
         ...(message.taskId === null ? {} : { taskId: message.taskId }),
+        mode: "steer",
         intentKey: `automatic-reply:${message.mailboxMessageId}:${result.runId}`, replyToMessageId: message.mailboxMessageId,
       });
     }
-    // Messages accepted while the provider was busy become context at this
-    // terminal boundary. Follow-ups then create a new retained run; ordinary
-    // steering remains available in the next future context.
-    const queued = (await this.#recursive.listMailboxMessages(result.sessionId, "inbound"))
-      .filter((message) => message.toBranchId === result.branchId && message.receiptStatus === "queued");
-    for (const message of queued) await this.#routeAcceptedMessage(message);
+    const currentState = projectEvents(await this.storage.loadEvents(result.sessionId, { branchId: result.branchId }));
+    const strandedQueueMessages = (await this.#recursive.listMailboxMessages(result.sessionId, "inbound"))
+      .filter((message) => message.toBranchId === result.branchId && message.mode === "queue" && message.deliveredToContext && message.contextRunId && !currentState.agentRuns[message.contextRunId])
+      .sort((left, right) => left.sentAt.localeCompare(right.sentAt) || left.mailboxMessageId.localeCompare(right.mailboxMessageId));
+    for (const message of strandedQueueMessages) await this.#ensureQueuedRun(message);
+    await this.#targetDispatch.run(`${result.sessionId}/${result.branchId}`, async () => {
+      const pending = (await this.#recursive.listMailboxMessages(result.sessionId, "inbound"))
+        .filter((message) => message.toBranchId === result.branchId && message.receiptStatus === "queued");
+      for (const message of pending.filter((candidate) => candidate.mode === "steer")) {
+        await this.#deliverToContext(message);
+      }
+      await this.#dispatchNextQueuedMessageLocked(result.sessionId, result.branchId);
+    });
   }
 
   /** Starts a newly admitted child through the ordinary autonomous run engine. */
@@ -620,7 +628,7 @@ export class AgentService {
     if (task && !["completed", "failed", "cancelled"].includes(task.status)) return this.cancel(sessionId, branchId, task.taskId, reason);
     const childState = projectEvents(await this.storage.loadEvents(resolved.session.sessionId, { branchId: resolved.branchId }));
     const active = Object.values(childState.agentRuns).find((run) => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
-    if (!active || !this.#runs) throw new ValidationError("Direct child has no cancellable task or follow-up run");
+    if (!active || !this.#runs) throw new ValidationError("Direct child has no cancellable task or queued run");
     return this.#runs.cancel(resolved.session.sessionId, resolved.branchId, active.id, reason);
   }
 
@@ -650,12 +658,70 @@ export class AgentService {
   }
 
   async #routeAcceptedMessage(message: MailboxRecord): Promise<void> {
-    const state = projectEvents(await this.storage.loadEvents(message.toSessionId, { branchId: message.toBranchId }));
-    const active = Object.values(state.agentRuns).find((run) => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status));
-    if (active) return; // AgentRunService claims it at its next durable step boundary.
-    const runId = message.followUp ? `agent-follow-up-run-${stableId(message.mailboxMessageId)}` : undefined;
+    await this.#targetDispatch.run(`${message.toSessionId}/${message.toBranchId}`, async () => {
+      const current = await this.#recursive.getMailboxMessage(message.mailboxMessageId);
+      if (!current || current.receiptStatus !== "queued") return;
+      if (current.mode === "steer") {
+        const state = projectEvents(await this.storage.loadEvents(current.toSessionId, { branchId: current.toBranchId }));
+        if (activeRun(state)) return;
+        await this.#deliverToContext(current);
+        return;
+      }
+      await this.#dispatchNextQueuedMessageLocked(current.toSessionId, current.toBranchId);
+    });
+  }
+
+  async #dispatchNextQueuedMessageLocked(sessionId: string, branchId: string): Promise<void> {
+    if (!this.#runs) return;
+    const events = await this.storage.loadEvents(sessionId, { branchId });
+    const deliveryOrder = new Map<string, number>();
+    for (const [index, event] of events.entries()) {
+      if (event.type === "MailboxMessageDelivered") deliveryOrder.set((event.payload as EventPayloads["MailboxMessageDelivered"]).mailboxMessageId, index);
+    }
+    const pending = (await this.#recursive.listMailboxMessages(sessionId, "inbound"))
+      .filter((message) => message.toBranchId === branchId && message.receiptStatus === "queued" && message.mode === "queue")
+      .sort((left, right) => (deliveryOrder.get(left.mailboxMessageId) ?? Number.MAX_SAFE_INTEGER) - (deliveryOrder.get(right.mailboxMessageId) ?? Number.MAX_SAFE_INTEGER) || left.sentAt.localeCompare(right.sentAt) || left.mailboxMessageId.localeCompare(right.mailboxMessageId));
+    if (!pending.length) return;
+    const state = projectEvents(events);
+    const active = activeRun(state);
+    if (active) {
+      const admittedMessage = pending.find((message) => retainedMessageRunId(message) === active.id);
+      if (admittedMessage) {
+        await this.#deliverToContext(admittedMessage, active.id);
+        this.#scheduleQueuedRunAdvance(admittedMessage, active.id);
+      }
+      return;
+    }
+    const message = pending[0]!;
+    const runId = retainedMessageRunId(message);
+    await this.#runs.admit(message.toSessionId, message.toBranchId, {
+      task: message.content,
+      requestKey: retainedMessageRequestKey(message),
+      requestedRunId: runId,
+      suppressTaskMessage: true,
+    });
     await this.#deliverToContext(message, runId);
-    if (message.followUp && runId) this.#scheduleRetainedRun(message, runId);
+    this.#scheduleQueuedRunAdvance(message, runId);
+  }
+
+  async #ensureQueuedRun(message: MailboxRecord): Promise<void> {
+    await this.#targetDispatch.run(`${message.toSessionId}/${message.toBranchId}`, async () => {
+      if (!this.#runs || !message.contextRunId) return;
+      const state = projectEvents(await this.storage.loadEvents(message.toSessionId, { branchId: message.toBranchId }));
+      const retained = state.agentRuns[message.contextRunId];
+      if (retained) {
+        if (!isTerminalRunStatus(retained.status)) this.#scheduleQueuedRunAdvance(message, retained.id);
+        return;
+      }
+      if (activeRun(state)) return;
+      await this.#runs.admit(message.toSessionId, message.toBranchId, {
+        task: message.content,
+        requestKey: retainedMessageRequestKey(message),
+        requestedRunId: message.contextRunId,
+        suppressTaskMessage: true,
+      });
+      this.#scheduleQueuedRunAdvance(message, message.contextRunId);
+    });
   }
 
   async #deliverToContext(message: MailboxRecord, runId?: string): Promise<void> {
@@ -696,10 +762,10 @@ export class AgentService {
     }]);
   }
 
-  #scheduleRetainedRun(message: MailboxRecord, runId: string): void {
+  #scheduleQueuedRunAdvance(message: MailboxRecord, runId: string): void {
     if (!this.#runs) return;
     const runs = this.#runs;
-    queueMicrotask(() => { void runs.start(message.toSessionId, message.toBranchId, { task: message.content, requestKey: `agent-follow-up:${message.mailboxMessageId}`, requestedRunId: runId, suppressTaskMessage: true }).catch(() => {}); });
+    queueMicrotask(() => { void runs.advance(message.toSessionId, message.toBranchId, runId).catch(() => {}); });
   }
 
   async #resolveFamilyTarget(source: SessionRecord, rawTarget: string): Promise<{ session: SessionRecord; branchId: string; relationship: FamilyRelationship }> {
@@ -732,7 +798,7 @@ export class AgentService {
   }
 
   #messageHandle(message: MailboxRecord, existing: boolean): MailboxMessageHandle {
-    return { mailboxMessageId: message.mailboxMessageId, fromSessionId: message.fromSessionId, fromBranchId: message.fromBranchId, toSessionId: message.toSessionId, toBranchId: message.toBranchId, delivered: message.delivered, receiptStatus: message.receiptStatus, queued: message.receiptStatus === "queued", existing, ...(message.error === null ? {} : { error: message.error }) };
+    return { mailboxMessageId: message.mailboxMessageId, fromSessionId: message.fromSessionId, fromBranchId: message.fromBranchId, toSessionId: message.toSessionId, toBranchId: message.toBranchId, delivered: message.delivered, mode: message.mode, receiptStatus: message.receiptStatus, queued: message.receiptStatus === "queued", existing, ...(message.error === null ? {} : { error: message.error }) };
   }
 
   async #publicMessage(viewerSessionId: string, message: MailboxRecord): Promise<FamilyMessageRecord> {
@@ -750,7 +816,7 @@ export class AgentService {
       // Pre-FU-012 events allowed same-root communication beyond the nuclear
       // family. Preserve those rows for endpoint inspection only. Keeping this
       // fallback here (rather than in target resolution) prevents retained
-      // history from authorizing sends, follow-ups, or cancellation.
+      // history from authorizing sends, queued work, or cancellation.
       const retainedShape = message.intentKey === null || message.intentKey === undefined;
       if (!(error instanceof FamilyReachError) || !retainedShape || sender.rootSessionId !== recipient.rootSessionId) throw error;
       relationship = "legacy";
@@ -1075,7 +1141,9 @@ function sameMailboxMeaning(record: MailboxRecord, value: EventPayloads["Mailbox
     record.toSessionId === value.toSessionId && record.toBranchId === value.toBranchId &&
     record.kind === value.kind && record.content === value.content && record.taskId === (value.taskId ?? null) &&
     Bun.deepEquals(record.artifactIds, value.artifactIds ?? []) && record.intentKey === (value.intentKey ?? null) &&
-    record.followUp === (value.followUp ?? false) && record.replyToMessageId === (value.replyToMessageId ?? null);
+    record.mode === (value.mode ?? (value.followUp ? "queue" : "steer")) &&
+    record.legacyFollowUp === (value.mode === undefined && value.followUp === true) &&
+    record.replyToMessageId === (value.replyToMessageId ?? null);
 }
 
 function inverseRelationship(relationship: FamilyRelationship): FamilyRelationship {
@@ -1094,6 +1162,19 @@ function decodeMessageCursor(cursor: string): { sentAt: string; id: string } {
 }
 
 function spawnRunId(taskId: string): string { return `agent-spawn-run-${stableId(taskId)}`; }
+function queueRunId(mailboxMessageId: string): string { return `agent-queue-run-${stableId(mailboxMessageId)}`; }
+function retainedMessageRunId(message: MailboxRecord): string {
+  return message.legacyFollowUp ? `agent-follow-up-run-${stableId(message.mailboxMessageId)}` : queueRunId(message.mailboxMessageId);
+}
+function retainedMessageRequestKey(message: MailboxRecord): string {
+  return `${message.legacyFollowUp ? "agent-follow-up" : "agent-queue"}:${message.mailboxMessageId}`;
+}
+function isTerminalRunStatus(status: AgentRunState["status"]): boolean {
+  return ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(status);
+}
+function activeRun(state: AgentState): AgentRunState | undefined {
+  return Object.values(state.agentRuns).find((run) => !isTerminalRunStatus(run.status));
+}
 function stableId(value: string): string {
   const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex").slice(0, 32);
 }

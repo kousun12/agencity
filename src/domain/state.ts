@@ -10,7 +10,7 @@ import type { AgentAction } from "./agent-action.ts";
 import type { AgentInvocationProfilePin, AgentProfileVersion, InvocationPromptProvenance } from "./agent-profile.ts";
 import type { JsonValue } from "./json.ts";
 
-export const REDUCER_VERSION = 15 as const;
+export const REDUCER_VERSION = 16 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
@@ -42,10 +42,10 @@ export interface MailboxMessageState {
   readonly id: string; readonly fromSessionId: string; readonly fromBranchId: string;
   readonly toSessionId: string; readonly toBranchId: string; readonly kind: MailboxMessageKind;
   readonly content: string; readonly taskId: string | null; readonly artifactIds: string[]; readonly direction: "inbound" | "outbound";
-  readonly intentKey: string | null; readonly followUp: boolean; readonly replyToMessageId: string | null;
+  readonly intentKey: string | null; readonly mode: "steer" | "queue"; readonly replyToMessageId: string | null;
   readonly senderRelationship: FamilyRelationship | null; readonly receiptStatus: MailboxReceiptStatus;
   readonly delivered: boolean; readonly deliveredToContext: boolean; readonly acknowledged: boolean;
-  readonly followUpRunId: string | null; readonly error: string | null; readonly eventId: string;
+  readonly contextRunId: string | null; readonly error: string | null; readonly eventId: string;
 }
 export interface TerminalNoticeState {
   readonly id: string; readonly taskId: string; readonly parentSessionId: string; readonly childSessionId: string;

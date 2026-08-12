@@ -111,7 +111,7 @@ The remote executor protocol is a typed execution boundary, not a hosted sandbox
 
 - Give each durable agent an optional computer-like environment that can stop, start, move, and recover without changing agent identity.
 - Let dormant agents consume no active compute merely because their identity, files, contracts, or relationships persist.
-- Start an authorized target quickly when an admitted call, explicitly retained follow-up, schedule, heartbeat, or owned task requires execution.
+- Start an authorized target quickly when an admitted call, queued family message, schedule, heartbeat, or owned task requires execution.
 - Let an environment install approved software, retain declared files, supervise processes, and use bounded network capabilities.
 - Let an agent publish immutable-versioned private procedure contracts.
 - Give every explicitly service-capable autonomous agent a standard request/response procedure backed by its autonomous agent loop.
@@ -552,7 +552,7 @@ The procedure input includes a bounded message, optional task reference, typed a
 1. admit the caller, exact contract, grant, budget, and request;
 2. durably deliver the request to the target;
 3. wake or start the target environment if required;
-4. admit one ordinary autonomous run or retained follow-up run;
+4. admit one ordinary autonomous run or queued-message run;
 5. execute through `bun_console` and `finish`;
 6. validate terminal status and result;
 7. return or later deliver the exact outcome to the caller.
@@ -561,7 +561,7 @@ The existing mailbox remains the durable actor-to-actor communication substrate.
 
 The asynchronous form returns the durable invocation handle immediately. The waiting form blocks only within an explicit timeout and remains recoverable by handle after caller-cell loss.
 
-Only an explicitly authorized `agent.respond` invocation or retained `followUp` request can trigger a new autonomous run. An ordinary mailbox message remains durable delivery or steering and does not wake an idle agent merely because the sender can reach it.
+Only an explicitly authorized `agent.respond` invocation or `send(..., { mode: "queue" })` can trigger a new autonomous run. `queue` is the default send mode. Explicit `steer` remains durable delivery or active-run steering and does not wake an idle agent merely because the sender can reach it.
 
 ### Invocation authority and accounting
 
@@ -1025,7 +1025,7 @@ Exit condition: two service-capable agents in one root family can publish, disco
 - Require storage-level writer fencing or proven former-writer detachment before automatic writable-volume takeover.
 - Require owned-scope reference checks, quiescence, partial-failure retry, orphan records, and exact deletion receipts before the Phase 2 environment and volume lifecycle is considered complete.
 - Make service deployment and environment wake recoverable.
-- Enumerate authorized wake triggers: admitted RPC invocation, explicitly retained follow-up, owned task, schedule, or heartbeat. Ordinary mailbox delivery alone does not wake an idle agent.
+- Enumerate authorized wake triggers: admitted RPC invocation, queued family message, owned task, schedule, or heartbeat. Explicit `steer` delivery alone does not wake an idle agent.
 - Keep the managed workspace service as the local wake and recovery owner. Phase 2 scale-to-zero stops environment instances; independently waking after every control-plane process exits remains unavailable until a later external wake owner exists.
 
 Exit condition: an agent environment can stop and restart locally without losing agent identity, contract identity, or declared durable state.

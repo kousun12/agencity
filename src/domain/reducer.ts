@@ -391,20 +391,20 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "MailboxMessageSent": {
       const p = event.payload as EventPayloads["MailboxMessageSent"]; if (state.mailbox[p.mailboxMessageId]) throw new InvalidTransitionError("mailboxMessage", "existing", "sent");
       const legacyDelivered = p.intentKey === undefined;
-      const message: MailboxMessageState = { id: p.mailboxMessageId, fromSessionId: p.fromSessionId, fromBranchId: p.fromBranchId, toSessionId: p.toSessionId, toBranchId: p.toBranchId, kind: p.kind, content: p.content, taskId: p.taskId ?? null, artifactIds: [...(p.artifactIds ?? [])], direction: "outbound", intentKey: p.intentKey ?? null, followUp: p.followUp ?? false, replyToMessageId: p.replyToMessageId ?? null, senderRelationship: null, receiptStatus: legacyDelivered ? "delivered_to_context" : "queued", delivered: legacyDelivered, deliveredToContext: legacyDelivered, acknowledged: false, followUpRunId: null, error: null, eventId: event.id };
+      const message: MailboxMessageState = { id: p.mailboxMessageId, fromSessionId: p.fromSessionId, fromBranchId: p.fromBranchId, toSessionId: p.toSessionId, toBranchId: p.toBranchId, kind: p.kind, content: p.content, taskId: p.taskId ?? null, artifactIds: [...(p.artifactIds ?? [])], direction: "outbound", intentKey: p.intentKey ?? null, mode: p.mode ?? (p.followUp ? "queue" : "steer"), replyToMessageId: p.replyToMessageId ?? null, senderRelationship: null, receiptStatus: legacyDelivered ? "delivered_to_context" : "queued", delivered: legacyDelivered, deliveredToContext: legacyDelivered, acknowledged: false, contextRunId: null, error: null, eventId: event.id };
       return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: message } };
     }
     case "MailboxMessageDelivered": {
       const p = event.payload as EventPayloads["MailboxMessageDelivered"]; if (state.mailbox[p.mailboxMessageId]) throw new InvalidTransitionError("mailboxMessage", "existing", "delivered");
       const legacyDelivered = p.intentKey === undefined;
-      const message: MailboxMessageState = { id: p.mailboxMessageId, fromSessionId: p.fromSessionId, fromBranchId: p.fromBranchId, toSessionId: p.toSessionId, toBranchId: p.toBranchId, kind: p.kind, content: p.content, taskId: p.taskId ?? null, artifactIds: [...(p.artifactIds ?? [])], direction: "inbound", intentKey: p.intentKey ?? null, followUp: p.followUp ?? false, replyToMessageId: p.replyToMessageId ?? null, senderRelationship: p.senderRelationship ?? null, receiptStatus: legacyDelivered ? "delivered_to_context" : "queued", delivered: true, deliveredToContext: legacyDelivered, acknowledged: false, followUpRunId: null, error: null, eventId: event.id };
+      const message: MailboxMessageState = { id: p.mailboxMessageId, fromSessionId: p.fromSessionId, fromBranchId: p.fromBranchId, toSessionId: p.toSessionId, toBranchId: p.toBranchId, kind: p.kind, content: p.content, taskId: p.taskId ?? null, artifactIds: [...(p.artifactIds ?? [])], direction: "inbound", intentKey: p.intentKey ?? null, mode: p.mode ?? (p.followUp ? "queue" : "steer"), replyToMessageId: p.replyToMessageId ?? null, senderRelationship: p.senderRelationship ?? null, receiptStatus: legacyDelivered ? "delivered_to_context" : "queued", delivered: true, deliveredToContext: legacyDelivered, acknowledged: false, contextRunId: null, error: null, eventId: event.id };
       return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: message } };
     }
     case "MailboxMessageContextDelivered": {
       const p = event.payload as EventPayloads["MailboxMessageContextDelivered"]; const old = state.mailbox[p.mailboxMessageId];
       if (!old) throw new InvalidTransitionError("mailboxMessage", "missing", "delivered_to_context");
       if (old.receiptStatus === "failed") throw new InvalidTransitionError("mailboxMessage", "failed", "delivered_to_context");
-      return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: { ...old, delivered: true, deliveredToContext: true, senderRelationship: old.senderRelationship ?? p.relationship, receiptStatus: old.acknowledged ? "acknowledged" : "delivered_to_context", followUpRunId: p.runId ?? old.followUpRunId, eventId: event.id } } };
+      return { ...next, mailbox: { ...state.mailbox, [p.mailboxMessageId]: { ...old, delivered: true, deliveredToContext: true, senderRelationship: old.senderRelationship ?? p.relationship, receiptStatus: old.acknowledged ? "acknowledged" : "delivered_to_context", contextRunId: p.runId ?? old.contextRunId, eventId: event.id } } };
     }
     case "MailboxMessageDeliveryFailed": {
       const p = event.payload as EventPayloads["MailboxMessageDeliveryFailed"]; const old = state.mailbox[p.mailboxMessageId];
