@@ -3,6 +3,7 @@ export * from "./projection.ts";
 export * from "./context.ts";
 export * from "./model-loop.ts";
 export * from "./model-effect-admission.ts";
+export * from "./model-selection.ts";
 export * from "./model-observability.ts";
 export * from "./model-catalog.ts";
 export * from "./outbox.ts";

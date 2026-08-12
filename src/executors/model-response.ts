@@ -6,6 +6,7 @@ import {
 } from "ai";
 import {
   AGENT_TOOL_CONTRACT_ID,
+  DECLARED_DATA_CONTRACT_ID,
   MAX_MODEL_FORMAL_RESPONSE_BYTES,
   MAX_MODEL_RESPONSE_BLOCKS,
   MAX_MODEL_SUPPLEMENTAL_TEXT_BYTES,
@@ -25,6 +26,7 @@ import {
   REFINEMENT_GOVERNANCE_CONTRACT_ID,
   REFINEMENT_GOVERNANCE_TOOL_NAME,
   validateRefinementGovernanceDecision,
+  validateDeclaredDataSubmissionInput,
   validateAgentToolSubmissionValue,
   type AgentAction,
   type CompleteModelResponse,
@@ -904,6 +906,10 @@ function validateToolInputValue(
   }
   if (contract.contractId === REFINEMENT_GOVERNANCE_CONTRACT_ID) {
     validateRefinementGovernanceDecision(value);
+    return value;
+  }
+  if (contract.contractId === DECLARED_DATA_CONTRACT_ID) {
+    validateDeclaredDataSubmissionInput(contract, name, value);
     return value;
   }
   throw new Error(`No runtime validator for ${contract.contractId}`);

@@ -10,11 +10,12 @@ import type { OutboxRunner } from "./outbox.ts";
 import type { AgentRunResult, AgentRunService } from "./agent-runs.ts";
 import { ProjectionService } from "./projection.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
+import type { ModelSelectionInput } from "./model-selection.ts";
 
 export interface SpawnAgentInput {
   readonly task: string;
   readonly completionCriteria?: string;
-  readonly model?: ModelConfigurationInput;
+  readonly model?: ModelSelectionInput;
   readonly budget?: BudgetLimits;
   readonly profile?: AgentProfileInput;
   /** Stable command identity. Reusing it with the same request returns the original handle. */
@@ -116,6 +117,27 @@ export class AgentService {
     }),
     readonly normalizeModelIdentity: (model: ModelConfigurationInput) => ModelConfiguration = normalizeModel,
     readonly assertRunnableModel: (model: ModelConfiguration) => void = () => {},
+    readonly selectModel: (
+      caller: ModelConfiguration,
+      selection: ModelSelectionInput,
+      mode: "admit" | "identity",
+    ) => Promise<ModelConfiguration> = async (caller, selection, mode) => {
+      const normalize = mode === "identity"
+        ? normalizeModelIdentity
+        : normalizeModel;
+      const model = typeof selection === "string"
+        ? normalize({ ...caller, model: selection })
+        : normalize(selection);
+      if (
+        model.provider !== caller.provider ||
+        model.model !== caller.model
+      ) {
+        throw new ValidationError(
+          "Child model provider/model must remain within the parent model policy",
+        );
+      }
+      return model;
+    },
   ) {
     this.#recursive = requireRecursiveStorage(storage);
     this.#projections = new ProjectionService(storage);
@@ -246,12 +268,26 @@ export class AgentService {
       for (let index = 0; index < existing.length; index++) {
         const task = existing[index]; const item = prepared[index]!;
         if (task && item.input.model !== undefined) {
-          if (!Bun.deepEquals(this.normalizeModelIdentity(item.input.model), task.model)) {
+          const selected = await this.selectModel(
+            // String selections inherit route and token options. Reconstruct
+            // those omitted fields from the original durable task so a retry
+            // is not reinterpreted after the parent changes models.
+            task.model,
+            item.input.model,
+            "identity",
+          );
+          if (!Bun.deepEquals(selected, task.model)) {
             throw new ValidationError("Subagent idempotency key was reused with a different model configuration");
           }
           item.model = task.model;
         } else if (task) item.model = task.model;
-        else if (item.input.model !== undefined) item.model = this.normalizeModel(item.input.model);
+        else if (item.input.model !== undefined) {
+          item.model = await this.selectModel(
+            parentState.model,
+            item.input.model,
+            "admit",
+          );
+        }
         if (task && item.input.budget === undefined) item.budget = task.budget;
       }
       for (let index = 0; index < existing.length; index++) {
@@ -284,7 +320,14 @@ export class AgentService {
       const activeDirect = directTasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status));
       if (activeDirect.length + novel.length > this.maxChildren) throw new ValidationError(`Maximum active child count ${this.maxChildren} exceeded`);
 
-      for (const item of novel) assertChildPolicy(parentState.model, parentState.budget.limits, item.model, item.budget);
+      for (const item of novel) {
+        assertChildLimits(
+          parentState.model,
+          parentState.budget.limits,
+          item.model,
+          item.budget,
+        );
+      }
       if (options.requireAgentToolSet) {
         for (const item of novel) this.assertRunnableModel(item.model);
       }
@@ -1098,10 +1141,7 @@ function stableId(value: string): string {
   const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex").slice(0, 32);
 }
 
-function assertChildPolicy(parentModel: ModelConfiguration, parentBudget: BudgetLimits, model: ModelConfiguration, budget: BudgetLimits): void {
-  if (model.provider !== parentModel.provider || model.model !== parentModel.model) {
-    throw new ValidationError("Child model provider/model must remain within the parent model policy");
-  }
+function assertChildLimits(parentModel: ModelConfiguration, parentBudget: BudgetLimits, model: ModelConfiguration, budget: BudgetLimits): void {
   if (parentModel.maxOutputTokens !== undefined && (model.maxOutputTokens ?? parentModel.maxOutputTokens) > parentModel.maxOutputTokens) {
     throw new ValidationError("Child model output limit cannot exceed the parent model limit");
   }

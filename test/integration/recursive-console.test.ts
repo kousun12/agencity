@@ -172,6 +172,109 @@ describe("FU-013 model-facing durable rlm API", () => {
     } finally { await supervisor.close(); }
   });
 
+  test("owner allowlist broadens only child model identity and preserves child limits", async () => {
+    const temp = await makeTempRuntime("agencity-child-model-allowlist-");
+    temps.push(temp);
+    const parentProvider = new PromptProvider("parent-route");
+    const delegatedProvider = new PromptProvider("delegated-route");
+    const supervisor = await open(temp, [parentProvider, delegatedProvider]);
+    try {
+      const root = await supervisor.createSession({
+        workspaceId: "child-model-allowlist",
+        model: {
+          provider: parentProvider.name,
+          model: "creator/base",
+          maxOutputTokens: 1_000,
+        },
+      });
+      await expect(supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        {
+          task: "not allowed",
+          model: {
+            provider: delegatedProvider.name,
+            model: "creator/delegated",
+          },
+        },
+      )).rejects.toThrow(/owner-managed delegated-model allowlist/i);
+
+      await supervisor.modelSelection.setAllowlist([
+        {
+          provider: delegatedProvider.name,
+          model: "creator/delegated",
+        },
+        {
+          provider: parentProvider.name,
+          model: "creator/alternate",
+        },
+      ]);
+      const child = await supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        {
+          task: "allowed",
+          model: {
+            provider: delegatedProvider.name,
+            model: "creator/delegated",
+            maxOutputTokens: 512,
+          },
+        },
+      );
+      const task = (await supervisor.agents.listTasks(root.sessionId))
+        .find((item) => item.taskId === child.taskId);
+      expect(task?.model).toMatchObject({
+        provider: delegatedProvider.name,
+        model: "creator/delegated",
+        maxOutputTokens: 512,
+      });
+
+      const stableInput = {
+        task: "stable string selection",
+        model: "creator/alternate",
+        idempotencyKey: "stable-string-selection",
+      } as const;
+      const stable = await supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        stableInput,
+      );
+      await supervisor.selectModel(root.sessionId, root.branchId, {
+        provider: parentProvider.name,
+        model: "creator/changed",
+        maxOutputTokens: 750,
+      });
+      const retried = await supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        stableInput,
+      );
+      expect(retried.taskId).toBe(stable.taskId);
+      expect((await supervisor.agents.listTasks(root.sessionId))
+        .find((item) => item.taskId === stable.taskId)?.model)
+        .toMatchObject({
+          provider: parentProvider.name,
+          model: "creator/alternate",
+          maxOutputTokens: 1_000,
+        });
+
+      await expect(supervisor.agents.spawn(
+        root.sessionId,
+        root.branchId,
+        {
+          task: "too much output",
+          model: {
+            provider: delegatedProvider.name,
+            model: "creator/delegated",
+            maxOutputTokens: 1_001,
+          },
+        },
+      )).rejects.toThrow(/output limit cannot exceed/i);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
   test("large results spill to durable artifacts and wall-time exhaustion remains distinct", async () => {
     const temp = await makeTempRuntime("agencity-rlm-results-"); temps.push(temp);
     const large = new PromptProvider("large-rlm", true);

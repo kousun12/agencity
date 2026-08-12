@@ -1,6 +1,6 @@
 # Explicit AI generation and typed agent runs plan
 
-**Status:** Proposed  
+**Status:** In progress
 **Date:** August 11, 2026  
 **Last revised:** August 11, 2026  
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
@@ -743,3 +743,11 @@ The refactor is complete when:
 - A branch-aware console pool changes process lifecycle and scratch behavior. It requires focused stress and shutdown testing before enabling awaited nested agents.
 - Typed model output remains model-generated data. Schema validity does not prove factual correctness, task completion, or permission to act.
 - Raw generation may be overused because it is cheap to call. Prompt guidance and examples must prefer deterministic TypeScript and full agents for work requiring tools or verification.
+
+## Implementation log
+
+### 2026-08-11 — Contract and schema foundation
+- Completed: Added the restricted canonical JSON Schema profile, deterministic runtime validation and digests, lossless supported Zod v4 conversion, host-owned declared-data response contracts, shared model-selection normalization, and an owner-managed delegated-model allowlist used by child admission.
+- Validation: `bun test --timeout 30000 test/unit/declared-schema.test.ts test/unit/schema-conversion.test.ts test/unit/declared-response-contract.test.ts test/unit/model-selection.test.ts test/integration/recursive-console.test.ts` (60 passed); `bun run typecheck`; `bun run check:architecture`; `git diff --check`.
+- Plan notes: The first schema profile rejects Zod intersections, readonly output mutation, UTF-16 string-length checks, non-Unicode regular-expression flags, non-scalar `const` and `enum` values, unsafe regular-expression shapes, and unknown Standard Schema vendors because their semantics are not reproduced safely by the durable validator.
+- Remaining: Raw generation, typed agent invocation/results, branch-aware console execution, public cutover, documentation, and aggregate verification.

@@ -102,6 +102,7 @@ import { SkillManagementService } from "./skill-management.ts";
 import { CompactionService, type CompactContextInput, type ContextCompactionView, type ContextInspection } from "./context-compaction.ts";
 import { ModelCatalog, type ModelCatalogOptions } from "./model-catalog.ts";
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
+import { ModelSelectionService } from "./model-selection.ts";
 import { RepositoryInstructionService } from "./repository-instructions.ts";
 
 export interface SupervisorOptions {
@@ -336,6 +337,7 @@ export class Supervisor {
   /** Process-local executor/provider catalog; descriptors contain no credential material. */
   readonly modelExecutor: ModelExecutor;
   readonly modelEffectAdmission: ModelEffectAdmissionService;
+  readonly modelSelection: ModelSelectionService;
   readonly modelCatalog: ModelCatalog;
   readonly repositoryInstructions: RepositoryInstructionService;
   readonly restartConsoleAfterCell: boolean;
@@ -379,6 +381,7 @@ export class Supervisor {
     this.console = consoleProcess;
     this.outbox = outbox;
     this.projections = new ProjectionService(storage);
+    this.modelSelection = new ModelSelectionService(modelExecutor, profile);
     this.agents = new AgentService(
       storage,
       outbox,
@@ -389,6 +392,12 @@ export class Supervisor {
       (model) => modelExecutor.assertRequiredToolSetAdmission(
         modelExecutor.resolveExecutionDescriptor(model),
       ),
+      (caller, selection, mode) =>
+        mode === "identity"
+          ? Promise.resolve(
+              this.modelSelection.normalizeIdentity(caller, selection),
+            )
+          : this.modelSelection.admit(caller, selection),
     );
     this.agentProfiles = this.agents.profiles;
     this.skills = new SkillService(storage, outbox, skillPermissionAllowlist, userScopeKey);
