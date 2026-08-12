@@ -297,11 +297,10 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     rollbackProfile: (target: string | undefined, input: unknown) =>
       call("agents.rollbackProfile", [target, input]),
     list: () => call("agents.list", []),
-    send: (input: unknown, content?: string) => call("agents.send", [input, content]),
+    send: (input: unknown, content?: string, options: Record<string, unknown> = {}) => call("agents.send", [input, content, options]),
     messages: (options: Record<string, unknown> = {}) => call("agents.messages", [options]),
     acknowledge: (messageId: string) => call("agents.acknowledge", [messageId]),
     cancel: (target: string, reason?: string) => call("agents.cancel", [target, reason]),
-    followUp: (target: string, content: string, options: Record<string, unknown> = {}) => call("agents.followUp", [target, content, options]),
   };
   const goals = {
     current: () => call("goals.current", []),

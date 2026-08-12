@@ -564,7 +564,7 @@ Tasks and recursive handles created from a goal episode inherit one immutable `G
 - origin run and action IDs;
 - creation event ID.
 
-The correlation propagates transitively to descendants. Later retained follow-up work inherits the correlation only when it is explicitly admitted as continuation of the correlated task. Owner-authorized independence stops future dependency waiting, but already-incurred usage and retained provenance remain goal-attributed.
+The correlation propagates transitively to descendants. Later queued work inherits the correlation only when it is explicitly admitted as continuation of the correlated task. Owner-authorized independence stops future dependency waiting, but already-incurred usage and retained provenance remain goal-attributed.
 
 Before automatic goal completion, the supervisor applies a built-in quiescence invariant:
 

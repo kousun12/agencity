@@ -94,7 +94,7 @@ This is less reassuring than a false success message, and much safer.
 
 Subagents in Agencity are not anonymous model calls whose only durable product is a returned string. Every subagent is a session with a parent, a task, a model configuration, budgets, messages, artifacts, and a lifecycle.
 
-A parent can start several child sessions concurrently, continue its own work, inspect their progress, and receive their results through durable mailboxes. It can later send a follow-up to the same retained child instead of recreating its context from a summary. A child can reply to its parent, and sibling communication follows explicit family-scoped routing.
+A parent can start several child sessions concurrently, continue its own work, inspect their progress, and receive their results through durable mailboxes. It can later queue more work for the same retained child instead of recreating its context from a summary. A child can reply to its parent, and sibling communication follows explicit family-scoped routing.
 
 Recursive model calls use the same foundation. A call returns a durable handle after admission. That handle can be stored, inspected, cancelled, or resolved from a later cell—even after the worker that created it has gone away.
 

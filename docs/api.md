@@ -194,6 +194,7 @@ await supervisor.agents.sendMessage(parentSessionId, parentBranchId, {
   target: child.sessionId,
   content: "Prioritize the first failure",
   taskId: child.taskId,
+  mode: "queue",
   intentKey: "priority-v1",
 });
 
@@ -216,6 +217,8 @@ const terminal = await supervisor.models.result(call.handleId, {
 ```
 
 `agents.spawnMany` validates and admits the complete batch atomically. Each input may supply `profile`; omission uses the sealed task-specialist profile. Recursive `models.start/startMany` use the same explicit-or-default rule and retain the resulting profile pin on the handle. Specification spawn materializes a profile from the exact active specification version and records those source IDs. Profile meaning participates in idempotent admission, so reusing an idempotency key with changed standing behavior is rejected.
+
+`agents.sendMessage` defaults to `mode: "queue"`. A busy recipient consumes queued work at its next durable boundary; an idle or stopped recipient starts one run. `mode: "steer"` enters an active run at its next boundary but never wakes an idle recipient. The mode participates in idempotent message meaning.
 
 `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 

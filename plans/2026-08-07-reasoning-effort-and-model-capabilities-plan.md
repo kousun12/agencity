@@ -257,7 +257,7 @@ Existing branches ignore changes to defaults. Changing a branch's effort require
 - When `sdk.agents.spawn`, `rlm.start`, or their batch forms omit `model`, the child receives the exact parent `ModelConfiguration`, including effort.
 - When a caller supplies explicit model-configuration input, it passes through the same normalization and validation as a root selection (closing the current gap where child configurations skip `normalizeModelConfiguration`), and the existing child policy still requires the parent's provider/model. A missing effort in input means `provider-default`; workspace preferences are never injected into model-generated child or recursive calls.
 - Stable child or recursive idempotency retries reuse the already retained complete model configuration byte-for-byte.
-- Schedules, heartbeats, resumed runs, and retained follow-up use their session's committed configuration and do not re-read workspace preferences.
+- Schedules, heartbeats, resumed runs, and queued-message runs use their session's committed configuration and do not re-read workspace preferences.
 - No separate delegated effort ceiling is added. An explicit child configuration may select any validated effort for the same provider/model; this is intentional and is covered by delegation authority and budget tests. Omitted configurations continue to inherit the exact parent effort.
 
 

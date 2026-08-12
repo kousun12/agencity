@@ -668,7 +668,7 @@ Prime Agent's agent-to-agent mechanism does not require a complex interoperabili
 
 ### Outcome
 
-The TypeScript SDK gives every session a durable family roster and plain-text message channel. A parent can retain a child, send follow-up work later, and observe its reply. A child can reply to its parent. Messages, receipts, acknowledgements, target wake-up, and resulting turns survive process restart.
+The TypeScript SDK gives every session a durable family roster and plain-text message channel. A parent can retain a child, queue work later, and observe its reply. A child can reply to its parent. Messages, receipts, acknowledgements, target wake-up, and resulting turns survive process restart.
 
 ### Scope
 
@@ -677,7 +677,7 @@ The TypeScript SDK gives every session a durable family roster and plain-text me
 - Route direct messages to the unique parent, named direct child, or sibling. Deeper relatives communicate through the intervening session.
 - Keep the primary payload a bounded UTF-8 string. Permit optional task and artifact references without requiring a general A2A content protocol.
 - Return durable receipts that distinguish accepted/queued, delivered to context, acknowledged, rejected, and failed states.
-- Define behavior for running, idle, stopped, and unavailable targets. A message to an idle retained child may schedule a normal follow-up turn; a busy target receives queued steering input at a durable boundary.
+- Define behavior for running, idle, stopped, and unavailable targets. A default `queue` message owns one separate durable run, starts immediately for an idle retained child, and waits in FIFO order behind a busy target. Explicit `steer` enters an active run at a durable boundary or becomes retained context without waking an idle target.
 - Preserve ordering per sender/receiver pair, enforce size and pending-queue limits, and make duplicate sends idempotent when supplied the same intent key.
 - Materialize incoming messages with sender relationship, task, and receipt provenance.
 - Expose the same records through the public protocol and FU-005 TUI without inventing a second message store.
@@ -709,7 +709,7 @@ The TypeScript SDK gives every session a durable family roster and plain-text me
 ### Completion evidence
 
 - Commits: `4a82122`, `a22becf`, and Supervisor integration in `bbeddb1`.
-- Implementation: `sdk.agents` spawn/list/send/messages/acknowledge/cancel/followUp; derived sender identity; nuclear-family authorization and human-name resolution; bounded durable receipts, context delivery, busy steering, retained same-child follow-up, automatic replies, cancellation/recovery, protocol/TUI surfaces, and migration 009.
+- Implementation: `sdk.agents` spawn/list/send/messages/acknowledge/cancel; `send` defaults to serial one-message/one-run `queue` behavior and accepts explicit non-waking `steer`; derived sender identity; nuclear-family authorization and human-name resolution; bounded durable receipts, context delivery, busy steering, retained same-child queued work, automatic replies, cancellation/recovery, protocol/TUI surfaces, and migration 009.
 - Verification: final suite passed 452 tests with 2 external skips before FU-014; family suite 14/14, agent-run suite 16/16, Slice 2 45/45. Independent review found legacy non-nuclear retained rows poisoning list and an admission-to-run crash gap; legacy rows now have rendering-only compatibility and `spawnRunnable` commits `AgentRunRequested` atomically with admission. Final adversarial re-review passed.
 - Remaining limitation: rejected unauthorized sends return typed errors without retaining the rejected payload, avoiding durable storage of untrusted message content.
 

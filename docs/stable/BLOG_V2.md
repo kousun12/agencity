@@ -84,7 +84,7 @@ This changes the problem from fitting the institution into a prompt to selecting
 
 Many systems treat a subagent as a function call: send a prompt, wait for text, discard the actor.
 
-Agencity already uses durable sessions for delegated and recursive work. A child has a task, model, budget, messages, artifacts, effects, and lifecycle. A parent can inspect its progress, receive a durable result, and later follow up with the same retained child. Recursive model calls use the same foundation and return handles that survive the console worker that created them.
+Agencity already uses durable sessions for delegated and recursive work. A child has a task, model, budget, messages, artifacts, effects, and lifecycle. A parent can inspect its progress, receive a durable result, and later queue more work for the same retained child. Recursive model calls use the same foundation and return handles that survive the console worker that created them.
 
 The proposed agent-city layer takes the next step. It distinguishes between two kinds of agent:
 
@@ -146,7 +146,7 @@ A user may navigate directly to any retained agent or branch, but opening anothe
 
 ## Work moves through assignments, not loose messages
 
-Repeated work sent to an existing agent needs more structure than a follow-up chat message.
+Repeated work sent to an existing agent needs more structure than a queued mailbox message.
 
 The proposed city uses durable **assignments**. An assignment records:
 
@@ -219,7 +219,7 @@ City-wide changes also need a durable home that is independent of any one conver
 
 An organization that can create agents must also be able to stop using them.
 
-Pausing is reversible. Retirement is terminal for one agent identity. A retired agent receives no new assignments, schedules, follow-ups, or autonomous runs. It leaves normal routing and the active organization view.
+Pausing is reversible. Retirement is terminal for one agent identity. A retired agent receives no new assignments, schedules, queued messages, or autonomous runs. It leaves normal routing and the active organization view.
 
 Its history remains:
 
