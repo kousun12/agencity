@@ -183,10 +183,16 @@ function cellSummary(): string {
   return "bun_console · TypeScript ·";
 }
 
-function compactCellSource(code: string): string {
-  const source = truncateLine(firstMeaningfulLine(code), 96);
+export function terminalCompactCellSource(code: string): string {
+  const firstLine = firstMeaningfulLine(code);
+  const displayLine = firstLine.replace(/^\/\/[ \t]*Purpose:[ \t]*/, "");
+  const source = truncateLine(displayLine, 96);
   if (!source) return "(empty source) …";
   return source.endsWith("…") ? source : `${source} …`;
+}
+
+export function terminalDisplayCellSource(code: string): string {
+  return code.replace(/^([ \t\r\n]*\/\/[ \t]*)Purpose:[ \t]*/, "$1");
 }
 
 export function terminalCellReturnedOutput(
@@ -547,7 +553,7 @@ export class TerminalTranscript {
       flexGrow: 1,
       minWidth: 1,
       height: 1,
-      content: compactCellSource(cell.code),
+      content: terminalCompactCellSource(cell.code),
       filetype: "typescript",
       syntaxStyle: this.syntaxStyle,
       fg: TERMINAL_THEME.text,
@@ -586,7 +592,7 @@ export class TerminalTranscript {
       id: `agencity-transcript-cell-source-${cell.id}`,
       width: "100%",
       height: "auto",
-      content: cell.code,
+      content: terminalDisplayCellSource(cell.code),
       filetype: "typescript",
       syntaxStyle: this.syntaxStyle,
       fg: TERMINAL_THEME.text,
@@ -645,9 +651,10 @@ export class TerminalTranscript {
         marker.content = terminalCellMarker(next.status);
         marker.fg = terminalToneColor(terminalCellTone(next.status));
         summary.content = cellSummary();
-        const nextCompactSource = compactCellSource(next.code);
+        const nextCompactSource = terminalCompactCellSource(next.code);
         if (compactSource.content !== nextCompactSource) compactSource.content = nextCompactSource;
-        if (source.content !== next.code) source.content = next.code;
+        const nextSource = terminalDisplayCellSource(next.code);
+        if (source.content !== nextSource) source.content = nextSource;
         details.visible = detailed;
         renderTerminalStreams(logs, "LOGS", next.logs, next.logStreams);
         const returnedOutput = next.status === "committed"
