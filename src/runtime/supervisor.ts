@@ -661,12 +661,21 @@ export class Supervisor {
     return this.modelExecutor.normalizeConfiguration(model);
   }
 
-  async #normalizeSelectedModel(model: ModelConfigurationInput): Promise<ModelConfiguration> {
-    if (this.modelExecutor.isProductTransport(model.provider) &&
-        normalizeReasoningEffort(model.reasoningEffort) !== "provider-default") {
+  /**
+   * Normalizes a newly selected model and applies authoritative product
+   * transport admission before it becomes durable.
+   */
+  async normalizeSelectedModelAdmission(model: ModelConfigurationInput): Promise<ModelConfiguration> {
+    const productTransport = this.modelExecutor.isProductTransport(model.provider);
+    if (productTransport) {
       await this.modelCatalog.ensureFresh();
     }
-    return this.normalizeModelConfiguration(model);
+    const normalized = this.normalizeModelConfiguration(model);
+    if (productTransport) {
+      const execution = this.modelExecutor.resolveExecutionDescriptor(normalized);
+      this.modelExecutor.assertRequiredToolSetAdmission(execution);
+    }
+    return normalized;
   }
 
   /** Reconciles retained work only after managed lease admission. */
@@ -758,9 +767,15 @@ export class Supervisor {
     }
     if (catalog?.deletedAt) throw new ValidationError("Workspace was deleted and cannot be silently reclaimed", { workspaceId: options.workspaceId, deletedAt: catalog.deletedAt });
     if (!catalog) await this.profile.putWorkspace({ workspaceId: options.workspaceId, name: options.workspaceId, databaseUrl: this.sync.databaseUrl, replicaUrl: null, syncUrl: null, credentialReference: null, ownerProfileId: this.device.profileId, createdAt: now, updatedAt: now, deletedAt: null });
-    const model = await this.#normalizeSelectedModel(options.model ?? { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" });
+    const requestedModel = options.model ?? { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" };
     const existing = await this.storage.loadEvents(sessionId);
     const existingCreated = existing.find((event) => event.type === "SessionCreated") as AgentEvent<"SessionCreated"> | undefined;
+    const model = existingCreated &&
+        retainedModelRequestMatches(requestedModel, existingCreated.payload.model)
+      ? existingCreated.payload.model
+      : existingCreated
+        ? this.modelExecutor.normalizeConfigurationIdentity(requestedModel)
+        : await this.normalizeSelectedModelAdmission(requestedModel);
     const branchId = options.branchId ?? existingCreated?.payload.initialBranchId ?? newId();
     const requestedProfile = options.agentProfile ?? SEALED_ROOT_AGENT_PROFILE;
     const profileMetadata = {
@@ -810,22 +825,30 @@ export class Supervisor {
     readonly eventId?: string;
     readonly cursor?: string;
   }> {
-    const normalizedModel = await this.#normalizeSelectedModel(model);
-    const descriptor = this.modelExecutor.providers().find(provider => provider.name === normalizedModel.provider);
-    if (!descriptor || normalizedModel.provider === "echo") {
-      throw new ValidationError(normalizedModel.provider === "echo"
-        ? "Echo is an internal test fixture and cannot be selected through /model"
-        : `Unknown model provider: ${normalizedModel.provider}`);
-    }
-    if (!descriptor.usable) throw new ValidationError(descriptor.remediation ?? `Credential unavailable for ${normalizedModel.provider}`);
+    assertNoReservedModelDispatchInputFields(
+      model,
+      "Public model configuration",
+    );
     const events = await this.storage.loadEvents(sessionId, { branchId });
     if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
     const state = projectEvents(events);
-    if (Bun.deepEquals(state.model, normalizedModel)) return { changed: false, previousModel: state.model, model: normalizedModel };
+    if (retainedModelRequestMatches(model, state.model)) {
+      return { changed: false, previousModel: state.model, model: state.model };
+    }
+    const normalizedIdentity = this.modelExecutor.normalizeConfigurationIdentity(model);
+    const descriptor = this.modelExecutor.providers().find(provider => provider.name === normalizedIdentity.provider);
+    if (!descriptor || normalizedIdentity.provider === "echo") {
+      throw new ValidationError(normalizedIdentity.provider === "echo"
+        ? "Echo is an internal test fixture and cannot be selected through /model"
+        : `Unknown model provider: ${normalizedIdentity.provider}`);
+    }
+    if (!descriptor.usable) throw new ValidationError(descriptor.remediation ?? `Credential unavailable for ${normalizedIdentity.provider}`);
+    if (Bun.deepEquals(state.model, normalizedIdentity)) return { changed: false, previousModel: state.model, model: normalizedIdentity };
     if (Object.values(state.agentRuns).some(run => !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status)) ||
         Object.values(state.modelCalls).some(call => call.status === "requested")) {
       throw new ValidationError("Cannot change the branch model while model work is active");
     }
+    const normalizedModel = await this.normalizeSelectedModelAdmission(model);
     const [event] = await this.storage.appendEvents([{
       sessionId,
       branchId,
@@ -1698,6 +1721,39 @@ export class Supervisor {
       }
       if (this.restartConsoleAfterCell) await this.console.stop();
     }
+  }
+}
+
+/**
+ * An exact retained identity remains a valid idempotent no-op even when a
+ * provider's current new-selection grammar has become stricter.
+ */
+function retainedModelRequestMatches(
+  requested: ModelConfigurationInput,
+  retained: ModelConfiguration,
+): boolean {
+  try {
+    if (
+      !requested ||
+      typeof requested.provider !== "string" ||
+      typeof requested.model !== "string"
+    ) {
+      return false;
+    }
+    const comparable: ModelConfiguration = {
+      provider: requested.provider.trim().toLowerCase(),
+      model: requested.model.trim(),
+      ...(requested.temperature === undefined
+        ? {}
+        : { temperature: requested.temperature }),
+      ...(requested.maxOutputTokens === undefined
+        ? {}
+        : { maxOutputTokens: requested.maxOutputTokens }),
+      reasoningEffort: normalizeReasoningEffort(requested.reasoningEffort),
+    };
+    return Bun.deepEquals(comparable, retained);
+  } catch {
+    return false;
   }
 }
 

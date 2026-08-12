@@ -36,13 +36,17 @@ agencity -- run the benchmark and explain the result
 
 ## First-run provider setup
 
-New work requires an explicit model provider and model ID. On the first interactive launch without a usable provider, Agencity:
+New work requires an explicit model provider and canonical model ID. When interactive startup cannot resolve them from an explicit option, a valid retained default, or environment configuration, Agencity uses an inline keyboard picker:
 
-1. asks for OpenAI, Anthropic, or Vercel AI Gateway;
-2. accepts the API key through hidden terminal input; and
-3. asks for the exact model ID before creating the session.
+1. type to search provider display names or stable IDs, use Up/Down to move, and press Enter to confirm;
+2. if the provider needs a credential, enter it through hidden input; and
+3. type to fuzzy-search model display names and canonical `creator/model` IDs, use Up/Down to move, and press Enter to confirm.
 
-The key is saved in an owner-only `auth.json` beside the profile database. It is not stored in workspace history or profile preferences. Environment credentials are also supported. See [Configuration](./configuration.md) for variables and precedence.
+Backspace edits either search and Escape cancels. A syntactically valid unmatched canonical ID appears as an explicit `Use exact model ID` row ahead of fuzzy suggestions. This remains available when the configured catalog is unavailable or has no rows for the provider. Direct OpenAI accepts only `openai/...`; direct Anthropic accepts only `anthropic/...`; Vercel AI Gateway accepts any valid creator namespace.
+
+The configured Gateway-compatible catalog supplies presentation and capability metadata. Display names are never stored as model identity; selection retains the exact canonical ID shown on the secondary row. Catalog loading sends no provider credential and makes no model-inference request. A refreshed catalog is shown normally, a failed refresh may use visibly stale cached rows, and unavailable or empty results keep manual canonical entry available. Catalog listing does not establish credential usability, execution availability, reasoning support, or formal-tool support.
+
+The key is saved in an owner-only `auth.json` beside the profile database. It is not stored in workspace history or profile preferences. Environment credentials are also supported. Cancelling the model picker after saving a key leaves that credential in place, but creates no session and writes no model preference. See [Configuration](./configuration.md) for variables, precedence, and partial-failure behavior.
 
 Open the provider and model inspector at any time:
 
@@ -50,7 +54,7 @@ Open the provider and model inspector at any time:
 /model
 ```
 
-Use Up/Down to select a provider, `L` to enter a key, and `X` to remove a stored key. Press Enter on a usable provider, type to filter its catalog models, use Up/Down to choose a match, and press Enter to select it. An exact canonical model ID remains accepted when the catalog has no match. Direct forms are also available:
+Use Up/Down to select a provider, `L` to enter a key, and `X` to remove a stored key. Press Enter on a usable provider, then type to use the same display-name/canonical-ID fuzzy search, creator filtering, and explicit manual canonical rows as first-run setup. `/model` remains a branch-attached OpenTUI inspector: it preserves that surface's provider visibility, login/logout controls, composer draft, and idle model-change boundary rather than reusing the pre-session inline renderer. Direct forms are also available:
 
 ```text
 /model login openai
@@ -59,15 +63,19 @@ Use Up/Down to select a provider, `L` to enter a key, and `X` to remove a stored
 /model vercel:openai/gpt-5.6-sol
 ```
 
-Model identifiers use `provider:creator/model`. The model part is the canonical Vercel AI Gateway catalog ID. A session branch retains its selected model; starting Agencity again does not silently replace it. Create new work to use a different model:
+Model identifiers use `provider:creator/model`. The model part is the canonical Vercel AI Gateway catalog ID. A new selection already known not to support Agencity's fixed `bun_console` and `finish` tool contract is rejected before a model preference, root, or branch model change is written. Unknown exact-model support remains admissible and is attempted without weakening the contract.
+
+A non-Echo session branch retains its selected model; starting Agencity again does not silently replace it even if defaults or capability metadata later change. Retained internal Echo branches use an explicit compatibility migration: Agencity selects a usable product model and commits a branch model change before ordinary product work. Create new work to use a different model:
 
 ```sh
 agencity new --model openai:openai/gpt-5.6-sol --effort high "start a separate review"
 ```
 
-Reasoning effort is retained with the branch model. Open the effort inspector with `/effort` (or `/thinking`), use Up/Down and Enter to select a catalog-supported level, or enter a direct command such as `/effort high`. `/effort refresh` refreshes the public Gateway catalog. `provider-default` omits an explicit reasoning override and lets the selected provider decide.
+Reasoning effort is retained with the branch model. Open the effort inspector with `/effort` (or `/thinking`), use Up/Down and Enter to select a catalog-supported level, or enter a direct command such as `/effort high`. `/effort refresh` refreshes the configured Gateway-compatible catalog. `provider-default` omits an explicit reasoning override and lets the selected provider decide.
 
 The inspector distinguishes catalog-listed, unverified, unsupported, and stale capability data. An explicit unsupported selection fails. A stored choice that becomes invalid falls back visibly to `provider-default`. The available levels are `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+
+If a retained workspace default is malformed, interactive startup warns, leaves the value inspectable, and opens reselection; confirming a replacement overwrites it normally. Non-interactive new work fails closed with the invalid-default diagnostic and guidance to pass `--model` or run interactively. After model confirmation, the valid workspace preference is written before the separate root-creation request. A later definite root failure or transport loss can therefore leave the preference in place; transport loss after dispatch is reported as an unconfirmed root outcome, and `agencity agents` is authoritative before retry.
 
 Agencity has no product demo mode or credential-free fallback. Internal deterministic providers are test-only and do not appear in product selection.
 

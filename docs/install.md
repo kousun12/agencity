@@ -69,11 +69,15 @@ Agencity discovers the nearest `.agencity` or `.git` root. The first open create
 
 Without a usable provider, an interactive first run:
 
-1. asks for OpenAI, Anthropic, or Vercel AI Gateway;
+1. opens a searchable keyboard picker for OpenAI, Anthropic, or Vercel AI Gateway;
 2. reads the API key through hidden terminal input; and
-3. asks for the exact model ID before creating work.
+3. loads the configured Gateway-compatible catalog and opens a searchable model picker before creating work.
 
-After startup, `/model` opens the provider and model inspector. Up/Down selects a provider, `L` enters a key, `X` removes a saved key, and Enter accepts a model ID.
+Type to filter provider display names and IDs. In the model picker, fuzzy search covers both catalog display names and canonical `creator/model` IDs. Up/Down moves the highlighted row, Enter confirms it, Backspace edits, and Escape cancels. A valid canonical ID typed exactly appears as a selectable manual row when it is absent from the catalog or catalog loading is unavailable. Direct OpenAI shows and accepts only `openai/...` models, direct Anthropic only `anthropic/...` models, and Gateway accepts any valid creator namespace. Catalog display names are not durable identity; the selected canonical ID is retained.
+
+Catalog retrieval uses the configured `AI_GATEWAY_BASE_URL`-compatible `/v1/models` endpoint without a provider credential and makes no inference request. A failed refresh may use a visibly stale cache. Unavailable or empty catalog results do not disable manual canonical-ID entry, and a listed model is not proof that provider execution or Agencity's formal tools will work.
+
+After startup, `/model` opens the branch-attached provider and model inspector. It uses the same fuzzy matching, creator filtering, and explicit manual rows, while retaining its own controls: Up/Down selects a provider, `L` enters a key, `X` removes a saved key, and Enter opens or confirms the selected row.
 
 Direct commands remain available:
 
@@ -91,6 +95,8 @@ Direct commands remain available:
 Stored provider keys live in the owner-only profile `auth.json`, separate from profile preferences and canonical workspace history. Environment fallbacks are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY`. A stored key takes precedence.
 
 The model identifier uses `provider:creator/model`; the model portion is the canonical Vercel AI Gateway catalog ID. `--model PROVIDER:CREATOR/MODEL` and optional `--effort LEVEL` select a model configuration for new work. Non-interactive new work fails with setup guidance until both a usable credential and model are available.
+
+Cancelling after a key has been stored leaves that credential in place but creates no session and writes no model preference. Confirming a model writes the workspace preference before root creation; if the later root request fails or its dispatched outcome is unconfirmed, that confirmed preference can remain. Inspect `agencity agents` before retrying an unconfirmed root request.
 
 There is no product demo mode or credential-free provider fallback. Internal deterministic providers are test-only and cannot be selected through the product CLI or `/model`.
 

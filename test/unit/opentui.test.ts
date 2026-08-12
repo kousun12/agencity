@@ -633,6 +633,7 @@ describe("OpenTUI interactive terminal", () => {
     let defaultModel: string | null = null;
     let selectedModel: ModelConfiguration = { provider: "echo", model: "echo-1", reasoningEffort: "provider-default" };
     let effortPreference: ModelConfiguration["reasoningEffort"] | null = null;
+    let catalogMode: "refreshed" | "cached" | "unavailable" | "rejected" | "empty" = "refreshed";
     const submittedKeys: Array<string | null> = [];
     const formalCapability = {
       status: "provider-strict" as const,
@@ -665,6 +666,13 @@ describe("OpenTUI interactive terminal", () => {
         usable: false,
         credentialSource: "missing" as const,
         remediation: "Log in to Vercel AI Gateway.",
+      },
+      {
+        name: "fixture-custom",
+        displayName: "Fixture Custom Provider",
+        capabilities: { streaming: true, requiredToolSet: formalCapability },
+        usable: true,
+        credentialSource: "programmatic" as const,
       },
       {
         name: "echo",
@@ -718,21 +726,68 @@ describe("OpenTUI interactive terminal", () => {
           selectedModelEffortPreference: effortPreference,
           credentialReferences: [],
         });
-        if (property === "modelCatalog") return async () => ({
+        if (property === "modelCatalog") return async () => {
+          if (catalogMode === "rejected") {
+            throw new Error("fixture catalog request rejected");
+          }
+          if (catalogMode === "unavailable") {
+            return {
+              status: "unavailable" as const,
+              descriptors: [],
+              error: "fixture catalog unavailable",
+            };
+          }
+          if (catalogMode === "empty") {
+            return {
+              status: "refreshed" as const,
+              origin: "https://empty.example.test",
+              descriptors: [],
+            };
+          }
+          return {
           endpointId: "a".repeat(64),
           origin: "https://ai-gateway.vercel.sh",
-          descriptors: [{
-            model: "openai/gpt-inspector-test",
-            displayName: "GPT Inspector Test",
-            contextWindowTokens: 100_000,
-            maxOutputTokens: 10_000,
-            pricing: null,
-            reasoning: { status: "listed", levels: ["low", "high"] },
-            catalogDigest: "b".repeat(64),
-            catalogEndpointId: "a".repeat(64),
-            stale: false,
-          }],
-        });
+          status: catalogMode === "cached" ? "cached-fallback" as const : "refreshed" as const,
+          ...(catalogMode === "cached" ? { error: "using bounded cached fixture catalog" } : {}),
+          descriptors: [
+            {
+              model: "openai/gpt-inspector-test",
+              displayName: "GPT Inspector Test",
+              contextWindowTokens: 100_000,
+              maxOutputTokens: 10_000,
+              pricing: null,
+              reasoning: { status: "listed" as const, levels: ["low", "high"] as const },
+              catalogDigest: "b".repeat(64),
+              catalogEndpointId: "a".repeat(64),
+              stale: false,
+            },
+            {
+              model: "openai/gpt-inspector-test-alt",
+              displayName: "Inspector Alternate",
+              contextWindowTokens: 80_000,
+              maxOutputTokens: 8_000,
+              pricing: null,
+              reasoning: { status: "unverified" as const, levels: ["low", "high"] as const },
+              catalogDigest: "b".repeat(64),
+              catalogEndpointId: "a".repeat(64),
+              stale: false,
+            },
+            ...Array.from({ length: 12 }, (_, index) => ({
+              model: `openai/catalog-${String(index).padStart(2, "0")}`,
+              displayName: index === 0
+                ? "Catalog\n\u001b[31m Zero"
+                : `Catalog Model ${String(index).padStart(2, "0")}`,
+              contextWindowTokens: 64_000,
+              maxOutputTokens: 4_000,
+              pricing: null,
+              reasoning: { status: "unsupported" as const, levels: [] },
+              catalogDigest: "b".repeat(64),
+              catalogEndpointId: "a".repeat(64),
+              stale: false,
+            })),
+          ],
+          };
+        };
         if (property === "productSetReasoningEffort") return async (_model: string, effort: ModelConfiguration["reasoningEffort"] | null) => {
           effortPreference = effort;
           return { effort };
@@ -773,6 +828,9 @@ describe("OpenTUI interactive terminal", () => {
     await terminal.attach(session.sessionId, session.branchId, false);
     const setup = await createTestRenderer({ width: 118, height: 32 });
     app = new OpenTuiApp(setup.renderer, terminal);
+    const composer = setup.renderer.root.findDescendantById(
+      "agencity-composer",
+    ) as TextareaRenderable;
     const secret = "hidden-openai-provider-key-123456";
     try {
       await setup.mockInput.typeText("/model");
@@ -808,8 +866,60 @@ describe("OpenTUI interactive terminal", () => {
       expect(frame).not.toContain(secret);
 
       setup.mockInput.pressEnter();
-      frame = await setup.waitForFrame(value => value.includes("Choose model") && value.includes("Model ID for openai"));
+      frame = await setup.waitForFrame(value =>
+        value.includes("Choose model") && value.includes("Model ID for openai"));
+      expect(frame).toContain("Models 1–8 of 14");
+
+      for (let index = 0; index < 9; index++) {
+        setup.mockInput.pressArrow("down");
+      }
+      frame = await setup.waitForFrame(value =>
+        value.includes("> Catalog Model 10") && value.includes("Models 3–10 of 14"));
+      expect(frame).not.toContain("Catalog Model 01");
+      await setup.mockInput.typeText("Zero");
+      frame = await setup.waitForFrame(value => value.includes("␛[31m Zero"));
+      expect(frame).not.toContain("\u001b[31m");
+      expect(
+        frame.split("\n").find(line => line.includes("␛[31m Zero")),
+      ).toContain("Catalog");
+
+      setup.mockInput.pressEscape();
+      await setup.waitForFrame(value => value.includes("Providers") && value.includes("Fixture Custom Provider"));
+      setup.mockInput.pressEnter();
+      await setup.mockInput.pasteBracketedText("openai/gpt");
+      frame = await setup.waitForFrame(value =>
+        value.includes("> Use exact model ID") && value.includes("GPT Inspector Test"));
+      expect(frame).toContain("openai/gpt · not listed in catalog");
+      setup.mockInput.pressArrow("down");
+      frame = await setup.waitForFrame(value =>
+        value.includes("> GPT Inspector Test") || value.includes("> Inspector Alternate"));
+      expect(frame).not.toContain("> Use exact model ID");
+      setup.mockInput.pressArrow("up");
+      await setup.waitForFrame(value => value.includes("> Use exact model ID"));
+
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      expect(selectedModel as unknown).toEqual({
+        provider: "openai",
+        model: "openai/gpt",
+        reasoningEffort: "provider-default",
+      });
+      expect(String(defaultModel)).toBe("openai:openai/gpt");
+      setup.mockInput.pressEnter();
       await setup.mockInput.typeText("Inspector");
+      await setup.waitForFrame(value => value.includes("> Inspector Alternate"));
+      setup.mockInput.pressArrow("down");
+      await setup.waitForFrame(value => value.includes("> GPT Inspector Test"));
+      await setup.mockInput.typeText(" Alternate");
+      await setup.waitForFrame(value => value.includes("> Inspector Alternate"));
+      for (let index = 0; index < " Alternate".length; index++) {
+        setup.mockInput.pressBackspace();
+      }
+      await setup.waitForFrame(value =>
+        value.includes("Search: Inspector") && value.includes("> Inspector Alternate"));
+      setup.mockInput.pressArrow("down");
+      await setup.waitForFrame(value => value.includes("> GPT Inspector Test"));
+      await terminal.execute("/model");
       await setup.waitForFrame(value => value.includes("> GPT Inspector Test"));
       setup.mockInput.pressEnter();
       expect(await app.settle()).toBe(true);
@@ -835,11 +945,106 @@ describe("OpenTUI interactive terminal", () => {
       expect((selectedModel as unknown as { reasoningEffort: string }).reasoningEffort).toBe("low");
 
       setup.mockInput.pressEscape();
+      await Bun.sleep(20);
+      await setup.mockInput.typeText("ordinary draft stays");
+      await terminal.execute("/model");
+      await setup.waitForFrame(value => value.includes("MODEL") && value.includes("OpenAI"));
+      setup.mockInput.pressEnter();
+      await setup.mockInput.pasteBracketedText("Inspector\nTest");
+      frame = await setup.waitForFrame(value =>
+        value.includes("Search: Inspector Test") && value.includes("> GPT Inspector Test"));
+      expect(composer.plainText).toBe("ordinary draft stays");
+      await setup.mockInput.pasteBracketedText("x".repeat(600));
+      frame = await setup.waitForFrame(value => value.includes("Search: Inspector Testx"));
+      expect(frame.split("\n").every(line => Bun.stringWidth(line) <= 118)).toBe(true);
+      expect(composer.plainText).toBe("ordinary draft stays");
+      setup.mockInput.pressKey("\u001b");
       await Bun.sleep(50);
+      frame = await setup.waitForFrame(value => value.includes("Providers"));
+      expect(composer.plainText).toBe("ordinary draft stays");
+      setup.mockInput.pressEscape();
+      await Bun.sleep(50);
+      await setup.waitForFrame(value =>
+        value.includes("ordinary draft stays") && !value.includes("Providers"));
+      expect(composer.plainText).toBe("ordinary draft stays");
+      setup.mockInput.pressKey("a", { ctrl: true });
+      setup.mockInput.pressKey("k", { ctrl: true });
+
+      catalogMode = "cached";
+      await terminal.execute("/model");
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value =>
+        value.includes("Using cached catalog") &&
+        value.includes("bounded cach") &&
+        value.includes("https://ai-gateway.vercel.sh"));
+      expect(frame).toContain("https://ai-gateway.vercel.sh");
+      app.showDetail(null);
+
+      catalogMode = "unavailable";
+      await terminal.execute("/model");
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value =>
+        value.includes("Catalog unavailable") &&
+        value.includes("fixture catalog una"));
+      await setup.mockInput.typeText("openai/private-preview");
+      frame = await setup.waitForFrame(value =>
+        value.includes("> Use exact model ID") &&
+        value.includes("Type an exact model ID to continue."));
+      app.showDetail(null);
+
+      catalogMode = "rejected";
+      await terminal.execute("/model");
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value =>
+        value.includes("Catalog unavailable") &&
+        value.includes("[model catalog erro"));
+      expect(frame).not.toContain("https://ai-gateway.vercel.sh");
+      app.showDetail(null);
+
+      catalogMode = "empty";
+      await terminal.execute("/model");
+      setup.mockInput.pressEnter();
+      frame = await setup.waitForFrame(value =>
+        value.includes("No catalog models are available for OpenAI.") &&
+        value.includes("Type an exact model ID to continue."));
+      app.showDetail(null);
+
+      catalogMode = "refreshed";
       await setup.mockInput.typeText("/model");
       setup.mockInput.pressEnter();
       expect(await app.settle()).toBe(true);
       await setup.waitForFrame(value => value.includes("MODEL") && value.includes("OpenAI"));
+      setup.mockInput.pressArrow("down");
+      setup.mockInput.pressArrow("down");
+      setup.mockInput.pressArrow("down");
+      await setup.waitForFrame(value => value.includes("> ✓ Fixture Custom Provider"));
+      setup.mockInput.pressEnter();
+      await setup.mockInput.typeText("native-v2");
+      frame = await setup.waitForFrame(value =>
+        value.includes("> Use exact model ID") && value.includes("native-v2"));
+      setup.resize(48, 6);
+      frame = await setup.waitForFrame(value =>
+        value.includes("native-v2") && value.includes("Enter save"));
+      expect(frame).toContain("Esc back");
+      setup.resize(118, 32);
+      await setup.waitForFrame(value => value.includes("> Use exact model ID"));
+      setup.mockInput.pressEnter();
+      expect(await app.settle()).toBe(true);
+      expect(selectedModel as unknown).toEqual({
+        provider: "fixture-custom",
+        model: "native-v2",
+        reasoningEffort: "low",
+      });
+      expect(String(defaultModel)).toBe("fixture-custom:native-v2");
+
+      await setup.waitForFrame(value =>
+        value.includes("native-v2") &&
+        value.includes("> ✓ Fixture Custom Provider") &&
+        value.includes("Providers"));
+      setup.mockInput.pressArrow("up");
+      setup.mockInput.pressArrow("up");
+      setup.mockInput.pressArrow("up");
+      await setup.waitForFrame(value => value.includes("> ✓ OpenAI"));
       setup.mockInput.pressKey("x");
       expect(await app.settle()).toBe(true);
       frame = await setup.waitForFrame(value => value.includes("> ○ OpenAI") && value.includes("not configured"));
@@ -847,7 +1052,8 @@ describe("OpenTUI interactive terminal", () => {
       expect(frame).not.toContain(secret);
 
       setup.resize(78, 24);
-      frame = await setup.waitForFrame(value => value.includes("MODEL") && value.includes("gpt-inspector-test"));
+      frame = await setup.waitForFrame(value =>
+        value.includes("MODEL") && value.includes("> ○ OpenAI"));
       expect(frame).toContain("Providers");
     } finally {
       app.destroy();

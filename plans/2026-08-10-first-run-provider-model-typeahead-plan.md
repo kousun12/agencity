@@ -1,18 +1,29 @@
 # First-run provider and model typeahead plan
 
-**Status:** Proposed
+**Status:** Completed
 **Date:** August 10, 2026
 **Last updated:** August 11, 2026
+**Verification:** Deterministic aggregate and installed acceptance matrix passed; external integrations remain gated and unverified
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)
 **Related plans:** [Reasoning effort and model capabilities](./2026-08-07-reasoning-effort-and-model-capabilities-plan.md), [Rich terminal rendering and layout](./2026-08-07-rich-terminal-rendering-and-layout-plan.md), and [Formal model tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md)
 
 ## Summary
 
-Agencity requires an explicit provider and canonical model before it creates a root session. The first interactive setup path presents a numbered provider prompt, reads a provider key through hidden input, and then asks the user to type an exact `creator/model` identifier. After session creation, the `/model` inspector provides a richer keyboard-driven catalog picker with model display names, Up/Down navigation, and Enter selection.
+Agencity requires an explicit provider and canonical model before it creates a root session. Interactive setup uses a session-independent inline typeahead. The provider picker searches visible provider names. The model picker loads the configured Gateway-compatible catalog endpoint, searches display names and canonical IDs with deterministic fuzzy ranking, and selects with Up/Down and Enter. Exact canonical model entry remains available when a model is absent from the catalog or catalog retrieval is unavailable.
 
-Replace the first-run provider and model prompts with a session-independent inline typeahead. The provider picker searches visible provider names. The model picker loads the existing configured Gateway catalog endpoint, searches both display names and canonical IDs with deterministic fuzzy ranking, and selects with Up/Down and Enter. Exact canonical model entry remains available when a model is absent from the catalog or catalog retrieval is unavailable.
+One pure fuzzy-selection model serves first-run setup and the branch-attached `/model` inspector. Each surface remains responsible for projecting the providers it is allowed to show. Product-transport model validation, safe bounded terminal presentation, and pre-admission rejection of models already known not to support the fixed agent tool contract are implemented without adding a provider list, model list, protocol endpoint, canonical event, table, or placeholder session.
 
-The work also extracts one pure fuzzy-selection model for both first-run setup and the `/model` inspector. Each surface remains responsible for projecting the providers it is allowed to show. The implementation adds product-transport model validation, safe bounded terminal presentation, and pre-admission rejection of models already known not to support the fixed agent tool contract. It does not add a provider list, model list, protocol endpoint, canonical event, table, or placeholder session.
+## Implementation status
+
+Implementation and required deterministic verification were completed on August 11, 2026.
+
+- Added shared bounded provider/model ranking, creator filtering, stable selection reconciliation, safe presentation, and explicit manual canonical rows.
+- Added the pre-session provider, hidden-credential, catalog-loading, and model-selection TTY flow.
+- Converged `/model` on the same matching, filtering, and manual-selection semantics while preserving its branch-attached controls.
+- Added product-model grammar enforcement, malformed retained-default handling, known-unsupported admission rejection, and explicit credential/model/root partial-outcome behavior.
+- Added deterministic unit, integration, fixture, OpenTUI, and linked pseudo-terminal coverage and updated public documentation.
+
+`bun run verify` passed for this revision: typecheck and architecture passed, the deterministic core reported 1,077 passes and 2 credential-gated Turso skips, linked end-to-end coverage reported 6 passes, and installed acceptance reported 22 passes with the real-provider smoke skipped. `bun run test:acceptance:matrix` also passed its deterministic installed row and skipped the separately gated real-provider, official Turso Sync, and Turso Cloud rows. The skipped external rows remain unverified.
 
 ## Architectural decision
 
@@ -72,7 +83,9 @@ This boundary preserves the durable lifecycle. The final selected model is norma
 - **Inline picker:** A bounded pre-session TTY interaction that redraws its own prompt rows without starting the branch-attached OpenTUI application.
 - **Echo migration:** The existing pre-release compatibility path that replaces a retained internal Echo branch's model when a command requires a usable product model. This is an explicit mutation of an existing branch, not first-session initialization.
 
-## Verified implementation baseline
+## Pre-implementation baseline
+
+This section records the behavior that the implementation replaced. It is historical context, not the current product contract.
 
 ### Product startup
 
@@ -86,13 +99,13 @@ The ordinary product path is:
 6. `finish` applies explicit or retained model-specific reasoning effort.
 7. `createSession` normalizes the complete model configuration and commits the initial model in `SessionCreated`.
 
-The interactive provider prompt accepts a number or provider ID. The model prompt accepts an unstructured line. Product-transport normalization currently requires a slash, no whitespace, and the matching direct-provider namespace; it does not enforce the catalog's complete canonical grammar or the 512-byte retained-dispatch bound before every preference or root write.
+The interactive provider prompt accepted a number or provider ID. The model prompt accepted an unstructured line. Product-transport normalization required a slash, no whitespace, and the matching direct-provider namespace; it did not enforce the catalog's complete canonical grammar or the 512-byte retained-dispatch bound before every preference or root write.
 
 `ProductPrompter.secret` already closes readline, enters raw mode, bounds the input, restores the previous raw/paused state, and never echoes the credential. Its data listener is removed on recognized Enter or cancellation input rather than unconditionally in `finally`; the new shared driver must harden listener cleanup for aborts, stream errors, and every exceptional exit.
 
-### Existing `/model` picker
+### Former `/model` picker
 
-The branch-attached terminal already provides:
+Before this implementation, the branch-attached terminal provided:
 
 - provider navigation and login/logout in `src/tui/opentui.ts`;
 - catalog loading through `TerminalUI.#showModelDetail` in `src/tui/index.ts`;
@@ -100,7 +113,7 @@ The branch-attached terminal already provides:
 - Up/Down wrapping and Enter selection;
 - an exact catalog-ID preference when the query exactly matches a returned descriptor.
 
-Its catalog filter is a case-insensitive substring test in `catalogModelsForProvider`. It does not implement fuzzy ranking. The selected index is not reconciled when a query changes, and the renderer always shows the first eight results even when navigation moves selection beyond that window. A typed unlisted ID is used only when no catalog result remains; if fuzzy or substring matches remain, Enter selects a catalog row instead of the typed ID. Catalog request failures are collapsed to an empty descriptor list by `TerminalUI.#showModelDetail`, so the inspector cannot distinguish an unavailable catalog from a valid empty result.
+Its catalog filter was a case-insensitive substring test in `catalogModelsForProvider`. It did not implement fuzzy ranking. The selected index was not reconciled when a query changed, and the renderer always showed the first eight results even when navigation moved selection beyond that window. A typed unlisted ID was used only when no catalog result remained; when substring matches remained, Enter selected a catalog row instead of the typed ID. Catalog request failures were collapsed to an empty descriptor list by `TerminalUI.#showModelDetail`, so the inspector could not distinguish an unavailable catalog from a valid empty result.
 
 ### Catalog and protocol
 

@@ -17,6 +17,16 @@ import {
   decodePasteBytes,
 } from "@opentui/core";
 import { stdin, stdout } from "node:process";
+import {
+  boundModelSelectionQuery,
+  fitTerminalLine,
+  navigateSelectedIdentity,
+  rankModelOptions,
+  reconcileSelectedIdentity,
+  sanitizeTerminalLine,
+  visibleSelectionWindow,
+  type ModelSelectionOption,
+} from "../product/model-selection.ts";
 import { scrubText } from "../security/index.ts";
 import {
   TERMINAL_COMMAND_REGISTRY,
@@ -124,6 +134,10 @@ function truncateFamilyText(value: string, maximum: number): string {
   if (maximum <= 0) return "";
   if (normalized.length <= maximum) return normalized;
   return maximum === 1 ? "…" : `${normalized.slice(0, maximum - 1)}…`;
+}
+
+function removeLastCodePoint(value: string): string {
+  return Array.from(value).slice(0, -1).join("");
 }
 
 export function familyBrowserLines(
@@ -354,51 +368,72 @@ function paletteText(query: string): string {
   ].join("\n");
 }
 
-function catalogModelsForProvider(
-  detail: TerminalModelDetail,
-  provider: string | null | undefined,
-  query = "",
-): readonly TerminalModelDetail["catalogModels"][number][] {
-  const normalized = query.trim().toLowerCase();
-  return detail.catalogModels.filter(model =>
-    (provider === "vercel" || model.model.startsWith(`${provider}/`))
-    && (!normalized || model.model.toLowerCase().includes(normalized) || model.displayName.toLowerCase().includes(normalized)));
-}
-
-function renderModelInspector(
+export function renderModelInspector(
   detail: TerminalModelDetail,
   selectedIndex: number,
   entryProvider: string | null,
-  catalogIndex: number,
   query: string,
+  selectedIdentity: string | null,
+  width = 80,
 ): string {
   const currentProvider = detail.providers.find(provider => provider.name === detail.current.provider);
   const selectedProvider = entryProvider ?? detail.providers[selectedIndex]?.name;
-  const catalogModels = catalogModelsForProvider(detail, selectedProvider, entryProvider ? query : "");
+  const catalogOptions = selectedProvider
+    ? rankModelOptions(
+        detail.catalogModels,
+        selectedProvider,
+        entryProvider ? query : "",
+      )
+    : [];
+  const fit = (value: unknown): string =>
+    fitTerminalLine(value, Math.max(1, width));
   if (entryProvider) {
     const provider = detail.providers.find(item => item.name === entryProvider);
-    const selectedCatalogIndex = catalogModels.length ? catalogIndex % catalogModels.length : -1;
-    return [
+    const window = visibleSelectionWindow(
+      catalogOptions,
+      selectedIdentity,
+    );
+    const catalogCount = catalogOptions.filter(option =>
+      option.kind === "catalog"
+    ).length;
+    const statusLines = detail.catalogStatus === "cached-fallback"
+      ? [
+          `! Using cached catalog${detail.catalogError ? ` · ${detail.catalogError}` : ""}`,
+        ]
+      : detail.catalogStatus === "unavailable"
+        ? [
+            `! Catalog unavailable${detail.catalogError ? ` · ${detail.catalogError}` : ""}`,
+            "Type an exact model ID to continue.",
+          ]
+        : catalogCount === 0
+          ? [
+              `No catalog models are available for ${provider?.displayName ?? entryProvider}.`,
+              "Type an exact model ID to continue.",
+            ]
+          : [];
+    const lines = [
       "MODEL",
       "",
       "Choose model",
       provider?.displayName ?? entryProvider,
-      "Type to filter the catalog, or enter an exact provider model ID.",
-      provider?.name === "vercel" ? "Gateway model IDs may contain /." : "",
-      ...(catalogModels.length ? [
+      `Search: ${query || "type a name or exact model ID"}`,
+      ...statusLines,
+      ...(detail.catalogOrigin ? [`Catalog origin: ${detail.catalogOrigin}`] : []),
+      ...(window.options.length ? [
         "",
-        "Catalog",
-        ...catalogModels.slice(0, 8).flatMap((model, index) => [
-          `${index === selectedCatalogIndex ? ">" : " "} ${model.displayName} · ${model.model}`,
-          `  ${model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`} · ${model.reasoning.status === "listed" ? "effort" : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed"} · agent tools ${terminalCatalogAgentToolState(detail, entryProvider, model.model)}${model.stale ? " · stale" : ""}`,
-        ]),
+        `Models ${window.start + 1}–${window.end} of ${catalogOptions.length}`,
+        ...window.options.flatMap(option =>
+          modelSelectionLines(detail, entryProvider, option, option.identity === selectedIdentity)
+        ),
       ] : []),
       "",
       "Current",
       `${currentProvider?.displayName ?? detail.current.provider} · ${detail.current.model}`,
       "",
-      "↑/↓ model · Enter save · Esc back",
-    ].filter((line, index, lines) => line || lines[index - 1] !== "").join("\n");
+      "Type/paste search · Backspace edit · ↑/↓ select",
+      "Enter save canonical ID · Esc back",
+    ].filter((line, index, lines) => line || lines[index - 1] !== "");
+    return lines.map(fit).join("\n");
   }
   const lines = [
     "MODEL",
@@ -421,9 +456,14 @@ function renderModelInspector(
     lines.push(`    ${provider.credentialLabel} · agent tools ${provider.agentToolState}`);
     if (selected && (!provider.usable || provider.agentToolAdmission === "rejected") && provider.remediation) lines.push(`    ${provider.remediation}`);
   });
+  const catalogModels = catalogOptions.filter(
+    (option): option is Extract<ModelSelectionOption, { kind: "catalog" }> =>
+      option.kind === "catalog",
+  );
   if (catalogModels.length) {
     lines.push("", "Catalog models");
-    for (const model of catalogModels.slice(0, 6)) {
+    for (const option of catalogModels.slice(0, 6)) {
+      const model = option.descriptor;
       const pricing = model.pricing === null ? "price unknown"
         : `$${(model.pricing.inputUsdPerToken * 1_000_000).toFixed(2)}/$${(model.pricing.outputUsdPerToken * 1_000_000).toFixed(2)} per 1M`;
       lines.push(
@@ -432,8 +472,34 @@ function renderModelInspector(
       );
     }
   }
+  if (detail.catalogStatus === "cached-fallback") {
+    lines.push("", `! Cached catalog fallback${detail.catalogError ? ` · ${detail.catalogError}` : ""}`);
+  } else if (detail.catalogStatus === "unavailable") {
+    lines.push("", `! Catalog unavailable${detail.catalogError ? ` · ${detail.catalogError}` : ""}`);
+  } else if (selectedProvider && catalogModels.length === 0) {
+    lines.push("", "No catalog models are available for this provider.");
+  }
   lines.push("", "↑/↓ provider · Enter choose · L login · X logout", "Shift-R raw · Esc close");
-  return lines.join("\n");
+  return lines.map(fit).join("\n");
+}
+
+function modelSelectionLines(
+  detail: TerminalModelDetail,
+  provider: string,
+  option: ModelSelectionOption,
+  selected: boolean,
+): string[] {
+  if (option.kind === "manual") {
+    return [
+      `${selected ? ">" : " "} ${option.displayName}`,
+      `  ${option.model} · not listed in catalog`,
+    ];
+  }
+  const model = option.descriptor;
+  return [
+    `${selected ? ">" : " "} ${model.displayName} · ${model.model}`,
+    `  ${model.contextWindowTokens === null ? "context unknown" : `${Math.round(model.contextWindowTokens / 1_000)}k context`} · ${model.reasoning.status === "listed" ? "effort" : model.reasoning.status === "unverified" ? "effort (unverified)" : "fixed"} · agent tools ${terminalCatalogAgentToolState(detail, provider, model.model)}${model.stale ? " · stale" : ""}`,
+  ];
 }
 
 function renderEffortInspector(detail: TerminalEffortDetail, selectedIndex: number): string {
@@ -533,7 +599,9 @@ export class OpenTuiApp {
   #paletteDraft: string | null = null;
   #modelProviderIndex = 0;
   #modelEntryProvider: string | null = null;
-  #modelCatalogIndex = 0;
+  #modelEntryQuery = "";
+  #modelSelectedIdentity: string | null = null;
+  #modelEntryDraft: string | null = null;
   #effortIndex = 0;
   #resetDetailScroll = false;
   #busy = false;
@@ -659,6 +727,13 @@ export class OpenTuiApp {
       },
       onKeyDown: key => {
         const escape = key.name === "escape" || key.name === "esc" || key.sequence === "\u001b";
+        if (!this.controller.pendingSecretInput && this.#modelEntryProvider && escape) {
+          key.preventDefault();
+          key.stopPropagation();
+          this.#leaveModelEntry();
+          this.#render();
+          return;
+        }
         if (!this.controller.pendingSecretInput && this.#view.workspaceAgents.open && escape) {
           key.preventDefault();
           key.stopPropagation();
@@ -669,15 +744,6 @@ export class OpenTuiApp {
             this.controller.closeWorkspaceAgents?.();
           }
           return;
-        }
-        if (
-          !this.controller.pendingSecretInput
-          && !this.#view.workspaceAgents.open
-          && escape
-        ) {
-          key.preventDefault();
-          key.stopPropagation();
-          this.#dismissInspector();
         }
       },
     });
@@ -796,6 +862,10 @@ export class OpenTuiApp {
   handleTerminalLinefeedInput(sequence: string): boolean {
     if (sequence !== "\n" || this.controller.pendingSecretInput) return false;
     if (this.#view.workspaceAgents.open) return true;
+    if (this.#modelEntryProvider) {
+      this.#confirmModelSelection();
+      return true;
+    }
     this.#composer.newLine();
     this.#render();
     return true;
@@ -824,22 +894,44 @@ export class OpenTuiApp {
     if (detail === null) {
       this.#detail = null;
       this.#rawDetail = false;
-      this.#modelEntryProvider = null;
+      this.#leaveModelEntry();
       this.#render();
       return;
     }
     const previousProvider = this.#selectedModelProvider()?.name;
+    const previousEntryProvider = this.#modelEntryProvider;
+    const previousEntryQuery = this.#modelEntryQuery;
+    const previousSelectedIdentity = this.#modelSelectedIdentity;
     this.#detail = detail;
     this.#rawDetail = detail.kind === "raw";
     this.#paletteQuery = "";
     this.#paletteDraft = null;
-    this.#modelEntryProvider = null;
-    this.#modelCatalogIndex = 0;
     if (detail.kind === "model") {
       const selected = detail.providers.findIndex(provider => provider.name === (previousProvider ?? detail.current.provider));
       this.#modelProviderIndex = Math.max(0, selected);
+      if (
+        previousEntryProvider &&
+        detail.providers.some(provider => provider.name === previousEntryProvider)
+      ) {
+        this.#modelEntryProvider = previousEntryProvider;
+        this.#modelEntryQuery = previousEntryQuery;
+        this.#modelSelectedIdentity = reconcileSelectedIdentity(
+          rankModelOptions(
+            detail.catalogModels,
+            previousEntryProvider,
+            previousEntryQuery,
+          ),
+          previousSelectedIdentity,
+          "data-refresh",
+        );
+      } else {
+        this.#leaveModelEntry();
+      }
     } else if (detail.kind === "effort") {
+      this.#leaveModelEntry();
       this.#effortIndex = Math.max(0, detail.options.indexOf(detail.current));
+    } else {
+      this.#leaveModelEntry();
     }
     this.#resetDetailScroll = true;
     this.#render();
@@ -909,6 +1001,12 @@ export class OpenTuiApp {
   };
 
   #onPaste = (event: PasteEvent): void => {
+    if (this.#modelEntryProvider && !this.controller.pendingSecretInput) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.#appendModelQuery(decodePasteBytes(event.bytes));
+      return;
+    }
     if (!this.controller.pendingSecretInput) return;
     event.preventDefault();
     event.stopPropagation();
@@ -1009,32 +1107,55 @@ export class OpenTuiApp {
     const modelDetail = this.#activeModelDetail();
     if (modelDetail && !this.#paletteQuery && this.#provisionalOutput.size === 0 && !this.#rawDetail) {
       if (this.#modelEntryProvider) {
-        const catalogModels = catalogModelsForProvider(modelDetail, this.#modelEntryProvider, this.#composerValue());
-        if ((key.name === "up" || key.name === "down") && catalogModels.length) {
+        const options = this.#modelOptions(modelDetail);
+        if ((key.name === "up" || key.name === "down") && options.length) {
           key.preventDefault();
           key.stopPropagation();
-          const delta = key.name === "up" ? -1 : 1;
-          this.#modelCatalogIndex = (this.#modelCatalogIndex + delta + catalogModels.length) % catalogModels.length;
+          this.#modelSelectedIdentity = navigateSelectedIdentity(
+            options,
+            this.#modelSelectedIdentity,
+            key.name === "up" ? -1 : 1,
+          );
           this.#render();
           return;
         }
         if (escape) {
           key.preventDefault();
           key.stopPropagation();
-          this.#dismissInspector();
+          this.#leaveModelEntry();
+          this.#render();
           return;
         }
-        if ((key.name === "return" || key.name === "linefeed" || key.name === "kpenter") && !key.meta && !key.ctrl) {
+        if (enter && !key.meta && !key.ctrl) {
           key.preventDefault();
           key.stopPropagation();
-          const query = this.#composerValue().trim();
-          const exact = catalogModels.find(model => model.model.toLowerCase() === query.toLowerCase());
-          const modelId = exact?.model ?? catalogModels[this.#modelCatalogIndex % Math.max(1, catalogModels.length)]?.model ?? query;
-          if (!modelId) {
-            this.#showNotice("Enter a model ID first.", "warning");
-            return;
-          }
-          void this.#runCommand(`/model ${this.#modelEntryProvider}:${modelId}`);
+          this.#confirmModelSelection();
+          return;
+        }
+        if (
+          !key.ctrl &&
+          !key.meta &&
+          (key.name === "backspace" || key.name === "delete")
+        ) {
+          key.preventDefault();
+          key.stopPropagation();
+          this.#setModelQuery(removeLastCodePoint(this.#modelEntryQuery));
+          return;
+        }
+        if (
+          !key.ctrl &&
+          !key.meta &&
+          key.sequence &&
+          !/[\r\n\u0000-\u001f\u007f]/u.test(key.sequence)
+        ) {
+          key.preventDefault();
+          key.stopPropagation();
+          this.#appendModelQuery(key.sequence);
+          return;
+        }
+        if (!(key.ctrl && (key.name === "c" || key.name === "d"))) {
+          key.preventDefault();
+          key.stopPropagation();
           return;
         }
       } else {
@@ -1056,9 +1177,7 @@ export class OpenTuiApp {
             this.#showNotice(provider.remediation ?? `Press L to log in to ${provider.displayName}.`, "warning");
             return;
           }
-          this.#modelEntryProvider = provider.name;
-          this.#modelCatalogIndex = 0;
-          this.#setComposerValue("");
+          this.#beginModelEntry(modelDetail, provider.name);
           this.#render();
           return;
         }
@@ -1069,8 +1188,11 @@ export class OpenTuiApp {
             this.#showNotice(`${provider.displayName} does not use the local provider credential store.`, "warning");
             return;
           }
-          if (key.name === "l") void this.#runCommand(`/model login ${provider.name}`);
-          else void this.#runCommand(`/model logout ${provider.name}`);
+          if (key.name === "l") {
+            void this.#runCommand(`/model login ${provider.name}`, true);
+          } else {
+            void this.#runCommand(`/model logout ${provider.name}`, true);
+          }
           return;
         }
       }
@@ -1089,7 +1211,7 @@ export class OpenTuiApp {
         key.preventDefault();
         key.stopPropagation();
         const effort = effortDetail.options[this.#effortIndex];
-        if (effort) void this.#runCommand(`/effort ${effort}`);
+        if (effort) void this.#runCommand(`/effort ${effort}`, true);
         return;
       }
     }
@@ -1283,9 +1405,82 @@ export class OpenTuiApp {
     this.#composer.gotoBufferEnd();
   }
 
-  #runCommand(value: string): Promise<void> {
+  #modelOptions(
+    detail: TerminalModelDetail = this.#activeModelDetail()!,
+  ): readonly ModelSelectionOption[] {
+    return this.#modelEntryProvider
+      ? rankModelOptions(
+          detail.catalogModels,
+          this.#modelEntryProvider,
+          this.#modelEntryQuery,
+        )
+      : [];
+  }
+
+  #beginModelEntry(detail: TerminalModelDetail, provider: string): void {
+    this.#modelEntryDraft = this.#composerValue();
+    this.#modelEntryProvider = provider;
+    this.#modelEntryQuery = "";
+    this.#modelSelectedIdentity = reconcileSelectedIdentity(
+      rankModelOptions(detail.catalogModels, provider, ""),
+      null,
+      "query-edit",
+    );
+  }
+
+  #setModelQuery(value: string): void {
+    const detail = this.#activeModelDetail();
+    const provider = this.#modelEntryProvider;
+    if (!detail || !provider) return;
+    this.#modelEntryQuery = boundModelSelectionQuery(value);
+    this.#modelSelectedIdentity = reconcileSelectedIdentity(
+      rankModelOptions(
+        detail.catalogModels,
+        provider,
+        this.#modelEntryQuery,
+      ),
+      this.#modelSelectedIdentity,
+      "query-edit",
+    );
+    this.#render();
+  }
+
+  #appendModelQuery(value: string): void {
+    const singleLine = sanitizeTerminalLine(value).replace(/\s+/gu, " ");
+    this.#setModelQuery(`${this.#modelEntryQuery}${singleLine}`);
+  }
+
+  #leaveModelEntry(): void {
+    if (this.#modelEntryDraft !== null) {
+      this.#setComposerValue(this.#modelEntryDraft);
+    }
+    this.#modelEntryProvider = null;
+    this.#modelEntryQuery = "";
+    this.#modelSelectedIdentity = null;
+    this.#modelEntryDraft = null;
+  }
+
+  #confirmModelSelection(): void {
+    const detail = this.#activeModelDetail();
+    const provider = this.#modelEntryProvider;
+    if (!detail || !provider) return;
+    const selected = this.#modelOptions(detail).find(option =>
+      option.identity === this.#modelSelectedIdentity
+    );
+    if (!selected) {
+      this.#showNotice(
+        "Type a matching model name or valid exact model ID first.",
+        "warning",
+      );
+      return;
+    }
+    this.#leaveModelEntry();
+    void this.#runCommand(`/model ${provider}:${selected.model}`, true);
+  }
+
+  #runCommand(value: string, preserveComposer = false): Promise<void> {
     if (this.#busy) return Promise.resolve();
-    const operation = this.#performSubmit(value);
+    const operation = this.#performSubmit(value, preserveComposer);
     this.#activeOperation = operation;
     return operation.finally(() => {
       if (this.#activeOperation === operation) this.#activeOperation = null;
@@ -1312,10 +1507,12 @@ export class OpenTuiApp {
     }
   }
 
-  async #performSubmit(value: string): Promise<void> {
-    this.#setComposerValue("");
-    this.#paletteQuery = "";
-    this.#paletteDraft = null;
+  async #performSubmit(value: string, preserveComposer = false): Promise<void> {
+    if (!preserveComposer) {
+      this.#setComposerValue("");
+      this.#paletteQuery = "";
+      this.#paletteDraft = null;
+    }
     this.#busy = true;
     this.#render();
     try {
@@ -1599,8 +1796,7 @@ export class OpenTuiApp {
 
   #dismissInspector(): void {
     if (this.#modelEntryProvider) {
-      this.#modelEntryProvider = null;
-      this.#setComposerValue("");
+      this.#leaveModelEntry();
       this.#render();
       return;
     }
@@ -1683,7 +1879,7 @@ export class OpenTuiApp {
       const count = this.#view.workspaceAgents.rows.length;
       return `${count} ${count === 1 ? "agent" : "agents"} · Ctrl-N new · ↑/↓ select · Enter/→ open · Ctrl-R refresh · Esc back`;
     }
-    if (this.#modelEntryProvider) return "Enter save · Esc back";
+    if (this.#modelEntryProvider) return "Type search · ↑/↓ select · Enter save · Esc back";
     if (this.#activeModelDetail()) return "↑/↓ provider · Enter choose · Esc close";
     if (this.#paletteQuery) return "Esc close";
     if (this.#provisionalOutput.size > 0) return "PgUp/PgDn scroll";
@@ -1711,9 +1907,16 @@ export class OpenTuiApp {
         : "AGENT FAMILY · no retained direct children · Esc close";
     }
     if (this.#activeModelDetail()) {
-      return this.#modelEntryProvider
-        ? `MODEL · ${this.#modelEntryProvider} ID · Enter save · Esc back`
-        : "MODEL · ↑/↓ provider · Enter choose · Esc close";
+      if (this.#modelEntryProvider) {
+        const selected = this.#modelOptions().find(option =>
+          option.identity === this.#modelSelectedIdentity
+        );
+        return fitTerminalLine(
+          `MODEL · ${selected?.model ?? this.#modelEntryProvider} · Enter save · Esc back`,
+          Math.max(1, this.renderer.terminalWidth),
+        );
+      }
+      return "MODEL · ↑/↓ provider · Enter choose · Esc close";
     }
     const firstLine = details.split("\n").find(line => line.trim()) ?? "DETAILS";
     return `${firstLine} · Esc close`;
@@ -1772,7 +1975,14 @@ export class OpenTuiApp {
           ? renderFamilyBrowser(this.#view, this.#familySelectedKey, compact, width >= 96, detailsContentWidth)
         : this.#detail
           ? this.#detail.kind === "model" && !this.#rawDetail
-            ? renderModelInspector(this.#detail, this.#modelProviderIndex, this.#modelEntryProvider, this.#modelCatalogIndex, this.#composerValue())
+            ? renderModelInspector(
+                this.#detail,
+                this.#modelProviderIndex,
+                this.#modelEntryProvider,
+                this.#modelEntryQuery,
+                this.#modelSelectedIdentity,
+                detailsContentWidth,
+              )
             : this.#detail.kind === "effort" && !this.#rawDetail
               ? renderEffortInspector(this.#detail, this.#effortIndex)
               : formatTerminalDetail(this.#detail, { raw: this.#rawDetail })
@@ -1814,7 +2024,10 @@ export class OpenTuiApp {
     this.#noticeText.visible = Boolean(notice) && layout.mode !== "minimum";
     this.#noticeText.content = notice ? `${notice}\n` : "";
     this.#noticeText.fg = terminalToneColor(this.#notice?.tone ?? "normal");
-    this.#detailsText.wrapMode = styledWorkspace || styledFamily ? "none" : "word";
+    this.#detailsText.wrapMode = styledWorkspace || styledFamily ||
+        this.#detail?.kind === "model"
+      ? "none"
+      : "word";
     this.#detailsText.content = styledWorkspace ?? styledFamily ?? details;
     const selectedFamily = this.#view.familyChildren.find(child => child.key === this.#familySelectedKey);
     this.#detailsText.fg = layout.mode === "minimum" && this.#notice
@@ -1859,6 +2072,20 @@ export class OpenTuiApp {
       }, 0);
       this.#detailScrollTimer.unref?.();
     }
+    if (this.#modelEntryProvider) {
+      const options = this.#modelOptions();
+      const window = visibleSelectionWindow(
+        options,
+        this.#modelSelectedIdentity,
+      );
+      const selectedIndex = window.options.findIndex(option =>
+        option.identity === this.#modelSelectedIdentity
+      );
+      const scrollTop = Math.max(0, (selectedIndex - 5) * 2);
+      this.#details.stickyScroll = false;
+      this.#details.scrollTo({ x: 0, y: scrollTop });
+      this.#details.scrollTop = scrollTop;
+    }
     this.#composer.placeholder = this.#busy
       ? "Working…"
       : this.controller.pendingSecretInput
@@ -1868,7 +2095,10 @@ export class OpenTuiApp {
           : workspaceAgentsActive
             ? "Search retained root work…"
           : this.#view.composerPlaceholder;
-    this.#composerPrompt.content = workspaceAgentsActive ? "⌕ " : "› ";
+    this.#composerPrompt.content = workspaceAgentsActive ||
+        this.#modelEntryProvider
+      ? "⌕ "
+      : "› ";
     const familyHint = this.#familyHint(compact);
     const footer = layoutTerminalFooter({
       width: Math.max(1, width - 2),

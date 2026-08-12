@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
 import { parseCliArgs, type ParsedCliArgs } from "./cli-args.ts";
 import { buildDataDeleteConfirmation, parseAdvancedArgv, type AdvancedCommandPath } from "./cli/advanced.ts";
 import { cliHelpColorEnabled, renderCliHelp } from "./cli/help.ts";
@@ -20,10 +18,10 @@ import {
   type ModelConfiguration,
   type ReasoningEffort,
 } from "./domain/index.ts";
-import type { ModelProviderDescriptor } from "./executors/index.ts";
 import { containsCredentialMaterial, inspectModelCredentialStatuses, modelCredentialPathForProfile, scrubText } from "./security/index.ts";
 import {
   ProductCatalog,
+  chooseManagedModel,
   chooseNewModel,
   defaultProfilePath,
   deriveDisplayName,
@@ -44,7 +42,7 @@ import {
   type ManagedServiceConfiguration,
   type ManagedServiceStatus,
 } from "./product/index.ts";
-import { AgentClient, InProcessProtocolTransport, ProtocolServer } from "./protocol/index.ts";
+import { AgentClient, InProcessProtocolTransport, ProtocolClientError, ProtocolServer } from "./protocol/index.ts";
 import {
   Supervisor,
   type AgentRunResult,
@@ -56,6 +54,7 @@ import {
 } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 import { OpenTerminalUI } from "./tui/opentui.ts";
+import { ProductPrompter } from "./tui/product-prompter.ts";
 
 const REQUIRED_BUN_VERSION = "1.3.13";
 const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact"]);
@@ -146,7 +145,7 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
   });
   const configuration = managedConfiguration(parsed, workspace);
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
-  const prompter = new ProductPrompter(interactive);
+  const prompter = new ProductPrompter({ enabled: interactive });
   try {
     if (parsed.command === "service") { await serviceCommand(configuration, parsed); return; }
 
@@ -177,11 +176,21 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     let summary: ProductBranchSummary;
     if (forceNew || existing.length === 0) {
       const model = await chooseManagedModel(client, parsed, interactive, prompter);
-      const created = await client.createSession(workspace.workspaceId, {
-        model,
-        sessionName: task ? deriveDisplayName(task) : `New session ${new Date().toISOString().slice(0, 10)}`,
-        branchName: "main",
-      });
+      let created: { sessionId: string; branchId: string };
+      try {
+        created = await client.createSession(workspace.workspaceId, {
+          model,
+          sessionName: task ? deriveDisplayName(task) : `New session ${new Date().toISOString().slice(0, 10)}`,
+          branchName: "main",
+        });
+      } catch (error) {
+        if (sessionCreationOutcomeIsUnconfirmed(error)) {
+          throw new ValidationError(
+            `Root creation is unconfirmed because no authoritative outcome was received. Inspect \`agencity agents\` before retrying. ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        throw error;
+      }
       selection = created;
       await client.productSelect(created.sessionId, created.branchId);
       summary = (await client.productSessions() as ProductBranchSummary[]).find(candidate => candidate.sessionId === created.sessionId && candidate.branchId === created.branchId)!;
@@ -774,106 +783,6 @@ async function configuredEffortModel(client: AgentClient, explicit: string | und
     throw new ValidationError("Effort preferences require a canonical creator/model ID");
   }
   return model;
-}
-
-async function chooseManagedModel(client: AgentClient, parsed: ParsedCliArgs, interactive: boolean, prompter: ProductPrompter): Promise<ModelConfiguration> {
-  const explicit = parsed.values.get("model");
-  const providers = (await client.modelProviders()).filter(provider => provider.name !== "echo");
-  const finish = async (model: ModelConfiguration): Promise<ModelConfiguration> => {
-    const explicitEffort = parsed.values.get("effort");
-    const config = await client.productConfig();
-    let effort: ReasoningEffort = "provider-default";
-    let ambient = false;
-    if (explicitEffort !== undefined) effort = normalizeReasoningEffort(explicitEffort);
-    else if (config.defaultModel === formatModel(model) && typeof config.selectedModelEffortPreference === "string") {
-      effort = config.selectedModelEffortPreference;
-      ambient = true;
-    }
-    if (explicitEffort !== undefined || ambient) try {
-      const catalog = await client.modelCatalog();
-      const capability = catalog.descriptors.find(descriptor => descriptor.model === model.model)?.reasoning ?? {
-        status: "unverified" as const,
-        levels: STANDARD_UNVERIFIED_REASONING_LEVELS,
-      };
-      assertReasoningSelection(effort, capability);
-    } catch (error) {
-      if (!ambient) throw error;
-      process.stderr.write(`Stored reasoning effort is no longer valid; using provider-default. ${error instanceof Error ? error.message : String(error)}\n`);
-      effort = "provider-default";
-    }
-    return { ...model, reasoningEffort: effort };
-  };
-  if (explicit) {
-    const model = parseModel(explicit);
-    if (model.provider === "echo") throw new ValidationError("Echo is an internal test fixture and is not available in the product");
-    let provider = providers.find(provider => provider.name === model.provider);
-    if (!provider) throw new ValidationError(`Model provider is unavailable: ${model.provider}`);
-    if (!provider.usable) {
-      if (!interactive || !["openai", "anthropic", "vercel"].includes(provider.name)) {
-        throw new ValidationError(provider.remediation ?? `Model provider is unavailable: ${model.provider}`);
-      }
-      const apiKey = await prompter.secret(`API key for ${provider.displayName} (input hidden): `);
-      if (!apiKey) throw new ValidationError("Provider API key is required");
-      await client.productSetProviderKey(provider.name, apiKey);
-      provider = (await client.modelProviders()).find(candidate => candidate.name === model.provider);
-      if (!provider?.usable) throw new ValidationError(provider?.remediation ?? `Credential unavailable for ${model.provider}`);
-    }
-    await client.productSetModel(formatModel(model));
-    return finish(model);
-  }
-  const configured = await client.productConfig();
-  if (configured.defaultModel) {
-    const model = parseModel(configured.defaultModel);
-    if (providers.some(provider => provider.name === model.provider && provider.usable)) return finish(model);
-  }
-  let usable = providers.filter(provider => provider.usable);
-  for (const provider of usable) {
-    const model = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`];
-    if (model?.trim()) {
-      await client.productSetModel(`${provider.name}:${model.trim()}`);
-      return finish({ provider: provider.name, model: model.trim(), reasoningEffort: "provider-default" });
-    }
-  }
-  if (!interactive) {
-    throw new ValidationError("No usable model is selected. Configure provider credentials and pass --model PROVIDER:MODEL, or run Agencity in an interactive terminal");
-  }
-  if (!usable.length) {
-    const candidates = providers.filter(provider => ["openai", "anthropic", "vercel"].includes(provider.name));
-    const selected = await chooseManagedProvider(candidates, prompter, "No model provider is configured.\n");
-    const apiKey = await prompter.secret(`API key for ${selected.displayName} (input hidden): `);
-    if (!apiKey) throw new ValidationError("Provider API key is required");
-    await client.productSetProviderKey(selected.name, apiKey);
-    const refreshed = (await client.modelProviders()).filter(provider => provider.name !== "echo");
-    const configuredProvider = refreshed.find(provider => provider.name === selected.name);
-    if (!configuredProvider?.usable) throw new ValidationError(configuredProvider?.remediation ?? `Credential unavailable for ${selected.name}`);
-    usable = [configuredProvider];
-  }
-  const provider = usable.length === 1 ? usable[0]! : await chooseManagedProvider(usable, prompter);
-  const environmentModel = process.env[`${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`]?.trim();
-  if (environmentModel) {
-    await client.productSetModel(`${provider.name}:${environmentModel}`);
-    return finish({ provider: provider.name, model: environmentModel, reasoningEffort: "provider-default" });
-  }
-  const modelId = (await prompter.question(`Model ID for ${provider.displayName}: `)).trim();
-  if (!modelId) throw new ValidationError("Model ID is required");
-  await client.productSetModel(`${provider.name}:${modelId}`);
-  return finish({ provider: provider.name, model: modelId, reasoningEffort: "provider-default" });
-}
-
-async function chooseManagedProvider(
-  providers: readonly ModelProviderDescriptor[],
-  prompter: ProductPrompter,
-  introduction = "",
-): Promise<ModelProviderDescriptor> {
-  if (!providers.length) throw new ValidationError("No supported model provider is available");
-  if (providers.length === 1) return providers[0]!;
-  const choices = providers.map((provider, index) => `${index + 1}) ${provider.displayName} [${provider.name}]`).join("\n");
-  const answer = (await prompter.question(`${introduction}Choose a provider:
-${choices}
-Provider number or ID: `)).trim();
-  const provider = providers[Number(answer) - 1] ?? providers.find(candidate => candidate.name === answer);
-  if (!provider) throw new ValidationError(`Unknown provider selection: ${answer}`);
-  return provider;
 }
 
 async function managedStatus(client: AgentClient, parsed: ParsedCliArgs): Promise<void> {
@@ -1524,55 +1433,10 @@ function printStartup(
   ].join("\n"));
 }
 
-class ProductPrompter {
-  #readline: ReadlineInterface | null = null;
-  constructor(readonly enabled: boolean) {}
-  question(question: string): Promise<string> {
-    if (!this.enabled) throw new ValidationError("Interactive selection requires a terminal");
-    this.#readline ??= createInterface({ input, output });
-    return this.#readline.question(question);
-  }
-  async secret(question: string): Promise<string> {
-    if (!this.enabled) throw new ValidationError("Interactive credential entry requires a terminal");
-    if (typeof input.setRawMode !== "function") throw new ValidationError("This terminal cannot provide hidden credential input");
-    this.#readline?.close();
-    this.#readline = null;
-    const wasRaw = input.isRaw === true;
-    const wasPaused = input.isPaused();
-    output.write(question);
-    try {
-      input.setRawMode(true);
-      input.resume();
-      return await new Promise<string>((resolve, reject) => {
-        let answer = "";
-        const onData = (chunk: Buffer | string): void => {
-          for (const character of String(chunk)) {
-            if (character === "\r" || character === "\n") {
-              input.off("data", onData);
-              resolve(answer.trim());
-              return;
-            }
-            if (character === "\u0003" || character === "\u0004" || character === "\u001b") {
-              input.off("data", onData);
-              reject(new ValidationError("Provider credential entry was cancelled"));
-              return;
-            }
-            if (character === "\b" || character === "\u007f") {
-              answer = Array.from(answer).slice(0, -1).join("");
-              continue;
-            }
-            if (character >= " " && character !== "\u007f") answer = `${answer}${character}`.slice(0, 16_384);
-          }
-        };
-        input.on("data", onData);
-      });
-    } finally {
-      input.setRawMode(wasRaw);
-      if (wasPaused) input.pause();
-      output.write("\n");
-    }
-  }
-  close(): void { this.#readline?.close(); this.#readline = null; }
+function sessionCreationOutcomeIsUnconfirmed(error: unknown): boolean {
+  return !(error instanceof ProtocolClientError) ||
+    error.code === "INVALID_RESPONSE" ||
+    error.status >= 500;
 }
 
 function required<T>(value: T | undefined, name: string): T { if (value === undefined) throw new ValidationError(`--${name} is required`); return value; }

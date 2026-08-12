@@ -1561,14 +1561,18 @@ export class TerminalUI {
     const available=providers??await this.client.modelProviders();
     const [config,catalog,agentTools]=await Promise.all([
       this.client.productConfig(),
-      this.client.modelCatalog().catch(()=>({descriptors:[]})),
+      this.client.modelCatalog().catch((error)=>({
+        status:"unavailable" as const,
+        descriptors:[],
+        error:renderTerminalError(error,"model catalog"),
+      })),
       this.client.agentToolCapability(current),
     ]);
     const detail=buildTerminalModelDetail({
       current,
       workspaceDefault:config.defaultModel,
       providers:available,
-      catalogModels:catalog.descriptors,
+      catalog,
       ...(agentTools.selected===undefined?{}:{currentAgentTools:agentTools.selected}),
     });
     this.#lastDetail=detail;
