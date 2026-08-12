@@ -98,7 +98,7 @@ A session created by a parent through a durable task. A child has the same persi
 
 ### Creation family
 
-One root agent and all descendants created under it. Task ownership, mailbox reach, cancellation, budget attribution, and follow-up use this retained family relationship. Unrelated roots are not members of one merged agent identity.
+One root agent and all descendants created under it. Task ownership, mailbox reach, cancellation, budget attribution, and queued messages use this retained family relationship. Unrelated roots are not members of one merged agent identity.
 
 ### Branch
 
@@ -112,7 +112,7 @@ The selected session-and-branch path through which the product reads conversatio
 
 ### Work source
 
-An admitted reason to begin autonomous work: a direct user request, child task, retained family follow-up, schedule, or wake. A durable profile alone does not authorize execution.
+An admitted reason to begin autonomous work: a direct user request, child task, retained family `queue` message, schedule, or wake. A durable profile alone does not authorize execution.
 
 ### Task
 
@@ -188,7 +188,7 @@ A durable user, assistant, system, tool, or family-delivered conversation record
 
 ### Mailbox
 
-The durable family-scoped communication path between authorized parent, child, and sibling sessions. Sends, deliveries, acknowledgements, and terminal notices remain attributable and recoverable.
+The durable family-scoped communication path between authorized parent, child, and sibling sessions. Sends, deliveries, acknowledgements, and terminal notices remain attributable and recoverable. A send defaults to `queue`: a busy recipient consumes it at a durable boundary, while an idle recipient starts a run. `steer` delivers without waking an idle recipient.
 
 ### Recursive model call
 

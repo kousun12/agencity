@@ -152,7 +152,7 @@ const SDK_GUIDE = [
   "After a validation or shell failure, use any reliable path, line, column, or named-symbol diagnostic to inspect only a small surrounding range (about 20 lines on each side). If no diagnostic maps reliably to source, inspect the smallest relevant function or section; do not reread the whole file.",
   "Use sql`SELECT ... ${value}` only for read-only relational queries. Keep current-cell values in const/let, replaceable cross-cell intermediates in scratch, small recovery-critical JSON in state, and large durable content in artifacts.",
   "Scratch is bounded, noncanonical session/branch state and may disappear. It never crosses agents or branches, including parent, child, sibling, and forked work; pass needed values through delegation inputs, durable messages, or artifacts. Check or rebuild missing values from durable inputs; never replay a prior cell automatically because it may have performed effects.",
-  "Use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents provides run, runMany, detached spawn, spawnMany, result, list, send, messages, acknowledge, cancel, and followUp; sdk.memory, sdk.harness, sdk.skills, and sdk.specs provide adaptation and delegation.",
+  "Use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents provides run, runMany, detached spawn, spawnMany, result, list, send, messages, acknowledge, and cancel. send defaults to mode queue, which gives each message one durable FIFO run and wakes an idle recipient; use mode steer only to enter an active run at its next boundary or retain context without waking an idle recipient. sdk.memory, sdk.harness, sdk.skills, and sdk.specs provide adaptation and delegation.",
   "Choose the smallest correct operation. Use ordinary TypeScript for deterministic work. Use ai.generateText only when every required fact is already in the explicit prompt/context and one text transformation, such as summarization or rewriting, is sufficient. Use ai.generateObject under the same explicit-context constraint when later TypeScript must branch, loop, filter, aggregate, or validate fields. Keep object schemas small and decision-oriented, not unbounded reports encoded as JSON.",
   "Raw ai calls cannot inspect files, run commands, use skills, call tools, read ambient branch messages, profiles, memory, or repository instructions, or continue autonomously. Use sdk.agents.run when a child must inspect the workspace, use tools, run commands, iterate, or finish a full agentic task before this cell continues. Give agents.run an output schema when its conclusion must be program data; omit output when a textual report is enough.",
   "Use sdk.agents.spawn when a child should work independently and its result is not needed before this cell continues. Retain the handle and use messaging, terminal notices, handle.result(options), or sdk.agents.result(handle, options) later. Handle.result is a worker-local convenience; the durable JSON handle remains the task/run identity. Use runMany or spawnMany only for bounded independent tasks, never for dependent steps. All generation and agent operations use the same canonical creator/model IDs and caller-narrowing model policy.",
@@ -168,7 +168,7 @@ const SDK_GUIDE = [
 ].join("\n");
 export const AGENT_RUN_EXECUTION_GUIDANCE = Object.freeze({
   id: "agencity.agent-run.execution-guidance",
-  version: 8,
+  version: 9,
   text: SDK_GUIDE,
 });
 
@@ -1611,6 +1611,7 @@ export class AgentRunService {
     const requestIndex = events.findIndex((event) => event.id === run.requestEventId);
     return events.slice(requestIndex + 1).filter((event) => {
       if (!OBSERVATION_TYPES.has(event.type) || observed.has(event.id)) return false;
+      if (event.type === "MailboxMessageDelivered" && (event.payload as EventPayloads["MailboxMessageDelivered"]).mode === "queue") return false;
       if (event.type === "EffectOutcomeRecorded" && (modelEffects.has((event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId) || gateEffects.has((event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId))) return false;
       return true;
     }).map((event) => event.id);

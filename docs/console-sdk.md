@@ -408,6 +408,15 @@ if (review.status === "succeeded" && review.output.kind === "object") {
 const audit = await sdk.agents.spawn({
   task: "Run the slow compatibility audit and report back to the parent.",
 });
+await sdk.agents.send(
+  audit.sessionId,
+  "Prioritize the stack trace",
+  { taskId: audit.taskId },
+);
+
+await sdk.agents.send(audit.sessionId, "Use the newest failure", {
+  mode: "steer",
+});
 
 return { auditTaskId: audit.taskId };
 ```
@@ -438,21 +447,22 @@ Methods:
 - `proposeProfileUpdate(target, input, { wait? })`
 - `rollbackProfile(target, { expectedCurrentVersionId, restoreVersionId, reason, evidenceEventIds })`
 - `list()`
-- `send(input)` or `send(target, content)`
+- `send(input)` or `send(target, content, options?)`
 - `messages(options?)`
 - `acknowledge(messageId)`
 - `cancel(target, reason?)`
-- `followUp(target, content, options?)`
 
 `list()` returns the same additive family projection as the public protocol. Every row includes exact session and branch identity, relationship, name, depth, session and task status, task summary, model configuration, cancellation-request state, derived activity, and a bounded activity reason. Direct children are scoped to task edges admitted from the executing branch. An admitted child without an active run is idle. Parent activity reflects the parent route, while the retained task fields describe the edge that relates the current child to that parent. Missing required state is returned as `unavailable` with `missing_state`; it is not omitted or redirected.
 
 The executing session and branch always supply sender identity. Targets are limited to the unique parent, direct children, or siblings; deeper and cross-root targets are rejected. The literal `parent` selects the unique parent. Ambiguous names fail.
 
-Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one authorized task reference and up to eight sender-registered artifact IDs. Intent keys provide stable deduplication. Rate and pending-queue bounds are enforced. Receipts distinguish queued, delivered to context, acknowledged, and failed.
+Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one authorized task reference and up to eight sender-registered artifact IDs. Intent keys provide stable deduplication. Rate and pending-queue bounds are enforced. Receipts include the exact `mode`, optional `contextRunId`, retained-history `legacyFollowUp` marker, and queued, delivered-to-context, acknowledged, or failed status.
 
 `run` admits a full autonomous child and waits for its terminal typed result. Omitting `output` returns a text result; `output.schema` requests compact programmatic object data and accepts the same supported Zod, Standard Schema, or restricted plain JSON Schema forms as raw object generation. `runMany` is all-or-nothing at admission and is intended only for bounded independent tasks. Awaited calls reserve console capacity before child admission, so an unsatisfiable nested dependency fails with `CONSOLE_CAPACITY_EXCEEDED` without creating the child.
 
-`spawn` and `spawnMany` always admit runnable detached children and return durable handles immediately. There is no model-facing `run` boolean. Use retained messaging and terminal notices, call `handle.result({ wait?, timeoutMs? })`, or call `sdk.agents.result(handleOrTaskId, options)` later. The bound method is a non-enumerable worker-local convenience over the same result operation; it is absent from JSON serialization, durable state, and a handle reconstructed after worker loss. A reconstructed handle or task ID remains usable through `sdk.agents.result`. A stable `idempotencyKey` recovers the same admission after disconnect or worker loss. `{ wait: false }` reports the current lifecycle; waiting is bounded and returns queued, running, succeeded, blocked, failed, cancelled, budget-exceeded, or unknown without fabricating output. Both result forms use the same validation, capacity reservation, timeout, and error semantics. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile. `followUp` reuses an idle or stopped retained child session and schedules a normal durable run.
+`spawn` and `spawnMany` always admit runnable detached children and return durable handles immediately. There is no model-facing `run` boolean. Use retained messaging and terminal notices, call `handle.result({ wait?, timeoutMs? })`, or call `sdk.agents.result(handleOrTaskId, options)` later. The bound method is a non-enumerable worker-local convenience over the same result operation; it is absent from JSON serialization, durable state, and a handle reconstructed after worker loss. A reconstructed handle or task ID remains usable through `sdk.agents.result`. A stable `idempotencyKey` recovers the same admission after disconnect or worker loss. `{ wait: false }` reports the current lifecycle; waiting is bounded and returns queued, running, succeeded, blocked, failed, cancelled, budget-exceeded, or unknown without fabricating output. Both result forms use the same validation, capacity reservation, timeout, and error semantics. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile.
+
+`send` defaults to `mode: "queue"`. Each queued message owns one separate durable run. An idle or stopped recipient starts that run immediately; a busy recipient retains queued messages in FIFO order and starts them one at a time after the active run and each earlier queued run terminate. Pending queued content is excluded from the recipient's model context until its run is admitted. `mode: "steer"` enters an active run at its next durable boundary. If the recipient is idle, it is delivered to retained context without waking the recipient.
 
 Use `runMany` or `spawnMany` only for independent work; dependent steps must be sequenced. A long loop in one parent cell is not a durable coordinator across worker loss. Persist durable handles, state, messages, or artifacts at recovery boundaries. Every agent method uses the same canonical model IDs and owner-managed narrowing policy as raw generation. Returned model judgments are data, not objective evidence, factual correctness, task-completion proof, or expanded authority. Cross-agent callable behavior uses retained messaging and artifacts; versioned durable RPC remains unavailable until a separately advertised capability implements it.
 

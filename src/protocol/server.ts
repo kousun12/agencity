@@ -481,7 +481,6 @@ export class ProtocolServer {
         if (parts[2] === "agents" && branchId) {
           if (request.method === "GET" && parts.length === 3) return Response.json(await this.supervisor.agents.listFamily(sessionId, branchId));
           if (request.method === "POST" && parts[3] === "batch") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.spawnMany(sessionId, branchId, batchInputs(body, "Subagent"))); }
-          if (request.method === "POST" && parts[3] && parts[4] === "follow-up") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.followUp(sessionId, branchId, decodeURIComponent(parts[3]), String(body.content ?? ""), body as any)); }
           if (request.method === "POST" && parts[3] && parts[4] === "cancel") { const body = await jsonBody(request); return Response.json(await this.supervisor.agents.cancelFamilyTarget(sessionId, branchId, decodeURIComponent(parts[3]), typeof body.reason === "string" ? body.reason : undefined)); }
           if (request.method === "POST" && parts.length === 3) return Response.json(await this.supervisor.agents.spawn(sessionId, branchId, await jsonBody(request) as any));
         }

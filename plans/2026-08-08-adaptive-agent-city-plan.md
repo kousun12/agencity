@@ -42,7 +42,7 @@ The reviewer is the only approval actor for ordinary refinements. There is no pe
 The product therefore separates:
 
 - **identity and standing behavior:** the durable session profile;
-- **finite work:** direct user requests, child tasks, retained family follow-up, schedules, and wakes;
+- **finite work:** direct user requests, child tasks, retained family `queue` messages, schedules, and wakes;
 - **completion:** goals, gates, and typed run outcomes;
 - **runtime authority:** typed SDK operations, effect policy, credentials, limits, and trusted-local process authority;
 - **knowledge:** memories, prompt notes, skills, artifacts, and dynamic context.
@@ -53,7 +53,7 @@ Review approval is not runtime authority. The reviewer cannot approve changes to
 
 ## Why this plan is narrower
 
-The runtime already supports durable root and child sessions, retained family relationships, delegation, follow-up, goals, gates, effects, recovery, and human-readable root selection. Those mechanisms are sufficient for the initial product.
+The runtime already supports durable root and child sessions, retained family relationships, delegation, queue/steer messaging, goals, gates, effects, recovery, and human-readable root selection. Those mechanisms are sufficient for the initial product.
 
 Cross-family reuse of an existing specialist is deferred. The initial product does not need:
 
@@ -76,7 +76,7 @@ The product's remembered root selection determines which root receives an ordina
 1. receive the user task;
 2. perform the work directly; or
 3. create a child through the existing durable `Task` path; or
-4. send an authorized follow-up to an existing child in its creation family; or
+4. queue authorized work for an existing child or steer its active run within the creation family; or
 5. finish blocked, failed, or successful through the existing typed model contract.
 
 No new coordinator role, pointer, system prompt, authority, or routing pass is required. Opening another root for inspection or explicitly selecting another root changes the product's remembered route through existing selection behavior.
@@ -88,7 +88,7 @@ The runtime provides:
 - `Session` as a durable actor with model configuration, budget, goals, conversation, branches, tasks, runs, and event history;
 - atomic child admission with parent and child identity, task intent, model, budget, initial prompt, and admission;
 - durable parent, child, and sibling mailboxes;
-- bounded child follow-up after terminal task work;
+- bounded queued child work after terminal task work and explicit active-run steering;
 - append-only canonical history and rebuildable projections;
 - attributable materialized model context;
 - immutable versioned prompt notes, memories, skills, and subagent specifications;
@@ -170,7 +170,7 @@ A root needs no special coordinator abstraction to choose between direct work an
 
 ### Quiescence is valid
 
-Durable purpose does not authorize execution. Every run still requires a direct user request, task, retained family-follow-up message, schedule, or wake accepted through the existing run path.
+Durable purpose does not authorize execution. Every run still requires a direct user request, task, retained family `queue` message, schedule, or wake accepted through the existing run path.
 
 ### Revisions append
 
@@ -199,7 +199,7 @@ Profiles influence model behavior only. Runtime services continue to own model c
 - **Reproposal:** A new proposal that references a rejected proposal and contains a substantively revised change.
 - **Root:** A session without a creation-family parent. A workspace may contain multiple roots.
 - **Task:** The existing durable relationship through which a parent creates and owns work for a child session.
-- **Work source:** A direct user request, task, retained family-follow-up message, schedule, or wake that starts an `AgentRun`.
+- **Work source:** A direct user request, task, retained family `queue` message, schedule, or wake that starts an `AgentRun`.
 - **Workspace agent-control stream:** A narrow canonical workspace-scoped stream that owns session-wide profile versions and active profile pointers independently of conversation branches.
 
 ## Domain model
@@ -915,7 +915,7 @@ No migration rewrites retained event rows or silently interprets an initial task
 - Existing root selection remains the no-ID inbound route.
 - A selected root may work directly or create a child through one existing `Task`.
 - Child creation does not create an assignment or routing record.
-- Existing authorized family follow-up remains available.
+- Existing authorized default-queue family messaging remains available.
 - Multiple workspace roots remain independent trees.
 - Profile changes do not alter creation ancestry, mailbox reach, task ownership, cancellation, or usage attribution.
 

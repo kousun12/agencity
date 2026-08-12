@@ -45,15 +45,15 @@ describe("FU-009 installed no-ID release transcript", () => {
           if (child?.taskStatus === "completed") break;
           await new Promise(resolve => setTimeout(resolve, 20));
         }
-        const followUp = await sdk.agents.followUp("acceptance-child", "acceptance child follow-up", { taskId: savedChild.value.taskId });
+        const queued = await sdk.agents.send("acceptance-child", "acceptance child queued work", { taskId: savedChild.value.taskId });
         await tools.writeFile("answer.txt", "42\n");
         const verification = await tools.shell("grep -q '^42$' answer.txt && printf verified");
-        return { followUp, verification };
+        return { queued, verification };
       `),
-      action("final", "answer repaired to 42; retained child follow-up was exercised"),
+      action("final", "answer repaired to 42; retained child queue was exercised"),
     ]);
     fixture.script("acceptance child initial", [action("final", "initial child result")]);
-    fixture.script("acceptance child follow-up", [action("final", "follow-up child result")]);
+    fixture.script("acceptance child queued work", [action("final", "queued child result")]);
 
     const missing = await world.command(["run", "--json", "provider must be explicit"]);
     expect(missing.code).not.toBe(0);
@@ -89,8 +89,8 @@ describe("FU-009 installed no-ID release transcript", () => {
       toolChoice: "required",
       parallelToolCalls: false,
     });
-    await fixture.waitFor("acceptance child follow-up");
-    expect(fixture.count("acceptance child follow-up")).toBe(1);
+    await fixture.waitFor("acceptance child queued work");
+    expect(fixture.count("acceptance child queued work")).toBe(1);
 
     const tree = await world.command(["tree", "--json"], fixture.environment());
     expect(tree.code).toBe(0);

@@ -204,7 +204,7 @@ export type ConsoleAgentRunResult<I = ConsoleAgentSpawnInput | string> =
     };
 export interface ConsoleAgentSendInput {
   readonly target: string; readonly content: string; readonly taskId?: string; readonly artifactIds?: readonly string[];
-  readonly intentKey?: string; readonly replyToMessageId?: string;
+  readonly intentKey?: string; readonly replyToMessageId?: string; readonly mode?: "steer" | "queue";
 }
 export interface ConsoleAgentMessageOptions { readonly direction?: "inbound" | "outbound" | "all"; readonly limit?: number; readonly before?: string; readonly pendingOnly?: boolean; }
 export interface AgentsSdk {
@@ -236,11 +236,11 @@ export interface AgentsSdk {
     readonly evidenceEventIds: readonly string[];
   }): Promise<JsonValue>;
   list(): Promise<JsonValue>;
-  send(input: ConsoleAgentSendInput | string, content?: string): Promise<JsonValue>;
+  send(input: ConsoleAgentSendInput): Promise<JsonValue>;
+  send(target: string, content: string, options?: Omit<ConsoleAgentSendInput, "target" | "content">): Promise<JsonValue>;
   messages(options?: ConsoleAgentMessageOptions): Promise<JsonValue>;
   acknowledge(messageId: string): Promise<JsonValue>;
   cancel(target: string, reason?: string): Promise<JsonValue>;
-  followUp(target: string, content: string, options?: Omit<ConsoleAgentSendInput, "target" | "content">): Promise<JsonValue>;
 }
 
 export type ConsoleAiContextReference =

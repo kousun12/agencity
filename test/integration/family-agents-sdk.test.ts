@@ -102,18 +102,21 @@ describe("FU-012 retained family messaging", () => {
         activityReason: null,
       })]);
 
-      const childSend = await value.supervisor.executeCell(handle.sessionId, handle.branchId, `return sdk.agents.send({ target: "parent", content: "child reply", taskId: "${handle.taskId}" });`, [], "family-child-send");
-      expect(childSend.result).toMatchObject({ fromSessionId: handle.sessionId, toSessionId: value.root.sessionId });
+      const childSend = await value.supervisor.executeCell(handle.sessionId, handle.branchId, `return sdk.agents.send({ target: "parent", content: "child reply", taskId: "${handle.taskId}", mode: "steer" });`, [], "family-child-send");
+      expect(childSend.result).toMatchObject({ fromSessionId: handle.sessionId, toSessionId: value.root.sessionId, mode: "steer" });
       const rootMessages = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.messages({ direction: "inbound" });`);
       const message = (rootMessages.result as any).items[0];
-      expect(message).toMatchObject({ content: "child reply", relationship: "child", taskId: handle.taskId, receiptStatus: "delivered_to_context" });
+      expect(message).toMatchObject({ content: "child reply", relationship: "child", taskId: handle.taskId, mode: "steer", receiptStatus: "delivered_to_context" });
+      expect(Object.values(projectEvents(await value.supervisor.storage.loadEvents(value.root.sessionId, { branchId: value.root.branchId })).agentRuns)).toHaveLength(0);
       await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.acknowledge("${message.mailboxMessageId}");`);
       expect((await value.supervisor.storage.getMailboxMessage?.(message.mailboxMessageId))?.receiptStatus).toBe("acknowledged");
 
-      const retry = await value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "stable", intentKey: "same" });
-      const duplicate = await value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "stable", intentKey: "same" });
+      const retry = await value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "stable", mode: "steer", intentKey: "same" });
+      const duplicate = await value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "stable", mode: "steer", intentKey: "same" });
       expect(duplicate).toMatchObject({ mailboxMessageId: retry.mailboxMessageId, existing: true });
-      await expect(value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "changed", intentKey: "same" })).rejects.toThrow(/different durable meaning/i);
+      await expect(value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "changed", mode: "steer", intentKey: "same" })).rejects.toThrow(/different durable meaning/i);
+      await expect(value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "stable", mode: "queue", intentKey: "same" })).rejects.toThrow(/different durable meaning/i);
+      await expect(value.supervisor.agents.sendMessage(handle.sessionId, handle.branchId, { target: "parent", content: "legacy", followUp: true } as any)).rejects.toThrow(/use mode/i);
     } finally { await value.supervisor.close(); }
   });
 
@@ -370,8 +373,8 @@ describe("FU-012 retained family messaging", () => {
     } finally { await value.supervisor.close(); }
   });
 
-  test("parent receives automatic initial and retained same-session follow-up replies", async () => {
-    const value = await fixture([action({ type: "final", content: "initial result" }), action({ type: "final", content: "follow-up result" })]);
+  test("parent receives automatic initial and retained same-session queued replies", async () => {
+    const value = await fixture([action({ type: "final", content: "initial result" }), action({ type: "final", content: "queued result" })]);
     try {
       const spawned = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.spawn({ task: "do initial", name: "worker" });`);
       const handle = spawned.result as any;
@@ -380,13 +383,13 @@ describe("FU-012 retained family messaging", () => {
       expect(firstReply.fromSessionId).toBe(handle.sessionId);
       expect(projectEvents(await value.supervisor.storage.loadEvents(handle.sessionId, { branchId: handle.branchId })).status).toBe("stopped");
 
-      const receipt = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.followUp("worker", "do more", { taskId: "${handle.taskId}" });`);
-      expect(receipt.result).toMatchObject({ toSessionId: handle.sessionId });
+      const receipt = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.send("worker", "do more", { taskId: "${handle.taskId}" });`);
+      expect(receipt.result).toMatchObject({ toSessionId: handle.sessionId, mode: "queue" });
       const secondReply = await waitFor(async () => (await value.supervisor.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === (receipt.result as any).mailboxMessageId));
-      expect(secondReply).toMatchObject({ fromSessionId: handle.sessionId, content: "follow-up result" });
+      expect(secondReply).toMatchObject({ fromSessionId: handle.sessionId, content: "queued result" });
       const childRuns = Object.values(projectEvents(await value.supervisor.storage.loadEvents(handle.sessionId, { branchId: handle.branchId })).agentRuns);
       expect(childRuns).toHaveLength(2);
-      expect(new Set(childRuns.map(run => run.requestKey))).toEqual(new Set([`agent-spawn:${handle.taskId}`, `agent-follow-up:${(receipt.result as any).mailboxMessageId}`]));
+      expect(new Set(childRuns.map(run => run.requestKey))).toEqual(new Set([`agent-spawn:${handle.taskId}`, `agent-queue:${(receipt.result as any).mailboxMessageId}`]));
     } finally { await value.supervisor.close(); }
   });
 
@@ -403,12 +406,12 @@ describe("FU-012 retained family messaging", () => {
     } finally { await value.supervisor.close(); }
   });
 
-  test("protocol/client exposes roster, send/follow-up/cancel, acknowledgement, and paginated receipts", async () => {
-    const value = await fixture([action({ type: "final", content: "wire follow-up result" })]); const server = new ProtocolServer(value.supervisor); const listener = server.listen(0); const client = new AgentClient(`http://127.0.0.1:${listener.port}`);
+  test("protocol/client exposes roster, send modes, cancel, acknowledgement, and paginated receipts", async () => {
+    const value = await fixture([action({ type: "final", content: "wire queued result" })]); const server = new ProtocolServer(value.supervisor); const listener = server.listen(0); const client = new AgentClient(`http://127.0.0.1:${listener.port}`);
     try {
       const child = await value.supervisor.agents.spawn(value.root.sessionId, value.root.branchId, { task: "child", name: "wire agent" });
-      await value.supervisor.agents.sendMessage(child.sessionId, child.branchId, { target: "parent", content: "one", intentKey: "wire-1" });
-      await value.supervisor.agents.sendMessage(child.sessionId, child.branchId, { target: "parent", content: "two", intentKey: "wire-2" });
+      await value.supervisor.agents.sendMessage(child.sessionId, child.branchId, { target: "parent", content: "one", mode: "steer", intentKey: "wire-1" });
+      await value.supervisor.agents.sendMessage(child.sessionId, child.branchId, { target: "parent", content: "two", mode: "steer", intentKey: "wire-2" });
       expect((await client.agents(value.root.sessionId, value.root.branchId)).items[0]).toMatchObject({ name: "wire agent", relationship: "child" });
       const first = await client.mailbox(value.root.sessionId, value.root.branchId, { direction: "inbound", limit: 1 });
       expect(first.items).toHaveLength(1); expect(first.nextCursor).not.toBeNull();
@@ -416,11 +419,11 @@ describe("FU-012 retained family messaging", () => {
       expect((await value.supervisor.storage.getMailboxMessage?.(first.items[0]!.mailboxMessageId))?.receiptStatus).toBe("acknowledged");
       const second = await client.mailbox(value.root.sessionId, value.root.branchId, { direction: "inbound", limit: 1, before: first.nextCursor! });
       expect(second.items).toHaveLength(1); expect(second.items[0]!.mailboxMessageId).not.toBe(first.items[0]!.mailboxMessageId);
-      const sent = await client.sendMailbox(value.root.sessionId, value.root.branchId, { target: "wire agent", content: "wire send", intentKey: "wire-client-send" });
-      expect(sent.toSessionId).toBe(child.sessionId);
-      const followUp = await client.followUpAgent(value.root.sessionId, value.root.branchId, "wire agent", "continue on wire", { taskId: child.taskId, intentKey: "wire-follow-up" });
-      const reply = await waitFor(async () => (await value.supervisor.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === followUp.mailboxMessageId));
-      expect(reply.content).toBe("wire follow-up result");
+      const sent = await client.sendMailbox(value.root.sessionId, value.root.branchId, { target: "wire agent", content: "wire send", mode: "steer", intentKey: "wire-client-send" });
+      expect(sent).toMatchObject({ toSessionId: child.sessionId, mode: "steer" });
+      const queued = await client.sendMailbox(value.root.sessionId, value.root.branchId, { target: "wire agent", content: "continue on wire", taskId: child.taskId, intentKey: "wire-queue" });
+      const reply = await waitFor(async () => (await value.supervisor.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === queued.mailboxMessageId));
+      expect(reply.content).toBe("wire queued result");
       expect(await client.cancelAgent(value.root.sessionId, value.root.branchId, "wire agent", "wire done")).toMatchObject({ status: "cancelled" });
     } finally { server.stop(); await value.supervisor.close(); }
   });
@@ -485,28 +488,286 @@ describe("FU-012 retained family messaging", () => {
   });
 
 
-  test("busy follow-up queues, crosses one durable boundary, and replies from the existing run", async () => {
-    const provider = new GatedActionProvider(); const value = await customFixture(provider);
+  test("busy steer reaches the active run at its next durable boundary", async () => {
+    const provider = new GatedActionProvider();
+    const value = await customFixture(provider);
+    try {
+      const spawned = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.spawn({ task: "busy work", name: "steerable" });`);
+      const handle = spawned.result as any;
+      await provider.started;
+      const steered = await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, {
+        target: "steerable",
+        content: "change the active work",
+        taskId: handle.taskId,
+        mode: "steer",
+        intentKey: "busy-steer",
+      });
+      expect(steered).toMatchObject({ queued: true, receiptStatus: "queued", mode: "steer" });
+      provider.release();
+      await waitFor(async () => (await value.supervisor.storage.getMailboxMessage?.(steered.mailboxMessageId))?.deliveredToContext && provider.contexts.length > 1 ? true : undefined);
+      const context = JSON.stringify(provider.contexts[1]);
+      expect(context).toContain("change the active work");
+      expect(context).toContain(steered.mailboxMessageId);
+      const state = projectEvents(await value.supervisor.storage.loadEvents(handle.sessionId, { branchId: handle.branchId }));
+      expect(Object.values(state.agentRuns)).toHaveLength(1);
+      expect(state.mailbox[steered.mailboxMessageId]?.contextRunId).toBe(Object.values(state.agentRuns)[0]!.id);
+    } finally { provider.release(); await value.supervisor.close(); }
+  });
+
+  test("retained followUp events keep legacy busy-run delivery after the mode cutover", async () => {
+    const provider = new GatedActionProvider();
+    const value = await customFixture(provider);
+    try {
+      const spawned = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.spawn({ task: "legacy busy work", name: "legacy-busy" });`);
+      const handle = spawned.result as any;
+      await provider.started;
+      const mailboxMessageId = "legacy-busy-follow-up";
+      const sentEventId = "legacy-busy-follow-up-sent";
+      const common = {
+        mailboxMessageId,
+        fromSessionId: value.root.sessionId,
+        fromBranchId: value.root.branchId,
+        toSessionId: handle.sessionId,
+        toBranchId: handle.branchId,
+        kind: "message" as const,
+        content: "legacy follow-up content",
+        taskId: handle.taskId,
+        intentKey: "legacy-busy-follow-up",
+        followUp: true,
+      };
+      await value.supervisor.storage.appendEvents([{
+        id: sentEventId,
+        sessionId: value.root.sessionId,
+        branchId: value.root.branchId,
+        type: "MailboxMessageSent",
+        producer: "client",
+        idempotencyKey: "legacy-busy-follow-up-sent",
+        payload: common,
+      }, {
+        sessionId: handle.sessionId,
+        branchId: handle.branchId,
+        type: "MailboxMessageDelivered",
+        producer: "supervisor",
+        idempotencyKey: "legacy-busy-follow-up-delivered",
+        payload: { ...common, sentEventId, senderRelationship: "parent" },
+      }]);
+      expect(await value.supervisor.storage.getMailboxMessage?.(mailboxMessageId)).toMatchObject({ mode: "queue", legacyFollowUp: true, receiptStatus: "queued" });
+      provider.release();
+      await waitFor(async () => provider.contexts.length > 1 ? true : undefined);
+      expect(JSON.stringify(provider.contexts[1])).toContain("legacy follow-up content");
+      const state = projectEvents(await value.supervisor.storage.loadEvents(handle.sessionId, { branchId: handle.branchId }));
+      expect(Object.values(state.agentRuns)).toHaveLength(1);
+      expect(state.mailbox[mailboxMessageId]?.contextRunId).toBe(Object.values(state.agentRuns)[0]!.id);
+    } finally { provider.release(); await value.supervisor.close(); }
+  });
+
+  test("busy default queue starts separate FIFO runs after the active run", async () => {
+    const provider = new GatedActionProvider(
+      action({ type: "typescript", code: `return "initial boundary";` }),
+      action({ type: "final", content: "queued result" }),
+    );
+    const value = await customFixture(provider);
     try {
       const spawned = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.spawn({ task: "busy work", name: "busy" });`);
       const handle = spawned.result as any;
       await provider.started;
-      (value.supervisor.agents as any).maxPendingMessages = 1;
-      const queued = await value.supervisor.agents.followUp(value.root.sessionId, value.root.branchId, "busy", "steer now", { taskId: handle.taskId, intentKey: "busy-steer" });
-      expect(queued).toMatchObject({ queued: true, receiptStatus: "queued", delivered: true });
-      await expect(value.supervisor.agents.acknowledgeMessage(handle.sessionId, handle.branchId, queued.mailboxMessageId)).rejects.toThrow(/before context delivery/i);
+      (value.supervisor.agents as any).maxPendingMessages = 2;
+      const first = await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: "busy", content: "first queued work", taskId: handle.taskId, intentKey: "busy-queue-1" });
+      const second = await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: "busy", content: "second queued work", taskId: handle.taskId, intentKey: "busy-queue-2" });
+      expect(first).toMatchObject({ queued: true, receiptStatus: "queued", delivered: true, mode: "queue" });
+      expect(second).toMatchObject({ queued: true, receiptStatus: "queued", delivered: true, mode: "queue" });
+      await expect(value.supervisor.agents.acknowledgeMessage(handle.sessionId, handle.branchId, first.mailboxMessageId)).rejects.toThrow(/before context delivery/i);
       await expect(value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: "busy", content: "queue overflow", intentKey: "busy-overflow" })).rejects.toThrow(/pending queue limit/i);
       provider.release();
-      const reply = await waitFor(async () => (await value.supervisor.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === queued.mailboxMessageId));
-      expect(reply.content).toBe("steered result");
-      const delivered = await value.supervisor.storage.getMailboxMessage?.(queued.mailboxMessageId);
-      expect(delivered).toMatchObject({ receiptStatus: "delivered_to_context", deliveredToContext: true });
-      const context = JSON.stringify(provider.contexts[1]);
-      expect(context).toContain("steer now"); expect(context).toContain(queued.mailboxMessageId);
+      const firstReply = await waitFor(async () => (await value.supervisor.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === first.mailboxMessageId));
+      const secondReply = await waitFor(async () => (await value.supervisor.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === second.mailboxMessageId));
+      expect(firstReply.content).toBe("queued result");
+      expect(secondReply.content).toBe("queued result");
+      expect(await value.supervisor.storage.getMailboxMessage?.(first.mailboxMessageId)).toMatchObject({ receiptStatus: "delivered_to_context", deliveredToContext: true });
+      expect(await value.supervisor.storage.getMailboxMessage?.(second.mailboxMessageId)).toMatchObject({ receiptStatus: "delivered_to_context", deliveredToContext: true });
+      const activeRunContext = JSON.stringify(provider.contexts[1]);
+      const firstQueueContext = JSON.stringify(provider.contexts[2]);
+      const secondQueueContext = JSON.stringify(provider.contexts[3]);
+      expect(activeRunContext).not.toContain("first queued work");
+      expect(activeRunContext).not.toContain("second queued work");
+      expect(firstQueueContext).toContain("first queued work");
+      expect(firstQueueContext).not.toContain("second queued work");
+      expect(secondQueueContext).toContain("second queued work");
       const state = projectEvents(await value.supervisor.storage.loadEvents(handle.sessionId, { branchId: handle.branchId }));
-      expect(Object.values(state.agentRuns)).toHaveLength(1);
-      expect(state.messages.filter(message => message.mailbox?.mailboxMessageId === queued.mailboxMessageId)).toHaveLength(1);
+      expect(Object.values(state.agentRuns)).toHaveLength(3);
+      expect(state.messages.filter(message => message.mailbox?.mailboxMessageId === first.mailboxMessageId)).toHaveLength(1);
+      expect(state.messages.filter(message => message.mailbox?.mailboxMessageId === second.mailboxMessageId)).toHaveLength(1);
+      expect(state.mailbox[first.mailboxMessageId]?.contextRunId).not.toBe(state.mailbox[second.mailboxMessageId]?.contextRunId);
     } finally { provider.release(); await value.supervisor.close(); }
+  });
+
+  test("durably accepted queue send survives an ordinary-run admission race", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "ordinary result" }),
+      action({ type: "final", content: "queued race result" }),
+    ]);
+    const child = await value.supervisor.agents.spawn(
+      value.root.sessionId,
+      value.root.branchId,
+      { task: "race target", name: "race-target" },
+    );
+    const originalAdmitMethod = value.supervisor.runs.admit;
+    const originalAdmit = originalAdmitMethod.bind(value.supervisor.runs);
+    let releaseQueuedAdmit!: () => void;
+    const queuedAdmitGate = new Promise<void>((resolve) => { releaseQueuedAdmit = resolve; });
+    let markQueuedAdmitReached!: () => void;
+    const queuedAdmitReached = new Promise<void>((resolve) => { markQueuedAdmitReached = resolve; });
+    (value.supervisor.runs as any).admit = async (
+      sessionId: string,
+      branchId: string,
+      input: any,
+    ) => {
+      if (input?.requestKey?.startsWith("agent-queue:")) {
+        markQueuedAdmitReached();
+        await queuedAdmitGate;
+      }
+      return originalAdmit(sessionId, branchId, input);
+    };
+    try {
+      const sending = value.supervisor.agents.sendMessage(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          target: child.sessionId,
+          content: "queued work accepted before the race",
+          intentKey: "ordinary-queue-race",
+        },
+      );
+      await queuedAdmitReached;
+      const ordinary = await originalAdmit(child.sessionId, child.branchId, {
+        task: "ordinary work wins admission",
+        requestKey: "ordinary-run-queue-race",
+        requestedRunId: "ordinary-run-queue-race",
+      });
+      releaseQueuedAdmit();
+
+      const receipt = await sending;
+      expect(receipt).toMatchObject({
+        delivered: true,
+        receiptStatus: "queued",
+        queued: true,
+        mode: "queue",
+      });
+      expect(Object.values(projectEvents(
+        await value.supervisor.storage.loadEvents(child.sessionId, {
+          branchId: child.branchId,
+        }),
+      ).agentRuns)).toHaveLength(1);
+
+      await value.supervisor.runs.advance(
+        child.sessionId,
+        child.branchId,
+        ordinary.runId,
+      );
+      const reply = await waitFor(async () =>
+        (await value.supervisor.storage.listMailboxMessages?.(
+          value.root.sessionId,
+          "inbound",
+        ))?.find(message => message.replyToMessageId === receipt.mailboxMessageId)
+      );
+      expect(reply.content).toBe("queued race result");
+      const finalState = projectEvents(await value.supervisor.storage.loadEvents(
+        child.sessionId,
+        { branchId: child.branchId },
+      ));
+      expect(Object.values(finalState.agentRuns)).toHaveLength(2);
+      expect(finalState.mailbox[receipt.mailboxMessageId]).toMatchObject({
+        deliveredToContext: true,
+        receiptStatus: "delivered_to_context",
+      });
+    } finally {
+      releaseQueuedAdmit();
+      (value.supervisor.runs as any).admit = originalAdmitMethod;
+      await value.supervisor.close();
+    }
+  });
+
+  test("concurrent senders cannot exceed one target pending slot", async () => {
+    const value = await fixture();
+    const firstSender = await value.supervisor.agents.spawn(
+      value.root.sessionId,
+      value.root.branchId,
+      { task: "first sender", name: "first-sender" },
+    );
+    const secondSender = await value.supervisor.agents.spawn(
+      value.root.sessionId,
+      value.root.branchId,
+      { task: "second sender", name: "second-sender" },
+    );
+    const ordinary = await value.supervisor.runs.admit(
+      value.root.sessionId,
+      value.root.branchId,
+      {
+        task: "keep the target busy",
+        requestKey: "pending-limit-target-run",
+        requestedRunId: "pending-limit-target-run",
+      },
+    );
+    expect(ordinary.status).toBe("queued");
+    (value.supervisor.agents as any).maxPendingMessages = 1;
+
+    const originalListMethod = value.supervisor.storage.listMailboxMessages!;
+    const originalList = originalListMethod.bind(value.supervisor.storage);
+    let releaseSnapshots!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => { releaseSnapshots = resolve; });
+    let markFirstSnapshot!: () => void;
+    let markSecondSnapshot!: () => void;
+    const firstSnapshot = new Promise<void>((resolve) => { markFirstSnapshot = resolve; });
+    const secondSnapshot = new Promise<void>((resolve) => { markSecondSnapshot = resolve; });
+    let targetSnapshotCalls = 0;
+    (value.supervisor.storage as any).listMailboxMessages = async (
+      sessionId: string,
+      direction: "inbound" | "outbound" | "all",
+    ) => {
+      const snapshot = await originalList(sessionId, direction);
+      if (sessionId === value.root.sessionId && direction === "inbound") {
+        targetSnapshotCalls++;
+        if (targetSnapshotCalls === 1) markFirstSnapshot();
+        if (targetSnapshotCalls === 2) markSecondSnapshot();
+        await snapshotGate;
+      }
+      return snapshot;
+    };
+    try {
+      const first = value.supervisor.agents.sendMessage(
+        firstSender.sessionId,
+        firstSender.branchId,
+        { target: "parent", content: "first pending message", intentKey: "pending-slot-first" },
+      );
+      await firstSnapshot;
+      const second = value.supervisor.agents.sendMessage(
+        secondSender.sessionId,
+        secondSender.branchId,
+        { target: "parent", content: "second pending message", intentKey: "pending-slot-second" },
+      );
+      await Promise.race([secondSnapshot, Bun.sleep(100)]);
+      releaseSnapshots();
+
+      const results = await Promise.allSettled([first, second]);
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter(result =>
+        result.status === "rejected" &&
+        result.reason instanceof Error &&
+        /pending queue limit/i.test(result.reason.message)
+      )).toHaveLength(1);
+      const pending = (await originalList(
+        value.root.sessionId,
+        "inbound",
+      )).filter(message =>
+        message.toBranchId === value.root.branchId &&
+        message.receiptStatus === "queued"
+      );
+      expect(pending).toHaveLength(1);
+    } finally {
+      releaseSnapshots();
+      (value.supervisor.storage as any).listMailboxMessages = originalListMethod;
+      await value.supervisor.close();
+    }
   });
 
   test("UTF-8 byte, rate, pending, and pagination bounds reject deterministically", async () => {
@@ -514,12 +775,12 @@ describe("FU-012 retained family messaging", () => {
     try {
       const child = await value.supervisor.agents.spawn(value.root.sessionId, value.root.branchId, { task: "bounds", name: "bounds" });
       const exact = "😀".repeat(8_192);
-      expect((await value.supervisor.agents.sendMessage(child.sessionId, child.branchId, { target: "parent", content: exact, intentKey: "exact-utf8" })).receiptStatus).toBe("delivered_to_context");
+      expect((await value.supervisor.agents.sendMessage(child.sessionId, child.branchId, { target: "parent", content: exact, mode: "steer", intentKey: "exact-utf8" })).receiptStatus).toBe("delivered_to_context");
       await expect(value.supervisor.agents.sendMessage(child.sessionId, child.branchId, { target: "parent", content: `${exact}x`, intentKey: "too-large" })).rejects.toThrow(/32768 UTF-8 bytes/i);
       (value.supervisor.agents as any).maxMessagesPerMinute = 2;
-      await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: child.sessionId, content: "rate one", intentKey: "rate-1" });
-      await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: child.sessionId, content: "rate two", intentKey: "rate-2" });
-      await expect(value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: child.sessionId, content: "rate three", intentKey: "rate-3" })).rejects.toThrow(/rate limit/i);
+      await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: child.sessionId, content: "rate one", mode: "steer", intentKey: "rate-1" });
+      await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: child.sessionId, content: "rate two", mode: "steer", intentKey: "rate-2" });
+      await expect(value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: child.sessionId, content: "rate three", mode: "steer", intentKey: "rate-3" })).rejects.toThrow(/rate limit/i);
       await expect(value.supervisor.agents.messages(value.root.sessionId, value.root.branchId, { limit: 0 })).rejects.toThrow(/1 to 100/i);
       await expect(value.supervisor.agents.messages(value.root.sessionId, value.root.branchId, { before: "not-a-cursor" })).rejects.toThrow(/pagination cursor/i);
     } finally { await value.supervisor.close(); }
@@ -531,7 +792,7 @@ describe("FU-012 retained family messaging", () => {
       const artifactCell = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return artifacts.put("linked family evidence", "text/plain");`, [], "family-artifact-cell");
       const artifact = artifactCell.result as { artifactId: string };
       const child = await value.supervisor.agents.spawn(value.root.sessionId, value.root.branchId, { task: "consume evidence", name: "consumer" });
-      const receipt = await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: "consumer", content: "use the evidence", taskId: child.taskId, artifactIds: [artifact.artifactId], intentKey: "artifact-link" });
+      const receipt = await value.supervisor.agents.sendMessage(value.root.sessionId, value.root.branchId, { target: "consumer", content: "use the evidence", taskId: child.taskId, artifactIds: [artifact.artifactId], mode: "steer", intentKey: "artifact-link" });
       expect(receipt.receiptStatus).toBe("delivered_to_context");
       const childState = projectEvents(await value.supervisor.storage.loadEvents(child.sessionId, { branchId: child.branchId }));
       expect(childState.artifacts[artifact.artifactId]).toBeDefined();
@@ -553,9 +814,9 @@ describe("FU-012 retained family messaging", () => {
     try {
       const left = await value.supervisor.agents.spawn(value.root.sessionId, value.root.branchId, { task: "left", name: "left" });
       const right = await value.supervisor.agents.spawn(value.root.sessionId, value.root.branchId, { task: "right", name: "right" });
-      const spoof = await value.supervisor.executeCell(left.sessionId, left.branchId, `return sdk.agents.send({ target: "right", content: "derived sender", fromSessionId: "${value.root.sessionId}", fromBranchId: "${value.root.branchId}" });`);
+      const spoof = await value.supervisor.executeCell(left.sessionId, left.branchId, `return sdk.agents.send({ target: "right", content: "derived sender", mode: "steer", fromSessionId: "${value.root.sessionId}", fromBranchId: "${value.root.branchId}" });`);
       expect(spoof.result).toMatchObject({ fromSessionId: left.sessionId, toSessionId: right.sessionId });
-      expect((await value.supervisor.agents.sendMessage(right.sessionId, right.branchId, { target: left.sessionId, content: "by id", intentKey: "sibling-id" })).toSessionId).toBe(left.sessionId);
+      expect((await value.supervisor.agents.sendMessage(right.sessionId, right.branchId, { target: left.sessionId, content: "by id", mode: "steer", intentKey: "sibling-id" })).toSessionId).toBe(left.sessionId);
       await expect(value.supervisor.agents.sendMessage(left.sessionId, left.branchId, { target: "right", toSessionId: value.root.sessionId, content: "confused target" })).rejects.toThrow(/aliases disagree/i);
       await expect(value.supervisor.agents.sendMessage(left.sessionId, left.branchId, { target: "right", content: "one", message: "two" })).rejects.toThrow(/content aliases disagree/i);
     } finally { await value.supervisor.close(); }
@@ -595,17 +856,211 @@ describe("FU-012 retained family messaging", () => {
     } finally { if (resumed) await resumed.close(); }
   });
 
-  test("an unknown follow-up run recovers without replay and returns a typed unknown reply", async () => {
+  test("stranded queue recovery survives an ordinary-run admission race", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "ordinary recovery result" }),
+      action({ type: "final", content: "recovered queued result" }),
+    ]);
+    const child = await value.supervisor.agents.spawn(
+      value.root.sessionId,
+      value.root.branchId,
+      { task: "stranded recovery target", name: "stranded-recovery" },
+    );
+    const mailboxMessageId = "mailbox-stranded-recovery-race";
+    const sentEventId = "mailbox-stranded-recovery-race-sent";
+    const queueRunId = "stranded-recovery-queue-run";
+    const common = {
+      mailboxMessageId,
+      fromSessionId: value.root.sessionId,
+      fromBranchId: value.root.branchId,
+      toSessionId: child.sessionId,
+      toBranchId: child.branchId,
+      kind: "message" as const,
+      content: "recover this stranded queued work",
+      taskId: child.taskId,
+      intentKey: "stranded-recovery-race",
+      mode: "queue" as const,
+    };
+    await value.supervisor.storage.appendEvents([{
+      id: sentEventId,
+      sessionId: value.root.sessionId,
+      branchId: value.root.branchId,
+      type: "MailboxMessageSent",
+      producer: "client",
+      idempotencyKey: "mailbox-stranded-recovery-race-sent",
+      payload: common,
+    }, {
+      sessionId: child.sessionId,
+      branchId: child.branchId,
+      type: "MailboxMessageDelivered",
+      producer: "supervisor",
+      idempotencyKey: "mailbox-stranded-recovery-race-delivered",
+      payload: { ...common, sentEventId, senderRelationship: "parent" },
+    }, {
+      id: "mailbox-stranded-recovery-race-context-message",
+      sessionId: child.sessionId,
+      branchId: child.branchId,
+      type: "MessageAppended",
+      producer: "supervisor",
+      idempotencyKey: "mailbox-stranded-recovery-race-context-message",
+      payload: {
+        messageId: "family-mailbox-stranded-recovery-race",
+        role: "user",
+        content: common.content,
+        mailbox: {
+          mailboxMessageId,
+          fromSessionId: value.root.sessionId,
+          relationship: "parent",
+          taskId: child.taskId,
+          receiptEventId: "mailbox-stranded-recovery-race-context-target",
+        },
+      },
+    }, {
+      id: "mailbox-stranded-recovery-race-context-target",
+      sessionId: child.sessionId,
+      branchId: child.branchId,
+      type: "MailboxMessageContextDelivered",
+      producer: "supervisor",
+      idempotencyKey: "mailbox-stranded-recovery-race-context-target",
+      payload: {
+        mailboxMessageId,
+        messageEventId: "mailbox-stranded-recovery-race-context-message",
+        deliveredAt: new Date().toISOString(),
+        relationship: "parent",
+        runId: queueRunId,
+      },
+    }, {
+      sessionId: value.root.sessionId,
+      branchId: value.root.branchId,
+      type: "MailboxMessageContextDelivered",
+      producer: "supervisor",
+      idempotencyKey: "mailbox-stranded-recovery-race-context-sender",
+      payload: {
+        mailboxMessageId,
+        messageEventId: "mailbox-stranded-recovery-race-context-message",
+        deliveredAt: new Date().toISOString(),
+        relationship: "parent",
+        runId: queueRunId,
+      },
+    }]);
+
+    const originalAdmitMethod = value.supervisor.runs.admit;
+    const originalAdmit = originalAdmitMethod.bind(value.supervisor.runs);
+    let releaseQueueAdmission!: () => void;
+    const queueAdmissionGate = new Promise<void>((resolve) => {
+      releaseQueueAdmission = resolve;
+    });
+    let markQueueAdmissionReached!: () => void;
+    const queueAdmissionReached = new Promise<void>((resolve) => {
+      markQueueAdmissionReached = resolve;
+    });
+    (value.supervisor.runs as any).admit = async (
+      sessionId: string,
+      branchId: string,
+      input: any,
+    ) => {
+      if (input?.requestedRunId === queueRunId) {
+        markQueueAdmissionReached();
+        await queueAdmissionGate;
+      }
+      return originalAdmit(sessionId, branchId, input);
+    };
+    try {
+      const recovering = value.supervisor.agents.recoverDeliveries();
+      await queueAdmissionReached;
+      const ordinary = await originalAdmit(child.sessionId, child.branchId, {
+        task: "ordinary run wins stranded recovery admission",
+        requestKey: "ordinary-stranded-recovery-race",
+        requestedRunId: "ordinary-stranded-recovery-race",
+      });
+      releaseQueueAdmission();
+
+      expect(await recovering).toBe(1);
+      const racedState = projectEvents(await value.supervisor.storage.loadEvents(
+        child.sessionId,
+        { branchId: child.branchId },
+      ));
+      expect(Object.keys(racedState.agentRuns)).toEqual([ordinary.runId]);
+      expect(racedState.mailbox[mailboxMessageId]).toMatchObject({
+        receiptStatus: "delivered_to_context",
+        deliveredToContext: true,
+        contextRunId: queueRunId,
+      });
+
+      await value.supervisor.runs.advance(
+        child.sessionId,
+        child.branchId,
+        ordinary.runId,
+      );
+      const reply = await waitFor(async () =>
+        (await value.supervisor.storage.listMailboxMessages?.(
+          value.root.sessionId,
+          "inbound",
+        ))?.find(message => message.replyToMessageId === mailboxMessageId)
+      );
+      expect(reply.content).toBe("recovered queued result");
+
+      const events = await value.supervisor.storage.loadEvents(
+        child.sessionId,
+        { branchId: child.branchId },
+      );
+      expect(events.filter(event =>
+        event.type === "AgentRunRequested" &&
+        (event.payload as any).runId === queueRunId
+      )).toHaveLength(1);
+      const finalState = projectEvents(events);
+      expect(Object.values(finalState.agentRuns)).toHaveLength(2);
+      expect(finalState.agentRuns[queueRunId]).toMatchObject({
+        id: queueRunId,
+        requestKey: `agent-queue:${mailboxMessageId}`,
+        status: "succeeded",
+      });
+    } finally {
+      releaseQueueAdmission();
+      (value.supervisor.runs as any).admit = originalAdmitMethod;
+      await value.supervisor.close();
+    }
+  });
+
+  test("an unknown queued run recovers without replay and returns a typed unknown reply", async () => {
     const value = await fixture(); let resumed: Supervisor | undefined;
     const child = await value.supervisor.agents.spawn(value.root.sessionId, value.root.branchId, { task: "unknown child", name: "unknown" });
-    const mailboxMessageId = "mailbox-unknown-follow-up"; const sentEventId = "mailbox-unknown-sent"; const runId = "family-unknown-run";
-    const common = { mailboxMessageId, fromSessionId: value.root.sessionId, fromBranchId: value.root.branchId, toSessionId: child.sessionId, toBranchId: child.branchId, kind: "message" as const, content: "ambiguous work", taskId: child.taskId, intentKey: "unknown-follow-up", followUp: true };
+    const mailboxMessageId = "mailbox-unknown-queue"; const sentEventId = "mailbox-unknown-sent"; const runId = "family-unknown-run";
+    const common = { mailboxMessageId, fromSessionId: value.root.sessionId, fromBranchId: value.root.branchId, toSessionId: child.sessionId, toBranchId: child.branchId, kind: "message" as const, content: "ambiguous work", taskId: child.taskId, intentKey: "unknown-queue", followUp: true };
     await value.supervisor.storage.appendEvents([{
       id: sentEventId, sessionId: value.root.sessionId, branchId: value.root.branchId, type: "MailboxMessageSent", producer: "client", idempotencyKey: "mailbox-unknown-sent", payload: common,
     }, {
       sessionId: child.sessionId, branchId: child.branchId, type: "MailboxMessageDelivered", producer: "supervisor", idempotencyKey: "mailbox-unknown-delivered", payload: { ...common, sentEventId, senderRelationship: "parent" },
     }]);
-    await value.supervisor.agents.deliverQueuedAtBoundary(child.sessionId, child.branchId, runId);
+    await value.supervisor.storage.appendEvents([{
+      id: "mailbox-unknown-context-message",
+      sessionId: child.sessionId,
+      branchId: child.branchId,
+      type: "MessageAppended",
+      producer: "supervisor",
+      idempotencyKey: "mailbox-unknown-context-message",
+      payload: {
+        messageId: "family-mailbox-unknown-queue",
+        role: "user",
+        content: "ambiguous work",
+        mailbox: { mailboxMessageId, fromSessionId: value.root.sessionId, relationship: "parent", taskId: child.taskId, receiptEventId: "mailbox-unknown-context-target" },
+      },
+    }, {
+      id: "mailbox-unknown-context-target",
+      sessionId: child.sessionId,
+      branchId: child.branchId,
+      type: "MailboxMessageContextDelivered",
+      producer: "supervisor",
+      idempotencyKey: "mailbox-unknown-context-target",
+      payload: { mailboxMessageId, messageEventId: "mailbox-unknown-context-message", deliveredAt: new Date().toISOString(), relationship: "parent", runId },
+    }, {
+      sessionId: value.root.sessionId,
+      branchId: value.root.branchId,
+      type: "MailboxMessageContextDelivered",
+      producer: "supervisor",
+      idempotencyKey: "mailbox-unknown-context-sender",
+      payload: { mailboxMessageId, messageEventId: "mailbox-unknown-context-message", deliveredAt: new Date().toISOString(), relationship: "parent", runId },
+    }]);
     await value.supervisor.storage.appendEvents([{
       sessionId: child.sessionId, branchId: child.branchId, type: "AgentRunRequested", producer: "client", idempotencyKey: `agent-run-request:${runId}`,
       payload: { runId, task: "ambiguous work", requestKey: "family-unknown-request", profilePin: agentProfilePin(await value.supervisor.agentProfiles.active(child.sessionId)) },
@@ -616,8 +1071,8 @@ describe("FU-012 retained family messaging", () => {
     try {
       resumed = await Supervisor.open({ databaseUrl: value.temp.databaseUrl, artifactDirectory: value.temp.artifactDirectory, workspaceRoot: value.temp.workspaceRoot, recover: true, restartConsoleAfterCell: true });
       expect(await resumed.runs.get(child.sessionId, child.branchId, runId)).toMatchObject({ status: "unknown" });
-      const reply = (await resumed.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === mailboxMessageId);
-      expect(reply?.content).toMatch(/^Follow-up unknown:/);
+      const reply = await waitFor(async () => (await resumed!.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === mailboxMessageId));
+      expect(reply?.content).toMatch(/^Queued message unknown:/);
       expect((await resumed.storage.loadEvents(child.sessionId, { branchId: child.branchId })).filter(event => event.type === "AgentRunRequested" && (event.payload as any).runId === runId)).toHaveLength(1);
     } finally { if (resumed) await resumed.close(); }
   });

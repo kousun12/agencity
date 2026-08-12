@@ -194,6 +194,7 @@ await supervisor.agents.sendMessage(parentSessionId, parentBranchId, {
   target: child.sessionId,
   content: "Prioritize the first failure",
   taskId: child.taskId,
+  mode: "queue",
   intentKey: "priority-v1",
 });
 
@@ -213,6 +214,8 @@ const terminal = await supervisor.ai.result(call.generationId, { wait: true });
 The public `AgentClient` exposes `spawn`, `spawnMany`, `runAgent`, `agentInvocationResult`, `agentInvocationContract`, `findAgentInvocation`, and `cancelAgentInvocation` over `/agent-invocations`. `spawn` is detached-running and has no `run` boolean. `runAgent` is a convenience composition of admission plus bounded result polling; HTTP admission itself returns a durable handle immediately. Generation methods are `admitTextGeneration`, `admitObjectGeneration`, `generateText`, `generateObject`, `generation`, `generationResult`, `findGeneration`, and `cancelGeneration` over `/ai/generations`. The client has no public `startModel`, `model`, `cancelModel`, or recursive-model admission method.
 
 `ai.admitText` and `ai.admitObject` freeze only explicit prompt/messages and context references, reserve caller-narrowing budget, and return immediately; `ai.result`, `ai.get`, `ai.find`, and `ai.cancel` operate on durable generation identity. Raw calls cannot inspect files, use tools or skills, read ambient branch context, or continue autonomously. Declared schemas constrain returned JSON shape and do not establish factual correctness, completion, safety, or authority.
+
+`agents.sendMessage` defaults to `mode: "queue"`. Each queued message owns a separate durable run. An idle or stopped recipient starts that run immediately; a busy recipient retains queued messages in FIFO order and starts them one at a time after the active run and each earlier queued run terminate. `mode: "steer"` enters an active run at its next boundary but never wakes an idle recipient. The mode participates in idempotent message meaning.
 
 `agents.listFamily` returns exact parent, sibling, and branch-scoped direct-child coordinates plus task text, model configuration, cancellation state, and derived activity. Admitted children without an active run are idle, and parent activity comes from the parent route rather than the task edge that spawned the current child. Activity values are `working`, `idle`, `attention`, `ended`, or `unavailable`, with blocked, failed, budget-exceeded, unknown, cancellation-pending, cancelled, archived, and missing-state reasons. Missing retained state stays unavailable instead of resolving to another branch.
 

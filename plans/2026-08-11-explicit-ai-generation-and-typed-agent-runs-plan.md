@@ -2,7 +2,7 @@
 
 **Status:** Implemented and deterministically verified; external integrations remain unverified
 **Date:** August 11, 2026  
-**Last revised:** August 11, 2026
+**Last revised:** August 12, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related planning:** [Prime Agent rewrite follow-up plan](./2026-08-06-prime-agent-typescript-turso-rewrite-follow-up-plan.md), [Formal model-tool contracts](./2026-08-07-formal-model-tool-contracts-plan.md), [Durable tenacious goal orchestration](./2026-08-09-tenacious-goal-orchestration-plan.md), and [Agent environments and service interfaces](./2026-08-11-agent-environments-and-service-interfaces-plan.md)  
 **Governing decisions:** [Durable agent relationships](../docs/decisions/0006-durable-agent-relationships.md), [Managed workspace execution](../docs/decisions/0007-managed-workspace-execution.md), [Formal model-tool contracts](../docs/decisions/0010-formal-model-tool-contracts.md), and [Capability-preserving placement](../docs/decisions/0011-capability-preserving-placement-contracts.md)
@@ -342,7 +342,7 @@ const handle = await sdk.agents.spawn({
 });
 ```
 
-`handle.result({ wait, timeoutMs })` and `sdk.agents.result(handle, options)` resolve the retained output contract. `sdk.agents.cancel`, messaging, acknowledgement, and follow-up continue to operate on the same retained child.
+`handle.result({ wait, timeoutMs })` and `sdk.agents.result(handle, options)` resolve the retained output contract. `sdk.agents.cancel`, mode-aware messaging, acknowledgement, and queued work continue to operate on the same retained child.
 
 The current `run` boolean on `spawn` is removed from the model-facing API:
 
@@ -694,7 +694,7 @@ Reassess the tenacious-goal plan after this primitive lands. Typed agent calls c
 - blocked, failed, cancelled, budget-exceeded, and unknown without fabricated output;
 - child filesystem, shell, skills, memory, family messaging, and recursive delegation remain available;
 - result propagation to task, terminal notice, handle, protocol, and calling cell;
-- run, runMany, spawn, spawnMany, result, follow-up, and cancel;
+- run, runMany, spawn, spawnMany, result, queued messaging, and cancel;
 - parent worker loss while waiting;
 - supervisor loss before admission, after admission, during provider execution, during child cell execution, after result commit, and before terminal delivery;
 - exact-once usage attribution and terminal delivery;
@@ -780,4 +780,10 @@ The refactor is complete when:
 - Completed: Reconciled the full plan against the five-phase implementation and fixed final-review findings: known-price raw generations reject unaffordable conservative reservations before durable effect admission, malformed public scalar and batch inputs fail with typed validation errors, invalid client generation waits fail before admission, the family benchmark uses the cut-over spawn contract, and the OpenTUI journey asserts explicit resident-worker keep-alive status.
 - Validation: `bun run verify` passed after the fixes: core unit/integration tests 1,113 passed, 2 external tests skipped, 0 failed; end-to-end tests 3 passed, 0 failed; installed acceptance tests 23 passed, 1 opt-in real-provider test skipped, 0 failed. Typecheck and architecture checks are included in the canonical gate. `git diff --check` passed.
 - Plan notes: Warm resident console workers are explicit service keep-alive reasons until quiescence retirement; they remain replaceable operational state rather than durable identity. Conservative exact-price cost admission rejects instead of clamping when the request cannot fit the effective cost limit.
+- Remaining: Live-provider, official Turso Sync server, and Turso Cloud checks were not run; they remain gated and unverified.
+
+### 2026-08-12 — Queue and steer messaging integration
+- Completed: Integrated the public `queue` and `steer` family-message modes into typed agent runs, generated guidance, recovery, protocol and Console SDK documentation, and acceptance coverage. Queued messages retain FIFO one-run ownership, while steering enters an active run at a durable boundary or remains context-only when the recipient is idle.
+- Validation: `bun run verify` passed after integration: core tests 1,118 passed, 2 external tests skipped, 0 failed; end-to-end tests 3 passed, 0 failed; installed acceptance tests 23 passed, 1 opt-in real-provider test skipped, 0 failed. Typecheck and architecture checks are included in the canonical gate.
+- Plan notes: The mailbox-mode projection remains migration 021 and the AI-generation projection moves to migration 022. A pre-release workspace that applied the former branch-local AI-generation migration 021 must be reset rather than silently reinterpreted.
 - Remaining: Live-provider, official Turso Sync server, and Turso Cloud checks were not run; they remain gated and unverified.

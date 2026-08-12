@@ -143,12 +143,11 @@ Reconciliation is evidence-only. It never rewrites an unknown effect, reports a 
 | `GET /sessions/:session/agents?branch=:branch` | Nuclear-family roster and task state. |
 | `POST /sessions/:session/agents?branch=:branch` | Low-level family admission without the current public runnable-invocation composition. |
 | `POST /sessions/:session/agents/batch?branch=:branch` | Low-level atomic family admission. |
-| `POST /sessions/:session/agents/:target/follow-up?branch=:branch` | Retained same-session follow-up. |
 | `POST /sessions/:session/agents/:target/cancel?branch=:branch` | Cancel a permitted family target. |
 | `GET /sessions/:session/tasks?branch=:branch` | Durable branch task records. |
 | `POST /sessions/:session/tasks/:task/cancel?branch=:branch` | Cascaded task cancellation. |
 | `GET /sessions/:session/mailbox?branch=:branch&direction=all&limit=20&before=:cursor&pending=1` | Bounded mailbox page. |
-| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` → durable delivery receipt. |
+| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` with optional `mode: "steer" \| "queue"` → durable delivery receipt. Mode defaults to `queue`: each message owns a separate FIFO run, starting immediately when idle and after earlier work when busy. `steer` enters an active run at its next boundary or becomes retained context without waking an idle recipient. |
 | `POST /sessions/:session/mailbox/:message/ack?branch=:branch` | Acknowledge a message. |
 | `POST /sessions/:session/documents?branch=:branch` | Import a chunked document. |
 | `POST /sessions/:session/input-sets?branch=:branch` | Create an exact ordered input set. |
@@ -183,7 +182,7 @@ The family roster is an additive deterministic read projection. Each item contai
 
 Only task edges admitted from the requested branch appear as direct children. A missing child or sibling branch, or an expected child or sibling task projection, remains an `unavailable` item rather than being omitted or redirected to another branch. Reading the roster and opening one of its routes appends no event and does not change task or execution ownership. Clients continue to watch the opened conversation through its own snapshot-plus-cursor stream; cursorless progress does not alter family activity.
 
-Family targets are URL-decoded and restricted to the caller's parent, direct children, or siblings. Sender identity comes from the path session/branch. Mailbox receipts retain queued, context-delivered, acknowledged, or failed state with relationship, task, artifact, and reply provenance.
+Family targets are URL-decoded and restricted to the caller's parent, direct children, or siblings. Sender identity comes from the path session/branch. Mailbox receipts retain queued, context-delivered, acknowledged, or failed state with relationship, task, artifact, mode, optional context-run, legacy-follow-up, and reply provenance.
 
 ### Memory, refinement, skills, and specifications
 
@@ -286,7 +285,7 @@ The client exposes typed methods for all route groups:
 - autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`, `agentToolCapability`, and `modelContractDiagnostics`;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
-- agents and raw generation: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mailbox methods, follow-up/cancel methods, documents, input sets, and generation admission/lookup/result/wait/cancel methods;
+- agents and raw generation: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mode-aware mailbox methods, agent cancellation, documents, input sets, and generation admission/lookup/result/wait/cancel methods;
 - goals and wakes: goal, heartbeat, schedule, and wake methods;
 - memory and refinement: memory, trajectory review, automatic policy, governed proposal/wait/detach/inspection/rollback, and advanced legacy-compatible candidate/evaluation methods;
 - skill management: `listSkills`, `getSkill`, `previewSkillImport`, `installSkill`, `proposeSkill`, `enableSkill`, `disableSkill`, `removeSkill`, `testSkill`, `invokeSkill`, and `spawnSpec`;
@@ -344,7 +343,7 @@ const run = "accepted" in admitted && admitted.accepted
 if (run.status === "blocked") {
   await client.startRun(session.sessionId, session.branchId, {
     task: "Here is the missing information: continue.",
-    requestKey: "protocol-example-follow-up",
+    requestKey: "protocol-example-continuation",
   });
 }
 ```

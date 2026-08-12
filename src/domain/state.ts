@@ -43,10 +43,10 @@ export interface MailboxMessageState {
   readonly id: string; readonly fromSessionId: string; readonly fromBranchId: string;
   readonly toSessionId: string; readonly toBranchId: string; readonly kind: MailboxMessageKind;
   readonly content: string; readonly taskId: string | null; readonly artifactIds: string[]; readonly direction: "inbound" | "outbound";
-  readonly intentKey: string | null; readonly followUp: boolean; readonly replyToMessageId: string | null;
+  readonly intentKey: string | null; readonly mode: "steer" | "queue"; readonly replyToMessageId: string | null;
   readonly senderRelationship: FamilyRelationship | null; readonly receiptStatus: MailboxReceiptStatus;
   readonly delivered: boolean; readonly deliveredToContext: boolean; readonly acknowledged: boolean;
-  readonly followUpRunId: string | null; readonly error: string | null; readonly eventId: string;
+  readonly contextRunId: string | null; readonly error: string | null; readonly eventId: string;
 }
 export interface TerminalNoticeState {
   readonly id: string; readonly taskId: string; readonly parentSessionId: string; readonly childSessionId: string;

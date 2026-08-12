@@ -95,7 +95,10 @@ describe("FU-012 review blockers", () => {
         target: grandchild.sessionId,
         content: "new sends stay nuclear",
       })).rejects.toMatchObject({ code: "FAMILY_REACH_DENIED" });
-      await expect(supervisor.agents.followUp(root.sessionId, root.branchId, grandchild.sessionId, "no deep follow-up", {
+      await expect(supervisor.agents.sendMessage(root.sessionId, root.branchId, {
+        target: grandchild.sessionId,
+        content: "no deep queued work",
+        mode: "queue",
         replyToMessageId: mailboxMessageId,
       })).rejects.toMatchObject({ code: "FAMILY_REACH_DENIED" });
       await expect(supervisor.agents.cancelFamilyTarget(root.sessionId, root.branchId, grandchild.sessionId, "no deep cancel"))

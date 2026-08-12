@@ -236,8 +236,8 @@ export interface EventPayloads {
   TaskStatusChanged: { taskId: string; status: Exclude<TaskStatus, "pending">; result?: JsonValue; artifactIds?: string[]; error?: string; reason?: string };
   SubagentCancellationRequested: { taskId: string; childSessionId: string; reason?: string };
   TaskUsageAttributed: { taskId: string; childSessionId: string; tokens: number; costUsd: number; turns: number; wallTimeMs: number; conservative: boolean };
-  MailboxMessageSent: { mailboxMessageId: string; fromSessionId: string; fromBranchId: string; toSessionId: string; toBranchId: string; kind: MailboxMessageKind; content: string; taskId?: string; artifactIds?: string[]; intentKey?: string; followUp?: boolean; replyToMessageId?: string };
-  MailboxMessageDelivered: { mailboxMessageId: string; sentEventId: string; fromSessionId: string; fromBranchId: string; toSessionId: string; toBranchId: string; kind: MailboxMessageKind; content: string; taskId?: string; artifactIds?: string[]; intentKey?: string; followUp?: boolean; replyToMessageId?: string; senderRelationship?: FamilyRelationship };
+  MailboxMessageSent: { mailboxMessageId: string; fromSessionId: string; fromBranchId: string; toSessionId: string; toBranchId: string; kind: MailboxMessageKind; content: string; taskId?: string; artifactIds?: string[]; intentKey?: string; mode?: "steer" | "queue"; followUp?: boolean; replyToMessageId?: string };
+  MailboxMessageDelivered: { mailboxMessageId: string; sentEventId: string; fromSessionId: string; fromBranchId: string; toSessionId: string; toBranchId: string; kind: MailboxMessageKind; content: string; taskId?: string; artifactIds?: string[]; intentKey?: string; mode?: "steer" | "queue"; followUp?: boolean; replyToMessageId?: string; senderRelationship?: FamilyRelationship };
   MailboxMessageContextDelivered: { mailboxMessageId: string; messageEventId: string; deliveredAt: string; relationship: FamilyRelationship; runId?: string };
   MailboxMessageDeliveryFailed: { mailboxMessageId: string; failedAt: string; error: string };
   MailboxMessageAcknowledged: { mailboxMessageId: string; acknowledgedBySessionId: string; acknowledgedAt: string };
@@ -552,7 +552,7 @@ export function validateEffectOrigin(value: unknown): EffectOrigin {
   return parsed.data;
 }
 const taskTerminalSchema = z.object({ noticeId: id, taskId: id, parentSessionId: id, childSessionId: id, status: z.enum(["completed", "failed", "cancelled"]), result: jsonValueSchema.optional(), artifactIds: z.array(id).optional(), error: z.string().optional(), reason: z.string().optional() });
-const mailboxBaseSchema = z.object({ mailboxMessageId: id, fromSessionId: id, fromBranchId: id, toSessionId: id, toBranchId: id, kind: z.enum(["message", "task_completed", "task_failed", "task_cancelled"]), content: z.string(), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), intentKey: id.optional(), followUp: z.boolean().optional(), replyToMessageId: id.optional() });
+const mailboxBaseSchema = z.object({ mailboxMessageId: id, fromSessionId: id, fromBranchId: id, toSessionId: id, toBranchId: id, kind: z.enum(["message", "task_completed", "task_failed", "task_cancelled"]), content: z.string(), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), intentKey: id.optional(), mode: z.enum(["steer", "queue"]).optional(), followUp: z.boolean().optional(), replyToMessageId: id.optional() });
 const compactionStrategySchema = z.enum(["deterministic-extractive-v1", "model-summary-v1"]);
 const compactionReasonSchema = z.enum(["user-request", "agent-request", "automatic-threshold", "provider-overflow", "rematerialize"]);
 const capacityProvenanceSchema = z.object({

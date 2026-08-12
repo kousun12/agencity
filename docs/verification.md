@@ -66,7 +66,7 @@ The suite uses a local OpenAI API fixture reached through the Vercel AI SDK tran
 - raw text generation, raw object generation through real worker-side Zod conversion, and explicit-context-only provider inputs;
 - awaited text/object child agents, detached spawn/result, nested child/grandchild execution, and pre-admission capacity failure;
 - typed child recovery across committed parent-worker/service loss and installed-client loss without duplicate admission;
-- child messages, retained follow-up, and the sealed recursive refinement path;
+- mode-aware child messages, retained queued work, and the sealed recursive refinement path;
 - sealed structured refinement submission with a message-free typed child result;
 - failed completion-gate repair;
 - detach, client loss, managed-service recovery, one-hour typed and human status, resume, named branching, tree, status, and history;
