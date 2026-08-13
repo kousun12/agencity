@@ -74,6 +74,52 @@ afterEach(async () => {
 });
 
 describe("reactive snapshots and resumable subscriptions", () => {
+  test("current branch recovery projection reuses current snapshots and catches up only stale routes", async () => {
+    const temp = await makeTempRuntime("agencity-current-branch-projection-");
+    temps.push(temp);
+    const storage = await openTempStorage(temp);
+    const first = await seedSession(storage, {
+      sessionId: "current-branch-first",
+      branchId: "main",
+    });
+    const second = await seedSession(storage, {
+      sessionId: "current-branch-second",
+      branchId: "main",
+    });
+    const initial = new ProjectionService(storage);
+    await initial.getSnapshot(first.sessionId, first.branchId);
+    await initial.getSnapshot(second.sessionId, second.branchId);
+
+    let historyLoads = 0;
+    const observed = new Proxy(storage, {
+      get(target, property) {
+        if (property === "loadEvents") {
+          return async (...args: Parameters<AgentStorage["loadEvents"]>) => {
+            historyLoads++;
+            return target.loadEvents(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as AgentStorage;
+    const projection = new ProjectionService(observed);
+    expect(await projection.currentBranches()).toHaveLength(2);
+    expect(historyLoads).toBe(0);
+
+    await appendMessage(
+      storage,
+      first.sessionId,
+      first.branchId,
+      "catch up one stale route",
+    );
+    const current = await projection.currentBranches();
+    expect(historyLoads).toBe(1);
+    expect(current.find((branch) =>
+      branch.sessionId === first.sessionId)?.state.messages.at(-1)?.content)
+      .toBe("catch up one stale route");
+  });
+
   test("terminal waiter covers pre-snapshot, snapshot-subscribe, live, timeout, and cancellation races", async () => {
     const temp = await makeTempRuntime("agencity-terminal-waiter-");
     temps.push(temp);

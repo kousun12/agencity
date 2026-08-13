@@ -307,6 +307,9 @@ Snapshots and operational tables are projections. `agent_profile_versions`, `wor
 const { cursor, state } =
   await supervisor.projections.getSnapshot(sessionId, branchId);
 
+const currentBranches =
+  await supervisor.projections.currentBranches();
+
 const unsubscribe = supervisor.projections.subscribe(
   sessionId,
   branchId,

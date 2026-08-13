@@ -27,6 +27,7 @@ import type { ModelExecutor } from "../executors/index.ts";
 import { containsBrokeredSecret } from "../security/index.ts";
 import { stableEffectId, type OutboxRunner } from "./outbox.ts";
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
+import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
 import {
   assertCompactionProgress,
   buildDeterministicExtractiveSummary,
@@ -205,9 +206,16 @@ export class CompactionService {
   }
 
   /** Finalizes requests interrupted at any durable outbox boundary. */
-  async recoverIncomplete(): Promise<number> {
+  async recoverIncomplete(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<number> {
     let recovered = 0;
-    for (const branch of await this.storage.listBranches()) {
+    const branches = currentBranches ??
+      await new ProjectionService(this.storage).currentBranches();
+    for (const branch of branches) {
+      if (!Object.values(branch.state.compactions).some(
+        (request) => request.status === "requested",
+      )) continue;
       const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
       if (!events.length) continue;
       const state = projectEvents(events);

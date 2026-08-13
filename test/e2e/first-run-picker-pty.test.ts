@@ -629,6 +629,8 @@ test.skipIf(!python || process.platform === "win32")(
   "retains the stored credential but no model or root after service loss and clean picker cancellation",
   async () => {
     const world = await createWorld("delayed");
+    world.environment.AGENCITY_ACCEPTANCE = "1";
+    world.environment.AGENCITY_ACCEPTANCE_LEASE_MS = "500";
     const controlPath = join(world.directory, "service-loss-control");
     const running = runPty(world, "service-loss", 80, controlPath);
     const [, catalogRequest] = await Promise.all([
@@ -651,7 +653,7 @@ test.skipIf(!python || process.platform === "win32")(
     expect(result.outputTail).not.toContain("Model selection was cancelled");
 
     world.fixture.releaseCatalog();
-    await Bun.sleep(5_500);
+    await Bun.sleep(1_000);
     const durable = await configAndSessions(world);
     expect(durable.config.defaultModel).toBeNull();
     expect(durable.sessions).toEqual([]);

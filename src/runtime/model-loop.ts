@@ -46,6 +46,7 @@ import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import { registerStructuredModelTurn } from "./internal.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
 import { composeAgentSystemPrompt, withProviderSystemPrompt } from "./agent-system-prompt.ts";
+import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
 
 
 class TurnQueue {
@@ -596,16 +597,30 @@ export class ModelLoop {
   }
 
   /** Finalizes effects committed before a supervisor crash without calling the model twice. */
-  async recoverIncomplete(): Promise<number> {
+  async recoverIncomplete(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<number> {
     let recovered = 0;
-    for (const branch of await this.storage.listBranches()) {
+    const branches = currentBranches ??
+      await new ProjectionService(this.storage).currentBranches();
+    for (const branch of branches) {
+      const initialState = branch.state;
+      const agentRunCallIds = new Set(
+        Object.values(initialState.agentRuns).flatMap((run) =>
+          run.steps.flatMap((step) => [
+            step.callId,
+            ...step.modelAttempts.map((attempt) => attempt.callId),
+          ])),
+      );
+      if (!Object.values(initialState.modelCalls).some((call) =>
+        call.status === "requested" && !agentRunCallIds.has(call.id))) continue;
       const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
       const state = projectEvents(events);
-      const agentRunCallIds = new Set(
+      const currentAgentRunCallIds = new Set(
         Object.values(state.agentRuns).flatMap((run) => run.steps.flatMap((step) => [step.callId, ...step.modelAttempts.map((attempt) => attempt.callId)])),
       );
       for (const call of Object.values(state.modelCalls)) {
-        if (call.status !== "requested" || agentRunCallIds.has(call.id)) continue;
+        if (call.status !== "requested" || currentAgentRunCallIds.has(call.id)) continue;
         const contextEvent = events.find((event) =>
           event.type === "ContextMaterialized" &&
           (event.payload as EventPayloads["ContextMaterialized"]).contextId ===
@@ -637,9 +652,14 @@ export class ModelLoop {
   }
 
   /** Restores an idle branch after a crash between turn-running and terminal finalization. */
-  async reconcileRunningSessions(): Promise<number> {
+  async reconcileRunningSessions(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<number> {
     let reconciled = 0;
-    for (const branch of await this.storage.listBranches()) {
+    const branches = currentBranches ??
+      await new ProjectionService(this.storage).currentBranches();
+    for (const branch of branches) {
+      if (branch.state.status !== "running") continue;
       const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
       if (!events.length || projectEvents(events).status !== "running") continue;
       const running = [...events].reverse().find((event) =>

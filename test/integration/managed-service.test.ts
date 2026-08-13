@@ -9,6 +9,7 @@ import { formalOutputFromAgentAction, formalOutputFromRefinementGovernanceDecisi
 import { Supervisor } from "../../src/runtime/index.ts";
 import {
   DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS,
+  DEFAULT_MANAGED_SERVICE_LEASE_MS,
   ManagedWorkspaceService,
   connectManagedService,
   decodeManagedServiceConfiguration,
@@ -195,6 +196,7 @@ describe("managed workspace service", () => {
       maxConsoleResidentProcesses: 17,
       maxConsoleActiveExecutions: 4,
       maxAwaitedAgentDepth: 8,
+      leaseMs: DEFAULT_MANAGED_SERVICE_LEASE_MS,
     });
     expect(managedServiceConfigurationHash(decoded))
       .toBe(managedServiceConfigurationHash(config));

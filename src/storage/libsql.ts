@@ -14,7 +14,7 @@ import {
 import type {
   AgentStorage, AiGenerationRecord, DocumentChunkRecord, DocumentRecord, EventQuery, GoalGateEvaluationRecord, GoalGateRecord, GoalRecord,
   HeartbeatRecord, InputSetRecord, MailboxRecord, OutboxRecord, ReadonlyStatement,
-  RecursiveModelRecord, ScheduleRecord, SessionRecord, StorageCapabilities, TaskRecord, WakeRecord,
+  RecursiveModelRecord, ScheduleRecord, SessionRecord, StorageCapabilities, TaskRecord, TaskTerminalRecoveryStatus, WakeRecord,
   ProcessExecutionLeaseClaim, ProcessExecutionLeaseProof, ProcessExecutionLeaseRecord,
   ProcessExecutionLeaseRenewal, ProcessExecutionLeaseScope, ProcessExecutionWriteFence,
   DataManifestRecord, SessionErasureResult, SyncBranchMappingRecord, SyncConflictRecord, SyncIngestReceiptRecord,
@@ -2349,6 +2349,30 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
     return result.rows.map(rowToTask);
   }
   async getMailboxMessage(messageId: string): Promise<MailboxRecord | null> { const result = await this.#execute({ sql: "SELECT * FROM mailbox_messages WHERE mailbox_message_id=?", args: [messageId] }); return result.rows[0] ? rowToMailbox(result.rows[0]) : null; }
+  async getTaskTerminalRecoveryStatus(taskId: string): Promise<TaskTerminalRecoveryStatus | null> {
+    const result = await this.#execute({
+      sql: `SELECT t.task_id,
+        EXISTS(
+          SELECT 1 FROM terminal_notices n
+          WHERE n.task_id=t.task_id AND n.delivered_event_id IS NOT NULL
+        ) AS notice_delivered,
+        EXISTS(
+          SELECT 1 FROM events e
+          WHERE e.session_id=t.parent_session_id
+            AND e.branch_id=t.parent_branch_id
+            AND e.type='TaskUsageAttributed'
+            AND e.idempotency_key=?
+        ) AS usage_attributed
+        FROM tasks t WHERE t.task_id=?`,
+      args: [`task-usage:${taskId}`, taskId],
+    });
+    const row = result.rows[0];
+    return row ? {
+      taskId: String(row.task_id),
+      noticeDelivered: Number(row.notice_delivered) === 1,
+      usageAttributed: Number(row.usage_attributed) === 1,
+    } : null;
+  }
   async listMailboxMessages(sessionId: string, direction: "inbound" | "outbound" | "all" = "all"): Promise<MailboxRecord[]> {
     const where = direction === "inbound" ? "to_session_id=?" : direction === "outbound" ? "from_session_id=?" : "(from_session_id=? OR to_session_id=?)";
     const args: InValue[] = direction === "all" ? [sessionId,sessionId] : [sessionId];

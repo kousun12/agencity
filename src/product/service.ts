@@ -35,6 +35,7 @@ import {
 export const MANAGED_SERVICE_PROTOCOL_VERSION = 2;
 export const MANAGED_SERVICE_CONFIG_ENV = "AGENCITY_SERVICE_CONFIG";
 export const DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 3_600_000;
+export const DEFAULT_MANAGED_SERVICE_LEASE_MS = 30_000;
 const MIN_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 100;
 const MAX_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 24 * 60 * 60 * 1_000;
 const MAX_SERVICE_CHILD_STARTUP_ERROR_BYTES = 16 * 1_024;
@@ -48,7 +49,7 @@ export interface ManagedServiceConfiguration {
   readonly maxConsoleResidentProcesses?: number;
   readonly maxConsoleActiveExecutions?: number;
   readonly maxAwaitedAgentDepth?: number;
-  /** Internal/test override; production defaults to a five-second local lease. */
+  /** Internal/test override; production defaults to a 30-second local lease. */
   readonly leaseMs?: number;
   /** Internal/test override for bounded shutdown after the workspace becomes quiescent. */
   readonly idleShutdownMs?: number;
@@ -132,7 +133,7 @@ function normalizedConfiguration(input: ManagedServiceConfiguration): ManagedSer
     maxConsoleActiveExecutions: input.maxConsoleActiveExecutions ??
       DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
     maxAwaitedAgentDepth: input.maxAwaitedAgentDepth ?? 8,
-    leaseMs: input.leaseMs ?? 5_000,
+    leaseMs: input.leaseMs ?? DEFAULT_MANAGED_SERVICE_LEASE_MS,
     idleShutdownMs: normalizedIdleShutdownMs(input.idleShutdownMs),
     sync: {
       ...(input.sync?.syncUrl ? { syncUrl: input.sync.syncUrl } : {}),
@@ -161,7 +162,7 @@ function serializedConfiguration(input: ManagedServiceConfiguration): Serialized
     maxConsoleActiveExecutions: normalized.maxConsoleActiveExecutions ??
       DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
     maxAwaitedAgentDepth: normalized.maxAwaitedAgentDepth ?? 8,
-    leaseMs: normalized.leaseMs ?? 5_000,
+    leaseMs: normalized.leaseMs ?? DEFAULT_MANAGED_SERVICE_LEASE_MS,
     idleShutdownMs: normalized.idleShutdownMs ?? DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS,
     sync: {
       syncUrl: normalized.sync?.syncUrl ?? null,
@@ -301,8 +302,13 @@ export class ManagedWorkspaceService {
       executionLease: {
         workspaceId: normalized.workspace.workspaceId,
         ownerProcessId: instanceId,
-        leaseMs: normalized.leaseMs ?? 5_000,
-        renewalIntervalMs: Math.max(1, Math.floor((normalized.leaseMs ?? 5_000) / 3)),
+        leaseMs: normalized.leaseMs ?? DEFAULT_MANAGED_SERVICE_LEASE_MS,
+        renewalIntervalMs: Math.max(
+          1,
+          Math.floor(
+            (normalized.leaseMs ?? DEFAULT_MANAGED_SERVICE_LEASE_MS) / 3,
+          ),
+        ),
         onLost: () => { if (service) void service.failClosed("Execution lease renewal was lost"); },
       },
       sync: {

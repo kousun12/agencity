@@ -829,20 +829,21 @@ export class Supervisor {
 
   /** Reconciles retained work only after managed lease admission. */
   async recoverExecution(options: { readonly drainPending?: boolean } = {}): Promise<void> {
-    await this.outbox.recover();
-    await this.agents.recoverCancellations();
+    const currentBranches = await this.projections.currentBranches();
+    await this.outbox.recover(currentBranches);
+    await this.agents.recoverCancellations(currentBranches);
     if (options.drainPending !== false) await this.outbox.drain();
-    await this.compactions.recoverIncomplete();
-    await this.modelLoop.recoverIncomplete();
-    await this.modelLoop.reconcileRunningSessions();
-    await this.goals.recoverIncomplete();
+    await this.compactions.recoverIncomplete(currentBranches);
+    await this.modelLoop.recoverIncomplete(currentBranches);
+    await this.modelLoop.reconcileRunningSessions(currentBranches);
+    await this.goals.recoverIncomplete(currentBranches);
     await this.ai.recoverIncomplete();
     await this.#recursiveModels.recoverIncomplete();
     await this.refiner.recoverIncomplete();
     await this.refinementGovernance.recoverIncomplete();
-    await this.agents.recoverDeliveries();
-    await this.runs.recoverIncomplete();
-    await this.runs.recoverOrphanGoals();
+    await this.agents.recoverDeliveries(currentBranches);
+    await this.runs.recoverIncomplete(currentBranches);
+    await this.runs.recoverOrphanGoals(currentBranches);
     await this.heartbeats.recoverDue();
     await this.schedules.recover();
   }

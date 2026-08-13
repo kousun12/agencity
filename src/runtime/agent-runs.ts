@@ -58,6 +58,7 @@ import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
 import { composeAgentSystemPrompt } from "./agent-system-prompt.ts";
 import { deriveAgentProviderObservations } from "./agent-observations.ts";
+import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
 
 export interface StartAgentRunInput {
   readonly task: string;
@@ -384,24 +385,41 @@ export class AgentRunService {
   }
 
   /** Resumes queued/running runs after outbox and model-call reconciliation. */
-  async recoverIncomplete(): Promise<number> {
+  async recoverIncomplete(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<number> {
     let recovered = 0;
-    for (const branch of await this.storage.listBranches()) {
+    const branches = currentBranches ??
+      await new ProjectionService(this.storage).currentBranches();
+    for (const branch of branches) {
+      const active = Object.values(branch.state.agentRuns).find(
+        (run) => ["queued", "running"].includes(run.status),
+      );
+      if (!active) continue;
       if (!await this.#isExecutionOwner(branch.sessionId)) continue;
       const state = await this.#state(branch.sessionId, branch.branchId).catch(() => null);
       if (!state) continue;
-      const active = Object.values(state.agentRuns).find((run) => ["queued", "running"].includes(run.status));
-      if (!active) continue;
-      await this.advance(branch.sessionId, branch.branchId, active.id);
+      const current = Object.values(state.agentRuns).find(
+        (run) => ["queued", "running"].includes(run.status),
+      );
+      if (!current) continue;
+      await this.advance(branch.sessionId, branch.branchId, current.id);
       recovered++;
     }
     return recovered;
   }
 
   /** Migrates orphan legacy active goals onto the single typed AgentRun loop. */
-  async recoverOrphanGoals(): Promise<number> {
+  async recoverOrphanGoals(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<number> {
     let recovered = 0;
-    for (const branch of await this.storage.listBranches()) {
+    const branches = currentBranches ??
+      await new ProjectionService(this.storage).currentBranches();
+    for (const branch of branches) {
+      if (!Object.values(branch.state.goals).some(
+        (goal) => goal.status === "active",
+      )) continue;
       if (!await this.#isExecutionOwner(branch.sessionId)) continue;
       const state = await this.#state(branch.sessionId, branch.branchId).catch(() => null);
       if (!state || Object.values(state.agentRuns).some((run) => !isTerminal(run.status))) continue;

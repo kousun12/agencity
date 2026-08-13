@@ -1569,7 +1569,7 @@ describe("FU-012 retained family messaging", () => {
     } finally { if (resumed) await resumed.close(); else await value.supervisor.close(); }
   });
 
-  test("recovery completes a retained parent task-status prefix without duplicate notices or usage", async () => {
+  test("recovery completes a retained terminal prefix missing usage without duplicate notices", async () => {
     const value = await fixture([
       action({ type: "final", content: "terminal prefix result" }),
     ]);
@@ -1594,7 +1594,25 @@ describe("FU-012 retained family messaging", () => {
         return current.status === "succeeded" ? current : undefined;
       });
       expect(result.resultReference).toBeDefined();
+      const noticeId = `notice-${handle.taskId}`;
+      const sentEventId = `terminal-sent-${handle.taskId}`;
+      const terminal = {
+        noticeId,
+        taskId: handle.taskId,
+        parentSessionId: value.root.sessionId,
+        childSessionId: handle.sessionId,
+        status: "completed" as const,
+        result: result.resultReference!,
+      };
       await value.supervisor.storage.appendEvents([{
+        id: sentEventId,
+        sessionId: handle.sessionId,
+        branchId: handle.branchId,
+        type: "TaskTerminalNoticeSent",
+        producer: "supervisor",
+        idempotencyKey: `task-terminal-sent:${handle.taskId}`,
+        payload: terminal,
+      }, {
         sessionId: value.root.sessionId,
         branchId: value.root.branchId,
         type: "TaskStatusChanged",
@@ -1605,6 +1623,20 @@ describe("FU-012 retained family messaging", () => {
           status: "completed",
           result: result.resultReference!,
         } as any,
+      }, {
+        sessionId: value.root.sessionId,
+        branchId: value.root.branchId,
+        type: "TaskTerminalNoticeDelivered",
+        producer: "supervisor",
+        idempotencyKey: `task-terminal-delivered:${handle.taskId}`,
+        payload: { ...terminal, sentEventId },
+      }, {
+        sessionId: handle.sessionId,
+        branchId: handle.branchId,
+        type: "SessionStatusChanged",
+        producer: "supervisor",
+        idempotencyKey: `task-terminal-session:${handle.taskId}`,
+        payload: { status: "stopped", reason: "Task completed" },
       }]);
       expect((await value.supervisor.agents.listTasks(
         value.root.sessionId,
@@ -1704,7 +1736,23 @@ describe("FU-012 retained family messaging", () => {
         { task: "perform later unrelated child work", goalMode: "none" },
       );
       expect(later.status).toBe("succeeded");
-      await value.supervisor.agents.recoverDeliveries();
+      const currentBranches =
+        await value.supervisor.projections.currentBranches();
+      const storage = value.supervisor.storage as typeof value.supervisor.storage & {
+        loadEvents: typeof value.supervisor.storage.loadEvents;
+      };
+      const originalLoadEvents = storage.loadEvents.bind(storage);
+      let historyLoads = 0;
+      storage.loadEvents = async (...args) => {
+        historyLoads++;
+        return originalLoadEvents(...args);
+      };
+      try {
+        await value.supervisor.agents.recoverDeliveries(currentBranches);
+      } finally {
+        storage.loadEvents = originalLoadEvents;
+      }
+      expect(historyLoads).toBe(0);
 
       const after = (await value.supervisor.storage.loadEvents(
         value.root.sessionId,

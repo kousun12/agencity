@@ -12,7 +12,7 @@ import {
 } from "../security/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
 import type { AgentRunResult, AgentRunService } from "./agent-runs.ts";
-import { ProjectionService } from "./projection.ts";
+import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
 import type { ModelSelectionInput } from "./model-selection.ts";
 
@@ -859,34 +859,98 @@ export class AgentService {
   }
 
   /** Completes crash prefixes between durable acceptance, context delivery, and queued-run admission. */
-  async recoverDeliveries(): Promise<number> {
+  async recoverDeliveries(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<number> {
+    const branches = currentBranches ?? await this.#projections.currentBranches();
     const seen = new Set<string>(); let recovered = 0;
-    for (const branch of await this.storage.listBranches()) {
+    const changedRoutes = new Set<string>();
+    for (const branch of branches) {
       for (const message of await this.#recursive.listMailboxMessages(branch.sessionId, "inbound")) {
         if (seen.has(message.mailboxMessageId)) continue;
         seen.add(message.mailboxMessageId);
         if (message.receiptStatus === "queued") {
           const accepted = message.delivered ? message : await this.#recoverAcceptedDelivery(message);
           if (accepted.receiptStatus === "queued") await this.#routeAcceptedMessage(accepted);
+          changedRoutes.add(`${message.toSessionId}/${message.toBranchId}`);
           recovered++;
           continue;
         }
         if (message.mode === "queue" && message.deliveredToContext && message.contextRunId) {
-          await this.#ensureQueuedRun(message);
-          recovered++;
+          const route = branches.find((candidate) =>
+            candidate.sessionId === message.toSessionId &&
+            candidate.branchId === message.toBranchId);
+          const state = route?.state ??
+            (await this.#projections.getSnapshot(
+              message.toSessionId,
+              message.toBranchId,
+            )).state;
+          if (!state.agentRuns[message.contextRunId]) {
+            await this.#ensureQueuedRun(message);
+            changedRoutes.add(`${message.toSessionId}/${message.toBranchId}`);
+            recovered++;
+          }
         }
       }
     }
     if (this.#runs) {
-      for (const branch of await this.storage.listBranches()) {
-        const state = projectEvents(await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId }));
+      for (const branch of branches) {
+        const routeKey = `${branch.sessionId}/${branch.branchId}`;
+        const state = changedRoutes.has(routeKey)
+          ? (await this.#projections.getSnapshot(
+              branch.sessionId,
+              branch.branchId,
+            )).state
+          : branch.state;
+        const inbound = await this.#recursive.listMailboxMessages(
+          branch.sessionId,
+          "inbound",
+        );
+        const outbound = await this.#recursive.listMailboxMessages(
+          branch.sessionId,
+          "outbound",
+        );
         for (const run of Object.values(state.agentRuns)) {
           if (!["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status)) continue;
+          if (!await this.#terminalRunNeedsRecovery(
+            branch.sessionId,
+            run,
+            inbound,
+            outbound,
+          )) continue;
           await this.onRunTerminal(await this.#runs.get(branch.sessionId, branch.branchId, run.id));
         }
       }
     }
     return recovered;
+  }
+
+  async #terminalRunNeedsRecovery(
+    sessionId: string,
+    run: AgentRunState,
+    inbound: readonly MailboxRecord[],
+    outbound: readonly MailboxRecord[],
+  ): Promise<boolean> {
+    const queuedInputs = inbound.filter((message) =>
+      message.contextRunId === run.id &&
+      message.mode === "queue" &&
+      !message.replyToMessageId);
+    if (queuedInputs.some((message) =>
+      !outbound.some((candidate) =>
+        candidate.replyToMessageId === message.mailboxMessageId))) {
+      return true;
+    }
+
+    const task = await this.#recursive.findTaskByChild(sessionId);
+    if (!task || run.requestKey !== `agent-spawn:${task.taskId}`) return false;
+    if (!["completed", "failed", "cancelled"].includes(task.status)) return true;
+    if (!this.storage.getTaskTerminalRecoveryStatus) return true;
+    const recovery = await this.storage.getTaskTerminalRecoveryStatus(
+      task.taskId,
+    );
+    if (!recovery?.noticeDelivered || !recovery.usageAttributed) return true;
+    return !outbound.some((message) =>
+      message.intentKey === `automatic-task-reply:${task.taskId}:${run.id}`);
   }
 
   async onRunTerminal(result: AgentRunResult): Promise<void> {
@@ -1420,12 +1484,13 @@ export class AgentService {
   }
 
   /** Completes durable cancellation intents left by any crash prefix. */
-  async recoverCancellations(): Promise<number> {
+  async recoverCancellations(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<number> {
     const pending = new Map<string, TaskRecord>();
-    for (const branch of await this.storage.listBranches()) {
-      const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
-      if (!events.length) continue;
-      for (const task of Object.values(projectEvents(events).tasks)) {
+    const branches = currentBranches ?? await this.#projections.currentBranches();
+    for (const branch of branches) {
+      for (const task of Object.values(branch.state.tasks)) {
         if (!task.cancellationRequested || ["completed", "failed", "cancelled"].includes(task.status)) continue;
         const record = await this.#recursive.getTask(task.id);
         if (record) pending.set(record.taskId, record);

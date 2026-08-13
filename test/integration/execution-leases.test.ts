@@ -220,6 +220,49 @@ describe("transactional process execution fencing", () => {
     } finally { await coordinator.close(); }
   });
 
+  test("renews a near-expiry workspace lease synchronously before a fenced write", async () => {
+    const value = await temp("agencity-process-lease-prewrite-renewal-");
+    const store = await storage(value);
+    await seedSession(store, {
+      sessionId: "root-prewrite-renewal",
+      workspaceId: "workspace-1",
+    });
+    const startedAt = new Date();
+    let now = startedAt;
+    const coordinator = await ManagedExecutionLeaseCoordinator.open(store, {
+      workspaceId: "workspace-1",
+      ownerProcessId: "managed-prewrite-renewal",
+      leaseMs: 1_000,
+      renewalIntervalMs: 900,
+      now: () => now,
+    });
+    try {
+      const fenced = createFencedAgentStorage(store, coordinator);
+      now = new Date(startedAt.getTime() + 950);
+      await fenced.appendEvents([{
+        sessionId: "root-prewrite-renewal",
+        branchId: "main",
+        type: "MessageAppended",
+        producer: "client",
+        payload: {
+          messageId: "message-prewrite-renewal",
+          role: "user",
+          content: "renew before committing",
+        },
+      }]);
+      expect(await store.getProcessExecutionLease({
+        kind: "workspace",
+        workspaceId: "workspace-1",
+      })).toMatchObject({
+        ownerProcessId: "managed-prewrite-renewal",
+        renewedAt: now.toISOString(),
+        leaseExpiresAt: new Date(now.getTime() + 1_000).toISOString(),
+      });
+    } finally {
+      await coordinator.close();
+    }
+  });
+
   test("rejects malformed clocks, durations, scopes, and cross-owner handles", async () => {
     const value = await temp("agencity-process-lease-adversarial-");
     const store = await storage(value);

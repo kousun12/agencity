@@ -27,8 +27,28 @@ export interface ProjectionTerminalWaitResult {
   readonly mode: "notifications" | "polling-fallback";
 }
 
+export interface CurrentBranchProjection {
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly state: AgentState;
+}
+
 export class ProjectionService {
   constructor(readonly storage: AgentStorage) {}
+
+  /**
+   * Loads each current branch through the verified snapshot path once. Startup
+   * recovery shares this bounded view instead of independently replaying every
+   * branch for each recovery subsystem.
+   */
+  async currentBranches(): Promise<CurrentBranchProjection[]> {
+    const result: CurrentBranchProjection[] = [];
+    for (const branch of await this.storage.listBranches()) {
+      const { state } = await this.getSnapshot(branch.sessionId, branch.branchId);
+      result.push({ ...branch, state });
+    }
+    return result;
+  }
 
   async getSnapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> {
     const latest = await this.storage.getLatestCursor(sessionId, branchId);

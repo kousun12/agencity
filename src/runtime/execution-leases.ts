@@ -105,6 +105,10 @@ export class ExecutionLeaseService {
     });
   }
 
+  currentTimestamp(): string {
+    return this.#timestamp();
+  }
+
   #timestamp(): string {
     const value = this.#now();
     if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
@@ -157,6 +161,7 @@ export class ManagedExecutionLeaseCoordinator {
   readonly #rootClaims = new Map<string, Promise<ProcessExecutionLeaseRecord>>();
   readonly #onLost: ((error: unknown) => void) | undefined;
   #timer: ReturnType<typeof setInterval> | null = null;
+  #renewal: Promise<void> | null = null;
   #lost: unknown = null;
   #closed = false;
 
@@ -188,7 +193,9 @@ export class ManagedExecutionLeaseCoordinator {
     const coordinator = new ManagedExecutionLeaseCoordinator(
       service, options.workspaceId, workspace, leaseMs, renewalIntervalMs, options.onLost,
     );
-    coordinator.#timer = setInterval(() => { void coordinator.#renewAll(); }, renewalIntervalMs);
+    coordinator.#timer = setInterval(() => {
+      void coordinator.refreshIfNeeded(true).catch(() => {});
+    }, renewalIntervalMs);
     return coordinator;
   }
 
@@ -198,6 +205,7 @@ export class ManagedExecutionLeaseCoordinator {
   get rootSessionIds(): readonly string[] { return [...this.#roots.keys()].sort(); }
 
   async fenceForEvents(events: readonly NewAgentEvent[]): Promise<ProcessExecutionWriteFence> {
+    await this.refreshIfNeeded();
     this.#assertLive();
     if (!events.length) throw new ValidationError("Cannot fence an empty event append");
     const rootIds = new Set<string>();
@@ -237,6 +245,7 @@ export class ManagedExecutionLeaseCoordinator {
   }
 
   async fenceForSession(sessionId: string): Promise<ProcessExecutionWriteFence> {
+    await this.refreshIfNeeded();
     this.#assertLive();
     const rootId = await this.#rootForSession(sessionId);
     const root = await this.ensureRoot(rootId);
@@ -244,6 +253,7 @@ export class ManagedExecutionLeaseCoordinator {
   }
 
   async ensureRoot(rootSessionId: string): Promise<ProcessExecutionLeaseRecord> {
+    await this.refreshIfNeeded();
     this.#assertLive();
     const retained = this.#roots.get(rootSessionId);
     if (retained) return retained;
@@ -261,6 +271,7 @@ export class ManagedExecutionLeaseCoordinator {
     this.#closed = true;
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = null;
+    await this.#renewal?.catch(() => {});
     await Promise.allSettled([...this.#rootClaims.values()]);
     for (const lease of [...this.#roots.values()].reverse()) await this.service.release(lease).catch(() => {});
     await this.service.release(this.#workspace).catch(() => {});
@@ -286,16 +297,32 @@ export class ManagedExecutionLeaseCoordinator {
     };
   }
 
-  async #renewAll(): Promise<void> {
-    if (this.#closed || this.#lost) return;
-    try {
+  async refreshIfNeeded(force = false): Promise<void> {
+    this.#assertLive();
+    const remainingMs = Date.parse(this.#workspace.leaseExpiresAt) -
+      Date.parse(this.service.currentTimestamp());
+    if (!force && remainingMs > this.renewalIntervalMs) return;
+    if (this.#renewal) return this.#renewal;
+    const renewal = (async () => {
       this.#workspace = await this.service.renew(this.#workspace, this.leaseMs);
-      for (const [rootId, lease] of this.#roots) this.#roots.set(rootId, await this.service.renew(lease, this.leaseMs));
+      for (const [rootId, lease] of this.#roots) {
+        this.#roots.set(
+          rootId,
+          await this.service.renew(lease, this.leaseMs),
+        );
+      }
+    })();
+    this.#renewal = renewal;
+    try {
+      await renewal;
     } catch (error) {
       this.#lost = error;
       if (this.#timer) clearInterval(this.#timer);
       this.#timer = null;
       this.#onLost?.(error);
+      throw error;
+    } finally {
+      if (this.#renewal === renewal) this.#renewal = null;
     }
   }
 

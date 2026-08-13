@@ -14,7 +14,7 @@ import type { EffectExecutionProgress, EffectExecutor, ExecutionResult } from ".
 import { result } from "../executors/contract.ts";
 import type { AgentStorage, OutboxRecord } from "../storage/index.ts";
 import { containsBrokeredSecret, isSensitiveEnvironmentKey, scrubJson, scrubText } from "../security/index.ts";
-import { ProjectionService } from "./projection.ts";
+import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
 
 export interface EffectRequest {
   readonly sessionId: string;
@@ -425,7 +425,9 @@ export class OutboxRunner {
    * Reconciles effects whose owner disappeared. Idempotent effects become pending
    * with their attempt counter retained; non-idempotent effects become unknown.
    */
-  async recover(): Promise<{ abandonedCellIds: string[]; unknownEffectIds: string[]; retriedEffectIds: string[] }> {
+  async recover(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<{ abandonedCellIds: string[]; unknownEffectIds: string[]; retriedEffectIds: string[] }> {
     const unknownEffectIds: string[] = [];
     const retriedEffectIds: string[] = [];
     for (const record of await this.storage.listOutbox(["pending", "running"])) {
@@ -459,10 +461,9 @@ export class OutboxRunner {
     const unknownSet = new Set(unknownEffectIds);
     const retrySet = new Set(retriedEffectIds);
     const abandonedCellIds: string[] = [];
-    for (const branch of await this.storage.listBranches()) {
-      const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
-      if (events.length === 0) continue;
-      const state = projectEvents(events);
+    const branches = currentBranches ?? await this.#projections.currentBranches();
+    for (const branch of branches) {
+      const state = branch.state;
       const pendingCells = Object.values(state.cells).filter(
         (cell) => cell.status === "proposed" || cell.status === "running",
       );

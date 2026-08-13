@@ -17,6 +17,7 @@ import {
   type GoalRecord,
 } from "../storage/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
+import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
 
 export interface CompletionGateInput {
   readonly name: string;
@@ -273,13 +274,15 @@ export class GoalService {
   }
 
   /** Reconciles completion requests only. Active goals are owned by AgentRunService. */
-  async recoverIncomplete(): Promise<number> {
+  async recoverIncomplete(
+    currentBranches?: readonly CurrentBranchProjection[],
+  ): Promise<number> {
     let recovered = 0;
     const seen = new Set<string>();
-    for (const branch of await this.storage.listBranches()) {
-      const events = await this.storage.loadEvents(branch.sessionId, { branchId: branch.branchId });
-      if (!events.length) continue;
-      for (const candidate of Object.values(projectEvents(events).goals)) {
+    const branches = currentBranches ??
+      await new ProjectionService(this.storage).currentBranches();
+    for (const branch of branches) {
+      for (const candidate of Object.values(branch.state.goals)) {
         if (seen.has(candidate.id)) continue;
         seen.add(candidate.id);
         const goal = await this.#recursive.getGoal(candidate.id);
