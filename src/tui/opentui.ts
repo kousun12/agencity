@@ -42,6 +42,7 @@ import {
   formatTerminalWorkspaceAgentRow,
   type TerminalFamilyChildView,
   type TerminalFamilyRefreshState,
+  type TerminalLearningDockView,
   type TerminalPresentation,
   type TerminalScreenView,
 } from "./view-model.ts";
@@ -364,7 +365,7 @@ function paletteText(query: string): string {
     "COMMANDS",
     ...matches.map(command => `${command.usage}\n  ${command.summary}`),
     "",
-    "Ctrl-P commands · Ctrl-O latest activity · Ctrl-L all activity · PgUp/PgDn scroll · Ctrl-C stop/detach · Ctrl-D detach · Esc close",
+    "Ctrl-P commands · Ctrl-O latest activity · Ctrl-L all activity · Ctrl-Y learning · PgUp/PgDn scroll · Ctrl-C stop/detach · Ctrl-D detach · Esc close",
   ].join("\n");
 }
 
@@ -523,6 +524,38 @@ function noticeText(notice: { text: string; tone: "normal" | "success" | "warnin
   return `${marker} ${notice.text}`;
 }
 
+export function learningDockLines(
+  learning: TerminalLearningDockView,
+  expanded: boolean,
+  width: number,
+): string[] {
+  const latest = learning.items.at(-1);
+  if (!latest) return [];
+  const maximum = Math.max(1, width);
+  const refresh = learning.refresh === "stale" || learning.refresh === "unavailable"
+    ? ` · ${learning.refresh}`
+    : "";
+  if (!expanded) {
+    const prior = learning.items.length > 1
+      ? ` · ${learning.items.length} updates`
+      : "";
+    return [truncateFamilyText(
+      `▸ LEARNING · ${latest.status} · ${latest.result}${prior}${refresh} · Ctrl-Y expand`,
+      maximum,
+    )];
+  }
+  const count = learning.items.length;
+  return [
+    `▾ LEARNING · ${count} retained update${count === 1 ? "" : "s"}${refresh} · Ctrl-Y collapse`,
+    `Request  ${latest.request}`,
+    `Status   ${latest.status}`,
+    `Result   ${latest.result}`,
+    ...(latest.reason ? [`Reason   ${latest.reason}`] : []),
+    ...(latest.guidance ? [`Next     ${latest.guidance}`] : []),
+    ...(count > 1 ? [`History  ${count} retained updates · /refine history shows all`] : []),
+  ].map(line => truncateFamilyText(line, maximum));
+}
+
 export interface OpenTuiController {
   readonly presentation: TerminalPresentation;
   readonly detached: boolean;
@@ -576,6 +609,9 @@ export class OpenTuiApp {
   readonly #details: ScrollBoxRenderable;
   readonly #noticeText: TextRenderable;
   readonly #detailsText: TextRenderable;
+  readonly #learningDockHost: BoxRenderable;
+  readonly #learningDock: BoxRenderable;
+  readonly #learningDockText: TextRenderable;
   readonly #composerBox: BoxRenderable;
   readonly #composerContent: BoxRenderable;
   readonly #composerPrompt: TextRenderable;
@@ -608,6 +644,7 @@ export class OpenTuiApp {
   #closed = false;
   #activeOperation: Promise<void> | null = null;
   #secretBuffer = "";
+  #learningExpanded = false;
   #familyFocus: "composer" | "summary" | "browser" = "composer";
   #familySelectedKey: string | null = null;
 
@@ -675,6 +712,36 @@ export class OpenTuiApp {
       height: "auto",
       fg: TERMINAL_THEME.muted,
       wrapMode: "word",
+      selectable: true,
+    });
+    this.#learningDockHost = new BoxRenderable(renderer, {
+      id: "agencity-learning-dock-host",
+      width: "100%",
+      height: 0,
+      flexDirection: "row",
+      justifyContent: "center",
+      flexShrink: 0,
+      backgroundColor: TERMINAL_THEME.background,
+      visible: false,
+    });
+    this.#learningDock = new BoxRenderable(renderer, {
+      id: "agencity-learning-dock",
+      width: 80,
+      height: 3,
+      paddingX: 1,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: TERMINAL_THEME.provisionalDim,
+      backgroundColor: TERMINAL_THEME.raised,
+    });
+    this.#learningDockText = new TextRenderable(renderer, {
+      id: "agencity-learning-dock-text",
+      width: "100%",
+      height: 1,
+      fg: TERMINAL_THEME.provisionalDim,
+      bg: TERMINAL_THEME.raised,
+      wrapMode: "none",
+      truncate: true,
       selectable: true,
     });
     this.#composerBox = new BoxRenderable(renderer, {
@@ -791,6 +858,8 @@ export class OpenTuiApp {
     this.#details.add(this.#detailsText);
     this.#main.add(this.#timeline);
     this.#main.add(this.#details);
+    this.#learningDock.add(this.#learningDockText);
+    this.#learningDockHost.add(this.#learningDock);
     this.#composerContent.add(this.#composerPrompt);
     this.#composerContent.add(this.#composer);
     this.#composerBox.add(this.#composerContent);
@@ -798,6 +867,7 @@ export class OpenTuiApp {
     this.#footer.add(this.#footerRight);
     this.#root.add(this.#header);
     this.#root.add(this.#main);
+    this.#root.add(this.#learningDockHost);
     this.#root.add(this.#composerBox);
     this.#root.add(this.#familySummary);
     this.#root.add(this.#footer);
@@ -1330,6 +1400,18 @@ export class OpenTuiApp {
       key.preventDefault();
       key.stopPropagation();
       this.requestExit();
+      return;
+    }
+    if (
+      key.ctrl
+      && key.name === "y"
+      && !this.#view.workspaceAgents.open
+      && this.#view.learning.items.length > 0
+    ) {
+      key.preventDefault();
+      key.stopPropagation();
+      this.#learningExpanded = !this.#learningExpanded;
+      this.#render();
       return;
     }
     if (key.ctrl && key.name === "l") {
@@ -1935,8 +2017,33 @@ export class OpenTuiApp {
     const workspaceAgentsActive = this.#view.workspaceAgents.open;
     const activeInspector = this.#activeInspector();
     const composerContentRows = terminalComposerContentRows(this.#composerValue(), layout.mode);
+    const learningVisible = !activeInspector
+      && !workspaceAgentsActive
+      && layout.mode !== "minimum"
+      && width >= 20
+      && this.#view.learning.items.length > 0;
+    const learningExpanded = learningVisible
+      && layout.mode === "normal"
+      && this.#learningExpanded;
+    const learningDockWidth = Math.max(
+      1,
+      Math.min(width - 2, 92, Math.max(28, Math.round(width * 0.82))),
+    );
+    const learningLines = learningVisible
+      ? learningDockLines(
+          this.#view.learning,
+          learningExpanded,
+          Math.max(1, learningDockWidth - 4),
+        )
+      : [];
     this.#header.height = layout.headerRows;
     this.#main.minHeight = 1;
+    this.#learningDockHost.visible = learningVisible;
+    this.#learningDockHost.height = learningVisible ? learningLines.length + 2 : 0;
+    this.#learningDock.width = learningDockWidth;
+    this.#learningDock.height = learningVisible ? learningLines.length + 2 : 0;
+    this.#learningDockText.height = Math.max(1, learningLines.length);
+    this.#learningDockText.content = learningLines.join("\n");
     this.#composerBox.height = layout.composerRows + composerContentRows - 1;
     this.#composerBox.paddingX = terminalComposerPaddingX(width);
     this.#composerBox.paddingTop = layout.composerPaddingTop;

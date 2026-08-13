@@ -13,6 +13,7 @@ export const TERMINAL_THEME = {
   warning: "#d29922",
   danger: "#f85149",
   provisional: "#a371f7",
+  provisionalDim: "#7350a6",
   codeBackground: "#11161d",
   selectionBackground: "#264f78",
   keyword: "#79c0ff",

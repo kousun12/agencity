@@ -72,6 +72,15 @@ export interface TerminalRefinementSummary {
   readonly changed: boolean;
 }
 
+export interface TerminalLearningDockItem extends TerminalRefinementSummary {
+  readonly id: string;
+}
+
+export interface TerminalLearningDockView {
+  readonly items: readonly TerminalLearningDockItem[];
+  readonly refresh: TerminalRefinementRefreshState;
+}
+
 export interface TerminalStepView {
   readonly id: string;
   readonly ordinal: number;
@@ -176,6 +185,7 @@ export interface TerminalScreenView {
   readonly historicalCursor: string | null;
   readonly ancestry: readonly string[];
   readonly conversation: readonly TerminalConversationItem[];
+  readonly learning: TerminalLearningDockView;
   readonly runs: readonly TerminalRunView[];
   readonly familyChildren: readonly TerminalFamilyChildView[];
   readonly familyParent: FamilyAgentRecord | null;
@@ -710,6 +720,22 @@ export function retainedRefinementConversation(
   return items;
 }
 
+function terminalLearningDock(
+  records: readonly RefinementReviewRecord[],
+  refresh: TerminalRefinementRefreshState,
+  historicalCursor: string | null,
+): TerminalLearningDockView {
+  return {
+    items: historicalCursor === null
+      ? records.slice(-8).map(record => ({
+          id: record.reviewId,
+          ...summarizeTerminalRefinement(record),
+        }))
+      : [],
+    refresh,
+  };
+}
+
 function stepView(state: AgentState, run: AgentRunState, ordinal: number): TerminalStepView | null {
   const step = run.steps[ordinal]!;
   const action = step.action;
@@ -829,6 +855,11 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
         ? retainedRefinementConversation(presentation.refinementReviews, presentation.refinementRefresh)
         : []),
     ].slice(-24),
+    learning: terminalLearningDock(
+      presentation.refinementReviews,
+      presentation.refinementRefresh,
+      presentation.historicalCursor,
+    ),
     runs,
     familyChildren,
     familyParent: presentation.family.parent,

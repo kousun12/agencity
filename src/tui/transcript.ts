@@ -232,13 +232,16 @@ export class TerminalTranscript {
   reconcile(view: TerminalScreenView, expandedRunIds: ReadonlySet<string>): void {
     const desired: TranscriptBlock[] = [];
     const runs = view.runs.slice(-6);
+    const conversation = view.conversation.filter(message =>
+      !message.id.startsWith("refinement-review:")
+    );
     const latestExpandableRunId = [...runs].reverse().find(run => run.steps.length > 0)?.id ?? null;
     const completedRunIds = runs
       .filter(run => !run.active && run.steps.length > 0)
       .map(run => run.id);
     const allCompletedExpanded = completedRunIds.length > 0
       && completedRunIds.every(runId => expandedRunIds.has(runId));
-    const visibleMessageIds = new Set(view.conversation.map(message => message.id));
+    const visibleMessageIds = new Set(conversation.map(message => message.id));
     const runsByTaskMessage = new Map(runs.map(run => [run.taskMessageId, run]));
     const runsByFinalMessage = new Map(
       runs
@@ -264,7 +267,7 @@ export class TerminalTranscript {
       placedRunIds.add(run.id);
     };
 
-    for (const message of view.conversation) {
+    for (const message of conversation) {
       const finalRun = runsByFinalMessage.get(message.id);
       if (finalRun && !visibleMessageIds.has(finalRun.taskMessageId)) appendRun(finalRun, false);
 

@@ -342,7 +342,8 @@ describe("FU-005 protocol-backed terminal UI", () => {
     });
     const first = new TerminalUI(client, { interactive: false, manageSignals: false });
     await first.attach(session.sessionId, session.branchId, false);
-    const firstResult = buildTerminalScreen(first.presentation).conversation.at(-1);
+    const firstScreen = buildTerminalScreen(first.presentation);
+    const firstResult = firstScreen.conversation.at(-1);
     expect(firstResult).toMatchObject({
       id: "refinement-review:review-visible",
       role: "runtime",
@@ -351,6 +352,18 @@ describe("FU-005 protocol-backed terminal UI", () => {
     expect(firstResult?.content).toContain("**Status:** No change");
     expect(firstResult?.content).toContain("No behavioral harness artifact changed.");
     expect(firstResult?.content).toContain("**Reason:** This needs ordinary repository implementation.");
+    expect(firstScreen.learning).toEqual({
+      refresh: "current",
+      items: [{
+        id: "review-visible",
+        request: "Make HTML editing more robust",
+        status: "No change",
+        result: "No behavioral harness artifact changed.",
+        reason: "This needs ordinary repository implementation.",
+        guidance: "Refinement updates memory, prompt notes, tested skills, or subagent specifications. Submit code, repository, or runtime implementation as a normal task.",
+        changed: false,
+      }],
+    });
     await first.detach(false);
 
     const reopened = new TerminalUI(client, { interactive: false, manageSignals: false });

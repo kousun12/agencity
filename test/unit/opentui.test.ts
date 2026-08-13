@@ -372,10 +372,29 @@ describe("OpenTUI interactive terminal", () => {
     let interruptCalls = 0;
     const executedLines: string[] = [];
     const slowCommand = new Promise<void>(resolve => { releaseSlowCommand = resolve; });
+    const learningReview = {
+      reviewId: "review-learning-dock",
+      mode: "automatic",
+      triggerKind: "repeated_cell_failure",
+      instructions: null,
+      status: "candidate",
+      governedStatus: "applied",
+      governedResult: {
+        reason: "Approved after application-time revalidation.",
+        appliedVersionIds: ["version-learning-dock"],
+      },
+      reason: null,
+    } as any;
+    const withLearningReview = (presentation: typeof controller.presentation) => ({
+      ...presentation,
+      refinementReviews: [learningReview],
+      refinementRefresh: "current" as const,
+    });
     const appController: OpenTuiController = {
-      get presentation() { return controller.presentation; },
+      get presentation() { return withLearningReview(controller.presentation); },
       get detached() { return controller.detached; },
-      subscribePresentation: listener => controller.subscribePresentation(listener),
+      subscribePresentation: listener => controller.subscribePresentation(presentation =>
+        listener(withLearningReview(presentation))),
       execute: async line => {
         executedLines.push(line);
         if (line.startsWith("pasted first line")) return "continue";
@@ -412,7 +431,23 @@ describe("OpenTUI interactive terminal", () => {
       expect(frame).not.toContain("RECOVERY");
       const initialLines = frame.split("\n");
       const composerLine = initialLines.findIndex(line => line.includes("› Ask Agencity"));
-      expect(initialLines[composerLine - 1]?.trim()).toBe("");
+      const learningLine = initialLines.findIndex(line => line.includes("LEARNING"));
+      expect(learningLine).toBeGreaterThanOrEqual(0);
+      expect(initialLines[learningLine]).toContain("Applied");
+      expect(initialLines[learningLine]).toContain("1 behavioral harness artifact");
+      expect(initialLines[learningLine]).toContain("Ctrl-Y expand");
+      expect(initialLines[learningLine]!.search(/\S/)).toBeGreaterThan(initialLines[composerLine]!.search(/\S/));
+      expect(frame).not.toContain("Approved after application-time revalidation.");
+      setup.mockInput.pressKey("y", { ctrl: true });
+      frame = await setup.waitForFrame(value =>
+        value.includes("Ctrl-Y collapse")
+        && value.includes("Request Automatic repeated cell failure review")
+        && value.includes("Approved after application-time revalidation."));
+      expect(frame).toContain("Status Applied");
+      setup.mockInput.pressKey("y", { ctrl: true });
+      frame = await setup.waitForFrame(value =>
+        value.includes("Ctrl-Y expand")
+        && !value.includes("Approved after application-time revalidation."));
       expect(initialLines[composerLine + 1]?.trim()).toBe("");
       const composer = setup.renderer.root.findDescendantById("agencity-composer") as TextareaRenderable;
 
@@ -1435,6 +1470,10 @@ describe("OpenTUI interactive terminal", () => {
           content: "# Result\n\nA **structured** answer.\n\n```typescript\nconst value = 42;\n```",
         },
       ],
+      learning: {
+        items: [],
+        refresh: "current",
+      },
       runs: [{
         id: "run-1",
         task: "Inspect retained output",
