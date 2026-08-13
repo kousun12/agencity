@@ -27,7 +27,12 @@ import {
   type StartAgentRunInput,
   type TextModelResponse,
 } from "../../src/index.ts";
-import { consumeRequiredToolStream, ModelProviderResponseFailureError, ModelResponseGuard } from "../../src/executors/model-response.ts";
+import {
+  consumeRequiredToolStream,
+  formalOutputFromAgentAction,
+  ModelProviderResponseFailureError,
+  ModelResponseGuard,
+} from "../../src/executors/model-response.ts";
 import { FIXTURE_EFFECTIVE_SYSTEM_PROMPT, fixturePromptProvenanceForPin, makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -49,6 +54,135 @@ class RecordingActions extends ScriptedAgentActionProvider {
     this.contexts.push(context);
     this.calls++;
     return super.complete(context, configuration, signal);
+  }
+}
+
+class ContextSensitiveActions implements ModelProvider {
+  readonly name = "context-sensitive-actions";
+  readonly capabilities = {
+    streaming: false,
+    reasoningControl: "none",
+    requiredToolSet: {
+      status: "provider-strict",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "provider-disabled",
+      streaming: true,
+      adapter: "agencity.context-sensitive.fixture.v1",
+    },
+    contextWindowTokens: 128_000,
+    contextCapacitySource: "model-catalog",
+  } as const;
+  readonly contexts: JsonValue[] = [];
+  readonly decisions: AgentAction[] = [];
+  calls = 0;
+
+  async complete(): Promise<TextModelResponse> {
+    throw new Error("Context-sensitive fixture requires formal streaming");
+  }
+
+  async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    this.calls++;
+    this.contexts.push(JSON.parse(JSON.stringify(context)) as JsonValue);
+    const run = this.#runFromProviderMessages(context);
+    const selected = this.#decide(run);
+    this.decisions.push(selected);
+    return formalOutputFromAgentAction({
+      action: selected,
+      dispatch,
+      providerToolCallId: `context-decision-${this.calls}`,
+      provider: this.name,
+      adapter: this.capabilities.requiredToolSet.adapter,
+      usage: {
+        inputTokens: Math.ceil(JSON.stringify(context).length / 4),
+        outputTokens: Math.ceil(JSON.stringify(selected).length / 4),
+        costUsd: 0,
+      },
+    });
+  }
+
+  #runFromProviderMessages(context: JsonValue): Record<string, JsonValue> {
+    if (!context || typeof context !== "object" || Array.isArray(context) ||
+        !Array.isArray(context.messages)) {
+      throw new Error("Context-sensitive fixture requires normalized provider messages");
+    }
+    const message = [...context.messages].reverse().find((item) =>
+      item && typeof item === "object" && !Array.isArray(item) &&
+      item.role === "user" && typeof item.content === "string" &&
+      item.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
+    if (!message || typeof message !== "object" || Array.isArray(message) ||
+        typeof message.content !== "string") {
+      throw new Error("Context-sensitive fixture did not receive the durable run step");
+    }
+    const envelope = JSON.parse(
+      message.content.slice("AGENCITY DURABLE RUN STEP\n".length),
+    ) as JsonValue;
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) ||
+        !envelope.run || typeof envelope.run !== "object" ||
+        Array.isArray(envelope.run)) {
+      throw new Error("Context-sensitive fixture received a malformed run envelope");
+    }
+    return envelope.run as Record<string, JsonValue>;
+  }
+
+  #decide(run: Record<string, JsonValue>): AgentAction {
+    if (run.task !== "Build the artifact-backed answer in two durable cells.") {
+      throw new Error(`Context-sensitive fixture received an unexpected task: ${run.task}`);
+    }
+    const observations = Array.isArray(run.observations)
+      ? run.observations.filter((item): item is Record<string, JsonValue> =>
+          Boolean(item && typeof item === "object" && !Array.isArray(item)))
+      : [];
+    const committed = [...observations].reverse().find((item) =>
+      item.type === "CellCommitted");
+    if (!committed) {
+      return action({
+        type: "typescript",
+        code: `
+          // Purpose: prepare one durable artifact-backed input.
+          const write = await tools.writeFile("context-stage.txt", "prepared-once");
+          const artifact = await artifacts.put("context-sensitive-payload", "text/plain");
+          return { phase: "prepared", artifact, writeSha256: write.sha256 };
+        `,
+      });
+    }
+    const payload = committed.payload && typeof committed.payload === "object" &&
+      !Array.isArray(committed.payload)
+      ? committed.payload as Record<string, JsonValue>
+      : {};
+    const result = payload.result && typeof payload.result === "object" &&
+      !Array.isArray(payload.result)
+      ? payload.result as Record<string, JsonValue>
+      : {};
+    if (result.phase === "verified") {
+      return action({
+        type: "final",
+        content: "Verified the artifact-backed answer from durable context.",
+      });
+    }
+    const artifact = result.artifact && typeof result.artifact === "object" &&
+      !Array.isArray(result.artifact)
+      ? result.artifact as Record<string, JsonValue>
+      : {};
+    if (result.phase !== "prepared" || typeof artifact.artifactId !== "string" ||
+        typeof artifact.size !== "number") {
+      throw new Error("Reduced provider input omitted the prepared artifact reference");
+    }
+    return action({
+      type: "typescript",
+      code: `
+        // Purpose: verify the retained artifact and complete the requested file.
+        const range = await artifacts.readRange(${JSON.stringify(artifact.artifactId)}, 0, ${artifact.size});
+        const content = new TextDecoder().decode(range.value.bytes);
+        if (content !== "context-sensitive-payload") throw new Error("artifact content mismatch");
+        const write = await tools.writeFile("context-answer.txt", content);
+        return { phase: "verified", artifactId: ${JSON.stringify(artifact.artifactId)}, writeSha256: write.sha256 };
+      `,
+    });
   }
 }
 
@@ -305,7 +439,146 @@ function crashAfterGoalCheck(supervisor: Supervisor): () => void {
   return () => Object.defineProperty(supervisor.storage, "appendEvents", { configurable: true, value: appendEvents });
 }
 
+async function runContextSensitiveScenario(
+  recoverAfterFirstCell: boolean,
+): Promise<{
+  readonly nextActionSource: string;
+  readonly providerCalls: number;
+  readonly cellCount: number;
+  readonly fileEffectCount: number;
+  readonly modelEffectCount: number;
+}> {
+  const temp = await makeTempRuntime(
+    recoverAfterFirstCell
+      ? "agencity-context-decision-recovery-"
+      : "agencity-context-decision-normal-",
+  );
+  temps.push(temp);
+  const provider = new ContextSensitiveActions();
+  let supervisor = await Supervisor.open({
+    databaseUrl: temp.databaseUrl,
+    artifactDirectory: temp.artifactDirectory,
+    workspaceRoot: temp.workspaceRoot,
+    restartConsoleAfterCell: true,
+    modelProviders: [provider],
+    recover: false,
+  });
+  const session = await supervisor.createSession({
+    workspaceId: "context-decision",
+    model: { provider: provider.name, model: "context-v1" },
+  });
+  if (recoverAfterFirstCell) {
+    let interrupted = false;
+    supervisor.runs.setBoundaryObserver(async () => {
+      if (interrupted) return;
+      const events = await supervisor.storage.loadEvents(session.sessionId, {
+        branchId: session.branchId,
+      });
+      if (events.filter((item) => item.type === "CellCommitted").length === 1) {
+        interrupted = true;
+        throw new Error("simulated service loss after CellCommitted");
+      }
+    });
+    await expect(supervisor.runs.start(session.sessionId, session.branchId, {
+      task: "Build the artifact-backed answer in two durable cells.",
+      requestKey: "context-sensitive-recovery",
+    })).rejects.toThrow("simulated service loss after CellCommitted");
+    expect(provider.calls).toBe(1);
+    const interruptedEvents = await supervisor.storage.loadEvents(
+      session.sessionId,
+      { branchId: session.branchId },
+    );
+    expect(interruptedEvents.filter((item) => item.type === "CellCommitted"))
+      .toHaveLength(1);
+    await supervisor.close();
+    supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      restartConsoleAfterCell: true,
+      modelProviders: [provider],
+      recover: true,
+    });
+  } else {
+    await expect(supervisor.runs.start(session.sessionId, session.branchId, {
+      task: "Build the artifact-backed answer in two durable cells.",
+      requestKey: "context-sensitive-normal",
+    })).resolves.toMatchObject({
+      status: "succeeded",
+      steps: 3,
+      final: "Verified the artifact-backed answer from durable context.",
+    });
+  }
+
+  const history = await supervisor.storage.loadEvents(session.sessionId, {
+    branchId: session.branchId,
+  });
+  const state = projectEvents(history);
+  const run = Object.values(state.agentRuns)[0]!;
+  expect(run).toMatchObject({
+    status: "succeeded",
+    result: {
+      kind: "text",
+      value: "Verified the artifact-backed answer from durable context.",
+    },
+  });
+  expect(provider.calls).toBe(3);
+  expect(provider.contexts).toHaveLength(3);
+  expect(provider.contexts.every((context) =>
+    context && typeof context === "object" && !Array.isArray(context) &&
+    Array.isArray(context.messages))).toBe(true);
+  expect(provider.decisions.map((item) => item.type))
+    .toEqual(["typescript", "typescript", "final"]);
+  expect(await Bun.file(`${temp.workspaceRoot}/context-stage.txt`).text())
+    .toBe("prepared-once");
+  expect(await Bun.file(`${temp.workspaceRoot}/context-answer.txt`).text())
+    .toBe("context-sensitive-payload");
+  expect(history.filter((item) => item.type === "AgentRunStepStarted"))
+    .toHaveLength(3);
+  expect(history.filter((item) => item.type === "AgentRunActionCommitted"))
+    .toHaveLength(3);
+  expect(history.filter((item) => item.type === "CellProposed")).toHaveLength(2);
+  expect(history.filter((item) => item.type === "CellCommitted")).toHaveLength(2);
+  const requestedEffects = history.filter((item) => item.type === "EffectRequested")
+    .map((item) => item.payload as EventPayloads["EffectRequested"]);
+  const fileEffects = requestedEffects.filter((item) => item.executor === "file");
+  const modelEffects = requestedEffects.filter((item) => item.executor === "model");
+  expect(fileEffects).toHaveLength(2);
+  expect(modelEffects).toHaveLength(3);
+  const nextAction = provider.decisions[1];
+  if (nextAction?.type !== "typescript") {
+    throw new Error("Context-sensitive fixture did not select its continuation cell");
+  }
+  const result = {
+    nextActionSource: nextAction.code,
+    providerCalls: provider.calls,
+    cellCount: history.filter((item) => item.type === "CellCommitted").length,
+    fileEffectCount: fileEffects.length,
+    modelEffectCount: modelEffects.length,
+  };
+  await supervisor.close();
+  return result;
+}
+
 describe("autonomous durable agent runs", () => {
+  test("derives the same next formal action from reduced provider input across a CellCommitted recovery boundary", async () => {
+    const normal = await runContextSensitiveScenario(false);
+    const recovered = await runContextSensitiveScenario(true);
+    expect(recovered.nextActionSource).toBe(normal.nextActionSource);
+    expect(normal).toMatchObject({
+      providerCalls: 3,
+      cellCount: 2,
+      fileEffectCount: 2,
+      modelEffectCount: 3,
+    });
+    expect(recovered).toMatchObject({
+      providerCalls: 3,
+      cellCount: 2,
+      fileEffectCount: 2,
+      modelEffectCount: 3,
+    });
+  });
+
   test("rejects a known unsupported root run before task, goal, run, model, or effect events", async () => {
     const temp = await makeTempRuntime("agencity-agent-unsupported-root-"); temps.push(temp);
     const provider = textOnlyProvider();

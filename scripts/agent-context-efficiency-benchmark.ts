@@ -212,6 +212,370 @@ async function largeShellEnvelope(): Promise<JsonValue> {
   }
 }
 
+const RUN_STEP_PREFIX = "AGENCITY DURABLE RUN STEP\n";
+
+type FormalDecision = {
+  readonly tool: "bun_console" | "finish";
+  readonly reason: "initial" | "inspect-artifact" | "repair-failure" | "verified";
+  readonly artifact?: {
+    readonly artifactId: string;
+    readonly digest: string;
+    readonly size: number;
+  };
+};
+
+function record(value: unknown): Record<string, JsonValue> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, JsonValue>
+    : {};
+}
+
+function providerStep(
+  candidate: ReturnType<typeof buildProviderInputCandidate>,
+): Record<string, JsonValue> {
+  const message = [...candidate.messages].reverse().find((item) =>
+    item.role === "user" && item.content.startsWith(RUN_STEP_PREFIX));
+  if (!message) throw new Error("Provider input omitted the durable run step");
+  const parsed = JSON.parse(message.content.slice(RUN_STEP_PREFIX.length)) as JsonValue;
+  const step = record(parsed);
+  if (!step.run || typeof step.run !== "object" || Array.isArray(step.run)) {
+    throw new Error("Provider input durable run step is malformed");
+  }
+  return step;
+}
+
+function artifactReference(value: JsonValue): FormalDecision["artifact"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = artifactReference(item);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  const candidate = value as Record<string, JsonValue>;
+  if (typeof candidate.artifactId === "string" &&
+      typeof candidate.digest === "string" &&
+      typeof candidate.size === "number") {
+    return {
+      artifactId: candidate.artifactId,
+      digest: candidate.digest,
+      size: candidate.size,
+    };
+  }
+  for (const item of Object.values(candidate)) {
+    const found = artifactReference(item);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * This intentionally small contract decides only from the exact normalized
+ * provider messages. It fails if context reduction removes a fact required for
+ * the next formal action; it is not a model-quality simulation.
+ */
+function nextFormalAction(
+  candidate: ReturnType<typeof buildProviderInputCandidate>,
+): FormalDecision {
+  const run = record(providerStep(candidate).run);
+  const observations = Array.isArray(run.observations)
+    ? run.observations.map(record)
+    : [];
+  const failed = observations.some((observation) => {
+    const payload = record(observation.payload);
+    return observation.type === "CellFailed" ||
+      (observation.type === "EffectOutcomeRecorded" &&
+        payload.outcome === "failed");
+  });
+  if (failed) return { tool: "bun_console", reason: "repair-failure" };
+
+  const committed = [...observations].reverse().find((observation) =>
+    observation.type === "CellCommitted");
+  const result = record(record(committed?.payload).result);
+  if (result.phase === "verified") return { tool: "finish", reason: "verified" };
+  const artifact = artifactReference(result as JsonValue);
+  if (artifact) {
+    return { tool: "bun_console", reason: "inspect-artifact", artifact };
+  }
+  return { tool: "bun_console", reason: "initial" };
+}
+
+function semanticCellObservations(input: {
+  readonly step: number;
+  readonly terminal: "CellCommitted" | "CellFailed";
+  readonly result?: JsonValue;
+  readonly error?: string;
+  readonly effect?: {
+    readonly executor: string;
+    readonly operation: string;
+    readonly outcome: "succeeded" | "failed";
+    readonly output?: JsonValue;
+    readonly error?: string;
+  };
+}): {
+  readonly events: AgentEvent[];
+  readonly derived: ReturnType<typeof deriveAgentProviderObservations>;
+} {
+  const actionId = `action-${input.step}`;
+  const cellId = `agent-run-cell-${actionId}`;
+  const events: AgentEvent[] = [];
+  const selectedIds: string[] = [];
+  if (input.effect) {
+    const effectId = `semantic-effect-${input.step}`;
+    events.push(
+      event(`semantic-request-${input.step}`, "EffectRequested", {
+        effectId,
+        executor: input.effect.executor,
+        operation: input.effect.operation,
+        input: { target: `semantic-step-${input.step}` },
+        origin: { kind: "cell", cellId },
+        idempotencyKey: `semantic-effect-${input.step}`,
+        idempotent: false,
+      }, events.length + 1),
+      event(`semantic-attempt-${input.step}`, "EffectAttemptStarted", {
+        effectId,
+        attempt: 1,
+      }, events.length + 2),
+      event(`semantic-outcome-${input.step}`, "EffectOutcomeRecorded", {
+        effectId,
+        attempt: 1,
+        outcome: input.effect.outcome,
+        ...(input.effect.output === undefined ? {} : { output: input.effect.output }),
+        ...(input.effect.error === undefined ? {} : { error: input.effect.error }),
+        observedAt: "2026-08-10T00:00:00.000Z",
+      }, events.length + 3),
+    );
+    selectedIds.push(`semantic-outcome-${input.step}`);
+  }
+  const terminalId = `semantic-cell-${input.step}`;
+  events.push(event(
+    terminalId,
+    input.terminal,
+    input.terminal === "CellCommitted"
+      ? {
+          cellId,
+          result: input.result ?? null,
+          logs: [],
+          durationMs: 1,
+          exports: [],
+        }
+      : {
+          cellId,
+          error: input.error ?? "semantic fixture failed",
+          logs: [],
+          durationMs: 1,
+          exports: [],
+        },
+    events.length + 1,
+  ));
+  selectedIds.push(terminalId);
+  return {
+    events,
+    derived: deriveAgentProviderObservations(events, selectedIds),
+  };
+}
+
+function semanticCandidate(input: {
+  readonly run: AgentRunState;
+  readonly step: number;
+  readonly observations: ReturnType<typeof deriveAgentProviderObservations>;
+  readonly recentActivity?: readonly JsonValue[];
+}): ReturnType<typeof buildProviderInputCandidate> {
+  const context = agentProviderContext(
+    {
+      activeRuns: [boundedActiveRunProjection(input.run)],
+      messages: [{ role: "user", content: TASK }],
+      recentActivity: [...(input.recentActivity ?? [])],
+    },
+    input.run,
+    input.step,
+    input.observations,
+    modelDispatch,
+    SYSTEM_PROMPT,
+  );
+  return buildProviderInputCandidate({
+    context,
+    modelDispatch,
+    capacity,
+  });
+}
+
+function verifyDecisionContract(shellOutput: JsonValue): {
+  readonly protocol: string;
+  readonly checks: readonly string[];
+  readonly scenarios: readonly Record<string, JsonValue>[];
+  readonly passed: true;
+  readonly limitation: string;
+} {
+  const checks: string[] = [];
+  const require = (condition: unknown, label: string): void => {
+    if (!condition) throw new Error(`Semantic preservation check failed: ${label}`);
+    checks.push(label);
+  };
+  const requiredTools = ["bun_console", "finish"];
+
+  const prepareSource =
+    "// Purpose: inspect the retained spill before deciding completion.\nreturn { prepared: true };";
+  const continuationRun = benchmarkRun([prepareSource]);
+  const continuationObservations = semanticCellObservations({
+    step: 1,
+    terminal: "CellCommitted",
+    result: shellOutput,
+    effect: {
+      executor: "shell",
+      operation: "run",
+      outcome: "succeeded",
+      output: shellOutput,
+    },
+  });
+  const continuation = semanticCandidate({
+    run: continuationRun,
+    step: 2,
+    observations: continuationObservations.derived,
+  });
+  const continuationStep = record(providerStep(continuation).run);
+  const continuationTrajectory = Array.isArray(continuationStep.recentTrajectory)
+    ? continuationStep.recentTrajectory.map(record)
+    : [];
+  const continuationObservation = (Array.isArray(continuationStep.observations)
+    ? continuationStep.observations.map(record)
+    : []).find((item) => item.type === "CellCommitted");
+  const continuationPayload = record(continuationObservation?.payload);
+  const continuationManifest = Array.isArray(continuationPayload.effectManifest)
+    ? continuationPayload.effectManifest.map(record)
+    : [];
+  const continuationDecision = nextFormalAction(continuation);
+  require(continuation.tools.map((tool) => tool.name).join(",") === requiredTools.join(","),
+    "formal tool set is bun_console then finish");
+  require(continuationStep.runId === "benchmark-run" &&
+    continuationStep.task === TASK && continuationStep.stepOrdinal === 2,
+  "continuation preserves run, task, and step identity");
+  require(continuationTrajectory.map((item) => item.ordinal).join(",") === "1",
+    "continuation preserves trajectory order");
+  require(typeof record(record(continuationTrajectory[0]?.action).source).sha256 === "string" &&
+    record(continuationTrajectory[0]?.outcome).status === "committed",
+  "continuation preserves compact action and outcome facts");
+  require(continuationManifest.length === 1 &&
+    continuationManifest[0]?.executor === "shell" &&
+    continuationManifest[0]?.operation === "run" &&
+    continuationManifest[0]?.terminalStatus === "succeeded" &&
+    continuationManifest[0]?.attemptCount === 1,
+  "cell owns the successful effect manifest");
+  require(!(Array.isArray(continuationStep.observations)
+    ? continuationStep.observations.map(record)
+    : []).some((item) => item.type === "EffectOutcomeRecorded"),
+  "successful effect output is not duplicated");
+  require(continuationDecision.tool === "bun_console" &&
+    continuationDecision.reason === "inspect-artifact" &&
+    continuationDecision.artifact?.artifactId ===
+      record(record(shellOutput).artifact).artifactId,
+  "artifact reference selects bun_console continuation");
+
+  const failedSource =
+    "// Purpose: repair the exact source location reported by validation.\nthrow new Error('fixture');";
+  const recoveryRun = benchmarkRun([prepareSource, failedSource]);
+  const failedError = "src/page.ts:42:7 validation failed";
+  const failureObservations = semanticCellObservations({
+    step: 2,
+    terminal: "CellFailed",
+    error: failedError,
+    effect: {
+      executor: "file",
+      operation: "read",
+      outcome: "failed",
+      error: failedError,
+    },
+  });
+  const recovery = semanticCandidate({
+    run: recoveryRun,
+    step: 3,
+    observations: failureObservations.derived,
+    recentActivity: continuationObservations.derived as unknown as JsonValue[],
+  });
+  const recoveryStep = record(providerStep(recovery).run);
+  const recoveryTrajectory = Array.isArray(recoveryStep.recentTrajectory)
+    ? recoveryStep.recentTrajectory.map(record)
+    : [];
+  const recoveryObservations = Array.isArray(recoveryStep.observations)
+    ? recoveryStep.observations.map(record)
+    : [];
+  const failedEffect = recoveryObservations.find((item) =>
+    item.type === "EffectOutcomeRecorded");
+  const recoveryDecision = nextFormalAction(recovery);
+  require(recoveryStep.runId === "benchmark-run" &&
+    recoveryStep.task === TASK && recoveryStep.stepOrdinal === 3,
+  "recovery preserves run, task, and step identity");
+  require(recoveryTrajectory.map((item) => item.ordinal).join(",") === "1,2",
+    "recovery preserves action order");
+  require(typeof record(record(recoveryTrajectory[0]?.action).source).sha256 === "string" &&
+    Array.isArray(record(recoveryTrajectory[0]?.outcome).effects),
+  "recovery preserves prior compact action, result, and effect facts");
+  require(String(record(record(recoveryTrajectory[1]?.action).source).text)
+    .includes("repair the exact source location") &&
+    record(recoveryTrajectory[1]?.outcome).status === "failed",
+  "recovery preserves latest failed action and outcome");
+  require(String(record(failedEffect?.payload).error).includes("src/page.ts:42:7") &&
+    String(record(failedEffect?.payload).guidance).includes("adjust the next action"),
+  "recovery preserves actionable failure and effect guidance");
+  require(String(recoveryStep.instruction).includes("small surrounding range") &&
+    String(recoveryStep.instruction).includes("Call bun_console"),
+  "recovery preserves bounded repair guidance");
+  require(recoveryDecision.tool === "bun_console" &&
+    recoveryDecision.reason === "repair-failure",
+  "failure selects bun_console repair");
+
+  const completionRun = benchmarkRun([
+    "// Purpose: verify the artifact-backed result.\nreturn { phase: 'verified' };",
+  ]);
+  const completionObservations = semanticCellObservations({
+    step: 1,
+    terminal: "CellCommitted",
+    result: {
+      phase: "verified",
+      artifactId: continuationDecision.artifact!.artifactId,
+    },
+  });
+  const completion = semanticCandidate({
+    run: completionRun,
+    step: 2,
+    observations: completionObservations.derived,
+  });
+  const completionStep = record(providerStep(completion).run);
+  const completionDecision = nextFormalAction(completion);
+  require(completionStep.task === TASK && completionStep.stepOrdinal === 2,
+    "completion preserves task and step identity");
+  require(completionDecision.tool === "finish" &&
+    completionDecision.reason === "verified",
+  "verified evidence selects finish");
+
+  return {
+    protocol: "agencity.context-efficiency-decision-contract.v1",
+    checks,
+    scenarios: [
+      {
+        name: "artifact-backed-continuation",
+        expected: "bun_console",
+        actual: continuationDecision.tool,
+        artifactId: continuationDecision.artifact!.artifactId,
+      },
+      {
+        name: "failed-cell-recovery",
+        expected: "bun_console",
+        actual: recoveryDecision.tool,
+      },
+      {
+        name: "verified-completion",
+        expected: "finish",
+        actual: completionDecision.tool,
+      },
+    ],
+    passed: true,
+    limitation:
+      "Deterministic decision-contract equivalence is not live-model semantic equivalence.",
+  };
+}
+
 const modelDispatch = dispatch();
 const shellOutput = await largeShellEnvelope();
 const completedSources: string[] = [];
@@ -309,6 +673,7 @@ if (reductionPercent < 30) {
   );
 }
 
+const semanticPreservation = verifyDecisionContract(shellOutput);
 const spilled = shellOutput as Record<string, JsonValue>;
 const report = {
   protocol: "agencity.context-efficiency-benchmark.v1",
@@ -325,6 +690,7 @@ const report = {
     requiredReductionPercent: 30,
     passed: true,
   },
+  semanticPreservation,
   spill: {
     completeness: spilled.completeness,
     artifactBytes: (spilled.artifact as Record<string, JsonValue>).size,

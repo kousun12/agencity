@@ -689,7 +689,7 @@ The TypeScript SDK gives every session a durable family roster and plain-text me
 - A child replies to its unique parent without naming or spoofing the sender.
 - A sibling message resolves by stable name or ID and rejects ambiguous targets.
 - A model-facing send to a grandchild or unrelated root family is rejected with a typed reach error.
-- Queue delivery gives each message one FIFO run without blocking the sender; steer delivery enters an active run at its next durable boundary or remains retained context without waking an idle target.
+- Queue delivery gives each new non-legacy message one deterministic immutable run ID immediately and one FIFO run without blocking the sender. Sender-authorized result lookup is observation-only: it reports queued before admission, failed delivery without inventing a run, and the retained run result after admission. Steer and retained legacy follow-up messages expose no independent run result.
 - Restarting the supervisor after send, delivery, or acknowledgement preserves the exact next state without duplicate messages or turns.
 - Message size, rate, queue, cancellation, and unavailable-target behavior have deterministic tests.
 - The TUI can show sender relationship, message text, task/artifact links, and receipt state from committed events.
@@ -709,7 +709,7 @@ The TypeScript SDK gives every session a durable family roster and plain-text me
 ### Completion evidence
 
 - Commits: `4a82122`, `a22becf`, and Supervisor integration in `bbeddb1`.
-- Implementation: `sdk.agents` spawn/list/send/messages/acknowledge/cancel; `send` defaults to serial one-message/one-run `queue` behavior and accepts explicit non-waking `steer`; derived sender identity; nuclear-family authorization and human-name resolution; bounded durable receipts, context delivery, busy steering, retained same-child queued work, automatic replies, cancellation/recovery, protocol/TUI surfaces, and migration 009.
+- Implementation: `sdk.agents` spawn/list/send/messageResult/messages/acknowledge/cancel; `send` defaults to serial one-message/one-run `queue` behavior, returns a deterministic derived run ID for each new non-legacy queue message, and accepts explicit non-waking `steer`; result lookup is sender-authorized and observational across pre-admission queueing, delivery failure, retained run status, FIFO delivery, and restart; derived sender identity; nuclear-family authorization and human-name resolution; bounded durable receipts, context delivery, busy steering, retained same-child queued work, automatic replies, cancellation/recovery, protocol/TUI surfaces, and migration 009.
 - Verification: final suite passed 452 tests with 2 external skips before FU-014; family suite 14/14, agent-run suite 16/16, Slice 2 45/45. Independent review found legacy non-nuclear retained rows poisoning list and an admission-to-run crash gap; legacy rows now have rendering-only compatibility and `spawnRunnable` commits `AgentRunRequested` atomically with admission. Final adversarial re-review passed.
 - Remaining limitation: rejected unauthorized sends return typed errors without retaining the rejected payload, avoiding durable storage of untrusted message content.
 
@@ -785,7 +785,7 @@ The ergonomic `rlm` API is backed by the ordinary recursive-agent and outbox ser
 - Commit: `42982e4`.
 - Implementation: `rlm.start/startMany/get/result/cancel` over existing durable child tasks/sessions, bounded typed input references, policy-checked models, durable terminal outcomes, result artifacts, and migration `007_recursive_model_input_results.sql` for the rebuildable projection.
 - Verification: `test/integration/recursive-console.test.ts` plus the Slice 2 recursive/recovery suites; independent adversarial review reported 30/30 probes passing.
-- Remaining limitation: result waiting polls durable projection state; reference/result limits are fixed bounded runtime policy.
+- Remaining limitation: reference/result limits are fixed bounded runtime policy. Runtime result waiting uses the shared snapshot-plus-cursor terminal waiter and falls back to bounded polling only when relational notification capability is unavailable.
 
 ---
 

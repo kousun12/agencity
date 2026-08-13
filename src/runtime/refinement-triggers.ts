@@ -264,6 +264,8 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
   const repairChurnFailureByCellId = new Map<string, {
     readonly event: NormalizedRecord;
     readonly normalizedError: string;
+    /** Null means a retained CellFailed predates typed causality. */
+    readonly causalEffectOutcomeEventIds: ReadonlySet<string> | null;
   }>();
   const runByCellId = collectAgentRunCellOwners(localRecords);
   // Retain deduplication for consumed and pending cell evidence regardless of
@@ -277,6 +279,16 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
     if (!runId || cellId === null) continue;
     const normalizedError = normalizedErrorForDedupe(payload?.error, secrets);
     if (normalizedError === null) continue;
+    const causalEffectOutcomeEventIds =
+      hasOwn(payload, "causalEffectOutcomeEventIds")
+        ? new Set(
+            boundedUniqueIdList(
+              payload?.causalEffectOutcomeEventIds,
+              16,
+              false,
+            ) ?? [],
+          )
+        : null;
     const key = triggerKey("repeated_cell_failure", { runId });
     const consumedThrough = consumptions.get(key);
     const pending = nonterminalKeys.has(
@@ -284,7 +296,11 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
     );
     if (pending || (consumedThrough !== undefined &&
         compareCursor(record.cursor, consumedThrough) <= 0)) {
-      repairChurnFailureByCellId.set(cellId, { event: record, normalizedError });
+      repairChurnFailureByCellId.set(cellId, {
+        event: record,
+        normalizedError,
+        causalEffectOutcomeEventIds,
+      });
     }
   }
 
@@ -324,6 +340,9 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
           repairChurnFailureByCellId.set(item.cellId, {
             event: item.event,
             normalizedError: item.normalizedError,
+            causalEffectOutcomeEventIds: cellFailureCausalOutcomeIds(
+              item.event.payload,
+            ),
           });
         }
       }
@@ -375,10 +394,12 @@ export function scanRefinementTriggers(input: ScanRefinementTriggersInput): read
       const normalizedEffectError = normalizedRefinementError(error, secrets);
       if (repairChurnFailure &&
           compareCursor(record.cursor, repairChurnFailure.event.cursor) < 0 &&
-          cellErrorCausedByEffect(
-            repairChurnFailure.normalizedError,
-            normalizedEffectError,
-          )) {
+          (repairChurnFailure.causalEffectOutcomeEventIds === null
+            ? cellErrorCausedByEffect(
+                repairChurnFailure.normalizedError,
+                normalizedEffectError,
+              )
+            : repairChurnFailure.causalEffectOutcomeEventIds.has(record.id))) {
         continue;
       }
       const errorSignature = normalizedRefinementErrorSignature(error, secrets);
@@ -776,6 +797,28 @@ function normalizedErrorForDedupe(
   const bytes = utf8Bytes(value);
   if (bytes === 0 || bytes > MAX_REFINEMENT_TRIGGER_ERROR_BYTES) return null;
   return normalizedRefinementError(value, secrets) || null;
+}
+
+function hasOwn(
+  value: Record<string, unknown> | null,
+  property: string,
+): boolean {
+  return value !== null &&
+    Object.prototype.hasOwnProperty.call(value, property);
+}
+
+function cellFailureCausalOutcomeIds(
+  payloadValue: unknown,
+): ReadonlySet<string> | null {
+  const payload = asRecord(payloadValue);
+  if (!hasOwn(payload, "causalEffectOutcomeEventIds")) return null;
+  return new Set(
+    boundedUniqueIdList(
+      payload?.causalEffectOutcomeEventIds,
+      16,
+      false,
+    ) ?? [],
+  );
 }
 
 function cellErrorCausedByEffect(

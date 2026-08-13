@@ -22,6 +22,7 @@ import {
   type CellListOptions,
   type EventProvenance,
 } from "../console/index.ts";
+import { consoleRpcResponse } from "../console/process.ts";
 import { StreamingJsonStager } from "../console/json-staging.ts";
 import {
   CapabilityUnavailableError,
@@ -253,6 +254,7 @@ function cellHistory(events: readonly AgentEvent[]): CellHistoryWithCursor[] {
     let durationMs: number | null = null;
     let exports: string[] = [];
     let error: string | null = null;
+    let causalEffectOutcomeEventIds: string[] | undefined;
     if (terminal?.type === "CellCommitted") {
       status = "committed";
       const payload = terminal.payload as { result: JsonValue; logs: string[]; durationMs: number; exports: string[] };
@@ -262,10 +264,19 @@ function cellHistory(events: readonly AgentEvent[]): CellHistoryWithCursor[] {
       exports = payload.exports;
     } else if (terminal?.type === "CellFailed") {
       status = "failed";
-      const payload = terminal.payload as { error: string; logs: string[]; durationMs: number };
+      const payload = terminal.payload as {
+        error: string;
+        logs: string[];
+        durationMs: number;
+        causalEffectOutcomeEventIds?: string[];
+      };
       error = payload.error;
       logs = payload.logs;
       durationMs = payload.durationMs;
+      causalEffectOutcomeEventIds =
+        payload.causalEffectOutcomeEventIds === undefined
+          ? undefined
+          : [...payload.causalEffectOutcomeEventIds];
     } else if (terminal?.type === "CellAbandoned") {
       status = "abandoned";
       error = (terminal.payload as { reason: string }).reason;
@@ -284,6 +295,9 @@ function cellHistory(events: readonly AgentEvent[]): CellHistoryWithCursor[] {
         durationMs,
         exports: [...exports],
         error,
+        ...(causalEffectOutcomeEventIds === undefined
+          ? {}
+          : { causalEffectOutcomeEventIds }),
         provenance: {
           proposed: provenance(proposed),
           starts: starts.map(provenance),
@@ -1780,6 +1794,77 @@ export class Supervisor {
         assertOptionalPropertyType(input, "intentKey", "string", "Agent message intent key");
         return this.agents.sendMessage(sessionId, branchId, { ...input, intentKey: typeof input.intentKey === "string" ? input.intentKey : nextRpcKey(method) } as any);
       }
+      if (method === "agents.messageResult") {
+        const raw = args[0];
+        const mailboxMessageId = typeof raw === "string"
+          ? raw
+          : raw && typeof raw === "object" && !Array.isArray(raw) &&
+            typeof (raw as Record<string, unknown>).mailboxMessageId === "string"
+          ? String((raw as Record<string, unknown>).mailboxMessageId)
+          : "";
+        if (!mailboxMessageId) {
+          throw new ValidationError(
+            "agents.messageResult requires a mailbox message ID or retained message handle",
+          );
+        }
+        const options = optionalRecordArgument(
+          args[1],
+          "Agent message result options",
+        );
+        if (Object.keys(options).some((key) =>
+          key !== "wait" && key !== "timeoutMs"
+        )) {
+          throw new ValidationError(
+            "agents.messageResult options contain unknown fields",
+          );
+        }
+        if (options.wait !== undefined && typeof options.wait !== "boolean") {
+          throw new ValidationError("agents.messageResult wait must be boolean");
+        }
+        if (options.timeoutMs !== undefined &&
+            typeof options.timeoutMs !== "number") {
+          throw new ValidationError(
+            "agents.messageResult timeoutMs must be a number",
+          );
+        }
+        const resultOptions = {
+          ...(typeof options.timeoutMs === "number"
+            ? { timeoutMs: options.timeoutMs }
+            : {}),
+        };
+        if (options.wait !== true) {
+          return this.agents.messageResult(
+            sessionId,
+            branchId,
+            mailboxMessageId,
+            { wait: false, ...resultOptions },
+          );
+        }
+        const current = await this.agents.messageResult(
+          sessionId,
+          branchId,
+          mailboxMessageId,
+          { wait: false, ...resultOptions },
+        );
+        if (["succeeded", "blocked", "failed", "cancelled",
+          "budget_exceeded", "unknown"].includes(current.status)) {
+          return current;
+        }
+        const reservation = await this.console.reserveAwaited([{
+          sessionId: current.sessionId,
+          branchId: current.branchId,
+        }]);
+        try {
+          return await this.agents.messageResult(
+            sessionId,
+            branchId,
+            mailboxMessageId,
+            { wait: true, ...resultOptions },
+          );
+        } finally {
+          await reservation.release();
+        }
+      }
       if (method === "agents.messages") {
         const options = optionalRecordArgument(args[0], "Agent message options");
         assertOptionalPropertyType(options, "direction", "string", "Agent message direction");
@@ -1908,7 +1993,23 @@ export class Supervisor {
           repositoryInstructionDiscoveryQueue = discover.catch(() => undefined);
           await discover;
         }
-        return execution;
+        if (execution.outcome === "succeeded") return execution;
+        const effectState = projectEvents(
+          await this.storage.loadEvents(sessionId, { branchId }),
+        ).effects[effectId];
+        const causalEffectOutcomeEventId =
+          effectState &&
+          effectState.origin.kind === "cell" &&
+          effectState.origin.cellId === cellId &&
+          effectState.status === execution.outcome &&
+          ["failed", "cancelled", "unknown"].includes(effectState.status)
+            ? effectState.eventId
+            : undefined;
+        return consoleRpcResponse(execution, {
+          ...(causalEffectOutcomeEventId === undefined
+            ? {}
+            : { causalEffectOutcomeEventId }),
+        });
       }
       throw new ValidationError(`Unknown console RPC method: ${method}`);
     };
@@ -2133,6 +2234,9 @@ export class Supervisor {
             logs,
             logStreams,
             durationMs: Math.round(performance.now() - started),
+            causalEffectOutcomeEventIds: error instanceof ConsoleCellError
+              ? [...error.causalEffectOutcomeEventIds]
+              : [],
           },
         }]);
       }

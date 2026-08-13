@@ -77,7 +77,7 @@ The detector:
 - suppresses a trigger while the same nonterminal review is running;
 - suppresses consumed evidence until enough newer evidence exists;
 - excludes successful, cancelled, and unknown effects from failure triggers;
-- counts every failed cell in one run, including effect-backed failures, and partitions causally linked effect outcomes away from duplicate repeated-effect review;
+- counts every failed cell in one run, including effect-backed failures, and partitions causally linked effect outcomes away from duplicate repeated-effect review; new `CellFailed` records use validated exact `EffectOutcomeRecorded` event IDs, a present empty list forbids inference, and only retained records that omit the field use the conservative text heuristic;
 - never infers a correction from message prose;
 - scrubs brokered credential values before deriving error signatures;
 - rejects oversized or malformed inputs.
@@ -251,7 +251,7 @@ The first default-on release retains the current thresholds:
 
 Changing the default and the thresholds in the same release would make trigger-volume regressions harder to interpret. Threshold tuning follows observed deterministic and real-provider behavior.
 
-The failed-cell trigger counts all failed cells in one exact run, including cells explained by failed effects. Effect outcomes causally linked to an eligible, pending, or consumed failed-cell repair tranche are excluded from repeated-effect detection so one durable failure tranche creates one automatic review. Matching effect failures spread across runs remain eligible for repeated-effect detection when no run reaches the failed-cell threshold.
+The failed-cell trigger counts all failed cells in one exact run, including cells explained by failed effects. Effect outcomes causally linked to an eligible, pending, or consumed failed-cell repair tranche are excluded from repeated-effect detection so one durable failure tranche creates one automatic review. New failures carry exact validated outcome-event IDs from private convenience-RPC metadata; handled, wrapped, mismatched-identical, and recovery-abandoned cases do not gain links from text. A present empty array means no causal effect was proven. Retained schema-version-5 failures that omit the field continue to use the conservative normalized-error heuristic. Matching effect failures spread across runs remain eligible for repeated-effect detection when no run reaches the failed-cell threshold.
 
 ### 5. Coarse positive reflection
 
@@ -538,3 +538,10 @@ Each follow-up requires its own evidence model. None should introduce generalize
 - Completed: every new governed review, including direct proposals, receives deterministic cited-event excerpts under one 32 KiB aggregate budget with payload/excerpt digests, byte counts, truncation, and redaction provenance. Repository instruction content and credential material are excluded. Retained frozen input versions 1 and 2 remain readable.
 - Validation: focused refinement-review, governance-hardening, and refiner suites passed with 128 passes, 0 failures, and 0 skips. Typecheck passed.
 - Remaining: aggregate verification and externally gated live-provider, official Turso Sync, and Turso Cloud checks were not run for this focused change.
+
+### 2026-08-12 — Exact effect-to-cell failure causality
+
+- Completed: new `CellFailed` events retain validated exact failed, cancelled, or unknown `EffectOutcomeRecorded` event IDs when an unwrapped convenience-helper error directly fails the cell. The worker carries the IDs outside error text through private RPC metadata, projection/history/provider observations preserve the field, and recovery leaves `CellAbandoned` uncertain.
+- Completed: repair-churn deduplication uses exact IDs whenever the field is present, treats an empty array as no proven cause, and retains normalized-error inference only for earlier schema-version-5 failures that omit the field.
+- Validation: 138 focused causality, console, refinement, replay, rebuild, and reopen tests passed with 0 failures and 0 skips. Typecheck, architecture checks, and `git diff --check` passed.
+- Remaining: the aggregate repository suite and externally gated live-provider, official Turso Sync, and Turso Cloud checks were not run for this focused change.

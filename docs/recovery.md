@@ -9,7 +9,7 @@ A cell has durable lifecycle events:
 1. `CellProposed` records code and declared dependencies;
 2. `CellStarted` records its attempt;
 3. the disposable worker runs, using durable outbox requests for SDK effects;
-4. success atomically appends staged `ArtifactRegistered`, `WorkingValueSet`, and `CellCommitted` events, or failure appends `CellFailed`.
+4. success atomically appends staged `ArtifactRegistered`, `WorkingValueSet`, and `CellCommitted` events, or failure appends `CellFailed`. A new `CellFailed` includes a validated exact list of terminal non-success effect-outcome event IDs only when a convenience-helper error directly escaped the worker; an empty list means no such cause was proven.
 
 Only a committed terminal event and its committed exports become required later state. The worker heap is never replayed. Arbitrary replay could repeat a file edit, command, network call, or model generation.
 
@@ -26,7 +26,7 @@ Before this sequence, storage admission verifies that every retained event uses 
 1. **Staging cleanup and outbox reconciliation.** Dead-process owner-only artifact staging directories are removed. Each mutable `running` row whose owner disappeared is inspected. Unreachable CAS objects are not treated as registered evidence.
 2. **Safe requeue.** An effect declared idempotent returns to `pending` with its attempt count retained.
 3. **Visible uncertainty.** A non-idempotent running effect gets a canonical `EffectOutcomeRecorded { outcome: "unknown" }`; it is not requeued. An anomalous pending non-idempotent row with a retained prior attempt is treated the same way; a normal pending first attempt remains safe to drain because it was never claimed.
-4. **Cell abandonment.** Every branch projection with a `proposed`/`running` cell gets a branch-scoped idempotent `CellAbandoned` event. This includes a child fork that inherited an incomplete ancestor cell, without reusing the ancestor's idempotency key.
+4. **Cell abandonment.** Every branch projection with a `proposed`/`running` cell gets a branch-scoped idempotent `CellAbandoned` event. This includes a child fork that inherited an incomplete ancestor cell, without reusing the ancestor's idempotency key. Recovery does not infer or synthesize effect-to-cell causality; abandonment remains uncertain.
 5. **Recovery evidence.** Affected branches get `RecoveryPerformed` with abandoned, unknown, and retried IDs.
 6. **Cancellation recovery.** Recorded `SubagentCancellationRequested` crash prefixes are resumed before queued work; the original reason wins and descendants terminate leaf-first.
 7. **Drain.** Pending/requeued effects execute and commit attempt/outcome events.
@@ -89,6 +89,12 @@ EffectRequested -> pending outbox
 
 The request commits before execution. A terminal event is authoritative even if its original caller dies before receiving the result. Outbox status is a mutable operational projection of that event history. If two local runners race for a pending row, the loser waits for the winner's durable terminal outcome through the recorded lease instead of reporting a transient `unknown`.
 
+Runtime terminal waits use one shared `ProjectionService` snapshot-plus-cursor primitive. It checks terminal state before the snapshot returns, catches commits between snapshot and subscription, follows live canonical events, cleans up on timeout or cancellation, and performs a final read. Local notification-capable relational storage uses commit notifications only as wakeups; durable cursor reads remain authoritative. A centralized bounded polling fallback is selected only when the placement advertises `notifications: false`, such as the current HTTP relational adapter. The runtime does not catch a notification capability error and silently downgrade placement semantics.
+
+The competing-outbox-owner path uses this waiter for canonical terminal outcomes until the recorded lease deadline. Its final outbox read remains authoritative for operational-only changes: a reset row returns to claim/execution, a terminal row loads its exact outcome event, and a still-running row after expiry returns unknown. This preserves lease expiry, final-read, and reset behavior without independent 25 ms polling.
+
+When `tools.shell`, `tools.readFile`, or `tools.writeFile` receives a failed, cancelled, or unknown terminal outcome and its generated error directly fails the cell, the new `CellFailed.causalEffectOutcomeEventIds` points to that exact outcome event. The link is not derived from error text and is not reconstructed after a crash. A handled or wrapped error has no direct link unless the original convenience error itself escapes.
+
 `unknown` means the runtime cannot prove whether an external action happened. It is not failure, cancellation, or success. Examples include process death after a provider/service accepted a request but before the result committed, or after a non-idempotent command may have changed the world.
 
 Provider stream deltas do not alter this lifecycle. They are process-local progress emitted only after `EffectRequested` and `EffectAttemptStarted`, have no cursor, and are never recovered or replayed. If a stream fails or is cancelled before the terminal success batch, no `ModelOutputChunk` or assistant `MessageAppended` commits. If the process disappears while the non-idempotent model effect is running, startup records `unknown`; it never promotes the observed prefix to a response and never retries the generation.
@@ -128,6 +134,8 @@ File write helps make retry safe by writing atomically, accepting an expected pr
 | Raw generation admitted, cancellation commits before provider claim | Atomic request/effect plus cancelled outcome/status. | Do not execute the terminal outbox row after restart. |
 | Raw generation effect terminal, generation result/status/debit missing | Frozen context, request, effect, and authoritative terminal outcome. | Finalize once, validate retained output, and settle usage without another provider call. |
 | Agent invocation admitted, parent worker or client disappears before handle/result delivery | Parent task, child session/profile, run ID, contract, and idempotency key are canonical. | Recover the same handle/result; do not admit a second child. |
+| Queued mailbox send commits before run admission or result delivery | Immutable message ID, sender/recipient route, mode, intent, and deterministic derived run ID are retained. | Report queued with zero steps until admission; preserve FIFO routing, recover the same run after restart, and never route or admit from result lookup. |
+| Queued mailbox delivery fails before run admission | Canonical failed receipt and deterministic derived ID; no `AgentRunRequested`. | Report typed failed with zero steps and `admitted: false`; do not fabricate a run. |
 | Typed child finish commits before task result or terminal notice delivery | Finish, assistant message, and exact schema-constrained value are canonical. | Commit the result reference and complete paired task/notice delivery once; do not regenerate the finish. |
 | Awaited nested child exceeds resident/depth capacity | No child task/session/run admission committed. | Return `CONSOLE_CAPACITY_EXCEEDED`; do not queue a dependency the suspended parent requires. |
 | Profile activation commits after a run or recursive invocation was admitted | New active pointer plus older invocation profile pin. | Continue the admitted invocation with its older pinned profile; use the activation only for later invocations. |

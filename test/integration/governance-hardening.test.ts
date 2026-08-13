@@ -3,6 +3,7 @@ import {
   SEALED_GOVERNANCE_REVIEWER_LIMITS,
   Supervisor,
   canonicalJsonDigest,
+  canonicalJsonStringify,
   registerBrokeredSecret,
   validateNewEvent,
   type GovernedRefinementProposal,
@@ -33,6 +34,11 @@ async function open(name: string, provider = new ApprovingGovernanceProvider(nam
     recover: false,
   });
   return { supervisor, provider, temp };
+}
+
+function resealFrozenInput(value: any): any {
+  const { canonicalDigest: _canonicalDigest, ...body } = value;
+  return { ...body, canonicalDigest: canonicalJsonDigest(body) };
 }
 
 describe("governance final-review hardening", () => {
@@ -176,6 +182,65 @@ describe("governance final-review hardening", () => {
           expectedStatus: "validated",
         },
       }])).rejects.toThrow(/Invalid RefinementGovernanceReviewRequested payload/i);
+      const forgedRedaction = structuredClone(record.frozenInput) as any;
+      const forgedPayload = canonicalJsonStringify({
+        forged: "self-consistent redacted payload",
+      });
+      const forgedExcerpt = forgedRedaction.evidencePayloads.excerpts[0];
+      forgedExcerpt.redactedPayloadDigest = canonicalJsonDigest(
+        JSON.parse(forgedPayload),
+      );
+      forgedExcerpt.redactedPayloadBytes =
+        new TextEncoder().encode(forgedPayload).byteLength;
+      forgedExcerpt.excerpt = forgedPayload;
+      forgedExcerpt.excerptDigest = canonicalJsonDigest(forgedPayload);
+      forgedExcerpt.excerptBytes =
+        new TextEncoder().encode(forgedPayload).byteLength;
+      forgedExcerpt.truncated = false;
+      forgedExcerpt.redactions = ["credentials"];
+      forgedRedaction.evidencePayloads.usedBytes =
+        forgedRedaction.evidencePayloads.excerpts.reduce(
+          (total: number, item: any) => total + item.excerptBytes,
+          0,
+        );
+      const sealedRedaction = resealFrozenInput(forgedRedaction);
+      await expect(supervisor.storage.appendEvents([{
+        sessionId: root.sessionId,
+        branchId: root.branchId,
+        type: "RefinementGovernanceReviewRequested",
+        producer: "supervisor",
+        idempotencyKey: "forged-governance-v3-redaction-provenance",
+        payload: {
+          proposalId: record.proposalId,
+          reviewId: "forged-governance-v3-redaction-review",
+          frozenInput: sealedRedaction,
+          frozenInputDigest: sealedRedaction.canonicalDigest,
+          expectedStatus: "validated",
+        },
+      }])).rejects.toThrow(/evidence provenance does not match canonical rows/i);
+      const forgedHeaders = structuredClone(record.frozenInput) as any;
+      forgedHeaders.evidence[0] = {
+        ...forgedHeaders.evidence[0],
+        sessionId: "forged-source-session",
+        branchId: "forged-source-branch",
+        cursor: "999999",
+        type: "ForgedEvidenceType",
+      };
+      const sealedHeaders = resealFrozenInput(forgedHeaders);
+      await expect(supervisor.storage.appendEvents([{
+        sessionId: root.sessionId,
+        branchId: root.branchId,
+        type: "RefinementGovernanceReviewRequested",
+        producer: "supervisor",
+        idempotencyKey: "forged-governance-v3-source-headers",
+        payload: {
+          proposalId: record.proposalId,
+          reviewId: "forged-governance-v3-source-review",
+          frozenInput: sealedHeaders,
+          frozenInputDigest: sealedHeaders.canonicalDigest,
+          expectedStatus: "validated",
+        },
+      }])).rejects.toThrow(/evidence provenance does not match canonical rows/i);
     } finally {
       releaseSecret?.();
       await supervisor.close();

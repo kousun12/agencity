@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, AgentClient, ProtocolServer, ScriptedAgentActionProvider, Supervisor,
-  agentProfilePin, projectEvents, type AgentAction, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse,
+  agentProfilePin, projectEvents, type AgentAction, type AgentRunResult, type ConsoleMailboxMessageResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse,
 } from "../../src/index.ts";
 import { formalOutputFromAgentAction } from "../../src/executors/model-response.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
@@ -63,9 +63,47 @@ class GatedActionProvider implements ModelProvider {
   }
 }
 
-async function customFixture(provider: ModelProvider, prefix = "agencity-family-custom-") {
+type Assert<T extends true> = T;
+type Assignable<From, To> = [From] extends [To] ? true : false;
+type ConsoleAdmittedMailboxResult = Extract<ConsoleMailboxMessageResult, {
+  readonly admitted: true;
+}>;
+type RuntimeAdmittedMailboxResult = AgentRunResult & {
+  readonly mailboxMessageId: string;
+  readonly admitted: true;
+};
+type _RuntimeMailboxResultFitsConsole = Assert<Assignable<
+  RuntimeAdmittedMailboxResult,
+  ConsoleAdmittedMailboxResult
+>>;
+type _ConsoleMailboxResultFitsRuntime = Assert<Assignable<
+  ConsoleAdmittedMailboxResult,
+  RuntimeAdmittedMailboxResult
+>>;
+
+async function customFixture(
+  provider: ModelProvider,
+  prefix = "agencity-family-custom-",
+  options: {
+    readonly maxResident?: number;
+    readonly maxActive?: number;
+  } = {},
+) {
   const temp = await makeTempRuntime(prefix); temps.push(temp);
-  const supervisor = await Supervisor.open({ databaseUrl: temp.databaseUrl, artifactDirectory: temp.artifactDirectory, workspaceRoot: temp.workspaceRoot, modelProviders: [provider], recover: false, restartConsoleAfterCell: true });
+  const supervisor = await Supervisor.open({
+    databaseUrl: temp.databaseUrl,
+    artifactDirectory: temp.artifactDirectory,
+    workspaceRoot: temp.workspaceRoot,
+    modelProviders: [provider],
+    recover: false,
+    restartConsoleAfterCell: true,
+    ...(options.maxResident === undefined
+      ? {}
+      : { maxConsoleResidentProcesses: options.maxResident }),
+    ...(options.maxActive === undefined
+      ? {}
+      : { maxConsoleActiveExecutions: options.maxActive }),
+  });
   const root = await supervisor.createSession({ workspaceId: "family-sdk", model: { provider: provider.name, model: "scripted" } });
   return { temp, provider, supervisor, root };
 }
@@ -79,6 +117,365 @@ async function fixture(script: AgentAction[] = []) {
 }
 
 describe("FU-012 retained family messaging", () => {
+  test("queued message handles expose deterministic observable run results across FIFO delivery and restart", async () => {
+    const provider = new GatedActionProvider(
+      action({ type: "typescript", code: `return "initial boundary";` }),
+      action({ type: "final", content: "queued terminal result" }),
+    );
+    const value = await customFixture(provider, "agencity-mailbox-result-");
+    let active = value.supervisor;
+    try {
+      const child = await active.agents.spawnRunnable(
+        value.root.sessionId,
+        value.root.branchId,
+        { task: "hold initial run", name: "queued worker" },
+      );
+      await provider.started;
+      const first = await active.agents.sendMessage(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          target: child.sessionId,
+          content: "first queued task",
+          intentKey: "queued-result-first",
+        },
+      );
+      const duplicate = await active.agents.sendMessage(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          target: child.sessionId,
+          content: "first queued task",
+          intentKey: "queued-result-first",
+        },
+      );
+      const second = await active.agents.sendMessage(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          target: child.sessionId,
+          content: "second queued task",
+          intentKey: "queued-result-second",
+        },
+      );
+      expect(first.runId).toMatch(/^agent-queue-run-/);
+      expect(duplicate).toMatchObject({
+        mailboxMessageId: first.mailboxMessageId,
+        runId: first.runId,
+        existing: true,
+      });
+      expect(second.runId).not.toBe(first.runId);
+      expect(await active.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        first.mailboxMessageId,
+        { wait: false },
+      )).toMatchObject({
+        runId: first.runId,
+        status: "queued",
+        steps: 0,
+        admitted: false,
+      });
+      const beforeRelease = projectEvents(await active.storage.loadEvents(
+        child.sessionId,
+        { branchId: child.branchId },
+      ));
+      expect(beforeRelease.agentRuns[first.runId!]).toBeUndefined();
+      expect(beforeRelease.agentRuns[second.runId!]).toBeUndefined();
+
+      const steer = await active.agents.sendMessage(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          target: child.sessionId,
+          content: "steer only",
+          mode: "steer",
+          intentKey: "steer-has-no-result",
+        },
+      );
+      expect(steer.runId).toBeUndefined();
+      await expect(active.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        steer.mailboxMessageId,
+      )).rejects.toThrow(/non-legacy queued/i);
+
+      provider.release();
+      const firstResult = await active.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        first.mailboxMessageId,
+        { wait: true, timeoutMs: 3_000 },
+      );
+      const secondResult = await active.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        second.mailboxMessageId,
+        { wait: true, timeoutMs: 3_000 },
+      );
+      expect(firstResult).toMatchObject({
+        runId: first.runId,
+        status: "succeeded",
+        admitted: true,
+        final: "queued terminal result",
+      });
+      expect(secondResult).toMatchObject({
+        runId: second.runId,
+        status: "succeeded",
+        admitted: true,
+      });
+      const requestedOrder = (await active.storage.loadEvents(
+        child.sessionId,
+        { branchId: child.branchId },
+      )).filter((event) => event.type === "AgentRunRequested")
+        .map((event) => (event.payload as { runId: string }).runId);
+      expect(requestedOrder.slice(-2)).toEqual([first.runId!, second.runId!]);
+      await expect(active.agents.messageResult(
+        child.sessionId,
+        child.branchId,
+        first.mailboxMessageId,
+      )).rejects.toThrow(/not found/i);
+
+      await active.storage.appendEvents([{
+        sessionId: child.sessionId,
+        branchId: child.branchId,
+        type: "SessionStatusChanged",
+        producer: "supervisor",
+        idempotencyKey: "mailbox-result-archive-target",
+        payload: { status: "archived" },
+      }]);
+      const failed = await active.agents.sendMessage(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          target: child.sessionId,
+          content: "cannot deliver",
+          intentKey: "queued-result-failed",
+        },
+      );
+      expect(failed.runId).toMatch(/^agent-queue-run-/);
+      expect(await active.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        failed.mailboxMessageId,
+      )).toMatchObject({
+        runId: failed.runId,
+        status: "failed",
+        steps: 0,
+        admitted: false,
+      });
+
+      const legacyMessageId = "legacy-follow-up-result";
+      await active.storage.appendEvents([{
+        sessionId: value.root.sessionId,
+        branchId: value.root.branchId,
+        type: "MailboxMessageSent",
+        producer: "client",
+        idempotencyKey: "legacy-follow-up-result",
+        payload: {
+          mailboxMessageId: legacyMessageId,
+          fromSessionId: value.root.sessionId,
+          fromBranchId: value.root.branchId,
+          toSessionId: child.sessionId,
+          toBranchId: child.branchId,
+          kind: "message",
+          content: "retained legacy follow-up",
+          followUp: true,
+        },
+      }]);
+      await expect(active.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        legacyMessageId,
+      )).rejects.toThrow(/non-legacy queued/i);
+
+      await active.close();
+      active = await Supervisor.open({
+        databaseUrl: value.temp.databaseUrl,
+        artifactDirectory: value.temp.artifactDirectory,
+        workspaceRoot: value.temp.workspaceRoot,
+        modelProviders: [provider],
+        recover: true,
+      });
+      expect(await active.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        first.mailboxMessageId,
+      )).toMatchObject({
+        runId: first.runId,
+        status: "succeeded",
+        admitted: true,
+      });
+    } finally {
+      await active.close();
+    }
+  });
+
+  test("console mailbox result wait fails before blocking when recipient capacity is unavailable", async () => {
+    const provider = new GatedActionProvider(
+      action({ type: "typescript", code: `return "queued cell";` }),
+      action({ type: "final", content: "queued capacity result" }),
+    );
+    const value = await customFixture(
+      provider,
+      "agencity-mailbox-result-no-capacity-",
+      { maxResident: 1, maxActive: 1 },
+    );
+    try {
+      const child = await value.supervisor.agents.spawn(
+        value.root.sessionId,
+        value.root.branchId,
+        { task: "retained recipient", name: "capacity recipient" },
+      );
+      const message = await value.supervisor.agents.sendMessage(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          target: child.sessionId,
+          content: "run queued work",
+          intentKey: "mailbox-no-capacity",
+        },
+      );
+      await provider.started;
+
+      const observed = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `try {
+          await sdk.agents.messageResult(${JSON.stringify(message)}, {
+            wait: true,
+            timeoutMs: 3000,
+          });
+          return { unexpected: true };
+        } catch (error) {
+          return { code: error.code, details: error.details };
+        }`,
+      );
+      expect(observed.result).toMatchObject({
+        code: "CONSOLE_CAPACITY_EXCEEDED",
+        details: {
+          requestedResidentProcesses: 1,
+          availableResidentProcesses: 0,
+          maxResidentProcesses: 1,
+        },
+      });
+      expect(value.supervisor.console.capacityStatus().reservedProcesses).toBe(0);
+      const current = await value.supervisor.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        message.mailboxMessageId,
+        { wait: false },
+      );
+      expect(current).toMatchObject({
+        mailboxMessageId: message.mailboxMessageId,
+        admitted: true,
+        status: "running",
+      });
+      expect("taskId" in current).toBe(false);
+
+      provider.release();
+      expect(await value.supervisor.agents.messageResult(
+        value.root.sessionId,
+        value.root.branchId,
+        message.mailboxMessageId,
+        { wait: true, timeoutMs: 3_000 },
+      )).toMatchObject({ status: "succeeded", admitted: true });
+    } finally {
+      provider.release();
+      await value.supervisor.close();
+    }
+  });
+
+  test("console mailbox result wait reserves the recipient branch and releases on timeout", async () => {
+    const provider = new GatedActionProvider(
+      action({ type: "typescript", code: `return "reserved queued cell";` }),
+      action({ type: "final", content: "reserved queued result" }),
+    );
+    const value = await customFixture(
+      provider,
+      "agencity-mailbox-result-reservation-",
+      { maxResident: 2, maxActive: 1 },
+    );
+    try {
+      const child = await value.supervisor.agents.spawn(
+        value.root.sessionId,
+        value.root.branchId,
+        { task: "retained recipient", name: "reserved recipient" },
+      );
+      const message = await value.supervisor.agents.sendMessage(
+        value.root.sessionId,
+        value.root.branchId,
+        {
+          target: child.sessionId,
+          content: "run reserved queued work",
+          intentKey: "mailbox-reserved-capacity",
+        },
+      );
+      await provider.started;
+
+      const timedOut = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `return sdk.agents.messageResult(${JSON.stringify(message)}, {
+          wait: true,
+          timeoutMs: 25,
+        });`,
+      );
+      expect(timedOut.result).toMatchObject({
+        mailboxMessageId: message.mailboxMessageId,
+        runId: message.runId,
+        sessionId: child.sessionId,
+        branchId: child.branchId,
+        status: "running",
+        admitted: true,
+      });
+      expect("taskId" in (timedOut.result as Record<string, unknown>)).toBe(false);
+      expect(value.supervisor.console.capacityStatus().reservedProcesses).toBe(0);
+
+      const waiting = value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `return sdk.agents.messageResult(${JSON.stringify(message)}, {
+          wait: true,
+          timeoutMs: 3000,
+        });`,
+      );
+      await waitFor(async () =>
+        value.supervisor.console.capacityStatus().reservedProcesses === 1
+          ? true
+          : undefined
+      );
+      provider.release();
+      const terminal = await waiting;
+      expect(terminal.result).toMatchObject({
+        mailboxMessageId: message.mailboxMessageId,
+        runId: message.runId,
+        sessionId: child.sessionId,
+        branchId: child.branchId,
+        status: "succeeded",
+        admitted: true,
+        final: "reserved queued result",
+        finalMessageId: expect.any(String),
+        output: {
+          kind: "text",
+          text: "reserved queued result",
+        },
+        resultReference: {
+          kind: "text",
+        },
+        steps: expect.any(Number),
+      });
+      expect("taskId" in (terminal.result as Record<string, unknown>)).toBe(false);
+      expect(value.supervisor.console.capacityStatus()).toMatchObject({
+        activeExecutions: 0,
+        reservedProcesses: 0,
+      });
+    } finally {
+      provider.release();
+      await value.supervisor.close();
+    }
+  });
+
   test("sdk.agents exposes spawn/list/send/messages/acknowledge with derived identity and stable cell intents", async () => {
     const value = await fixture([action({ type: "final", content: "child completed" })]);
     try {
@@ -384,9 +781,24 @@ describe("FU-012 retained family messaging", () => {
       expect(projectEvents(await value.supervisor.storage.loadEvents(handle.sessionId, { branchId: handle.branchId })).status).toBe("stopped");
 
       const receipt = await value.supervisor.executeCell(value.root.sessionId, value.root.branchId, `return sdk.agents.send("worker", "do more", { taskId: "${handle.taskId}" });`);
-      expect(receipt.result).toMatchObject({ toSessionId: handle.sessionId, mode: "queue" });
+      expect(receipt.result).toMatchObject({
+        toSessionId: handle.sessionId,
+        mode: "queue",
+        runId: expect.stringMatching(/^agent-queue-run-/),
+      });
       const secondReply = await waitFor(async () => (await value.supervisor.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === (receipt.result as any).mailboxMessageId));
       expect(secondReply).toMatchObject({ fromSessionId: handle.sessionId, content: "queued result" });
+      const observed = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `return sdk.agents.messageResult(${JSON.stringify(receipt.result)}, { wait: true, timeoutMs: 3000 });`,
+      );
+      expect(observed.result).toMatchObject({
+        mailboxMessageId: (receipt.result as any).mailboxMessageId,
+        runId: (receipt.result as any).runId,
+        status: "succeeded",
+        admitted: true,
+      });
       const childRuns = Object.values(projectEvents(await value.supervisor.storage.loadEvents(handle.sessionId, { branchId: handle.branchId })).agentRuns);
       expect(childRuns).toHaveLength(2);
       expect(new Set(childRuns.map(run => run.requestKey))).toEqual(new Set([`agent-spawn:${handle.taskId}`, `agent-queue:${(receipt.result as any).mailboxMessageId}`]));
@@ -422,8 +834,18 @@ describe("FU-012 retained family messaging", () => {
       const sent = await client.sendMailbox(value.root.sessionId, value.root.branchId, { target: "wire agent", content: "wire send", mode: "steer", intentKey: "wire-client-send" });
       expect(sent).toMatchObject({ toSessionId: child.sessionId, mode: "steer" });
       const queued = await client.sendMailbox(value.root.sessionId, value.root.branchId, { target: "wire agent", content: "continue on wire", taskId: child.taskId, intentKey: "wire-queue" });
+      expect(queued.runId).toMatch(/^agent-queue-run-/);
       const reply = await waitFor(async () => (await value.supervisor.storage.listMailboxMessages?.(value.root.sessionId, "inbound"))?.find(message => message.replyToMessageId === queued.mailboxMessageId));
       expect(reply.content).toBe("wire queued result");
+      expect(await client.mailboxResult(
+        value.root.sessionId,
+        value.root.branchId,
+        queued.mailboxMessageId,
+      )).toMatchObject({
+        runId: queued.runId,
+        status: "succeeded",
+        admitted: true,
+      });
       expect(await client.cancelAgent(value.root.sessionId, value.root.branchId, "wire agent", "wire done")).toMatchObject({ status: "cancelled" });
     } finally { server.stop(); await value.supervisor.close(); }
   });

@@ -39,6 +39,7 @@ import {
   cloneExactJsonValue,
   type ExplicitContextInput,
 } from "./explicit-context.ts";
+import { ProjectionService } from "./projection.ts";
 
 export const MAX_AI_PROMPT_BYTES = 64 * 1024;
 export const MAX_AI_MESSAGES = 64;
@@ -115,6 +116,7 @@ export interface AiGenerationResult {
 export class AiGenerationService {
   readonly #recursive;
   readonly #context;
+  readonly #projections;
   readonly #runs = new Set<Promise<void>>();
   readonly #running = new Set<string>();
   readonly #activeByCell = new Map<string, number>();
@@ -130,6 +132,7 @@ export class AiGenerationService {
   ) {
     this.#recursive = requireRecursiveStorage(storage);
     this.#context = context;
+    this.#projections = new ProjectionService(storage);
   }
 
   admitText(
@@ -333,10 +336,17 @@ export class AiGenerationService {
     if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 86_400_000)) {
       throw new ValidationError("AI generation wait timeout must be from 0 to 86400000ms");
     }
-    const deadline = timeoutMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
     let record = await this.#load(generationId);
-    while (options.wait !== false && !terminal(record.status) && Date.now() < deadline) {
-      await Bun.sleep(Math.min(25, Math.max(1, deadline - Date.now())));
+    if (options.wait !== false && !terminal(record.status)) {
+      await this.#projections.waitForTerminal(
+        record.sessionId,
+        record.branchId,
+        (state) => {
+          const generation = state.aiGenerations[generationId];
+          return generation !== undefined && terminal(generation.status);
+        },
+        { ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+      );
       record = await this.#load(generationId);
     }
     return resultRecord(record);

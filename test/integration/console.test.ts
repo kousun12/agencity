@@ -473,6 +473,107 @@ describe("disposable TypeScript console process", () => {
     await supervisor.close();
   });
 
+  test("retains only exact private effect causality for directly escaping convenience errors across reopen", async () => {
+    const secret = "rpc-causal-secret-a811";
+    process.env.AGENCITY_RPC_TEST_SECRET = secret;
+    const { temp, supervisor, sessionId, branchId } = await open(true);
+    await Bun.write(join(temp.workspaceRoot, "secret-source.txt"), secret);
+    const command =
+      "cat secret-source.txt >&2; exit 7";
+
+    await expect(supervisor.executeCell(
+      sessionId,
+      branchId,
+      `await tools.shell(${JSON.stringify(command)});`,
+    )).rejects.toBeInstanceOf(ConsoleCellError);
+    await expect(supervisor.executeCell(
+      sessionId,
+      branchId,
+      `
+        try {
+          await tools.shell(${JSON.stringify(command)});
+        } catch (error) {
+          throw new Error((error as Error).message);
+        }
+      `,
+    )).rejects.toBeInstanceOf(ConsoleCellError);
+    await expect(supervisor.executeCell(
+      sessionId,
+      branchId,
+      `
+        const handled = await tools.request(
+          "shell",
+          "run",
+          { command: ${JSON.stringify(command)} },
+          { idempotent: true },
+        );
+        if (handled.outcome !== "failed") throw new Error("expected handled failure");
+        await tools.shell(${JSON.stringify(command)});
+      `,
+    )).rejects.toBeInstanceOf(ConsoleCellError);
+
+    const events = await supervisor.storage.loadEvents(sessionId, { branchId });
+    const failures = events.filter((event) => event.type === "CellFailed");
+    const requests = events.filter((event) => event.type === "EffectRequested");
+    const outcomes = events.filter((event) => event.type === "EffectOutcomeRecorded");
+    expect(failures).toHaveLength(3);
+    expect(requests).toHaveLength(4);
+    expect(outcomes).toHaveLength(4);
+    expect((failures[0]!.payload as any).causalEffectOutcomeEventIds)
+      .toEqual([outcomes[0]!.id]);
+    expect((failures[1]!.payload as any).causalEffectOutcomeEventIds)
+      .toEqual([]);
+    expect((failures[2]!.payload as any).causalEffectOutcomeEventIds)
+      .toEqual([outcomes[3]!.id]);
+    expect((failures[2]!.payload as any).causalEffectOutcomeEventIds)
+      .not.toContain(outcomes[2]!.id);
+    for (const failure of failures) {
+      const payload = failure.payload as any;
+      expect(payload.error).not.toContain(outcomes[0]!.id);
+      expect(JSON.stringify(payload.logs)).not.toContain(outcomes[0]!.id);
+    }
+    expect(JSON.stringify(events)).not.toContain(secret);
+
+    const projected = projectEvents(events);
+    const causalCells = Object.values(projected.cells)
+      .map((cell) => cell.causalEffectOutcomeEventIds);
+    expect(causalCells).toEqual([
+      [outcomes[0]!.id],
+      [],
+      [outcomes[3]!.id],
+    ]);
+    const rebuilt = await supervisor.projections.rebuild(sessionId, branchId);
+    expect(Object.values(rebuilt.cells).map((cell) =>
+      cell.causalEffectOutcomeEventIds)).toEqual(causalCells);
+    await supervisor.close();
+
+    const reopened = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      restartConsoleAfterCell: true,
+      recover: true,
+    });
+    try {
+      const replayed = await reopened.projections.rebuild(sessionId, branchId);
+      expect(Object.values(replayed.cells).map((cell) =>
+        cell.causalEffectOutcomeEventIds)).toEqual(causalCells);
+      const history = await reopened.executeCell(
+        sessionId,
+        branchId,
+        `return await cells.list({ status: "failed", limit: 10 });`,
+      );
+      expect((history.result as any).items.map((item: any) =>
+        item.causalEffectOutcomeEventIds)).toEqual([
+        [outcomes[3]!.id],
+        [],
+        [outcomes[0]!.id],
+      ]);
+    } finally {
+      await reopened.close();
+    }
+  });
+
   test("generated SQL cannot mutate history or inspect private operational state", async () => {
     const { supervisor, sessionId, branchId } = await open(true);
     const beforeCount = (await supervisor.storage.loadEvents(sessionId)).length;

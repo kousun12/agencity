@@ -48,6 +48,7 @@ Existing local bounds do not form one end-to-end model-context guarantee:
 - Make context-window admission estimate the exact normalized messages, tool declarations, and token-relevant request options.
 - Keep internal product routing metadata out of model context.
 - Preserve the disposable TypeScript console and restart-after-every-cell correctness.
+- Verify through the production context and provider-input builders that reduction retains the deterministic facts required to select the next formal action and repair after a committed failure.
 
 ## Non-goals
 
@@ -58,6 +59,7 @@ Existing local bounds do not form one end-to-end model-context guarantee:
 - Adding semantic/vector retrieval or a repository-map subsystem.
 - Replacing the existing deterministic compaction mechanism with a new model-summary architecture.
 - Hiding failed or unknown effects to reduce token use.
+- Claiming that deterministic decision-contract equivalence proves equivalent interpretation by a live model.
 - Optimizing TUI rendering or client event storage.
 - Bounding memory allocated directly by arbitrary model-generated TypeScript. The runtime bounds its own capture buffers, IPC payloads, canonical events, artifact spills, and provider observations; trusted local code can still allocate process memory until the operating system or an external sandbox intervenes.
 - Converting SQL results, `state.list`, recursive-model results, skills, or every existing typed response to the output envelope without evidence that they materially affect provider context.
@@ -324,7 +326,9 @@ The benchmark report should record:
 - provider-reported input tokens when a credential-gated run is explicitly enabled;
 - automatic observation bytes by event type;
 - artifact spill bytes and preview bytes;
-- compaction status and capacity provenance.
+- compaction status and capacity provenance;
+- deterministic next-action contract results for task and step identity, trajectory order, compact action/outcome facts, failure guidance, effect ownership, and required artifact references;
+- uninterrupted and post-`CellCommitted` recovery results from a context-sensitive deterministic provider that chooses from the normalized provider input.
 
 Credential-gated provider results remain separate from deterministic verification and must be reported as passed, failed, or skipped.
 
@@ -339,8 +343,9 @@ This plan is complete when:
 5. no single dependent step can exceed the aggregate model-observation budget;
 6. complete oversized evidence within the spill ceiling remains attributable through verified artifact references;
 7. disposable-console restart semantics remain unchanged;
-8. deterministic, recovery, adversarial, and installed-product tests pass;
-9. public documentation and `AGENTS.md` accurately describe the implemented behavior and remaining limitations.
+8. deterministic next-action checks use the production context/provider-input path and focused recovery coverage proves the same context-derived continuation without duplicate cell, effect, or model work;
+9. deterministic, recovery, adversarial, and installed-product tests pass;
+10. public documentation and `AGENTS.md` accurately describe the implemented behavior and remaining limitations.
 
 ## Implementation log
 
@@ -367,3 +372,9 @@ This plan is complete when:
 - Validation: `bun run verify` passed: core 937 passed, 2 external skips, 0 failed; end-to-end 3 passed, 0 failed; acceptance 16 passed, 1 external skip, 0 failed.
 - Plan notes: None.
 - Remaining: The live-provider, official Turso Sync server, and Turso Cloud checks were skipped because their external prerequisites were unavailable; they remain explicitly unverified.
+
+### 2026-08-12 — Deterministic semantic-preservation verification
+- Completed: Extended the production-builder benchmark with a deterministic next-action contract covering task and step identity, trajectory order, compact action/outcome/effect facts, bounded failure guidance, successful-effect ownership, artifact-backed continuation, repair, and completion. Added a context-sensitive deterministic provider integration that derives its actions from normalized provider messages in uninterrupted execution and across a post-`CellCommitted` service recovery boundary.
+- Validation: The benchmark retained a 60.52% provider-message reduction and passed all 16 semantic-preservation checks. Focused integration coverage proved the same continuation source and exactly three model calls, two committed cells, and two file effects in each path.
+- Plan notes: This evidence proves the encoded deterministic decision contract and recovery invariants. It does not prove equivalent interpretation by a live model.
+- Remaining: Live-model semantic equivalence and live-provider token usage remain unverified.

@@ -83,6 +83,7 @@ flowchart TD
 - Most effectful SDK calls commit their own outbox or domain events as they occur. A later cell failure does not erase an already committed external effect.
 - Only a successful cell terminal batch exposes staged working values and artifact registrations.
 - A failed or interrupted cell receives `CellFailed` or recovery-time `CellAbandoned`; its heap is never replayed.
+- If a failed, cancelled, or unknown `tools.shell`, `tools.readFile`, or `tools.writeFile` error directly escapes and fails the cell, `CellFailed` retains the exact causal outcome-event ID. This bookkeeping is private worker/RPC metadata: it is not part of the helper result, error message, stack, or logs, and generated code cannot supply an ID through the SDK. Catching and wrapping the error creates a new error and therefore does not retain the direct link.
 
 Use local variables inside one cell, `scratch` for replaceable nearby intermediates, `state` for small values required after recovery, and artifacts for larger or byte-oriented durable content. Store durable handle IDs, not convenience functions. End each cell with only the focused observation needed by the next decision.
 
@@ -143,7 +144,7 @@ const prior = recent.items[0]
 
 `cells.list({ limit?, status?, beforeCursor? })` is newest-first and cursor-paginated. The default statuses are committed, failed, and abandoned; the maximum page size is 100. `cells.get(cellId)` returns `null` outside the current branch lineage.
 
-Entries include retained source, observation, logs, status, dependencies, attempts, duration, exports or error, and proposed/start/terminal event provenance. Reading history never replays code or effects.
+Entries include retained source, observation, logs, status, dependencies, attempts, duration, exports or error, optional `causalEffectOutcomeEventIds`, and proposed/start/terminal event provenance. The causal field is omitted on earlier schema-version-5 failures; a present empty array means no direct effect cause was proven. Reading history never replays code or effects.
 
 ## Observations, artifact spill, and logs
 
@@ -414,11 +415,15 @@ if (review.status === "succeeded" && review.output.kind === "object") {
 const audit = await sdk.agents.spawn({
   task: "Run the slow compatibility audit and report back to the parent.",
 });
-await sdk.agents.send(
+const queued = await sdk.agents.send(
   audit.sessionId,
   "Prioritize the stack trace",
   { taskId: audit.taskId },
 );
+const queuedResult = await sdk.agents.messageResult(queued, {
+  wait: true,
+  timeoutMs: 30_000,
+});
 
 await sdk.agents.send(audit.sessionId, "Use the newest failure", {
   mode: "steer",
@@ -454,6 +459,7 @@ Methods:
 - `rollbackProfile(target, { expectedCurrentVersionId, restoreVersionId, reason, evidenceEventIds })`
 - `list()`
 - `send(input)` or `send(target, content, options?)`
+- `messageResult(messageHandleOrId, { wait?, timeoutMs? })`
 - `messages(options?)`
 - `acknowledge(messageId)`
 - `cancel(target, reason?)`
@@ -464,13 +470,13 @@ Delegation should decompose work, not pass the caller's full assignment down an 
 
 The executing session and branch always supply sender identity. Targets are limited to the unique parent, direct children, or siblings; deeper and cross-root targets are rejected. The literal `parent` selects the unique parent. Ambiguous names fail.
 
-Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one authorized task reference and up to eight sender-registered artifact IDs. Intent keys provide stable deduplication. Rate and pending-queue bounds are enforced. Receipts include the exact `mode`, optional `contextRunId`, retained-history `legacyFollowUp` marker, and queued, delivered-to-context, acknowledged, or failed status.
+Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one authorized task reference and up to eight sender-registered artifact IDs. Intent keys provide stable deduplication. Rate and pending-queue bounds are enforced. A new non-legacy queued receipt includes its deterministic immutable `runId`; exact intent-key reuse returns the same message and run IDs. Steer receipts expose no independent run ID.
 
 `run` admits a full autonomous child and waits for its terminal typed result. Omitting `output` returns a text result; `output.schema` requests compact programmatic object data and accepts the same supported Zod, Standard Schema, or restricted plain JSON Schema forms as raw object generation. `runMany` is all-or-nothing at admission and is intended only for bounded independent tasks. Awaited calls reserve console capacity before child admission, so an unsatisfiable nested dependency fails with `CONSOLE_CAPACITY_EXCEEDED` without creating the child.
 
 `spawn` and `spawnMany` always admit runnable detached children and return durable handles immediately. There is no model-facing `run` boolean. Use retained messaging and terminal notices, call `handle.result({ wait?, timeoutMs? })`, or call `sdk.agents.result(handleOrTaskId, options)` later. The bound method is a non-enumerable worker-local convenience over the same result operation; it is absent from JSON serialization, durable state, and a handle reconstructed after worker loss. A reconstructed handle or task ID remains usable through `sdk.agents.result`. A stable `idempotencyKey` recovers the same admission after disconnect or worker loss. `{ wait: false }` reports the current lifecycle; waiting is bounded and returns queued, running, succeeded, blocked, failed, cancelled, budget-exceeded, or unknown without fabricating output. Both result forms use the same validation, capacity reservation, timeout, and error semantics. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile.
 
-`send` defaults to `mode: "queue"`. Each queued message owns one separate durable run. An idle or stopped recipient starts that run immediately; a busy recipient retains queued messages in FIFO order and starts them one at a time after the active run and each earlier queued run terminate. Pending queued content is excluded from the recipient's model context until its run is admitted. `mode: "steer"` enters an active run at its next durable boundary. If the recipient is idle, it is delivered to retained context without waking the recipient.
+`send` defaults to `mode: "queue"`. Each queued message owns one separate durable run. `messageResult` is authorized only for the exact sender branch and is observation-only. Before admission it returns queued with zero steps and `admitted: false`; delivery failure returns failed with zero steps without creating a canonical run; after admission it returns the retained run result without adding an invocation `taskId`. It never routes, admits, or reorders work. A console-cell wait first reads the current result, reserves the exact recipient branch's console capacity only when the result is nonterminal, and releases that reservation after completion or timeout. Insufficient capacity fails with `CONSOLE_CAPACITY_EXCEEDED` instead of blocking the caller and recipient indefinitely. Retained legacy `followUp` and `mode: "steer"` messages have no independent result. An idle or stopped recipient starts a queued run immediately; a busy recipient retains queued messages in FIFO order and starts them one at a time after the active run and each earlier queued run terminate. Pending queued content is excluded from the recipient's model context until its run is admitted. `mode: "steer"` enters an active run at its next durable boundary. If the recipient is idle, it is delivered to retained context without waking the recipient.
 
 Use `runMany` or `spawnMany` only for independent work; dependent steps must be sequenced. A long loop in one parent cell is not a durable coordinator across worker loss. Persist durable handles, state, messages, or artifacts at recovery boundaries. Every agent method uses the same canonical model IDs and owner-managed narrowing policy as raw generation. Returned model judgments are data, not objective evidence, factual correctness, task-completion proof, or expanded authority. Cross-agent callable behavior uses retained messaging and artifacts; versioned durable RPC remains unavailable until a separately advertised capability implements it.
 

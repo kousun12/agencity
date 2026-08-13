@@ -20,9 +20,32 @@ export interface ConsoleExecution {
 
 export type ConsoleRpcHandler = (method: string, args: unknown[]) => Promise<unknown>;
 
+const CONSOLE_RPC_RESPONSE = Symbol("agencity.console-rpc-response");
+
+interface ConsoleRpcResponse {
+  readonly [CONSOLE_RPC_RESPONSE]: true;
+  readonly value: unknown;
+  readonly causalEffectOutcomeEventId?: string;
+}
+
+/**
+ * Attaches supervisor-only metadata to an RPC value. The worker unwraps the
+ * public value before generated code receives it.
+ */
+export function consoleRpcResponse(
+  value: unknown,
+  metadata: { readonly causalEffectOutcomeEventId?: string },
+): unknown {
+  return {
+    [CONSOLE_RPC_RESPONSE]: true,
+    value,
+    ...metadata,
+  } satisfies ConsoleRpcResponse;
+}
+
 type WorkerMessage =
   | { type: "rpc"; executionId: string; requestId: string; method: string; args: unknown[] }
-  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; logs: string[]; logStreams: CellLogStream[]; rssBytes: number }
+  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; causalEffectOutcomeEventIds?: string[]; logs: string[]; logStreams: CellLogStream[]; rssBytes: number }
   | { type: "control-result"; requestId: string; ok: boolean; value?: unknown; error?: string };
 
 interface PendingExecution {
@@ -316,12 +339,21 @@ export class ConsoleProcess {
       if (message.ok) {
         if (!validObservation(message.observation)) throw new Error("Console worker emitted an invalid observation");
         pending.resolve({ observation: message.observation, logs: message.logs, logStreams: message.logStreams, rssBytes: message.rssBytes });
-      } else pending.reject(new ConsoleCellError(
-        message.error ?? "Console cell failed",
-        message.logs,
-        message.logStreams,
-        message.rssBytes,
-      ));
+      } else {
+        if (message.causalEffectOutcomeEventIds !== undefined &&
+            (!Array.isArray(message.causalEffectOutcomeEventIds) ||
+             message.causalEffectOutcomeEventIds.length > 16 ||
+             !message.causalEffectOutcomeEventIds.every((id) => typeof id === "string"))) {
+          throw new Error("Console worker emitted invalid private failure causality");
+        }
+        pending.reject(new ConsoleCellError(
+          message.error ?? "Console cell failed",
+          message.logs,
+          message.logStreams,
+          message.rssBytes,
+          message.causalEffectOutcomeEventIds ?? [],
+        ));
+      }
       return;
     }
     if (typeof message.requestId !== "string" || typeof message.method !== "string" || !Array.isArray(message.args)) {
@@ -333,11 +365,21 @@ export class ConsoleProcess {
       ).then(
         (value) => {
           try {
+            const response: {
+              readonly value: unknown;
+              readonly causalEffectOutcomeEventId?: string;
+            } = isConsoleRpcResponse(value) ? value : { value };
             this.#send({
               type: "rpc-result",
               requestId: message.requestId,
               ok: true,
-              value,
+              value: response.value,
+              ...(response.causalEffectOutcomeEventId === undefined
+                ? {}
+                : {
+                    causalEffectOutcomeEventId:
+                      response.causalEffectOutcomeEventId,
+                  }),
             });
           } catch { /* Worker loss does not cancel durable RPC work. */ }
         },
@@ -429,8 +471,16 @@ export class ConsoleCellError extends Error {
     readonly logs: string[],
     readonly logStreams: CellLogStream[],
     readonly rssBytes: number,
+    readonly causalEffectOutcomeEventIds: readonly string[] = [],
   ) {
     super(message);
     this.name = "ConsoleCellError";
   }
+}
+
+function isConsoleRpcResponse(value: unknown): value is ConsoleRpcResponse {
+  return Boolean(
+    value && typeof value === "object" &&
+    (value as Partial<ConsoleRpcResponse>)[CONSOLE_RPC_RESPONSE] === true,
+  );
 }

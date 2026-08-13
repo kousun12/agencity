@@ -39,6 +39,7 @@ import {
 import type { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import type { OutboxRunner } from "./outbox.ts";
 import { ExplicitContextMaterializer } from "./explicit-context.ts";
+import { ProjectionService } from "./projection.ts";
 
 export const MAX_RECURSIVE_INPUT_BYTES = 256 * 1024;
 export const MAX_RECURSIVE_RESULT_BYTES = 64 * 1024;
@@ -136,6 +137,7 @@ const PUBLIC_RECURSIVE_RESPONSE_ADMISSION: RecursiveResponseAdmission = Object.f
 export class RecursiveModelService {
   readonly #recursive;
   readonly #explicitContext;
+  readonly #projections;
   readonly #runs = new Set<Promise<void>>();
   readonly #runningHandles = new Set<string>();
 
@@ -151,6 +153,7 @@ export class RecursiveModelService {
   ) {
     this.#recursive = requireRecursiveStorage(storage);
     this.#explicitContext = new ExplicitContextMaterializer(storage, artifacts, memory);
+    this.#projections = new ProjectionService(storage);
     // Supervisor-only structured refinement start stays behind the non-barrel
     // internal capability registry; see src/runtime/internal.ts.
     registerRefinementReviewStarter(this, (parentSessionId, parentBranchId, input) =>
@@ -418,10 +421,17 @@ export class RecursiveModelService {
     if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 24 * 60 * 60 * 1_000)) {
       throw new ValidationError("Recursive model result timeoutMs must be an integer from 0 to 86400000");
     }
-    const deadline = timeoutMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
     let handle = await this.#load(handleId);
-    while (wait && !TERMINAL.has(handle.status) && Date.now() < deadline) {
-      await Bun.sleep(Math.min(25, Math.max(1, deadline - Date.now())));
+    if (wait && !TERMINAL.has(handle.status)) {
+      await this.#projections.waitForTerminal(
+        handle.parentSessionId,
+        handle.parentBranchId,
+        (state) => {
+          const recursive = state.recursiveModels[handleId];
+          return recursive !== undefined && TERMINAL.has(recursive.status);
+        },
+        { ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+      );
       handle = await this.#load(handleId);
     }
     return this.#resultRecord(handle);

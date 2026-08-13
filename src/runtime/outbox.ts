@@ -14,6 +14,7 @@ import type { EffectExecutionProgress, EffectExecutor, ExecutionResult } from ".
 import { result } from "../executors/contract.ts";
 import type { AgentStorage, OutboxRecord } from "../storage/index.ts";
 import { containsBrokeredSecret, isSensitiveEnvironmentKey, scrubJson, scrubText } from "../security/index.ts";
+import { ProjectionService } from "./projection.ts";
 
 export interface EffectRequest {
   readonly sessionId: string;
@@ -52,12 +53,14 @@ export class OutboxRunner {
   readonly #controllers = new Map<string, AbortController>();
   readonly #inflight = new Map<string, Promise<ExecutionResult>>();
   readonly #progressListeners = new Set<(notification: EffectProgressNotification) => void>();
+  readonly #projections: ProjectionService;
   #claimAdmissions = 0;
   #deletionQuiesced = false;
   readonly owner = `runner-${newId()}`;
 
   constructor(readonly storage: AgentStorage, executors: readonly EffectExecutor[]) {
     for (const executor of executors) this.#executors.set(executor.name, executor);
+    this.#projections = new ProjectionService(storage);
   }
 
   onProgress(listener: (notification: EffectProgressNotification) => void): () => void {
@@ -134,15 +137,20 @@ export class OutboxRunner {
   async #waitForOwner(record: OutboxRecord): Promise<ExecutionResult> {
     const parsedExpiry = record.leaseExpiresAt === null ? Number.NaN : Date.parse(record.leaseExpiresAt);
     const deadline = Number.isFinite(parsedExpiry) ? parsedExpiry : Date.now() + 30_000;
-    while (Date.now() <= deadline) {
-      const current = await this.storage.getOutbox(record.effectId);
-      if (!current) return result("failed", undefined, "Effect does not exist");
-      if (!["pending", "running"].includes(current.status)) return this.#loadTerminal(current);
-      if (current.status === "pending") return this.#claimAndExecute(record.effectId);
-      await Bun.sleep(Math.min(25, Math.max(1, deadline - Date.now())));
-    }
+    await this.#projections.waitForTerminal(
+      record.sessionId,
+      record.branchId,
+      (state) => {
+        const effect = state.effects[record.effectId];
+        return effect !== undefined &&
+          !["requested", "started"].includes(effect.status);
+      },
+      { timeoutMs: Math.max(0, deadline - Date.now()) },
+    );
     const final = await this.storage.getOutbox(record.effectId);
+    if (!final) return result("failed", undefined, "Effect does not exist");
     if (final && !["pending", "running"].includes(final.status)) return this.#loadTerminal(final);
+    if (final.status === "pending") return this.#claimAndExecute(record.effectId);
     return result("unknown", undefined, "Effect owner lease expired before a durable outcome");
   }
 

@@ -1,8 +1,14 @@
 import { ValidationError } from "../domain/errors.ts";
 import {
+  canonicalJsonByteLength,
   canonicalJsonDigest,
+  canonicalJsonStringify,
   type JsonValue,
 } from "../domain/json.ts";
+import {
+  MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
+  type FrozenRefinementGovernanceEvidenceExcerpt,
+} from "../domain/refinement-governance.ts";
 import { scrubCredentialText } from "./scrub.ts";
 
 export type RefinementEvidenceRedaction =
@@ -12,6 +18,32 @@ export type RefinementEvidenceRedaction =
 export interface SanitizedRefinementEvidencePayload {
   readonly payload: JsonValue;
   readonly redactions: readonly RefinementEvidenceRedaction[];
+}
+
+export interface RefinementGovernanceEvidenceSource {
+  readonly eventId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly cursor: string;
+  readonly type: string;
+  readonly payload: JsonValue;
+}
+
+export interface FrozenRefinementGovernanceEvidence {
+  readonly evidence: readonly {
+    readonly eventId: string;
+    readonly sessionId: string;
+    readonly branchId: string;
+    readonly cursor: string;
+    readonly type: string;
+    readonly payloadDigest: `sha256:${string}`;
+  }[];
+  readonly evidencePayloads: {
+    readonly maximumBytes:
+      typeof MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES;
+    readonly usedBytes: number;
+    readonly excerpts: readonly FrozenRefinementGovernanceEvidenceExcerpt[];
+  };
 }
 
 /**
@@ -43,6 +75,83 @@ export function refinementVisibleEventPayload(
   value: JsonValue,
 ): JsonValue {
   return sanitizeRefinementEvidencePayload(type, value).payload;
+}
+
+/**
+ * Builds the complete deterministic V3 evidence section. Storage uses the
+ * same function to rederive the section from canonical rows before append.
+ */
+export function buildFrozenRefinementGovernanceEvidence(
+  sources: readonly RefinementGovernanceEvidenceSource[],
+): FrozenRefinementGovernanceEvidence {
+  const evidence = sources.map((source) => ({
+    eventId: source.eventId,
+    sessionId: source.sessionId,
+    branchId: source.branchId,
+    cursor: source.cursor,
+    type: source.type,
+    payloadDigest: canonicalJsonDigest(source.payload),
+  }));
+  const payloads = sources.map((source) => {
+    const sanitized = sanitizeRefinementEvidencePayload(
+      source.type,
+      source.payload,
+    );
+    const redactedPayloadJson = canonicalJsonStringify(sanitized.payload);
+    return {
+      eventId: source.eventId,
+      canonicalPayloadDigest: canonicalJsonDigest(source.payload),
+      canonicalPayloadBytes: canonicalJsonByteLength(source.payload),
+      redactedPayloadDigest: canonicalJsonDigest(sanitized.payload),
+      redactedPayloadBytes: new TextEncoder().encode(redactedPayloadJson)
+        .byteLength,
+      redactedPayloadJson,
+      redactions: sanitized.redactions,
+    };
+  });
+  let remainingBytes = MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES;
+  const excerpts = payloads.map((source, index) => {
+    const remainingItems = payloads.length - index;
+    const allowance = Math.floor(remainingBytes / remainingItems);
+    const excerpt = truncateUtf8(source.redactedPayloadJson, allowance);
+    const excerptBytes = new TextEncoder().encode(excerpt).byteLength;
+    remainingBytes -= excerptBytes;
+    return {
+      eventId: source.eventId,
+      canonicalPayloadDigest: source.canonicalPayloadDigest,
+      canonicalPayloadBytes: source.canonicalPayloadBytes,
+      redactedPayloadDigest: source.redactedPayloadDigest,
+      redactedPayloadBytes: source.redactedPayloadBytes,
+      excerpt,
+      excerptDigest: canonicalJsonDigest(excerpt),
+      excerptBytes,
+      truncated: excerptBytes < source.redactedPayloadBytes,
+      redactions: source.redactions,
+    };
+  });
+  return {
+    evidence,
+    evidencePayloads: {
+      maximumBytes: MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
+      usedBytes:
+        MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES - remainingBytes,
+      excerpts,
+    },
+  };
+}
+
+function truncateUtf8(value: string, maximum: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).byteLength <= maximum) return value;
+  let output = "";
+  let used = 0;
+  for (const character of value) {
+    const bytes = encoder.encode(character).byteLength;
+    if (used + bytes > maximum) break;
+    output += character;
+    used += bytes;
+  }
+  return output;
 }
 
 function scrubRefinementCredentialEvidence(value: JsonValue): JsonValue {

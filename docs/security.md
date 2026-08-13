@@ -93,6 +93,8 @@ The envelope digest detects corruption; it is not a signature or writer authoriz
 
 Event headers/payloads and JSON values are validated before append. Working JSON is finite, plain, acyclic JSON. Immutable-table triggers prevent update/delete even through another database connection. Typed SDK commands, not model-visible SQL, own writes.
 
+Direct convenience-helper effect failures use private worker/RPC metadata rather than generated error text to retain `CellFailed.causalEffectOutcomeEventIds`. The metadata is not exposed as an SDK return field or attached to the error, stack, or logs. Canonical reduction rejects every ID that is missing, belongs to another cell's `EffectRequested`, or does not identify a failed, cancelled, or unknown terminal outcome. A present empty list remains explicit and cannot be replaced by text inference. This protects supported-path attribution from forged model values; it does not change the trusted-local non-sandbox claim for arbitrary hostile process behavior.
+
 ### Agent profiles are behavior, not authority
 
 Each runnable session has an immutable initial agent profile containing role, purpose, instructions, and an exact rendered prompt. The profile influences provider-facing behavior only. It cannot select a provider or model, reveal or resolve credentials, widen budgets, add SDK methods, change effect or completion-gate policy, authorize publication, grant filesystem/network access, or alter the runtime's trusted-local OS authority.

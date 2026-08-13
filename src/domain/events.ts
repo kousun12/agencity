@@ -216,7 +216,7 @@ export interface EventPayloads {
   CellProposed: { cellId: string; code: string; dependencies: string[] };
   CellStarted: { cellId: string; attempt: number };
   CellCommitted: { cellId: string; result: JsonValue; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; exports: string[]; repositoryInstructions?: RepositoryInstructionDiscovery[]; repositoryInstructionOmission?: RepositoryInstructionOmission };
-  CellFailed: { cellId: string; error: string; logs: string[]; logStreams?: CellLogStream[]; durationMs: number };
+  CellFailed: { cellId: string; error: string; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; causalEffectOutcomeEventIds?: string[] };
   CellAbandoned: { cellId: string; reason: string };
   WorkingValueSet: { name: string; version: number; value: WorkingValue };
   ArtifactRegistered: ArtifactReference & { sourceEventId?: string };
@@ -786,9 +786,19 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     logs: z.array(z.string()),
     logStreams: z.array(z.enum(["stdout", "stderr"])).optional(),
     durationMs: nonnegative,
+    causalEffectOutcomeEventIds: z.array(id).max(16).optional(),
   }).superRefine((payload, context) => {
     if (payload.logStreams && payload.logStreams.length !== payload.logs.length) {
       context.addIssue({ code: "custom", message: "Cell log stream metadata must align with logs", path: ["logStreams"] });
+    }
+    if (payload.causalEffectOutcomeEventIds &&
+        new Set(payload.causalEffectOutcomeEventIds).size !==
+          payload.causalEffectOutcomeEventIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Cell failure causal effect outcome IDs must be unique",
+        path: ["causalEffectOutcomeEventIds"],
+      });
     }
   }),
   CellAbandoned: z.object({ cellId: id, reason: z.string() }),
@@ -912,10 +922,6 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     if (value.proposalId !== value.proposal.proposalId ||
         value.proposalFingerprint !== canonicalJsonDigest(value.proposal as unknown as JsonValue)) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "governed proposal identity or fingerprint does not match" });
-    }
-    if (value.proposal.principal.kind === "automatic_refiner" &&
-        value.proposal.evaluation === undefined) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: "automatic governed proposals require objective evaluation intent" });
     }
     if (value.proposal.evaluation !== undefined) {
       try {

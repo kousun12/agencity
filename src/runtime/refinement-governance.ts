@@ -1,7 +1,6 @@
 import {
   PRODUCT_CONSTITUTION,
   PRODUCT_CONSTITUTION_REFERENCE,
-  MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
   REFINEMENT_GOVERNANCE_CONTRACT_ID,
   REFINEMENT_GOVERNANCE_POLICY,
   REFINEMENT_GOVERNANCE_POLICY_REFERENCE,
@@ -12,7 +11,6 @@ import {
   ValidationError,
   canonicalJsonByteLength,
   canonicalJsonDigest,
-  canonicalJsonStringify,
   newId,
   normalizeAgentProfileInput,
   projectEvents,
@@ -36,8 +34,8 @@ import {
   type RollbackRefinementInput,
 } from "../domain/index.ts";
 import {
+  buildFrozenRefinementGovernanceEvidence,
   containsBrokeredSecret,
-  sanitizeRefinementEvidencePayload,
   scrubJson,
   scrubText,
 } from "../security/index.ts";
@@ -51,6 +49,7 @@ import {
 } from "./internal.ts";
 import type { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import type { PublicRecursiveModelService } from "./models.ts";
+import { ProjectionService } from "./projection.ts";
 import type { RefinementTrajectorySnapshot } from "./refinement-context.ts";
 
 const TERMINAL = new Set<GovernedRefinementStatus>([
@@ -98,6 +97,7 @@ export class RefinementGovernanceService {
   readonly #queue = new GovernanceQueue();
   readonly #jobs = new Map<string, Promise<void>>();
   readonly #prepareApprovedProfile: GovernedAgentProfilePreparer;
+  readonly #projections: ProjectionService;
 
   constructor(
     readonly storage: AgentStorage,
@@ -109,6 +109,7 @@ export class RefinementGovernanceService {
     readonly ownerProfileId: string,
   ) {
     this.#prepareApprovedProfile = internalGovernedAgentProfilePreparer(profiles);
+    this.#projections = new ProjectionService(storage);
   }
 
   proposeOwner(
@@ -617,12 +618,6 @@ export class RefinementGovernanceService {
     if (proposal.evaluation !== undefined) {
       validateObjectiveEvaluation(proposal.evaluation);
     }
-    if (proposal.principal.kind === "automatic_refiner" &&
-        proposal.evaluation === undefined) {
-      throw new ValidationError(
-        "Automatic refiner proposals require objective post-activation evaluation intent",
-      );
-    }
     const events = await this.storage.loadEvents(proposal.origin.sessionId, {
       branchId: proposal.origin.branchId,
     });
@@ -756,11 +751,16 @@ export class RefinementGovernanceService {
   }
 
   async #waitForAdmission(proposalId: string): Promise<GovernedRefinementRecord> {
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline) {
-      const record = await this.get(proposalId);
-      if (record.status !== "proposed") return record;
-      await Bun.sleep(5);
+    const initial = await this.get(proposalId);
+    const waited = await this.#projections.waitForTerminal(
+      initial.sessionId,
+      initial.branchId,
+      async () => (await this.get(proposalId)).status !== "proposed",
+      { timeoutMs: 5_000 },
+    );
+    const record = await this.get(proposalId);
+    if (waited.reason === "terminal" || record.status !== "proposed") {
+      return record;
     }
     throw new ConflictError("Stable refinement proposal admission did not reach validation");
   }
@@ -1280,64 +1280,21 @@ export class RefinementGovernanceService {
           exactAgentPrompt: renderExactAgentPrompt(proposal.target.replacement),
         } as unknown as JsonValue
       : proposal.target.edits as unknown as JsonValue;
-    const evidence = [];
-    const payloadSources: Array<{
-      readonly eventId: string;
-      readonly canonicalPayloadDigest: `sha256:${string}`;
-      readonly canonicalPayloadBytes: number;
-      readonly redactedPayloadDigest: `sha256:${string}`;
-      readonly redactedPayloadBytes: number;
-      readonly redactedPayloadJson: string;
-      readonly redactions: readonly ("credentials" | "repository_instructions")[];
-    }> = [];
+    const evidenceSources = [];
     for (const eventId of proposal.evidenceEventIds) {
       const event = await this.storage.getEvent(eventId);
       if (!event) throw new ValidationError("Frozen governance evidence is unavailable");
-      const canonicalPayload = event.payload as unknown as JsonValue;
-      const sanitized = sanitizeRefinementEvidencePayload(event.type, canonicalPayload);
-      const redactedPayloadJson = canonicalJsonStringify(sanitized.payload);
-      evidence.push({
+      evidenceSources.push({
         eventId,
         sessionId: event.sessionId,
         branchId: event.branchId,
         cursor: event.cursor,
         type: event.type,
-        payloadDigest: canonicalJsonDigest(canonicalPayload),
-      });
-      payloadSources.push({
-        eventId,
-        canonicalPayloadDigest: canonicalJsonDigest(canonicalPayload),
-        canonicalPayloadBytes: canonicalJsonByteLength(canonicalPayload),
-        redactedPayloadDigest: canonicalJsonDigest(sanitized.payload),
-        redactedPayloadBytes: new TextEncoder().encode(redactedPayloadJson).byteLength,
-        redactedPayloadJson,
-        redactions: sanitized.redactions,
+        payload: event.payload as unknown as JsonValue,
       });
     }
-    let remainingExcerptBytes =
-      MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES;
-    const evidenceExcerpts = payloadSources.map((source, index) => {
-      const remainingItems = payloadSources.length - index;
-      const allowance = Math.floor(remainingExcerptBytes / remainingItems);
-      const excerpt = truncateUtf8(source.redactedPayloadJson, allowance);
-      const excerptBytes = new TextEncoder().encode(excerpt).byteLength;
-      remainingExcerptBytes -= excerptBytes;
-      return {
-        eventId: source.eventId,
-        canonicalPayloadDigest: source.canonicalPayloadDigest,
-        canonicalPayloadBytes: source.canonicalPayloadBytes,
-        redactedPayloadDigest: source.redactedPayloadDigest,
-        redactedPayloadBytes: source.redactedPayloadBytes,
-        excerpt,
-        excerptDigest: canonicalJsonDigest(excerpt),
-        excerptBytes,
-        truncated: excerptBytes < source.redactedPayloadBytes,
-        redactions: source.redactions,
-      };
-    });
-    const usedEvidenceExcerptBytes =
-      MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES -
-      remainingExcerptBytes;
+    const frozenEvidence =
+      buildFrozenRefinementGovernanceEvidence(evidenceSources);
     const origin = await this.storage.readonlyQuery({
       sql: "SELECT workspace_id FROM sessions WHERE session_id=?",
       args: [proposal.origin.sessionId],
@@ -1362,12 +1319,8 @@ export class RefinementGovernanceService {
       proposal,
       currentTarget,
       renderedReplacement,
-      evidence,
-      evidencePayloads: {
-        maximumBytes: MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
-        usedBytes: usedEvidenceExcerptBytes,
-        excerpts: evidenceExcerpts,
-      },
+      evidence: frozenEvidence.evidence,
+      evidencePayloads: frozenEvidence.evidencePayloads,
       ...(refinementGrounding === undefined ? {} : { refinementGrounding }),
       proposerRelationship: relationship,
       targetScope: proposal.target.kind === "agent_profile"
@@ -1736,20 +1689,6 @@ function rowToGovernedRollback(
 function parseJson<T>(value: unknown, fallback: T): T {
   if (value === null || value === undefined) return fallback;
   return JSON.parse(String(value)) as T;
-}
-
-function truncateUtf8(value: string, maximum: number): string {
-  const encoder = new TextEncoder();
-  if (encoder.encode(value).byteLength <= maximum) return value;
-  let output = "";
-  let used = 0;
-  for (const character of value) {
-    const bytes = encoder.encode(character).byteLength;
-    if (used + bytes > maximum) break;
-    output += character;
-    used += bytes;
-  }
-  return output;
 }
 
 function normalizeBounded(value: string, label: string, maxBytes: number): string {

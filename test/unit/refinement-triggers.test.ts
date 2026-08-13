@@ -147,6 +147,38 @@ function effectBackedFailedCells(
   });
 }
 
+function withExactCellFailureCausality(
+  records: readonly RefinementTriggerRecordInput[],
+  ids: "matching" | "empty" = "matching",
+): RefinementTriggerRecordInput[] {
+  const outcomeIdByEffectId = new Map<string, string>();
+  const effectIdByCellId = new Map<string, string>();
+  for (const item of records) {
+    const payload = item.payload as Record<string, any>;
+    if (item.type === "EffectRequested" && payload.origin?.kind === "cell") {
+      effectIdByCellId.set(payload.origin.cellId, payload.effectId);
+    } else if (item.type === "EffectOutcomeRecorded") {
+      outcomeIdByEffectId.set(payload.effectId, item.id);
+    }
+  }
+  return records.map((item) => {
+    if (item.type !== "CellFailed") return item;
+    const payload = item.payload as Record<string, any>;
+    const effectId = effectIdByCellId.get(payload.cellId);
+    const outcomeId = effectId === undefined
+      ? undefined
+      : outcomeIdByEffectId.get(effectId);
+    return {
+      ...item,
+      payload: {
+        ...payload,
+        causalEffectOutcomeEventIds:
+          ids === "matching" && outcomeId ? [outcomeId] : [],
+      },
+    };
+  });
+}
+
 function runStatus(
   runId: string,
   cursor: number,
@@ -265,6 +297,93 @@ describe("FU-016 deterministic refinement trigger policy", () => {
       "cell-failed-run-1-1",
       "cell-failed-run-1-2",
       "cell-failed-run-1-3",
+    ]);
+  });
+
+  test("uses typed outcome IDs for wrapped errors and never falls back from a present empty array", () => {
+    const wrapped = withExactCellFailureCausality(
+      effectBackedFailedCells(
+        "run-1",
+        ["same effect failure", "same effect failure", "same effect failure"],
+      ).map((item) => item.type === "CellFailed"
+        ? {
+            ...item,
+            payload: {
+              ...(item.payload as Record<string, unknown>),
+              error: "Error: wrapped with unrelated text",
+            },
+          }
+        : item),
+    );
+    expect(scan(wrapped).map((trigger) => trigger.kind))
+      .toEqual(["repeated_cell_failure"]);
+
+    const explicitlyUnproven = withExactCellFailureCausality(
+      effectBackedFailedCells(
+        "run-1",
+        ["same effect failure", "same effect failure", "same effect failure"],
+      ),
+      "empty",
+    );
+    expect(scan(explicitlyUnproven).map((trigger) => trigger.kind))
+      .toEqual(["repeated_effect_failure", "repeated_cell_failure"]);
+  });
+
+  test("deduplicates only the exact escaped outcome among identical multiple-effect errors", () => {
+    const records: RefinementTriggerRecordInput[] = [];
+    for (let index = 1; index <= 3; index++) {
+      const actionId = `run-1-action-${index}`;
+      const cellId = `agent-run-cell-${actionId}`;
+      const base = (index - 1) * 6 + 1;
+      const handledEffectId = `handled-${index}`;
+      const escapedEffectId = `escaped-${index}`;
+      const escapedOutcomeId = `escaped-outcome-${index}`;
+      records.push(
+        record(`action-${index}`, base, "AgentRunActionCommitted", {
+          runId: "run-1",
+          actionId,
+          action: { type: "typescript" },
+        }),
+        record(`handled-request-${index}`, base + 1, "EffectRequested", {
+          effectId: handledEffectId,
+          executor: "shell",
+          operation: "run",
+          origin: { kind: "cell", cellId },
+        }),
+        record(`handled-outcome-${index}`, base + 2, "EffectOutcomeRecorded", {
+          effectId: handledEffectId,
+          attempt: 1,
+          outcome: "failed",
+          error: "identical failure",
+        }),
+        record(`escaped-request-${index}`, base + 3, "EffectRequested", {
+          effectId: escapedEffectId,
+          executor: "shell",
+          operation: "run",
+          origin: { kind: "cell", cellId },
+        }),
+        record(escapedOutcomeId, base + 4, "EffectOutcomeRecorded", {
+          effectId: escapedEffectId,
+          attempt: 1,
+          outcome: "failed",
+          error: "identical failure",
+        }),
+        record(`cell-failed-${index}`, base + 5, "CellFailed", {
+          cellId,
+          error: "Error: identical failure",
+          causalEffectOutcomeEventIds: [escapedOutcomeId],
+        }),
+      );
+    }
+    const triggers = scan(records);
+    expect(triggers.map((trigger) => trigger.kind))
+      .toEqual(["repeated_effect_failure", "repeated_cell_failure"]);
+    const effectTrigger = triggers.find((trigger) =>
+      trigger.kind === "repeated_effect_failure");
+    expect(effectTrigger?.evidenceEventIds).toEqual([
+      "handled-outcome-1",
+      "handled-outcome-2",
+      "handled-outcome-3",
     ]);
   });
 

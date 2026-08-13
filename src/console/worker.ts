@@ -40,7 +40,7 @@ type Incoming =
   | { type: "scratch-record-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string; candidate: import("./scratch.ts").ScratchCheckpointCandidate; result: ScratchCheckpointWriteResult }
   | { type: "scratch-record-cache-write"; requestId: string; scope: ScratchScope; status: ScratchCheckpointWriteResult["status"] | "unavailable" }
   | { type: "scratch-evict"; requestId: string; scope: ScratchScope }
-  | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string; code?: string; details?: Record<string, unknown> }
+  | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string; code?: string; details?: Record<string, unknown>; causalEffectOutcomeEventId?: string }
   | { type: "shutdown" };
 
 const MAX_LOG_BYTES = 64 * 1024;
@@ -88,7 +88,19 @@ function send(message: unknown): void {
   process.send(message);
 }
 
-const pendingRpc = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+interface PrivateRpcResult {
+  readonly value: unknown;
+  readonly causalEffectOutcomeEventId?: string;
+}
+
+const pendingRpc = new Map<string, {
+  resolve: (value: PrivateRpcResult) => void;
+  reject: (error: Error) => void;
+}>();
+const causalEffectErrors = new WeakMap<
+  Error,
+  readonly string[]
+>();
 let executionQueue = Promise.resolve();
 interface WarmScratchScope {
   readonly scope: ScratchScope;
@@ -114,9 +126,14 @@ function scopeKey(scope: ScratchScope): string {
   return `${scope.sessionId.length}:${scope.sessionId}${scope.branchId}`;
 }
 
-function rpc(executionId: string, method: string, args: unknown[]): Promise<unknown> {
+function rpc(
+  executionId: string,
+  method: string,
+  args: unknown[],
+): Promise<PrivateRpcResult> {
   const requestId = crypto.randomUUID();
-  const promise = new Promise<unknown>((resolve, reject) => pendingRpc.set(requestId, { resolve, reject }));
+  const promise = new Promise<PrivateRpcResult>((resolve, reject) =>
+    pendingRpc.set(requestId, { resolve, reject }));
   send({ type: "rpc", executionId, requestId, method, args });
   return promise;
 }
@@ -128,7 +145,17 @@ process.on("message", (raw: unknown) => {
     const pending = pendingRpc.get(message.requestId);
     if (pending) {
       pendingRpc.delete(message.requestId);
-      if (message.ok) pending.resolve(message.value);
+      if (message.ok) {
+        pending.resolve({
+          value: message.value,
+          ...(typeof message.causalEffectOutcomeEventId === "string"
+            ? {
+                causalEffectOutcomeEventId:
+                  message.causalEffectOutcomeEventId,
+              }
+            : {}),
+        });
+      }
       else {
         const error = new Error(message.error ?? "RPC failed") as Error & {
           code?: string;
@@ -234,7 +261,8 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     error: (...args: unknown[]) => logs.push(args.map(printable).join(" "), "stderr"),
     warn: (...args: unknown[]) => logs.push(args.map(printable).join(" "), "stderr"),
   };
-  const call = (method: string, args: unknown[]) => rpc(message.executionId, method, args);
+  const call = async (method: string, args: unknown[]) =>
+    (await rpc(message.executionId, method, args)).value;
   const callWithOptional = (
     method: string,
     required: unknown[],
@@ -278,34 +306,77 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       };
     },
   };
-  const request = async (executor: string, operation: string, input: JsonValue, options?: unknown) =>
-    callWithOptional("tools.request", [executor, operation, input], options) as Promise<any>;
+  const requestWithMetadata = (
+    executor: string,
+    operation: string,
+    input: JsonValue,
+    options?: unknown,
+  ) => rpc(
+    message.executionId,
+    "tools.request",
+    options === undefined
+      ? [executor, operation, input]
+      : [executor, operation, input, options],
+  );
+  const request = async (
+    executor: string,
+    operation: string,
+    input: JsonValue,
+    options?: unknown,
+  ) => (await requestWithMetadata(executor, operation, input, options)).value as any;
+  const convenienceResult = async (
+    result: Promise<PrivateRpcResult>,
+    label: string,
+  ): Promise<any> => {
+    const response = await result;
+    const value = response.value as any;
+    if (value?.outcome === "succeeded") return value.output;
+    const error = new Error(
+      value?.error ?? `${label}: ${value?.outcome ?? "failed"}`,
+    );
+    if (response.causalEffectOutcomeEventId !== undefined) {
+      causalEffectErrors.set(error, [response.causalEffectOutcomeEventId]);
+    }
+    throw error;
+  };
   const tools = {
     request,
     shell: async (command: string, rawOptions: Record<string, unknown> = {}) => {
       const options = optionsObject(rawOptions, "shell options");
-      const response = await request("shell", "run", { command, ...options }, options);
-      if (response.outcome !== "succeeded") throw new Error(response.error ?? `shell: ${response.outcome}`);
-      return response.output;
+      return convenienceResult(
+        requestWithMetadata("shell", "run", { command, ...options }, options),
+        "shell",
+      );
     },
     readFile: async (path: string, rawOptions: Record<string, unknown> = {}) => {
       const options = optionsObject(rawOptions, "readFile options");
-      const response = await request("file", "read", { path, ...options }, { idempotent: true });
-      if (response.outcome !== "succeeded") throw new Error(response.error ?? `readFile: ${response.outcome}`);
-      return response.output;
+      return convenienceResult(
+        requestWithMetadata(
+          "file",
+          "read",
+          { path, ...options },
+          { idempotent: true },
+        ),
+        "readFile",
+      );
     },
     writeFile: async (path: string, content: string, expectedSha256?: string) => {
       if (expectedSha256 !== undefined && typeof expectedSha256 !== "string") {
         throw new TypeError("writeFile expectedSha256 must be a string");
       }
-      const response = await request(
-        "file",
-        "write",
-        { path, content, ...(expectedSha256 === undefined ? {} : { expectedSha256 }) },
-        { idempotent: true },
+      return convenienceResult(
+        requestWithMetadata(
+          "file",
+          "write",
+          {
+            path,
+            content,
+            ...(expectedSha256 === undefined ? {} : { expectedSha256 }),
+          },
+          { idempotent: true },
+        ),
+        "writeFile",
       );
-      if (response.outcome !== "succeeded") throw new Error(response.error ?? `writeFile: ${response.outcome}`);
-      return response.output;
     },
   };
   const memory = {
@@ -337,6 +408,15 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       typeof handle === "string" ? handle : { taskId: handle.taskId },
       options,
     ]) as Promise<ConsoleAgentRunResult<I>>;
+  const agentMessageResult = (
+    message: string | { readonly mailboxMessageId: string },
+    options: ConsoleAgentResultOptions = {},
+  ) => call("agents.messageResult", [
+    typeof message === "string"
+      ? message
+      : { mailboxMessageId: message.mailboxMessageId },
+    options,
+  ]);
   const attachAgentHandle = <I extends ConsoleAgentSpawnInput | string>(
     raw: unknown,
   ): ConsoleAgentHandle<I> => {
@@ -388,6 +468,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     },
     list: () => call("agents.list", []),
     send: (input: unknown, content?: string, options: Record<string, unknown> = {}) => call("agents.send", [input, content, options]),
+    messageResult: agentMessageResult,
     messages: (options: Record<string, unknown> = {}) => call("agents.messages", [options]),
     acknowledge: (messageId: string) => call("agents.acknowledge", [messageId]),
     cancel: (target: string, reason?: string) =>
@@ -516,11 +597,17 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     response = { type: "result", executionId: message.executionId, ok: true, observation, rssBytes: process.memoryUsage.rss() };
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    const causalEffectOutcomeEventIds = error instanceof Error
+      ? causalEffectErrors.get(error)
+      : undefined;
     response = {
       type: "result",
       executionId: message.executionId,
       ok: false,
       error: detail.length > MAX_LOG_BYTES ? `${detail.slice(0, MAX_LOG_BYTES)}…` : detail,
+      ...(causalEffectOutcomeEventIds === undefined
+        ? {}
+        : { causalEffectOutcomeEventIds: [...causalEffectOutcomeEventIds] }),
       rssBytes: process.memoryUsage.rss(),
     };
   } finally {
@@ -702,7 +789,11 @@ async function stageObservation(
       Buffer.from(bytes.subarray(start, Math.min(bytes.byteLength, start + chunkBytes))).toString("base64"),
     ]);
   }
-  const result = await rpc(executionId, "observation.stage.finish", [observation.preview]) as JsonValue;
+  const result = (await rpc(
+    executionId,
+    "observation.stage.finish",
+    [observation.preview],
+  )).value as JsonValue;
   return {
     kind: "staged",
     result,

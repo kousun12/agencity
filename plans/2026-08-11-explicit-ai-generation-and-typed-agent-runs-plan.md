@@ -504,7 +504,7 @@ Add typed HTTP/client operations for:
 
 Use route names that expose lifecycle directly, such as `/sessions/:session/ai/generations` and `/sessions/:session/agent-invocations`.
 
-HTTP admission returns a durable handle immediately. Result waiting uses a lookup endpoint or cursor-resumable SSE; it does not hold one ordinary request open for the duration of an agent run. `AgentClient.generateText`, `generateObject`, and `runAgent` are convenience compositions of admission plus result waiting. Console `ai.generate*` and `sdk.agents.run` use the same durable handle/result protocol over worker RPC. Lookup by parent branch plus stable idempotency key recovers work when a disconnect occurs before handle delivery.
+HTTP admission returns a durable handle immediately. `AgentClient.generateText`, `generateObject`, and `runAgent` wait through one snapshot-plus-cursor, cursor-resumable SSE path and perform a final result read; they do not hold one ordinary request open for the duration of an agent run or maintain independent short-interval polls. Runtime AI-generation, agent-run, retained-recursive, refinement-admission, and canonical outbox-owner waits use one `ProjectionService` snapshot-plus-cursor primitive. A bounded polling fallback is explicit and centralized only for relational placements that advertise unavailable notifications; notification-capable placements do not silently downgrade. Console `ai.generate*` and `sdk.agents.run` use the same durable handle/result protocol over worker RPC. Lookup by parent branch plus stable idempotency key recovers work when a disconnect occurs before handle delivery.
 
 This is a pre-release public API cutover:
 

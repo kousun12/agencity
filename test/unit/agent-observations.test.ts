@@ -156,6 +156,7 @@ describe("derived agent provider observations", () => {
         error: "tool failed",
         logs: [],
         durationMs: 1,
+        causalEffectOutcomeEventIds: ["2", "4"],
       }),
     ];
     const observations = deriveAgentProviderObservations(events, ["2", "4", "5"]);
@@ -178,6 +179,9 @@ describe("derived agent provider observations", () => {
       outcome: "unknown",
       error: "owner disappeared",
       guidance: expect.stringContaining("Do not retry automatically"),
+    });
+    expect(observations[2]!.payload).toMatchObject({
+      causalEffectOutcomeEventIds: ["2", "4"],
     });
   });
 

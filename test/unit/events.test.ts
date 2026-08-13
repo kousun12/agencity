@@ -4,8 +4,10 @@ import {
   ConflictError,
   LibSqlStorage,
   ProjectionService,
+  canonicalJsonDigest,
   projectEvents,
   reduceAgentState,
+  validateNewEvent,
   type AgentEvent,
 } from "../../src/index.ts";
 import {
@@ -31,6 +33,53 @@ async function setup(): Promise<{ temp: TempRuntime; storage: LibSqlStorage; ses
 }
 
 describe("canonical event storage", () => {
+  test("decodes retained automatic governed proposals without evaluation", () => {
+    const proposal = {
+      proposalId: "retained-automatic-governed-proposal",
+      target: {
+        kind: "harness",
+        harnessKind: "memory",
+        edits: [{
+          operation: "create",
+          kind: "memory",
+          scope: "local",
+          scopeKey: "retained-session",
+          name: "retained-automatic-memory",
+          content: {
+            kind: "memory",
+            memoryKind: "claim",
+            text: "Retained before governed evaluation became mandatory.",
+          },
+        }],
+      },
+      principal: {
+        kind: "automatic_refiner",
+        componentId: "agencity.trajectory-refiner",
+        version: 1,
+        sessionId: "retained-session",
+        branchId: "retained-branch",
+      },
+      origin: {
+        sessionId: "retained-session",
+        branchId: "retained-branch",
+      },
+      reason: "Retained schema-v5 automatic proposal.",
+      predictedEffect: "Historical proposal remains readable.",
+      evidenceEventIds: [],
+    };
+    expect(() => validateNewEvent({
+      sessionId: proposal.origin.sessionId,
+      branchId: proposal.origin.branchId,
+      type: "GovernedRefinementProposed",
+      producer: "supervisor",
+      payload: {
+        proposalId: proposal.proposalId,
+        proposalFingerprint: canonicalJsonDigest(proposal),
+        proposal,
+      },
+    })).not.toThrow();
+  });
+
   test("is physically append-only even through a separate administrative connection", async () => {
     const { temp, storage, sessionId } = await setup();
     const message = await appendMessage(storage, sessionId, "main", "01", "immutable");
@@ -201,6 +250,112 @@ describe("canonical event storage", () => {
       },
     }])).rejects.toMatchObject({ code: "INVALID_TRANSITION" });
     expect(await storage.loadEvents(sessionId)).toEqual(before);
+    storage.close();
+  });
+
+  test("validates typed cell-failure effect causality against exact owned terminal outcomes", async () => {
+    const { storage, sessionId, branchId } = await setup();
+    const cells = ["valid", "missing", "succeeded", "wrong-owner"];
+    await storage.appendEvents(cells.flatMap((cellId) => [{
+      sessionId,
+      branchId,
+      type: "CellProposed" as const,
+      producer: "console",
+      idempotencyKey: `cell-proposed:${cellId}`,
+      payload: { cellId, code: "fixture", dependencies: [] },
+    }, {
+      sessionId,
+      branchId,
+      type: "CellStarted" as const,
+      producer: "console",
+      idempotencyKey: `cell-started:${cellId}`,
+      payload: { cellId, attempt: 1 },
+    }]));
+    const effectSpecs = [
+      { effectId: "failed-effect", cellId: "valid", outcome: "failed" as const },
+      { effectId: "cancelled-effect", cellId: "valid", outcome: "cancelled" as const },
+      { effectId: "unknown-effect", cellId: "valid", outcome: "unknown" as const },
+      { effectId: "successful-effect", cellId: "succeeded", outcome: "succeeded" as const },
+      { effectId: "other-effect", cellId: "valid", outcome: "failed" as const },
+    ];
+    const committed = await storage.appendEvents(effectSpecs.flatMap((spec) => [{
+      sessionId,
+      branchId,
+      type: "EffectRequested" as const,
+      producer: "supervisor",
+      idempotencyKey: `request:${spec.effectId}`,
+      payload: {
+        effectId: spec.effectId,
+        executor: "shell",
+        operation: "run",
+        input: { command: "fixture" },
+        origin: { kind: "cell" as const, cellId: spec.cellId },
+        idempotencyKey: `request:${spec.effectId}`,
+        idempotent: true,
+      },
+    }, {
+      sessionId,
+      branchId,
+      type: "EffectOutcomeRecorded" as const,
+      producer: "executor",
+      idempotencyKey: `outcome:${spec.effectId}`,
+      payload: {
+        effectId: spec.effectId,
+        attempt: 1,
+        outcome: spec.outcome,
+        ...(spec.outcome === "succeeded" ? { output: null } : { error: "fixture" }),
+        observedAt: "2026-08-12T00:00:00.000Z",
+      },
+    }]));
+    const outcomeByEffect = new Map(
+      committed.filter((event) => event.type === "EffectOutcomeRecorded")
+        .map((event) => [
+          (event.payload as { effectId: string }).effectId,
+          event.id,
+        ]),
+    );
+    const validIds = [
+      outcomeByEffect.get("failed-effect")!,
+      outcomeByEffect.get("cancelled-effect")!,
+      outcomeByEffect.get("unknown-effect")!,
+    ];
+    await expect(storage.appendEvents([{
+      sessionId,
+      branchId,
+      type: "CellFailed",
+      producer: "console",
+      idempotencyKey: "failed:valid",
+      payload: {
+        cellId: "valid",
+        error: "fixture",
+        logs: [],
+        durationMs: 1,
+        causalEffectOutcomeEventIds: validIds,
+      },
+    }])).resolves.toHaveLength(1);
+    expect(projectEvents(await storage.loadEvents(sessionId, { branchId }))
+      .cells.valid?.causalEffectOutcomeEventIds).toEqual(validIds);
+
+    for (const [cellId, causalEffectOutcomeEventIds] of [
+      ["missing", ["missing-outcome-event"]],
+      ["succeeded", [outcomeByEffect.get("successful-effect")!]],
+      ["wrong-owner", [outcomeByEffect.get("other-effect")!]],
+    ] as const) {
+      await expect(storage.appendEvents([{
+        sessionId,
+        branchId,
+        type: "CellFailed",
+        producer: "console",
+        idempotencyKey: `failed:${cellId}`,
+        payload: {
+          cellId,
+          error: "fixture",
+          logs: [],
+          durationMs: 1,
+          causalEffectOutcomeEventIds: [...causalEffectOutcomeEventIds],
+        },
+      }])).rejects.toThrow(/owned terminal non-success/);
+    }
     storage.close();
   });
 

@@ -11,6 +11,22 @@ function validateCursor(cursor: string): void {
   if (!/^\d+$/.test(cursor)) throw new Error(`Invalid cursor: ${cursor}`);
 }
 
+export const DEFAULT_TERMINAL_WAIT_POLL_INTERVAL_MS = 25;
+
+export interface ProjectionTerminalWaitOptions {
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  /** Used only by the explicit no-notifications placement fallback. */
+  readonly pollingFallbackIntervalMs?: number;
+}
+
+export interface ProjectionTerminalWaitResult {
+  readonly cursor: string;
+  readonly state: AgentState;
+  readonly reason: "terminal" | "timeout" | "cancelled";
+  readonly mode: "notifications" | "polling-fallback";
+}
+
 export class ProjectionService {
   constructor(readonly storage: AgentStorage) {}
 
@@ -54,6 +70,157 @@ export class ProjectionService {
     const events = await this.storage.loadEvents(sessionId, { branchId });
     if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
     return events;
+  }
+
+  /**
+   * Race-safe terminal wait over one canonical branch.
+   *
+   * Notification-capable placements use snapshot plus cursor catch-up. A
+   * centralized polling fallback is selected only when the relational adapter
+   * truthfully advertises that notifications are unavailable.
+   */
+  async waitForTerminal(
+    sessionId: string,
+    branchId: string,
+    terminal: (state: AgentState) => boolean | Promise<boolean>,
+    options: ProjectionTerminalWaitOptions = {},
+  ): Promise<ProjectionTerminalWaitResult> {
+    const timeoutMs = options.timeoutMs;
+    if (timeoutMs !== undefined &&
+        (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 86_400_000)) {
+      throw new Error("Projection terminal wait timeout must be from 0 to 86400000ms");
+    }
+    const interval = options.pollingFallbackIntervalMs ??
+      DEFAULT_TERMINAL_WAIT_POLL_INTERVAL_MS;
+    if (!Number.isSafeInteger(interval) || interval < 1 || interval > 60_000) {
+      throw new Error("Projection terminal polling fallback interval must be from 1 to 60000ms");
+    }
+    const deadline = timeoutMs === undefined
+      ? Number.POSITIVE_INFINITY
+      : Date.now() + timeoutMs;
+    const initial = await this.getSnapshot(sessionId, branchId);
+    if (await terminal(initial.state)) {
+      const final = await this.getSnapshot(sessionId, branchId);
+      return {
+        ...final,
+        reason: "terminal",
+        mode: this.storage.capabilities.notifications
+          ? "notifications"
+          : "polling-fallback",
+      };
+    }
+    if (!this.storage.capabilities.notifications) {
+      return this.#waitByPollingFallback(
+        sessionId,
+        branchId,
+        terminal,
+        initial,
+        deadline,
+        interval,
+        options.signal,
+      );
+    }
+
+    let dirty = false;
+    let wake: (() => void) | undefined;
+    let state = initial.state;
+    const unsubscribe = this.subscribe(
+      sessionId,
+      branchId,
+      initial.cursor,
+      (event) => {
+        state = reduceAgentState(state, event);
+        dirty = true;
+        wake?.();
+      },
+    );
+    let reason: ProjectionTerminalWaitResult["reason"] = "timeout";
+    try {
+      while (true) {
+        if (await terminal(state)) {
+          reason = "terminal";
+          break;
+        }
+        if (options.signal?.aborted) {
+          reason = "cancelled";
+          break;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          reason = "timeout";
+          break;
+        }
+        if (dirty) {
+          dirty = false;
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          const finish = (): void => {
+            if (settled) return;
+            settled = true;
+            if (timer !== undefined) clearTimeout(timer);
+            options.signal?.removeEventListener("abort", finish);
+            if (wake === finish) wake = undefined;
+            resolve();
+          };
+          const timer = Number.isFinite(remaining)
+            ? setTimeout(finish, remaining)
+            : undefined;
+          wake = finish;
+          options.signal?.addEventListener("abort", finish, { once: true });
+          // Close the event-between-check-and-arm race.
+          if (dirty || options.signal?.aborted) finish();
+        });
+        dirty = false;
+      }
+    } finally {
+      wake?.();
+      wake = undefined;
+      unsubscribe();
+    }
+    const final = await this.getSnapshot(sessionId, branchId);
+    return {
+      ...final,
+      reason: await terminal(final.state) ? "terminal" : reason,
+      mode: "notifications",
+    };
+  }
+
+  async #waitByPollingFallback(
+    sessionId: string,
+    branchId: string,
+    terminal: (state: AgentState) => boolean | Promise<boolean>,
+    initial: { cursor: string; state: AgentState },
+    deadline: number,
+    interval: number,
+    signal?: AbortSignal,
+  ): Promise<ProjectionTerminalWaitResult> {
+    let current = initial;
+    let reason: ProjectionTerminalWaitResult["reason"] = "timeout";
+    while (true) {
+      if (await terminal(current.state)) {
+        reason = "terminal";
+        break;
+      }
+      if (signal?.aborted) {
+        reason = "cancelled";
+        break;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        reason = "timeout";
+        break;
+      }
+      await abortableDelay(Math.min(interval, remaining), signal);
+      current = await this.getSnapshot(sessionId, branchId);
+    }
+    const final = await this.getSnapshot(sessionId, branchId);
+    return {
+      ...final,
+      reason: await terminal(final.state) ? "terminal" : reason,
+      mode: "polling-fallback",
+    };
   }
 
   /**
@@ -147,4 +314,17 @@ export interface AgentEventSource {
     afterCursor: string,
     onEvent: (event: AgentEvent) => void,
   ): () => void;
+}
+
+async function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted || milliseconds <= 0) return;
+  await new Promise<void>((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }

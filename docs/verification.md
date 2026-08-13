@@ -189,17 +189,21 @@ bun run benchmark:context-efficiency
 
 The benchmark uses the shipped `agentProviderContext`, bounded active-run projection, observation derivation, `buildProviderInputCandidate`, estimator, formal tool registry, local shell executor, and local artifact store. Its documented pre-change baseline shape accumulates completed TypeScript source under the active run and delivers the same successful shell result through both effect and cell observations. The optimized side is not a handcrafted request shape.
 
-The August 10, 2026 deterministic run produced:
+The August 12, 2026 deterministic run produced:
 
-- step 1: complete candidate 3,527 bytes; provider messages 698 bytes; serialized request 2,563 bytes; estimated input 641 tokens; baseline messages 517 bytes;
-- steps 2-5 each: complete candidate 29,205 bytes; provider messages 26,375 bytes; serialized request 28,240 bytes; estimated input 7,060 tokens;
+- step 1: complete candidate 3,691 bytes; provider messages 862 bytes; serialized request 2,727 bytes; estimated input 682 tokens; baseline messages 517 bytes;
+- steps 2-5: complete candidates 31,768, 31,943, 32,118, and 32,293 bytes; provider messages 28,938, 29,113, 29,288, and 29,463 bytes; serialized requests 30,803, 30,978, 31,153, and 31,328 bytes; estimated input 7,701, 7,745, 7,789, and 7,832 tokens;
 - baseline provider messages for steps 2-5: 60,714; 69,818; 78,922; and 88,026 bytes;
 - automatic observations for steps 2-5: cell-owned `CellCommitted` 25,548 bytes; production observation selection excludes request/attempt events, and the selected duplicate successful `EffectOutcomeRecorded` contributes zero automatic bytes;
 - shell fixture: 30,013 artifact bytes and 24,737 serialized preview bytes, with `spilled` completeness and 64 KiB artifact-range support;
 - capacity provenance: fixture provider metadata, 128,000-token context, 2,048-token output reserve, estimator `provider-input-utf8-bytes-per-4-tokens-v1`; compaction was not required; and
-- cumulative provider messages: 297,997 baseline bytes versus 106,198 shipped bytes, a 64.36% reduction. The required minimum is 30%.
+- cumulative provider messages: 297,997 baseline bytes versus 117,664 shipped bytes, a 60.52% reduction. The required minimum is 30%.
 
-Provider-reported input tokens were skipped because no live credential-gated provider run was enabled. Live-provider, official Turso Sync server, and Turso Cloud results remain unverified; the deterministic estimate is not presented as provider-reported usage.
+The same benchmark also applies `agencity.context-efficiency-decision-contract.v1` to exact normalized provider messages built by the production path. Sixteen deterministic checks cover the required task and run identity, step ordinals and trajectory order, compact action/result/effect facts, bounded failure guidance, successful-effect ownership by `CellCommitted`, omission of duplicate successful effect output, and retention of the spilled artifact reference. The contract selects `bun_console` for artifact-backed continuation, `bun_console` for failed-cell repair, and `finish` for verified completion.
+
+Focused integration coverage uses a deterministic provider that parses the actual normalized provider-message envelope and chooses actions from its observations. It proves the same artifact-derived continuation cell in uninterrupted execution and after a service boundary immediately following the first `CellCommitted`; each path completes with three model calls, two committed cells, and two file effects, without duplicate model, cell, or file work.
+
+These checks prove deterministic preservation for the encoded decision contract. They do not prove that a live model will interpret reduced and unreduced inputs equivalently. Provider-reported input tokens were skipped because no live credential-gated provider run was enabled. Live-provider, official Turso Sync server, and Turso Cloud results remain unverified; the deterministic estimate is not presented as provider-reported usage.
 
 Final context-efficiency verification on August 10, 2026 passed:
 

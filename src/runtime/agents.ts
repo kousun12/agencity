@@ -67,8 +67,25 @@ export interface MailboxMessageHandle {
   readonly toSessionId: string; readonly toBranchId: string; readonly delivered: boolean;
   readonly mode: "steer" | "queue";
   readonly receiptStatus: MailboxReceiptStatus; readonly queued: boolean; readonly existing: boolean;
+  /** Deterministic immutable run identity for non-legacy queued work only. */
+  readonly runId?: string;
   readonly error?: string;
 }
+export type MailboxMessageResult =
+  | {
+      readonly mailboxMessageId: string;
+      readonly runId: string;
+      readonly sessionId: string;
+      readonly branchId: string;
+      readonly status: "queued" | "failed";
+      readonly steps: 0;
+      readonly admitted: false;
+      readonly reason?: string;
+    }
+  | (AgentRunResult & {
+      readonly mailboxMessageId: string;
+      readonly admitted: true;
+    });
 export interface FamilyAgentRecord {
   readonly sessionId: string; readonly branchId: string; readonly name: string | null;
   readonly relationship: FamilyRelationship; readonly depth: number; readonly status: string;
@@ -724,6 +741,115 @@ export class AgentService {
     return { items, nextCursor: records.length > page.length && page.length ? encodeMessageCursor(page.at(-1)!) : null };
   }
 
+  /**
+   * Observes one sender-owned queued message without routing or admitting work.
+   * The queued run identity is a pure function of the immutable message ID.
+   */
+  async messageResult(
+    fromSessionId: string,
+    fromBranchId: string,
+    mailboxMessageId: string,
+    options: { readonly wait?: boolean; readonly timeoutMs?: number } = {},
+  ): Promise<MailboxMessageResult> {
+    if (!this.#runs) throw new ValidationError("Agent run service is unavailable");
+    if (options.wait !== undefined && typeof options.wait !== "boolean") {
+      throw new ValidationError("Mailbox message result wait must be boolean");
+    }
+    if (options.timeoutMs !== undefined &&
+        (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0 ||
+          options.timeoutMs > MAX_AGENT_INVOCATION_WAIT_MS)) {
+      throw new ValidationError(
+        `Mailbox message result timeout must be from 0 to ${MAX_AGENT_INVOCATION_WAIT_MS}ms`,
+      );
+    }
+    let message = await this.#recursive.getMailboxMessage(mailboxMessageId);
+    if (!message || message.fromSessionId !== fromSessionId ||
+        message.fromBranchId !== fromBranchId) {
+      throw new NotFoundError("outbound mailbox message", mailboxMessageId);
+    }
+    if (message.mode !== "queue" || message.legacyFollowUp ||
+        message.intentKey === null) {
+      throw new ValidationError(
+        "Only a non-legacy queued mailbox message has an independent result",
+      );
+    }
+    const read = async (): Promise<MailboxMessageResult> => {
+      message = await this.#recursive.getMailboxMessage(mailboxMessageId);
+      if (!message || message.fromSessionId !== fromSessionId ||
+          message.fromBranchId !== fromBranchId) {
+        throw new NotFoundError("outbound mailbox message", mailboxMessageId);
+      }
+      const runId = queuedMailboxRunId(mailboxMessageId);
+      if (message.receiptStatus === "failed") {
+        return {
+          mailboxMessageId,
+          runId,
+          sessionId: message.toSessionId,
+          branchId: message.toBranchId,
+          status: "failed",
+          steps: 0,
+          admitted: false,
+          ...(message.error === null ? {} : { reason: message.error }),
+        };
+      }
+      const state = projectEvents(await this.storage.loadEvents(
+        message.toSessionId,
+        { branchId: message.toBranchId },
+      ));
+      if (!state.agentRuns[runId]) {
+        return {
+          mailboxMessageId,
+          runId,
+          sessionId: message.toSessionId,
+          branchId: message.toBranchId,
+          status: "queued",
+          steps: 0,
+          admitted: false,
+        };
+      }
+      return {
+        ...await this.#runs!.get(message.toSessionId, message.toBranchId, runId),
+        mailboxMessageId,
+        admitted: true,
+      };
+    };
+    let result = await read();
+    if (!options.wait ||
+        ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(result.status)) {
+      return result;
+    }
+    const controller = new AbortController();
+    const waitOptions = {
+      signal: controller.signal,
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    };
+    const waits = [
+      this.#projections.waitForTerminal(
+        message.toSessionId,
+        message.toBranchId,
+        (state) => {
+          const run = state.agentRuns[queuedMailboxRunId(mailboxMessageId)];
+          return run !== undefined && isTerminalRunStatus(run.status);
+        },
+        waitOptions,
+      ),
+      this.#projections.waitForTerminal(
+        fromSessionId,
+        fromBranchId,
+        (state) => state.mailbox[mailboxMessageId]?.receiptStatus === "failed",
+        waitOptions,
+      ),
+    ];
+    try {
+      await Promise.race(waits);
+    } finally {
+      controller.abort();
+      await Promise.allSettled(waits);
+    }
+    result = await read();
+    return result;
+  }
+
   /** Delivers active-run steering inputs at an AgentRun durable step boundary. */
   async deliverSteeringAtBoundary(sessionId: string, branchId: string, runId: string): Promise<number> {
     const messages = (await this.#recursive.listMailboxMessages(sessionId, "inbound"))
@@ -860,22 +986,33 @@ export class AgentService {
       throw new NotFoundError("agent invocation", taskId);
     }
     const runId = spawnRunId(task.taskId);
-    const deadline = options.timeoutMs === undefined
-      ? Number.POSITIVE_INFINITY
-      : Date.now() + options.timeoutMs;
-    for (;;) {
-      const result = await this.#runs.get(
+    let result = await this.#runs.get(
+      task.childSessionId,
+      task.childBranchId,
+      runId,
+    );
+    if (options.wait &&
+        !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(result.status)) {
+      await this.#projections.waitForTerminal(
+        task.childSessionId,
+        task.childBranchId,
+        (state) => {
+          const run = state.agentRuns[runId];
+          return run !== undefined && isTerminalRunStatus(run.status);
+        },
+        {
+          ...(options.timeoutMs === undefined
+            ? {}
+            : { timeoutMs: options.timeoutMs }),
+        },
+      );
+      result = await this.#runs.get(
         task.childSessionId,
         task.childBranchId,
         runId,
       );
-      if (!options.wait ||
-          ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(result.status) ||
-          Date.now() >= deadline) {
-        return { ...result, taskId: task.taskId };
-      }
-      await Bun.sleep(Math.min(25, Math.max(1, deadline - Date.now())));
     }
+    return { ...result, taskId: task.taskId };
   }
 
   async invocationContract(
@@ -1140,7 +1277,7 @@ export class AgentService {
   }
 
   #messageHandle(message: MailboxRecord, existing: boolean): MailboxMessageHandle {
-    return { mailboxMessageId: message.mailboxMessageId, fromSessionId: message.fromSessionId, fromBranchId: message.fromBranchId, toSessionId: message.toSessionId, toBranchId: message.toBranchId, delivered: message.delivered, mode: message.mode, receiptStatus: message.receiptStatus, queued: message.receiptStatus === "queued", existing, ...(message.error === null ? {} : { error: message.error }) };
+    return { mailboxMessageId: message.mailboxMessageId, fromSessionId: message.fromSessionId, fromBranchId: message.fromBranchId, toSessionId: message.toSessionId, toBranchId: message.toBranchId, delivered: message.delivered, mode: message.mode, receiptStatus: message.receiptStatus, queued: message.receiptStatus === "queued", existing, ...(message.mode === "queue" && !message.legacyFollowUp && message.intentKey !== null ? { runId: queuedMailboxRunId(message.mailboxMessageId) } : {}), ...(message.error === null ? {} : { error: message.error }) };
   }
 
   async #publicMessage(viewerSessionId: string, message: MailboxRecord): Promise<FamilyMessageRecord> {
@@ -1594,9 +1731,9 @@ function decodeMessageCursor(cursor: string): { sentAt: string; id: string } {
 }
 
 function spawnRunId(taskId: string): string { return `agent-spawn-run-${stableId(taskId)}`; }
-function queueRunId(mailboxMessageId: string): string { return `agent-queue-run-${stableId(mailboxMessageId)}`; }
+export function queuedMailboxRunId(mailboxMessageId: string): string { return `agent-queue-run-${stableId(mailboxMessageId)}`; }
 function retainedMessageRunId(message: MailboxRecord): string {
-  return message.legacyFollowUp ? `agent-follow-up-run-${stableId(message.mailboxMessageId)}` : queueRunId(message.mailboxMessageId);
+  return message.legacyFollowUp ? `agent-follow-up-run-${stableId(message.mailboxMessageId)}` : queuedMailboxRunId(message.mailboxMessageId);
 }
 function retainedMessageRequestKey(message: MailboxRecord): string {
   return `${message.legacyFollowUp ? "agent-follow-up" : "agent-queue"}:${message.mailboxMessageId}`;

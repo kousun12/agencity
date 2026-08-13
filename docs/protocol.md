@@ -147,7 +147,8 @@ Reconciliation is evidence-only. It never rewrites an unknown effect, reports a 
 | `GET /sessions/:session/tasks?branch=:branch` | Durable branch task records. |
 | `POST /sessions/:session/tasks/:task/cancel?branch=:branch` | Cascaded task cancellation. |
 | `GET /sessions/:session/mailbox?branch=:branch&direction=all&limit=20&before=:cursor&pending=1` | Bounded mailbox page. |
-| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` with optional `mode: "steer" \| "queue"` → durable delivery receipt. Mode defaults to `queue`: each message owns a separate FIFO run, starting immediately when idle and after earlier work when busy. `steer` enters an active run at its next boundary or becomes retained context without waking an idle recipient. |
+| `POST /sessions/:session/mailbox?branch=:branch` | `SendMessageInput` with optional `mode: "steer" \| "queue"` → durable delivery receipt. A new non-legacy queued receipt includes its deterministic immutable `runId`; exact intent-key reuse returns the same message and run IDs. |
+| `GET /sessions/:session/mailbox/:message/result?branch=:branch` | Sender-authorized observational result lookup. Before admission it is queued with zero steps; delivery failure is failed without a fabricated run; after admission it returns the retained `AgentRun` status/result. |
 | `POST /sessions/:session/mailbox/:message/ack?branch=:branch` | Acknowledge a message. |
 | `POST /sessions/:session/documents?branch=:branch` | Import a chunked document. |
 | `POST /sessions/:session/input-sets?branch=:branch` | Create an exact ordered input set. |
@@ -182,7 +183,7 @@ The family roster is an additive deterministic read projection. Each item contai
 
 Only task edges admitted from the requested branch appear as direct children. A missing child or sibling branch, or an expected child or sibling task projection, remains an `unavailable` item rather than being omitted or redirected to another branch. Reading the roster and opening one of its routes appends no event and does not change task or execution ownership. Clients continue to watch the opened conversation through its own snapshot-plus-cursor stream; cursorless progress does not alter family activity.
 
-Family targets are URL-decoded and restricted to the caller's parent, direct children, or siblings. Sender identity comes from the path session/branch. Mailbox receipts retain queued, context-delivered, acknowledged, or failed state with relationship, task, artifact, mode, optional context-run, legacy-follow-up, and reply provenance.
+Family targets are URL-decoded and restricted to the caller's parent, direct children, or siblings. Sender identity comes from the path session/branch. Mailbox receipts retain queued, context-delivered, acknowledged, or failed state with relationship, task, artifact, mode, optional context-run, legacy-follow-up, and reply provenance. New `queue` messages derive `runId` from the immutable mailbox message ID without adding canonical state. `steer` and retained legacy `followUp` rows expose no independent run ID or result. Result lookup never routes, admits, or reorders work.
 
 ### Memory, refinement, skills, and specifications
 
@@ -285,7 +286,7 @@ The client exposes typed methods for all route groups:
 - autonomous runs and diagnostics: `startRun`, `run`, `resumeRun`, `cancelRun`, `turn`, `cell`, `agentToolCapability`, and `modelContractDiagnostics`;
 - streaming: `stream`, `watchBranch`, `abortPendingRequests`;
 - context/recovery: `inspectContext`, `compact`, `recoverySummary`, `unknownEffects`, `inspectUnknownEffect`, `reconcileUnknownEffect`;
-- agents and raw generation: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, mode-aware mailbox methods, agent cancellation, documents, input sets, and generation admission/lookup/result/wait/cancel methods;
+- agents and raw generation: `spawn`, `spawnMany`, `agents`, `tasks`, `cancelTask`, `sendMailbox`, `mailbox`, `mailboxResult`, acknowledgement, agent cancellation, documents, input sets, and generation admission/lookup/result/wait/cancel methods;
 - goals and wakes: goal, heartbeat, schedule, and wake methods;
 - memory and refinement: memory, trajectory review, automatic policy, governed proposal/wait/detach/inspection/rollback, and advanced legacy-compatible candidate/evaluation methods;
 - skill management: `listSkills`, `getSkill`, `previewSkillImport`, `installSkill`, `proposeSkill`, `enableSkill`, `disableSkill`, `removeSkill`, `testSkill`, `invokeSkill`, and `spawnSpec`;
@@ -413,7 +414,7 @@ The endpoint begins with the SSE comment `: connected` so a quiet branch opens i
 
 The endpoint does not emit the initial snapshot, periodic heartbeat frames, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
 
-`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded.
+`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded. `runAgent`, `generateText`, and `generateObject` use this shared watch path for terminal waiting and always perform one final retained result read on terminal detection or timeout; they do not maintain independent short-interval polling loops.
 
 ## Exported protocol types
 

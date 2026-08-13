@@ -54,6 +54,27 @@ function taskCanTransition(from: TaskStatus, to: TaskStatus): boolean {
   return ["running", "completed", "failed", "cancelled"].includes(to);
 }
 
+function validateCellFailureCausality(
+  state: AgentState,
+  cellId: string,
+  outcomeEventIds: readonly string[],
+): void {
+  const effectsByOutcomeEventId = new Map(
+    Object.values(state.effects).map((effect) => [effect.eventId, effect]),
+  );
+  for (const outcomeEventId of outcomeEventIds) {
+    const effect = effectsByOutcomeEventId.get(outcomeEventId);
+    if (!effect ||
+        effect.origin.kind !== "cell" ||
+        effect.origin.cellId !== cellId ||
+        !["failed", "cancelled", "unknown"].includes(effect.status)) {
+      throw new ValidationError(
+        "Cell failure causality must reference an owned terminal non-success effect outcome",
+      );
+    }
+  }
+}
+
 export function reduceAgentState(state: AgentState | undefined, event: AgentEvent): AgentState {
   if (event.schemaVersion !== EVENT_SCHEMA_VERSION) {
     throw new ValidationError(
@@ -119,7 +140,45 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     case "CellProposed": { const p = event.payload as EventPayloads["CellProposed"]; if (state.cells[p.cellId]) throw new InvalidTransitionError("cell", state.cells[p.cellId]!.status, "proposed"); const cell: CellState = { id: p.cellId, code: p.code, status: "proposed", attempts: 0, logs: [], logStreams: [], eventId: event.id }; return { ...next, cells: { ...state.cells, [p.cellId]: cell } }; }
     case "CellStarted": { const p = event.payload as EventPayloads["CellStarted"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("cell", old?.status ?? "missing", "running"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "running", attempts: p.attempt, eventId: event.id } } }; }
     case "CellCommitted": { const p = event.payload as EventPayloads["CellCommitted"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "committed"); assertBoundedOutputs(p.result); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "committed", result: p.result, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
-    case "CellFailed": { const p = event.payload as EventPayloads["CellFailed"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "failed"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "failed", error: p.error, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
+    case "CellFailed": {
+      const p = event.payload as EventPayloads["CellFailed"];
+      const old = state.cells[p.cellId];
+      if (!old || old.status !== "running") {
+        throw new InvalidTransitionError(
+          "cell",
+          old?.status ?? "missing",
+          "failed",
+        );
+      }
+      if (p.causalEffectOutcomeEventIds !== undefined) {
+        validateCellFailureCausality(
+          state,
+          p.cellId,
+          p.causalEffectOutcomeEventIds,
+        );
+      }
+      return {
+        ...next,
+        cells: {
+          ...state.cells,
+          [p.cellId]: {
+            ...old,
+            status: "failed",
+            error: p.error,
+            logs: p.logs,
+            logStreams: p.logStreams ?? p.logs.map(() => "stdout"),
+            ...(p.causalEffectOutcomeEventIds === undefined
+              ? {}
+              : {
+                  causalEffectOutcomeEventIds: [
+                    ...p.causalEffectOutcomeEventIds,
+                  ],
+                }),
+            eventId: event.id,
+          },
+        },
+      };
+    }
     case "CellAbandoned": { const p = event.payload as EventPayloads["CellAbandoned"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status)) throw new InvalidTransitionError("cell", old?.status ?? "missing", "abandoned"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "abandoned", error: p.reason, eventId: event.id } } }; }
     case "WorkingValueSet": { const p = event.payload as EventPayloads["WorkingValueSet"]; const old = state.workingValues[p.name]; if (old && p.version <= old.version) throw new ValidationError(`Working value version must increase for ${p.name}`); return { ...next, workingValues: { ...state.workingValues, [p.name]: { name: p.name, version: p.version, value: p.value, eventId: event.id } } }; }
     case "ArtifactRegistered": { const p = event.payload as EventPayloads["ArtifactRegistered"]; return { ...next, artifacts: { ...state.artifacts, [p.artifactId]: { artifactId: p.artifactId, digest: p.digest, mediaType: p.mediaType, size: p.size } } }; }

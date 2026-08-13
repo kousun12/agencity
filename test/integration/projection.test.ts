@@ -74,6 +74,210 @@ afterEach(async () => {
 });
 
 describe("reactive snapshots and resumable subscriptions", () => {
+  test("terminal waiter covers pre-snapshot, snapshot-subscribe, live, timeout, and cancellation races", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-waiter-");
+    temps.push(temp);
+    const storage = await openTempStorage(temp);
+    const first = await seedSession(storage, {
+      sessionId: "terminal-before-snapshot",
+      branchId: "main",
+    });
+    await storage.appendEvents([{
+      sessionId: first.sessionId,
+      branchId: first.branchId,
+      type: "SessionStatusChanged",
+      producer: "supervisor",
+      idempotencyKey: "terminal-before-snapshot",
+      payload: { status: "stopped" },
+    }]);
+    const projection = new ProjectionService(storage);
+    expect(await projection.waitForTerminal(
+      first.sessionId,
+      first.branchId,
+      (state) => state.status === "stopped",
+      { timeoutMs: 100 },
+    )).toMatchObject({ reason: "terminal", mode: "notifications" });
+
+    const between = await seedSession(storage, {
+      sessionId: "terminal-between-snapshot-subscribe",
+      branchId: "main",
+    });
+    let injected = false;
+    const raceStorage = new Proxy(storage, {
+      get(target, property) {
+        if (property === "saveSnapshot") {
+          return async (state: AgentState) => {
+            await target.saveSnapshot(state);
+            if (!injected && state.sessionId === between.sessionId) {
+              injected = true;
+              await target.appendEvents([{
+                sessionId: between.sessionId,
+                branchId: between.branchId,
+                type: "SessionStatusChanged",
+                producer: "supervisor",
+                idempotencyKey: "terminal-between-snapshot-subscribe",
+                payload: { status: "stopped" },
+              }]);
+            }
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as AgentStorage;
+    expect(await new ProjectionService(raceStorage).waitForTerminal(
+      between.sessionId,
+      between.branchId,
+      (state) => state.status === "stopped",
+      { timeoutMs: 500 },
+    )).toMatchObject({ reason: "terminal", mode: "notifications" });
+
+    const live = await seedSession(storage, {
+      sessionId: "terminal-live",
+      branchId: "main",
+    });
+    const liveWait = projection.waitForTerminal(
+      live.sessionId,
+      live.branchId,
+      (state) => state.status === "stopped",
+      { timeoutMs: 500 },
+    );
+    await Bun.sleep(10);
+    await storage.appendEvents([{
+      sessionId: live.sessionId,
+      branchId: live.branchId,
+      type: "SessionStatusChanged",
+      producer: "supervisor",
+      idempotencyKey: "terminal-live",
+      payload: { status: "stopped" },
+    }]);
+    expect(await liveWait).toMatchObject({ reason: "terminal" });
+
+    const bounded = await seedSession(storage, {
+      sessionId: "terminal-bounded",
+      branchId: "main",
+    });
+    expect(await projection.waitForTerminal(
+      bounded.sessionId,
+      bounded.branchId,
+      (state) => state.status === "stopped",
+      { timeoutMs: 5 },
+    )).toMatchObject({ reason: "timeout", state: { status: "idle" } });
+    let activeSubscriptions = 0;
+    const cleanupStorage = new Proxy(storage, {
+      get(target, property) {
+        if (property === "onCommitted") {
+          return (listener: (events: readonly AgentEvent[]) => void) => {
+            activeSubscriptions++;
+            const unsubscribe = target.onCommitted(listener);
+            let active = true;
+            return () => {
+              if (active) {
+                active = false;
+                activeSubscriptions--;
+              }
+              unsubscribe();
+            };
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as AgentStorage;
+    const controller = new AbortController();
+    const cancelled = new ProjectionService(cleanupStorage).waitForTerminal(
+      bounded.sessionId,
+      bounded.branchId,
+      (state) => state.status === "stopped",
+      { signal: controller.signal },
+    );
+    controller.abort();
+    expect(await cancelled).toMatchObject({ reason: "cancelled" });
+    expect(activeSubscriptions).toBe(0);
+
+    const finalRead = await seedSession(storage, {
+      sessionId: "terminal-final-read",
+      branchId: "main",
+    });
+    let latestCursorReads = 0;
+    const finalReadStorage = new Proxy(storage, {
+      get(target, property) {
+        if (property === "getLatestCursor") {
+          return async (sessionId: string, branchId: string) => {
+            latestCursorReads++;
+            if (sessionId === finalRead.sessionId && latestCursorReads === 2) {
+              await target.appendEvents([{
+                sessionId,
+                branchId,
+                type: "SessionStatusChanged",
+                producer: "supervisor",
+                idempotencyKey: "terminal-final-read",
+                payload: { status: "stopped" },
+              }]);
+            }
+            return target.getLatestCursor(sessionId, branchId);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as AgentStorage;
+    expect(await new ProjectionService(finalReadStorage).waitForTerminal(
+      finalRead.sessionId,
+      finalRead.branchId,
+      (state) => state.status === "stopped",
+      { timeoutMs: 0 },
+    )).toMatchObject({
+      reason: "terminal",
+      state: { status: "stopped" },
+    });
+    storage.close();
+  });
+
+  test("terminal waiter uses the explicit fallback only without notification capability", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-waiter-fallback-");
+    temps.push(temp);
+    const inner = await openTempStorage(temp);
+    const { sessionId, branchId } = await seedSession(inner);
+    let notificationAttempted = false;
+    const storage = new Proxy(inner, {
+      get(target, property) {
+        if (property === "capabilities") {
+          return { ...target.capabilities, notifications: false };
+        }
+        if (property === "onCommitted") {
+          return () => {
+            notificationAttempted = true;
+            throw new Error("notification fallback must not subscribe");
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as AgentStorage;
+    const waiting = new ProjectionService(storage).waitForTerminal(
+      sessionId,
+      branchId,
+      (state) => state.status === "stopped",
+      { timeoutMs: 500, pollingFallbackIntervalMs: 5 },
+    );
+    await Bun.sleep(10);
+    await inner.appendEvents([{
+      sessionId,
+      branchId,
+      type: "SessionStatusChanged",
+      producer: "supervisor",
+      idempotencyKey: "fallback-terminal",
+      payload: { status: "stopped" },
+    }]);
+    expect(await waiting).toMatchObject({
+      reason: "terminal",
+      mode: "polling-fallback",
+    });
+    expect(notificationAttempted).toBe(false);
+    storage.close();
+  });
+
   test("advances a current-version snapshot from its cursor without replaying retained history", async () => {
     const temp = await makeTempRuntime("agencity-snapshot-catch-up-");
     temps.push(temp);

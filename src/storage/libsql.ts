@@ -1,6 +1,6 @@
 import { createClient, type Client, type InArgs, type InStatement, type InValue, type ResultSet, type Row, type Transaction } from "@libsql/client";
 import type { AgentEvent, AgentProfileVersion, AgentState, EventPayloads, EventType, GovernedRefinementProposal, NewAgentEvent } from "../domain/index.ts";
-import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, REFINEMENT_GOVERNANCE_CONTRACT_ID, ValidationError, canonicalJsonByteLength, canonicalJsonDigest, canonicalSkillDigest, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, newId, normalizeAgentProfileInput, projectEvents, reduceAgentState, refinementPrincipalToAgentPrincipal, validateEffectOrigin, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateProviderInputCandidate, validateRefinementGovernanceDecision, validateRefinementGovernanceRecursiveResult, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
+import { CapabilityUnavailableError, ConflictError, DependencyFailureError, EVENT_SCHEMA_VERSION, ExecutionOwnershipConflictError, NotFoundError, REDUCER_VERSION, REFINEMENT_GOVERNANCE_CONTRACT_ID, ValidationError, canonicalJsonDigest, canonicalSkillDigest, createRefinementGovernanceRecursiveResult, createRefinementReviewRecursiveResult, newId, normalizeAgentProfileInput, projectEvents, reduceAgentState, refinementPrincipalToAgentPrincipal, validateEffectOrigin, validateModelEffectOutputV2, validateModelResponseContract, validateModelResponseContractCapability, validateNewEvent, validateProviderInputCandidate, validateRefinementGovernanceDecision, validateRefinementGovernanceRecursiveResult, validateRefinementReviewRecursiveResult, validateRefinementReviewRequest } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import {
   SCRATCH_CHECKPOINT_SCHEMA_VERSION,
@@ -25,10 +25,13 @@ import {
   type ScratchStore,
   type ScratchStoreWriteResult,
 } from "./scratch.ts";
-import { containsBrokeredSecret } from "../security/index.ts";
+import {
+  buildFrozenRefinementGovernanceEvidence,
+  containsBrokeredSecret,
+} from "../security/index.ts";
 
 const SQLITE_BUSY_TIMEOUT_MS = 250;
-const SQLITE_CONTENTION_ATTEMPTS = 8;
+const SQLITE_CONTENTION_ATTEMPTS = 12;
 const SQLITE_RETRY_BASE_MS = 4;
 const SQLITE_RETRY_CAP_MS = 100;
 
@@ -827,25 +830,39 @@ async appendEvents(rawEvents: readonly NewAgentEvent[], fence?: ProcessExecution
           throw new ValidationError("Frozen governance input does not match its exact proposal");
         }
         if (frozen.version === 3) {
-          for (const excerpt of frozen.evidencePayloads.excerpts as any[]) {
+          const evidenceSources = [];
+          for (const header of frozen.evidence as any[]) {
             const sources = await tx.execute({
-              sql: "SELECT payload_json FROM events WHERE id=?",
-              args: [excerpt.eventId],
+              sql: "SELECT id,session_id,branch_id,sequence,origin_sequence,type,payload_json FROM events WHERE id=?",
+              args: [header.eventId],
             });
-            if (!sources.rows[0]) {
+            const source = sources.rows[0];
+            if (!source) {
               throw new ValidationError(
                 "Frozen governance V3 evidence payload is unavailable",
               );
             }
-            const payload = JSON.parse(
-              String(sources.rows[0].payload_json),
-            ) as JsonValue;
-            if (excerpt.canonicalPayloadDigest !== canonicalJsonDigest(payload) ||
-                excerpt.canonicalPayloadBytes !== canonicalJsonByteLength(payload)) {
-              throw new ValidationError(
-                "Frozen governance V3 canonical payload provenance does not match",
-              );
-            }
+            evidenceSources.push({
+              eventId: String(source.id),
+              sessionId: String(source.session_id),
+              branchId: String(source.branch_id),
+              cursor: cursorOf(Number(
+                source.origin_sequence ?? source.sequence,
+              )),
+              type: String(source.type),
+              payload: JSON.parse(String(source.payload_json)) as JsonValue,
+            });
+          }
+          const expected =
+            buildFrozenRefinementGovernanceEvidence(evidenceSources);
+          if (!Bun.deepEquals(frozen.evidence, expected.evidence) ||
+              !Bun.deepEquals(
+                frozen.evidencePayloads,
+                expected.evidencePayloads,
+              )) {
+            throw new ValidationError(
+              "Frozen governance V3 evidence provenance does not match canonical rows",
+            );
           }
         }
       }

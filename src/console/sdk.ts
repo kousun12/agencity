@@ -1,4 +1,4 @@
-import type { AgentProfileInput, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, HarnessKind, HarnessScope, ModelConfigurationInput, WorkingValue } from "../domain/index.ts";
+import type { AgentInvocationContract, AgentProfileInput, AgentRunResultReference, AgentRunStatus, ArtifactReference, BoundedOutputV1, BudgetLimits, ContextCompactionStrategy, HarnessKind, HarnessScope, ModelConfigurationInput, WorkingValue } from "../domain/index.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { InspectOptions, InspectPreview } from "./inspect.ts";
 import type { ScratchSdk } from "./scratch.ts";
@@ -46,6 +46,7 @@ export interface CellHistoryEntry {
   readonly durationMs: number | null;
   readonly exports: string[];
   readonly error: string | null;
+  readonly causalEffectOutcomeEventIds?: string[];
   readonly provenance: {
     readonly proposed: EventProvenance;
     readonly starts: EventProvenance[];
@@ -206,6 +207,52 @@ export interface ConsoleAgentSendInput {
   readonly target: string; readonly content: string; readonly taskId?: string; readonly artifactIds?: readonly string[];
   readonly intentKey?: string; readonly replyToMessageId?: string; readonly mode?: "steer" | "queue";
 }
+export interface ConsoleMailboxMessageHandle {
+  readonly mailboxMessageId: string;
+  readonly fromSessionId: string;
+  readonly fromBranchId: string;
+  readonly toSessionId: string;
+  readonly toBranchId: string;
+  readonly delivered: boolean;
+  readonly mode: "steer" | "queue";
+  readonly receiptStatus: string;
+  readonly queued: boolean;
+  readonly existing: boolean;
+  readonly runId?: string;
+  readonly error?: string;
+}
+export type ConsoleMailboxMessageResult =
+  | {
+      readonly mailboxMessageId: string;
+      readonly runId: string;
+      readonly sessionId: string;
+      readonly branchId: string;
+      readonly status: "queued" | "failed";
+      readonly steps: 0;
+      readonly admitted: false;
+      readonly reason?: string;
+    }
+  | {
+      readonly mailboxMessageId: string;
+      readonly admitted: true;
+      readonly runId: string;
+      readonly sessionId: string;
+      readonly branchId: string;
+      readonly status: AgentRunStatus;
+      readonly steps: number;
+      readonly reason?: string;
+      readonly final?: string;
+      readonly finalMessageId?: string;
+      readonly output?: {
+        readonly kind: "text";
+        readonly text: string;
+      } | {
+        readonly kind: "object";
+        readonly object: JsonValue;
+      };
+      readonly resultReference?: AgentRunResultReference;
+      readonly invocationContract?: AgentInvocationContract;
+    };
 export interface ConsoleAgentMessageOptions { readonly direction?: "inbound" | "outbound" | "all"; readonly limit?: number; readonly before?: string; readonly pendingOnly?: boolean; }
 export interface AgentsSdk {
   spawn<I extends ConsoleAgentSpawnInput | string>(input: I): Promise<ConsoleAgentHandle<I>>;
@@ -236,8 +283,12 @@ export interface AgentsSdk {
     readonly evidenceEventIds: readonly string[];
   }): Promise<JsonValue>;
   list(): Promise<JsonValue>;
-  send(input: ConsoleAgentSendInput): Promise<JsonValue>;
-  send(target: string, content: string, options?: Omit<ConsoleAgentSendInput, "target" | "content">): Promise<JsonValue>;
+  send(input: ConsoleAgentSendInput): Promise<ConsoleMailboxMessageHandle>;
+  send(target: string, content: string, options?: Omit<ConsoleAgentSendInput, "target" | "content">): Promise<ConsoleMailboxMessageHandle>;
+  messageResult(
+    message: string | Pick<ConsoleMailboxMessageHandle, "mailboxMessageId">,
+    options?: ConsoleAgentResultOptions,
+  ): Promise<ConsoleMailboxMessageResult>;
   messages(options?: ConsoleAgentMessageOptions): Promise<JsonValue>;
   acknowledge(messageId: string): Promise<JsonValue>;
   cancel(target: string, reason?: string): Promise<JsonValue>;

@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentInvocationContract, AgentProfileInput, AgentState, ModelConfigurationInput, ModelDescriptor, ObjectiveEvaluation, ReasoningEffort } from "../domain/index.ts";
+import { reduceAgentState, type AgentEvent, type AgentInvocationContract, type AgentProfileInput, type AgentState, type ModelConfigurationInput, type ModelDescriptor, type ObjectiveEvaluation, type ReasoningEffort } from "../domain/index.ts";
 import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
@@ -8,7 +8,7 @@ import type {
   AgentInvocationResult, SpawnAgentInput, SubagentHandle, CreateMemoryInput,
   ProposeRefinementInput, ActivateCandidateInput, AllocateCandidateInput, RecordObservationInput, DecideRefinementInput, ApproveRollbackInput,
   InvokeSkillOptions, SpawnSpecInput, SpecSubagentHandle, EffectProgressNotification,
-  StartAgentRunInput, AgentRunResult, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle,
+  StartAgentRunInput, AgentRunResult, FamilyListResult, MailboxListOptions, MailboxListResult, MailboxMessageHandle, MailboxMessageResult,
   RecordEffectReconciliationInput, EffectReconciliationView, UnknownEffectView, RecoverySummaryView,
   StartRefinementReviewInput, RefinementReviewRecord, RefinementTriggerPolicyV1,
   LearningActivity, LearningHistoryView, LearningStatusView,
@@ -357,19 +357,24 @@ export class AgentClient {
   ): Promise<AgentInvocationResult> {
     assertWaitTimeout(options.timeoutMs, "Agent invocation");
     const handle = await this.spawn(sessionId, branchId, input);
-    const deadline = Date.now() + (options.timeoutMs ?? 120_000);
-    for (;;) {
-      const result = await this.agentInvocationResult(sessionId, branchId, handle.taskId);
-      if (["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(result.status) ||
-          Date.now() >= deadline) return result;
-      await Bun.sleep(25);
-    }
+    return this.#waitForBranchResult(
+      handle.sessionId,
+      handle.branchId,
+      (state) => {
+        const run = handle.runId ? state.agentRuns[handle.runId] : undefined;
+        return run !== undefined &&
+          ["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"].includes(run.status);
+      },
+      () => this.agentInvocationResult(sessionId, branchId, handle.taskId),
+      options.timeoutMs ?? 120_000,
+    );
   }
   tasks(sessionId: string, branchId: string): Promise<TaskRecord[]> { return this.#json(`/sessions/${sessionId}/tasks?branch=${branchId}`); }
   cancelTask(sessionId: string, branchId: string, taskId: string, reason?: string): Promise<TaskRecord> { return this.#post(`/sessions/${sessionId}/tasks/${taskId}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }
   agents(sessionId: string, branchId: string): Promise<FamilyListResult> { return this.#json(`/sessions/${sessionId}/agents?branch=${branchId}`); }
   sendMailbox(sessionId: string, branchId: string, input: SendMessageInput): Promise<MailboxMessageHandle> { return this.#post(`/sessions/${sessionId}/mailbox?branch=${branchId}`, input); }
   mailbox(sessionId: string, branchId: string, options: MailboxListOptions = {}): Promise<MailboxListResult> { const params = new URLSearchParams({ branch: branchId, ...(options.direction === undefined ? {} : { direction: options.direction }), ...(options.limit === undefined ? {} : { limit: String(options.limit) }), ...(options.before === undefined ? {} : { before: options.before }), ...(options.pendingOnly ? { pending: "1" } : {}) }); return this.#json(`/sessions/${sessionId}/mailbox?${params}`); }
+  mailboxResult(sessionId: string, branchId: string, messageId: string): Promise<MailboxMessageResult> { return this.#json(`/sessions/${sessionId}/mailbox/${encodeURIComponent(messageId)}/result?branch=${branchId}`); }
   acknowledgeMailbox(sessionId: string, branchId: string, messageId: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/mailbox/${messageId}/ack?branch=${branchId}`); }
   cancelAgent(sessionId: string, branchId: string, target: string, reason?: string): Promise<unknown> { return this.#post(`/sessions/${sessionId}/agents/${encodeURIComponent(target)}/cancel?branch=${branchId}`, reason === undefined ? {} : { reason }); }
 
@@ -487,13 +492,49 @@ export class AgentClient {
   deleteOwnedData(input:DeleteOwnedDataInput):Promise<PhysicalDeletionReceipt>{return this.#post("/sync/delete",input);}
 
   async #waitForGeneration(sessionId: string, branchId: string, generationId: string, timeoutMs = 120_000): Promise<AiGenerationResult> {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const result = await this.generationResult(sessionId, branchId, generationId);
-      if (["succeeded", "failed", "cancelled", "unknown", "budget_exceeded"].includes(result.status) ||
-          Date.now() >= deadline) return result;
-      await Bun.sleep(25);
+    return this.#waitForBranchResult(
+      sessionId,
+      branchId,
+      (state) => {
+        const generation = state.aiGenerations[generationId];
+        return generation !== undefined &&
+          ["succeeded", "failed", "cancelled", "unknown", "budget_exceeded"].includes(generation.status);
+      },
+      () => this.generationResult(sessionId, branchId, generationId),
+      timeoutMs,
+    );
+  }
+
+  async #waitForBranchResult<T>(
+    sessionId: string,
+    branchId: string,
+    terminal: (state: AgentState) => boolean,
+    finalRead: () => Promise<T>,
+    timeoutMs: number,
+  ): Promise<T> {
+    const controller = new AbortController();
+    let state: AgentState | undefined;
+    const timer = setTimeout(
+      () => controller.abort(new DOMException("Protocol terminal wait timed out", "TimeoutError")),
+      timeoutMs,
+    );
+    try {
+      await this.watchBranch(sessionId, branchId, {
+        onSnapshot: (snapshot) => {
+          state = snapshot.state;
+          if (terminal(state)) controller.abort();
+        },
+        onEvent: (event) => {
+          if (!state) return;
+          state = reduceAgentState(state, event);
+          if (terminal(state)) controller.abort();
+        },
+      }, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
     }
+    return finalRead();
   }
 
   #put<T>(path: string, value?: unknown): Promise<T> { return this.#json(path, { method: "PUT", ...(value === undefined ? {} : { body: JSON.stringify(value), headers: { "content-type": "application/json" } }) }); }

@@ -4,13 +4,18 @@ import {
   DeterministicSyncHub,
   REFINEMENT_GOVERNANCE_CONTRACT_ID,
   REFINEMENT_REVIEW_CONTRACT_ID,
+  canonicalJsonDigest,
+  canonicalJsonStringify,
   encodeRefinementReviewTransportValue,
+  envelopeDigest,
   projectEvents,
+  replicatedEnvelopeId,
   type JsonValue,
   type ModelConfiguration,
   type ModelDispatch,
   type ModelEffectOutputV2,
   type ModelProvider,
+  type ReplicatedEnvelope,
   type TextModelResponse,
 } from "../../src/index.ts";
 import {
@@ -135,6 +140,11 @@ class GatedRawSyncProvider implements ModelProvider {
   }
 }
 
+function resealFrozenInput(value: any): any {
+  const { canonicalDigest: _canonicalDigest, ...body } = value;
+  return { ...body, canonicalDigest: canonicalJsonDigest(body) };
+}
+
 describe("Slice 4 offline-first synchronization lifecycle",()=>{
  test("keeps working offline, reports failure honestly, and catches up on reconnect",async()=>{root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);b.transport.setOnline(false);await b.supervisor.appendMessage(session.sessionId,session.branchId,"user","offline B");await expect(b.supervisor.sync.sync()).rejects.toThrow("offline");const failed=await b.supervisor.sync.status();expect(failed.replica.lifecycle).toBe("error");expect(failed.replica.lastSuccessAt).not.toBeNull();expect(failed.replica.lastError).toContain("offline");expect((await b.supervisor.storage.loadEvents(session.sessionId,{branchId:session.branchId})).some(e=>(e.payload as any).content==="offline B")).toBe(true);b.transport.setOnline(true);await b.supervisor.sync.reconnect();await a.supervisor.sync.sync();expect((await a.supervisor.storage.loadEvents(session.sessionId)).some(e=>(e.payload as any).content==="offline B")).toBe(true);});
  test("preserves concurrent offline advancement as derived branches without losing either writer",async()=>{root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);await a.supervisor.appendMessage(session.sessionId,session.branchId,"user","from A");await b.supervisor.appendMessage(session.sessionId,session.branchId,"user","from B");await a.supervisor.sync.sync();await b.supervisor.sync.sync();await a.supervisor.sync.sync();const branches=await a.supervisor.storage.listBranches();expect(branches.length).toBe(2);const histories=await Promise.all(branches.map(x=>a!.supervisor.storage.loadEvents(x.sessionId,{branchId:x.branchId})));const texts=histories.flatMap(events=>events.filter(e=>e.type==="MessageAppended").map(e=>(e.payload as any).content));expect(new Set(texts)).toEqual(new Set(["from A","from B"]));expect(histories.some(events=>events.some(e=>e.type==="BranchCreated"&&e.producer==="sync-derived"))).toBe(true);expect((await a.supervisor.sync.conflicts("unresolved")).some(x=>x.kind==="divergent_session")).toBe(true);});
@@ -177,6 +187,50 @@ describe("Slice 4 offline-first synchronization lifecycle",()=>{
   await a.supervisor.close();a=await openReplica(root,"a",hub);await a.supervisor.sync.sync();
   expect((await a.supervisor.agentProfiles.active(session.sessionId)).profileVersionId).toBe(profileA);
   expect((await a.supervisor.storage.loadEvents(session.sessionId)).filter(event=>event.type==="AgentProfileVersionCreated")).toHaveLength(1);
+ });
+ test("quarantines self-consistent forged V3 evidence provenance",async()=>{
+  root=await makeRoot();const hub=new DeterministicSyncHub();const providerA=new SyncReviewProvider();const providerB=new SyncReviewProvider();a=await openReplica(root,"a",hub,{modelProviders:[providerA]});b=await openReplica(root,"b",hub,{modelProviders:[providerB]});const session=await seedBoth(a,b,{provider:providerA.name,model:"fixture"});
+  const initial=await a.supervisor.agentProfiles.active(session.sessionId);
+  const evidence=await a.supervisor.appendMessage(session.sessionId,session.branchId,"user","Canonical sync provenance evidence");
+  const applied=await a.supervisor.refinementGovernance.proposeOwner(session.sessionId,session.branchId,{clientRequestId:"forged-v3-sync-source",target:{kind:"agent_profile",agentSessionId:session.sessionId,expectedProfileVersionId:initial.profileVersionId,replacement:{role:initial.role,purpose:initial.purpose,instructions:"This valid source proposal is forged only in transport."}},reason:"Create a source governance history.",predictedEffect:"Exercise forged sync rejection.",evidenceEventIds:[evidence.id],wait:true});
+  expect(applied.status).toBe("applied");
+  await a.supervisor.sync.stage();
+  const envelopes=await a.transport.listEnvelopes("workspace");
+  for(const envelope of envelopes){
+    if(envelope.body.type!=="RefinementGovernanceReviewRequested"){hub.inject(envelope);continue;}
+    const payload=structuredClone(envelope.body.payload) as any;
+    const frozen=structuredClone(payload.frozenInput) as any;
+    const forgedPayload=canonicalJsonStringify({forged:"sync redacted payload"});
+    const excerpt=frozen.evidencePayloads.excerpts[0];
+    excerpt.redactedPayloadDigest=canonicalJsonDigest(JSON.parse(forgedPayload));
+    excerpt.redactedPayloadBytes=new TextEncoder().encode(forgedPayload).byteLength;
+    excerpt.excerpt=forgedPayload;
+    excerpt.excerptDigest=canonicalJsonDigest(forgedPayload);
+    excerpt.excerptBytes=new TextEncoder().encode(forgedPayload).byteLength;
+    excerpt.truncated=false;
+    excerpt.redactions=["credentials"];
+    frozen.evidence[0]={...frozen.evidence[0],sessionId:"forged-sync-source",branchId:"forged-sync-branch",cursor:"999999",type:"ForgedSyncEvidence"};
+    frozen.evidencePayloads.usedBytes=frozen.evidencePayloads.excerpts.reduce((total:number,item:any)=>total+item.excerptBytes,0);
+    payload.frozenInput=resealFrozenInput(frozen);
+    payload.frozenInputDigest=payload.frozenInput.canonicalDigest;
+    const body={...envelope.body,payload};
+    const identity={workspaceId:envelope.workspaceId,originDeviceId:envelope.originDeviceId,originSequence:envelope.originSequence,entityKind:envelope.entityKind,entityId:envelope.entityId,dependencies:envelope.dependencies,body};
+    const withoutDigest={protocolVersion:envelope.protocolVersion,envelopeId:replicatedEnvelopeId(identity),...identity,createdAt:envelope.createdAt};
+    hub.inject({...withoutDigest,digest:envelopeDigest(withoutDigest)} as ReplicatedEnvelope);
+  }
+  await b.supervisor.sync.sync();
+  const quarantine=await (b.supervisor.storage as any).listSyncQuarantine();
+  expect(quarantine.some((row:any)=>String(row.reason).includes("evidence provenance does not match canonical rows"))).toBe(true);
+  expect((await b.supervisor.storage.loadEvents(session.sessionId)).some(event=>event.type==="RefinementGovernanceReviewRequested")).toBe(false);
+ });
+ test("imports retained automatic governed proposals without evaluation",async()=>{
+  root=await makeRoot();const hub=new DeterministicSyncHub();a=await openReplica(root,"a",hub);b=await openReplica(root,"b",hub);const session=await seedBoth(a,b);
+  const proposal={proposalId:"retained-pre-v3-automatic-proposal",target:{kind:"harness",harnessKind:"memory",edits:[{operation:"create",kind:"memory",scope:"local",scopeKey:session.sessionId,name:"retained-pre-v3-memory",content:{kind:"memory",memoryKind:"claim",text:"Retained before evaluation became mandatory."}}]},principal:{kind:"automatic_refiner",componentId:"agencity.trajectory-refiner",version:1,sessionId:session.sessionId,branchId:session.branchId},origin:{sessionId:session.sessionId,branchId:session.branchId},reason:"Retained schema-v5 automatic proposal.",predictedEffect:"Historical synchronization remains compatible.",evidenceEventIds:[]};
+  await a.supervisor.storage.appendEvents([{sessionId:session.sessionId,branchId:session.branchId,type:"GovernedRefinementProposed",producer:"supervisor",idempotencyKey:"retained-pre-v3-automatic-proposal",payload:{proposalId:proposal.proposalId,proposalFingerprint:canonicalJsonDigest(proposal),proposal}}]);
+  await a.supervisor.sync.sync();await b.supervisor.sync.sync();
+  expect((await b.supervisor.sync.status()).quarantineCount).toBe(0);
+  const retained=(await b.supervisor.storage.loadEvents(session.sessionId,{branchId:session.branchId})).find(event=>event.type==="GovernedRefinementProposed"&&(event.payload as any).proposalId===proposal.proposalId);
+  expect((retained?.payload as any).proposal.evaluation).toBeUndefined();
  });
  test("preserves concurrent offline rollback claims without selecting either restoration",async()=>{
   root=await makeRoot();const hub=new DeterministicSyncHub();const providerA=new SyncReviewProvider();const providerB=new SyncReviewProvider();a=await openReplica(root,"a",hub,{modelProviders:[providerA]});b=await openReplica(root,"b",hub,{modelProviders:[providerB]});const session=await seedBoth(a,b,{provider:providerA.name,model:"fixture"});
