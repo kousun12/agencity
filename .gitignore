@@ -17,3 +17,4 @@ benchmarks/prime/tmp/
 benchmarks/prime/evidence/raw/
 benchmarks/prime/**/__pycache__/
 benchmarks/prime/**/*.pyc
+.agencity/
