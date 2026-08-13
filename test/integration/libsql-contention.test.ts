@@ -145,7 +145,7 @@ describe("LibSQL contention boundaries", () => {
     }
     expect(ordinary).toMatchObject({
       code: "DEPENDENCY_FAILURE",
-      details: { reason: "sqlite_contention_exhausted", attempts: 12, operation: "append events" },
+      details: { reason: "sqlite_contention_exhausted", attempts: 8, operation: "append events" },
     });
     expect(ordinary?.constructor?.name).not.toBe("LibsqlError");
     await ordinaryLock.rollback();
@@ -170,7 +170,7 @@ describe("LibSQL contention boundaries", () => {
       code: "EXECUTION_OWNERSHIP_CONFLICT",
       details: {
         reason: "sqlite_contention_exhausted",
-        attempts: 12,
+        attempts: 8,
         action: "claim",
         scopeKind: "workspace",
         scopeId: "contention-workspace",

@@ -31,7 +31,7 @@ import {
 } from "../security/index.ts";
 
 const SQLITE_BUSY_TIMEOUT_MS = 250;
-const SQLITE_CONTENTION_ATTEMPTS = 12;
+const SQLITE_CONTENTION_ATTEMPTS = 8;
 const SQLITE_RETRY_BASE_MS = 4;
 const SQLITE_RETRY_CAP_MS = 100;
 

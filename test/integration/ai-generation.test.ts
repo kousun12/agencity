@@ -99,6 +99,39 @@ class KnownPricingProvider extends TextGenerationProvider {
   } as const;
 }
 
+class KnownPricingBarrierProvider extends KnownPricingProvider {
+  readonly #releases: Array<() => void> = [];
+  readonly #startWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #started = 0;
+  releaseNext(): void { this.#releases.shift()?.(); }
+  releaseAll(): void {
+    for (const release of this.#releases.splice(0)) release();
+  }
+  waitForStarts(count: number): Promise<void> {
+    if (this.#started >= count) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.#startWaiters.push({ count, resolve });
+    });
+  }
+  override async complete(
+    context: JsonValue,
+    configuration: ModelConfiguration,
+    signal: AbortSignal,
+  ): Promise<TextModelResponse> {
+    this.#started++;
+    const released = new Promise<void>((resolve) => {
+      this.#releases.push(resolve);
+    });
+    for (const waiter of [...this.#startWaiters]) {
+      if (this.#started < waiter.count) continue;
+      this.#startWaiters.splice(this.#startWaiters.indexOf(waiter), 1);
+      waiter.resolve();
+    }
+    await released;
+    return super.complete(context, configuration, signal);
+  }
+}
+
 class DeclaredObjectProvider implements ModelProvider {
   calls = 0;
   readonly contexts: JsonValue[] = [];
@@ -849,9 +882,9 @@ describe("durable raw AI generation", () => {
     }
   });
 
-  test("uses exact catalog pricing for concurrent cost reservations", async () => {
+  test("uses exact catalog pricing for overlapping cost reservations across service instances", async () => {
     const temp = await makeTempRuntime("agencity-ai-generation-priced-reservations-"); temps.push(temp);
-    const provider = new KnownPricingProvider("priced-raw", "done", 1_000);
+    const provider = new KnownPricingBarrierProvider("priced-raw", "done");
     const catalogFetch = (async () => Response.json({
       data: [{
         id: "creator/priced",
@@ -890,12 +923,16 @@ describe("durable raw AI generation", () => {
         model: { provider: provider.name, model: "creator/priced", maxOutputTokens: 16 },
         budget: { tokenLimit: 100_000, costLimitUsd: 0.001, turnLimit: 10, wallTimeLimitMs: 100_000 },
       });
-      const admitted = await Promise.all(Array.from({ length: 3 }, (_, index) =>
-        (index % 2 === 0 ? first : second).ai.admitText(root.sessionId, root.branchId, {
+      const admitted: Awaited<ReturnType<typeof first.ai.admitText>>[] = [];
+      for (let index = 0; index < 3; index++) {
+        const handle = await (index % 2 === 0 ? first : second).ai.admitText(root.sessionId, root.branchId, {
           prompt: `priced generation ${index}`,
           budget: { costLimitUsd: 0.0004, wallTimeLimitMs: 20_000 },
           idempotencyKey: `priced-generation-${index}`,
-        })));
+        });
+        admitted.push(handle);
+        if (index < 2) await provider.waitForStarts(index + 1);
+      }
       const events = await first.storage.loadEvents(root.sessionId, { branchId: root.branchId });
       const requests = events.filter(event =>
         event.type === "AiGenerationRequested" &&
@@ -911,8 +948,16 @@ describe("durable raw AI generation", () => {
         return payload.reservation.costUsd as number;
       });
       expect(reservations.reduce((sum, value) => sum + value, 0)).toBeLessThan(0.001);
-      await Promise.all(admitted.map(item => first.ai.cancel(item.generationId)));
+      for (const [index, item] of admitted.entries()) {
+        await provider.waitForStarts(index + 1);
+        provider.releaseNext();
+        await first.ai.result(item.generationId, {
+          wait: true,
+          timeoutMs: 5_000,
+        });
+      }
     } finally {
+      provider.releaseAll();
       await Promise.allSettled([first.close(), second.close()]);
     }
   });
