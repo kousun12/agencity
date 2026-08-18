@@ -1,6 +1,6 @@
 # Agencity
 
-Agencity is a terminal-first autonomous agent runtime for work that may outlive one model context, terminal, or process. It keeps agent sessions, tasks, branches, tool effects, subagents, and evidence in a durable local event history—an append-only sequence of records. Generated work runs through disposable TypeScript cells, while committed state can be inspected and resumed after restart.
+Agencity is a terminal-first autonomous agent runtime for work that may outlive one model context, terminal, or process. It keeps agent sessions, tasks, branches, tool effects, subagents, and evidence in a durable local event history—an append-only sequence of records. Generated work runs in an exact-branch TypeScript REPL whose bindings remain available while its worker lives, while committed state can be inspected and resumed after restart.
 
 A **session** is a durable agent identity. A **branch** is one retained line of that session's history. An **effect** is an external action such as a model call, shell command, or file operation. Agencity records effect intent before execution and keeps success, failure, cancellation, and uncertainty distinct.
 

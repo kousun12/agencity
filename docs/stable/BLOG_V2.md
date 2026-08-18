@@ -19,7 +19,7 @@ This is the idea behind the name **Agencity**: not a swarm of anonymous model ca
 
 Together, these ideas move the model beyond a fixed loop in which it chooses one tool at a time. The agent can construct the computation it needs and improve the harness that shapes future work.
 
-Agencity starts from this prior art. It is not a compatibility port of Prime Agent, and it does not preserve Prime Agent's Python modules, file formats, extension APIs, or persistent-kernel architecture. It asks a related systems question:
+Agencity starts from this prior art. It is not a compatibility port of Prime Agent, and it does not preserve Prime Agent's Python modules, file formats, extension APIs, or Python kernel as durable agent identity. It asks a related systems question:
 
 > What would an RLM and continual harness look like if agents, relationships, assignments, evidence, and organizational change all had durable identities?
 
@@ -29,7 +29,7 @@ The answer begins with technical changes to the individual agent runtime. It the
 
 A model can write useful programs without making a live language process the source of its identity.
 
-Agencity gives the model one general generated-execution surface: a Bun TypeScript console. SQL, files, shell effects, artifacts, model calls, memory, skills, and subagents are typed APIs inside that environment. The model can filter data, run concurrent investigations, delegate work, and aggregate results as a program rather than selecting from an ever-growing menu of special-purpose tools.
+Agencity gives the model one general generated-execution surface: a Bun TypeScript console. Each exact session branch has a persistent REPL namespace while its worker remains alive, so top-level variables, functions, classes, imports, closures, and object identity can be reused across nearby cells. SQL, files, shell effects, artifacts, model calls, memory, skills, and subagents are typed APIs inside that environment. The model can filter data, run concurrent investigations, delegate work, and aggregate results as a program rather than selecting from an ever-growing menu of special-purpose tools.
 
 For example:
 
@@ -53,12 +53,13 @@ await state.set("failureInvestigations", investigations);
 return investigations;
 ```
 
-The TypeScript worker is disposable. Its heap can make a healthy run faster, but it does not own the agent. Values needed later are committed as typed state, stored as immutable artifacts, or represented by durable handles. If the worker exits, another worker can reconstruct the committed work.
+The REPL namespace is useful but disposable. Top-level bindings remain available to later cells on the same live branch worker without an explicit cache API, but they do not own the agent and are not supplied automatically to the model. Values required after worker loss are committed as typed state, stored as immutable artifacts, or represented by durable handles. A cell's final expression or explicit return remains a separate bounded observation for the next model decision. If the worker exits, another worker can reconstruct the committed work, not the arbitrary heap.
 
 This is more than a language change from Python to TypeScript. Agencity separates temporary computation from durable identity:
 
 - agent sessions, branches, tasks, messages, goals, and budgets are retained;
 - TypeScript cells and their bounded observations are retained;
+- live REPL bindings accelerate nearby work but remain noncanonical and replaceable;
 - model and tool requests are recorded before execution;
 - subagents are durable sessions rather than anonymous returned strings;
 - exact context and harness provenance can be inspected later;
