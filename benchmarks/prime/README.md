@@ -231,6 +231,19 @@ uv run --locked python scripts/preflight_oolong.py \
 
 ## Running evaluations
 
+Prepare each new treatment from the latest remote Agencity `main`:
+
+```sh
+uv run --locked python scripts/refresh_agencity_source.py
+```
+
+The refresh command resolves remote `main` once, then writes that exact commit
+to the harness defaults, suite configs, and catalog treatment metadata. Runs
+therefore default to the latest published `main` at preparation time while
+retaining an immutable source pin in their resolved configuration. Use
+`--ref <full-commit>` to reproduce an earlier treatment, or `--check` to verify
+that every retained pin already matches the current remote `main`.
+
 Set the top-level `model` in a copied config to a Verifiers-supported model that
 can produce Agencity's required formal tool calls. Do not change taskset
 semantics when changing the model.
@@ -304,9 +317,17 @@ uv build
 ```
 
 The exact-container startup test archives the current runtime source, installs
-it inside the pinned Bun image, and runs the real JSON product path against a
-local fake provider. It deliberately supplies a missing explicit state
-directory and requires one valid terminal result without paid inference.
+it inside the pinned Bun image under explicit `linux/amd64` execution, and runs
+the real JSON product path against a local fake provider. It deliberately
+supplies a missing explicit state directory and requires one valid terminal
+result without paid inference.
+
+Suite task catalogs and the portable Bun executable intentionally target
+`linux/amd64`. An ARM Mac therefore runs local benchmark containers through
+Docker's AMD64 emulation; changing only the executable or host platform to ARM
+would create a different treatment and may not match the audited task images or
+official scorers. Prime remote sandboxes can execute the same pinned AMD64
+treatment without relying on the local Mac's architecture.
 
 Official SWE-bench Pro Docker reference/no-op checks are opt-in:
 
@@ -320,12 +341,14 @@ Model-free checks validate selection, pins, packaging, isolation, sanitizer,
 official scorer parsing, lifecycle order, cleanup, and reporting. They are not
 model performance evaluations.
 
-The final August 11, 2026 run recorded 70 passing benchmark tests, 1 skipped
-opt-in scorer test, and 0 failures. The same official scorer test passed
-separately when enabled. The live Yahoo 128K slice exactly matched its packaged
-manifest. All 21 suite preflights, all 22 config dry-runs, source/wheel builds,
-isolated wheel/sdist loading, lock validation, root typecheck, architecture
-checks, and patch checks passed. A Vuls no-op audit returned empty parser
+The August 18, 2026 run against Agencity commit
+`e03a2ad264e18589064153252fa7f094b00a4c21` recorded 74 passing benchmark
+tests, 1 skipped opt-in scorer test, and 0 failures. The same official scorer
+test passed separately when enabled. The explicit `linux/amd64` exact-container
+startup passed on an ARM Mac through Docker emulation. All 21 suite preflights,
+all 22 config dry-runs, source/wheel builds, isolated wheel/sdist loading, lock
+validation, and source-pin checks passed. The live Yahoo 128K slice exactly
+matched its packaged manifest. A Vuls no-op audit returned empty parser
 evidence; the catalog therefore retains that row as incompatible rather than
 mapping it to reward zero.
 

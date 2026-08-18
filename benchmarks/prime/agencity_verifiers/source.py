@@ -1,0 +1,3 @@
+AGENCITY_SOURCE_BRANCH = "main"
+AGENCITY_SOURCE_REPO = "https://github.com/kousun12/agencity.git"
+AGENCITY_SOURCE_REF = "e03a2ad264e18589064153252fa7f094b00a4c21"

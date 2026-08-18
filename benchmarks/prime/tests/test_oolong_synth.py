@@ -27,6 +27,7 @@ from agencity_oolong_synth.taskset import (
     parse_candidate,
     score_answer,
 )
+from agencity_verifiers.source import AGENCITY_SOURCE_REF
 from agencity_verifiers.harness import RESULT_PATH, WORKSPACE_DIR
 from agencity_verifiers.selection import SelectionSpec
 from scripts.preflight_oolong import build_manifest
@@ -338,7 +339,7 @@ class LoadingTests(unittest.TestCase):
                 self.assertEqual(harness["installation"], "portable")
                 self.assertEqual(
                     harness["source_ref"],
-                    "5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193",
+                    AGENCITY_SOURCE_REF,
                 )
                 if taskset["dataset_name"] == "yahoo":
                     self.assertEqual(

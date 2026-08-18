@@ -13,12 +13,11 @@ from typing import Any
 
 from agencity_verifiers.harbor_suite import _sha256_file, _sha256_tree
 from agencity_verifiers.selection import task_entries_digest
+from agencity_verifiers.source import AGENCITY_SOURCE_REF, AGENCITY_SOURCE_REPO
 
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK_PATH = ROOT / "uv.lock"
-AGENCITY_SOURCE_REF = "5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193"
-AGENCITY_SOURCE_REPO = "https://github.com/kousun12/agencity.git"
 BUN_ARCHIVE = (
     "https://github.com/oven-sh/bun/releases/download/"
     "bun-v1.3.14/bun-linux-x64.zip"

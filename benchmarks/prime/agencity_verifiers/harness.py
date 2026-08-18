@@ -10,6 +10,7 @@ import verifiers.v1 as vf
 
 from agencity_verifiers.bootstrap import PortableBootstrap, build_portable_bootstrap
 from agencity_verifiers.result import parse_run_result
+from agencity_verifiers.source import AGENCITY_SOURCE_REF, AGENCITY_SOURCE_REPO
 
 
 RESULT_PATH = ".agencity-eval/agencity-result.json"
@@ -34,8 +35,8 @@ BUN_LINUX_X64_SHA256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbcc
 
 
 class AgencityHarnessConfig(vf.HarnessConfig):
-    source_repo: str = "https://github.com/kousun12/agencity.git"
-    source_ref: str = "5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193"
+    source_repo: str = AGENCITY_SOURCE_REPO
+    source_ref: str = AGENCITY_SOURCE_REF
     installation: Literal["apt-git", "portable"] = "apt-git"
     bun_url: str = BUN_LINUX_X64_URL
     bun_sha256: str = BUN_LINUX_X64_SHA256

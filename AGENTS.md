@@ -264,7 +264,12 @@ supports exact IDs, explicit ID lists, named smoke subsets, seeded samples,
 stable shards, and all compatible tasks. Generated immutable catalogs retain
 complete task coverage, typed incompatibility reasons, task/source/tree/image/
 workdir/evaluator/lock pins, exact selected IDs and digests, and named smoke
-sets. Terminal-Bench 2 and 2.1 each catalog 89/89 compatible official tasks and
+sets. New treatments resolve the latest remote Agencity `main` through the
+source-refresh command and then retain the resulting immutable commit across
+the harness defaults, configs, and catalog treatment metadata. Suite task
+images and the portable Bun executable remain explicitly `linux/amd64`; local
+ARM Macs use Docker AMD64 emulation rather than changing the audited treatment.
+Terminal-Bench 2 and 2.1 each catalog 89/89 compatible official tasks and
 leave the unmodified Harbor verifier authoritative. SWE-bench Pro catalogs all
 731 public rows: one qutebrowser row is compatible, 729 remain incompatible
 with `image_configuration_not_audited`, and one audited Vuls row is incompatible
@@ -293,7 +298,12 @@ from each Yahoo context window. A
 pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
-stdout/stderr diagnostics instead of collapsing to a parser-only error.
+stdout/stderr diagnostics instead of collapsing to a parser-only error. The
+August 18, 2026 model-free verification against commit `e03a2ad` passed 74
+benchmark tests with one intentionally skipped opt-in scorer test; that official
+scorer test passed separately, as did all 21 suite preflights, all 22 config
+dry-runs, package builds, lock and source-pin checks, and explicit AMD64
+container startup through Docker emulation on an ARM Mac.
 
 Deterministic summaries separate passes, valid zeros, partial rewards, harness
 terminal failures, provider failures, scorer/infrastructure errors,

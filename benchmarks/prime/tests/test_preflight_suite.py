@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+import json
 import tomllib
 import unittest
 from pathlib import Path
 
 from agencity_terminal_bench_2.taskset import CATALOG_PATH
+from agencity_verifiers.harness import AgencityHarnessConfig
 from agencity_verifiers.selection import load_catalog
+from agencity_verifiers.source import AGENCITY_SOURCE_REF, AGENCITY_SOURCE_REPO
 from scripts.preflight_suite import _validate_catalog_pins, preflight
 
 
@@ -14,6 +17,29 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class SuitePreflightTests(unittest.TestCase):
+    def test_configs_and_catalogs_share_the_canonical_agencity_source_pin(self) -> None:
+        harness_config = AgencityHarnessConfig(id="agencity-verifiers")
+        self.assertEqual(harness_config.source_ref, AGENCITY_SOURCE_REF)
+        self.assertEqual(harness_config.source_repo, AGENCITY_SOURCE_REPO)
+        self.assertEqual(len(AGENCITY_SOURCE_REF), 40)
+
+        config_paths = sorted((ROOT / "configs").glob("*.toml"))
+        self.assertTrue(config_paths)
+        for path in config_paths:
+            with self.subTest(config=path.name):
+                harness = tomllib.loads(path.read_text(encoding="utf-8"))["env"]["agent"]["harness"]
+                self.assertEqual(harness["source_repo"], AGENCITY_SOURCE_REPO)
+                self.assertEqual(harness["source_ref"], AGENCITY_SOURCE_REF)
+
+        catalog_paths = sorted((ROOT / "manifests").glob("*-catalog.json"))
+        self.assertTrue(catalog_paths)
+        for path in catalog_paths:
+            with self.subTest(catalog=path.name):
+                catalog = json.loads(path.read_text(encoding="utf-8"))
+                treatment = catalog["treatments"]["agencity-portable"]
+                self.assertEqual(treatment["source_repo"], AGENCITY_SOURCE_REPO)
+                self.assertEqual(treatment["source_ref"], AGENCITY_SOURCE_REF)
+
     def test_suite_configs_use_36k_output_limits(self) -> None:
         config_paths = sorted(
             path

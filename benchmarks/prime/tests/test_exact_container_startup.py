@@ -195,6 +195,8 @@ class ExactContainerStartupTests(unittest.TestCase):
                     "docker",
                     "run",
                     "--rm",
+                    "--platform",
+                    "linux/amd64",
                     "--add-host",
                     "host.docker.internal:host-gateway",
                     "-v",
@@ -203,6 +205,7 @@ class ExactContainerStartupTests(unittest.TestCase):
                     "sh",
                     "-lc",
                     (
+                        "test \"$(uname -m)\" = x86_64 && "
                         "mkdir -p /opt/agencity /app/workspace /app/.agencity-eval && "
                         "tar -xzf /tmp/agencity-source.tgz -C /opt/agencity && "
                         "cd /opt/agencity && "
