@@ -54,6 +54,7 @@ interface RunBlock extends TranscriptBlock {
   readonly stepBlocks: Map<string, StepBlock>;
   run: TerminalRunView;
   expanded: boolean;
+  fullyExpanded: boolean;
   inline: boolean;
   latestExpandable: boolean;
   allCompletedExpanded: boolean;
@@ -258,7 +259,8 @@ export class TerminalTranscript {
         this.#blocks.set(key, block);
       }
       block.run = run;
-      block.expanded = run.active || expandedRunIds.has(run.id);
+      block.fullyExpanded = expandedRunIds.has(run.id);
+      block.expanded = run.active || block.fullyExpanded;
       block.inline = inline;
       block.latestExpandable = run.id === latestExpandableRunId;
       block.allCompletedExpanded = allCompletedExpanded;
@@ -424,6 +426,7 @@ export class TerminalTranscript {
       stepBlocks: new Map(),
       run,
       expanded: run.active,
+      fullyExpanded: false,
       inline: false,
       latestExpandable: false,
       allCompletedExpanded: false,
@@ -445,7 +448,11 @@ export class TerminalTranscript {
         reason.content = current.reason ?? "";
         stepsHost.visible = block.expanded;
         if (block.expanded) {
-          this.#reconcileSteps(block, current.steps.slice(-8), current.active, current.actionPending);
+          this.#reconcileSteps(
+            block,
+            current.steps.slice(-8),
+            current.active && !block.fullyExpanded,
+          );
         }
       },
     };
@@ -456,10 +463,9 @@ export class TerminalTranscript {
     block: RunBlock,
     steps: readonly TerminalStepView[],
     latestOnly: boolean,
-    actionPending: boolean,
   ): void {
     const desired: StepBlock[] = [];
-    const detailedStepId = actionPending ? undefined : steps.at(-1)?.id;
+    const detailedStepId = steps.at(-1)?.id;
     for (const step of steps) {
       const key = `step:${step.id}`;
       let stepBlock = block.stepBlocks.get(key);

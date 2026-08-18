@@ -25,6 +25,7 @@ import {
   familyRefreshSuffix,
   formatManagedDetach,
   toggleAllRunDetails,
+  toggleLatestRunDetails,
   workspaceAgentsLines,
   type OpenTuiController,
 } from "../../src/tui/opentui.ts";
@@ -1628,14 +1629,41 @@ describe("OpenTUI interactive terminal", () => {
         }],
       };
       transcript.reconcile(activeView, new Set());
-      await setup.waitForFrame(value =>
-        value.includes("running")
-        && value.includes("const value = 42;")
-        && !value.includes("return { value };"),
-      );
+      await setup.waitForFrame(value => value.includes("return { value };"));
       expect((await setup.captureCharFrame()).toString()).not.toContain("Waiting for model response");
       expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
+        .toBe(true);
+
+      const nextStep = {
+        ...view.runs[0]!.steps[0]!,
+        id: "step-2",
+        ordinal: 2,
+        cell: {
+          ...view.runs[0]!.steps[0]!.cell!,
+          id: "agent-run-cell-action-2",
+          code: "// Purpose: Inspect the next value.\nconst next = 43;\nreturn { next };",
+        },
+      };
+      const activeNextView: TerminalScreenView = {
+        ...activeView,
+        runs: [{
+          ...activeView.runs[0]!,
+          actionPending: false,
+          steps: [activeView.runs[0]!.steps[0]!, nextStep],
+        }],
+      };
+      transcript.reconcile(activeNextView, new Set());
+      await setup.waitForFrame(value => value.includes("return { next };"));
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
         .toBe(false);
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-2")?.visible)
+        .toBe(true);
+
+      transcript.reconcile(activeNextView, new Set(["run-1"]));
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
+        .toBe(true);
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-2")?.visible)
+        .toBe(true);
 
       transcript.reconcile(view, new Set());
       await setup.waitForFrame(value => value.includes("Ctrl-O to expand latest") && !value.includes("return { value };"));
@@ -1697,7 +1725,7 @@ describe("OpenTUI interactive terminal", () => {
     })).toBe("Detached. Service remains active: 1 active schedule.");
   });
 
-  test("toggles every completed run while leaving active work alone", () => {
+  test("toggles details for completed and active runs", () => {
     const expanded = new Set<string>();
     const runs = [
       { id: "older", active: false, steps: [{}] },
@@ -1705,8 +1733,12 @@ describe("OpenTUI interactive terminal", () => {
       { id: "active", active: true, steps: [{}] },
     ] as unknown as TerminalScreenView["runs"];
     expect(toggleAllRunDetails(runs, expanded)).toBe(true);
-    expect([...expanded].sort()).toEqual(["newer", "older"]);
+    expect([...expanded].sort()).toEqual(["active", "newer", "older"]);
     expect(toggleAllRunDetails(runs, expanded)).toBe(true);
+    expect([...expanded]).toEqual([]);
+    expect(toggleLatestRunDetails(runs, expanded)).toBe(true);
+    expect([...expanded]).toEqual(["active"]);
+    expect(toggleLatestRunDetails(runs, expanded)).toBe(true);
     expect([...expanded]).toEqual([]);
   });
 

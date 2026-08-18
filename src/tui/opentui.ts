@@ -581,15 +581,26 @@ export function toggleAllRunDetails(
   runs: TerminalScreenView["runs"],
   expandedRunIds: Set<string>,
 ): boolean {
-  const completedRunIds = runs
-    .filter(run => !run.active && run.steps.length > 0)
+  const expandableRunIds = runs
+    .filter(run => run.steps.length > 0)
     .map(run => run.id);
-  if (completedRunIds.length === 0) return false;
-  const collapse = completedRunIds.every(runId => expandedRunIds.has(runId));
-  for (const runId of completedRunIds) {
+  if (expandableRunIds.length === 0) return false;
+  const collapse = expandableRunIds.every(runId => expandedRunIds.has(runId));
+  for (const runId of expandableRunIds) {
     if (collapse) expandedRunIds.delete(runId);
     else expandedRunIds.add(runId);
   }
+  return true;
+}
+
+export function toggleLatestRunDetails(
+  runs: TerminalScreenView["runs"],
+  expandedRunIds: Set<string>,
+): boolean {
+  const latest = [...runs].reverse().find(run => run.steps.length > 0);
+  if (!latest) return false;
+  if (expandedRunIds.has(latest.id)) expandedRunIds.delete(latest.id);
+  else expandedRunIds.add(latest.id);
   return true;
 }
 
@@ -1434,11 +1445,7 @@ export class OpenTuiApp {
     if (key.ctrl && key.name === "o") {
       key.preventDefault();
       key.stopPropagation();
-      const latest = [...this.#view.runs].reverse().find(run => run.steps.length > 0);
-      if (latest) {
-        if (this.#expandedRunIds.has(latest.id)) this.#expandedRunIds.delete(latest.id);
-        else this.#expandedRunIds.add(latest.id);
-      }
+      toggleLatestRunDetails(this.#view.runs, this.#expandedRunIds);
       this.#render();
       return;
     }

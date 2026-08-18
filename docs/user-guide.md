@@ -160,7 +160,7 @@ Agencity remembers the recent branch for each workspace. If more than one choice
 
 ## Terminal interface basics
 
-The full-screen terminal interface renders committed user and assistant messages as structured Markdown. Supported fenced languages and retained TypeScript cells use syntax-aware rendering; unsupported fenced languages remain readable as plain code. Each run appears directly after the user task that started it and before the resulting assistant message. During an active run, prior steps collapse to syntax-colored one-line summaries as each new step starts; only the latest committed action shows details. A pending model response is represented by the active run header rather than a separate waiting row. Completed activity collapses to one status row. Expanding it with `Ctrl-O` shows retained step details in a slightly indented, rounded panel, including full TypeScript source with the presentation-only `Purpose:` label omitted, dim stream-colored logs and returned stdout/stderr, and errors. The canonical retained cell keeps the exact submitted source. Structured result JSON remains available through cell diagnostics rather than the conversation transcript.
+The full-screen terminal interface renders committed user and assistant messages as structured Markdown. Supported fenced languages and retained TypeScript cells use syntax-aware rendering; unsupported fenced languages remain readable as plain code. Each run appears directly after the user task that started it and before the resulting assistant message. During an active run, prior steps collapse to syntax-colored one-line summaries as each new step starts; the latest committed action stays detailed while the model prepares its next action, then collapses when that next action opens. A pending model response is represented by the active run header rather than a separate waiting row. `Ctrl-O` switches the active run between this latest-only view and all retained step details. Completed activity collapses to one status row. Expanding it shows retained step details in a slightly indented, rounded panel, including full TypeScript source with the presentation-only `Purpose:` label omitted, dim stream-colored logs and returned stdout/stderr, and errors. The canonical retained cell keeps the exact submitted source. Structured result JSON remains available through cell diagnostics rather than the conversation transcript.
 
 Agencity does not enable click or drag mouse reporting. Drag normally to select rendered text, then use the terminal's native copy command such as Command-C on macOS. Compatible terminals use alternate-scroll mode to translate trackpad or wheel gestures into conversation scrolling without taking over text selection.
 
@@ -173,7 +173,7 @@ Normal, compact, and minimum height modes reduce chrome in a fixed order. The ma
 - Type plain text to start a task or provide more information after a blocked result.
 - `Ctrl-P` opens command search.
 - `Ctrl-O` expands or collapses the latest run activity.
-- `Ctrl-L` expands or collapses all completed run activity without changing the composer draft.
+- `Ctrl-L` expands or collapses all run activity, including the current run, without changing the composer draft.
 - `Ctrl-Y` expands or collapses the retained learning dock.
 - Page Up/Down scrolls the active view.
 - Escape closes the current inspector.
