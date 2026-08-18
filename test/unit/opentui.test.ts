@@ -1566,7 +1566,7 @@ describe("OpenTUI interactive terminal", () => {
       expect(details.border).toBe(true);
       expect(details.borderStyle).toBe("rounded");
       expect(details.screenX).toBeGreaterThan(cellRoot.screenX);
-      expect((await setup.captureCharFrame()).toString()).toContain("╭");
+      expect((await setup.captureCharFrame()).toString()).toContain("╰");
       expect(compactSource.filetype).toBe("typescript");
       expect(compactSource.content).toBe("Compute the retained value. …");
       expect(compactSource.content).toEndWith("…");
@@ -1600,10 +1600,17 @@ describe("OpenTUI interactive terminal", () => {
         typeof child !== "string" && child.children.join("").includes("command output"))).toBe(true);
       expect(output.textNode.children.some(child =>
         typeof child !== "string" && child.children.join("").includes("command warning"))).toBe(true);
+      const returned = setup.renderer.root.findDescendantById(
+        "agencity-transcript-cell-returned-agent-run-cell-action-1",
+      ) as TextRenderable;
+      expect(returned.content.chunks.map(chunk => chunk.text).join("")).toBe(
+        'RETURNED\n{\n  "exitCode": 0,\n  "stdout": "command output",\n  "stderr": "command warning"\n}',
+      );
       const frame = (await setup.captureCharFrame()).toString();
       expect(frame).toContain("OUTPUT");
-      expect(frame).not.toContain("exitCode");
-      expect(frame).not.toContain("\"stdout\"");
+      expect(frame).toContain("RETURNED");
+      expect(frame).toContain("exitCode");
+      expect(frame).toContain("\"stdout\"");
       setup.renderer.startSelection(source, source.screenX, source.screenY);
       setup.renderer.updateSelection(
         logs,

@@ -81,7 +81,7 @@ function truncateLine(value: string, maximum = 120): string {
   return normalized.length <= maximum ? normalized : `${normalized.slice(0, maximum - 1)}…`;
 }
 
-function boundedText(value: string): string {
+function boundedText(value: string, truncationNotice = "… output truncated; use /cells for retained diagnostics"): string {
   const lines = value.split("\n");
   let bounded = lines.slice(0, MAX_INLINE_OUTPUT_LINES).join("\n");
   let truncated = lines.length > MAX_INLINE_OUTPUT_LINES;
@@ -89,7 +89,7 @@ function boundedText(value: string): string {
     bounded = bounded.slice(0, MAX_INLINE_OUTPUT_CHARACTERS);
     truncated = true;
   }
-  return truncated ? `${bounded}\n… output truncated; use /cells for retained diagnostics` : bounded;
+  return truncated ? `${bounded}\n${truncationNotice}` : bounded;
 }
 
 interface TerminalLogLine {
@@ -232,6 +232,13 @@ export function terminalCellReturnedOutput(
     streams.push(stream);
   }
   return { values, streams };
+}
+
+export function terminalCellReturnedValue(result: JsonValue | null): string {
+  return boundedText(
+    JSON.stringify(result, null, 2),
+    "… returned value truncated; use /cells, then Shift-R for full diagnostics",
+  );
 }
 
 function ordinaryStepSummary(step: TerminalStepView): string {
@@ -662,6 +669,15 @@ export class TerminalTranscript {
       wrapMode: "word",
       selectable: true,
     });
+    const returned = new TextRenderable(this.renderer, {
+      id: `agencity-transcript-cell-returned-${cell.id}`,
+      width: "100%",
+      height: "auto",
+      marginTop: 1,
+      fg: TERMINAL_THEME.text,
+      wrapMode: "word",
+      selectable: true,
+    });
     const error = new TextRenderable(this.renderer, {
       id: `agencity-transcript-cell-error-${cell.id}`,
       width: "100%",
@@ -679,6 +695,7 @@ export class TerminalTranscript {
     details.add(source);
     details.add(logs);
     details.add(output);
+    details.add(returned);
     details.add(error);
     root.add(details);
 
@@ -702,6 +719,10 @@ export class TerminalTranscript {
           ? terminalCellReturnedOutput(next.result, next.logs)
           : { values: [], streams: [] };
         renderTerminalStreams(output, "OUTPUT", returnedOutput.values, returnedOutput.streams);
+        returned.visible = next.status === "committed";
+        returned.content = next.status === "committed"
+          ? `RETURNED\n${terminalCellReturnedValue(next.result)}`
+          : "";
         error.content = next.error ? `ERROR\n${boundedText(next.error)}` : "";
       },
     };

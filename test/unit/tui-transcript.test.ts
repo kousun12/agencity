@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   terminalCellReturnedOutput,
+  terminalCellReturnedValue,
   terminalCompactCellSource,
   terminalDisplayCellSource,
 } from "../../src/tui/transcript.ts";
@@ -46,7 +47,7 @@ describe("structured terminal transcript", () => {
     ]).toEqual(["accent", "muted", "danger", "muted", "danger"]);
   });
 
-  test("renders returned shell streams without exposing result JSON or duplicating logs", () => {
+  test("separates returned shell streams from the complete returned value", () => {
     const shellResult = {
       exitCode: 0,
       stdout: "tests passed\n",
@@ -61,6 +62,25 @@ describe("structured terminal transcript", () => {
       streams: ["stderr"],
     });
     expect(terminalCellReturnedOutput({ value: 42 }, [])).toEqual({ values: [], streams: [] });
+    expect(terminalCellReturnedValue(shellResult)).toBe(
+      '{\n  "exitCode": 0,\n  "stdout": "tests passed\\n",\n  "stderr": "warning\\n"\n}',
+    );
+    expect(terminalCellReturnedValue(["buildResult", "localStoreFile"])).toBe(
+      '[\n  "buildResult",\n  "localStoreFile"\n]',
+    );
+    expect(terminalCellReturnedValue(null)).toBe("null");
+  });
+
+  test("bounds returned values by lines and points to full diagnostics", () => {
+    const rendered = terminalCellReturnedValue(
+      Array.from({ length: 20 }, (_, index) => `returned-line-${index}`),
+    );
+    expect(rendered.split("\n")).toHaveLength(13);
+    expect(rendered).toContain("returned-line-10");
+    expect(rendered).not.toContain("returned-line-11");
+    expect(rendered).toEndWith(
+      "… returned value truncated; use /cells, then Shift-R for full diagnostics",
+    );
   });
 
   test("shows declared cell purposes without the source-code label", () => {
