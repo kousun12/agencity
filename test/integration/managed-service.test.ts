@@ -663,7 +663,7 @@ describe("managed workspace service", () => {
 
   test("status reports warm workers and idle shutdown retires them before exit", async () => {
     const config = {
-      ...(await configuration("agencity-managed-warm-scratch-idle-")),
+      ...(await configuration("agencity-managed-warm-repl-idle-")),
       idleShutdownMs: 2_000,
     };
     const service = await opened(config);
@@ -674,7 +674,7 @@ describe("managed workspace service", () => {
     await service.supervisor.executeCell(
       session.sessionId,
       session.branchId,
-      "scratch.warmOnly = () => 42; ({ warm: typeof scratch.warmOnly === 'function' })",
+      "const warmOnly = () => 42; ({ warm: typeof warmOnly === 'function' })",
     );
     expect(service.supervisor.console.status().running).toBe(true);
     expect(await service.status()).toMatchObject({
@@ -689,7 +689,7 @@ describe("managed workspace service", () => {
 
     await waitFor(
       async () => !(await Bun.file(serviceStatePaths(config.workspace.root).manifestPath).exists()),
-      "idle service with warm scratch shutdown",
+      "idle service with warm TypeScript environment shutdown",
       7_000,
     );
     await service.close();

@@ -91,13 +91,13 @@ class NestedAgentProvider implements ModelProvider {
       if (ordinal === 1) {
         return action({
           type: "typescript",
-          code: `scratch.steps = ["first"]; console.log("child-first"); return { step: 1, pid: process.pid };`,
+          code: `const steps = ["first"]; console.log("child-first"); return { step: 1, pid: process.pid };`,
         });
       }
       if (ordinal === 2) {
         return action({
           type: "typescript",
-          code: `scratch.steps.push("second"); console.log("child-second"); return { steps: scratch.steps, pid: process.pid };`,
+          code: `steps.push("second"); console.log("child-second"); return { steps, pid: process.pid };`,
         });
       }
       return action({ type: "final", content: "multi-cell child complete" });
@@ -115,7 +115,7 @@ class NestedAgentProvider implements ModelProvider {
       if (ordinal === 1) {
         return action({
           type: "typescript",
-          code: `scratch.level = "grandchild"; console.log("grandchild-only"); return { level: scratch.level, pid: process.pid };`,
+          code: `const level = "grandchild"; console.log("grandchild-only"); return { level, pid: process.pid };`,
         });
       }
       return action({ type: "final", content: "grandchild complete" });
@@ -125,13 +125,13 @@ class NestedAgentProvider implements ModelProvider {
       if (ordinal === 1) {
         return action({
           type: "typescript",
-          code: `scratch.identity = "${identity}"; console.log("${identity}-only"); const startedAt = Date.now(); await Bun.sleep(200); return { identity: scratch.identity, pid: process.pid, startedAt, endedAt: Date.now() };`,
+          code: `const identity = "${identity}"; console.log("${identity}-only"); const startedAt = Date.now(); await Bun.sleep(200); return { identity, pid: process.pid, startedAt, endedAt: Date.now() };`,
         });
       }
       if (ordinal === 2) {
         return action({
           type: "typescript",
-          code: `return { identity: scratch.identity, pid: process.pid };`,
+          code: `return { identity, pid: process.pid };`,
         });
       }
       return action({ type: "final", content: `${identity} complete` });
@@ -384,7 +384,7 @@ describe("branch-aware console execution pool", () => {
     }
   });
 
-  test("runMany overlaps siblings while isolating scratch, logs, and worker heap", async () => {
+  test("runMany overlaps siblings while isolating bindings, logs, and worker heap", async () => {
     const value = await fixture({ maxResident: 3, maxActive: 2 });
     try {
       const result = await value.supervisor.executeCell(
@@ -562,7 +562,7 @@ describe("branch-aware console execution pool", () => {
       const first = await value.supervisor.executeCell(
         sibling.sessionId,
         sibling.branchId,
-        `scratch.keep = "sibling"; return { pid: process.pid };`,
+        `const keep = "sibling"; return { pid: process.pid };`,
       );
       const interrupted = value.supervisor.executeCell(
         value.root.sessionId,
@@ -589,7 +589,7 @@ describe("branch-aware console execution pool", () => {
       const preserved = await value.supervisor.executeCell(
         sibling.sessionId,
         sibling.branchId,
-        `return { keep: scratch.keep, pid: process.pid };`,
+        `return { keep, pid: process.pid };`,
       );
       expect(preserved.result).toEqual({
         keep: "sibling",

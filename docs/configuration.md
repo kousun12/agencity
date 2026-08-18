@@ -58,7 +58,7 @@ The profile default is intentionally not derived from the workspace database. Th
 
 `--db`, `--artifacts`, and `--profile` do not move the workspace identity marker or managed-service discovery files.
 
-The one-hour timeout begins whenever the managed service becomes quiescent. It is not a task timeout or scratch-retention promise. Attached clients, resident managed run-queue work, active runs, pending effects, queued wakes, active schedules, and active heartbeats defer shutdown. Service status reports resident console workers and active console executions while they exist. At the final idle check, replaceable idle console workers are retired before quiescence is decided, so warm scratch is not a durable keep-alive or retention promise. Human `service status` formats the default as `1 hour`, while `service status --json` returns exact milliseconds.
+The one-hour timeout begins whenever the managed service becomes quiescent. It is not a task timeout or REPL-namespace retention promise. Attached clients, resident managed run-queue work, active runs, pending effects, queued wakes, active schedules, and active heartbeats defer shutdown. Service status reports resident console workers and active console executions while they exist. At the final idle check, replaceable idle console workers are retired before quiescence is decided, so a live namespace is not a durable keep-alive or retention promise. Human `service status` formats the default as `1 hour`, while `service status --json` returns exact milliseconds.
 
 There is no product CLI override for the idle timeout. Embedding and deterministic lifecycle tests may set `ManagedServiceConfiguration.idleShutdownMs` within the accepted bounds. The normalized value is included in the service discovery configuration hash. A client using a different default receives `CONFIG_MISMATCH` while the existing owner is live rather than taking ownership or deleting its manifest.
 
@@ -214,7 +214,6 @@ Turso data-plane credentials do not grant administrative deletion authority. The
 - `--completion-gate COMMAND` adds a required shell verification gate to a newly selected goal. It cannot be combined with `--goal current`.
 - `--detach` returns after durable run admission while the managed service continues.
 - `--json` requests the command's structured output contract.
-- `--restart-console-after-cell` stops the disposable TypeScript worker after each cell for recovery diagnostics. Managed exact-file-local composition may restore eligible scratch JSON from its bounded checkpoint; warm-only values disappear.
 - `--help` and `--version` print help or version information without starting ordinary work.
 
 ## Selection and inspection options

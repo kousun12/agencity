@@ -86,7 +86,7 @@ A task is the instruction you give Agencity. A run is one durable attempt to car
 - `bun_console`, which submits a TypeScript cell using the console SDK for files, shell commands, SQL, models, subagents, memory, skills, or artifacts;
 - `finish`, which returns a successful answer or an explicit blocked or failed result.
 
-These are declaration-only provider tools. They do not execute at the provider and have no execute callbacks. Only a validated, durably committed `bun_console` action can start a disposable TypeScript cell. The APIs available inside that cell are a separate layer, not additional provider tools.
+These are declaration-only provider tools. They do not execute at the provider and have no execute callbacks. Only a validated, durably committed `bun_console` action can evaluate a TypeScript cell in the branch's persistent REPL. The APIs available inside that cell are a separate layer, not additional provider tools.
 
 The TypeScript console, workspace files, and shell operations are the general mechanism for different task domains. Agencity does not add a dedicated core tool for every specialized workflow; recurring specializations can be retained as inspectable skills.
 
@@ -96,7 +96,7 @@ If information is missing, `finish` returns a blocked response containing the qu
 
 Agencity records a requested external effect before executing it. A dependent model step starts only after the result is committed. A final answer may also be checked by a completion gate:
 
-Each dependent step receives a bounded `recentTrajectory` containing recent actions and outcomes, plus newly delivered exact-once observations. Completed actions are represented by compact deterministic facts such as their declared purpose, source and result digests, byte counts, and grouped effect status; their source and result text are not replayed. The latest failed or unresolved action retains bounded source and detailed error context so it can be repaired. After a validation or shell failure, the next-step guidance asks for a small read around a reliable diagnostic location, or the smallest relevant function or section when no reliable location exists, rather than another whole-file read. This preserves continuity without replaying the complete notebook. The step prompt asks the model to decide whether the request is complete before executing anything else. Retained cell-history APIs remain available for deliberate historical inspection, but ordinary active-run continuation does not require the model to reconstruct its own work from them.
+Each dependent step receives a bounded `recentTrajectory` containing recent actions and outcomes, plus newly delivered exact-once observations. Completed actions are represented by compact deterministic facts such as their declared purpose, source and result digests, byte counts, and grouped effect status; their source and result text are not replayed. The latest failed or unresolved action retains bounded source and detailed error context so it can be repaired. After a validation or shell failure, the next-step guidance asks for a small read around a reliable diagnostic location, or the smallest relevant function or section when no reliable location exists, rather than another whole-file read. This preserves continuity without replaying complete cell history. The step prompt asks the model to decide whether the request is complete before executing anything else. Retained cell-history APIs remain available for deliberate historical inspection, but ordinary active-run continuation does not require the model to reconstruct its own work from them.
 
 ```sh
 agencity run --completion-gate "bun test" \
@@ -111,9 +111,9 @@ Unexpected large output does not become an unbounded next prompt. Shell and file
 
 Automatic observations are also capped per step. The complete canonical event-ID ledger remains retained for inspection; the model receives a bounded derived view that avoids repeating a successful cell effect both as an effect outcome and as the cell result. Failed, cancelled, and unknown effects remain visible and actionable.
 
-Inside a cell, ordinary variables last only for that cell. Direct `scratch` is an exact-session-and-branch cache for replaceable parsed data, indexes, helper functions, and other intermediates useful across nearby cells. `state` and artifacts remain the correct place for anything required after recovery. Each cell should return only the focused summary, slice, status, digest, or reference needed for the next decision instead of returning the complete value placed in scratch.
+Each exact session and branch has a persistent Bun TypeScript REPL worker. Top-level variables, functions, classes, imports, module instances, closures, and object identity remain available across cells while that worker lives. A runtime throw leaves completed in-memory mutations available to a later cell, but state and artifact writes staged by the failed cell do not commit.
 
-Scratch is not durable work. Arbitrary values survive only while the worker remains warm. The managed file-local product attempts a bounded same-device JSON checkpoint after successful cells, but functions, classes, cycles, modules, skipped values, and evicted or expired cache rows do not restore. A later cell can inspect `sdk.scratch.status()` and rebuild missing values from durable inputs. Scratch does not cross forks, child sessions, devices, synchronization, or export and is never automatic context or completion evidence.
+The REPL namespace is temporary. Cancellation, RSS recycling, worker/service/process loss, branch change, parse/transpilation failure, or failure after execution but before canonical commit may discard it. Use state for small values required after recovery and artifacts for larger or byte-oriented durable data. Agencity never replays retained cell source automatically; rebuild from durable inputs or safe idempotent effects.
 
 ## Sessions and branches
 
@@ -236,7 +236,7 @@ agencity agents
 agencity stop "unique agent name"
 ```
 
-The on-demand workspace service owns detached execution. It is not an operating-system login service. It exits after one hour of quiescence by default, while active runs, effects, schedules, heartbeats, queued wakes, resident managed run-queue work, or attached clients can keep it resident. Warm scratch and an idle console worker do not keep the service alive, so detach/resume does not promise warm scratch retention.
+The on-demand workspace service owns detached execution. It is not an operating-system login service. It exits after one hour of quiescence by default, while active runs, effects, schedules, heartbeats, queued wakes, resident managed run-queue work, or attached clients can keep it resident. A live REPL namespace and an idle console worker do not keep the service alive, so detach/resume does not promise namespace retention.
 
 ## Recovery attention
 

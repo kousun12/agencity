@@ -44,6 +44,8 @@ The implementation adds:
 
 The first implementation is workspace-local. It does not add cross-workspace worker types, automatic user/global promotion, class inheritance, work stealing, cross-family reassignment, a workspace manager, or an organization control plane.
 
+Event schema 6 has one reusable-worker representation: `WorkerType`. It removes `subagent_spec` from `HarnessKind`, removes `sdk.specs`, replaces specification-source profile fields with worker-type source fields, and maps recurring delegated roles to owner-created worker types or refinements of an existing exact source type. Version-5 workspaces fail closed before decode, so the new runtime does not need to decode old specification proposals, rollback targets, or frozen review records as live schema-6 state. A future importer may translate them explicitly; no compatibility alias remains in the shipped schema-6 API.
+
 ## Product decision
 
 Agencity treats specialization as a relationship between a reusable worker type and durable worker instances.
@@ -152,6 +154,7 @@ Before implementation, a new ADR must amend the organization limitations in ADR 
 - Treating reviewer approval, successful runs, or type adoption as proof of improved outcomes.
 - Replacing memories, prompt notes, skills, profiles, tasks, or goals with one large type prompt.
 - Adding a second agent runtime for typed workers.
+- Adding provider tools beyond the existing required `bun_console` and `finish` contract.
 
 ## Terms
 
@@ -341,12 +344,20 @@ An explicit custom child profile without a reusable type becomes an inline type.
 interface WorkerTypeBinding {
   origin: WorkerTypeSource;
   adopted: WorkerTypeSource;
+  admissionConfiguration: {
+    modelSource: "inherited" | "type_default" | "explicit_override";
+    effectiveModel: ModelConfiguration;
+    budgetSource: "inherited_remaining" | "type_default" | "explicit_override";
+    requestedBudget: BudgetLimits;
+  };
   adoptedAt: string;
   adoptionEventId: string | null;
 }
 ```
 
 The complete initial type binding is embedded in `SessionCreated` beside the complete initial agent profile. A newly runnable session cannot exist without either a workspace, sealed, or inline type source.
+
+`SessionCreated` continues to retain the effective model and budget as runtime truth. `admissionConfiguration` explains whether each value was inherited, supplied by the type, or explicitly overridden, and preserves the exact bounded request used during admission. It does not create another mutable model or budget owner.
 
 The session continues to own:
 
@@ -374,6 +385,8 @@ On admission from a worker type:
 Instance profile revision does not revise the worker type. Worker-type revision does not revise an instance profile.
 
 Type adoption creates and activates a new instance profile derived from the adopted type version in the same transaction as the binding change. Adoption does not attempt an implicit text merge. If the instance profile has diverged since its previous type-derived profile, adoption requires an explicit owner-supplied resolution that previews and confirms the exact replacement profile. Automatic adoption is unavailable.
+
+Adoption changes behavior and type-owned harness bindings only. It does not silently change the session's current model or budget. New type defaults are shown in the preview and apply only to later instances unless the owner performs a separate ordinary model or budget operation through the services that own those fields.
 
 ### Type-owned harness
 
@@ -544,7 +557,7 @@ interface RefinementTargetPolicyV2 {
   version: 2;
   automatic: boolean;
   instanceTargets: boolean;
-  workerTypeTargets: boolean;
+  workerTypeTargets: "default" | "enabled" | "disabled";
   targetPreference: "instance_only" | "type_preferred";
   generation: number;
 }
@@ -552,11 +565,11 @@ interface RefinementTargetPolicyV2 {
 
 Policy behavior is:
 
-- a fresh device profile receives automatic instance and worker-type learning with `type_preferred`;
-- a retained explicit v1 boolean or v1 policy preserves its automatic on/off value but maps to `instance_only` with `workerTypeTargets: false`;
+- a fresh device profile stores `workerTypeTargets: "default"`; it remains effectively disabled until the runtime advertises type-target capability, then resolves to type-preferred learning;
+- a retained explicit v1 boolean or v1 policy preserves its automatic on/off value but maps to `instance_only` with `workerTypeTargets: "disabled"`;
 - the product asks the owner to enable type learning explicitly for such a retained profile;
 - pause and resume continue to control all automatic admission without rewriting target consent;
-- worker-type target enablement has a separate explicit command and TUI control;
+- worker-type target enablement has a separate explicit command and TUI control that stores `"enabled"` or `"disabled"`;
 - policy lease ordering and generation revalidation run immediately before every automatic request append;
 - already admitted work is not cancelled by a later policy change.
 
@@ -581,6 +594,8 @@ Refinement uses:
 - type-behavior replacement only when the standing job definition itself should change.
 
 The reviewer rejects type-behavior proposals that are knowledge dumps, task transcripts, mutable repository facts, or disguised runtime configuration.
+
+Recurring delegated roles map to worker types rather than a harness `subagent_spec`. Automatic and agent-originated trajectory refinement may revise only an existing exact source type. Creating a new reusable type is an explicit workspace-owner operation with a complete definition and ordinary sealed governance. When automatic evidence suggests a missing role, the refiner returns `no_change` with bounded owner guidance rather than creating workspace catalog state.
 
 ### Cross-instance evidence
 
@@ -661,12 +676,15 @@ The sealed reviewer receives:
 - exact type exposure and work-episode summaries;
 - active conflicting proposals and versions;
 - immutable product constitution and refinement policy;
+- workspace-charter and user-constraint components retained as `null` until those capabilities receive a separate accepted design;
 - explicit instance-versus-type generalization criteria;
 - runtime boundaries and fields excluded from automatic change;
 - evaluation intent;
 - exact reviewer model dispatch and limits.
 
 Reviewer approval establishes policy consistency, not empirical improvement.
+
+Worker types and their mandates do not create an implicit workspace charter, user constraint, reviewer policy, or product constitution. Repository `AGENTS.md` content remains untrusted model-facing guidance and is excluded from sealed governance authority under the existing rules.
 
 ### Authority
 
@@ -703,11 +721,13 @@ Rollback affects new instances and later explicit adoption. It does not rewrite 
 
 Proposal-level grouped rollback remains available for automatic type-owned multi-edit proposals. Every inverse and the resulting type version commit atomically after validation, except staged skill restoration follows existing exact test-evidence rules.
 
+Rolling back a newly created worker type has no earlier version to restore. Its exact proposal-level inverse retires the created type, deactivates only the initial type-owned harness entries created by that proposal, and records one immutable rollback event. It does not delete the type, versions, proposal, review, tests, instances, or evidence. A type with retained instances remains inspectable after retirement, and those instances keep their exact pins.
+
 ## Worker-type lifecycle
 
 ### Create
 
-An owner or authorized refiner proposes a new workspace worker type.
+The workspace owner proposes a new workspace worker type through an explicit typed creation operation. Automatic and agent-originated trajectory refinement cannot create catalog entries in the first implementation.
 
 Creation validates:
 
@@ -829,6 +849,40 @@ Canonical worker-type state includes:
 
 Candidate evidence indexes, catalogs, current pointers, and summary counts are rebuildable.
 
+### Workspace control stream
+
+Worker types cannot be canonically owned by an arbitrary root or by the session that first proposed them. Event schema 6 therefore introduces a non-executable workspace control address:
+
+```ts
+type EventAddress =
+  | {
+      kind: "session_branch";
+      sessionId: string;
+      branchId: string;
+    }
+  | {
+      kind: "workspace_control";
+      workspaceId: string;
+      streamId: "worker-types";
+    };
+```
+
+All existing session and branch events use `session_branch`. Worker-type identity, version, activation, retirement, type-targeted governance application, type-level trigger consumption, and grouped type rollback use `workspace_control`.
+
+The control stream:
+
+- is not a `Session`;
+- cannot run a model, own a task, hold a mailbox, receive a budget, or acquire an execution lease;
+- is globally ordered with ordinary workspace events through the existing canonical sequence;
+- accepts writes only through typed workspace services with an authenticated principal and an exact origin route;
+- retains proposer and reviewer session references without transferring event ownership to those sessions;
+- remains after one root or instance is deleted;
+- participates in synchronization, conflict handling, export, and guarded workspace deletion.
+
+Governance proposer and reviewer children remain ordinary durable sessions. Their route-owned review events link to the workspace-control proposal and application identities. Storage validates the complete cross-stream relationship before application.
+
+The event table, storage contract, sync envelope, subscription/query APIs, deletion planner, and architecture checks must support this discriminated address. Code that requires a session branch must reject `workspace_control` rather than manufacturing session IDs.
+
 ### Proposed canonical events
 
 - `WorkerTypeCreated`
@@ -865,7 +919,9 @@ The expected cutover is:
 
 - event schema version 6;
 - a reducer-version increment;
+- a discriminated session-branch or workspace-control event address;
 - a numbered storage migration for new projections and indexes;
+- a profile-store migration from retained v1 automatic preferences to instance-only version-2 target policy;
 - fail-closed reset guidance for event-schema versions 1–5 before decode, migration, projection, sync ingestion, or recovery;
 - no retained-event rewriting;
 - no inference of historical worker types from task text or profile prose.
@@ -944,6 +1000,8 @@ POST /worker-types/:type/proposals
 POST /worker-types/:type/rollback
 POST /sessions/:session/worker-type-adoptions?branch=:branch
 GET  /learning/snapshot?scope=workspace
+GET  /refinement-target-policy
+PUT  /refinement-target-policy
 ```
 
 Public responses retain exact IDs, versions, digests, active/historical state, source evidence, governance, application, adoption, and rollback. List operations remain bounded and omit full prompts unless detail is explicitly requested.
@@ -971,7 +1029,7 @@ sdk.harness.review({
 
 `sdk.workers.spawn` uses normal durable child admission. Generated code cannot create or revise model/budget/permission policy, spoof owner identity, approve proposals, or adopt a type for an unrelated session.
 
-The existing `sdk.specs.spawn` is removed in the schema cutover or retained only as a short-lived compatibility alias that resolves a migrated worker type. Public documentation presents one worker API.
+The existing `sdk.specs.spawn` and `SubagentSpecService` are removed in the schema cutover. Public documentation and generated execution guidance present one worker API. There is no schema-6 compatibility alias or second specification lifecycle.
 
 ### CLI
 
@@ -990,6 +1048,8 @@ agencity workers adopt TYPE@REVISION
 agencity refine --target auto "review recent experience"
 agencity refine --target instance "retain this worker's local lesson"
 agencity refine --target type "improve this kind of worker"
+agencity refine targets
+agencity refine targets type on|off
 agencity refine snapshot --workspace
 ```
 
@@ -1079,7 +1139,9 @@ An export that cannot explain a type-derived invocation is partial, not successf
 
 Owned workspace deletion removes worker types and their projections with the existing guarded workspace operation.
 
-Session deletion removes the instance and its local state but does not delete a workspace worker type shared by other sessions. Deleting or retiring a type through refinement is unavailable. Type retirement is reversible behavioral availability state; physical deletion remains a guarded data-control operation that checks retained references and quiescence.
+Session deletion never cascades through worker-type evidence. The deletion planner refuses an instance deletion while retained workspace-control proposals, type versions, frozen reviews, evaluation records, or other surviving sessions require that instance's events to explain active or historical behavior. The refusal lists bounded dependency identities and directs the owner to delete the complete workspace scope or use a future explicitly reviewed provenance-detachment operation. No such detachment operation is included in this plan.
+
+When no retained cross-scope dependency exists, session deletion removes the instance and its local state but does not delete a workspace worker type shared by other sessions. Ordinary refinement cannot delete or retire a type. The exact proposal-level rollback of a type-creation proposal is the sole refinement exception: it retires that created type and deactivates proposal-created initial harness entries without deleting history. Other retirement is an explicit owner management operation. Type retirement is reversible behavioral availability state; physical deletion remains a guarded data-control operation that checks retained references, quiescence, remote administration, receipts, and retry state.
 
 ## Security and authority
 
@@ -1126,10 +1188,12 @@ Ordinary provider context does not include the workspace worker catalog, instanc
 3. Confirm workspace-only reusable types and sealed/inline type semantics.
 4. Confirm explicit adoption and no silent existing-instance mutation.
 5. Fix type-preferred eligibility and typed-correction override rules.
-6. Fix type prompt, harness manifest, model-default, and budget-default contracts.
-7. Define event schema 6 and reducer cutover behavior.
-8. Accept a new ADR amending ADRs 0006 and 0012 without weakening their durable relationship, governance, or authority decisions.
-9. Update ADR indexes, backlinks, `AGENTS.md`, and this plan’s status only after acceptance.
+6. Fix the version-2 automatic target policy and retained-v1 migration behavior.
+7. Fix type prompt, harness manifest, model-default, and budget-default contracts.
+8. Fix workspace-control event addressing and cross-stream governance ownership.
+9. Define event schema 6 and reducer cutover behavior.
+10. Accept a new ADR amending ADRs 0006 and 0012 without weakening their durable relationship, governance, or authority decisions.
+11. Update ADR indexes, backlinks, `AGENTS.md`, and this plan’s status only after acceptance.
 
 Exit evidence:
 
@@ -1144,25 +1208,31 @@ Exit evidence:
 2. Add workspace, sealed, and inline type sources.
 3. Require a complete type binding in every new `SessionCreated`.
 4. Add sealed repository-root and task-specialist types.
-5. Add type pins to session state, snapshots, and public inspection.
-6. Add storage migration, projections, rebuild, constraints, and architecture checks.
-7. Cut over to event schema 6 with fail-closed older-workspace guidance.
+5. Add discriminated type pins to every autonomous run, retained recursive invocation, context, model call, provider-input record, compaction, recovery path, snapshot, and public inspection response.
+6. Refuse model execution whenever the exact type or manifest pin cannot be materialized.
+7. Add the non-executable workspace control stream and cross-stream storage validation.
+8. Add the minimum `WorkerTypeService` resolution and typed child-admission path required to replace specification spawn.
+9. Remove `subagent_spec` from domain schemas and refiner output, remove `SubagentSpecService`, `SubagentSpecInvoked`, `sdk.specs`, and specification-source profile fields, and add their worker-type replacements.
+10. Migrate profile-store automatic policy to version 2: retained v1 choices become worker-type-disabled, fresh choices remain `"default"`, and effective worker-type targets stay unavailable until Phase 5.
+11. Add storage migration, projections, rebuild, constraints, and architecture checks.
+12. Cut over to event schema 6 with fail-closed older-workspace guidance only after all mandatory admission, invocation, specification-removal, and consent-migration work is present.
 
 Exit evidence:
 
 - fresh root, ordinary child, explicit-profile child, and private recursive child all retain exact type provenance;
+- no schema-6 runnable session or invocation can exist without exact type provenance;
+- schema 6 exposes no `subagent_spec` domain kind, event, service, profile source, refiner result, or public API;
 - replay and rebuild produce identical type state;
 - invalid or missing type dependencies prevent runnable admission.
 
-### Phase 2 — Typed worker admission and `subagent_spec` replacement
+### Phase 2 — Typed worker admission and product API hardening
 
-1. Implement `WorkerTypeService`.
-2. Add `sdk.workers.spawn`, `spawnMany`, and retained handles.
-3. Materialize exact initial profiles and tasks from worker types.
+1. Complete `WorkerTypeService` resolve, list, history, and private version-application primitives; creation, retirement, and rollback remain unavailable outside the governed or owner-management paths added in Phase 4.
+2. Add batch `sdk.workers.spawnMany`, retained handles, and exact result inspection.
+3. Harden initial profile and task materialization from worker types.
 4. Preserve parent limits, awaited-child capacity, idempotency, cancellation, and usage attribution.
-5. Replace `SubagentSpecService` and `SubagentSpecInvoked` with worker-type admission.
-6. Add protocol and owner inspection for types, history, and instances.
-7. Add focused type-admission and adversarial tests.
+5. Add protocol and owner inspection for types, history, and instances.
+6. Add focused type-admission and adversarial tests.
 
 Exit evidence:
 
@@ -1176,7 +1246,7 @@ Exit evidence:
 1. Add `worker_type` harness scope.
 2. Add immutable type harness manifests.
 3. Extend memory, prompt-note, skill, retrieval, and context policy for adopted types.
-4. Pin type and manifest meaning to runs, contexts, model calls, effects, compaction, and recovery.
+4. Extend the mandatory Phase-1 type pins with exact non-empty manifest selection and historical manifest-authorized resolution.
 5. Stage type-owned generated skills through compile and declared tests before type activation.
 6. Add context-size, missing-artifact, stale-manifest, and secret tests.
 
@@ -1191,27 +1261,29 @@ Exit evidence:
 1. Extend the refiner contract with explicit owner target and generalization reason.
 2. Add deterministic allowed-target computation.
 3. Keep instance-local behavior for ineligible evidence.
-4. Add type-preferred automatic selection for eligible evidence.
-5. Add worker-type governance target validation and frozen review input.
-6. Add atomic non-skill type application and staged skill type application.
-7. Add terminal delivery, bounded reproposal, exact rollback, and application conflict.
-8. Add `--target auto|instance|type` to CLI, TUI, protocol, and SDK.
+4. Add explicit governed owner creation, explicit owner retirement, exact creation rollback, and manually targeted worker-type revision governance validation with owner-bound harness edits and frozen review input.
+5. Add atomic non-skill type application and staged skill type application.
+6. Add terminal delivery, bounded reproposal, exact rollback, and application conflict.
+7. Add `--target auto|instance|type` to CLI, TUI, protocol, and SDK while keeping automatic scans instance-only until Phase 5.
 
 Exit evidence:
 
 - the same trigger can produce a justified instance change, type change, or `no_change`;
-- automatic type proposals cannot use stale or unrelated type evidence;
+- evidence for a missing recurring role produces owner guidance rather than automatic catalog mutation;
+- manually targeted type proposals cannot use stale or unrelated type evidence;
 - reviewer approval alone is not reported as outcome proof.
 
 ### Phase 5 — Cross-instance evidence and automatic generalization
 
-1. Add exact worker-type pins to all eligible work episodes.
+1. Use the mandatory exact Phase-1 worker-type pins to index eligible work episodes.
 2. Build the bounded `worker_type_evidence` projection.
 3. Add type-version trigger identities, nonterminal suppression, and consumption frontiers.
-4. Require two distinct work episodes for automatic type targeting.
-5. Add explicit typed correction targeting.
-6. Prevent duplicate concurrent type reviews across instances.
-7. Add bounded post-activation outcome summaries without making them activation authority.
+4. Make worker-type target capability available for the Phase-1 version-2 policy, resolve fresh `"default"` choices to type-preferred, preserve migrated v1 `"disabled"` choices, and enforce lease ordering and generation revalidation.
+5. Add type-preferred automatic selection for eligible existing source types.
+6. Require two distinct work episodes for automatic type targeting.
+7. Add explicit typed correction targeting.
+8. Prevent duplicate concurrent type reviews across instances.
+9. Add bounded post-activation outcome summaries without making them activation authority.
 
 Exit evidence:
 
@@ -1274,6 +1346,7 @@ Exit evidence:
 - Sealed and inline types cannot receive workspace type revisions.
 - Historical reduction retains exact old type and profile pins.
 - Type rollback creates a new version and never rewrites history.
+- Workspace-control events cannot be projected as session activity or acquire execution state.
 
 ### Admission and families
 
@@ -1281,6 +1354,7 @@ Exit evidence:
 - Batch spawn is atomic.
 - Idempotency reuse with changed type meaning conflicts.
 - Child model, budget, depth, and concurrency cannot widen parent limits.
+- Admission retains whether effective model and budget came from inheritance, type defaults, or explicit override.
 - Typed workers retain normal queue, steer, result, cancellation, and usage semantics.
 - A typed instance can delegate a narrower task to another visible type.
 - Unrelated existing sessions are never reassigned or reparented.
@@ -1289,6 +1363,7 @@ Exit evidence:
 
 - Every invocation pins type, manifest, profile, and effective prompt.
 - Existing instances do not observe later type-owned artifacts before adoption.
+- Superseded manifest-bound versions remain resolvable until explicit quarantine, removal, or dependency loss.
 - Local instance artifacts remain separate from type-owned artifacts.
 - Type, local, workspace, user, and global context ordering is deterministic.
 - Missing or corrupt manifest dependencies fail visibly.
@@ -1301,20 +1376,28 @@ Exit evidence:
 - Eligible evidence permits type or instance targeting.
 - Two distinct work episodes satisfy the automatic type threshold.
 - One episode does not, absent an explicit typed correction.
+- Automatic and agent-originated trajectory refinement cannot create a workspace type.
+- Owner-created types use complete governed creation and leave no active type or orphan active harness content after rejection or failure.
 - Manual owner type targeting may use one attributable episode.
+- Retained v1 automatic-on policy permits instance learning but not worker-type mutation.
+- Fresh version-2 policy is type-preferred, and target enablement is generation-revalidated before append.
 - Stale, unrelated, sibling, inline, sealed, or cross-workspace targets reject.
+- Every type-owned harness edit is structurally bound to the exact target type.
 - Automatic type proposals cannot modify runtime defaults or authority.
 - Valid proposals receive exactly one sealed reviewer decision.
 - Rejected, failed, unknown, stale, malformed, or conflicting proposals activate nothing.
 - Concurrent type revisions conflict by expected version.
 - Terminal notices survive restart and remain exact-once.
 - Rollback restores exact content and manifest provenance.
+- Rolling back a newly created type retires it and deactivates proposal-created initial harness entries without deleting history.
 
 ### Evidence
 
 - Candidate projection rows always reload and verify canonical events.
 - Type evidence identifies exact exposed versions and work episodes.
 - Evidence from different type versions is not merged.
+- An instance never receives raw unrelated-root evidence through automatic type aggregation.
+- The sealed reviewer receives only bounded redacted cross-root excerpts under workspace policy.
 - Trigger consumption prevents duplicate logical reviews.
 - Post-activation evidence is distinguished from approval and skill tests.
 - Missing evaluation remains explicit.
@@ -1325,6 +1408,7 @@ Exit evidence:
 - Adoption is unavailable during active work.
 - Adoption requires the same type identity.
 - Adoption validates model, budget, manifest, and skill dependencies.
+- Adoption does not change the session model or budget; separate owner operations remain required.
 - Adoption creates an exact type-derived profile and binding.
 - Divergent profiles require explicit resolution.
 - Recovery cannot partially apply adoption.
@@ -1338,6 +1422,7 @@ Exit evidence:
 - Export contains every dependency needed to explain typed invocations.
 - Partial export is reported when a type dependency is missing.
 - Session deletion does not remove shared type content.
+- Session deletion refuses when retained type provenance depends on that session's events.
 - Workspace deletion includes all type content and projections.
 - Sync does not grant execution ownership or choose a last-writer type.
 
@@ -1456,6 +1541,10 @@ The plan is complete when:
 25. `AGENTS.md`, ADRs, public documentation, capability claims, and this plan match shipped behavior.
 26. Typecheck, architecture checks, focused tests, deterministic verification, and acceptance pass.
 27. External live-provider, official Turso Sync, and Turso Cloud results are reported separately as pass, fail, or skip.
+28. Workspace-owned type events use a non-executable canonical control stream rather than an arbitrary root session.
+29. Retained version-1 automatic-learning consent never silently enables worker-type mutation.
+30. Historical manifest-bound artifacts remain exact and usable unless explicitly quarantined, removed, incompatible, or missing.
+31. Session deletion refuses rather than breaking surviving type evidence or governance provenance.
 
 ## Deferred extensions
 

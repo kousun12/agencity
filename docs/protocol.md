@@ -17,7 +17,7 @@ Ordinary product commands discover or start a per-workspace managed service. It:
 
 The token is read from the manifest and is not placed in argv, URLs, events, or output. Authenticated health includes workspace and service identity, application/protocol versions, readiness, and the configuration hash used during discovery.
 
-The service shuts down after one hour of quiescence by default. The normalized `idleShutdownMs` is part of that configuration hash, so clients with a different default receive `CONFIG_MISMATCH` while the current owner remains live. Warm scratch and an idle console worker are not keep-alive reasons.
+The service shuts down after one hour of quiescence by default. The normalized `idleShutdownMs` is part of that configuration hash, so clients with a different default receive `CONFIG_MISMATCH` while the current owner remains live. A live REPL namespace and an idle console worker are not keep-alive reasons.
 
 This is authenticated local process access, not multi-tenant authorization or a hostile-code sandbox.
 
@@ -120,7 +120,7 @@ Selected capability query values must be nonblank UTF-8 strings. Provider is lim
 
 Managed `POST .../runs` admits the run, returns HTTP 202 with stable run/cursor identity, and advances it on the resident queue. The embedded server calls `runs.start`. Missing information becomes a blocked `finish`; a later user message starts an ordinary new run. There is no separate run-input route or retained input-request state.
 
-`POST .../cells` executes with the private console's exact-branch scratch semantics. Scratch values and inventories never appear in snapshots, event history, SSE, automatic context, or any protocol export. A caller that needs scratch status must execute a cell using `sdk.scratch.status()`; this is generated execution, not a new public protocol route.
+`POST .../cells` evaluates code in the private console's persistent exact-session-and-branch REPL worker. Top-level bindings and object identity remain available across calls while that worker lives, but the namespace never appears in snapshots, event history, SSE, automatic context, or protocol export. Runtime throws retain completed in-memory mutations in a surviving worker while staged state and artifact writes remain uncommitted; non-runtime failures recycle the worker. There is no namespace status or recovery route.
 
 Profile summaries include version/session IDs, revision, role, purpose, prompt contract and digest, creator, optional specification source IDs, reason, creation time, and active status. Full detail additionally returns `instructions`, `exactAgentPrompt`, evidence IDs, supersession/restoration IDs, and proposal/review IDs. Normal reads omit prompt-bearing fields to keep lists bounded. Reads are observational. Proposal and rollback are explicit mutations and require a live route.
 

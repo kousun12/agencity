@@ -2,20 +2,24 @@ import { ConsoleCapacityError, ValidationError } from "../domain/index.ts";
 import {
   ConsoleProcess,
   type ConsoleExecution,
-  type ConsoleProcessOptions,
   type ConsoleRpcHandler,
 } from "./process.ts";
-import type { ScratchScope } from "./scratch.ts";
 
 // One caller plus the largest public runMany batch (16). Larger concurrent
 // families fail visibly instead of eagerly retaining dozens of Bun processes.
 export const DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES = 17;
 export const DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS = 4;
+export const DEFAULT_CONSOLE_RSS_RECYCLE_BYTES = 512 * 1024 * 1024;
+
+export interface ConsoleScope {
+  readonly sessionId: string;
+  readonly branchId: string;
+}
 
 type Release = () => void;
 
 interface BranchWorker {
-  readonly scope: ScratchScope;
+  readonly scope: ConsoleScope;
   readonly process: ConsoleProcess;
   busy: number;
   resident: boolean;
@@ -23,7 +27,7 @@ interface BranchWorker {
 }
 
 interface ResidentWaiter {
-  readonly scope: ScratchScope;
+  readonly scope: ConsoleScope;
   readonly resolve: (worker: BranchWorker) => void;
   readonly reject: (error: Error) => void;
 }
@@ -33,7 +37,7 @@ interface ResidentReservationSlot {
   released: boolean;
 }
 
-export interface ConsoleExecutionPoolOptions extends ConsoleProcessOptions {
+export interface ConsoleExecutionPoolOptions {
   readonly maxResidentProcesses?: number;
   readonly maxActiveExecutions?: number;
 }
@@ -100,7 +104,6 @@ class AsyncPermitPool {
 export class ConsoleExecutionPool {
   readonly maxResidentProcesses: number;
   readonly maxActiveExecutions: number;
-  readonly #processOptions: ConsoleProcessOptions;
   readonly #workers = new Map<string, BranchWorker>();
   readonly #residentWaiters: ResidentWaiter[] = [];
   readonly #active: AsyncPermitPool;
@@ -119,17 +122,6 @@ export class ConsoleExecutionPool {
       DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS;
     assertPositiveInteger(this.maxResidentProcesses, "resident-process limit");
     assertPositiveInteger(this.maxActiveExecutions, "active-execution limit");
-    this.#processOptions = {
-      ...(options.scratchCheckpointTimeoutMs === undefined
-        ? {}
-        : { scratchCheckpointTimeoutMs: options.scratchCheckpointTimeoutMs }),
-      ...(options.scratchIdleScopeMs === undefined
-        ? {}
-        : { scratchIdleScopeMs: options.scratchIdleScopeMs }),
-      ...(options.scratchMaxWarmScopes === undefined
-        ? {}
-        : { scratchMaxWarmScopes: options.scratchMaxWarmScopes }),
-    };
     this.#active = new AsyncPermitPool(this.maxActiveExecutions);
   }
 
@@ -153,7 +145,7 @@ export class ConsoleExecutionPool {
   }
 
   async run<T>(
-    scope: ScratchScope,
+    scope: ConsoleScope,
     operation: (process: ConsoleProcess) => Promise<T>,
   ): Promise<T> {
     let settleOperation!: () => void;
@@ -179,6 +171,7 @@ export class ConsoleExecutionPool {
     session: { readonly id: string; readonly branchId: string },
     restored: Record<string, unknown>,
     handler: ConsoleRpcHandler,
+    workspaceRoot?: string,
   ): Promise<ConsoleExecution> {
     let releaseActive: Release | null = await this.#active.acquire();
     let reacquiring: Promise<void> | null = null;
@@ -210,7 +203,13 @@ export class ConsoleExecutionPool {
       }
     };
     try {
-      return await process.execute(code, session, restored, wrapped);
+      return await process.execute(
+        code,
+        session,
+        restored,
+        wrapped,
+        workspaceRoot,
+      );
     } finally {
       executionEnded = true;
       releaseActive?.();
@@ -221,7 +220,7 @@ export class ConsoleExecutionPool {
   }
 
   async reserveAwaited(
-    scopes: readonly ScratchScope[],
+    scopes: readonly ConsoleScope[],
   ): Promise<ConsoleResidentReservation> {
     if (scopes.length < 1) {
       throw new ValidationError("Awaited console reservation scopes cannot be empty");
@@ -277,7 +276,7 @@ export class ConsoleExecutionPool {
     };
   }
 
-  async recycleScope(scope: ScratchScope, reason: string): Promise<void> {
+  async recycleScope(scope: ConsoleScope, reason: string): Promise<void> {
     await this.#mutations.run(async () => {
       if (this.#closed) return;
       const worker = this.#workers.get(scopeKey(scope));
@@ -336,7 +335,7 @@ export class ConsoleExecutionPool {
     });
   }
 
-  async #acquireWorker(scope: ScratchScope): Promise<BranchWorker> {
+  async #acquireWorker(scope: ConsoleScope): Promise<BranchWorker> {
     return new Promise<BranchWorker>((resolve, reject) => {
       void this.#mutations.run(async () => {
         try {
@@ -351,7 +350,7 @@ export class ConsoleExecutionPool {
     });
   }
 
-  async #tryAcquire(scope: ScratchScope): Promise<BranchWorker | null> {
+  async #tryAcquire(scope: ConsoleScope): Promise<BranchWorker | null> {
     this.#pruneStoppedWorkers();
     const key = scopeKey(scope);
     let worker = this.#workers.get(key);
@@ -375,7 +374,7 @@ export class ConsoleExecutionPool {
 
     worker ??= {
       scope,
-      process: new ConsoleProcess(undefined, this.#processOptions),
+      process: new ConsoleProcess(),
       busy: 0,
       resident: false,
       lastUsedAt: Date.now(),
@@ -499,7 +498,7 @@ export class ConsoleExecutionPool {
     if (reservations.size === 0) this.#scopeReservations.delete(slot.key);
   }
 
-  async #releaseWorker(scope: ScratchScope): Promise<void> {
+  async #releaseWorker(scope: ConsoleScope): Promise<void> {
     await this.#mutations.run(async () => {
       const key = scopeKey(scope);
       const worker = this.#workers.get(key);
@@ -561,7 +560,7 @@ class SerialQueue {
   }
 }
 
-function scopeKey(scope: ScratchScope): string {
+function scopeKey(scope: ConsoleScope): string {
   return `${scope.sessionId.length}:${scope.sessionId}${scope.branchId}`;
 }
 

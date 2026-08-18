@@ -1,15 +1,6 @@
 import { environmentWithoutSecrets } from "../security/index.ts";
 import { assertBoundedOutputV1, type CellLogStream } from "../domain/index.ts";
 import { MAX_CELL_OBSERVATION_JSON_BYTES, type EncodedObservation } from "./inspect.ts";
-import {
-  SCRATCH_LIMITS,
-  validateScratchCheckpoint,
-  type ScratchCheckpointCandidate,
-  type ScratchCheckpointLoadResult,
-  type ScratchCheckpointWriteResult,
-  type ScratchScope,
-  type ScratchStatus,
-} from "./scratch.ts";
 
 export interface ConsoleExecution {
   readonly observation: EncodedObservation;
@@ -45,25 +36,12 @@ export function consoleRpcResponse(
 
 type WorkerMessage =
   | { type: "rpc"; executionId: string; requestId: string; method: string; args: unknown[] }
-  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; causalEffectOutcomeEventIds?: string[]; logs: string[]; logStreams: CellLogStream[]; rssBytes: number }
-  | { type: "control-result"; requestId: string; ok: boolean; value?: unknown; error?: string };
+  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; failurePhase?: "compile" | "runtime"; causalEffectOutcomeEventIds?: string[]; logs: string[]; logStreams: CellLogStream[]; rssBytes: number };
 
 interface PendingExecution {
   readonly resolve: (value: ConsoleExecution) => void;
   readonly reject: (error: Error) => void;
   readonly handler: ConsoleRpcHandler;
-}
-
-interface PendingControl {
-  readonly resolve: (value: unknown) => void;
-  readonly reject: (error: Error) => void;
-  readonly timer: ReturnType<typeof setTimeout>;
-}
-
-export interface ConsoleProcessOptions {
-  readonly scratchCheckpointTimeoutMs?: number;
-  readonly scratchIdleScopeMs?: number;
-  readonly scratchMaxWarmScopes?: number;
 }
 
 export interface ConsoleProcessStatus {
@@ -81,19 +59,11 @@ export interface ConsoleProcessStatus {
 export class ConsoleProcess {
   #process: ReturnType<typeof Bun.spawn> | null = null;
   #pending = new Map<string, PendingExecution>();
-  #controls = new Map<string, PendingControl>();
   #rpcOperations = new Set<Promise<void>>();
   #lastRecycleReason: string | null = null;
   #closed = false;
 
-  constructor(
-    readonly workerUrl = new URL("./worker.ts", import.meta.url),
-    readonly options: ConsoleProcessOptions = {},
-  ) {
-    assertPositiveInteger(options.scratchCheckpointTimeoutMs, "scratch checkpoint timeout");
-    assertPositiveInteger(options.scratchIdleScopeMs, "scratch idle scope timeout");
-    assertPositiveInteger(options.scratchMaxWarmScopes, "scratch warm-scope limit");
-  }
+  constructor(readonly workerUrl = new URL("./worker.ts", import.meta.url)) {}
 
   status(): ConsoleProcessStatus {
     return { running: this.#process !== null, lastRecycleReason: this.#lastRecycleReason };
@@ -133,6 +103,7 @@ export class ConsoleProcess {
     session: { id: string; branchId: string },
     restored: Record<string, unknown>,
     handler: ConsoleRpcHandler,
+    workspaceRoot = process.cwd(),
   ): Promise<ConsoleExecution> {
     await this.start();
     const executionId = crypto.randomUUID();
@@ -140,81 +111,19 @@ export class ConsoleProcess {
       this.#pending.set(executionId, { resolve, reject, handler });
     });
     try {
-      this.#send({ type: "execute", executionId, code, session, restored });
+      this.#send({
+        type: "execute",
+        executionId,
+        code,
+        session,
+        restored,
+        workspaceRoot,
+      });
     } catch (error) {
       this.#pending.delete(executionId);
       throw error;
     }
     return promise;
-  }
-
-  async prepareScratch(
-    scope: ScratchScope,
-    loadResult: ScratchCheckpointLoadResult,
-    cacheAvailable: boolean,
-  ): Promise<ScratchStatus> {
-    const value = await this.#control({
-      type: "scratch-prepare",
-      scope,
-      loadResult,
-      cacheAvailable,
-      idleScopeMs: this.options.scratchIdleScopeMs ?? SCRATCH_LIMITS.idleScopeMs,
-      maxWarmScopes: this.options.scratchMaxWarmScopes ?? SCRATCH_LIMITS.maxWarmScopes,
-    }, 5_000, "scratch-control-timeout");
-    return value as ScratchStatus;
-  }
-
-  async hasScratch(scope: ScratchScope): Promise<boolean> {
-    const value = await this.#control(
-      { type: "scratch-probe", scope },
-      5_000,
-      "scratch-control-timeout",
-    ) as { warm?: unknown };
-    return value?.warm === true;
-  }
-
-  async checkpointScratch(
-    scope: ScratchScope,
-    sourceCellId: string,
-  ): Promise<ScratchCheckpointCandidate | null> {
-    const value = await this.#control(
-      { type: "scratch-checkpoint", scope, sourceCellId },
-      this.options.scratchCheckpointTimeoutMs ?? SCRATCH_LIMITS.checkpointTimeoutMs,
-      "scratch-checkpoint-timeout",
-    );
-    if (value === null) return null;
-    return validateScratchCheckpoint(value as ScratchCheckpointCandidate);
-  }
-
-  async recordScratchCheckpoint(
-    scope: ScratchScope,
-    sourceCellId: string,
-    candidate: ScratchCheckpointCandidate,
-    result: ScratchCheckpointWriteResult,
-  ): Promise<void> {
-    await this.#control(
-      { type: "scratch-record-checkpoint", scope, sourceCellId, candidate, result },
-      5_000,
-      "scratch-control-timeout",
-    );
-  }
-
-  async recordScratchCacheWrite(
-    scope: ScratchScope,
-    status: ScratchCheckpointWriteResult["status"] | "unavailable",
-  ): Promise<void> {
-    await this.#control(
-      { type: "scratch-record-cache-write", scope, status },
-      5_000,
-    );
-  }
-
-  async evictScratch(scope: ScratchScope): Promise<void> {
-    await this.#control(
-      { type: "scratch-evict", scope },
-      5_000,
-      "scratch-control-timeout",
-    );
   }
 
   async recycle(reason: string): Promise<void> {
@@ -254,39 +163,6 @@ export class ConsoleProcess {
     }
   }
 
-  async #control(
-    message: Record<string, unknown>,
-    timeoutMs = 5_000,
-    recycleReason?: string,
-  ): Promise<unknown> {
-    await this.start();
-    const requestId = crypto.randomUUID();
-    const promise = new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.#controls.delete(requestId);
-        const error = new Error(`Console control request timed out after ${timeoutMs}ms`);
-        if (!recycleReason) {
-          reject(error);
-          return;
-        }
-        void this.recycle(recycleReason).then(
-          () => reject(error),
-          () => reject(error),
-        );
-      }, timeoutMs);
-      this.#controls.set(requestId, { resolve, reject, timer });
-    });
-    try {
-      this.#send({ ...message, requestId });
-    } catch (error) {
-      const pending = this.#controls.get(requestId);
-      if (pending) clearTimeout(pending.timer);
-      this.#controls.delete(requestId);
-      throw error;
-    }
-    return promise;
-  }
-
   #send(message: unknown): void {
     const child = this.#process;
     if (!child) throw new Error("Console worker is not running");
@@ -295,18 +171,8 @@ export class ConsoleProcess {
 
   #message(message: WorkerMessage): void {
     if (!message || typeof message !== "object" ||
-        (message.type !== "rpc" && message.type !== "result" && message.type !== "control-result")) {
+        (message.type !== "rpc" && message.type !== "result")) {
       throw new Error("Console worker emitted an invalid IPC message");
-    }
-    if (message.type === "control-result") {
-      if (typeof message.requestId !== "string") throw new Error("Console worker emitted an invalid control response");
-      const pending = this.#controls.get(message.requestId);
-      if (!pending) return;
-      clearTimeout(pending.timer);
-      this.#controls.delete(message.requestId);
-      if (message.ok) pending.resolve(message.value);
-      else pending.reject(new Error(message.error ?? "Console control request failed"));
-      return;
     }
     if (typeof message.executionId !== "string") {
       throw new Error("Console worker emitted an invalid execution response");
@@ -340,6 +206,10 @@ export class ConsoleProcess {
         if (!validObservation(message.observation)) throw new Error("Console worker emitted an invalid observation");
         pending.resolve({ observation: message.observation, logs: message.logs, logStreams: message.logStreams, rssBytes: message.rssBytes });
       } else {
+        if (message.failurePhase !== "compile" &&
+            message.failurePhase !== "runtime") {
+          throw new Error("Console worker emitted invalid failure phase");
+        }
         if (message.causalEffectOutcomeEventIds !== undefined &&
             (!Array.isArray(message.causalEffectOutcomeEventIds) ||
              message.causalEffectOutcomeEventIds.length > 16 ||
@@ -351,6 +221,7 @@ export class ConsoleProcess {
           message.logs,
           message.logStreams,
           message.rssBytes,
+          message.failurePhase,
           message.causalEffectOutcomeEventIds ?? [],
         ));
       }
@@ -411,11 +282,6 @@ export class ConsoleProcess {
   #rejectAll(error: Error): void {
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
-    for (const pending of this.#controls.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    this.#controls.clear();
   }
 }
 
@@ -454,12 +320,6 @@ function processExec(): string {
   return process.execPath.endsWith("bun") ? process.execPath : "bun";
 }
 
-function assertPositiveInteger(value: number | undefined, label: string): void {
-  if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
-    throw new Error(`Console ${label} must be a positive integer`);
-  }
-}
-
 /** Do not give generated code brokered provider credentials through process.env. */
 function consoleWorkerEnvironment(): Record<string, string> {
   return environmentWithoutSecrets();
@@ -471,6 +331,7 @@ export class ConsoleCellError extends Error {
     readonly logs: string[],
     readonly logStreams: CellLogStream[],
     readonly rssBytes: number,
+    readonly failurePhase: "compile" | "runtime",
     readonly causalEffectOutcomeEventIds: readonly string[] = [],
   ) {
     super(message);

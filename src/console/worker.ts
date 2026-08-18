@@ -1,3 +1,7 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { runInThisContext } from "node:vm";
 import type { JsonValue } from "../domain/json.ts";
 import type { CellLogStream } from "../domain/events.ts";
 import type {
@@ -17,29 +21,15 @@ import {
   type EncodedObservation,
   type InspectOptions,
 } from "./inspect.ts";
-import { notebookCellBody } from "./notebook.ts";
-import { schemaToPlainJsonSchema } from "./schema-conversion.ts";
 import {
-  SCRATCH_LIMITS,
-  createScratchProxy,
-  scratchValueType,
-  serializeScratch,
-  validateScratchCheckpoint,
-  type ScratchCheckpointLoadResult,
-  type ScratchCheckpointWriteResult,
-  type ScratchProxyState,
-  type ScratchScope,
-  type ScratchStatus,
-} from "./scratch.ts";
+  CELL_RETURN_GLOBAL,
+  CELL_RETURN_GUARD_GLOBAL,
+  prepareReplCellSource,
+} from "./repl.ts";
+import { schemaToPlainJsonSchema } from "./schema-conversion.ts";
 
 type Incoming =
-  | { type: "execute"; executionId: string; code: string; session: { id: string; branchId: string }; restored: Record<string, unknown> }
-  | { type: "scratch-prepare"; requestId: string; scope: ScratchScope; loadResult: ScratchCheckpointLoadResult; cacheAvailable: boolean; idleScopeMs: number; maxWarmScopes: number }
-  | { type: "scratch-probe"; requestId: string; scope: ScratchScope }
-  | { type: "scratch-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string }
-  | { type: "scratch-record-checkpoint"; requestId: string; scope: ScratchScope; sourceCellId: string; candidate: import("./scratch.ts").ScratchCheckpointCandidate; result: ScratchCheckpointWriteResult }
-  | { type: "scratch-record-cache-write"; requestId: string; scope: ScratchScope; status: ScratchCheckpointWriteResult["status"] | "unavailable" }
-  | { type: "scratch-evict"; requestId: string; scope: ScratchScope }
+  | { type: "execute"; executionId: string; code: string; session: { id: string; branchId: string }; restored: Record<string, unknown>; workspaceRoot: string }
   | { type: "rpc-result"; requestId: string; ok: boolean; value?: unknown; error?: string; code?: string; details?: Record<string, unknown>; causalEffectOutcomeEventId?: string }
   | { type: "shutdown" };
 
@@ -102,28 +92,45 @@ const causalEffectErrors = new WeakMap<
   readonly string[]
 >();
 let executionQueue = Promise.resolve();
-interface WarmScratchScope {
-  readonly scope: ScratchScope;
-  readonly proxy: ScratchProxyState;
-  temperature: "warm" | "cold" | "restored";
-  readonly cacheAvailable: boolean;
-  readonly restoreAttempted: boolean;
-  cacheStatus: ScratchCheckpointLoadResult["status"];
-  cacheReason: import("./scratch.ts").ScratchCacheUnavailableReason |
-    import("./scratch.ts").ScratchCacheCorruptReason | null;
-  lastCacheWrite: ScratchCheckpointWriteResult["status"] | "unavailable" | null;
-  lastUsedAt: number;
-  lastCheckpointAt: string | null;
-  lastCheckpointCellId: string | null;
-  savedNames: string[];
-  skipped: Array<{ name: string; reason: import("./scratch.ts").ScratchSkipReason }>;
-}
-const scratchScopes = new Map<string, WarmScratchScope>();
-let idleScopeMs: number = SCRATCH_LIMITS.idleScopeMs;
-let maxWarmScopes: number = SCRATCH_LIMITS.maxWarmScopes;
 
-function scopeKey(scope: ScratchScope): string {
-  return `${scope.sessionId.length}:${scope.sessionId}${scope.branchId}`;
+type ReplBindingName =
+  | "sdk"
+  | "sql"
+  | "session"
+  | "console"
+  | "state"
+  | "artifacts"
+  | "tools"
+  | "inspect"
+  | "cells"
+  | "ai";
+
+type ReplBindings = Readonly<Record<ReplBindingName, unknown>>;
+const activeReplBindings = new AsyncLocalStorage<ReplBindings>();
+const REPL_BINDING_NAMES: readonly ReplBindingName[] = [
+  "sdk",
+  "sql",
+  "session",
+  "console",
+  "state",
+  "artifacts",
+  "tools",
+  "inspect",
+  "cells",
+  "ai",
+];
+const replGlobals = Object.fromEntries(
+  REPL_BINDING_NAMES.map((name) => [
+    name,
+    name === "sql" || name === "inspect"
+      ? createCallableReplBinding(name)
+      : createObjectReplBinding(name),
+  ]),
+) as Record<ReplBindingName, unknown>;
+let replScopeKey: string | null = null;
+
+class CellReturnSignal {
+  constructor(readonly value: unknown) {}
 }
 
 function rpc(
@@ -171,62 +178,20 @@ process.on("message", (raw: unknown) => {
     return;
   }
   if (message.type === "execute") {
-    // One worker can serve several branches, but stdout/stderr are process-wide.
-    // Serial execution makes their bounded capture unambiguous.
+    // A pool-owned worker is pinned to one exact branch. Serial execution also
+    // keeps process-wide stdout/stderr capture unambiguous.
     executionQueue = executionQueue.then(() => execute(message));
-    return;
-  }
-  if (message.type === "scratch-prepare") {
-    executionQueue = executionQueue.then(() => control(message.requestId, () => prepareScratch(message)));
-    return;
-  }
-  if (message.type === "scratch-probe") {
-    executionQueue = executionQueue.then(() => control(message.requestId, () => {
-      evictScratchScopes();
-      return { warm: scratchScopes.has(scopeKey(message.scope)) };
-    }));
-    return;
-  }
-  if (message.type === "scratch-checkpoint") {
-    executionQueue = executionQueue.then(() => control(message.requestId, () => checkpointScratch(message)));
-    return;
-  }
-  if (message.type === "scratch-record-checkpoint") {
-    executionQueue = executionQueue.then(() => control(
-      message.requestId,
-      () => recordScratchCheckpoint(message),
-    ));
-    return;
-  }
-  if (message.type === "scratch-record-cache-write") {
-    executionQueue = executionQueue.then(() => control(message.requestId, () => {
-      const warm = scratchScopes.get(scopeKey(message.scope));
-      if (!warm) throw new Error("Scratch scope is not warm");
-      warm.lastCacheWrite = message.status;
-      return { recorded: true };
-    }));
-    return;
-  }
-  if (message.type === "scratch-evict") {
-    executionQueue = executionQueue.then(() => control(message.requestId, () => {
-      scratchScopes.delete(scopeKey(message.scope));
-      return { evicted: true };
-    }));
     return;
   }
   process.exit(0);
 });
 
 async function execute(message: Extract<Incoming, { type: "execute" }>): Promise<void> {
-  evictScratchScopes();
-  const warmScratch = scratchScopes.get(scopeKey({
-    sessionId: message.session.id,
-    branchId: message.session.branchId,
-  })) ?? createWarmScratch({
-    sessionId: message.session.id,
-    branchId: message.session.branchId,
-  }, { status: "unavailable", reason: "placement_unavailable" }, false);
-  warmScratch.lastUsedAt = Date.now();
+  const scope = `${message.session.id.length}:${message.session.id}${message.session.branchId}`;
+  if (replScopeKey !== null && replScopeKey !== scope) {
+    throw new Error("Console worker cannot change its exact session/branch scope");
+  }
+  replScopeKey = scope;
   const logs = new BoundedLogs();
   const printable = (value: unknown): string => {
     if (typeof value === "string") return value;
@@ -507,42 +472,6 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     inspect: () => call("context.inspect", []),
     compact: (options: Record<string, unknown> = {}) => call("context.compact", [options]),
   };
-  const scratchStatus = (): ScratchStatus => {
-    const descriptors = Object.getOwnPropertyDescriptors(warmScratch.proxy.target);
-    const propertyNames = Object.keys(descriptors).sort();
-    const propertyTypes: Record<string, import("./scratch.ts").ScratchValueType> = Object.create(null);
-    for (const name of propertyNames) {
-      const descriptor = descriptors[name]!;
-      propertyTypes[name] = "value" in descriptor
-        ? scratchValueType(descriptor.value)
-        : "undefined";
-    }
-    return {
-      scope: warmScratch.scope,
-      temperature: warmScratch.temperature,
-      propertyNames,
-      propertyTypes,
-      lastCheckpointAt: warmScratch.lastCheckpointAt,
-      lastCheckpointCellId: warmScratch.lastCheckpointCellId,
-      savedNames: [...warmScratch.savedNames],
-      skipped: [...warmScratch.skipped],
-      cache: {
-        available: warmScratch.cacheAvailable,
-        restoreAttempted: warmScratch.restoreAttempted,
-        status: warmScratch.cacheStatus,
-        reason: warmScratch.cacheReason,
-        lastWrite: warmScratch.lastCacheWrite,
-      },
-      limits: SCRATCH_LIMITS,
-    };
-  };
-  const scratchSdk = {
-    status: async () => scratchStatus(),
-    clear: async () => {
-      warmScratch.proxy.clear();
-      return scratchStatus();
-    },
-  };
   const ai = {
     generateText: (input: unknown) => call("ai.generateText", [input]),
     generateObject: (input: unknown) => {
@@ -560,26 +489,62 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   });
 
   let response: Record<string, unknown> & { rssBytes: number };
+  let failurePhase: "compile" | "runtime" = "compile";
   try {
-    const transpiler = new Bun.Transpiler({ loader: "ts", target: "bun" });
-    const body = notebookCellBody(message.code);
-    const source = `async function __cell(sdk,sql,session,console,state,artifacts,tools,inspect,cells,ai,scratch){\n${body}\n}`;
-    const javascript = transpiler.transformSync(source);
-    const factory = new Function(`${javascript}\nreturn __cell;`)() as (
-      sdk: ConsoleSdk,
-      sql: SqlTag,
-      session: unknown,
-      console: unknown,
-      state: unknown,
-      artifacts: unknown,
-      tools: unknown,
-      inspect: typeof inspectValue,
-      cells: unknown,
-      ai: unknown,
-      scratch: Record<string, unknown>,
-    ) => Promise<unknown>;
-    const sdk = { scratch: scratchSdk, state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, ai, inspect } as unknown as ConsoleSdk;
-    const value = await factory(sdk, sql, message.session, cellConsole, state, artifacts, tools, inspect, cells, ai, warmScratch.proxy.object);
+    const transpiler = new Bun.Transpiler({
+      loader: "ts",
+      target: "bun",
+      replMode: true,
+    });
+    const javascript = transpiler.transformSync(
+      prepareReplCellSource(message.code),
+    );
+    failurePhase = "runtime";
+    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, ai, inspect } as unknown as ConsoleSdk;
+    const bindings: ReplBindings = {
+      sdk,
+      sql,
+      session: message.session,
+      console: cellConsole,
+      state,
+      artifacts,
+      tools,
+      inspect,
+      cells,
+      ai,
+    };
+    for (const name of REPL_BINDING_NAMES) {
+      Reflect.set(globalThis, name, replGlobals[name]);
+    }
+    Reflect.set(
+      globalThis,
+      CELL_RETURN_GLOBAL,
+      (value: unknown) => new CellReturnSignal(value),
+    );
+    Reflect.set(
+      globalThis,
+      CELL_RETURN_GUARD_GLOBAL,
+      (value: unknown) => value instanceof CellReturnSignal,
+    );
+    let replResult: unknown;
+    let explicitReturn = false;
+    try {
+      replResult = await activeReplBindings.run(
+        bindings,
+        () => runInThisContext(javascript, {
+          filename: `agencity://${message.session.id}/${message.session.branchId}/${message.executionId}.ts`,
+          importModuleDynamically: (specifier: string) =>
+            import(resolveCellImport(specifier, message.workspaceRoot)),
+        }),
+      );
+    } catch (error) {
+      if (!(error instanceof CellReturnSignal)) throw error;
+      explicitReturn = true;
+      replResult = error.value;
+    }
+    const value = await (
+      explicitReturn ? replResult : unwrapReplResult(replResult)
+    );
     const encoded = encodeObservation(value);
     const inlineTerminal = {
       type: "result",
@@ -605,6 +570,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       executionId: message.executionId,
       ok: false,
       error: detail.length > MAX_LOG_BYTES ? `${detail.slice(0, MAX_LOG_BYTES)}…` : detail,
+      failurePhase,
       ...(causalEffectOutcomeEventIds === undefined
         ? {}
         : { causalEffectOutcomeEventIds: [...causalEffectOutcomeEventIds] }),
@@ -614,9 +580,6 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     stdout.write = originalStdout;
     stderr.write = originalStderr;
   }
-  warmScratch.lastUsedAt = Date.now();
-  warmScratch.temperature = "warm";
-  evictScratchScopes();
   send(fitTerminalIpc({ ...response, logs: logs.values, logStreams: logs.streams }));
 }
 
@@ -637,144 +600,75 @@ function normalizeAgentInput(input: unknown): unknown {
   };
 }
 
-async function control(requestId: string, operation: () => unknown | Promise<unknown>): Promise<void> {
-  try {
-    send({ type: "control-result", requestId, ok: true, value: await operation() });
-  } catch (error) {
-    send({
-      type: "control-result",
-      requestId,
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    });
+function currentReplBinding(name: ReplBindingName): unknown {
+  const bindings = activeReplBindings.getStore();
+  if (!bindings) {
+    throw new Error(`Console binding ${name} is unavailable outside an active cell`);
   }
+  return bindings[name];
 }
 
-function prepareScratch(
-  message: Extract<Incoming, { type: "scratch-prepare" }>,
-): ScratchStatus {
-  idleScopeMs = message.idleScopeMs;
-  maxWarmScopes = message.maxWarmScopes;
-  evictScratchScopes();
-  const key = scopeKey(message.scope);
-  let warm = scratchScopes.get(key);
-  if (!warm) warm = createWarmScratch(message.scope, message.loadResult, message.cacheAvailable);
-  warm.lastUsedAt = Date.now();
-  evictScratchScopes(key);
-  const descriptors = Object.getOwnPropertyDescriptors(warm.proxy.target);
-  const names = Object.keys(descriptors).sort();
-  const propertyTypes: Record<string, import("./scratch.ts").ScratchValueType> = Object.create(null);
-  for (const name of names) {
-    const descriptor = descriptors[name]!;
-    propertyTypes[name] = "value" in descriptor ? scratchValueType(descriptor.value) : "undefined";
-  }
-  return {
-    scope: warm.scope,
-    temperature: warm.temperature,
-    propertyNames: names,
-    propertyTypes,
-    lastCheckpointAt: warm.lastCheckpointAt,
-    lastCheckpointCellId: warm.lastCheckpointCellId,
-    savedNames: [...warm.savedNames],
-    skipped: [...warm.skipped],
-    cache: {
-      available: warm.cacheAvailable,
-      restoreAttempted: warm.restoreAttempted,
-      status: warm.cacheStatus,
-      reason: warm.cacheReason,
-      lastWrite: warm.lastCacheWrite,
+function createObjectReplBinding(name: ReplBindingName): object {
+  return new Proxy(Object.create(null), {
+    get(_target, property) {
+      return Reflect.get(currentReplBinding(name) as object, property);
     },
-    limits: SCRATCH_LIMITS,
-  };
+    set(_target, property, value) {
+      return Reflect.set(currentReplBinding(name) as object, property, value);
+    },
+    has(_target, property) {
+      return Reflect.has(currentReplBinding(name) as object, property);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(currentReplBinding(name) as object);
+    },
+    getOwnPropertyDescriptor(_target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(
+        currentReplBinding(name) as object,
+        property,
+      );
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+  });
 }
 
-function createWarmScratch(
-  scope: ScratchScope,
-  loadResult: ScratchCheckpointLoadResult,
-  cacheAvailable: boolean,
-): WarmScratchScope {
-  const restore = loadResult.status === "restored" ? loadResult.restore : null;
-  const candidate = restore ? validateScratchCheckpoint(restore.candidate) : null;
-  const skipped = new Map(candidate?.skipped.map((item) => [item.name, item.reason]) ?? []);
-  const proxy = createScratchProxy(skipped, restore?.sourceCellId ?? null);
-  if (candidate) {
-    for (const name of candidate.savedNames) {
-      Reflect.defineProperty(proxy.target, name, {
-        configurable: true,
-        enumerable: true,
-        writable: true,
-        value: structuredClone(candidate.values[name]),
-      });
-    }
-  }
-  const warm: WarmScratchScope = {
-    scope,
-    proxy,
-    temperature: restore ? "restored" : "cold",
-    cacheAvailable,
-    restoreAttempted: cacheAvailable,
-    cacheStatus: loadResult.status,
-    cacheReason: loadResult.status === "unavailable" || loadResult.status === "corrupt"
-      ? loadResult.reason
-      : null,
-    lastCacheWrite: null,
-    lastUsedAt: Date.now(),
-    lastCheckpointAt: restore?.checkpointedAt ?? null,
-    lastCheckpointCellId: restore?.sourceCellId ?? null,
-    savedNames: candidate ? [...candidate.savedNames] : [],
-    skipped: candidate ? [...candidate.skipped] : [],
-  };
-  scratchScopes.set(scopeKey(scope), warm);
-  return warm;
+function createCallableReplBinding(name: ReplBindingName): (...args: unknown[]) => unknown {
+  return new Proxy(function () {}, {
+    apply(_target, thisArg, args) {
+      return Reflect.apply(
+        currentReplBinding(name) as (...values: unknown[]) => unknown,
+        thisArg,
+        args,
+      );
+    },
+    get(_target, property) {
+      return Reflect.get(currentReplBinding(name) as object, property);
+    },
+  });
 }
 
-function checkpointScratch(
-  message: Extract<Incoming, { type: "scratch-checkpoint" }>,
-) {
-  const warm = scratchScopes.get(scopeKey(message.scope));
-  if (!warm) throw new Error("Scratch scope is not warm");
-  if (!warm.proxy.dirty) return null;
-  const candidate = serializeScratch(warm.proxy.target, warm.proxy.skipped);
-  warm.lastUsedAt = Date.now();
-  return candidate;
+function unwrapReplResult(value: unknown): unknown {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    Object.getPrototypeOf(value) === null &&
+    Reflect.ownKeys(value).length === 1 &&
+    Object.hasOwn(value, "value")
+  ) {
+    return (value as { value: unknown }).value;
+  }
+  return value;
 }
 
-function recordScratchCheckpoint(
-  message: Extract<Incoming, { type: "scratch-record-checkpoint" }>,
-): { recorded: true } {
-  const warm = scratchScopes.get(scopeKey(message.scope));
-  if (!warm) throw new Error("Scratch scope is not warm");
-  const candidate = validateScratchCheckpoint(message.candidate);
-  if (message.result.status === "unchanged") {
-    warm.proxy.markClean();
-    warm.lastUsedAt = Date.now();
-    return { recorded: true };
+function resolveCellImport(specifier: string, workspaceRoot: string): string {
+  if (specifier.startsWith("./") || specifier.startsWith("../")) {
+    const base = pathToFileURL(
+      resolve(workspaceRoot, "__agencity_cell__.ts"),
+    );
+    return new URL(specifier, base).href;
   }
-  warm.lastCheckpointAt = new Date().toISOString();
-  warm.lastCheckpointCellId = message.sourceCellId;
-  warm.savedNames = [...candidate.savedNames];
-  warm.skipped = [...candidate.skipped];
-  warm.proxy.skipped.clear();
-  for (const item of candidate.skipped) warm.proxy.skipped.set(item.name, item.reason);
-  warm.proxy.unavailableCheckpointCellId = message.sourceCellId;
-  warm.proxy.markClean();
-  warm.lastUsedAt = Date.now();
-  return { recorded: true };
-}
-
-function evictScratchScopes(preserveKey?: string): void {
-  const now = Date.now();
-  for (const [key, scope] of scratchScopes) {
-    if (key !== preserveKey && now - scope.lastUsedAt >= idleScopeMs) scratchScopes.delete(key);
-  }
-  while (scratchScopes.size > maxWarmScopes) {
-    const candidate = [...scratchScopes.entries()]
-      .filter(([key]) => key !== preserveKey)
-      .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt ||
-        left[0].localeCompare(right[0]))[0];
-    if (!candidate) break;
-    scratchScopes.delete(candidate[0]);
-  }
+  if (specifier.startsWith("/")) return pathToFileURL(specifier).href;
+  return specifier;
 }
 
 async function stageObservation(

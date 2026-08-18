@@ -13,17 +13,17 @@ At every **committed cell boundary**, state needed later must be one of:
 - a registered content-addressed artifact reference plus available bytes;
 - an external resource reference/outcome explicitly represented by an effect event.
 
-The Bun heap, console globals, scratch, open handles, child processes, notifications, snapshots, and outbox leases are not durable identity. `events` is canonical. The reducer plus retained artifact contents projects `AgentState`; snapshots accelerate this and may be discarded. External files/services remain external and can change independently.
+The Bun REPL namespace and heap, open handles, child processes, notifications, snapshots, and outbox leases are not durable identity. `events` is canonical. The reducer plus retained artifact contents projects `AgentState`; snapshots accelerate this and may be discarded. External files/services remain external and can change independently.
 
-### Best-effort console scratch
+### Persistent console REPL
 
-Every cell receives a direct scratch object keyed by exact `(sessionId, branchId)`. A bounded worker pool pins each resident Bun process to one exact branch, so siblings and descendants never share worker heap, stdout capture, or warm scratch. Cell boundaries remain serialized per branch, while different branches may execute concurrently.
+The bounded worker pool pins each resident Bun process to one exact `(sessionId, branchId)`. Cells on that route execute serially in one persistent TypeScript REPL, so top-level variables, functions, classes, imports, module instances, closures, and object identity remain available across cells while the worker lives. Siblings and descendants never share a namespace, heap, or stdout capture. Different branches may execute concurrently.
 
 Resident-process permits are separate from active-execution permits. A generated cell suspended in an SDK RPC retains its exact worker and JavaScript stack but releases its active permit. Awaited child admission reserves all immediately required resident slots before creating any task or child; insufficient capacity returns `CONSOLE_CAPACITY_EXCEEDED` without partial batch admission. Detached children may queue because no suspended caller depends on them. Worker processes and permits are replaceable process-local capacity, not durable task identity or completion evidence.
 
-After `CellCommitted`, the supervisor independently requests a getter-free bounded JSON projection. Mutable reads are conservatively dirty so this request still runs when nested state might have changed. The supervisor filters sensitive content and validates the candidate before the managed exact-file-local composition passes it to the private, fenced `ScratchStore`. When the schema version and serialized digest match the current valid row, the store returns `unchanged` before row construction or quota eviction; payload, source provenance, timestamps, TTL, access and integrity metadata, and quota position remain untouched. The worker acknowledges that result by marking the live scope clean while retaining the previous checkpoint metadata. A changed nested value produces a changed digest and follows the ordinary write path. `console_scratch_cache` remains an overwriteable operational projection with same-device exact-key restore, source-event/cursor validation, integrity digests, seven-day expiry, 64-branch and 16 MiB workspace quotas, and least-recently-used eviction. It has no foreign key to rebuildable session projections and is excluded from generated SQL, canonical rebuild, synchronization, and export.
+A runtime throw records failure but leaves declarations and mutations already completed in the live namespace. The failed cell's staged state and artifact writes remain uncommitted, while independently committed effects retain their outcomes. Parse/transpilation failure, cancellation, worker loss, or failure after execution but before canonical commit recycles the worker.
 
-Checkpoint failure never changes the cell outcome. Failed, abandoned, or uncommitted execution evicts the warm scope. Branch forks, child sessions, other devices, and remote relational placement do not inherit or restore the parent scope. Direct diagnostic supervisors remain warm-only because they do not have managed execution-fence authority. Any value required for correctness after a committed boundary must still use canonical state, an artifact, or another durable reference.
+The namespace may also disappear on RSS recycling, service/process loss, or branch change. It has no checkpoint, event, synchronization, export, automatic-context, gate, or completion-evidence representation. Any value required after recovery uses state or artifacts. Recovery constructs a fresh namespace and never replays retained cell source automatically.
 
 ## Dependency direction
 
@@ -112,7 +112,7 @@ flowchart LR
     cloud <-->|"push and pull"| bReplica
 ```
 
-Only immutable envelopes cross the cloud boundary. Artifact bytes, workspace snapshots, scratch checkpoints, outbox leases, and other mutable operational projections remain local.
+Only immutable envelopes cross the cloud boundary. Artifact bytes, workspace snapshots, outbox leases, and other mutable operational projections remain local. REPL namespaces exist only in their owning worker process and are not synchronized.
 
 Cloud exchange uses a second local file through `TursoSyncTransport` and pinned `@tursodatabase/sync@0.7.2`. Its `connect()` URL callback returns `null` during initialization, schema creation, staging, queries, checkpointing, and stats, and returns the configured URL only during an explicit official `push()` or `pull()`. This is the installed offline-first equivalent of `bootstrapIfEmpty:false`. Cloud exchange does not use remote schema administration, database-client swapping, frame-replication APIs, or an invented `sync()` wrapper. Rejected network calls leave the same local database and unsent change-data-capture (CDC) operations usable. Capabilities truthfully advertise directional push/pull/checkpoint/stats for this adapter; the deterministic in-process hub remains `bidirectional-only`.
 
@@ -124,7 +124,7 @@ Startup, reconnect, interval, and manual cycles stage local envelopes, optionall
 
 ## Canonical versus derived relational data
 
-Canonical events are physically guarded against update and delete. Context records are immutable derived provenance and have the same physical guards. Mutable tables are limited to migration metadata, rebuildable routing/snapshot projections, and operational cache/outbox/lease state. The private `console_scratch_cache` is classified as an `operational-projection`: it is safe to delete and never projects into `AgentState`. [The table registry](./mutable-tables.md) specifies every table and is checked against every migration.
+Canonical events are physically guarded against update and delete. Context records are immutable derived provenance and have the same physical guards. Mutable tables are limited to migration metadata, rebuildable routing/snapshot projections, and operational cache/outbox/lease state. [The table registry](./mutable-tables.md) specifies every table and is checked against every migration.
 
 The adapter is the only code allowed to issue canonical inserts. Application state changes call `appendEvents`; the checker rejects update/delete/replace patterns for immutable tables anywhere in `src`.
 
@@ -174,7 +174,7 @@ Reviewer approval establishes consistency with the frozen policy, not empirical 
 
 These declarations have no execute callback, provider-hosted execution, tool-result continuation, or provider-managed loop. Agencity accepts exactly one completed permitted call. Supplemental text is bounded diagnostic evidence only; it is never parsed for JSON or TypeScript. Zero, multiple, malformed, truncated, oversized, unknown, refused, or incomplete calls execute nothing and become typed contract violations.
 
-Only `bun_console` can lead to execution. Agencity validates and durably commits its canonical `agencity.agent-action` before starting the disposable worker. Files, shell, read-only SQL, models, subagents, skills, memory, state, artifacts, goals, and refinement are injected SDK APIs inside that later cell, not provider tools.
+Only `bun_console` can lead to execution. Agencity validates and durably commits its canonical `agencity.agent-action` before evaluating the cell in the exact-branch persistent REPL worker. Files, shell, read-only SQL, models, subagents, skills, memory, state, artifacts, goals, and refinement are injected SDK APIs inside that later cell, not provider tools.
 
 A successful `finish` remains provisional until required completion gates pass. Failed gates create bounded repair evidence without publishing the proposed success message; an unknown required gate ends unknown without publishing it. Blocked and failed finishes atomically retain their exact submitted assistant message with the effective terminal status. A failed finish after unresolved required-gate failure becomes goal-derived blocked. Missing information uses blocked `finish`; later user text starts a normal new run on the same branch. There is no second pending-input lifecycle.
 

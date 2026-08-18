@@ -167,7 +167,7 @@ Optional fields are marked `?`. All IDs/names required by schema are non-empty s
 
 `ContextRecordReference` is `{ eventId, type: EventType, schemaVersion: positive integer, reason?: string }`. The source event must predate the context event; the materializer stores why each record was selected. The exact context is retained in the event/immutable `context_records` row; snapshots project only context provenance metadata to avoid repeatedly copying full historical prompts.
 
-Scratch has no event type or event payload field. A successful `CellCommitted` is the durable terminal boundary; only after that append succeeds may the supervisor attempt a noncanonical scratch checkpoint. The private mutable cache can be absent, stale, evicted, expired, corrupt, or placement-unavailable without changing historical projection. Event replay, branching, synchronization, context materialization, gate evaluation, and export never consult it.
+The persistent REPL namespace has no event type or event payload field. `CellCommitted`, `CellFailed`, and `CellAbandoned` retain cell outcomes, not heap snapshots. Event replay, branching, synchronization, context materialization, gate evaluation, and export never reconstruct or consult the namespace.
 
 Mailbox intent, artifact, queue-marker, and receipt-link fields are optional by schema. New messages carry an intent and require an explicit context-delivery event before acknowledgement.
 
@@ -195,7 +195,7 @@ A cell's external effects have their own lifecycle and can outlive an abandoned 
 
 The worker transports direct convenience-helper failure causality as private RPC metadata, separate from the generated error message, stack, and logs. The supervisor commits only validated exact outcome-event IDs. Catching an effect error and wrapping it in a new error breaks that direct link; matching text does not recreate it.
 
-A successful cell may leave an exact-branch scratch scope warm and may trigger a later bounded local cache update. Neither operation appends an event. Failed, abandoned, or uncommitted cells evict their warm scope and cannot advance the retained checkpoint.
+A successful cell leaves its top-level bindings and in-memory mutations available while the exact-branch worker lives. A runtime failure also leaves completed mutations in that live namespace, although staged state and artifact writes remain uncommitted. Non-runtime failure recycles the worker. None of this appends a namespace event, and retained cell source is never replayed automatically.
 
 ### External effect
 

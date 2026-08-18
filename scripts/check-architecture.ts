@@ -190,11 +190,34 @@ const allMigrationSql = `${migrationSources.map(({ source }) => source).join("\n
   .replace(/--[^\n]*/g, "")
   .replace(/\/\*[\s\S]*?\*\//g, "");
 const migratedTables = new Set<string>();
-for (const match of allMigrationSql.matchAll(/\bCREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?([A-Za-z_][A-Za-z0-9_]*)/gi)) {
-  migratedTables.add(match[1]!.toLowerCase());
+const historicalMigratedTables = new Set<string>();
+const tableOperation = /\b(?:CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?([A-Za-z_][A-Za-z0-9_]*)|DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?["`\[]?([A-Za-z_][A-Za-z0-9_]*)|ALTER\s+TABLE\s+["`\[]?([A-Za-z_][A-Za-z0-9_]*)["`\]]?\s+RENAME\s+TO\s+["`\[]?([A-Za-z_][A-Za-z0-9_]*))/gi;
+for (const source of [...migrationSources.map(({ source }) => source), profileMigrationSource]) {
+  const migrationSql = source
+    .replace(/--[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const match of migrationSql.matchAll(tableOperation)) {
+    if (match[1]) {
+      const table = match[1].toLowerCase();
+      migratedTables.add(table);
+      historicalMigratedTables.add(table);
+    } else if (match[2]) {
+      migratedTables.delete(match[2].toLowerCase());
+    } else {
+      const priorName = match[3]!.toLowerCase();
+      const currentName = match[4]!.toLowerCase();
+      migratedTables.delete(priorName);
+      migratedTables.add(currentName);
+      historicalMigratedTables.add(currentName);
+    }
+  }
 }
 migratedTables.add("profile_schema_migrations");
-if (/\bAUTOINCREMENT\b/i.test(allMigrationSql)) migratedTables.add("sqlite_sequence");
+historicalMigratedTables.add("profile_schema_migrations");
+if (/\bAUTOINCREMENT\b/i.test(allMigrationSql)) {
+  migratedTables.add("sqlite_sequence");
+  historicalMigratedTables.add("sqlite_sequence");
+}
 
 const validClassMutability: Readonly<Record<string, "mutable" | "immutable">> = {
   "canonical-append-only": "immutable",
@@ -227,7 +250,7 @@ for (const table of migratedTables) {
   }
 }
 for (const table of classifications.keys()) {
-  if (!migratedTables.has(table)) violations.push(`docs/mutable-tables.md: stale/unknown registry table ${table}`);
+  if (!historicalMigratedTables.has(table)) violations.push(`docs/mutable-tables.md: stale/unknown registry table ${table}`);
 }
 const requiredClassifications: Readonly<Record<string, string>> = {
   events: "canonical-append-only",
@@ -237,7 +260,6 @@ const requiredClassifications: Readonly<Record<string, string>> = {
   snapshots: "rebuildable-projection",
   outbox: "operational-projection",
   ai_generations: "rebuildable-projection",
-  console_scratch_cache: "operational-projection",
   agent_profile_versions: "rebuildable-projection",
   workspace_agent_profiles: "rebuildable-projection",
   schema_migrations: "migration-metadata",
@@ -247,13 +269,6 @@ for (const [table, classification] of Object.entries(requiredClassifications)) {
   if (classifications.get(table)?.classification !== classification) {
     violations.push(`docs/mutable-tables.md: ${table} must be classified ${classification}`);
   }
-}
-
-const storageContractSource = await Bun.file(resolve(src, "storage/contract.ts")).text();
-const storageBarrelSource = await Bun.file(resolve(src, "storage/index.ts")).text();
-if (storageContractSource.includes("ScratchStore") ||
-    storageBarrelSource.includes("./scratch.ts")) {
-  violations.push("scratch storage must remain private and outside AgentStorage/public storage exports");
 }
 
 const immutableTables = [...classifications.entries()]
