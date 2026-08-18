@@ -191,6 +191,7 @@ const allMigrationSql = `${migrationSources.map(({ source }) => source).join("\n
   .replace(/\/\*[\s\S]*?\*\//g, "");
 const migratedTables = new Set<string>();
 const historicalMigratedTables = new Set<string>();
+const droppedMigratedTables = new Set<string>();
 const tableOperation = /\b(?:CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?([A-Za-z_][A-Za-z0-9_]*)|DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?["`\[]?([A-Za-z_][A-Za-z0-9_]*)|ALTER\s+TABLE\s+["`\[]?([A-Za-z_][A-Za-z0-9_]*)["`\]]?\s+RENAME\s+TO\s+["`\[]?([A-Za-z_][A-Za-z0-9_]*))/gi;
 for (const source of [...migrationSources.map(({ source }) => source), profileMigrationSource]) {
   const migrationSql = source
@@ -202,7 +203,9 @@ for (const source of [...migrationSources.map(({ source }) => source), profileMi
       migratedTables.add(table);
       historicalMigratedTables.add(table);
     } else if (match[2]) {
-      migratedTables.delete(match[2].toLowerCase());
+      const table = match[2].toLowerCase();
+      migratedTables.delete(table);
+      droppedMigratedTables.add(table);
     } else {
       const priorName = match[3]!.toLowerCase();
       const currentName = match[4]!.toLowerCase();
@@ -251,6 +254,26 @@ for (const table of migratedTables) {
 }
 for (const table of classifications.keys()) {
   if (!historicalMigratedTables.has(table)) violations.push(`docs/mutable-tables.md: stale/unknown registry table ${table}`);
+}
+const allowedRemovedMutableTables: Readonly<Record<string, string>> = {
+  console_scratch_cache: "operational-projection",
+};
+for (const table of droppedMigratedTables) {
+  if (migratedTables.has(table)) continue;
+  const classification = allowedRemovedMutableTables[table];
+  if (!classification ||
+      validClassMutability[classification] !== "mutable") {
+    violations.push(
+      `migration: removed table ${table} requires an explicit mutable-table drop authorization`,
+    );
+  }
+}
+for (const table of Object.keys(allowedRemovedMutableTables)) {
+  if (!droppedMigratedTables.has(table) || migratedTables.has(table)) {
+    violations.push(
+      `migration: stale mutable-table drop authorization for ${table}`,
+    );
+  }
 }
 const requiredClassifications: Readonly<Record<string, string>> = {
   events: "canonical-append-only",

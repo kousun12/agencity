@@ -658,6 +658,22 @@ describe("disposable TypeScript console process", () => {
     `);
     expect(throughCatch.result).toEqual({ path: "return-through-catch" });
 
+    const destructuredCatch = await supervisor.executeCell(sessionId, branchId, `
+      try {
+        throw { detail: "preserved" };
+      } catch ({ detail }) {
+        return { detail };
+      }
+    `);
+    expect(destructuredCatch.result).toEqual({ detail: "preserved" });
+
+    const conditionalReturnFallthrough = await supervisor.executeCell(
+      sessionId,
+      branchId,
+      `if (false) return "unreachable"; const declarationAfterReturn = 42;`,
+    );
+    expect(conditionalReturnFallthrough.result).toBeNull();
+
     const nullPrototype = await supervisor.executeCell(sessionId, branchId, `
       const value = Object.assign(Object.create(null), { value: "preserved" });
       return value;
@@ -873,7 +889,7 @@ describe("disposable TypeScript console process", () => {
   });
 
   test("cleans incomplete cell staging and commits only failure when placement fails", async () => {
-    const { temp, supervisor, sessionId, branchId } = await open(true);
+    const { temp, supervisor, sessionId, branchId } = await open(false);
     const putStaged = supervisor.artifacts.putStaged.bind(supervisor.artifacts);
     Object.defineProperty(supervisor.artifacts, "putStaged", {
       configurable: true,
@@ -885,13 +901,23 @@ describe("disposable TypeScript console process", () => {
       await expect(supervisor.executeCell(
         sessionId,
         branchId,
-        `return { data: "x".repeat(200000) };`,
+        `const failedPlacementBinding = 42; return { data: "x".repeat(200000) };`,
       )).rejects.toThrow(/staged placement failure/);
       const events = await supervisor.storage.loadEvents(sessionId, { branchId });
       expect(events.some((item) => item.type === "ArtifactRegistered")).toBe(false);
       expect(events.some((item) => item.type === "CellCommitted")).toBe(false);
       expect(events.some((item) => item.type === "CellFailed")).toBe(true);
       expect(await filesBelow(temp.artifactDirectory)).toHaveLength(0);
+      Object.defineProperty(supervisor.artifacts, "putStaged", {
+        configurable: true,
+        value: putStaged,
+      });
+      const afterFailure = await supervisor.executeCell(
+        sessionId,
+        branchId,
+        `typeof failedPlacementBinding`,
+      );
+      expect(afterFailure.result).toBe("undefined");
     } finally {
       Object.defineProperty(supervisor.artifacts, "putStaged", {
         configurable: true,
@@ -972,6 +998,8 @@ describe("disposable TypeScript console process", () => {
       const originalMarker = shared.marker;
       let closureTotal = 2;
       const addToTotal = (amount: number) => closureTotal += amount;
+      await state.set("persistedMethodValue", { retained: true });
+      const persistedStateGet = state.get;
       await Promise.resolve();
       ({
         pid: process.pid,
@@ -1001,6 +1029,7 @@ describe("disposable TypeScript console process", () => {
         staticImportPersisted: staticBasename("/tmp/static.ts"),
         dynamicImportPersisted: dynamicPath.extname("dynamic.ts"),
         relativeImportPersisted: relativeValue,
+        persistedSdkMethod: await persistedStateGet("persistedMethodValue"),
       })
     `);
     expect(second.result).toEqual({
@@ -1014,6 +1043,10 @@ describe("disposable TypeScript console process", () => {
       staticImportPersisted: "static.ts",
       dynamicImportPersisted: ".ts",
       relativeImportPersisted: "workspace-relative",
+      persistedSdkMethod: {
+        kind: "json",
+        value: { retained: true },
+      },
     });
     await supervisor.close();
   });

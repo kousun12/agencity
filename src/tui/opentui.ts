@@ -80,6 +80,7 @@ const DISABLE_ALTERNATE_SCROLL = "\u001b[?1007l";
 const ENABLE_APPLICATION_CURSOR_KEYS = "\u001b[?1h";
 const DISABLE_APPLICATION_CURSOR_KEYS = "\u001b[?1l";
 const ALTERNATE_SCROLL_LINES = 3;
+const RUN_ANIMATION_INTERVAL_MS = 90;
 
 export interface ManagedServiceKeepAliveReasonView {
   readonly kind: string;
@@ -642,6 +643,8 @@ export class OpenTuiApp {
   #notice: { text: string; tone: "normal" | "success" | "warning" | "danger" } | null = null;
   #noticeTimer: ReturnType<typeof setTimeout> | null = null;
   #detailScrollTimer: ReturnType<typeof setTimeout> | null = null;
+  #runAnimationTimer: ReturnType<typeof setInterval> | null = null;
+  #runAnimationFrame = 0;
   #paletteQuery = "";
   #paletteDraft: string | null = null;
   #modelProviderIndex = 0;
@@ -1060,6 +1063,7 @@ export class OpenTuiApp {
     this.#clearSecretInput();
     if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
     if (this.#detailScrollTimer) clearTimeout(this.#detailScrollTimer);
+    this.#stopRunAnimation();
     this.controller.abortPendingOperations?.();
     this.#resolveDone();
   }
@@ -1070,6 +1074,7 @@ export class OpenTuiApp {
     this.#clearSecretInput();
     if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
     if (this.#detailScrollTimer) clearTimeout(this.#detailScrollTimer);
+    this.#stopRunAnimation();
     this.#unsubscribe();
     this.renderer.keyInput.off("keypress", this.#onKey);
     this.renderer.keyInput.off("paste", this.#onPaste);
@@ -2015,6 +2020,35 @@ export class OpenTuiApp {
     return `${firstLine} · Esc close`;
   }
 
+  #syncRunAnimation(): void {
+    const animating = this.#view.runs.some(run =>
+      run.active || run.status === "queued" || run.status === "running"
+    );
+    if (!animating) {
+      this.#stopRunAnimation();
+      this.#runAnimationFrame = 0;
+      this.#transcript.setAnimationFrame(0);
+      return;
+    }
+    if (this.#runAnimationTimer) return;
+    this.#runAnimationTimer = setInterval(() => {
+      if (this.#closed) {
+        this.#stopRunAnimation();
+        return;
+      }
+      this.#runAnimationFrame += 1;
+      this.#transcript.setAnimationFrame(this.#runAnimationFrame);
+      this.renderer.requestRender();
+    }, RUN_ANIMATION_INTERVAL_MS);
+    this.#runAnimationTimer.unref?.();
+  }
+
+  #stopRunAnimation(): void {
+    if (!this.#runAnimationTimer) return;
+    clearInterval(this.#runAnimationTimer);
+    this.#runAnimationTimer = null;
+  }
+
   #render(): void {
     const width = this.renderer.terminalWidth;
     const height = this.renderer.terminalHeight;
@@ -2127,6 +2161,7 @@ export class OpenTuiApp {
         : primaryHeader;
     this.#header.fg = this.#view.connection === "connected" ? TERMINAL_THEME.text : TERMINAL_THEME.warning;
     this.#transcript.reconcile(this.#view, this.#expandedRunIds);
+    this.#syncRunAnimation();
     const styledFamily = familyBrowserActive && layout.mode !== "minimum"
       ? styledFamilyBrowser(
           familyBrowserLines(this.#view, this.#familySelectedKey, compact, width >= 96, detailsContentWidth),

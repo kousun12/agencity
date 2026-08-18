@@ -31,7 +31,7 @@ import {
 } from "../../src/tui/opentui.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
 import type { ProductBranchSummary } from "../../src/product/index.ts";
-import { TerminalTranscript } from "../../src/tui/transcript.ts";
+import { TerminalTranscript, terminalRunMarker } from "../../src/tui/transcript.ts";
 import { createTerminalSyntaxStyle } from "../../src/tui/theme.ts";
 import { buildTerminalScreen, type TerminalScreenView } from "../../src/tui/view-model.ts";
 import { fixtureAgentProfile, makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
@@ -1631,6 +1631,18 @@ describe("OpenTUI interactive terminal", () => {
       transcript.reconcile(activeView, new Set());
       await setup.waitForFrame(value => value.includes("return { value };"));
       expect((await setup.captureCharFrame()).toString()).not.toContain("Waiting for model response");
+      const activeMarker = setup.renderer.root.findDescendantById(
+        "agencity-transcript-run-marker-run-1",
+      ) as TextRenderable;
+      const stepsHost = setup.renderer.root.findDescendantById(
+        "agencity-transcript-run-steps-run-1",
+      ) as BoxRenderable;
+      const markerText = (): string => activeMarker.content.chunks.map(chunk => chunk.text).join("");
+      expect(markerText()).toBe("⠋");
+      transcript.setAnimationFrame(1);
+      expect(markerText()).toBe("⠙");
+      expect(stepsHost.border).toEqual(["left"]);
+      expect(stepsHost.screenX).toBeLessThan(cellRoot.screenX);
       expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
         .toBe(true);
 
@@ -1723,6 +1735,13 @@ describe("OpenTUI interactive terminal", () => {
       lifecycle: "running",
       keepAliveReasons: [{ kind: "active_schedules", count: 1, summary: "1 active schedule" }],
     })).toBe("Detached. Service remains active: 1 active schedule.");
+  });
+
+  test("uses braille animation frames only for active run states", () => {
+    expect(terminalRunMarker({ active: true, status: "running" }, 0)).toBe("⠋");
+    expect(terminalRunMarker({ active: true, status: "running" }, 7)).toBe("⠧");
+    expect(terminalRunMarker({ active: false, status: "queued" }, 1)).toBe("⠙");
+    expect(terminalRunMarker({ active: false, status: "succeeded" }, 1)).toBe("✓");
   });
 
   test("toggles details for completed and active runs", () => {

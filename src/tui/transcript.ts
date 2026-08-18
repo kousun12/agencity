@@ -26,6 +26,18 @@ import type {
 
 const MAX_INLINE_OUTPUT_CHARACTERS = 800;
 const MAX_INLINE_OUTPUT_LINES = 12;
+export const TERMINAL_RUN_SPINNER_FRAMES = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+] as const;
 
 interface TranscriptBlock {
   readonly key: string;
@@ -136,8 +148,16 @@ function renderTerminalStreams(
   });
 }
 
-export function terminalRunMarker(run: Pick<TerminalRunView, "active" | "status">): string {
-  if (run.active) return "●";
+export function terminalRunMarker(
+  run: Pick<TerminalRunView, "active" | "status">,
+  animationFrame = 0,
+): string {
+  if (run.active || run.status === "queued" || run.status === "running") {
+    const frame = Number.isFinite(animationFrame) ? Math.floor(Math.abs(animationFrame)) : 0;
+    return TERMINAL_RUN_SPINNER_FRAMES[
+      frame % TERMINAL_RUN_SPINNER_FRAMES.length
+    ]!;
+  }
   switch (run.status) {
     case "succeeded": return "✓";
     case "budget_exceeded": return "!";
@@ -145,8 +165,6 @@ export function terminalRunMarker(run: Pick<TerminalRunView, "active" | "status"
     case "blocked":
     case "unknown": return "!";
     case "cancelled": return "×";
-    case "queued":
-    case "running": return "●";
   }
 }
 
@@ -223,6 +241,8 @@ function ordinaryStepSummary(step: TerminalStepView): string {
 
 export class TerminalTranscript {
   readonly #blocks = new Map<string, TranscriptBlock>();
+  readonly #runBlocks = new Map<string, RunBlock>();
+  #animationFrame = 0;
 
   constructor(
     readonly renderer: CliRenderer,
@@ -257,6 +277,7 @@ export class TerminalTranscript {
       if (!block) {
         block = this.#createRunBlock(key, run);
         this.#blocks.set(key, block);
+        this.#runBlocks.set(key, block);
       }
       block.run = run;
       block.fullyExpanded = expandedRunIds.has(run.id);
@@ -296,6 +317,7 @@ export class TerminalTranscript {
       this.host.remove(block.root);
       block.root.destroyRecursively();
       this.#blocks.delete(key);
+      this.#runBlocks.delete(key);
     }
     desired.forEach((block, index) => {
       const current = this.host.getChildren()[index];
@@ -303,6 +325,14 @@ export class TerminalTranscript {
       if (block.root.parent) this.host.remove(block.root);
       this.host.add(block.root, index);
     });
+  }
+
+  setAnimationFrame(frame: number): void {
+    this.#animationFrame = frame;
+    for (const block of this.#runBlocks.values()) {
+      if (!block.run.active && block.run.status !== "queued" && block.run.status !== "running") continue;
+      block.marker.content = terminalRunMarker(block.run, frame);
+    }
   }
 
   #createMessageBlock(key: string, message: TerminalConversationItem): MessageBlock {
@@ -407,7 +437,9 @@ export class TerminalTranscript {
       width: "100%",
       height: "auto",
       flexDirection: "column",
-      paddingLeft: 2,
+      paddingLeft: 1,
+      border: ["left"],
+      borderColor: TERMINAL_THEME.provisionalDim,
       backgroundColor: TERMINAL_THEME.background,
     });
     header.add(marker);
@@ -432,7 +464,7 @@ export class TerminalTranscript {
       allCompletedExpanded: false,
       update: () => {
         const current = block.run;
-        marker.content = terminalRunMarker(current);
+        marker.content = terminalRunMarker(current, this.#animationFrame);
         marker.fg = terminalToneColor(current.provisional ? "provisional" : terminalRunTone(current.status));
         summary.clear();
         summary.add(TextNodeRenderable.fromString(runSummary(current, block.inline, block.expanded), {

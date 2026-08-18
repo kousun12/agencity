@@ -26,6 +26,7 @@ import {
   CELL_RETURN_GUARD_GLOBAL,
   prepareReplCellSource,
 } from "./repl.ts";
+import { CONSOLE_EXECUTION_YIELD_METHOD } from "./process.ts";
 import { schemaToPlainJsonSchema } from "./schema-conversion.ts";
 
 type Incoming =
@@ -86,6 +87,8 @@ interface PrivateRpcResult {
 const pendingRpc = new Map<string, {
   resolve: (value: PrivateRpcResult) => void;
   reject: (error: Error) => void;
+  executionId: string;
+  executionYield: boolean;
 }>();
 const causalEffectErrors = new WeakMap<
   Error,
@@ -106,7 +109,11 @@ type ReplBindingName =
   | "ai";
 
 type ReplBindings = Readonly<Record<ReplBindingName, unknown>>;
-const activeReplBindings = new AsyncLocalStorage<ReplBindings>();
+interface ActiveReplContext {
+  readonly executionId: string;
+  readonly bindings: ReplBindings;
+}
+const activeReplContext = new AsyncLocalStorage<ActiveReplContext>();
 const REPL_BINDING_NAMES: readonly ReplBindingName[] = [
   "sdk",
   "sql",
@@ -128,6 +135,8 @@ const replGlobals = Object.fromEntries(
   ]),
 ) as Record<ReplBindingName, unknown>;
 let replScopeKey: string | null = null;
+let runningExecutionId: string | null = null;
+let executionYieldScheduled = false;
 
 class CellReturnSignal {
   constructor(readonly value: unknown) {}
@@ -137,10 +146,16 @@ function rpc(
   executionId: string,
   method: string,
   args: unknown[],
+  executionYield = false,
 ): Promise<PrivateRpcResult> {
   const requestId = crypto.randomUUID();
   const promise = new Promise<PrivateRpcResult>((resolve, reject) =>
-    pendingRpc.set(requestId, { resolve, reject }));
+    pendingRpc.set(requestId, {
+      resolve,
+      reject,
+      executionId,
+      executionYield,
+    }));
   send({ type: "rpc", executionId, requestId, method, args });
   return promise;
 }
@@ -174,6 +189,9 @@ process.on("message", (raw: unknown) => {
         }
         pending.reject(error);
       }
+      if (!pending.executionYield) {
+        scheduleExecutionYield(pending.executionId);
+      }
     }
     return;
   }
@@ -186,12 +204,38 @@ process.on("message", (raw: unknown) => {
   process.exit(0);
 });
 
+function scheduleExecutionYield(executionId: string): void {
+  if (executionYieldScheduled || runningExecutionId !== executionId) return;
+  executionYieldScheduled = true;
+  // An RPC result reacquires the active-execution permit before it can resume
+  // generated code. After that code drains its microtasks, release the permit
+  // again when the cell is still suspended on another concurrent RPC.
+  setTimeout(() => {
+    executionYieldScheduled = false;
+    if (runningExecutionId !== executionId) return;
+    const hasPendingCellRpc = [...pendingRpc.values()].some((pending) =>
+      pending.executionId === executionId && !pending.executionYield
+    );
+    const hasPendingYield = [...pendingRpc.values()].some((pending) =>
+      pending.executionId === executionId && pending.executionYield
+    );
+    if (!hasPendingCellRpc || hasPendingYield) return;
+    void rpc(
+      executionId,
+      CONSOLE_EXECUTION_YIELD_METHOD,
+      [],
+      true,
+    ).catch(() => {});
+  }, 0);
+}
+
 async function execute(message: Extract<Incoming, { type: "execute" }>): Promise<void> {
   const scope = `${message.session.id.length}:${message.session.id}${message.session.branchId}`;
   if (replScopeKey !== null && replScopeKey !== scope) {
     throw new Error("Console worker cannot change its exact session/branch scope");
   }
   replScopeKey = scope;
+  runningExecutionId = message.executionId;
   const logs = new BoundedLogs();
   const printable = (value: unknown): string => {
     if (typeof value === "string") return value;
@@ -227,7 +271,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     warn: (...args: unknown[]) => logs.push(args.map(printable).join(" "), "stderr"),
   };
   const call = async (method: string, args: unknown[]) =>
-    (await rpc(message.executionId, method, args)).value;
+    (await rpc(currentReplExecutionId(), method, args)).value;
   const callWithOptional = (
     method: string,
     required: unknown[],
@@ -277,7 +321,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     input: JsonValue,
     options?: unknown,
   ) => rpc(
-    message.executionId,
+    currentReplExecutionId(),
     "tools.request",
     options === undefined
       ? [executor, operation, input]
@@ -489,7 +533,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   });
 
   let response: Record<string, unknown> & { rssBytes: number };
-  let failurePhase: "compile" | "runtime" = "compile";
+  let failurePhase: "compile" | "runtime" | "finalization" = "compile";
   try {
     const transpiler = new Bun.Transpiler({
       loader: "ts",
@@ -529,8 +573,8 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     let replResult: unknown;
     let explicitReturn = false;
     try {
-      replResult = await activeReplBindings.run(
-        bindings,
+      replResult = await activeReplContext.run(
+        { executionId: message.executionId, bindings },
         () => runInThisContext(javascript, {
           filename: `agencity://${message.session.id}/${message.session.branchId}/${message.executionId}.ts`,
           importModuleDynamically: (specifier: string) =>
@@ -545,6 +589,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     const value = await (
       explicitReturn ? replResult : unwrapReplResult(replResult)
     );
+    failurePhase = "finalization";
     const encoded = encodeObservation(value);
     const inlineTerminal = {
       type: "result",
@@ -580,6 +625,8 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
     stdout.write = originalStdout;
     stderr.write = originalStderr;
   }
+  runningExecutionId = null;
+  executionYieldScheduled = false;
   send(fitTerminalIpc({ ...response, logs: logs.values, logStreams: logs.streams }));
 }
 
@@ -601,11 +648,19 @@ function normalizeAgentInput(input: unknown): unknown {
 }
 
 function currentReplBinding(name: ReplBindingName): unknown {
-  const bindings = activeReplBindings.getStore();
-  if (!bindings) {
+  const context = activeReplContext.getStore();
+  if (!context) {
     throw new Error(`Console binding ${name} is unavailable outside an active cell`);
   }
-  return bindings[name];
+  return context.bindings[name];
+}
+
+function currentReplExecutionId(): string {
+  const context = activeReplContext.getStore();
+  if (!context) {
+    throw new Error("Console RPC is unavailable outside an active cell");
+  }
+  return context.executionId;
 }
 
 function createObjectReplBinding(name: ReplBindingName): object {

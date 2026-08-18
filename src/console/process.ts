@@ -11,6 +11,9 @@ export interface ConsoleExecution {
 
 export type ConsoleRpcHandler = (method: string, args: unknown[]) => Promise<unknown>;
 
+export const CONSOLE_EXECUTION_YIELD_METHOD =
+  "__agencity.internal.execution-yield.v1";
+
 const CONSOLE_RPC_RESPONSE = Symbol("agencity.console-rpc-response");
 
 interface ConsoleRpcResponse {
@@ -36,7 +39,7 @@ export function consoleRpcResponse(
 
 type WorkerMessage =
   | { type: "rpc"; executionId: string; requestId: string; method: string; args: unknown[] }
-  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; failurePhase?: "compile" | "runtime"; causalEffectOutcomeEventIds?: string[]; logs: string[]; logStreams: CellLogStream[]; rssBytes: number };
+  | { type: "result"; executionId: string; ok: boolean; observation?: EncodedObservation; error?: string; failurePhase?: "compile" | "runtime" | "finalization"; causalEffectOutcomeEventIds?: string[]; logs: string[]; logStreams: CellLogStream[]; rssBytes: number };
 
 interface PendingExecution {
   readonly resolve: (value: ConsoleExecution) => void;
@@ -207,7 +210,8 @@ export class ConsoleProcess {
         pending.resolve({ observation: message.observation, logs: message.logs, logStreams: message.logStreams, rssBytes: message.rssBytes });
       } else {
         if (message.failurePhase !== "compile" &&
-            message.failurePhase !== "runtime") {
+            message.failurePhase !== "runtime" &&
+            message.failurePhase !== "finalization") {
           throw new Error("Console worker emitted invalid failure phase");
         }
         if (message.causalEffectOutcomeEventIds !== undefined &&
@@ -331,7 +335,7 @@ export class ConsoleCellError extends Error {
     readonly logs: string[],
     readonly logStreams: CellLogStream[],
     readonly rssBytes: number,
-    readonly failurePhase: "compile" | "runtime",
+    readonly failurePhase: "compile" | "runtime" | "finalization",
     readonly causalEffectOutcomeEventIds: readonly string[] = [],
   ) {
     super(message);

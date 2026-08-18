@@ -1,5 +1,6 @@
 import { ConsoleCapacityError, ValidationError } from "../domain/index.ts";
 import {
+  CONSOLE_EXECUTION_YIELD_METHOD,
   ConsoleProcess,
   type ConsoleExecution,
   type ConsoleRpcHandler,
@@ -192,6 +193,14 @@ export class ConsoleExecutionPool {
       if (releaseActive) {
         releaseActive();
         releaseActive = null;
+      }
+      if (method === CONSOLE_EXECUTION_YIELD_METHOD) {
+        if (args.length !== 0) {
+          throw new ValidationError(
+            "Console execution yield must not include arguments",
+          );
+        }
+        return { yielded: true };
       }
       try {
         return await handler(method, args);

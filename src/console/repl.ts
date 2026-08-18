@@ -25,6 +25,7 @@ export function prepareReplCellSource(code: string): string {
     ts.ScriptKind.TS,
   );
   const edits: Edit[] = [];
+  const catchClauses: ts.CatchClause[] = [];
   let catchIndex = 0;
   let hasCellReturn = false;
 
@@ -43,31 +44,44 @@ export function prepareReplCellSource(code: string): string {
       return;
     }
     if (ts.isCatchClause(node)) {
+      catchClauses.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+
+  if (hasCellReturn) {
+    for (const node of catchClauses) {
       const blockStart = node.block.getStart(source);
-      const binding = node.variableDeclaration?.name;
+      const declaration = node.variableDeclaration;
+      const binding = declaration?.name;
       if (binding && ts.isIdentifier(binding)) {
         edits.push({
           start: blockStart + 1,
           end: blockStart + 1,
           text: `if(globalThis.${CELL_RETURN_GUARD_GLOBAL}(${binding.text}))throw ${binding.text};`,
         });
-      } else {
-        const name = `__agencityCaught_${catchIndex++}`;
-        edits.push({
-          start: node.getStart(source),
-          end: blockStart,
-          text: `catch (${name}) `,
-        });
-        edits.push({
-          start: blockStart + 1,
-          end: blockStart + 1,
-          text: `if(globalThis.${CELL_RETURN_GUARD_GLOBAL}(${name}))throw ${name};`,
-        });
+        continue;
       }
+      const name = `__agencityCaught_${catchIndex++}`;
+      edits.push({
+        start: node.getStart(source),
+        end: blockStart,
+        text: `catch (${name}) `,
+      });
+      const restoreBinding = declaration
+        ? `const ${code.slice(
+          declaration.getStart(source),
+          declaration.getEnd(),
+        )}=${name};`
+        : "";
+      edits.push({
+        start: blockStart + 1,
+        end: blockStart + 1,
+        text: `if(globalThis.${CELL_RETURN_GUARD_GLOBAL}(${name}))throw ${name};${restoreBinding}`,
+      });
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
+  }
 
   let output = code;
   for (const edit of edits.sort((left, right) =>
@@ -76,8 +90,7 @@ export function prepareReplCellSource(code: string): string {
     output = `${output.slice(0, edit.start)}${edit.text}${output.slice(edit.end)}`;
   }
   const lastStatement = source.statements.at(-1);
-  if (!hasCellReturn &&
-      (!lastStatement || !ts.isExpressionStatement(lastStatement))) {
+  if (!lastStatement || !ts.isExpressionStatement(lastStatement)) {
     output = `${output}\nnull`;
   }
   return output;

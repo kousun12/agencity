@@ -217,6 +217,63 @@ describe("branch-aware console execution pool", () => {
     }
   });
 
+  test("a fast parallel RPC cannot retain the permit needed by a slower child RPC", async () => {
+    const pool = new ConsoleExecutionPool({
+      maxResidentProcesses: 2,
+      maxActiveExecutions: 1,
+    });
+    try {
+      const execution = pool.run(
+        { sessionId: "parallel-parent", branchId: "branch" },
+        (parentProcess) => pool.execute(
+          parentProcess,
+          `const [values, child] = await Promise.all([
+            state.list(),
+            sdk.cells.list(),
+          ]);
+          ({ valueCount: values.length, child });`,
+          { id: "parallel-parent", branchId: "branch" },
+          {},
+          async (method) => {
+            if (method === "state.list") return [];
+            if (method === "cells.list") {
+              await Bun.sleep(50);
+              const child = await pool.run(
+                { sessionId: "parallel-child", branchId: "branch" },
+                (childProcess) => pool.execute(
+                  childProcess,
+                  `({ completed: true })`,
+                  { id: "parallel-child", branchId: "branch" },
+                  {},
+                  async () => null,
+                ),
+              );
+              return {
+                completed: child.observation.kind === "json",
+              };
+            }
+            throw new Error(`Unexpected RPC method: ${method}`);
+          },
+        ),
+      );
+      const result = await Promise.race([
+        execution,
+        Bun.sleep(2_000).then(() => {
+          throw new Error("Parallel child RPC deadlocked");
+        }),
+      ]);
+      expect(result.observation.kind).toBe("json");
+      if (result.observation.kind === "json") {
+        expect(JSON.parse(result.observation.json)).toEqual({
+          valueCount: 0,
+          child: { completed: true },
+        });
+      }
+    } finally {
+      await pool.stop();
+    }
+  });
+
   test("running-child retries reuse full resident capacity", async () => {
     const value = await fixture({ maxResident: 2, maxActive: 2 });
     try {
