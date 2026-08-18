@@ -1,20 +1,20 @@
 # Generated TypeScript console SDK
 
-Agencity's generated execution surface is a TypeScript cell. A cell is transpiled by Bun, wrapped as the body of an async function, and executed in a disposable worker process. The worker receives typed facades for durable state and effects; it does not receive a storage client or provider credentials.
+Agencity's generated execution surface is a TypeScript cell evaluated in a persistent Bun REPL worker dedicated to one exact session and branch. The worker receives typed facades for durable state and effects; it does not receive a storage client or provider credentials.
 
 This reference describes the model-facing cell environment and its private supervisor/worker boundary. External applications should use the [TypeScript integration API](./api.md) or [public client protocol](./protocol.md), not the worker RPC.
 
 ## Provider boundary versus cell environment
 
-An autonomous model request exposes exactly two declaration-only provider tools: `bun_console` and `finish`. Those tools have no execute callbacks and do not expose the SDK to the provider. An accepted `bun_console` call proposes source text; Agencity validates and durably commits the canonical action before creating the disposable cell described below.
+An autonomous model request exposes exactly two declaration-only provider tools: `bun_console` and `finish`. Those tools have no execute callbacks and do not expose the SDK to the provider. An accepted `bun_console` call proposes source text; Agencity validates and durably commits the canonical action before evaluating the cell in the exact-branch REPL described below.
 
-The injected names in this document—`tools`, `sql`, `scratch`, `state`, `cells`, `artifacts`, `ai`, `sdk`, memory, agents, skills, goals, and related facades—exist only inside that later cell. They are not provider tools. Provider narration cannot invoke them, and Agencity has no assistant-text JSON or fenced-code fallback.
+The injected names in this document—`tools`, `sql`, `state`, `cells`, `artifacts`, `ai`, `sdk`, memory, agents, skills, goals, and related facades—exist only inside that later REPL evaluation. They are not provider tools. Provider narration cannot invoke them, and Agencity has no assistant-text JSON or fenced-code fallback.
 
 The console and workspace tools are the general execution mechanism. Agencity keeps this core domain-general instead of adding a dedicated provider tool or framework API for each task category. Repeated specialized operations belong in inspectable skills when they need a reusable interface.
 
 ## Execution model
 
-A cell can use top-level `await` and is evaluated like an async notebook cell:
+A cell can use top-level `await` and is evaluated in the branch's persistent REPL:
 
 ```ts
 const rows = await sql`
@@ -29,7 +29,9 @@ rows.slice(0, 5)
 
 If the cell has no cell-level `return`, its last top-level expression becomes the observation and is awaited when it is a promise. An explicit cell-level `return` keeps normal early-return behavior. A `return` inside a nested function does not suppress final-expression observation. A cell ending in a declaration observes `null`.
 
-Cells on one branch are serialized. The worker heap is disposable and can be restarted after every committed cell without changing durable semantics. Exact-session-and-branch scratch is a best-effort acceleration layer, not part of those semantics.
+Cells on one branch are serialized. Top-level variables, functions, classes, imports, module instances, closures, and object identity remain available to later cells while the exact-session-and-branch worker lives. No namespace is shared with another branch or session.
+
+The namespace is noncanonical and may disappear on cancellation, RSS recycling, worker/service/process loss, or branch change. State and artifacts are the only supported recovery persistence. Agencity never reconstructs the namespace by replaying retained cell source.
 
 ## Injected names
 
@@ -38,7 +40,6 @@ Every cell receives:
 | Name | Value |
 |---|---|
 | `session` | `{ id, branchId }` for the executing branch. |
-| `scratch` | Direct exact-branch object for replaceable cross-cell intermediates. |
 | `state` | Durable typed working values: `restored`, `get`, `set`, and `list`. |
 | `cells` | Retained cell history: `list` and `get`. |
 | `artifacts` | Scoped content-addressed artifacts: `put` and bounded `readRange`. |
@@ -46,24 +47,23 @@ Every cell receives:
 | `sql` | Parameterized read-only tagged template. |
 | `inspect` | Bounded, getter-free, redacting preview function. |
 | `ai` | Durable one-request raw text and declared-object generation. |
-| `sdk` | Namespaced access to the surfaces above, including `scratch.status/clear`, plus memory, harness, skills, specifications, agents, goals, heartbeats, schedules, and context. |
+| `sdk` | Namespaced access to the surfaces above, plus memory, harness, skills, specifications, agents, goals, heartbeats, schedules, and context. |
 | `console` | Cell-local `log`, `warn`, and `error`; output becomes bounded cell logs. |
 
-The direct `state`, `cells`, `artifacts`, `tools`, `inspect`, and `ai` names are the same implementations exposed under `sdk`. `scratch` is the direct object; its controls are `sdk.scratch`. `sql` and `session` are direct cell parameters rather than `sdk` properties.
+The direct `state`, `cells`, `artifacts`, `tools`, `inspect`, and `ai` names are the same implementations exposed under `sdk`. `sql` and `session` are direct REPL bindings rather than `sdk` properties.
 
 Optional arguments use their documented defaults only when omitted or explicitly `undefined`. A supplied value of the wrong runtime type is rejected instead of being treated as absent.
 
 ## Durability rules
 
-Durable identity lives in events, typed working values, artifacts, tasks, mailboxes, and model handles. JavaScript heap state and scratch do not.
+Durable identity lives in events, typed working values, artifacts, tasks, mailboxes, and model handles. The REPL namespace and JavaScript heap do not.
 
 ```mermaid
 flowchart TD
-    cell["TypeScript cell<br/>disposable worker"]
+    cell["TypeScript cell<br/>persistent exact-branch REPL"]
 
-    cell --> heap["Lexical bindings and heap"]
-    heap --> scratch["Exact-branch scratch<br/>best-effort warm cache"]
-    scratch --> discarded["May disappear after failure,<br/>eviction, restart, or service loss"]
+    cell --> heap["Top-level bindings and heap<br/>persist while worker lives"]
+    heap --> discarded["May disappear on cancellation,<br/>recycle, restart, loss, or branch change"]
 
     cell --> staged["state.set and artifacts.put<br/>staged for the cell"]
     staged --> terminal{"Cell terminal outcome"}
@@ -76,38 +76,34 @@ flowchart TD
     outcome --> retained["Retained even if the cell later fails"]
 ```
 
-- Lexical bindings are cell-local. Module instances, closures, sockets, subprocess handles, and `globalThis` changes disappear with the worker.
-- `scratch` may preserve ordinary runtime values across nearby successful cells while one exact branch scope remains warm. The managed file-local product also attempts a bounded same-device JSON checkpoint after a successful cell; this does not make scratch durable.
+- Top-level variables, functions, classes, imports, module instances, closures, and object identity persist across cells while the exact-branch worker lives.
+- Do not keep long-lived timers, streams, sockets, subprocesses, or the only copy of required evidence in the namespace. Worker loss discards them without recovery.
 - `state.set` stages JSON working values for atomic commit with the cell.
 - `artifacts.put` stages an immutable artifact reference for atomic registration with the cell.
 - Most effectful SDK calls commit their own outbox or domain events as they occur. A later cell failure does not erase an already committed external effect.
 - Only a successful cell terminal batch exposes staged working values and artifact registrations.
-- A failed or interrupted cell receives `CellFailed` or recovery-time `CellAbandoned`; its heap is never replayed.
+- A runtime throw records `CellFailed` but leaves completed in-memory declarations and mutations in the live REPL namespace. Its staged state and artifact writes remain uncommitted.
+- Parse/transpilation failure, cancellation, worker loss, or failure after execution but before canonical commit recycles the worker and discards its namespace. Recovery-time interruption records `CellAbandoned`.
+- Retained cell source is available for inspection but is never replayed automatically.
 - If a failed, cancelled, or unknown `tools.shell`, `tools.readFile`, or `tools.writeFile` error directly escapes and fails the cell, `CellFailed` retains the exact causal outcome-event ID. This bookkeeping is private worker/RPC metadata: it is not part of the helper result, error message, stack, or logs, and generated code cannot supply an ID through the SDK. Catching and wrapping the error creates a new error and therefore does not retain the direct link.
 
-Use local variables inside one cell, `scratch` for replaceable nearby intermediates, `state` for small values required after recovery, and artifacts for larger or byte-oriented durable content. Store durable handle IDs, not convenience functions. End each cell with only the focused observation needed by the next decision.
+Use top-level bindings for nearby computation that can be lost, `state` for small values required after recovery, and artifacts for larger or byte-oriented durable content. Store durable handle IDs, not convenience functions. End each cell with only the focused observation needed by the next decision.
 
-## `scratch`
+## Persistent REPL namespace
 
 ```ts
 const output = await tools.shell("rg --files");
-scratch.files = output.completeness === "inline"
+const files = output.completeness === "inline"
   ? output.value.stdout.split("\n").filter(Boolean)
   : [];
-scratch.normalize = (value: string) => value.trim();
+const normalize = (value: string) => value.trim();
 
-return { fileCount: scratch.files.length };
+return { fileCount: files.length };
 ```
 
-Later cells on the same exact session and branch can read the same object while its worker scope remains warm. Values may include functions, classes, cyclic objects, parsed documents, and module objects. Do not retain cell-scoped SDK facades, long-lived clients, timers, streams, sockets, subprocesses, or the only copy of required evidence. Scratch has a null prototype, permits at most 64 own string properties, limits keys to 128 UTF-8 bytes, and rejects symbols, accessors, non-configurable properties, extension locks, and prototype-pollution names so `sdk.scratch.clear()` can always empty the scope. It does not cross branch forks, parent, child, or sibling sessions, devices, or placements; transfer values explicitly through delegation inputs, durable messages, or artifacts.
+A later cell in the same live worker can use `files` and `normalize` directly. Static and dynamic relative imports resolve from the workspace root. Imported bindings, classes, cyclic objects, parsed documents, module objects, and ordinary JavaScript references preserve their identity. Parent, child, sibling, and forked branches use different workers and namespaces.
 
-After each successful committed cell, the supervisor checks whether scratch was changed. Clean scopes skip serialization and checkpoint storage. Top-level writes and deletes mark the scope dirty; reading a mutable value also marks it potentially dirty so nested changes such as `scratch.index.files.push(...)` are not missed. Dirty scopes receive a getter-free, 500 ms bounded checkpoint attempt. Eligible top-level properties are finite acyclic plain JSON, independently limited to 128 KiB and 256 KiB total with bounded depth/node/property counts. Unsupported, cyclic, accessor-backed, oversized, or secret-rejected siblings are recorded as skipped without hiding eligible values. Checkpoint failure never changes the committed cell result.
-
-The ordinary managed product enables fenced checkpoints only for an exact file-local workspace database. After sensitive filtering and validation, a candidate with the same schema version and serialized digest as the current valid row returns `unchanged`. That result marks warm scratch clean but does not refresh the cache payload, source cell/cursor, timestamps, TTL, access time, integrity metadata, or quota position; `sdk.scratch.status()` retains the prior checkpoint provenance and reports `cache.lastWrite: "unchanged"`. A real nested mutation changes the digest and persists normally. The cache keeps at most 64 branch rows and 16 MiB per workspace, expires rows after seven days, and may evict them earlier. A new worker on the same device and exact branch may restore an eligible checkpoint. Embedded diagnostic supervisors and remote relational placements are warm-only unless an embedding host explicitly supplies its own checkpoint hooks.
-
-Use `await sdk.scratch.status()` for bounded names, shallow types, temperature (`warm`, `restored`, or `cold`), checkpoint metadata, skipped reasons, cache availability, and limits. It never returns values. `await sdk.scratch.clear()` clears the live scope; the next successful checkpoint removes the retained cache row. A known skipped property throws `ScratchBindingUnavailableError` on direct read after restore. Rebuild it from durable inputs instead of replaying a prior cell that may have caused non-idempotent effects.
-
-Scratch is noncanonical. It is excluded from events, state projections, synchronization, export, branch lineage, automatic context, completion gates, and completion evidence. Warm scratch and the console worker are not managed-service keep-alive reasons.
+The namespace has no event, checkpoint, status API, synchronization, export, automatic-context, gate, or completion-evidence representation. After loss, required values restore only from state or artifacts. New work may recompute from current external inputs or explicitly request safe idempotent effects. Never replay prior cells automatically because they may have performed non-idempotent work.
 
 ## `state`
 

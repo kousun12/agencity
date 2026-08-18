@@ -68,11 +68,11 @@ Remote subscriptions are unavailable. Remote migration is operator-owned by defa
 
 The included handler does not add authentication, TLS, tenancy, rate limiting, or deployment management. Wrap it in an operator-controlled service boundary.
 
-### Console scratch placement
+### Console REPL placement
 
-Warm exact-session-and-branch scratch lives inside the console worker and remains available while that worker survives. Cold scratch checkpoints are a private optional capability, not part of `AgentStorage` or `agencity-relational-rpc-v1`.
+Each exact-session-and-branch REPL namespace lives only inside its console worker and remains available while that worker survives. It is not part of `AgentStorage`, `agencity-relational-rpc-v1`, or any placement capability.
 
-The managed product injects its `ScratchStore` only when the canonical workspace database is an exact local `file:` placement and managed execution fencing is active. The cache uses the same local database but a private operational table. Direct diagnostic supervisors and remote relational placements are warm-only; Agencity does not create a silent local checkpoint fallback beside a remote workspace. Synchronization and HTTP relational conformance do not transfer scratch.
+Local and remote relational placements use the same process-local namespace semantics. No placement stores, restores, synchronizes, exports, or transfers bindings or heap identity. Worker loss starts a fresh namespace; state and artifacts remain the supported recovery persistence.
 
 ## Artifact content-addressed storage
 

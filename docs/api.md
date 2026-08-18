@@ -13,7 +13,7 @@ The package is private and is consumed from a source checkout or Bun link. It is
 | `@prime-agent/runtime/storage` | `AgentStorage`, storage capabilities, `LibSqlStorage`, and the Turso transport adapter. |
 | `@prime-agent/runtime/artifacts` | `ArtifactStore` and `LocalArtifactStore`. |
 | `@prime-agent/runtime/executors` | Effect contracts and file, shell, model, and skill executors. |
-| `@prime-agent/runtime/console` | Generated-cell SDK and scratch types, observation helpers, and the private worker-process host. |
+| `@prime-agent/runtime/console` | Generated-cell SDK, observation helpers, and the private persistent REPL worker host. |
 | `@prime-agent/runtime/runtime` | `Supervisor` and its run, outbox, projection, context, agent, raw-generation, retained private recursive-operation, memory, harness, skill, goal, schedule, and recovery services. |
 | `@prime-agent/runtime/protocol` | `ProtocolServer`, `AgentClient`, HTTP and in-process transports, and wire-facing types. |
 | `@prime-agent/runtime/security` | Secret filtering, scrubbing, and model-credential helpers. |
@@ -38,7 +38,6 @@ async function usingRuntime() {
     profileDatabaseUrl: "file:.agencity/profile.db",
     artifactDirectory: ".agencity/artifacts",
     workspaceRoot: process.cwd(),
-    restartConsoleAfterCell: true,
     recover: true,
     providerConcurrency: { openai: 2 },
     userScopeKey: "profile-user-id",
@@ -71,7 +70,7 @@ async function usingRuntime() {
 }
 ```
 
-`Supervisor.open` migrates the local stores, opens the content-addressed artifact store and profile-owned credential store, installs the standard executors, and optionally performs recovery. Every supervisor supports warm exact-branch scratch. `enableLocalScratchCheckpoints: true` is a product-composition opt-in that additionally requires an exact local `file:` workspace database and managed execution fencing; direct diagnostic and remote placements remain warm-only. Custom embeddings may instead supply explicit `scratchCheckpointHooks`; their checkpoint hook returns `{ status: "stored" | "cleared" | "unchanged" }` so the worker can clean its dirty flag without falsely advancing retained checkpoint metadata. `close` stops local schedulers, drains admitted recursive and agent work, stops the branch-aware console pool, releases registered credential-redaction values, and closes storage.
+`Supervisor.open` migrates the local stores, opens the content-addressed artifact store and profile-owned credential store, installs the standard executors, and optionally performs recovery. It creates persistent Bun REPL workers keyed by exact session and branch as cells are admitted. Their namespaces are noncanonical and are never checkpointed or replayed. `close` stops local schedulers, drains admitted recursive and agent work, stops the branch-aware console pool, releases registered credential-redaction values, and closes storage.
 
 An embedded supervisor does not by itself provide the managed product service's discovery manifest, bearer authentication, resident run queue, process fencing, or idle shutdown. If an embedded host creates a `ProtocolServer`, it also owns network exposure and authentication policy.
 
@@ -79,7 +78,7 @@ An embedded supervisor does not by itself provide the managed product service's 
 
 Ordinary `agencity` product flows discover or start a per-workspace `ManagedWorkspaceService`. That service owns the `Supervisor`, local process lease, startup recovery, resident run advancement, schedules, loopback listener, bearer token, one-hour default quiescent shutdown, and graceful drain. Clients attach through `AgentClient` and do not open the workspace database directly.
 
-`ManagedServiceConfiguration.idleShutdownMs` remains available for embedding and deterministic tests. Its normalized value defaults to `3_600_000` and participates in the discovery configuration hash. `ManagedServiceStatus.idleShutdownMs` and JSON output retain exact milliseconds; the product CLI formats the default human duration as one hour. Warm scratch and the mere existence of a console worker do not count as resident work.
+`ManagedServiceConfiguration.idleShutdownMs` remains available for embedding and deterministic tests. Its normalized value defaults to `3_600_000` and participates in the discovery configuration hash. `ManagedServiceStatus.idleShutdownMs` and JSON output retain exact milliseconds; the product CLI formats the default human duration as one hour. A live REPL namespace and the mere existence of an idle console worker do not count as resident work.
 
 The managed service is a product lifecycle component, not a hosted multi-tenant service and not a placement adapter. It binds to `127.0.0.1`, authenticates every route with an owner bearer from an owner-only manifest, and retains trusted-local OS authority. See [Public client protocol](./protocol.md).
 
@@ -109,7 +108,7 @@ Structured requests use response-aware `agencity.model-dispatch.v2`, immutable `
 - `selectModel` normalizes provider shorthand, checks availability, requires an idle model boundary, and appends `SessionModelChanged`.
 - `appendMessage` scrubs known credentials and appends a message event.
 - `fork` creates a durable branch from a validated lineage cursor without changing the parent.
-- `executeCell` serializes cell execution per exact branch, runs different branches through the bounded branch-aware console pool, atomically commits its observation, staged working values, and artifact references, then independently attempts a nonfatal scratch checkpoint.
+- `executeCell` serializes cell execution per exact branch, evaluates it in that branch's persistent REPL worker, and atomically commits its observation, staged working values, and artifact references. Runtime throws retain completed in-memory mutations while the worker survives but do not commit staged state or artifacts; non-runtime failures recycle the worker.
 - `resume` reconstructs and reattaches to a retained branch.
 
 Product tasks use the strict autonomous-run service:
@@ -123,7 +122,7 @@ An exact `requestKey` retry returns the same run; reuse with changed durable mea
 
 Each step's `observationEventIds` is the complete canonical exact-once ledger. `deriveAgentProviderObservations` creates the bounded provider view: a terminal cell owns successful linked effect presentation, duplicate successful outcome payloads are omitted, and failed/cancelled/unknown outcomes remain actionable. Automatic observations are limited to 56 KiB per item and 64 KiB total without changing the raw ledger.
 
-Autonomous calls declare exactly two fixed provider tools: `bun_console` and `finish`. They are response declarations, not executable provider callbacks. Only a validated and durably committed `bun_console` submission can execute generated work. Shell, file, SQL, model, subagent, memory, skill, state, and artifact operations are injected APIs inside that later disposable cell. `finish` ends the run as successful, blocked, or failed. Supplemental narration is diagnostic-only, and the supervisor never searches prose for JSON or code. See [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) and [Generated TypeScript console SDK](./console-sdk.md).
+Autonomous calls declare exactly two fixed provider tools: `bun_console` and `finish`. They are response declarations, not executable provider callbacks. Only a validated and durably committed `bun_console` submission can execute generated work. Shell, file, SQL, model, subagent, memory, skill, state, and artifact operations are injected APIs inside that later exact-branch REPL evaluation. `finish` ends the run as successful, blocked, or failed. Supplemental narration is diagnostic-only, and the supervisor never searches prose for JSON or code. See [ADR 0010](./decisions/0010-formal-model-tool-contracts.md) and [Generated TypeScript console SDK](./console-sdk.md).
 
 A successful finish publishes its exact message only after required gates pass. Failed or unknown required gates do not publish the proposed success. Blocked and failed finishes commit their exact messages atomically with effective terminal status. Missing information uses a blocked finish; later user text starts a normal new run.
 

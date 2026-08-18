@@ -65,9 +65,9 @@ agencity service status
 agencity service status --json
 ```
 
-The status reports lifecycle, recovery, attached clients, idle deadline, retained roots, and reasons the service remains resident. Human output renders the default duration as `1 hour`; `--json` retains the exact `idleShutdownMs: 3600000`. Active runs, pending effects, queued wakes, schedules, heartbeats, resident managed run-queue work, and clients can keep it alive. A terminal blocked branch, an idle console worker, and warm scratch do not.
+The status reports lifecycle, recovery, attached clients, idle deadline, retained roots, and reasons the service remains resident. Human output renders the default duration as `1 hour`; `--json` retains the exact `idleShutdownMs: 3600000`. Active runs, pending effects, queued wakes, schedules, heartbeats, resident managed run-queue work, and clients can keep it alive. A terminal blocked branch, an idle console worker, and its live REPL namespace do not.
 
-The service normally exits one hour after becoming quiescent. This is an idle process-lifetime bound, not a task timeout or scratch-retention guarantee. It is not registered as an OS boot or login service.
+The service normally exits one hour after becoming quiescent. This is an idle process-lifetime bound, not a task timeout or REPL-namespace retention guarantee. It is not registered as an OS boot or login service.
 
 ### Graceful shutdown
 

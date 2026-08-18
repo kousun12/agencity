@@ -297,7 +297,6 @@ export class ManagedWorkspaceService {
       maxAwaitedAgentDepth: normalized.maxAwaitedAgentDepth ?? 8,
       recover: false,
       startWakeSchedulers: false,
-      enableLocalScratchCheckpoints: true,
       ...options,
       executionLease: {
         workspaceId: normalized.workspace.workspaceId,

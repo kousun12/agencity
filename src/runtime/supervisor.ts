@@ -6,20 +6,14 @@ import {
   ConsoleCellError,
   ConsoleExecutionPool,
   ConsoleProcess,
+  DEFAULT_CONSOLE_RSS_RECYCLE_BYTES,
   DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
   DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
   MAX_CELL_OBSERVATION_JSON_BYTES,
-  SCRATCH_LIMITS,
-  filterScratchCheckpoint,
-  validateScratchCheckpoint,
-  type ScratchCheckpointCandidate,
-  type ScratchCheckpointHooks,
-  type ScratchCheckpointLoadResult,
-  type ScratchCheckpointWriteResult,
-  type ScratchScope,
   type CellHistoryEntry,
   type CellHistoryStatus,
   type CellListOptions,
+  type ConsoleScope,
   type EventProvenance,
 } from "../console/index.ts";
 import { consoleRpcResponse } from "../console/process.ts";
@@ -64,8 +58,6 @@ import {
   type ProviderConcurrency,
 } from "../executors/index.ts";
 import { LibSqlStorage, ProfileStore, TursoSyncTransport, type AgentStorage } from "../storage/index.ts";
-import { LibSqlScratchStore } from "../storage/libsql.ts";
-import type { ScratchStore } from "../storage/scratch.ts";
 import { SyncService, type DeleteOwnedDataInput, type DeviceIdentity, type ManagedReplicaDeletionAdmin, type PhysicalDeletionReceipt, type SyncTransport } from "../sync/index.ts";
 import { ContextMaterializer } from "./context.ts";
 import { ModelLoop } from "./model-loop.ts";
@@ -74,7 +66,6 @@ import { ProjectionService } from "./projection.ts";
 import {
   ModelCredentialStore,
   containsBrokeredSecret,
-  containsCredentialMaterial,
   modelCredentialPathForProfile,
   scrubJson,
   scrubText,
@@ -120,13 +111,6 @@ export interface SupervisorOptions {
   readonly artifactDirectoryOwnership?: "exclusive" | "shared";
   readonly workspaceRoot?: string;
   readonly restartConsoleAfterCell?: boolean;
-  /** Optional noncanonical cold-cache adapter; Phase B defaults to warm-only scratch. */
-  readonly scratchCheckpointHooks?: ScratchCheckpointHooks;
-  readonly scratchCheckpointTimeoutMs?: number;
-  readonly scratchIdleScopeMs?: number;
-  readonly scratchMaxWarmScopes?: number;
-  /** Product composition opt-in for the private file-local scratch cache. */
-  readonly enableLocalScratchCheckpoints?: boolean;
   readonly consoleRssRecycleThresholdBytes?: number;
   /** Global bound for exact-branch resident Bun console workers (default 17). */
   readonly maxConsoleResidentProcesses?: number;
@@ -439,9 +423,8 @@ export class Supervisor {
   readonly modelSelection: ModelSelectionService;
   readonly modelCatalog: ModelCatalog;
   readonly repositoryInstructions: RepositoryInstructionService;
+  readonly workspaceRoot: string;
   readonly restartConsoleAfterCell: boolean;
-  readonly scratchCheckpointHooks: ScratchCheckpointHooks | null;
-  readonly #scratchStore: ScratchStore | null;
   readonly consoleRssRecycleThresholdBytes: number;
   readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
   readonly #cells = new BranchQueue();
@@ -459,8 +442,6 @@ export class Supervisor {
     consoleProcess: ConsoleExecutionPool,
     outbox: OutboxRunner,
     restartConsoleAfterCell: boolean,
-    scratchCheckpointHooks: ScratchCheckpointHooks | null,
-    scratchStore: ScratchStore | null,
     consoleRssRecycleThresholdBytes: number,
     maxSessionDepth: number,
     maxAwaitedAgentDepth: number,
@@ -507,6 +488,7 @@ export class Supervisor {
     this.modelExecutor = modelExecutor;
     this.modelEffectAdmission = new ModelEffectAdmissionService(modelExecutor);
     this.modelCatalog = modelCatalog;
+    this.workspaceRoot = workspaceRoot;
     this.repositoryInstructions = new RepositoryInstructionService(workspaceRoot);
     this.executionLeases = executionLeases;
     this.contexts = new ContextMaterializer(
@@ -544,8 +526,6 @@ export class Supervisor {
       new ExplicitContextMaterializer(storage, artifacts, this.memory),
     );
     this.restartConsoleAfterCell = restartConsoleAfterCell;
-    this.scratchCheckpointHooks = scratchCheckpointHooks;
-    this.#scratchStore = scratchStore;
     this.consoleRssRecycleThresholdBytes = consoleRssRecycleThresholdBytes;
     this.maxAwaitedAgentDepth = maxAwaitedAgentDepth;
     this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), acceptanceAgentRunMaxSteps(), this.compactions, modelExecutor, this.agentProfiles);
@@ -583,17 +563,6 @@ export class Supervisor {
   }
 
   static async open(options: SupervisorOptions): Promise<Supervisor> {
-    if (options.enableLocalScratchCheckpoints && options.scratchCheckpointHooks) {
-      throw new ValidationError(
-        "Local scratch checkpoints cannot be combined with custom checkpoint hooks",
-      );
-    }
-    if (options.enableLocalScratchCheckpoints &&
-        (!options.executionLease || !isExactFileDatabaseUrl(options.databaseUrl))) {
-      throw new ValidationError(
-        "Local scratch checkpoints require managed execution fencing and an exact file: workspace database URL",
-      );
-    }
     if (options.consoleRssRecycleThresholdBytes !== undefined &&
         (!Number.isSafeInteger(options.consoleRssRecycleThresholdBytes) ||
          options.consoleRssRecycleThresholdBytes < 1)) {
@@ -734,32 +703,6 @@ export class Supervisor {
       new SkillExecutor(),
       modelExecutor,
     ];
-    let scratchStore: ScratchStore | null = null;
-    let scratchCheckpointHooks = options.scratchCheckpointHooks ?? null;
-    if (options.enableLocalScratchCheckpoints) {
-      scratchStore = new LibSqlScratchStore({
-        url: options.databaseUrl,
-        deviceId: device.deviceId,
-      });
-      scratchCheckpointHooks = {
-        load: async (scope) => scratchStore!.load(
-          scope,
-          await executionLeases!.fenceForSession(scope.sessionId),
-        ),
-        checkpoint: async (scope, candidate, source) => {
-          const fence = await executionLeases!.fenceForSession(scope.sessionId);
-          const result = candidate.savedNames.length === 0 && candidate.skipped.length === 0
-            ? await scratchStore!.clear(scope, source, fence)
-            : await scratchStore!.write(scope, candidate, source, fence);
-          if (result.status === "stale") {
-            throw new ValidationError(
-              "Scratch checkpoint was superseded before local cache persistence",
-            );
-          }
-          return result;
-        },
-      };
-    }
     const supervisor = new Supervisor(
       storage,
       profile,
@@ -772,21 +715,10 @@ export class Supervisor {
           DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
         maxActiveExecutions: options.maxConsoleActiveExecutions ??
           DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
-        ...(options.scratchCheckpointTimeoutMs === undefined ? {} : {
-          scratchCheckpointTimeoutMs: options.scratchCheckpointTimeoutMs,
-        }),
-        ...(options.scratchIdleScopeMs === undefined ? {} : {
-          scratchIdleScopeMs: options.scratchIdleScopeMs,
-        }),
-        ...(options.scratchMaxWarmScopes === undefined ? {} : {
-          scratchMaxWarmScopes: options.scratchMaxWarmScopes,
-        }),
       }),
       new OutboxRunner(storage, executors),
       options.restartConsoleAfterCell ?? false,
-      scratchCheckpointHooks,
-      scratchStore,
-      options.consoleRssRecycleThresholdBytes ?? SCRATCH_LIMITS.rssRecycleBytes,
+      options.consoleRssRecycleThresholdBytes ?? DEFAULT_CONSOLE_RSS_RECYCLE_BYTES,
       maxSessionDepth,
       maxAwaitedAgentDepth,
       options.maxChildrenPerSession ?? 32,
@@ -867,7 +799,6 @@ export class Supervisor {
     await this.#recursiveModels.close();
     await this.sync.stop();
     await this.executionLeases?.close();
-    this.#scratchStore?.close();
     this.storage.close();
     this.credentials.close();
     this.profile.close();
@@ -884,7 +815,6 @@ export class Supervisor {
     await this.ai.close();
     await this.#recursiveModels.close();
     await this.outbox.quiesceForDeletion();
-    this.#scratchStore?.close();
     try { return await this.sync.deleteOwnedData(input); }
     finally {
       await this.sync.stop().catch(() => {});
@@ -1168,7 +1098,6 @@ export class Supervisor {
       throw new ValidationError(`Stable cell ${cellId} is ${existing.status}; started cells are never blindly replayed`);
     }
     const started = performance.now();
-    const scratchScope: ScratchScope = { sessionId, branchId };
     await this.storage.appendEvents([{
       sessionId,
       branchId,
@@ -1614,7 +1543,7 @@ export class Supervisor {
               // therefore share the same scope reservation instead of racing
               // two speculative process counts.
               beforeAdmission: async (items) => {
-                const awaitedScopes: ScratchScope[] = [];
+                const awaitedScopes: ConsoleScope[] = [];
                 for (const item of items) {
                   if (item.existing) {
                     const current = await this.agents.result(
@@ -2016,38 +1945,16 @@ export class Supervisor {
     };
 
     let terminalCommitted = false;
+    let runtimeCellFailed = false;
     let workerRssBytes = 0;
     try {
-      let loadResult: ScratchCheckpointLoadResult = {
-        status: "unavailable",
-        reason: "placement_unavailable",
-      };
-      if (this.scratchCheckpointHooks && !await consoleProcess.hasScratch(scratchScope)) {
-        loadResult = await this.scratchCheckpointHooks.load(scratchScope).catch(() => ({
-          status: "unavailable",
-          reason: "storage_error",
-        }));
-        if (loadResult.status === "restored") {
-          loadResult = {
-            status: "restored",
-            restore: {
-              ...loadResult.restore,
-              candidate: filterSensitiveScratchCheckpoint(loadResult.restore.candidate),
-            },
-          };
-        }
-      }
-      await consoleProcess.prepareScratch(
-        scratchScope,
-        loadResult,
-        this.scratchCheckpointHooks !== null,
-      );
       const execution = await this.console.execute(
         consoleProcess,
         code,
         { id: sessionId, branchId },
         restored,
         handler,
+        this.workspaceRoot,
       );
       workerRssBytes = execution.rssBytes;
       const rawPreview = JSON.parse(JSON.stringify(execution.observation.preview)) as unknown;
@@ -2161,65 +2068,12 @@ export class Supervisor {
       }
       terminalCommitted = true;
       acceptanceCrashAfterCellCommit(cellId);
-      let checkpoint: ScratchCheckpointCandidate | null = null;
-      try {
-        checkpoint = await consoleProcess.checkpointScratch(scratchScope, cellId);
-        if (checkpoint) {
-          checkpoint = validateScratchCheckpoint(
-            filterSensitiveScratchCheckpoint(checkpoint),
-          );
-        }
-      } catch {
-        if (consoleProcess.status().running) {
-          await consoleProcess
-            .recycle("scratch-checkpoint-serialization-failed")
-            .catch(() => {});
-        }
-      }
-      if (checkpoint && this.scratchCheckpointHooks) {
-        let persisted: ScratchCheckpointWriteResult | null = null;
-        try {
-          const result = await this.scratchCheckpointHooks.checkpoint(
-            scratchScope,
-            checkpoint,
-            {
-              cellId,
-              eventId: committedCellEvent.id,
-              cursor: committedCellEvent.cursor,
-            },
-          );
-          if (result.status !== "stored" &&
-              result.status !== "cleared" &&
-              result.status !== "unchanged") {
-            throw new ValidationError("Scratch checkpoint hook returned an invalid result");
-          }
-          persisted = result;
-        } catch {
-          // Scratch persistence is an optional operational cache. The warm
-          // scope and committed cell remain valid when its storage is absent.
-          await consoleProcess.recordScratchCacheWrite(
-            scratchScope,
-            "unavailable",
-          ).catch(() => {});
-        }
-        if (persisted) {
-          try {
-            await consoleProcess.recordScratchCheckpoint(
-              scratchScope,
-              cellId,
-              checkpoint,
-              persisted,
-            );
-            await consoleProcess.recordScratchCacheWrite(
-              scratchScope,
-              persisted.status,
-            );
-          } catch { /* Status bookkeeping never invalidates committed warm scratch. */ }
-        }
-      }
       return { cellId, result, logs };
     } catch (error) {
-      if (error instanceof ConsoleCellError) workerRssBytes = error.rssBytes;
+      if (error instanceof ConsoleCellError) {
+        runtimeCellFailed = error.failurePhase === "runtime";
+        workerRssBytes = error.rssBytes;
+      }
       const logs = error instanceof ConsoleCellError ? error.logs.map(scrubText) : [];
       const logStreams = error instanceof ConsoleCellError ? [...error.logStreams] : [];
       if (!terminalCommitted) {
@@ -2246,16 +2100,10 @@ export class Supervisor {
       const unfinishedWriter = stagedObservationWriter as StreamingJsonStager | null;
       await unfinishedWriter?.abort();
       if (stagedObservationPath) await rm(stagedObservationPath, { force: true }).catch(() => {});
-      if (!terminalCommitted) {
-        if (consoleProcess.status().running) {
-          try {
-            await consoleProcess.evictScratch(scratchScope);
-          } catch {
-            if (consoleProcess.status().running) {
-              await consoleProcess.recycle("failed-scope-eviction").catch(() => {});
-            }
-          }
-        }
+      if (!terminalCommitted &&
+          !runtimeCellFailed &&
+          consoleProcess.status().running) {
+        await consoleProcess.recycle("uncommitted-cell-runtime").catch(() => {});
       }
       if (workerRssBytes > this.consoleRssRecycleThresholdBytes &&
           consoleProcess.status().running) {
@@ -2299,23 +2147,6 @@ function retainedModelRequestMatches(
   }
 }
 
-function filterSensitiveScratchCheckpoint(
-  candidate: ScratchCheckpointCandidate,
-): ScratchCheckpointCandidate {
-  const safeNames = filterScratchCheckpoint(
-    candidate,
-    (name) => containsCredentialMaterial(name),
-    {
-      retainRejectedNames: false,
-      omitSkippedName: (name) => containsCredentialMaterial(name),
-    },
-  );
-  return filterScratchCheckpoint(
-    safeNames,
-    (_name, value) => containsCredentialMaterial(JSON.stringify(value)),
-  );
-}
-
 function acceptanceCrashAfterCellCommit(cellId: string): void {
   if (process.env.AGENCITY_ACCEPTANCE !== "1") return;
   if (process.env.AGENCITY_ACCEPTANCE_FAILPOINT !== "cell-committed") return;
@@ -2335,16 +2166,4 @@ function acceptanceAgentRunMaxSteps(): number {
 function adjacentFileUrl(databaseUrl: string, suffix: string): string {
   if (!databaseUrl.startsWith("file:")) throw new ValidationError("Profile and local sync-replica defaults require a file: workspace database URL");
   return `${databaseUrl}${suffix}`;
-}
-
-function isExactFileDatabaseUrl(databaseUrl: string): boolean {
-  try {
-    const url = new URL(databaseUrl);
-    return url.protocol === "file:" && !url.username && !url.password &&
-      !url.hostname && !url.search && !url.hash &&
-      url.pathname.length > 0 &&
-      url.pathname !== ":memory:" && url.pathname !== "/:memory:";
-  } catch {
-    return false;
-  }
 }

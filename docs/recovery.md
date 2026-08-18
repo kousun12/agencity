@@ -8,14 +8,14 @@ A cell has durable lifecycle events:
 
 1. `CellProposed` records code and declared dependencies;
 2. `CellStarted` records its attempt;
-3. the disposable worker runs, using durable outbox requests for SDK effects;
+3. the exact-branch REPL worker evaluates the cell, using durable outbox requests for SDK effects;
 4. success atomically appends staged `ArtifactRegistered`, `WorkingValueSet`, and `CellCommitted` events, or failure appends `CellFailed`. A new `CellFailed` includes a validated exact list of terminal non-success effect-outcome event IDs only when a convenience-helper error directly escaped the worker; an empty list means no such cause was proven.
 
-Only a committed terminal event and its committed exports become required later state. The worker heap is never replayed. Arbitrary replay could repeat a file edit, command, network call, or model generation.
+Only a committed terminal event and its committed exports become required later state. While the exact-session-and-branch REPL worker lives, top-level variables, functions, classes, imports, module instances, and object identity remain available across cells. That namespace is noncanonical and may disappear on cancellation, RSS recycling, worker/service/process loss, or branch change.
 
-Exact-branch `scratch` is a separate best-effort cache. A successful cell may leave arbitrary values warm in its worker. After `CellCommitted`, the managed file-local product independently attempts a bounded plain-JSON checkpoint in a fenced operational table. Mutable reads remain conservatively dirty. When the filtered, validated serialization has the same schema version and digest as the current valid row, the worker becomes clean but the cold checkpoint retains its prior source provenance, timestamps, TTL, access and integrity metadata, and quota position. Nested mutation changes the digest and persists a new checkpoint. A checkpoint failure does not change the cell outcome. Failed, abandoned, or uncommitted cells evict their warm scope and cannot replace the last completed checkpoint.
+A runtime throw records `CellFailed` without rolling back in-memory work already completed in the live REPL namespace. Staged state and artifact writes from that cell remain uncommitted, while independently committed outbox effects retain their ordinary outcomes. Parse/transpilation failure, cancellation, worker loss, or failure after execution but before canonical commit recycles the worker and discards the namespace.
 
-Recovery uses warm scratch when present, then an exact same-device and same-branch checkpoint when available. Branch forks, child sessions, synchronized devices, diagnostic embedded supervisors, and remote relational placements start cold or warm-only as applicable. Eligible JSON can restore, while functions, classes, cycles, modules, and other skipped values do not. Known skipped names remain explicit; complete cache loss with no metadata is simply cold. Generated work must rebuild missing scratch from durable state, artifacts, files, retained cells, or safe idempotent effects and must not replay retained cell source automatically.
+Recovery starts with a fresh namespace. Required recovery values come only from state or artifacts. New work may recompute from current external inputs or explicitly request safe idempotent effects, but Agencity never replays retained cell source automatically because arbitrary replay could repeat a file edit, command, network call, or model generation.
 
 ## Startup sequence
 
@@ -123,7 +123,9 @@ File write helps make retry safe by writing atomically, accepting an expected pr
 | After claim/start, before external effect | `running`; actual effect uncertain from the database alone. | Requeue only if declared idempotent; otherwise `unknown`. |
 | After external action or streamed prefix, before terminal commit | Same as above; this is the ambiguity window. Cursorless progress is absent from history. | Same conservative rule; never infer success or commit the partial model text. |
 | After terminal outcome commit, before caller receives it | Canonical terminal event. | Return/reconstruct it; do not call executor again. |
-| Cell proposed/started, worker dies before terminal cell event | Incomplete cell plus any separately durable effect events. | Append `CellAbandoned`; reconcile effects independently. |
+| Runtime cell throws | `CellFailed`; completed in-memory mutations remain only if the same REPL worker survives. Staged state/artifact writes are absent. | Continue in the live namespace when appropriate; do not treat heap state as recovery data. |
+| Cell parse/transpile/protocol/cancellation failure | No successful cell boundary; the exact-branch worker namespace is discarded. | Recycle the worker and reconstruct required values from state or artifacts without source replay. |
+| Cell proposed/started, worker dies before terminal cell event | Incomplete cell plus any separately durable effect events; the namespace is lost. | Append `CellAbandoned`; reconcile effects independently and do not replay source. |
 | Shell spill staged before CAS placement | No artifact reference or terminal effect. | Remove stale owner staging at startup; apply ordinary idempotent/unknown effect recovery. |
 | Shell spill placed in CAS before atomic artifact/outcome append | Unreachable CAS bytes, no canonical success evidence. | Do not expose or infer success; unreferenced bytes may remain until a future garbage collector. |
 | Shell spill artifact registration and effect outcome append succeeds | Both canonical records are visible in one batch. | Reconstruct the bounded `spilled` envelope; do not rerun the command. |
@@ -181,7 +183,7 @@ Guaranteed by implemented paths:
 Not guaranteed:
 
 - exactly once in an external system;
-- recovery of heap objects or uncheckpointed cell variables;
+- recovery of REPL bindings, heap objects, module instances, or object identity;
 - reconstruction of independently changed workspace/services;
 - cross-device automatic execution-owner failover or distributed leases; local same-device managed-service takeover waits for the retained process lease to expire;
 - crash-atomicity across database and artifact/filesystem placement before the canonical registration/outcome append; the registration and referencing outcome themselves are one local database transaction;

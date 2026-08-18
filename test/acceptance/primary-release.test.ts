@@ -207,88 +207,103 @@ describe("FU-009 installed no-ID release transcript", () => {
     expect(fixture.count(task)).toBe(3);
   }, 120_000);
 
-  test("keeps scratch warm across detached cells and restores only reconstructible cache after service loss", async () => {
+  test("keeps a REPL namespace warm across detached cells, isolates forks, and reconstructs from state after service loss", async () => {
     const fixture = new StrictActionFixture(); fixtures.push(fixture);
-    const world = await AcceptanceWorld.create("scratch-lifecycle"); worlds.push(world);
-    const warmTask = "exercise compact warm scratch";
-    const isolationTask = "write isolated fork scratch";
-    const coldTask = "recover scratch after service loss";
+    const world = await AcceptanceWorld.create("repl-lifecycle"); worlds.push(world);
+    const warmTask = "exercise compact warm REPL namespace";
+    const isolationTask = "verify isolated fork REPL namespace";
+    const coldTask = "reconstruct REPL inputs after service loss";
 
     fixture.script(warmTask, [
       action("typescript", String.raw`
         const durableInput = { seed: 7, count: 2048 };
-        await state.set("scratch-rebuild-input", durableInput);
-        scratch.rows = Array.from(
+        await state.set("repl-rebuild-input", durableInput);
+        const replRows = Array.from(
           { length: durableInput.count },
           (_, index) => durableInput.seed + index,
         );
-        scratch.identity = { label: "same-worker-object" };
-        scratch.alias = scratch.identity;
-        scratch.transform = (value: number) => value * 2;
-        scratch.persisted = durableInput;
-        return { cachedRows: scratch.rows.length, durableKeys: 1 };
+        const replIdentity = { label: "same-worker-object" };
+        const replAlias = replIdentity;
+        function replTransform(value: number) {
+          return value * 2;
+        }
+        return { retainedRows: replRows.length, durableKeys: 1 };
       `),
       probe => {
-        expect(probe.lastUserText).toContain('"cachedRows":2048');
+        expect(probe.lastUserText).toContain('"retainedRows":2048');
         expect(probe.lastUserText.length).toBeLessThan(100_000);
         return action("typescript", String.raw`
-          const status = await sdk.scratch.status();
-          const warmIdentity = scratch.identity === scratch.alias;
-          const transformed = scratch.transform(scratch.rows[10]);
+          const warmIdentity = replIdentity === replAlias;
+          const transformed = replTransform(replRows[10]);
           return {
-            temperature: status.temperature,
+            bindingsAvailable: true,
             warmIdentity,
             transformed,
-            cachedRows: scratch.rows.length,
+            retainedRows: replRows.length,
           };
         `);
       },
       probe => {
-        expect(probe.lastUserText).toContain('"temperature":"warm"');
+        expect(probe.lastUserText).toContain('"bindingsAvailable":true');
         expect(probe.lastUserText).toContain('"warmIdentity":true');
         expect(probe.lastUserText).toContain('"transformed":34');
-        expect(probe.lastUserText).toContain('"cachedRows":2048');
-        return action("final", "warm scratch was reused with compact observations");
+        expect(probe.lastUserText).toContain('"retainedRows":2048');
+        return action("final", "warm REPL bindings and object identity persisted with compact observations");
       },
     ]);
     fixture.script(isolationTask, [
       action("typescript", String.raw`
-        scratch.persisted = { seed: 99, count: 1 };
-        scratch.transform = (value: number) => value + 1;
-        return { forkSeed: scratch.persisted.seed };
+        const parentBindingsMissing =
+          typeof replRows === "undefined" &&
+          typeof replIdentity === "undefined" &&
+          typeof replTransform === "undefined";
+        const forkInput = { seed: 99, count: 1 };
+        function forkTransform(value: number) {
+          return value + 1;
+        }
+        return {
+          parentBindingsMissing,
+          forkSeed: forkInput.seed,
+          forkValue: forkTransform(forkInput.seed),
+        };
       `),
       probe => {
+        expect(probe.lastUserText).toContain('"parentBindingsMissing":true');
         expect(probe.lastUserText).toContain('"forkSeed":99');
-        return action("final", "fork scratch remained isolated");
+        expect(probe.lastUserText).toContain('"forkValue":100');
+        return action("final", "fork REPL namespace remained isolated");
       },
     ]);
     fixture.script(coldTask, [
       action("typescript", String.raw`
-        const before = await sdk.scratch.status();
-        const durable = await state.get("scratch-rebuild-input");
+        const warmBindingsGone =
+          typeof replRows === "undefined" &&
+          typeof replIdentity === "undefined" &&
+          typeof replTransform === "undefined";
+        const durable = await state.get("repl-rebuild-input");
         const stateInventory = await state.list();
-        const helperWasMissing = !("transform" in scratch);
-        if (helperWasMissing) {
-          scratch.transform = (value: number) => value * 2;
+        const reconstructedRows = Array.from(
+          { length: durable.value.count },
+          (_, index) => durable.value.seed + index,
+        );
+        function reconstructedTransform(value: number) {
+          return value * 2;
         }
-        const restoredInput = scratch.persisted;
         return {
-          temperature: before.temperature,
-          cacheStatus: before.cache.status,
-          restoredSeed: restoredInput.seed,
-          helperWasMissing,
-          rebuiltValue: scratch.transform(durable.value.seed),
+          warmBindingsGone,
+          reconstructedSeed: durable.value.seed,
+          reconstructedRows: reconstructedRows.length,
+          rebuiltValue: reconstructedTransform(durable.value.seed),
           durableStateNames: stateInventory.map(item => item.name),
         };
       `),
       probe => {
-        expect(probe.lastUserText).toContain('"temperature":"restored"');
-        expect(probe.lastUserText).toContain('"cacheStatus":"restored"');
-        expect(probe.lastUserText).toContain('"restoredSeed":7');
-        expect(probe.lastUserText).toContain('"helperWasMissing":true');
+        expect(probe.lastUserText).toContain('"warmBindingsGone":true');
+        expect(probe.lastUserText).toContain('"reconstructedSeed":7');
+        expect(probe.lastUserText).toContain('"reconstructedRows":2048');
         expect(probe.lastUserText).toContain('"rebuiltValue":14');
-        expect(probe.lastUserText).toContain('"durableStateNames":["scratch-rebuild-input"]');
-        return action("final", "eligible scratch restored and the warm-only helper was rebuilt from durable input");
+        expect(probe.lastUserText).toContain('"durableStateNames":["repl-rebuild-input"]');
+        return action("final", "warm REPL bindings were gone and required input was reconstructed from durable state");
       },
     ]);
     fixture.hold(warmTask, 2);
@@ -328,7 +343,7 @@ describe("FU-009 installed no-ID release transcript", () => {
     });
     const resumed = await world.command(["resume"], fixture.environment());
     expect(resumed).toMatchObject({ code: 0, stderr: "" });
-    expect(resumed.stdout).toContain("Session: exercise compact warm scratch / main");
+    expect(resumed.stdout).toContain("Session: exercise compact warm REPL namespace / main");
     expect(resumed.stdout).toContain("Detached. Session identity and durable work remain owned by the service.");
 
     const warmHistory = JSON.parse((await world.command(
@@ -340,25 +355,25 @@ describe("FU-009 installed no-ID release transcript", () => {
       JSON.stringify(cell.result).length < 1_000)).toBe(true);
 
     const forked = await world.command(
-      ["branch", "head", "scratch-isolation", "--json"],
+      ["branch", "head", "repl-isolation", "--json"],
       fixture.environment(),
     );
     expect(JSON.parse(forked.stdout)).toMatchObject({
       created: true,
-      branch: "scratch-isolation",
+      branch: "repl-isolation",
       from: "head",
     });
     const isolated = await world.command(["run", "--json", isolationTask], fixture.environment());
     expect(parseSingleJson(isolated)).toMatchObject({
       status: "succeeded",
-      final: "fork scratch remained isolated",
+      final: "fork REPL namespace remained isolated",
     });
     const mainResume = await world.command(
       ["resume", "main"],
       fixture.environment(),
     );
     expect(mainResume).toMatchObject({ code: 0, stderr: "" });
-    expect(mainResume.stdout).toContain("Session: exercise compact warm scratch / main");
+    expect(mainResume.stdout).toContain("Session: exercise compact warm REPL namespace / main");
     const resumedMainHistory = JSON.parse((await world.command(
       ["history", "current", "--json"],
       fixture.environment(),
@@ -395,7 +410,7 @@ describe("FU-009 installed no-ID release transcript", () => {
     expect(recovered.code, `${recovered.stdout}\n${recovered.stderr}`).toBe(0);
     expect(parseSingleJson(recovered)).toMatchObject({
       status: "succeeded",
-      final: "eligible scratch restored and the warm-only helper was rebuilt from durable input",
+      final: "warm REPL bindings were gone and required input was reconstructed from durable state",
     });
     expect(fixture.count(warmTask)).toBe(3);
     expect(fixture.count(isolationTask)).toBe(2);

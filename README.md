@@ -1,6 +1,6 @@
 # Agencity
 
-Agencity is a terminal-first autonomous agent runtime for work that may outlive one model context, terminal, or process. It keeps agent sessions, tasks, branches, tool effects, subagents, and evidence in a durable local event history—an append-only sequence of records. Generated work runs through disposable TypeScript cells, while committed state can be inspected and resumed after restart.
+Agencity is a terminal-first autonomous agent runtime for work that may outlive one model context, terminal, or process. It keeps agent sessions, tasks, branches, tool effects, subagents, and evidence in a durable local event history—an append-only sequence of records. Generated work runs in an exact-branch TypeScript REPL whose bindings remain available while its worker lives, while committed state can be inspected and resumed after restart.
 
 A **session** is a durable agent identity. A **branch** is one retained line of that session's history. An **effect** is an external action such as a model call, shell command, or file operation. Agencity records effect intent before execution and keeps success, failure, cancellation, and uncertainty distinct.
 
@@ -60,7 +60,7 @@ Agencity:
 - discovers the nearest repository root and creates or resumes named work without requiring internal IDs;
 - keeps the branch's model explicit and never silently changes it on resume;
 - uses one fixed formal model-tool set: `bun_console` for a validated TypeScript cell and `finish` for a successful, blocked, or failed result;
-- runs file, shell, SQL, model, subagent, memory, skill, and artifact operations through durable runtime APIs, while direct branch-scoped `scratch` holds replaceable nearby intermediates;
+- runs file, shell, SQL, model, subagent, memory, skill, and artifact operations through durable runtime APIs, while one exact-branch TypeScript environment keeps top-level bindings alive as long as its worker remains resident;
 - commits each action and observation before a dependent model step;
 - keeps automatic observations bounded, spills recoverable large local output to immutable artifacts, and exposes file pages and artifact byte ranges for focused continuation;
 - retains child agents, messages, goals, completion checks, budgets, and unresolved outcomes;
@@ -68,11 +68,11 @@ Agencity:
 - opens a full-screen terminal client on interactive terminals and a readable transcript for non-interactive use; and
 - starts an authenticated local-machine-only workspace service on demand so detached work can continue independently of the client; it exits after one hour of quiescence by default.
 
-`bun_console` and `finish` are declaration-only provider response tools. They have no execute callbacks and do not run at the provider. Only an accepted `bun_console` call can lead to execution, after validation and durable action commit. The `tools`, `sql`, `scratch`, `state`, `ai`, `sdk`, memory, agent, skill, and artifact surfaces exist inside that later disposable cell; they are not provider tools. Every autonomous model step must return exactly one formal call. Supplemental narration is diagnostic only, and Agencity has no text-JSON or fenced-code fallback.
+`bun_console` and `finish` are declaration-only provider response tools. They have no execute callbacks and do not run at the provider. Only an accepted `bun_console` call can lead to execution, after validation and durable action commit. The `tools`, `sql`, `state`, `ai`, `sdk`, memory, agent, skill, and artifact surfaces exist inside that later console cell; they are not provider tools. Every autonomous model step must return exactly one formal call. Supplemental narration is diagnostic only, and Agencity has no text-JSON or fenced-code fallback.
 
 Inside a cell, ordinary TypeScript handles deterministic work. `ai.generateText` and `ai.generateObject` each make one raw provider request over only the explicit prompt/messages and bounded context supplied by that call; they cannot inspect files, run tools, use skills, read ambient branch context, or continue autonomously. `sdk.agents.run` waits for a full child agent and returns text or schema-validated object data. `sdk.agents.spawn` starts the same durable child lifecycle and returns a handle immediately; `handle.result(options)` and `sdk.agents.result(handle, options)` retrieve the same lifecycle or terminal result later. The bound method is worker-local and is not serialized with the durable JSON handle. `runMany` and `spawnMany` are bounded independent fan-out, not durable orchestration for dependent steps. Structured validity does not prove facts, completion, safety, or authority.
 
-Use ordinary variables within one cell, `scratch` for replaceable intermediates useful across nearby cells, `state` for small values required after recovery, artifacts for larger durable bytes, and a compact final expression for the next model decision. Scratch is exact-branch and noncanonical. Arbitrary values survive only while the worker remains warm; the managed file-local product may opportunistically restore bounded eligible JSON on the same device. Scratch is not synchronized, exported, supplied automatically to model context, accepted as completion evidence, or guaranteed after detach, eviction, restart, or service loss.
+Top-level variables, functions, classes, imports, and object identity remain available across cells while the exact-branch worker lives. Use `state` for small values required after recovery, artifacts for larger durable bytes, and a compact final expression for the next model decision. The in-memory environment is noncanonical: it is not synchronized, exported, supplied automatically to model context, accepted as completion evidence, or guaranteed after cancellation, memory recycling, restart, or service loss.
 
 A successful `finish` message is published only after required completion gates pass. Blocked and failed finishes atomically retain their exact assistant message and terminal status. Missing information ends the current run as blocked; a later user message starts an ordinary new run on the same branch.
 
@@ -117,7 +117,7 @@ Closing a client detaches; it does not prove that durable or external work stopp
 
 ## Recovery and uncertainty
 
-Committed work is reconstructed from retained events rather than a live TypeScript heap or scratch cache. Eligible same-device scratch JSON may restore as an optimization; missing or skipped scratch must be rebuilt from durable inputs without replaying unsafe effects. Work declared safe to repeat may resume after a crash. If an external action is not safe to repeat and may have happened without a committed result, Agencity records an `unknown` effect and does not retry it automatically.
+Committed work is reconstructed from retained events rather than a live TypeScript heap. Missing in-memory bindings must be rebuilt from state, artifacts, files, retained cells, or other durable inputs without replaying unsafe effects. Work declared safe to repeat may resume after a crash. If an external action is not safe to repeat and may have happened without a committed result, Agencity records an `unknown` effect and does not retry it automatically.
 
 ```sh
 agencity unknown

@@ -25,12 +25,13 @@ import {
   familyRefreshSuffix,
   formatManagedDetach,
   toggleAllRunDetails,
+  toggleLatestRunDetails,
   workspaceAgentsLines,
   type OpenTuiController,
 } from "../../src/tui/opentui.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
 import type { ProductBranchSummary } from "../../src/product/index.ts";
-import { TerminalTranscript } from "../../src/tui/transcript.ts";
+import { TerminalTranscript, terminalRunMarker } from "../../src/tui/transcript.ts";
 import { createTerminalSyntaxStyle } from "../../src/tui/theme.ts";
 import { buildTerminalScreen, type TerminalScreenView } from "../../src/tui/view-model.ts";
 import { fixtureAgentProfile, makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
@@ -1628,14 +1629,53 @@ describe("OpenTUI interactive terminal", () => {
         }],
       };
       transcript.reconcile(activeView, new Set());
-      await setup.waitForFrame(value =>
-        value.includes("running")
-        && value.includes("const value = 42;")
-        && !value.includes("return { value };"),
-      );
+      await setup.waitForFrame(value => value.includes("return { value };"));
       expect((await setup.captureCharFrame()).toString()).not.toContain("Waiting for model response");
+      const activeMarker = setup.renderer.root.findDescendantById(
+        "agencity-transcript-run-marker-run-1",
+      ) as TextRenderable;
+      const stepsHost = setup.renderer.root.findDescendantById(
+        "agencity-transcript-run-steps-run-1",
+      ) as BoxRenderable;
+      const markerText = (): string => activeMarker.content.chunks.map(chunk => chunk.text).join("");
+      expect(markerText()).toBe("⠋");
+      transcript.setAnimationFrame(1);
+      expect(markerText()).toBe("⠙");
+      expect(stepsHost.border).toEqual(["left"]);
+      expect(stepsHost.screenX).toBeLessThan(cellRoot.screenX);
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
+        .toBe(true);
+
+      const nextStep = {
+        ...view.runs[0]!.steps[0]!,
+        id: "step-2",
+        ordinal: 2,
+        cell: {
+          ...view.runs[0]!.steps[0]!.cell!,
+          id: "agent-run-cell-action-2",
+          code: "// Purpose: Inspect the next value.\nconst next = 43;\nreturn { next };",
+        },
+      };
+      const activeNextView: TerminalScreenView = {
+        ...activeView,
+        runs: [{
+          ...activeView.runs[0]!,
+          actionPending: false,
+          steps: [activeView.runs[0]!.steps[0]!, nextStep],
+        }],
+      };
+      transcript.reconcile(activeNextView, new Set());
+      await setup.waitForFrame(value => value.includes("return { next };"));
       expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
         .toBe(false);
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-2")?.visible)
+        .toBe(true);
+
+      transcript.reconcile(activeNextView, new Set(["run-1"]));
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-1")?.visible)
+        .toBe(true);
+      expect(setup.renderer.root.findDescendantById("agencity-transcript-cell-details-agent-run-cell-action-2")?.visible)
+        .toBe(true);
 
       transcript.reconcile(view, new Set());
       await setup.waitForFrame(value => value.includes("Ctrl-O to expand latest") && !value.includes("return { value };"));
@@ -1697,7 +1737,14 @@ describe("OpenTUI interactive terminal", () => {
     })).toBe("Detached. Service remains active: 1 active schedule.");
   });
 
-  test("toggles every completed run while leaving active work alone", () => {
+  test("uses braille animation frames only for active run states", () => {
+    expect(terminalRunMarker({ active: true, status: "running" }, 0)).toBe("⠋");
+    expect(terminalRunMarker({ active: true, status: "running" }, 7)).toBe("⠧");
+    expect(terminalRunMarker({ active: false, status: "queued" }, 1)).toBe("⠙");
+    expect(terminalRunMarker({ active: false, status: "succeeded" }, 1)).toBe("✓");
+  });
+
+  test("toggles details for completed and active runs", () => {
     const expanded = new Set<string>();
     const runs = [
       { id: "older", active: false, steps: [{}] },
@@ -1705,8 +1752,12 @@ describe("OpenTUI interactive terminal", () => {
       { id: "active", active: true, steps: [{}] },
     ] as unknown as TerminalScreenView["runs"];
     expect(toggleAllRunDetails(runs, expanded)).toBe(true);
-    expect([...expanded].sort()).toEqual(["newer", "older"]);
+    expect([...expanded].sort()).toEqual(["active", "newer", "older"]);
     expect(toggleAllRunDetails(runs, expanded)).toBe(true);
+    expect([...expanded]).toEqual([]);
+    expect(toggleLatestRunDetails(runs, expanded)).toBe(true);
+    expect([...expanded]).toEqual(["active"]);
+    expect(toggleLatestRunDetails(runs, expanded)).toBe(true);
     expect([...expanded]).toEqual([]);
   });
 

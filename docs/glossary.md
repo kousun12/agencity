@@ -156,15 +156,15 @@ The validated, canonical decision submitted by the model for one run step. The f
 
 ### Cell
 
-A proposed TypeScript program executed in a disposable Bun worker. A committed cell records source, dependencies, bounded logs, result, exports, and terminal status. Lexical variables are cell-local; worker heap and scratch are not durable identity.
+A proposed TypeScript program evaluated in a persistent Bun REPL worker dedicated to one exact session and branch. A committed cell records source, dependencies, bounded logs, result, exports, and terminal status. Top-level bindings and object identity persist while the worker lives, but its namespace is not durable identity.
 
-### Scratch
+### Console namespace
 
-An exact-session-and-branch, noncanonical console cache for replaceable intermediates. Warm scratch may contain arbitrary runtime values while one worker survives. The managed file-local product may opportunistically restore bounded eligible JSON from a same-device fenced operational checkpoint. Scratch is excluded from events, synchronization, export, automatic context, gates, and correctness requirements.
+The noncanonical top-level bindings and heap of one exact-session-and-branch Bun REPL worker. Variables, functions, classes, imports, module instances, closures, and object identity persist across cells while the worker lives. The namespace may be lost on cancellation, RSS recycling, non-runtime failure, worker/service/process loss, or branch change. It is never checkpointed or replayed.
 
 ### Working value
 
-A named durable JSON value, or a reference to an artifact, saved through the console state API for later cells and recovery. Each committed update appends retained history. It is the small structured-data alternative when a value cannot safely depend on scratch.
+A named durable JSON value, or a reference to an artifact, saved through the console state API for later cells and recovery. Each committed update appends retained history. It is the small structured-data choice when a value must survive REPL namespace loss.
 
 ### Artifact
 
@@ -350,7 +350,7 @@ The full-screen terminal client that presents conversation, runs, cells, effects
 
 ### Managed workspace service
 
-The authenticated loopback process that owns detached run advancement, recovery, schedules, wakes, and same-device execution fencing for product use. It stops after one hour of quiescence by default without deleting durable agent identity. Warm scratch and an idle console worker are not keep-alive reasons.
+The authenticated loopback process that owns detached run advancement, recovery, schedules, wakes, and same-device execution fencing for product use. It stops after one hour of quiescence by default without deleting durable agent identity. A live REPL namespace and an idle console worker are not keep-alive reasons.
 
 ### Placement
 
