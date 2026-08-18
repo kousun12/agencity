@@ -3,6 +3,7 @@ export * from "./model.ts";
 export * from "./model-response.ts";
 export * from "./declared-schema.ts";
 export * from "./provider-input.ts";
+export * from "./repl-namespace.ts";
 export * from "./events.ts";
 export * from "./agent-action.ts";
 export * from "./agent-tool-contract.ts";

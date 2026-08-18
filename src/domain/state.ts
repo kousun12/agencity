@@ -10,8 +10,9 @@ import type { AgentAction } from "./agent-action.ts";
 import type { AgentInvocationProfilePin, AgentProfileVersion, InvocationPromptProvenance } from "./agent-profile.ts";
 import type { JsonValue } from "./json.ts";
 import type { AgentInvocationContract, AgentRunResultReference } from "./agent-invocation-contract.ts";
+import type { ReplNamespaceStatus } from "./repl-namespace.ts";
 
-export const REDUCER_VERSION = 19 as const;
+export const REDUCER_VERSION = 20 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
@@ -97,7 +98,8 @@ export interface AgentRunModelAttemptState {
   readonly attempt: number; readonly contextId: string; readonly callId: string; readonly effectId: string;
   readonly reason: "initial" | "proactive-compaction" | "provider-overflow"; readonly estimatedInputTokens: number;
   readonly providerInputVersion: string; readonly providerInputDigest: string;
-  readonly contextWindow: ContextCapacityProvenance; readonly retryOfCallId?: string; readonly eventId: string;
+  readonly contextWindow: ContextCapacityProvenance; readonly replNamespace?: ReplNamespaceStatus;
+  readonly retryOfCallId?: string; readonly eventId: string;
 }
 export interface AgentRunStepState {
   readonly id: string; readonly ordinal: number; readonly contextId: string; readonly callId: string;

@@ -53,7 +53,9 @@ await state.set("failureInvestigations", investigations);
 return investigations;
 ```
 
-The REPL namespace is useful but disposable. Top-level bindings remain available to later cells on the same live branch worker without an explicit cache API, but they do not own the agent and are not supplied automatically to the model. Values required after worker loss are committed as typed state, stored as immutable artifacts, or represented by durable handles. A cell's final expression or explicit return remains a separate bounded observation for the next model decision. If the worker exits, another worker can reconstruct the committed work, not the arbitrary heap.
+The REPL namespace is useful but disposable. Top-level bindings remain available to later cells on the same live branch worker without an explicit cache API, but they do not own the agent. Each worker generation has a random authoritative epoch ID and a readable name. Before every autonomous model call, Agencity reports the exact branch as cold or as that warm named epoch and retains the same status with the model attempt. Before a submitted cell runs, Agencity compares the pin with current worker status. If the namespace changed in between, the source does not run; a typed `REPL_EPOCH_CHANGED` observation tells the next model step to rebuild only the required bindings.
+
+Values required after worker loss are committed as typed state, stored as immutable artifacts, or represented by durable handles. A cell's final expression or explicit return remains a separate bounded observation for the next model decision. If the worker exits, another worker can reconstruct the committed work, not the arbitrary heap. Agencity does not automatically replay old cells because they may have edited files, started commands, or called external services.
 
 This is more than a language change from Python to TypeScript. Agencity separates temporary computation from durable identity:
 

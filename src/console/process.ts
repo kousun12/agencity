@@ -1,5 +1,13 @@
 import { environmentWithoutSecrets } from "../security/index.ts";
-import { assertBoundedOutputV1, type CellLogStream } from "../domain/index.ts";
+import {
+  COLD_REPL_NAMESPACE,
+  REPL_NAMESPACE_PROTOCOL,
+  ReplEpochChangedError,
+  assertBoundedOutputV1,
+  sameReplNamespace,
+  type CellLogStream,
+  type ReplNamespaceStatus,
+} from "../domain/index.ts";
 import { MAX_CELL_OBSERVATION_JSON_BYTES, type EncodedObservation } from "./inspect.ts";
 
 export interface ConsoleExecution {
@@ -10,6 +18,13 @@ export interface ConsoleExecution {
 }
 
 export type ConsoleRpcHandler = (method: string, args: unknown[]) => Promise<unknown>;
+
+export interface ConsoleExecutionNamespaceGuard {
+  /** The exact cold/warm status retained with the model attempt. */
+  readonly modelExpected: ReplNamespaceStatus;
+  /** The live epoch admitted by the pool after any permitted cold start. */
+  readonly executionExpected: ReplNamespaceStatus;
+}
 
 export const CONSOLE_EXECUTION_YIELD_METHOD =
   "__agencity.internal.execution-yield.v1";
@@ -50,6 +65,7 @@ interface PendingExecution {
 export interface ConsoleProcessStatus {
   readonly running: boolean;
   readonly lastRecycleReason: string | null;
+  readonly replNamespace: ReplNamespaceStatus;
 }
 
 /**
@@ -64,12 +80,19 @@ export class ConsoleProcess {
   #pending = new Map<string, PendingExecution>();
   #rpcOperations = new Set<Promise<void>>();
   #lastRecycleReason: string | null = null;
+  #replNamespace: ReplNamespaceStatus = COLD_REPL_NAMESPACE;
   #closed = false;
 
   constructor(readonly workerUrl = new URL("./worker.ts", import.meta.url)) {}
 
   status(): ConsoleProcessStatus {
-    return { running: this.#process !== null, lastRecycleReason: this.#lastRecycleReason };
+    return {
+      running: this.#process !== null,
+      lastRecycleReason: this.#lastRecycleReason,
+      replNamespace: this.#process === null
+        ? COLD_REPL_NAMESPACE
+        : this.#replNamespace,
+    };
   }
 
   async start(): Promise<void> {
@@ -91,12 +114,16 @@ export class ConsoleProcess {
       },
     });
     this.#process = child;
+    this.#replNamespace = newReplNamespace();
     // Output that bypasses the worker's per-cell capture is never protocol. It
     // is drained to prevent pipe backpressure and deliberately not re-parsed.
     void drain(child.stdout);
     void drain(child.stderr);
     void child.exited.then((code) => {
-      if (this.#process === child) this.#process = null;
+      if (this.#process === child) {
+        this.#process = null;
+        this.#replNamespace = COLD_REPL_NAMESPACE;
+      }
       this.#rejectAll(new Error(`Console worker exited with code ${code}`));
     });
   }
@@ -107,8 +134,24 @@ export class ConsoleProcess {
     restored: Record<string, unknown>,
     handler: ConsoleRpcHandler,
     workspaceRoot = process.cwd(),
+    namespaceGuard?: ConsoleExecutionNamespaceGuard,
   ): Promise<ConsoleExecution> {
-    await this.start();
+    if (namespaceGuard) {
+      const status = this.status();
+      const current = status.replNamespace;
+      if (!status.running ||
+          !sameReplNamespace(
+            namespaceGuard.executionExpected,
+            current,
+          )) {
+        throw new ReplEpochChangedError(
+          namespaceGuard.modelExpected,
+          current,
+        );
+      }
+    } else {
+      await this.start();
+    }
     const executionId = crypto.randomUUID();
     const promise = new Promise<ConsoleExecution>((resolve, reject) => {
       this.#pending.set(executionId, { resolve, reject, handler });
@@ -135,7 +178,10 @@ export class ConsoleProcess {
     if (!child) return;
     child.kill();
     await child.exited;
-    if (this.#process === child) this.#process = null;
+    if (this.#process === child) {
+      this.#process = null;
+      this.#replNamespace = COLD_REPL_NAMESPACE;
+    }
   }
 
   async stop(): Promise<void> {
@@ -149,7 +195,10 @@ export class ConsoleProcess {
     const timer = setTimeout(() => child.kill(), 1_000);
     await child.exited;
     clearTimeout(timer);
-    if (this.#process === child) this.#process = null;
+    if (this.#process === child) {
+      this.#process = null;
+      this.#replNamespace = COLD_REPL_NAMESPACE;
+    }
   }
 
   /** Permanently prevents this pool-owned worker from restarting. */
@@ -287,6 +336,32 @@ export class ConsoleProcess {
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
   }
+}
+
+const REPL_EPOCH_ADJECTIVES = [
+  "amber", "brisk", "calm", "clear", "cool", "eager", "fair", "gentle",
+  "keen", "lively", "lucid", "quiet", "rapid", "steady", "vivid", "warm",
+] as const;
+const REPL_EPOCH_NOUNS = [
+  "badger", "cedar", "crane", "dolphin", "falcon", "fox", "harbor", "heron",
+  "lynx", "maple", "otter", "pine", "raven", "river", "sparrow", "willow",
+] as const;
+
+function newReplNamespace(): ReplNamespaceStatus {
+  const epochId = crypto.randomUUID();
+  const hex = epochId.replaceAll("-", "");
+  const adjective = REPL_EPOCH_ADJECTIVES[
+    Number.parseInt(hex.slice(0, 2), 16) % REPL_EPOCH_ADJECTIVES.length
+  ]!;
+  const noun = REPL_EPOCH_NOUNS[
+    Number.parseInt(hex.slice(2, 4), 16) % REPL_EPOCH_NOUNS.length
+  ]!;
+  return Object.freeze({
+    protocol: REPL_NAMESPACE_PROTOCOL,
+    state: "warm",
+    epochId,
+    epochName: `${adjective}-${noun}-${hex.slice(4, 10)}`,
+  });
 }
 
 function validObservation(value: unknown): value is EncodedObservation {

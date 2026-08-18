@@ -14,6 +14,7 @@ import {
   type CellHistoryStatus,
   type CellListOptions,
   type ConsoleScope,
+  type ConsoleWorkerAcquisition,
   type EventProvenance,
 } from "../console/index.ts";
 import { consoleRpcResponse } from "../console/process.ts";
@@ -33,6 +34,7 @@ import {
   NotFoundError,
   normalizeReasoningEffort,
   projectEvents,
+  ReplEpochChangedError,
   ValidationError,
   type AgentEvent,
   type AgentProfileInput,
@@ -43,6 +45,7 @@ import {
   type ModelConfigurationInput,
   type RepositoryInstructionDiscovery,
   type RepositoryInstructionOmission,
+  type ReplNamespaceStatus,
   type WorkingValue,
 } from "../domain/index.ts";
 import {
@@ -528,7 +531,21 @@ export class Supervisor {
     this.restartConsoleAfterCell = restartConsoleAfterCell;
     this.consoleRssRecycleThresholdBytes = consoleRssRecycleThresholdBytes;
     this.maxAwaitedAgentDepth = maxAwaitedAgentDepth;
-    this.runs = new AgentRunService(storage, this.contexts, outbox, this.goals, this.executeCell.bind(this), acceptanceAgentRunMaxSteps(), this.compactions, modelExecutor, this.agentProfiles);
+    this.runs = new AgentRunService(
+      storage,
+      this.contexts,
+      outbox,
+      this.goals,
+      this.executeCell.bind(this),
+      acceptanceAgentRunMaxSteps(),
+      this.compactions,
+      modelExecutor,
+      this.agentProfiles,
+      (sessionId, branchId) => this.console.replNamespaceStatus({
+        sessionId,
+        branchId,
+      }),
+    );
     this.effectReconciliation = new EffectReconciliationService(storage);
     this.refiner = new RefinerService(
       storage,
@@ -1054,6 +1071,7 @@ export class Supervisor {
     code: string,
     dependencies: string[] = [],
     stableCellId?: string,
+    expectedReplNamespace?: ReplNamespaceStatus | null,
   ): Promise<{ cellId: string; result: JsonValue; logs: string[] }> {
     const session = await this.storage.getSession?.(sessionId);
     if (session?.executionOwnerDeviceId && session.executionOwnerDeviceId !== this.device.deviceId) throw new CapabilityUnavailableError(`execution of session owned by device ${session.executionOwnerDeviceId}`, `device ${this.device.deviceId} (automatic ownership failover is unavailable)`);
@@ -1061,26 +1079,35 @@ export class Supervisor {
       `${sessionId}/${branchId}`,
       () => this.console.run(
         { sessionId, branchId },
-        (consoleProcess) =>
+        (consoleProcess, acquisition) =>
           this.#executeCell(
             consoleProcess,
+            acquisition,
             sessionId,
             branchId,
             code,
             dependencies,
             stableCellId,
+            expectedReplNamespace,
           ),
+        {
+          ...(expectedReplNamespace === undefined
+            ? {}
+            : { expectedReplNamespace }),
+        },
       ),
     );
   }
 
   async #executeCell(
     consoleProcess: ConsoleProcess,
+    acquisition: ConsoleWorkerAcquisition,
     sessionId: string,
     branchId: string,
     code: string,
     dependencies: string[],
     stableCellId?: string,
+    expectedReplNamespace?: ReplNamespaceStatus | null,
   ): Promise<{ cellId: string; result: JsonValue; logs: string[] }> {
     if (containsBrokeredSecret(code)) {
       throw new ValidationError("Brokered credentials cannot enter console cell source");
@@ -1948,6 +1975,17 @@ export class Supervisor {
     let runtimeCellFailed = false;
     let workerRssBytes = 0;
     try {
+      if (acquisition.epochChanged) {
+        if (expectedReplNamespace === undefined) {
+          throw new ValidationError(
+            "Console pool reported an epoch change without an expected namespace",
+          );
+        }
+        throw new ReplEpochChangedError(
+          expectedReplNamespace,
+          acquisition.replNamespaceBeforeAcquire,
+        );
+      }
       const execution = await this.console.execute(
         consoleProcess,
         code,
@@ -1955,6 +1993,13 @@ export class Supervisor {
         restored,
         handler,
         this.workspaceRoot,
+        expectedReplNamespace == null
+          ? undefined
+          : {
+              modelExpected: expectedReplNamespace,
+              executionExpected:
+                acquisition.replNamespaceForExecution,
+            },
       );
       workerRssBytes = execution.rssBytes;
       const rawPreview = JSON.parse(JSON.stringify(execution.observation.preview)) as unknown;
@@ -2073,6 +2118,10 @@ export class Supervisor {
       if (error instanceof ConsoleCellError) {
         runtimeCellFailed = error.failurePhase === "runtime";
         workerRssBytes = error.rssBytes;
+      } else if (error instanceof ReplEpochChangedError) {
+        // No generated code ran, so the newly observed/current namespace is
+        // safe to retain for the corrective model step.
+        runtimeCellFailed = true;
       }
       const logs = error instanceof ConsoleCellError ? error.logs.map(scrubText) : [];
       const logStreams = error instanceof ConsoleCellError ? [...error.logStreams] : [];
@@ -2092,6 +2141,16 @@ export class Supervisor {
             causalEffectOutcomeEventIds: error instanceof ConsoleCellError
               ? [...error.causalEffectOutcomeEventIds]
               : [],
+            ...(error instanceof ReplEpochChangedError
+              ? {
+                  failure: {
+                    code: error.code,
+                    expected: error.details.expected,
+                    current: error.details.current,
+                    guidance: error.details.guidance,
+                  },
+                }
+              : {}),
           },
         }]);
       }

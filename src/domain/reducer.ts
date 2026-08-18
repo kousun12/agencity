@@ -969,7 +969,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
           !Bun.deepEquals(admission.capacity, p.contextWindow)) {
         throw new InvalidTransitionError("agentRunModelAttempt", run?.status ?? "missing-run", "started");
       }
-      const attempt = { attempt: p.attempt, contextId: p.contextId, callId: p.callId, effectId: p.effectId, reason: p.reason, providerInputVersion: p.providerInputVersion, providerInputDigest: p.providerInputDigest, estimatedInputTokens: p.estimatedInputTokens, contextWindow: p.contextWindow, ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), eventId: event.id };
+      const attempt = { attempt: p.attempt, contextId: p.contextId, callId: p.callId, effectId: p.effectId, reason: p.reason, providerInputVersion: p.providerInputVersion, providerInputDigest: p.providerInputDigest, estimatedInputTokens: p.estimatedInputTokens, contextWindow: p.contextWindow, ...(p.replNamespace === undefined ? {} : { replNamespace: p.replNamespace }), ...(p.retryOfCallId === undefined ? {} : { retryOfCallId: p.retryOfCallId }), eventId: event.id };
       const updated = { ...step, modelAttempts: [...step.modelAttempts, attempt], eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, steps: [...run.steps.slice(0, -1), updated], eventId: event.id } } };
     }

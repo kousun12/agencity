@@ -16,8 +16,8 @@ import { effectiveCompaction } from "./context-compaction.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
 import type { RepositoryInstructionService } from "./repository-instructions.ts";
 
-export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. Top-level TypeScript bindings persist only while the exact-branch console worker remains alive. Persist every value required after recovery through state or artifacts. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
-export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 3, text: BASE_POLICY });
+export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. run.replNamespace identifies whether the exact-branch console is cold or names its current warm epoch. Top-level TypeScript bindings persist only while that same warm epoch remains alive. Persist every value required after recovery through state or artifacts. REPL_EPOCH_CHANGED means the submitted cell did not execute; rebuild required bindings without replaying prior effectful cells. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
+export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 4, text: BASE_POLICY });
 function hash(value: string): string { const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex"); }
 
 export interface ContextMaterializeOptions {

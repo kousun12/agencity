@@ -4,6 +4,8 @@ import {
   AGENT_TOOL_CONTRACT_VERSION,
   AGENT_TOOL_SELECTION_POLICY,
   PROVIDER_INPUT_ESTIMATOR_ID,
+  COLD_REPL_NAMESPACE,
+  replNamespaceStatusSchema,
   agentProfilePin,
   agentActionFromToolSubmission,
   createAgentInvocationContract,
@@ -40,6 +42,7 @@ import {
   type ModelDispatch,
   type ModelEffectFailureCode,
   type ModelEffectOutputV2,
+  type ReplNamespaceStatus,
   validateTypedAgentToolSubmissionValue,
   validateModelEffectOutputV2,
   validateProviderInputCandidate,
@@ -106,7 +109,13 @@ type ExecuteCell = (
   code: string,
   dependencies?: string[],
   stableCellId?: string,
+  expectedReplNamespace?: ReplNamespaceStatus | null,
 ) => Promise<{ cellId: string; result: JsonValue; logs: string[] }>;
+
+type GetReplNamespaceStatus = (
+  sessionId: string,
+  branchId: string,
+) => ReplNamespaceStatus;
 
 const TERMINAL_RUN_STATUSES: readonly AgentRunStatus[] = [
   "succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown",
@@ -151,8 +160,8 @@ const SDK_GUIDE = [
   "Pass file.value.sha256 as expectedSha256 when replacing a previously read file. Shell options use { timeoutMs, cwd?, idempotencyKey? }; the option is timeoutMs, not timeout.",
   "tools.readFile, tools.writeFile, and tools.shell throw when their durable effect does not succeed. Use tools.request(executor, operation, input, options?) when an expected failed outcome must be inspected without failing the cell.",
   "After a validation or shell failure, use any reliable path, line, column, or named-symbol diagnostic to inspect only a small surrounding range (about 20 lines on each side). If no diagnostic maps reliably to source, inspect the smallest relevant function or section; do not reread the whole file.",
-  "Use sql`SELECT ... ${value}` only for read-only relational queries. Top-level TypeScript bindings, functions, classes, imports, and object identity remain available across cells while this exact-branch worker lives. Put small recovery-critical JSON in state and large durable content in artifacts.",
-  "The in-memory TypeScript environment is noncanonical and may disappear after cancellation, memory recycling, service shutdown, or process loss. It never crosses agents or branches, including parent, child, sibling, and forked work. Rebuild missing bindings from durable inputs; never replay a prior cell automatically because it may have performed effects.",
+  "Use sql`SELECT ... ${value}` only for read-only relational queries. run.replNamespace reports the exact branch console as cold or as a warm named epoch. Top-level TypeScript bindings, functions, classes, imports, and object identity remain available only while that same warm epoch lives. Put small recovery-critical JSON in state and large durable content in artifacts.",
+  "The in-memory TypeScript environment is noncanonical and may disappear after cancellation, memory recycling, service shutdown, or process loss. It never crosses agents or branches, including parent, child, sibling, and forked work. A REPL_EPOCH_CHANGED failure means the submitted cell was not executed; rebuild bindings from durable inputs or recompute them in a new cell. Never replay a prior cell automatically because it may have performed effects.",
   "Use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents provides run, runMany, detached spawn, spawnMany, result, list, send, messages, acknowledge, and cancel. sdk.agents.list() is an on-demand nuclear-family snapshot; consult it before admitting a child when retained family work may already cover the proposed subtask, but do not poll it on every step. send defaults to mode queue, which gives each message one durable FIFO run and wakes an idle recipient; use mode steer only to enter an active run at its next boundary or retain context without waking an idle recipient. sdk.memory, sdk.harness, sdk.skills, and sdk.specs provide adaptation and delegation.",
   "Choose the smallest correct operation. Use ordinary TypeScript for deterministic work. Use ai.generateText only when every required fact is already in the explicit prompt/context and one text transformation, such as summarization or rewriting, is sufficient. Use ai.generateObject under the same explicit-context constraint when later TypeScript must branch, loop, filter, aggregate, or validate fields. Keep object schemas small and decision-oriented, not unbounded reports encoded as JSON.",
   "Raw ai calls cannot inspect files, run commands, use skills, call tools, read ambient branch messages, profiles, memory, or repository instructions, or continue autonomously. Use sdk.agents.run when a strictly narrower child task must inspect the workspace, use tools, run commands, or iterate before this cell continues. Do not hand off your entire assigned task, restate it as a child task, or recurse solely because the work is agentic; continue directly unless the child has a bounded independent outcome that you will use. Give agents.run an output schema when its conclusion must be program data; omit output when a textual report is enough.",
@@ -169,7 +178,7 @@ const SDK_GUIDE = [
 ].join("\n");
 export const AGENT_RUN_EXECUTION_GUIDANCE = Object.freeze({
   id: "agencity.agent-run.execution-guidance",
-  version: 11,
+  version: 12,
   text: SDK_GUIDE,
 });
 
@@ -213,6 +222,8 @@ export class AgentRunService {
     readonly compactions?: CompactionService,
     readonly modelExecutor?: ModelExecutor,
     readonly profiles: AgentProfileService = new AgentProfileService(storage),
+    readonly replNamespaceStatus: GetReplNamespaceStatus = () =>
+      COLD_REPL_NAMESPACE,
   ) {
     if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) throw new ValidationError("Agent run maxSteps must be positive");
   }
@@ -565,6 +576,9 @@ export class AgentRunService {
       const providerInput = providerInputFromContextEvent(retainedContextEvent);
       const admission = retainedContextEvent.payload.providerInputAdmission!;
       const modelDispatch = admission.modelDispatch;
+      const replNamespace = replNamespaceFromProviderContext(
+        retainedContextEvent.payload.context,
+      );
       const estimatedInputTokens = estimateProviderInputCandidate(providerInput).estimatedTokens;
       assertProviderInputWithinProductLimit(providerInput);
       await this.storage.appendEvents([{
@@ -576,6 +590,7 @@ export class AgentRunService {
           providerInputVersion: providerInput.version,
           providerInputDigest: providerInput.digest,
           estimatedInputTokens, contextWindow: admission.capacity,
+          ...(replNamespace === undefined ? {} : { replNamespace }),
         },
       }, {
         sessionId, branchId, type: "SessionStatusChanged", producer: "recovery",
@@ -600,13 +615,25 @@ export class AgentRunService {
       if (this.compactions) {
         const admission = await new ContextWindowController(window.configuration).admit({
           buildCandidate: async ({ completedCompactions }) => {
+            const replNamespace = this.replNamespaceStatus(
+              sessionId,
+              branchId,
+            );
             const retained = await this.contexts.materialize(sessionId, branchId, {
               contextId: completedCompactions === 0 ? step.contextId : `${step.contextId}-window-${completedCompactions}`,
               idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}:window:${completedCompactions}`,
               additionalRecordIds: step.observationEventIds,
               promptProvenance: prompt.provenance,
               agentProfileVersionId: run.profilePin.profileVersionId,
-              transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch, prompt.content),
+              transform: (base) => agentProviderContext(
+                base,
+                run,
+                step.ordinal,
+                observations,
+                modelDispatch,
+                prompt.content,
+                replNamespace,
+              ),
               providerInput: {
                 modelDispatch,
                 capacity: window.provenance,
@@ -615,6 +642,7 @@ export class AgentRunService {
             return {
               ...retained,
               providerInput: providerInputFromContextEvent(retained.event),
+              replNamespace,
             };
           },
           estimate: (candidate) =>
@@ -637,22 +665,37 @@ export class AgentRunService {
         materialized = admission.candidate;
       } else {
         let contextEvent = events.find((event) => event.type === "ContextMaterialized" && (event.payload as EventPayloads["ContextMaterialized"]).contextId === step.contextId) as AgentEvent<"ContextMaterialized"> | undefined;
-        if (!contextEvent) contextEvent = (await this.contexts.materialize(sessionId, branchId, {
-          contextId: step.contextId, idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}`,
-          additionalRecordIds: step.observationEventIds,
-          promptProvenance: prompt.provenance,
-          agentProfileVersionId: run.profilePin.profileVersionId,
-          transform: (base) => agentProviderContext(base, run, step.ordinal, observations, modelDispatch, prompt.content),
-          providerInput: {
-            modelDispatch,
-            capacity: window.provenance,
-          },
-        })).event;
+        let replNamespace = contextEvent
+          ? replNamespaceFromProviderContext(contextEvent.payload.context)
+          : undefined;
+        if (!contextEvent) {
+          replNamespace = this.replNamespaceStatus(sessionId, branchId);
+          contextEvent = (await this.contexts.materialize(sessionId, branchId, {
+            contextId: step.contextId, idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}`,
+            additionalRecordIds: step.observationEventIds,
+            promptProvenance: prompt.provenance,
+            agentProfileVersionId: run.profilePin.profileVersionId,
+            transform: (base) => agentProviderContext(
+              base,
+              run,
+              step.ordinal,
+              observations,
+              modelDispatch,
+              prompt.content,
+              replNamespace!,
+            ),
+            providerInput: {
+              modelDispatch,
+              capacity: window.provenance,
+            },
+          })).event;
+        }
         materialized = {
           contextId: step.contextId,
           context: contextEvent.payload.context,
           event: contextEvent,
           providerInput: providerInputFromContextEvent(contextEvent),
+          replNamespace,
         };
       }
       const estimatedInputTokens =
@@ -669,6 +712,9 @@ export class AgentRunService {
           providerInputDigest: materialized.providerInput.digest,
           estimatedInputTokens,
           contextWindow: window.provenance,
+          ...(materialized.replNamespace === undefined
+            ? {}
+            : { replNamespace: materialized.replNamespace }),
         },
       }, {
         sessionId, branchId, type: "SessionStatusChanged", producer: "supervisor",
@@ -743,6 +789,10 @@ export class AgentRunService {
         });
         if (compacted.status === "completed") {
           const nextAttempt = attempt.attempt + 1;
+          const nextReplNamespace = this.replNamespaceStatus(
+            sessionId,
+            branchId,
+          );
           const nextContext = await this.contexts.materialize(sessionId, branchId, {
             contextId: `${step.contextId}-overflow-${nextAttempt}`,
             idempotencyKey: `agent-run-overflow-context:${run.id}:${step.ordinal}:${nextAttempt}`,
@@ -756,6 +806,7 @@ export class AgentRunService {
               observations,
               call.modelDispatch,
               systemPromptFromContext(context),
+              nextReplNamespace,
             ),
             providerInput: {
               modelDispatch: call.modelDispatch,
@@ -785,6 +836,7 @@ export class AgentRunService {
                 providerInputVersion: nextProviderInput.version,
                 providerInputDigest: nextProviderInput.digest,
                 estimatedInputTokens: nextEstimate, contextWindow: attempt.contextWindow,
+                replNamespace: nextReplNamespace,
                 retryOfCallId: attempt.callId,
               },
             }, {
@@ -1282,7 +1334,19 @@ export class AgentRunService {
         return true;
       }
       if (!cell) {
-        try { await this.executeCell(sessionId, branchId, action.code, [], cellId); }
+        const expectedReplNamespace = run.steps.find(
+          (candidate) => candidate.actionId === actionId,
+        )?.modelAttempts.at(-1)?.replNamespace ?? null;
+        try {
+          await this.executeCell(
+            sessionId,
+            branchId,
+            action.code,
+            [],
+            cellId,
+            expectedReplNamespace,
+          );
+        }
         catch {
           const after = await this.#state(sessionId, branchId);
           const terminal = after.cells[cellId];
@@ -1762,6 +1826,7 @@ export function agentProviderContext(
   observations: readonly { eventId: string; type: string; payload: JsonValue }[],
   modelDispatch: ModelDispatch,
   systemPrompt: string,
+  replNamespace: ReplNamespaceStatus = COLD_REPL_NAMESPACE,
 ): JsonValue {
   if (modelDispatch.responseContract.kind !== "required-tool-set") {
     throw new ValidationError("Agent provider context requires its retained formal tool contract");
@@ -1879,15 +1944,28 @@ export function agentProviderContext(
         Array.isArray(observation.payload)) return false;
     return observation.payload.outcome === "failed";
   });
+  const recoveringChangedReplEpoch = observations.some((observation) =>
+    observation.type === "CellFailed" &&
+    observation.payload !== null &&
+    typeof observation.payload === "object" &&
+    !Array.isArray(observation.payload) &&
+    observation.payload.failure !== null &&
+    typeof observation.payload.failure === "object" &&
+    !Array.isArray(observation.payload.failure) &&
+    observation.payload.failure.code === "REPL_EPOCH_CHANGED"
+  );
   const stepInput = {
     runId: run.id,
     task: run.task,
     stepOrdinal,
     status: run.status,
+    replNamespace,
     recentTrajectory,
     observations,
     instruction: correctingRejectedAction
       ? "The prior response was rejected without executing any code. Use the exact typed validation error in the observation and call exactly one provided tool with valid input."
+      : recoveringChangedReplEpoch
+      ? "The prior cell was not executed because the exact-branch REPL epoch changed after the model call. Rebuild only the required bindings from durable state, artifacts, or current inputs in one new cell. Do not replay prior effectful cells."
       : recoveringFailedExecution
       ? "The prior cell or effect failed. Use the exact bounded error and any reliable path, line, column, or named symbol in the new observations. If inspection is needed, read only a small surrounding range (about 20 lines on each side), or the smallest relevant function or section when no reliable location exists. Call bun_console for one targeted repair, or finish blocked/failed if safe progress is not possible. Do not reread the whole file."
       : stepOrdinal === 1
@@ -1949,6 +2027,12 @@ function recentRunTrajectory(
       const action = trajectoryAction(step, keepDetailedAction);
       return {
         ordinal: step.ordinal,
+        ...(step.modelAttempts.at(-1)?.replNamespace === undefined
+          ? {}
+          : {
+              replNamespace:
+                step.modelAttempts.at(-1)!.replNamespace,
+            }),
         action,
         ...(terminal === undefined
           ? goalCheck === undefined
@@ -2198,6 +2282,20 @@ function sha256Text(value: string): string {
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(value);
   return hasher.digest("hex");
+}
+
+function replNamespaceFromProviderContext(
+  context: JsonValue,
+): ReplNamespaceStatus | undefined {
+  if (!context || typeof context !== "object" || Array.isArray(context) ||
+      !context.run || typeof context.run !== "object" ||
+      Array.isArray(context.run)) {
+    return undefined;
+  }
+  const parsed = replNamespaceStatusSchema.safeParse(
+    context.run.replNamespace,
+  );
+  return parsed.success ? parsed.data : undefined;
 }
 
 function systemPromptFromContext(context: JsonValue): string {

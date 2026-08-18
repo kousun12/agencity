@@ -23,7 +23,7 @@ Resident-process permits are separate from active-execution permits. A generated
 
 A runtime throw records failure but leaves declarations and mutations already completed in the live namespace. The failed cell's staged state and artifact writes remain uncommitted, while independently committed effects retain their outcomes. Parse/transpilation failure, cancellation, worker loss, or failure after execution but before canonical commit recycles the worker.
 
-The namespace may also disappear on RSS recycling, service/process loss, or branch change. It has no checkpoint, event, synchronization, export, automatic-context, gate, or completion-evidence representation. Any value required after recovery uses state or artifacts. Recovery constructs a fresh namespace and never replays retained cell source automatically.
+The namespace may also disappear on RSS recycling, service/process loss, or branch change. Every live worker gets a random authoritative epoch ID and a readable adjective-noun-suffix name. Autonomous provider input reports the exact branch as cold or as that warm epoch, and `AgentRunModelAttemptStarted` pins the status the model saw. The namespace still has no checkpoint, synchronization, export, gate, or completion-evidence role. Any value required after recovery uses state or artifacts. Recovery constructs a fresh namespace and never replays retained cell source automatically.
 
 ## Dependency direction
 
@@ -174,7 +174,7 @@ Reviewer approval establishes consistency with the frozen policy, not empirical 
 
 These declarations have no execute callback, provider-hosted execution, tool-result continuation, or provider-managed loop. Agencity accepts exactly one completed permitted call. Supplemental text is bounded diagnostic evidence only; it is never parsed for JSON or TypeScript. Zero, multiple, malformed, truncated, oversized, unknown, refused, or incomplete calls execute nothing and become typed contract violations.
 
-Only `bun_console` can lead to execution. Agencity validates and durably commits its canonical `agencity.agent-action` before evaluating the cell in the exact-branch persistent REPL worker. Files, shell, read-only SQL, models, subagents, skills, memory, state, artifacts, goals, and refinement are injected SDK APIs inside that later cell, not provider tools.
+Only `bun_console` can lead to execution. Agencity validates and durably commits its canonical `agencity.agent-action` before evaluating the cell in the exact-branch persistent REPL worker. Immediately before execution, the worker-pool admission compares the model attempt's pinned cold/warm epoch status with the current branch status. A mismatch appends a typed `REPL_EPOCH_CHANGED` `CellFailed` and does not evaluate the submitted source. Files, shell, read-only SQL, models, subagents, skills, memory, state, artifacts, goals, and refinement are injected SDK APIs inside a cell that passes this guard, not provider tools.
 
 A successful `finish` remains provisional until required completion gates pass. Failed gates create bounded repair evidence without publishing the proposed success message; an unknown required gate ends unknown without publishing it. Blocked and failed finishes atomically retain their exact submitted assistant message with the effective terminal status. A failed finish after unresolved required-gate failure becomes goal-derived blocked. Missing information uses blocked `finish`; later user text starts a normal new run on the same branch. There is no second pending-input lifecycle.
 

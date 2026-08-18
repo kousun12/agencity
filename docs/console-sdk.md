@@ -29,9 +29,9 @@ rows.slice(0, 5)
 
 If the cell has no cell-level `return`, its last top-level expression becomes the observation and is awaited when it is a promise. An explicit cell-level `return` keeps normal early-return behavior. A `return` inside a nested function does not suppress final-expression observation. A cell ending in a declaration observes `null`.
 
-Cells on one branch are serialized. Top-level variables, functions, classes, imports, module instances, closures, and object identity remain available to later cells while the exact-session-and-branch worker lives. No namespace is shared with another branch or session.
+Cells on one branch are serialized. Top-level variables, functions, classes, imports, module instances, closures, and object identity remain available to later cells while the exact-session-and-branch worker lives. No namespace is shared with another branch or session. Each worker generation has a random authoritative epoch ID and a readable name such as `quiet-otter-a13f09`.
 
-The namespace is noncanonical and may disappear on cancellation, RSS recycling, worker/service/process loss, or branch change. State and artifacts are the only supported recovery persistence. Agencity never reconstructs the namespace by replaying retained cell source.
+The namespace is noncanonical and may disappear on cancellation, RSS recycling, worker/service/process loss, or branch change. Every autonomous model step receives `run.replNamespace`, which is either cold with null epoch fields or warm with the current exact epoch ID and name. State and artifacts are the only supported recovery persistence. Agencity never reconstructs the namespace by replaying retained cell source.
 
 ## Injected names
 
@@ -103,7 +103,7 @@ return { fileCount: files.length };
 
 A later cell in the same live worker can use `files` and `normalize` directly. Static and dynamic relative imports resolve from the workspace root. Imported bindings, classes, cyclic objects, parsed documents, module objects, and ordinary JavaScript references preserve their identity. Parent, child, sibling, and forked branches use different workers and namespaces.
 
-The namespace has no event, checkpoint, status API, synchronization, export, automatic-context, gate, or completion-evidence representation. After loss, required values restore only from state or artifacts. New work may recompute from current external inputs or explicitly request safe idempotent effects. Never replay prior cells automatically because they may have performed non-idempotent work.
+The namespace has no checkpoint, model-facing mutation API, synchronization, export, gate, or completion-evidence role. The runtime reports its cold/warm status in autonomous provider input and pins the same value to `AgentRunModelAttemptStarted`. Before evaluating the submitted cell, worker-pool admission compares that pin with current status. A mismatch records `CellFailed.failure.code = REPL_EPOCH_CHANGED`, including expected/current status and guidance, without running the source. After loss, required values restore only from state or artifacts. New work may recompute from current external inputs or explicitly request safe idempotent effects. Never replay prior cells automatically because they may have performed non-idempotent work.
 
 ## `state`
 

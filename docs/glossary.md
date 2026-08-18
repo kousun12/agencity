@@ -160,7 +160,7 @@ A proposed TypeScript program evaluated in a persistent Bun REPL worker dedicate
 
 ### Console namespace
 
-The noncanonical top-level bindings and heap of one exact-session-and-branch Bun REPL worker. Variables, functions, classes, imports, module instances, closures, and object identity persist across cells while the worker lives. The namespace may be lost on cancellation, RSS recycling, non-runtime failure, worker/service/process loss, or branch change. It is never checkpointed or replayed.
+The noncanonical top-level bindings and heap of one exact-session-and-branch Bun REPL worker. Variables, functions, classes, imports, module instances, closures, and object identity persist across cells while the worker lives. Each worker generation has an authoritative random epoch ID and readable adjective-noun-suffix name. Autonomous model attempts retain cold or exact warm epoch status so a changed namespace can reject stale source before execution. Heap contents are never checkpointed or replayed.
 
 ### Working value
 

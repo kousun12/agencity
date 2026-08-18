@@ -164,6 +164,55 @@ class NestedAgentProvider implements ModelProvider {
   }
 }
 
+class ReplEpochRaceProvider implements ModelProvider {
+  readonly name = "repl-epoch-race";
+  readonly capabilities = {
+    streaming: false,
+    requiredToolSet: {
+      status: "provider-strict",
+      requiredChoice: "provider-enforced",
+      parallelCalls: "provider-disabled",
+      streaming: true,
+      adapter: "agencity.repl-epoch-race.fixture.v1",
+    },
+  } as const;
+  beforeFirstAction: (() => Promise<void>) | null = null;
+  #ordinal = 0;
+
+  async complete(): Promise<TextModelResponse> {
+    throw new Error("REPL epoch fixture requires formal streaming");
+  }
+
+  async streamResponse(
+    _context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    this.#ordinal++;
+    if (this.#ordinal === 1) await this.beforeFirstAction?.();
+    const selected = this.#ordinal === 1
+      ? action({
+          type: "typescript",
+          code: `globalThis.__staleEpochActionExecuted = true; return "stale";`,
+        })
+      : this.#ordinal === 2
+      ? action({
+          type: "typescript",
+          code: `const rebuiltAfterEpochChange = 42; return rebuiltAfterEpochChange;`,
+        })
+      : action({ type: "final", content: "epoch recovery complete" });
+    return formalOutputFromAgentAction({
+      action: selected,
+      dispatch,
+      providerToolCallId: `repl-epoch-${this.#ordinal}`,
+      provider: this.name,
+      adapter: this.capabilities.requiredToolSet.adapter,
+      usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+    });
+  }
+}
+
 async function fixture(
   options: {
     readonly maxResident?: number;
@@ -192,6 +241,208 @@ async function fixture(
 }
 
 describe("branch-aware console execution pool", () => {
+  test("names each warm namespace and reports cold without spawning", async () => {
+    const pool = new ConsoleExecutionPool({
+      maxResidentProcesses: 1,
+      maxActiveExecutions: 1,
+    });
+    const scope = { sessionId: "epoch-status", branchId: "branch" };
+    try {
+      expect(pool.replNamespaceStatus(scope)).toMatchObject({
+        state: "cold",
+        epochId: null,
+        epochName: null,
+      });
+      let firstEpochId = "";
+      await pool.run(scope, async (process, acquisition) => {
+        expect(acquisition.epochChanged).toBe(false);
+        const status = process.status().replNamespace;
+        expect(status.state).toBe("warm");
+        if (status.state === "warm") {
+          firstEpochId = status.epochId;
+          expect(status.epochName).toMatch(
+            /^[a-z]+-[a-z]+-[0-9a-f]{6}$/,
+          );
+        }
+      });
+      expect(pool.replNamespaceStatus(scope).state).toBe("warm");
+      await pool.recycleScope(scope, "test-epoch-replacement");
+      expect(pool.replNamespaceStatus(scope).state).toBe("cold");
+      await pool.run(scope, async (process) => {
+        const status = process.status().replNamespace;
+        expect(status.state).toBe("warm");
+        if (status.state === "warm") {
+          expect(status.epochId).not.toBe(firstEpochId);
+        }
+      });
+    } finally {
+      await pool.stop();
+    }
+  });
+
+  test("rejects a model cell when its pinned REPL epoch changed", async () => {
+    const temp = await makeTempRuntime("agencity-repl-epoch-race-");
+    temps.push(temp);
+    const provider = new ReplEpochRaceProvider();
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const root = await supervisor.createSession({
+      workspaceId: "repl-epoch-race",
+      model: { provider: provider.name, model: "fixture-v1" },
+    });
+    provider.beforeFirstAction = async () => {
+      await supervisor.executeCell(
+        root.sessionId,
+        root.branchId,
+        `const interleavedBinding = "warm"; return interleavedBinding;`,
+      );
+    };
+    try {
+      const result = await supervisor.runs.start(
+        root.sessionId,
+        root.branchId,
+        "recover after the exact branch namespace changes",
+      );
+      expect(result).toMatchObject({
+        status: "succeeded",
+        final: "epoch recovery complete",
+      });
+      const events = await supervisor.storage.loadEvents(root.sessionId, {
+        branchId: root.branchId,
+      });
+      const attempts = events.filter((event) =>
+        event.type === "AgentRunModelAttemptStarted"
+      ).map((event) =>
+        (event.payload as {
+          replNamespace?: { state: string; epochId: string | null };
+        }).replNamespace
+      );
+      expect(attempts.map((status) => status?.state)).toEqual([
+        "cold",
+        "warm",
+        "warm",
+      ]);
+      const changed = events.find((event) =>
+        event.type === "CellFailed" &&
+        (event.payload as { failure?: { code?: string } }).failure?.code ===
+          "REPL_EPOCH_CHANGED"
+      );
+      expect(changed?.payload).toMatchObject({
+        failure: {
+          code: "REPL_EPOCH_CHANGED",
+          expected: { state: "cold", epochId: null },
+          current: { state: "warm" },
+        },
+      });
+      const changedCellId = (changed?.payload as { cellId?: string } | undefined)
+        ?.cellId;
+      expect(events.find((event) =>
+        event.type === "CellProposed" &&
+        (event.payload as { cellId: string }).cellId === changedCellId
+      )?.payload).toMatchObject({
+        code: expect.stringContaining("__staleEpochActionExecuted"),
+      });
+      expect(events.some((event) =>
+        event.type === "CellCommitted" &&
+        (event.payload as { cellId: string }).cellId === changedCellId
+      )).toBe(false);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("does not restart a guarded worker after loss at execution", async () => {
+    const pool = new ConsoleExecutionPool({
+      maxResidentProcesses: 1,
+      maxActiveExecutions: 1,
+    });
+    const scope = { sessionId: "epoch-send-race", branchId: "branch" };
+    try {
+      await pool.run(scope, async (process, acquisition) => {
+        const expected = acquisition.replNamespaceForExecution;
+        expect(expected.state).toBe("warm");
+        await process.recycle("test-loss-before-send");
+        await expect(pool.execute(
+          process,
+          `globalThis.__guardedRestartExecuted = true;`,
+          { id: scope.sessionId, branchId: scope.branchId },
+          {},
+          async () => null,
+          globalThis.process.cwd(),
+          {
+            modelExpected: expected,
+            executionExpected: expected,
+          },
+        )).rejects.toMatchObject({
+          code: "REPL_EPOCH_CHANGED",
+          details: {
+            expected,
+            current: { state: "cold", epochId: null },
+          },
+        });
+        expect(process.status().running).toBe(false);
+      });
+    } finally {
+      await pool.stop();
+    }
+  });
+
+  test("fails a retained action without an epoch pin before execution", async () => {
+    const temp = await makeTempRuntime("agencity-unpinned-epoch-");
+    temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const root = await supervisor.createSession({
+      workspaceId: "unpinned-epoch",
+    });
+    try {
+      await expect(supervisor.executeCell(
+        root.sessionId,
+        root.branchId,
+        `globalThis.__unpinnedActionExecuted = true;`,
+        [],
+        "legacy-unpinned-cell",
+        null,
+      )).rejects.toMatchObject({
+        code: "REPL_EPOCH_CHANGED",
+        details: {
+          expected: null,
+          current: { state: "cold" },
+        },
+      });
+      const events = await supervisor.storage.loadEvents(root.sessionId, {
+        branchId: root.branchId,
+      });
+      expect(events.find((event) =>
+        event.type === "CellFailed" &&
+        (event.payload as { cellId: string }).cellId ===
+          "legacy-unpinned-cell"
+      )?.payload).toMatchObject({
+        failure: {
+          code: "REPL_EPOCH_CHANGED",
+          expected: null,
+          current: { state: "cold" },
+        },
+      });
+      expect(events.some((event) =>
+        event.type === "CellCommitted" &&
+        (event.payload as { cellId: string }).cellId ===
+          "legacy-unpinned-cell"
+      )).toBe(false);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
   test("parallel RPC completions share one active-permit reacquisition", async () => {
     const value = await fixture({ maxResident: 1, maxActive: 1 });
     try {

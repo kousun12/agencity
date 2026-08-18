@@ -59,6 +59,11 @@ import {
 import {
   MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
 } from "./refinement-governance.ts";
+import {
+  REPL_EPOCH_CHANGED,
+  replNamespaceStatusSchema,
+  type ReplNamespaceStatus,
+} from "./repl-namespace.ts";
 
 export const EVENT_SCHEMA_VERSION = 5 as const;
 export const eventTypes = [
@@ -216,7 +221,20 @@ export interface EventPayloads {
   CellProposed: { cellId: string; code: string; dependencies: string[] };
   CellStarted: { cellId: string; attempt: number };
   CellCommitted: { cellId: string; result: JsonValue; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; exports: string[]; repositoryInstructions?: RepositoryInstructionDiscovery[]; repositoryInstructionOmission?: RepositoryInstructionOmission };
-  CellFailed: { cellId: string; error: string; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; causalEffectOutcomeEventIds?: string[] };
+  CellFailed: {
+    cellId: string;
+    error: string;
+    logs: string[];
+    logStreams?: CellLogStream[];
+    durationMs: number;
+    causalEffectOutcomeEventIds?: string[];
+    failure?: {
+      code: typeof REPL_EPOCH_CHANGED;
+      expected: ReplNamespaceStatus | null;
+      current: ReplNamespaceStatus;
+      guidance: string;
+    };
+  };
   CellAbandoned: { cellId: string; reason: string };
   WorkingValueSet: { name: string; version: number; value: WorkingValue };
   ArtifactRegistered: ArtifactReference & { sourceEventId?: string };
@@ -331,7 +349,7 @@ export interface EventPayloads {
   AgentRunRequested: { runId: string; task: string; requestKey: string; profilePin: AgentInvocationProfilePin; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
   AgentInvocationContractPinned: { runId: string; contract: AgentInvocationContract };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
-  AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; providerInputVersion: typeof PROVIDER_INPUT_VERSION; providerInputDigest: Sha256Digest; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; retryOfCallId?: string };
+  AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; providerInputVersion: typeof PROVIDER_INPUT_VERSION; providerInputDigest: Sha256Digest; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; replNamespace?: ReplNamespaceStatus; retryOfCallId?: string };
   AgentRunActionCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; action: AgentAction };
   AgentRunActionRejected: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "contract-violation" }>; error: string };
   AgentRunTypedFinishCommitted: { runId: string; stepId: string; ordinal: number; actionId: string; source: Extract<AgentRunActionSource, { kind: "tool-submission" }>; outcome: AgentRunTypedFinishOutcome };
@@ -787,6 +805,12 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     logStreams: z.array(z.enum(["stdout", "stderr"])).optional(),
     durationMs: nonnegative,
     causalEffectOutcomeEventIds: z.array(id).max(16).optional(),
+    failure: z.object({
+      code: z.literal(REPL_EPOCH_CHANGED),
+      expected: replNamespaceStatusSchema.nullable(),
+      current: replNamespaceStatusSchema,
+      guidance: z.string().min(1),
+    }).strict().optional(),
   }).superRefine((payload, context) => {
     if (payload.logStreams && payload.logStreams.length !== payload.logs.length) {
       context.addIssue({ code: "custom", message: "Cell log stream metadata must align with logs", path: ["logStreams"] });
@@ -1003,7 +1027,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
     }),
   }).strict(),
   AgentRunStepStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, contextId: id, callId: id, effectId: id, actionId: id, observationEventIds: z.array(id) }).strict(),
-  AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), providerInputVersion: z.literal(PROVIDER_INPUT_VERSION), providerInputDigest: fingerprint, estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, retryOfCallId: id.optional() }).strict(),
+  AgentRunModelAttemptStarted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, attempt: positiveInteger, contextId: id, callId: id, effectId: id, reason: z.enum(["initial", "proactive-compaction", "provider-overflow"]), providerInputVersion: z.literal(PROVIDER_INPUT_VERSION), providerInputDigest: fingerprint, estimatedInputTokens: z.number().int().nonnegative(), contextWindow: capacityProvenanceSchema, replNamespace: replNamespaceStatusSchema.optional(), retryOfCallId: id.optional() }).strict(),
   AgentRunActionCommitted: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceSubmissionSchema, action: agentActionSchema }).strict(),
   AgentRunActionRejected: z.object({ runId: id, stepId: id, ordinal: positiveInteger, actionId: id, source: actionSourceViolationSchema, error: z.string().min(1) }).strict(),
   AgentRunTypedFinishCommitted: z.object({

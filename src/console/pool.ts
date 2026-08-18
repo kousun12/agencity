@@ -1,8 +1,15 @@
-import { ConsoleCapacityError, ValidationError } from "../domain/index.ts";
+import {
+  COLD_REPL_NAMESPACE,
+  ConsoleCapacityError,
+  ValidationError,
+  sameReplNamespace,
+  type ReplNamespaceStatus,
+} from "../domain/index.ts";
 import {
   CONSOLE_EXECUTION_YIELD_METHOD,
   ConsoleProcess,
   type ConsoleExecution,
+  type ConsoleExecutionNamespaceGuard,
   type ConsoleRpcHandler,
 } from "./process.ts";
 
@@ -29,7 +36,8 @@ interface BranchWorker {
 
 interface ResidentWaiter {
   readonly scope: ConsoleScope;
-  readonly resolve: (worker: BranchWorker) => void;
+  readonly expectedReplNamespace?: ReplNamespaceStatus | null;
+  readonly resolve: (acquisition: ConsoleWorkerAcquisition) => void;
   readonly reject: (error: Error) => void;
 }
 
@@ -54,6 +62,17 @@ export interface ConsoleExecutionPoolStatus {
 
 export interface ConsoleResidentReservation {
   release(): Promise<void>;
+}
+
+export interface ConsoleWorkerAcquisition {
+  readonly process: ConsoleProcess;
+  readonly replNamespaceBeforeAcquire: ReplNamespaceStatus;
+  readonly replNamespaceForExecution: ReplNamespaceStatus;
+  readonly epochChanged: boolean;
+}
+
+export interface ConsoleRunOptions {
+  readonly expectedReplNamespace?: ReplNamespaceStatus | null;
 }
 
 class AsyncPermitPool {
@@ -145,9 +164,22 @@ export class ConsoleExecutionPool {
     };
   }
 
+  /** Returns exact-branch namespace status without starting a worker. */
+  replNamespaceStatus(scope: ConsoleScope): ReplNamespaceStatus {
+    const worker = this.#workers.get(scopeKey(scope));
+    if (!worker?.resident || !worker.process.status().running) {
+      return COLD_REPL_NAMESPACE;
+    }
+    return worker.process.status().replNamespace;
+  }
+
   async run<T>(
     scope: ConsoleScope,
-    operation: (process: ConsoleProcess) => Promise<T>,
+    operation: (
+      process: ConsoleProcess,
+      acquisition: ConsoleWorkerAcquisition,
+    ) => Promise<T>,
+    options: ConsoleRunOptions = {},
   ): Promise<T> {
     let settleOperation!: () => void;
     const operationSettled = new Promise<void>((resolve) => {
@@ -156,9 +188,12 @@ export class ConsoleExecutionPool {
     this.#operations.add(operationSettled);
     let acquired = false;
     try {
-      const worker = await this.#acquireWorker(scope);
+      const acquisition = await this.#acquireWorker(
+        scope,
+        options.expectedReplNamespace,
+      );
       acquired = true;
-      return await operation(worker.process);
+      return await operation(acquisition.process, acquisition);
     } finally {
       settleOperation();
       this.#operations.delete(operationSettled);
@@ -173,6 +208,7 @@ export class ConsoleExecutionPool {
     restored: Record<string, unknown>,
     handler: ConsoleRpcHandler,
     workspaceRoot?: string,
+    namespaceGuard?: ConsoleExecutionNamespaceGuard,
   ): Promise<ConsoleExecution> {
     let releaseActive: Release | null = await this.#active.acquire();
     let reacquiring: Promise<void> | null = null;
@@ -218,6 +254,7 @@ export class ConsoleExecutionPool {
         restored,
         wrapped,
         workspaceRoot,
+        namespaceGuard,
       );
     } finally {
       executionEnded = true;
@@ -344,14 +381,29 @@ export class ConsoleExecutionPool {
     });
   }
 
-  async #acquireWorker(scope: ConsoleScope): Promise<BranchWorker> {
-    return new Promise<BranchWorker>((resolve, reject) => {
+  async #acquireWorker(
+    scope: ConsoleScope,
+    expectedReplNamespace?: ReplNamespaceStatus | null,
+  ): Promise<ConsoleWorkerAcquisition> {
+    return new Promise<ConsoleWorkerAcquisition>((resolve, reject) => {
       void this.#mutations.run(async () => {
         try {
           this.#assertOpen();
-          const worker = await this.#tryAcquire(scope);
-          if (worker) resolve(worker);
-          else this.#residentWaiters.push({ scope, resolve, reject });
+          const acquisition = await this.#tryAcquire(
+            scope,
+            expectedReplNamespace,
+          );
+          if (acquisition) resolve(acquisition);
+          else {
+            this.#residentWaiters.push({
+              scope,
+              ...(expectedReplNamespace === undefined
+                ? {}
+                : { expectedReplNamespace }),
+              resolve,
+              reject,
+            });
+          }
         } catch (error) {
           reject(error instanceof Error ? error : new Error(String(error)));
         }
@@ -359,10 +411,21 @@ export class ConsoleExecutionPool {
     });
   }
 
-  async #tryAcquire(scope: ConsoleScope): Promise<BranchWorker | null> {
+  async #tryAcquire(
+    scope: ConsoleScope,
+    expectedReplNamespace?: ReplNamespaceStatus | null,
+  ): Promise<ConsoleWorkerAcquisition | null> {
     this.#pruneStoppedWorkers();
     const key = scopeKey(scope);
     let worker = this.#workers.get(key);
+    const replNamespaceBeforeAcquire =
+      this.#workerReplNamespace(worker);
+    const epochChanged = expectedReplNamespace !== undefined &&
+      (expectedReplNamespace === null ||
+        !sameReplNamespace(
+          expectedReplNamespace,
+          replNamespaceBeforeAcquire,
+        ));
     if (worker?.resident && worker.process.status().running) {
       if (!this.#isBusyResident(key) &&
           !this.#scopeReservations.has(key) &&
@@ -370,7 +433,13 @@ export class ConsoleExecutionPool {
         return null;
       }
       worker.busy++;
-      return worker;
+      return {
+        process: worker.process,
+        replNamespaceBeforeAcquire,
+        replNamespaceForExecution:
+          worker.process.status().replNamespace,
+        epochChanged,
+      };
     }
     if (worker?.resident) worker.resident = false;
 
@@ -394,7 +463,13 @@ export class ConsoleExecutionPool {
       worker.resident = true;
       worker.busy++;
       worker.lastUsedAt = Date.now();
-      return worker;
+      return {
+        process: worker.process,
+        replNamespaceBeforeAcquire,
+        replNamespaceForExecution:
+          worker.process.status().replNamespace,
+        epochChanged,
+      };
     } catch (error) {
       worker.resident = false;
       if (this.#workers.get(key) === worker) this.#workers.delete(key);
@@ -443,13 +518,16 @@ export class ConsoleExecutionPool {
     for (let index = 0; index < this.#residentWaiters.length;) {
       const waiter = this.#residentWaiters[index]!;
       try {
-        const worker = await this.#tryAcquire(waiter.scope);
-        if (!worker) {
+        const acquisition = await this.#tryAcquire(
+          waiter.scope,
+          waiter.expectedReplNamespace,
+        );
+        if (!acquisition) {
           index++;
           continue;
         }
         this.#residentWaiters.splice(index, 1);
-        waiter.resolve(worker);
+        waiter.resolve(acquisition);
       } catch (error) {
         this.#residentWaiters.splice(index, 1);
         waiter.reject(error instanceof Error ? error : new Error(String(error)));
@@ -463,6 +541,15 @@ export class ConsoleExecutionPool {
       if (worker.resident && worker.process.status().running) count++;
     }
     return count;
+  }
+
+  #workerReplNamespace(
+    worker: BranchWorker | undefined,
+  ): ReplNamespaceStatus {
+    if (!worker?.resident || !worker.process.status().running) {
+      return COLD_REPL_NAMESPACE;
+    }
+    return worker.process.status().replNamespace;
   }
 
   #isBusyResident(key: string): boolean {
