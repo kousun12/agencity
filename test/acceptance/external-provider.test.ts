@@ -6,7 +6,7 @@ let world: AcceptanceWorld | undefined;
 
 afterEach(async () => { if (world) await world.dispose(); world = undefined; });
 
-test.skipIf(!enabled)("opt-in real OpenAI-compatible provider smoke uses the installed product path", async () => {
+test.skipIf(!enabled)("opt-in real OpenAI Responses-compatible provider smoke uses the installed product path", async () => {
   const key = process.env.OPENAI_API_KEY;
   const model = process.env.AGENCITY_ACCEPTANCE_REAL_MODEL;
   if (!key || !model) throw new Error("real smoke requires OPENAI_API_KEY and AGENCITY_ACCEPTANCE_REAL_MODEL");

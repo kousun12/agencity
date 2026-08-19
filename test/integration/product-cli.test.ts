@@ -668,7 +668,7 @@ print(json.dumps({
     expect(await Bun.file(join(value.home, ".agencity", "profile.db")).exists()).toBe(false);
   });
 
-  test("doctor discovers OpenAI-compatible configuration without outputting or persisting its raw secret", async () => {
+  test("doctor discovers OpenAI Responses configuration without outputting or persisting its raw secret", async () => {
     const value = await fixture(); const secret = "sk-test-NEVER-PERSIST-0123456789";
     const checked = await cli(["doctor", "--workspace", value.workspace, "--json"], { home: value.home, extraEnv: { OPENAI_API_KEY: secret, OPENAI_BASE_URL: "https://example.invalid/v1" } });
     expect(checked).toMatchObject({ code: 0, stderr: "" });

@@ -114,7 +114,7 @@ Endpoint overrides:
 - `ANTHROPIC_BASE_URL`, default `https://api.anthropic.com`
 - `AI_GATEWAY_BASE_URL`, default `https://ai-gateway.vercel.sh`
 
-These values must be HTTP(S) origins without credentials, a path, query, or fragment. Agencity derives the provider API path from the origin. They affect provider network destinations, so treat a custom endpoint as part of the same trust boundary as the provider because it receives prompts and model traffic.
+These values must be HTTP(S) origins without credentials, a path, query, or fragment. Agencity derives the provider API path from the origin. Direct OpenAI execution uses `${OPENAI_BASE_URL}/v1/responses`, disables provider-side response storage, and sends explicit reasoning through the Responses API so required function tools remain available. They affect provider network destinations, so treat a custom endpoint as part of the same trust boundary as the provider because it receives prompts and model traffic.
 
 ### Model selection
 

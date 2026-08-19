@@ -293,7 +293,11 @@ class AiSdkModelProvider implements ModelProvider {
     this.displayName = options.displayName;
     this.#baseUrl = executionBaseUrl(options.transport, options.origin);
     this.executionOrigin = this.#baseUrl;
-    this.executionEndpointId = digest(this.#baseUrl);
+    this.executionEndpointId = digest(
+      options.transport === "openai"
+        ? `${this.#baseUrl}/responses`
+        : this.#baseUrl,
+    );
     this.capabilities = Object.freeze({
       streaming: true,
       reasoningControl: "normalized",
@@ -307,7 +311,9 @@ class AiSdkModelProvider implements ModelProvider {
           ? "runtime-rejected"
           : "provider-disabled",
         streaming: true,
-        adapter: "agencity.vercel-ai-sdk.v7",
+        adapter: this.name === "openai"
+          ? "agencity.vercel-ai-sdk.v7.openai-responses.v1"
+          : "agencity.vercel-ai-sdk.v7",
         reason:
           "The selected transport has proven bounded formal streaming, but the catalog does not authoritatively classify this model.",
       }),
@@ -468,6 +474,16 @@ class AiSdkModelProvider implements ModelProvider {
               : configuration.reasoningEffort)) === undefined
         ? {}
         : { reasoning: candidate?.options.reasoningEffort ?? configuration.reasoningEffort }),
+      ...(this.name === "openai"
+        ? {
+            providerOptions: {
+              openai: {
+                store: false,
+                reasoningSummary: null,
+              },
+            },
+          }
+        : {}),
     };
   }
 
@@ -476,7 +492,11 @@ class AiSdkModelProvider implements ModelProvider {
     if (this.name === "openai") {
       return {
         providerOptions: {
-          openai: { parallelToolCalls: false },
+          openai: {
+            store: false,
+            reasoningSummary: null,
+            parallelToolCalls: false,
+          },
         },
       };
     }
@@ -506,7 +526,7 @@ class AiSdkModelProvider implements ModelProvider {
         apiKey: key,
         baseURL: this.#baseUrl,
         ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
-      }).chat(nativeId);
+      }).responses(nativeId);
     }
     return createAnthropic({
       apiKey: key,

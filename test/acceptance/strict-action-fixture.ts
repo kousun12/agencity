@@ -211,22 +211,22 @@ export class StrictActionFixture {
           : FIXTURE_CATALOG_MODELS,
       });
     }
-    if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
+    if (request.method !== "POST" || url.pathname !== "/v1/responses") return new Response("not found", { status: 404 });
     const authorization = request.headers.get("authorization");
     if (authorization !== "Bearer acceptance-fixture-key") return new Response("unauthorized", { status: 401 });
     const body = await request.json() as {
       model?: unknown;
       stream?: unknown;
-      messages?: Array<{ role?: unknown; content?: unknown }>;
-      tools?: Array<{ function?: { name?: unknown } }>;
+      input?: Array<{ role?: unknown; content?: unknown }>;
+      tools?: Array<{ name?: unknown }>;
       tool_choice?: unknown;
       parallel_tool_calls?: unknown;
     };
-    if (typeof body.model !== "string" || !Array.isArray(body.messages)) return new Response("invalid request", { status: 400 });
-    const lastUser = [...body.messages].reverse().find(item => item.role === "user");
-    const firstUser = body.messages.find(item => item.role === "user");
-    const messageRoles = body.messages.map(item => String(item.role ?? ""));
-    const allMessageText = body.messages.map(item =>
+    if (typeof body.model !== "string" || !Array.isArray(body.input)) return new Response("invalid request", { status: 400 });
+    const lastUser = [...body.input].reverse().find(item => item.role === "user");
+    const firstUser = body.input.find(item => item.role === "user");
+    const messageRoles = body.input.map(item => String(item.role ?? ""));
+    const allMessageText = body.input.map(item =>
       messageText(item.content)
     ).join("\n");
     const firstUserText = messageText(firstUser?.content);
@@ -234,7 +234,7 @@ export class StrictActionFixture {
     const durable = this.readDurableStep(lastUserText);
     const toolNames = Array.isArray(body.tools)
       ? body.tools.flatMap(tool =>
-          typeof tool.function?.name === "string" ? [tool.function.name] : [])
+          typeof tool.name === "string" ? [tool.name] : [])
       : [];
     const governance = toolNames.length === 1 &&
       toolNames[0] === "agencity_submit_refinement_governance_decision";
@@ -242,7 +242,7 @@ export class StrictActionFixture {
       ? this.requests.filter(item => item.governanceStep !== null).length + 1
       : null;
     const proposalId = governance
-      ? JSON.stringify(body.messages).match(
+      ? JSON.stringify(body.input).match(
           /proposalId[^A-Za-z0-9]+(governed-refinement-proposal-[a-f0-9]{32}|[0-9A-HJKMNP-TV-Z]{26})/,
         )?.[1] ?? null
       : null;
@@ -284,7 +284,7 @@ export class StrictActionFixture {
       : governanceStep === null
         ? this.scripts.get(firstUserText)?.[(rawStep ?? 1) - 1]
         : this.governanceScripts[governanceStep - 1];
-    const reviewId = JSON.stringify(body.messages).match(/refinement-review-[a-f0-9]{32}/)?.[0];
+    const reviewId = JSON.stringify(body.input).match(/refinement-review-[a-f0-9]{32}/)?.[0];
     const fallback: Reply = durable
       ? action("final", `fixture completed: ${durable.task}`)
       : reviewId
@@ -313,47 +313,25 @@ export class StrictActionFixture {
       toolCall !== null
       ? toolCall.arguments.slice(0, -1)
       : toolCall?.arguments;
-    if (body.stream !== true) return Response.json({
-      id: "fixture-completion",
-      object: "chat.completion",
-      created: 1,
+    const callId = `fixture-tool-${durable?.stepOrdinal ?? 1}`;
+    if (body.stream !== true) {
+      return Response.json(openAiResponsesCompletion({
+        model: body.model,
+        text,
+        narration,
+        toolCall,
+        argumentsText: truncatedArguments,
+        callId,
+      }));
+    }
+    return openAiResponsesStream({
       model: body.model,
-      choices: [{
-        index: 0,
-        message: toolCall
-          ? { role: "assistant", content: narration, tool_calls: [{ index: 0, id: `fixture-tool-${durable?.stepOrdinal ?? 1}`, type: "function", function: { ...toolCall, arguments: truncatedArguments } }] }
-          : { role: "assistant", content: text },
-        finish_reason: toolCall ? "tool_calls" : "stop",
-      }],
-      usage: { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4), total_tokens: 7 + Math.ceil(text.length / 4) },
+      text,
+      narration,
+      toolCall,
+      argumentsText: truncatedArguments,
+      callId,
     });
-    const chunks = split(truncatedArguments ?? text, 3);
-    return new Response(new ReadableStream<Uint8Array>({
-      start(controller) {
-        const encoder = new TextEncoder();
-        const envelope = (choices: unknown[], usage?: unknown) => ({
-          id: "fixture-chunk",
-          object: "chat.completion.chunk",
-          created: 1,
-          model: body.model,
-          choices,
-          ...(usage === undefined ? {} : { usage }),
-        });
-        if (toolCall && narration) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta: { content: narration }, finish_reason: null }]))}\n\n`));
-        }
-        for (const [index, chunk] of chunks.entries()) {
-          const delta = toolCall
-            ? { tool_calls: [{ index: 0, ...(index === 0 ? { id: `fixture-tool-${durable?.stepOrdinal ?? 1}`, type: "function" } : {}), function: { ...(index === 0 ? { name: toolCall.name } : {}), arguments: chunk } }] }
-            : { content: chunk };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta, finish_reason: null }]))}\n\n`));
-        }
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([{ index: 0, delta: {}, finish_reason: toolCall ? "tool_calls" : "stop" }]))}\n\n`));
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope([], { prompt_tokens: 7, completion_tokens: Math.ceil(text.length / 4), total_tokens: 7 + Math.ceil(text.length / 4) }))}\n\n`));
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      },
-    }), { headers: { "content-type": "text/event-stream" } });
   }
 
   private readDurableStep(text: string): { task: string; stepOrdinal: number } | null {
@@ -389,7 +367,9 @@ function messageText(value: unknown): string {
   if (!Array.isArray(value)) return "";
   return value.map(part =>
     part && typeof part === "object" && !Array.isArray(part) &&
-    (part as { type?: unknown }).type === "text" &&
+    ["text", "input_text", "output_text"].includes(
+      String((part as { type?: unknown }).type ?? ""),
+    ) &&
     typeof (part as { text?: unknown }).text === "string"
       ? (part as { text: string }).text
       : "",
@@ -401,6 +381,161 @@ function split(text: string, parts: number): string[] {
   const result: string[] = [];
   for (let index = 0; index < text.length; index += size) result.push(text.slice(index, index + size));
   return result.length ? result : [""];
+}
+
+function openAiResponsesCompletion(input: {
+  readonly model: string;
+  readonly text: string;
+  readonly narration: string | null;
+  readonly toolCall: { name: string; arguments: string } | null;
+  readonly argumentsText: string | undefined;
+  readonly callId: string;
+}): Record<string, unknown> {
+  const output: Record<string, unknown>[] = [];
+  if (input.narration) {
+    output.push(responseMessage("fixture-narration", input.narration));
+  }
+  if (input.toolCall) {
+    output.push({
+      type: "function_call",
+      id: "fixture-tool-item",
+      call_id: input.callId,
+      name: input.toolCall.name,
+      arguments: input.argumentsText ?? input.toolCall.arguments,
+    });
+  } else {
+    output.push(responseMessage("fixture-message", input.text));
+  }
+  return {
+    id: "fixture-response",
+    created_at: 1,
+    model: input.model,
+    output,
+    incomplete_details: null,
+    usage: responseUsage(input.text),
+  };
+}
+
+function openAiResponsesStream(input: {
+  readonly model: string;
+  readonly text: string;
+  readonly narration: string | null;
+  readonly toolCall: { name: string; arguments: string } | null;
+  readonly argumentsText: string | undefined;
+  readonly callId: string;
+}): Response {
+  const events: Record<string, unknown>[] = [{
+    type: "response.created",
+    response: {
+      id: "fixture-response",
+      created_at: 1,
+      model: input.model,
+      service_tier: null,
+    },
+  }];
+  if (input.narration) {
+    appendResponseTextEvents(events, "fixture-narration", input.narration, 0);
+  }
+  const outputIndex = input.narration ? 1 : 0;
+  if (input.toolCall) {
+    const argumentsText = input.argumentsText ?? input.toolCall.arguments;
+    events.push({
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: {
+        type: "function_call",
+        id: "fixture-tool-item",
+        call_id: input.callId,
+        name: input.toolCall.name,
+        arguments: "",
+      },
+    });
+    for (const delta of split(argumentsText, 3)) {
+      events.push({
+        type: "response.function_call_arguments.delta",
+        item_id: "fixture-tool-item",
+        output_index: outputIndex,
+        delta,
+      });
+    }
+    events.push({
+      type: "response.output_item.done",
+      output_index: outputIndex,
+      item: {
+        type: "function_call",
+        id: "fixture-tool-item",
+        call_id: input.callId,
+        name: input.toolCall.name,
+        arguments: argumentsText,
+        status: "completed",
+      },
+    });
+  } else {
+    appendResponseTextEvents(events, "fixture-message", input.text, outputIndex);
+  }
+  events.push({
+    type: "response.completed",
+    response: {
+      incomplete_details: null,
+      usage: responseUsage(input.text),
+      reasoning: null,
+      service_tier: null,
+    },
+  });
+  return new Response(
+    events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+function appendResponseTextEvents(
+  events: Record<string, unknown>[],
+  itemId: string,
+  text: string,
+  outputIndex: number,
+): void {
+  events.push({
+    type: "response.output_item.added",
+    output_index: outputIndex,
+    item: { type: "message", id: itemId },
+  });
+  for (const delta of split(text, 3)) {
+    events.push({
+      type: "response.output_text.delta",
+      item_id: itemId,
+      output_index: outputIndex,
+      delta,
+      logprobs: null,
+    });
+  }
+  events.push({
+    type: "response.output_item.done",
+    output_index: outputIndex,
+    item: { type: "message", id: itemId },
+  });
+}
+
+function responseMessage(id: string, text: string): Record<string, unknown> {
+  return {
+    type: "message",
+    role: "assistant",
+    id,
+    content: [{
+      type: "output_text",
+      text,
+      logprobs: null,
+      annotations: [],
+    }],
+  };
+}
+
+function responseUsage(text: string): Record<string, unknown> {
+  return {
+    input_tokens: 7,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens: Math.ceil(text.length / 4),
+    output_tokens_details: { reasoning_tokens: 0 },
+  };
 }
 
 function formalToolCall(reply: Record<string, unknown>): { name: string; arguments: string } | null {

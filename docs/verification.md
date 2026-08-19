@@ -389,7 +389,7 @@ was an infrastructure error rather than reward zero, and the row is retained as
 incompatible. No paid benchmark run or matched second-harness run was performed
 as part of suite-layer verification.
 
-### Real OpenAI-compatible provider
+### Real OpenAI Responses-compatible provider
 
 ```sh
 AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 \
@@ -398,7 +398,7 @@ AGENCITY_ACCEPTANCE_REAL_MODEL=... \
 bun run test:acceptance:external
 ```
 
-`AGENCITY_ACCEPTANCE_REAL_MODEL` uses the canonical `openai/...` catalog ID. Set `OPENAI_BASE_URL` to a path-free HTTP(S) origin when testing another compatible endpoint. This is a credential-gated installed-product smoke against the selected live model. It does not verify every supported provider or model.
+`AGENCITY_ACCEPTANCE_REAL_MODEL` uses the canonical `openai/...` catalog ID. Set `OPENAI_BASE_URL` to a path-free HTTP(S) origin when testing another endpoint that implements `/v1/responses`; Chat Completions compatibility alone is insufficient. This is a credential-gated installed-product smoke against the selected live model. It does not verify every supported provider or model.
 
 The same row can be included in the release matrix:
 
@@ -440,7 +440,7 @@ Report the exact command, exit result, test runner pass/fail/skip counts, and th
 `bun run test:acceptance:matrix` prints one status for each of:
 
 - deterministic installed acceptance;
-- real OpenAI-compatible provider;
+- real OpenAI Responses-compatible provider;
 - official Turso Sync server; and
 - real Turso Cloud.
 
@@ -457,7 +457,7 @@ A concise verification report should preserve that distinction, for example:
 ```text
 bun run verify: PASS
 deterministic installed acceptance: PASS
-real OpenAI-compatible provider: SKIP (not enabled)
+real OpenAI Responses-compatible provider: SKIP (not enabled)
 official Turso Sync server: SKIP (binary unavailable)
 real Turso Cloud: SKIP (not enabled)
 ```

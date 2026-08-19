@@ -167,16 +167,15 @@ describe("formal AI SDK model responses", () => {
       expect(providerInput.tools.map((tool) => tool.name)).toEqual([
         REFINEMENT_REVIEW_TOOL_NAME,
       ]);
-      const tools = transport === "openai"
-        ? body!.tools.map((item: any) => item.function)
-        : body!.tools;
+      const tools = body!.tools;
       expect(tools.map((item: any) => item.name)).toEqual([
         REFINEMENT_REVIEW_TOOL_NAME,
       ]);
       if (transport === "vercel") expect(body!.reasoning).toBe("high");
       else if (transport === "openai") {
-        expect(body!.reasoning_effort).toBe("high");
+        expect(body!.reasoning).toEqual({ effort: "high" });
         expect(body!.parallel_tool_calls).toBe(false);
+        expect(body!.store).toBe(false);
       } else {
         expect(body!.thinking).toEqual({
           type: "adaptive",
@@ -208,7 +207,12 @@ describe("formal AI SDK model responses", () => {
       }) as typeof fetch,
     });
     const executor = new ModelExecutor([provider]);
-    const dispatch = admittedDispatch(executor, "openai", "openai/gpt-5.4");
+    const dispatch = admittedDispatch(
+      executor,
+      "openai",
+      "openai/gpt-5.6-sol",
+      "high",
+    );
     const privateDeltas: string[] = [];
     const output = await executor.executeResponseAware(
       { messages: [{ role: "user", content: "finish" }] },
@@ -237,17 +241,19 @@ describe("formal AI SDK model responses", () => {
     expect(privateDeltas).toContain("tool-call-start");
     expect(privateDeltas).toContain("tool-input-delta");
     expect(body).toMatchObject({
-      model: "gpt-5.4",
+      model: "gpt-5.6-sol",
       stream: true,
       tool_choice: "required",
       parallel_tool_calls: false,
+      reasoning: { effort: "high" },
       tools: [
-        { type: "function", function: { name: "bun_console" } },
-        { type: "function", function: { name: "finish" } },
+        { type: "function", name: "bun_console" },
+        { type: "function", name: "finish" },
       ],
     });
-    expect(body!.tools.every((item: any) => item.function.strict === undefined))
+    expect(body!.tools.every((item: any) => item.strict === undefined))
       .toBe(true);
+    expect(body!.store).toBe(false);
     expect(requestCount).toBe(1);
   });
 
@@ -283,7 +289,7 @@ describe("formal AI SDK model responses", () => {
           parallelCalls: "runtime-rejected",
           streaming: true,
           catalogDigest: base.reasoning.capability.catalogDigest,
-          adapter: "agencity.vercel-ai-sdk.v7",
+          adapter: "agencity.vercel-ai-sdk.v7.openai-responses.v1",
         },
       },
     });
@@ -303,7 +309,7 @@ describe("formal AI SDK model responses", () => {
     expect(body?.tool_choice).toBe("required");
     expect(body).not.toHaveProperty("parallel_tool_calls");
     expect(body?.tools.every((item: any) =>
-      item.function.strict === undefined)).toBe(true);
+      item.strict === undefined)).toBe(true);
   });
 
   test("normalizes a Gateway formal stream with retained cost and canonical model identity", async () => {
@@ -442,9 +448,7 @@ describe("formal AI SDK model responses", () => {
         const expectedToolNames = contractId === AGENT_TOOL_CONTRACT_ID
           ? ["bun_console", "finish"]
           : [REFINEMENT_REVIEW_TOOL_NAME];
-        const sentTools = transport === "openai"
-          ? body!.tools.map((item: any) => item.function)
-          : body!.tools;
+        const sentTools = body!.tools;
         expect(sentTools.map((item: any) => item.name)).toEqual(expectedToolNames);
         if (transport === "vercel") {
           expect(modelHeader as string | null).toBe(model);
@@ -462,9 +466,10 @@ describe("formal AI SDK model responses", () => {
             tool_choice: "required",
             parallel_tool_calls: false,
           });
-          expect(body!.reasoning_effort).toBe(
-            effort === "provider-default" ? undefined : effort,
+          expect(body!.reasoning).toEqual(
+            effort === "provider-default" ? undefined : { effort },
           );
+          expect(body!.store).toBe(false);
         } else {
           expect(body).toMatchObject({
             model: "claude-fable-5",
@@ -535,9 +540,7 @@ describe("formal AI SDK model responses", () => {
         dispatch,
         new AbortController().signal,
       ).catch(() => {});
-      const tools = transport === "openai"
-        ? body!.tools.map((item: any) => item.function)
-        : body!.tools;
+      const tools = body!.tools;
       expect(tools.map((item: any) => item.strict)).toEqual([true, true]);
       expect(providerInput.tools.every((tool) => tool.strict)).toBe(true);
     }
@@ -1302,7 +1305,9 @@ function strictDispatch(
           : "provider-disabled",
         streaming: true,
         catalogDigest: base.reasoning.capability.catalogDigest,
-        adapter: "agencity.vercel-ai-sdk.v7",
+        adapter: provider === "openai"
+          ? "agencity.vercel-ai-sdk.v7.openai-responses.v1"
+          : "agencity.vercel-ai-sdk.v7",
       },
     },
   });
@@ -1540,48 +1545,60 @@ function finishParts(
 function openAiToolStream(
   argumentDeltas: readonly { arguments: string }[],
 ): Response {
-  const chunks = argumentDeltas.map((delta, index) => ({
-    id: "chat-formal",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "gpt-5.4",
-    choices: [{
-      index: 0,
-      delta: {
-        ...(index === 0 ? { role: "assistant" } : {}),
-        tool_calls: [{
-          index: 0,
-          ...(index === 0
-            ? {
-                id: "call-finish",
-                type: "function",
-                function: { name: "finish", arguments: delta.arguments },
-              }
-            : { function: { arguments: delta.arguments } }),
-        }],
+  const argumentsText = argumentDeltas.map(delta => delta.arguments).join("");
+  const chunks: Record<string, unknown>[] = [{
+    type: "response.created",
+    response: {
+      id: "response-formal",
+      created_at: 1,
+      model: "gpt-5.6-sol",
+      service_tier: null,
+    },
+  }, {
+    type: "response.output_item.added",
+    output_index: 0,
+    item: {
+      type: "function_call",
+      id: "item-finish",
+      call_id: "call-finish",
+      name: "finish",
+      arguments: "",
+    },
+  }];
+  chunks.push(...argumentDeltas.map(delta => ({
+    type: "response.function_call_arguments.delta",
+    item_id: "item-finish",
+    output_index: 0,
+    delta: delta.arguments,
+  })));
+  chunks.push({
+    type: "response.output_item.done",
+    output_index: 0,
+    item: {
+      type: "function_call",
+      id: "item-finish",
+      call_id: "call-finish",
+      name: "finish",
+      arguments: argumentsText,
+      status: "completed",
+    },
+  }, {
+    type: "response.completed",
+    response: {
+      incomplete_details: null,
+      usage: {
+        input_tokens: 7,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 3,
+        output_tokens_details: { reasoning_tokens: 0 },
       },
-      finish_reason: null,
-    }],
-  }));
-  chunks.push({
-    id: "chat-formal",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "gpt-5.4",
-    choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
-  } as any);
-  chunks.push({
-    id: "chat-formal",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "gpt-5.4",
-    choices: [],
-    usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
-  } as any);
+      reasoning: null,
+      service_tier: null,
+    },
+  });
   return new Response([
-    ...chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n`),
-    "data: [DONE]\n",
-  ].join("\n"), {
+    ...chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`),
+  ].join(""), {
     headers: { "content-type": "text/event-stream" },
   });
 }

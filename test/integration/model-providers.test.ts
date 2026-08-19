@@ -63,18 +63,7 @@ describe("AI SDK product model providers", () => {
   test("streams OpenAI AI SDK deltas and returns one authoritative response", async () => {
     const server = Bun.serve({
       port: 0,
-      fetch: () => new Response([
-        `data: ${JSON.stringify({ id: "chunk-1", object: "chat.completion.chunk", created: 1, model: "gpt-5.4", choices: [{ index: 0, delta: { role: "assistant", content: "hello " }, finish_reason: null }] })}`,
-        "",
-        `data: ${JSON.stringify({ id: "chunk-1", object: "chat.completion.chunk", created: 1, model: "gpt-5.4", choices: [{ index: 0, delta: { content: "world" }, finish_reason: null }] })}`,
-        "",
-        `data: ${JSON.stringify({ id: "chunk-1", object: "chat.completion.chunk", created: 1, model: "gpt-5.4", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}`,
-        "",
-        `data: ${JSON.stringify({ id: "chunk-1", object: "chat.completion.chunk", created: 1, model: "gpt-5.4", choices: [], usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } })}`,
-        "",
-        "data: [DONE]",
-        "",
-      ].join("\n"), { headers: { "content-type": "text/event-stream" } }),
+      fetch: () => openAiResponsesTextStream(["hello ", "world"]),
     });
     servers.push(server);
     const provider = createOpenAIModelProvider({ origin: server.url.origin, apiKey: () => "openai-test-key" });
@@ -97,7 +86,29 @@ describe("AI SDK product model providers", () => {
     const server = Bun.serve({
       port: 0,
       fetch: () => new Response([
-        `data: ${JSON.stringify({ id: "chunk-truncated", object: "chat.completion.chunk", created: 1, model: "gpt-5.4", choices: [{ index: 0, delta: { role: "assistant", content: "partial" }, finish_reason: null }] })}`,
+        `data: ${JSON.stringify({
+          type: "response.created",
+          response: {
+            id: "response-truncated",
+            created_at: 1,
+            model: "gpt-5.4",
+            service_tier: null,
+          },
+        })}`,
+        "",
+        `data: ${JSON.stringify({
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "message", id: "message-truncated" },
+        })}`,
+        "",
+        `data: ${JSON.stringify({
+          type: "response.output_text.delta",
+          item_id: "message-truncated",
+          output_index: 0,
+          delta: "partial",
+          logprobs: null,
+        })}`,
         "",
       ].join("\n"), { headers: { "content-type": "text/event-stream" } }),
     });
@@ -122,17 +133,36 @@ describe("AI SDK product model providers", () => {
           body: await request.json() as Record<string, unknown>,
         };
         return Response.json({
-          id: "chat-test",
-          object: "chat.completion",
-          created: 1,
+          id: "response-test",
+          created_at: 1,
           model: "gpt-5.4",
-          choices: [{ index: 0, message: { role: "assistant", content: "reasoned" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+          output: [{
+            type: "message",
+            role: "assistant",
+            id: "message-test",
+            content: [{
+              type: "output_text",
+              text: "reasoned",
+              logprobs: null,
+              annotations: [],
+            }],
+          }],
+          incomplete_details: null,
+          usage: {
+            input_tokens: 5,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 2,
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
         });
       },
     });
     servers.push(server);
     const provider = createOpenAIModelProvider({ origin: server.url.origin, apiKey: () => "openai-test-key" });
+    expect(provider.executionOrigin).toBe(`${server.url.origin}/v1`);
+    expect(provider.executionEndpointId).toBe(
+      sha256(`${server.url.origin}/v1/responses`),
+    );
     const response = await provider.complete(
       { messages: [{ role: "user", content: "hello" }] },
       { provider: "openai", model: "openai/gpt-5.4", reasoningEffort: "high", temperature: 0.5 },
@@ -144,9 +174,13 @@ describe("AI SDK product model providers", () => {
       message: "temperature is not supported for reasoning models",
     }]);
     expect(observed).toMatchObject({
-      path: "/v1/chat/completions",
+      path: "/v1/responses",
       authorization: "Bearer openai-test-key",
-      body: { model: "gpt-5.4", reasoning_effort: "high" },
+      body: {
+        model: "gpt-5.4",
+        reasoning: { effort: "high" },
+        store: false,
+      },
     });
   });
 
@@ -316,3 +350,54 @@ describe("AI SDK product model providers", () => {
     expect(JSON.stringify(executor.providers())).not.toContain(key);
   });
 });
+
+function openAiResponsesTextStream(deltas: readonly string[]): Response {
+  const chunks: Record<string, unknown>[] = [{
+    type: "response.created",
+    response: {
+      id: "response-text",
+      created_at: 1,
+      model: "gpt-5.4",
+      service_tier: null,
+    },
+  }, {
+    type: "response.output_item.added",
+    output_index: 0,
+    item: { type: "message", id: "message-text" },
+  }];
+  chunks.push(...deltas.map(delta => ({
+    type: "response.output_text.delta",
+    item_id: "message-text",
+    output_index: 0,
+    delta,
+    logprobs: null,
+  })));
+  chunks.push({
+    type: "response.output_item.done",
+    output_index: 0,
+    item: { type: "message", id: "message-text" },
+  }, {
+    type: "response.completed",
+    response: {
+      incomplete_details: null,
+      usage: {
+        input_tokens: 4,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 2,
+        output_tokens_details: { reasoning_tokens: 0 },
+      },
+      reasoning: null,
+      service_tier: null,
+    },
+  });
+  return new Response(
+    chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+function sha256(value: string): string {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(value);
+  return hash.digest("hex");
+}

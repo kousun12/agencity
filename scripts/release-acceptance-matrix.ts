@@ -16,12 +16,12 @@ await run("deterministic installed acceptance", ["bun", "run", "test:acceptance"
 
 if (process.env.AGENCITY_ACCEPTANCE_REAL_PROVIDER === "1") {
   if (process.env.OPENAI_API_KEY && process.env.AGENCITY_ACCEPTANCE_REAL_MODEL) {
-    await run("real OpenAI-compatible provider", ["bun", "run", "test:acceptance:external"], "credential-gated live smoke");
+    await run("real OpenAI Responses-compatible provider", ["bun", "run", "test:acceptance:external"], "credential-gated live smoke");
   } else {
-    rows.push({ gate: "real OpenAI-compatible provider", status: "FAIL", detail: "opted in but OPENAI_API_KEY or AGENCITY_ACCEPTANCE_REAL_MODEL is missing" });
+    rows.push({ gate: "real OpenAI Responses-compatible provider", status: "FAIL", detail: "opted in but OPENAI_API_KEY or AGENCITY_ACCEPTANCE_REAL_MODEL is missing" });
     failed = true;
   }
-} else rows.push({ gate: "real OpenAI-compatible provider", status: "SKIP", detail: "set AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 with credentials and model" });
+} else rows.push({ gate: "real OpenAI Responses-compatible provider", status: "SKIP", detail: "set AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 with credentials and model" });
 
 if (process.env.TURSO_SYNC_SERVER_BIN) await run("official Turso Sync server", ["bun", "run", "test:turso-official"], "external version-matched binary");
 else rows.push({ gate: "official Turso Sync server", status: "SKIP", detail: "TURSO_SYNC_SERVER_BIN is unset" });

@@ -26,7 +26,7 @@ describe("strict action fixture catalog", () => {
     expect(provider.catalogRequests[0]?.authorization).toBeNull();
     expect(provider.requests).toHaveLength(0);
 
-    const inferenceResponse = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
+    const inferenceResponse = await fetch(`${provider.baseUrl}/v1/responses`, {
       method: "POST",
       headers: {
         authorization: "Bearer acceptance-fixture-key",
@@ -34,7 +34,10 @@ describe("strict action fixture catalog", () => {
       },
       body: JSON.stringify({
         model: "fixture-v1",
-        messages: [{ role: "user", content: "fixture request" }],
+        input: [{
+          role: "user",
+          content: [{ type: "input_text", text: "fixture request" }],
+        }],
       }),
     });
     expect(inferenceResponse.status).toBe(200);

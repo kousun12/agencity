@@ -68,6 +68,17 @@ test.skipIf(!python || process.platform === "win32")("linked interactive OpenTUI
     action("typescript", `await sdk.agents.spawn({ task: ${JSON.stringify(childTask)}, name: "PTY reviewer" }); return "spawned";`),
     action("final", `fixture completed: ${task}`),
   ]);
+  // Keep the first committed cell visible for at least one terminal frame
+  // before the final step auto-collapses the completed run.
+  provider.hold(task, 2);
+  const releaseTaskCompletion = (async () => {
+    try {
+      await provider.waitFor(task, 2);
+      await Bun.sleep(500);
+    } finally {
+      provider.release(task, 2);
+    }
+  })();
   const script = String.raw`
 import fcntl, json, os, pty, select, signal, struct, subprocess, sys, termios, time
 
@@ -402,6 +413,8 @@ print(json.dumps({
       activity: "idle",
     })]);
   } finally {
+    provider.release(task, 2);
+    await releaseTaskCompletion.catch(() => null);
     await cli(executable, workspace, home, ["service", "shutdown"]).catch(() => null);
     provider.close();
   }

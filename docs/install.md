@@ -129,7 +129,7 @@ bun run test:acceptance
 bun run test:acceptance:matrix
 ```
 
-The deterministic acceptance endpoint is an external loopback OpenAI-compatible fixture that implements the typed action and streaming protocols. Coverage includes provider setup failure, explicit model configuration, TypeScript cells and effects, retained child work, completion-gate repair, detach and reattach, branching, history, interruption, recovery, unknown outcomes without automatic retry, refinement, skills, compaction, streaming, and scheduled wakes.
+The deterministic acceptance endpoint is an external loopback OpenAI Responses-compatible fixture that implements `/v1/responses`, typed actions, and Responses streaming events. Coverage includes provider setup failure, explicit model configuration, TypeScript cells and effects, retained child work, completion-gate repair, detach and reattach, branching, history, interruption, recovery, unknown outcomes without automatic retry, refinement, skills, compaction, streaming, and scheduled wakes.
 
 ## Gated external verification
 

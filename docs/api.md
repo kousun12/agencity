@@ -88,7 +88,7 @@ Do not run an embedded supervisor against a workspace database currently owned b
 
 ## Model providers
 
-The product supports OpenAI, Anthropic, and Vercel AI Gateway through one shared Vercel AI SDK execution core with thin transport factories. Stored owner keys take precedence over `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY`. The corresponding base origin environment variables can replace the default endpoints. Model identity is durable as `{ provider, model, reasoningEffort }` and is formatted as `provider:creator/model` at product boundaries.
+The product supports OpenAI, Anthropic, and Vercel AI Gateway through one shared Vercel AI SDK execution core with thin transport factories. Direct OpenAI uses `/v1/responses` with `store: false`; it does not use Chat Completions. Stored owner keys take precedence over `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AI_GATEWAY_API_KEY`. The corresponding base origin environment variables can replace the default endpoints. Model identity is durable as `{ provider, model, reasoningEffort }` and is formatted as `provider:creator/model` at product boundaries.
 
 `reasoningEffort` is `provider-default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. `provider-default` leaves the provider override absent. `ModelExecutor.resolveDispatch` resolves the complete configuration, reasoning capability decision, catalog digest, and execution endpoint identity once before the request is committed. Recovery executes that retained `ModelDispatch`; it does not reinterpret a changed catalog or endpoint.
 

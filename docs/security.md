@@ -58,6 +58,7 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 - The shell executor receives an environment with credential-shaped names removed.
 - OpenAI, Anthropic, and Vercel AI Gateway providers resolve stored or environment keys in the supervisor.
 - Provider execution uses the Vercel AI SDK inside the supervisor; provider keys are not passed to the TypeScript console worker.
+- Direct OpenAI requests use the Responses API with `store: false`; Agencity does not ask OpenAI to retain response state or reasoning summaries.
 - REPL bindings and heap objects remain only in worker memory and are discarded when the worker exits. They are not serialized, synchronized, exported, or included in database backups.
 - Provider tool declarations do not receive credentials and have no execute callback. Provider keys remain supervisor-side for the model request.
 - The public Gateway model-catalog request sends no provider credential. Custom provider origins receive execution prompts and authentication and must be treated as trusted network destinations.
