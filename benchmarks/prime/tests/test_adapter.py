@@ -13,6 +13,7 @@ from agencity_verifiers.harness import (
     AgencityHarnessConfig,
     _adapter_failure_diagnostics,
     _agencity_command,
+    _agencity_model,
     _endpoint_origin,
     _provider_environment,
 )
@@ -119,7 +120,18 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(provider, "openai")
         self.assertEqual(environment["OPENAI_BASE_URL"], "http://localhost:4312")
         self.assertEqual(environment["OPENAI_API_KEY"], "intercept-secret")
-        with self.assertRaisesRegex(ValueError, "only openai"):
+        native_provider, native_environment = _provider_environment(
+            "gpt-5.6-sol",
+            "http://localhost:4312",
+            "intercept-secret",
+        )
+        self.assertEqual(native_provider, "openai")
+        self.assertEqual(native_environment["OPENAI_API_KEY"], "intercept-secret")
+        self.assertEqual(
+            _agencity_model(native_provider, "gpt-5.6-sol"),
+            "openai/gpt-5.6-sol",
+        )
+        with self.assertRaisesRegex(ValueError, "supports only"):
             _provider_environment(
                 "deepseek/deepseek-v4-flash",
                 "http://localhost:4312",

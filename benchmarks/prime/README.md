@@ -252,8 +252,10 @@ Committed configs route evaluation calls directly to OpenAI's native
 OpenAI-compatible endpoint and require an exported `OPENAI_API_KEY`. They do not
 fall back to Vercel AI Gateway: a prior Gateway treatment emitted the
 nonstandard streaming terminal reason `error`, which Verifiers 0.3.0 could not
-represent. Native routing must pass a paid canary before a full treatment is
-admitted.
+represent. Configs use OpenAI's native model IDs such as `gpt-5.6-sol`, omit
+unsupported temperature sampling, and let the harness add the `openai/` creator
+namespace only when constructing Agencity's canonical model identity behind the
+interception endpoint. A paid native OpenAI canary has passed this path.
 
 Smoke:
 
@@ -382,6 +384,11 @@ mapping it to reward zero.
   six completed tasks and is not a suite result: one passed, five scored zero,
   three reached the former 48,000-token run bound, and one received Gateway's
   nonstandard `finish_reason="error"` envelope before any model turn.
+  A native OpenAI Sol-xhigh canary on commit `63b35ea` then scored `1.0` in 6
+  model calls, with 17,388 prompt tokens, 2,507 completion tokens, 12,170 cached
+  input tokens, and about 81 seconds end to end. The first native probes exposed
+  and removed Gateway-style model namespacing and unsupported temperature
+  sampling before this passing treatment.
 - Terminal-Bench 2.1: one independently pinned Luna-high `fix-git` task scored
   `1.0`.
 - SWE-bench Pro: one attended Luna-high qutebrowser task made nine calls,

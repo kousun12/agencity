@@ -295,8 +295,11 @@ suite configs route directly to OpenAI using `OPENAI_API_KEY`, use `xhigh`
 reasoning and a 128,000-token per-response ceiling, and retain 800,000 input,
 500,000 output, and 1,000,000 total-token per-run ceilings. The limits are
 permissive bounds rather than spend targets, are checked between calls, and can
-overshoot by one admitted call. The bounded eight-task Sol treatment uses four
-explicit IDs from each Yahoo context window. A
+overshoot by one admitted call. Configs use native unprefixed OpenAI model IDs
+and omit unsupported temperature sampling; the harness adds `openai/` only for
+Agencity's canonical model identity behind the interception endpoint. The
+bounded eight-task Sol treatment uses four explicit IDs from each Yahoo context
+window. A
 pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
@@ -316,7 +319,7 @@ same selection and scorer. No second harness integration or matched comparison
 is implemented.
 
 Model-free suite validation is infrastructure evidence, not benchmark
-performance. Paid evidence remains limited to two passing Terminal-Bench 2
+performance. Paid evidence remains limited to three passing Terminal-Bench 2
 `fix-git` treatments, one passing Terminal-Bench 2.1 `fix-git` treatment,
 bounded OOLONG probes including one revised Sol-high Yahoo 128K pass and one
 current-revision Sol-high zero, and one zero-score SWE-bench Pro qutebrowser
@@ -332,9 +335,12 @@ $0.89. A later Terminal-Bench 2 full-set attempt through Vercel AI Gateway was
 operator-stopped after six completed tasks: one passed, five scored zero, three
 reached the former 48,000-token bound, and one received Gateway's nonstandard
 `finish_reason="error"` envelope. It is incomplete treatment evidence, not a
-suite score. Native OpenAI routing is configured but remains unverified until an
-`OPENAI_API_KEY` is supplied. No paid full-suite, hosted, or matched-harness
-result is verified. Large
+suite score. A later native OpenAI Sol-xhigh canary passed on commit `63b35ea`
+in 6 model calls with 17,388 prompt tokens, 2,507 completion tokens, 12,170
+cached input tokens, and about 81 seconds end to end. The native path uses the
+unprefixed `gpt-5.6-sol` upstream ID while retaining Agencity's canonical
+`openai/gpt-5.6-sol` identity behind interception. No paid full-suite, hosted,
+or matched-harness result is verified. Large
 unattended runs also remain limited by the absence of a public durable
 cancellation/reconciliation receipt.
 

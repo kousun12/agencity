@@ -56,6 +56,7 @@ class SuitePreflightTests(unittest.TestCase):
         for path in config_paths:
             with self.subTest(config=path.name):
                 config = tomllib.loads(path.read_text(encoding="utf-8"))
+                self.assertNotIn("/", config["model"])
                 self.assertEqual(
                     config["client"],
                     {
@@ -68,6 +69,7 @@ class SuitePreflightTests(unittest.TestCase):
                     config["sampling"]["reasoning_effort"],
                     EVALUATION_REASONING_EFFORT,
                 )
+                self.assertNotIn("temperature", config["sampling"])
                 self.assertEqual(
                     config["sampling"]["max_tokens"],
                     EVALUATION_MAX_RESPONSE_TOKENS,

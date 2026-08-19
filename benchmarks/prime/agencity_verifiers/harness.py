@@ -196,7 +196,7 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
         process = await runtime.run_program(
             _agencity_command(
                 provider,
-                ctx.model,
+                _agencity_model(provider, ctx.model),
                 effort,
                 task,
                 workspace=workspace,
@@ -497,7 +497,7 @@ def _provider_environment(
     origin: str,
     secret: str,
 ) -> tuple[str, dict[str, str]]:
-    if model.startswith("openai/"):
+    if model.startswith("openai/") or "/" not in model:
         return "openai", {
             "OPENAI_BASE_URL": origin,
             "OPENAI_API_KEY": secret,
@@ -508,5 +508,12 @@ def _provider_environment(
             "ANTHROPIC_API_KEY": secret,
         }
     raise ValueError(
-        "The initial Agencity harness supports only openai/... and anthropic/... models"
+        "The initial Agencity harness supports only native OpenAI, openai/..., "
+        "and anthropic/... models"
     )
+
+
+def _agencity_model(provider: str, model: str) -> str:
+    if provider == "openai" and "/" not in model:
+        return f"openai/{model}"
+    return model

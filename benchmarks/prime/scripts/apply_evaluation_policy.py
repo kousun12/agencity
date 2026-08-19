@@ -28,10 +28,17 @@ def apply_policy(path: Path) -> bool:
     if "env" not in value or "agent" not in value["env"]:
         raise RuntimeError(f"{path} has no evaluation agent configuration")
 
+    updated = re.sub(
+        r'(?m)^model = "openai/([^"]+)"$',
+        r'model = "\1"',
+        original,
+        count=1,
+    )
+    updated = re.sub(r"(?m)^temperature = [^\n]+\n", "", updated)
     updated, reasoning_count = re.subn(
         r'(?m)^reasoning_effort = "[^"]+"$',
         f'reasoning_effort = "{EVALUATION_REASONING_EFFORT}"',
-        original,
+        updated,
     )
     if reasoning_count == 0:
         updated = updated.replace(
@@ -91,7 +98,10 @@ def apply_policy(path: Path) -> bool:
     sampling = parsed["sampling"]
     agent = parsed["env"]["agent"]
     if (
-        parsed["client"]
+        not isinstance(parsed.get("model"), str)
+        or "/" in parsed["model"]
+        or "temperature" in parsed["sampling"]
+        or parsed["client"]
         != {
             "type": EVALUATION_CLIENT_TYPE,
             "base_url": EVALUATION_CLIENT_BASE_URL,
