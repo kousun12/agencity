@@ -30,6 +30,9 @@ See [`AUTHORING.md`](./AUTHORING.md) for the reusable benchmark contract.
   logs runtime-stop failures but does not expose a teardown receipt to the
   custom environment.
 - `agencity_verifiers.reporting` creates deterministic mixed-outcome summaries.
+- `agencity_runebench` starts the pinned game after harness provisioning and
+  maps RuneBench's TypeScript SDK directly into Agencity's persistent Bun
+  console. See [`RUNEBENCH.md`](./RUNEBENCH.md).
 
 Task traces retain the complete selected ID list and digest, catalog and task
 digests, task/image/workdir pins, benchmark-specific evaluator pins, the model,
@@ -101,6 +104,9 @@ uv run --locked eval @ configs/terminal-bench-2-full.toml --dry-run
 
 Suite configs are provided for:
 
+- RuneBench: `runebench-woodcutting-15m-{fresh,adaptive}.toml`,
+  `runebench-15m-sample-adaptive.toml`, and
+  `runebench-full-adaptive.toml`;
 - Terminal-Bench 2: `terminal-bench-2-{smoke,sample,full}.toml` and
   `terminal-bench-2-shard-0-of-4.toml`;
 - Terminal-Bench 2.1: `terminal-bench-2-1-{smoke,sample,full}.toml` and
@@ -117,6 +123,29 @@ The earlier `fix-git` and qutebrowser filenames remain aliases for fast exact
 treatments. They use the same task and scorer implementation as larger runs.
 
 ## Compatibility and immutable catalogs
+
+### RuneBench
+
+Catalog: [`manifests/runebench-catalog.json`](./manifests/runebench-catalog.json)
+
+- Harbor dataset:
+  `maxbittker/runebench@sha256:4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28`;
+- upstream source commit: `826107d10f731eae4fd6b93bcd63d072d4346654`;
+- catalog coverage: 32/32 compatible published skill tasks;
+- immutable game image:
+  `ghcr.io/maxbittker/rs-agent-benchmark@sha256:0961663ac1dc23d6cd00b88e79ff106cb1f0c7b7340659a914f96a8454124016`.
+
+The `agencity-runebench-repl-v1` treatment replaces the task prompt's MCP
+wrapper with direct imports of the same image-owned TypeScript SDK inside
+Agencity's persistent Bun console. The official task package, save fixture,
+time horizon, sampling cadence, game image, and Harbor verifier remain pinned.
+The treatment raises the pinned package's 4 GiB memory cap to 8 GiB, matching
+the current upstream generator's hardening for documented agent OOM failures;
+both values remain explicit in the catalog. Fresh and within-run learning modes
+are separate configs: fresh pauses automatic learning before the run, while
+within-run explicitly enables it and permits one evidence-backed governed
+review. Every scored task has fresh Agencity and game state; no learned artifact
+crosses episodes.
 
 ### Terminal-Bench 2
 
@@ -436,6 +465,9 @@ performance claims. No paid full-suite execution has been performed.
 
 ## Remaining limits
 
+- RuneBench support covers the pinned 32 published skill tasks. Gold,
+  collaboration, and cross-episode curriculum treatments are not included. No
+  paid RuneBench rollout has been run.
 - Only 1 of 731 SWE-bench Pro public rows is currently compatible. Of the 730
   incompatible rows, 729 lack audited immutable image pins and one audited Vuls
   row fails the required official no-op parser-evidence control. This blocks a

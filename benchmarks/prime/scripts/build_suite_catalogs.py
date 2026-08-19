@@ -97,6 +97,35 @@ TERMINAL = {
         },
     },
 }
+RUNEBENCH = {
+    "package": (
+        "maxbittker/runebench@"
+        "sha256:4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28"
+    ),
+    "cache": (
+        Path.home()
+        / ".cache/harbor"
+        / "maxbittker_runebench_sha256:"
+        "4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28"
+        / "runebench"
+    ),
+    "source": {
+        "repository": "https://github.com/MaxBittker/runebench",
+        "commit": "826107d10f731eae4fd6b93bcd63d072d4346654",
+    },
+    "image_tag": "ghcr.io/maxbittker/rs-agent-benchmark:v37",
+    "image": (
+        "ghcr.io/maxbittker/rs-agent-benchmark@"
+        "sha256:0961663ac1dc23d6cd00b88e79ff106cb1f0c7b7340659a914f96a8454124016"
+    ),
+    "image_manifest_digest": (
+        "sha256:0961663ac1dc23d6cd00b88e79ff106cb1f0c7b7340659a914f96a8454124016"
+    ),
+    "image_config_digest": (
+        "sha256:583556dc0adcc31d541629851f937bf72edd1386327f5ad46076c802fffaecb9"
+    ),
+    "workdir": "/app",
+}
 
 
 class RegistryClient:
@@ -267,6 +296,194 @@ def terminal_catalog(benchmark: str, workers: int) -> dict[str, Any]:
     )
 
 
+def runebench_catalog() -> dict[str, Any]:
+    root = RUNEBENCH["cache"]
+    if not root.is_dir():
+        raise FileNotFoundError(f"RuneBench Harbor cache is unavailable: {root}")
+    tasks: list[dict[str, Any]] = []
+    expected_ids: list[str] = []
+    for task_toml in sorted(root.glob("*/task.toml")):
+        task_dir = task_toml.parent
+        identifier = task_dir.name
+        value = tomllib.loads(task_toml.read_text(encoding="utf-8"))
+        expected_ids.append(identifier)
+        reasons: list[dict[str, str]] = []
+        try:
+            skill_slug, horizon = identifier.rsplit("-xp-", 1)
+            duration_seconds = int(horizon.removesuffix("m")) * 60
+        except (TypeError, ValueError):
+            skill_slug = identifier
+            duration_seconds = 0
+            reasons.append(
+                {
+                    "code": "unsupported_task_shape",
+                    "detail": "expected a <skill>-xp-<minutes>m task id",
+                }
+            )
+        dockerfile = task_dir / "environment" / "Dockerfile"
+        save = task_dir / "environment" / "agent.sav"
+        instruction = task_dir / "instruction.md"
+        verifier = task_dir / "tests" / "check_skill_xp.ts"
+        test_script = task_dir / "tests" / "test.sh"
+        missing = [
+            path.relative_to(task_dir).as_posix()
+            for path in (dockerfile, save, instruction, verifier, test_script)
+            if not path.is_file()
+        ]
+        if missing:
+            reasons.append(
+                {
+                    "code": "official_task_assets_missing",
+                    "detail": ", ".join(missing),
+                }
+            )
+            docker_text = ""
+        else:
+            docker_text = dockerfile.read_text(encoding="utf-8")
+            expected_dockerfile = "\n".join(
+                [
+                    f"FROM {RUNEBENCH['image_tag']}",
+                    "ENV SAMPLE_INTERVAL_MS=15000",
+                    "ENV GATEWAY_URL=ws://localhost:7780",
+                    f"ENV BENCHMARK_DURATION_SECS={duration_seconds}",
+                    "COPY agent.sav /app/server/engine/data/players/main/agent.sav",
+                    "",
+                ]
+            )
+            if docker_text != expected_dockerfile:
+                reasons.append(
+                    {
+                        "code": "unsupported_environment_dockerfile",
+                        "detail": "the task thin image no longer matches the audited template",
+                    }
+                )
+        environment = value.get("environment", {})
+        source_memory_gb = environment.get("memory_mb", 0) / 1024
+        treatment_memory_gb = 8.0
+        if source_memory_gb != 4.0:
+            reasons.append(
+                {
+                    "code": "unexpected_source_memory",
+                    "detail": f"expected the pinned package's 4 GiB, found {source_memory_gb!r}",
+                }
+            )
+        if environment.get("docker_image") is not None:
+            reasons.append(
+                {
+                    "code": "unexpected_declared_image",
+                    "detail": "the pinned task is expected to use an audited thin Dockerfile",
+                }
+            )
+        if environment.get("workdir") is not None:
+            reasons.append(
+                {
+                    "code": "unexpected_declared_workdir",
+                    "detail": "the pinned task is expected to inherit /app from the base image",
+                }
+            )
+        task_name = value.get("task", {}).get("name")
+        if task_name != f"maxbittker/{identifier}":
+            reasons.append(
+                {
+                    "code": "upstream_name_drift",
+                    "detail": f"found {task_name!r}",
+                }
+            )
+        tasks.append(
+            {
+                "id": identifier,
+                "upstream_name": task_name,
+                "skill": skill_slug.replace("-", " ").title(),
+                "duration_seconds": duration_seconds,
+                "sample_interval_ms": 15000,
+                "source_memory_gb": source_memory_gb,
+                "treatment_memory_gb": treatment_memory_gb,
+                "task_toml_sha256": _sha256_file(task_toml),
+                "task_tree_sha256": _sha256_tree(task_dir),
+                "source_dockerfile_sha256": (
+                    _sha256_file(dockerfile) if dockerfile.is_file() else None
+                ),
+                "save_sha256": _sha256_file(save) if save.is_file() else None,
+                "instruction_sha256": (
+                    _sha256_file(instruction) if instruction.is_file() else None
+                ),
+                "verifier_sha256": (
+                    _sha256_file(verifier) if verifier.is_file() else None
+                ),
+                "test_script_sha256": (
+                    _sha256_file(test_script) if test_script.is_file() else None
+                ),
+                "declared_image": None,
+                "declared_workdir": None,
+                "image": RUNEBENCH["image"],
+                "image_manifest_digest": RUNEBENCH["image_manifest_digest"],
+                "image_config_digest": RUNEBENCH["image_config_digest"],
+                "workdir": RUNEBENCH["workdir"],
+                "compatible": not reasons,
+                "incompatibility_reasons": reasons,
+            }
+        )
+    if len(expected_ids) != 32:
+        raise ValueError(f"RuneBench dataset has {len(expected_ids)} tasks, expected 32")
+    treatment = {
+        "agencity-runebench-repl-v1": {
+            "harness": "agencity-runebench",
+            "source_repo": AGENCITY_SOURCE_REPO,
+            "source_ref": AGENCITY_SOURCE_REF,
+            "bun_version": "1.3.14",
+            "bun_archive": BUN_ARCHIVE,
+            "bun_archive_sha256": BUN_ARCHIVE_SHA256,
+            "interface": "direct-rs-sdk-through-persistent-bun-console",
+            "learning_modes": ["fresh", "within-run"],
+            "cross_episode_learning": False,
+            "source_memory_gb": 4,
+            "treatment_memory_gb": 8,
+            "memory_reason": (
+                "The current upstream generator uses an 8 GiB hard cap after "
+                "documented 4 GiB agent OOM failures; this treatment applies that "
+                "runtime hardening to the pinned task package."
+            ),
+        },
+        "harness-native": {
+            "description": (
+                "The original RuneBench MCP treatment. It is retained as the "
+                "comparison protocol and is not executed by this Agencity taskset."
+            )
+        },
+    }
+    return _catalog(
+        "runebench",
+        dataset={
+            "package": RUNEBENCH["package"],
+            "source": RUNEBENCH["source"],
+            "task_count": len(tasks),
+        },
+        evaluator={
+            "kind": "upstream-harbor-runebench",
+            "source_repository": RUNEBENCH["source"]["repository"],
+            "source_commit": RUNEBENCH["source"]["commit"],
+            "reward_files": [
+                "/logs/verifier/reward.json",
+                "/logs/verifier/reward.txt",
+            ],
+            "metric": "peak normalized real-game XP per minute over fixed 15-second windows",
+        },
+        smoke_subsets={
+            "default": ["woodcutting-xp-15m"],
+            "woodcutting": ["woodcutting-xp-15m"],
+            "representative-15m": [
+                "attack-xp-15m",
+                "cooking-xp-15m",
+                "mining-xp-15m",
+                "woodcutting-xp-15m",
+            ],
+        },
+        tasks=tasks,
+        treatments=treatment,
+        uses_harbor=True,
+    )
+
+
 def swe_catalog(evaluator: Path, workers: int) -> dict[str, Any]:
     from datasets import load_dataset
 
@@ -406,7 +623,11 @@ def _catalog(
     evaluator: dict[str, Any],
     smoke_subsets: dict[str, list[str]],
     tasks: list[dict[str, Any]],
+    treatments: dict[str, Any] | None = None,
+    uses_harbor: bool | None = None,
 ) -> dict[str, Any]:
+    if uses_harbor is None:
+        uses_harbor = benchmark.startswith("terminal-bench")
     return {
         "schema": "agencity.benchmark-catalog.v1",
         "benchmark": benchmark,
@@ -414,10 +635,10 @@ def _catalog(
         "evaluator": evaluator,
         "runtime": {
             "verifiers_version": "0.3.0",
-            "harbor_version": "0.20.0" if benchmark.startswith("terminal-bench") else None,
+            "harbor_version": "0.20.0" if uses_harbor else None,
             "docker_sdk_version": "7.2.0",
         },
-        "treatments": {
+        "treatments": treatments or {
             "agencity-portable": {
                 "harness": "agencity-verifiers",
                 "source_repo": AGENCITY_SOURCE_REPO,
@@ -450,13 +671,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build immutable benchmark catalogs.")
     parser.add_argument(
         "benchmark",
-        choices=["terminal-bench-2", "terminal-bench-2-1", "swe-bench-pro-public"],
+        choices=[
+            "runebench",
+            "terminal-bench-2",
+            "terminal-bench-2-1",
+            "swe-bench-pro-public",
+        ],
     )
     parser.add_argument("--evaluator", type=Path)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if args.benchmark.startswith("terminal-bench"):
+    if args.benchmark == "runebench":
+        catalog = runebench_catalog()
+    elif args.benchmark.startswith("terminal-bench"):
         catalog = terminal_catalog(args.benchmark, args.workers)
     else:
         evaluator = args.evaluator

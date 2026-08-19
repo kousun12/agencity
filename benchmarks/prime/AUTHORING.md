@@ -19,10 +19,11 @@ Answer-scored tasks may be added later for low-cost integration checks, model
 routing tests, or narrow reasoning measurements. They are useful diagnostics,
 but they are not the main product benchmark.
 
-Interactive action environments, simulated users, MCP-backed tasks, and
-multi-agent environments require separate capability work. The current harness
-must not advertise those capabilities until their contracts are implemented and
-tested.
+Interactive action environments, simulated users, generic MCP-backed tasks, and
+multi-agent environments require explicit capability contracts. RuneBench is
+the implemented narrow exception: its benchmark-specific harness imports the
+colocated TypeScript SDK directly through Agencity's Bun console and does not
+advertise generic MCP support.
 
 ## Benchmark classes
 
@@ -59,7 +60,9 @@ adapter.
 The benchmark exposes an action API and returns observations over multiple
 turns. ARC-AGI-3 and game environments belong here. They require a typed
 connector or resumable harness-session contract and are not interchangeable
-with workspace-scored tasks.
+with workspace-scored tasks. RuneBench uses a pinned colocated TypeScript SDK,
+starts the game after harness provisioning, and retains the official verifier;
+that treatment does not generalize to an arbitrary MCP task.
 
 ## Component ownership
 

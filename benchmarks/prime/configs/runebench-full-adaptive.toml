@@ -1,0 +1,55 @@
+model = "gpt-5.6-luna"
+num_tasks = 32
+num_rollouts = 1
+shuffle = false
+max_concurrent = 1
+push = false
+rich = false
+
+[client]
+type = "eval"
+base_url = "https://api.openai.com/v1"
+api_key_var = "OPENAI_API_KEY"
+
+[sampling]
+reasoning_effort = "xhigh"
+max_tokens = 128000
+
+[env.taskset]
+id = "agencity-runebench"
+dataset = "maxbittker/runebench@sha256:4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28"
+treatment = "agencity-runebench-repl-v1"
+learning_mode = "within-run"
+ignore_timeouts = false
+ignore_dockerfile = true
+require_image = false
+
+[env.taskset.selection]
+mode = "all"
+
+[env.agent]
+max_turns = 50
+max_input_tokens = 800000
+max_output_tokens = 500000
+max_total_tokens = 1000000
+
+[env.agent.timeout]
+setup = 600
+finalize = 60
+
+[env.agent.retries]
+max_retries = 0
+
+[env.agent.harness]
+id = "agencity-runebench"
+source_repo = "https://github.com/kousun12/agencity.git"
+source_ref = "52d2209574196a8fbaa3f5df593431ba09870566"
+installation = "portable"
+bun_url = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
+bun_sha256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+
+[env.agent.runtime]
+type = "docker"
+cpu = 2
+memory = 8
+disk = 10

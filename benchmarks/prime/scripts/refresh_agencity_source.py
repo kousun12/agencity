@@ -64,9 +64,16 @@ def configured_revisions() -> dict[Path, str]:
 
     for path in CATALOGS:
         value = json.loads(path.read_text(encoding="utf-8"))
-        treatment = value.get("treatments", {}).get("agencity-portable")
-        if not isinstance(treatment, dict) or treatment.get("source_repo") != AGENCITY_SOURCE_REPO:
-            raise RuntimeError(f"{path} has no Agencity portable treatment")
+        treatments = value.get("treatments", {})
+        matching = [
+            treatment
+            for treatment in treatments.values()
+            if isinstance(treatment, dict)
+            and treatment.get("source_repo") == AGENCITY_SOURCE_REPO
+        ] if isinstance(treatments, dict) else []
+        if len(matching) != 1:
+            raise RuntimeError(f"{path} must have exactly one Agencity treatment")
+        treatment = matching[0]
         revision = treatment.get("source_ref")
         if not isinstance(revision, str):
             raise RuntimeError(f"{path} has no Agencity treatment source pin")

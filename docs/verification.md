@@ -279,10 +279,10 @@ External rows require explicit prerequisites and are not part of the determinist
 ### Prime Verifiers benchmark suites
 
 The isolated Python project under `benchmarks/prime/` evaluates Agencity as a
-custom Prime Verifiers v1 harness. Terminal-Bench 2, Terminal-Bench 2.1,
-SWE-bench Pro public, and OOLONG support exact IDs, explicit IDs, named smoke
-subsets, seeded samples, stable shards, and all compatible tasks through one
-selection contract.
+custom Prime Verifiers v1 harness. RuneBench, Terminal-Bench 2,
+Terminal-Bench 2.1, SWE-bench Pro public, and OOLONG support exact IDs,
+explicit IDs, named smoke subsets, seeded samples, stable shards, and all
+compatible tasks through one selection contract.
 
 Run the model-free gate:
 
@@ -308,6 +308,18 @@ deliberately begins without the explicit state directory and verifies startup,
 one terminal result, and container cleanup without paid inference.
 
 ### Catalog coverage and scoring authority
+
+RuneBench catalogs all 32 skill tasks in its pinned Harbor dataset. It uses one
+immutable game image and the unmodified Harbor XP-rate verifier. The
+`agencity-runebench-repl-v1` treatment replaces the official MCP wrapper with
+direct imports of the same image-owned TypeScript SDK through Agencity's
+persistent Bun console. It applies an 8 GiB runtime memory cap to the pinned
+package's 4 GiB declaration, matching the current upstream generator's
+hardening for documented agent OOM failures; both values are retained as
+treatment provenance. The separate fresh and within-run treatments set the
+automatic-learning policy explicitly before each root run: fresh pauses it and
+within-run enables it. No profile or learned artifact crosses scored tasks.
+Gold, collaboration, and cross-episode curriculum treatments are not included.
 
 Terminal-Bench 2 and 2.1 each catalog and pin all 89 official tasks. Every
 entry records complete task-tree integrity, immutable linux/amd64 image
@@ -367,8 +379,8 @@ probes, and one zero-score SWE-bench Pro qutebrowser treatment. The
 current-revision Sol-high OOLONG canary completed the repaired infrastructure
 route but returned `Society & Culture` instead of `Sports`, scoring `0` after
 19 Agencity steps, 20 provider calls, 90,951 prompt-plus-completion tokens,
-about four minutes, and $0.89. No full paid suite or matched harness comparison
-has run. Exact catalogs, commands, and limitations are in
+about four minutes, and $0.89. No paid RuneBench treatment, full paid suite, or
+matched harness comparison has run. Exact catalogs, commands, and limitations are in
 [`benchmarks/prime/README.md`](../benchmarks/prime/README.md).
 
 Final suite-layer model-free verification on August 11, 2026 recorded:

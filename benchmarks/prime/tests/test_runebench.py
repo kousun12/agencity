@@ -1,0 +1,286 @@
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from agencity_runebench.harness import (
+    AgencityRuneBenchHarness,
+    _set_automatic_learning,
+    _start_game,
+)
+from agencity_runebench.taskset import (
+    BENCHMARK,
+    CATALOG_PATH,
+    DATASET,
+    REPL_GUIDANCE,
+    WITHIN_RUN_GUIDANCE,
+    RuneBenchConfig,
+    RuneBenchTask,
+    RuneBenchTaskset,
+)
+from agencity_verifiers.harbor_suite import HarborSuiteTask
+from agencity_verifiers.selection import SelectionSpec, load_catalog
+from verifiers.v1.tasksets.harbor import HarborTask
+
+
+class RuneBenchCatalogTests(unittest.TestCase):
+    def test_catalog_pins_all_published_skill_tasks_and_shared_image(self) -> None:
+        catalog = load_catalog(CATALOG_PATH, BENCHMARK)
+        self.assertEqual(catalog["dataset"]["package"], DATASET)
+        self.assertEqual(len(catalog["tasks"]), 32)
+        self.assertEqual(sum(task["compatible"] for task in catalog["tasks"]), 32)
+        self.assertEqual(
+            {task["duration_seconds"] for task in catalog["tasks"]},
+            {900, 1800},
+        )
+        self.assertEqual(
+            {task["sample_interval_ms"] for task in catalog["tasks"]},
+            {15000},
+        )
+        self.assertEqual(
+            len({task["image_manifest_digest"] for task in catalog["tasks"]}),
+            1,
+        )
+        treatment = catalog["treatments"]["agencity-runebench-repl-v1"]
+        self.assertEqual(treatment["source_memory_gb"], 4)
+        self.assertEqual(treatment["treatment_memory_gb"], 8)
+        for task in catalog["tasks"]:
+            self.assertTrue(task["image"].endswith(task["image_manifest_digest"]))
+            self.assertEqual(task["workdir"], "/app")
+            self.assertEqual(len(task["save_sha256"]), 64)
+            self.assertEqual(len(task["source_dockerfile_sha256"]), 64)
+
+    def test_selection_modes_use_one_task_implementation(self) -> None:
+        selections = {
+            "smoke": SelectionSpec(mode="smoke", subset="woodcutting"),
+            "sample": SelectionSpec(mode="sample", count=3, seed=20260819),
+            "all": SelectionSpec(mode="all"),
+        }
+        expected = {"smoke": 1, "sample": 3, "all": 32}
+        for name, selection in selections.items():
+            with self.subTest(name=name):
+                tasks = list(
+                    RuneBenchTaskset(
+                        RuneBenchConfig(
+                            id="agencity-runebench",
+                            selection=selection,
+                        )
+                    ).load()
+                )
+                self.assertEqual(len(tasks), expected[name])
+                self.assertTrue(all(isinstance(task, RuneBenchTask) for task in tasks))
+                self.assertTrue(all(task.data.resources.memory == 8 for task in tasks))
+
+    def test_fresh_and_within_run_modes_are_explicit_and_isolated(self) -> None:
+        selection = SelectionSpec(
+            mode="exact",
+            ids=["woodcutting-xp-15m"],
+        )
+        fresh = next(
+            iter(
+                RuneBenchTaskset(
+                    RuneBenchConfig(
+                        id="agencity-runebench",
+                        selection=selection,
+                        learning_mode="fresh",
+                    )
+                ).load()
+            )
+        )
+        adaptive = next(
+            iter(
+                RuneBenchTaskset(
+                    RuneBenchConfig(
+                        id="agencity-runebench",
+                        selection=selection,
+                        learning_mode="within-run",
+                    )
+                ).load()
+            )
+        )
+        self.assertIn(REPL_GUIDANCE, str(fresh.data.prompt))
+        self.assertNotIn(WITHIN_RUN_GUIDANCE, str(fresh.data.prompt))
+        self.assertIn(WITHIN_RUN_GUIDANCE, str(adaptive.data.prompt))
+        self.assertNotEqual(fresh.data.adapted_prompt_sha256, adaptive.data.adapted_prompt_sha256)
+        self.assertEqual(fresh.data.selected_ids, adaptive.data.selected_ids)
+
+    def test_official_harbor_reward_remains_authoritative(self) -> None:
+        self.assertIs(RuneBenchTask.solved, HarborTask.solved)
+        self.assertIsNot(HarborSuiteTask._graded, HarborTask._graded)
+
+
+class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def task(self, learning_mode: str = "within-run") -> RuneBenchTask:
+        return next(
+            iter(
+                RuneBenchTaskset(
+                    RuneBenchConfig(
+                        id="agencity-runebench",
+                        learning_mode=learning_mode,
+                        selection=SelectionSpec(
+                            mode="exact",
+                            ids=["woodcutting-xp-15m"],
+                        ),
+                    )
+                ).load()
+            )
+        )
+
+    async def test_task_setup_stages_save_and_adapter_instructions(self) -> None:
+        writes: dict[str, bytes] = {}
+
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+            async def read(self, path: str, max_bytes: int) -> bytes:
+                self.read_call = (path, max_bytes)
+                return b"# upstream instructions\n"
+
+            async def write(self, path: str, data: bytes) -> None:
+                writes[path] = data
+
+        trace = SimpleNamespace(info={})
+        task = self.task()
+        await task.setup(trace, Runtime())
+        self.assertIn(
+            "/app/server/engine/data/players/main/agent.sav",
+            writes,
+        )
+        self.assertIn(b"## Agencity RuneBench treatment", writes["/app/AGENTS.md"])
+        self.assertIn(b"within-run adaptive treatment", writes["/app/AGENTS.md"])
+        self.assertEqual(trace.info["runebench"]["services"], "staged")
+        self.assertFalse(trace.info["runebench"]["cross_episode_learning"])
+
+    async def test_task_setup_creates_missing_agents_instructions(self) -> None:
+        writes: dict[str, bytes] = {}
+
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                return SimpleNamespace(exit_code=1, stdout="", stderr="")
+
+            async def read(self, path: str, max_bytes: int) -> bytes:
+                raise AssertionError("missing AGENTS.md must not be read")
+
+            async def write(self, path: str, data: bytes) -> None:
+                writes[path] = data
+
+        await self.task().setup(SimpleNamespace(info={}), Runtime())
+        self.assertTrue(
+            writes["/app/AGENTS.md"].startswith(b"## Agencity RuneBench treatment")
+        )
+
+    async def test_game_starts_after_staging_and_waits_for_tracker_and_bot(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        class Runtime:
+            async def run_background(
+                self, command: list[str], environment: dict[str, str], log: str
+            ) -> None:
+                calls.append(("background", (command, environment, log)))
+
+            async def run(self, command: list[str], environment: dict[str, str]):
+                calls.append(("run", command))
+                return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+        trace = SimpleNamespace(
+            info={"runebench": {"services": "staged"}},
+        )
+        task = self.task()
+        await _start_game(Runtime(), trace, task.data)
+        kind, background = calls[0]
+        self.assertEqual(kind, "background")
+        command, environment, log = background
+        self.assertEqual(command, ["/entrypoint.sh"])
+        self.assertEqual(environment["BENCHMARK_DURATION_SECS"], "900")
+        self.assertEqual(environment["SAMPLE_INTERVAL_MS"], "15000")
+        self.assertTrue(log.endswith("entrypoint.log"))
+        self.assertEqual(trace.info["runebench"]["services"], "ready")
+
+    async def test_learning_policy_is_explicit_before_launch(self) -> None:
+        calls: list[list[str]] = []
+
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                calls.append(command)
+                return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+        runtime = Runtime()
+        await _set_automatic_learning(
+            runtime,
+            installation="portable",
+            enabled=False,
+        )
+        self.assertIn("refinement.trigger-policy.v1',false", calls[0][2])
+        await _set_automatic_learning(
+            runtime,
+            installation="portable",
+            enabled=True,
+        )
+        self.assertIn("refinement.trigger-policy.v1',true", calls[1][2])
+
+    async def test_startup_timeout_is_infrastructure_error_with_bounded_log(self) -> None:
+        class Runtime:
+            async def run_background(self, *args) -> None:
+                return None
+
+            async def run(self, command: list[str], environment: dict[str, str]):
+                if command[1] == "-c" and command[2].startswith("tail"):
+                    return SimpleNamespace(
+                        exit_code=0,
+                        stdout="startup failed",
+                        stderr="",
+                    )
+                return SimpleNamespace(exit_code=1, stdout="", stderr="not ready")
+
+        with (
+            patch("agencity_runebench.harness.STARTUP_ATTEMPTS", 1),
+            patch("agencity_runebench.harness.asyncio.sleep", AsyncMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                await _start_game(
+                    Runtime(),
+                    SimpleNamespace(info={"runebench": {}}),
+                    self.task().data,
+                )
+
+    async def test_harness_starts_game_immediately_before_agencity_launch(self) -> None:
+        harness = AgencityRuneBenchHarness(
+            SimpleNamespace(installation="portable")
+        )
+        order: list[str] = []
+        task = self.task()
+        with (
+            patch(
+                "agencity_runebench.harness._set_automatic_learning",
+                AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("learning")),
+            ) as learning,
+            patch(
+                "agencity_runebench.harness._start_game",
+                AsyncMock(side_effect=lambda *_: order.append("game")),
+            ),
+            patch(
+                "agencity_verifiers.harness.AgencityHarness.launch",
+                AsyncMock(
+                    side_effect=lambda *_args, **_kwargs: order.append("agencity")
+                    or SimpleNamespace()
+                ),
+            ),
+        ):
+            await harness.launch(
+                SimpleNamespace(),
+                SimpleNamespace(info={}),
+                SimpleNamespace(),
+                "http://localhost:1/v1",
+                "secret",
+                {},
+                task.data,
+            )
+        learning.assert_awaited_once()
+        self.assertTrue(learning.await_args.kwargs["enabled"])
+        self.assertEqual(order, ["learning", "game", "agencity"])
+
+
+if __name__ == "__main__":
+    unittest.main()

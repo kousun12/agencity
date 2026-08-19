@@ -258,8 +258,8 @@ AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=...   bun test te
 ```
 
 The isolated `benchmarks/prime/` project provides a custom Prime Verifiers v1
-harness plus suite-capable Terminal-Bench 2, Terminal-Bench 2.1, SWE-bench Pro
-public, and OOLONG tasksets. One shared deterministic selection contract
+harness plus suite-capable RuneBench, Terminal-Bench 2, Terminal-Bench 2.1,
+SWE-bench Pro public, and OOLONG tasksets. One shared deterministic selection contract
 supports exact IDs, explicit ID lists, named smoke subsets, seeded samples,
 stable shards, and all compatible tasks. Generated immutable catalogs retain
 complete task coverage, typed incompatibility reasons, task/source/tree/image/
@@ -269,6 +269,19 @@ source-refresh command and then retain the resulting immutable commit across
 the harness defaults, configs, and catalog treatment metadata. Suite task
 images and the portable Bun executable remain explicitly `linux/amd64`; local
 ARM Macs use Docker AMD64 emulation rather than changing the audited treatment.
+RuneBench catalogs all 32 skill tasks in its pinned Harbor dataset against one
+immutable game image and the official peak normalized XP-rate verifier. The
+`agencity-runebench-repl-v1` treatment imports the image-owned TypeScript SDK
+directly into Agencity's persistent Bun console instead of advertising generic
+MCP support. It raises the pinned package's 4 GiB memory cap to 8 GiB, matching
+the current upstream generator's hardening for documented agent OOM failures,
+and retains both limits as treatment provenance. Fresh and within-run learning
+modes are separate and set the policy before the root run: fresh pauses
+automatic learning, while within-run enables it and permits one evidence-backed
+governed review. Every scored task uses fresh Agencity and game state, so no
+learned artifact crosses episodes.
+Gold, collaboration, and cross-episode curriculum treatments remain unavailable,
+and no paid RuneBench rollout is verified.
 Terminal-Bench 2 and 2.1 each catalog 89/89 compatible official tasks and
 leave the unmodified Harbor verifier authoritative. SWE-bench Pro catalogs all
 731 public rows: one qutebrowser row is compatible, 729 remain incompatible
@@ -309,11 +322,15 @@ pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
 stdout/stderr diagnostics instead of collapsing to a parser-only error. The
-August 18, 2026 model-free verification against commit `e03a2ad` passed 74
-benchmark tests with one intentionally skipped opt-in scorer test; that official
-scorer test passed separately, as did all 21 suite preflights, all 22 config
-dry-runs, package builds, lock and source-pin checks, and explicit AMD64
-container startup through Docker emulation on an ARM Mac.
+August 19, 2026 model-free verification of the RuneBench working tree passed 85
+benchmark tests with one intentionally skipped opt-in scorer test, all four
+RuneBench config preflights and dry-runs, package builds and source compilation,
+actual pinned-image game startup, and a direct image-owned TypeScript SDK
+connection plus explicit fresh-mode automatic-learning pause through Docker
+emulation on an ARM Mac. The August 18 verification against commit `e03a2ad`
+separately passed the opt-in official scorer test, all 21 then-existing suite
+preflights, all 22 then-existing config dry-runs, lock and source-pin checks,
+and explicit AMD64 container startup.
 
 Deterministic summaries separate passes, valid zeros, partial rewards, agent
 terminal failures, provider failures, scorer/infrastructure errors,

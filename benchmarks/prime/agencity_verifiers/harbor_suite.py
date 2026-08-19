@@ -80,7 +80,7 @@ class HarborSuiteTask(HarborTask):
             # until they finish, then remove only Agencity's portable state.
             await super().finalize(trace, runtime)
         finally:
-            if self.data.treatment == "agencity-portable":
+            if self.data.treatment.startswith("agencity-"):
                 metadata = trace.info.setdefault("agencity", {})
                 if not isinstance(metadata, dict):
                     raise ValueError("Agencity trace metadata is malformed")

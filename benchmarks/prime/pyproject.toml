@@ -19,6 +19,7 @@ build-backend = "hatchling.build"
 packages = [
     "agencity_verifiers",
     "agencity_oolong_synth",
+    "agencity_runebench",
     "agencity_terminal_bench_2",
     "agencity_terminal_bench_2_1",
     "agencity_swe_bench_pro",
@@ -26,6 +27,7 @@ packages = [
 
 [tool.hatch.build.targets.wheel.force-include]
 "manifests/oolong-yahoo-128k.json" = "agencity_oolong_synth/data/selection.json"
+"manifests/runebench-catalog.json" = "agencity_runebench/data/catalog.json"
 "manifests/terminal-bench-2-catalog.json" = "agencity_terminal_bench_2/data/catalog.json"
 "uv.lock" = "agencity_terminal_bench_2/data/uv.lock"
 "manifests/terminal-bench-2-1-catalog.json" = "agencity_terminal_bench_2_1/data/catalog.json"

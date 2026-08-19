@@ -51,7 +51,13 @@ class SuitePreflightTests(unittest.TestCase):
         for path in catalog_paths:
             with self.subTest(catalog=path.name):
                 catalog = json.loads(path.read_text(encoding="utf-8"))
-                treatment = catalog["treatments"]["agencity-portable"]
+                treatments = [
+                    treatment
+                    for treatment in catalog["treatments"].values()
+                    if treatment.get("source_repo") == AGENCITY_SOURCE_REPO
+                ]
+                self.assertEqual(len(treatments), 1)
+                treatment = treatments[0]
                 self.assertEqual(treatment["source_repo"], AGENCITY_SOURCE_REPO)
                 self.assertEqual(treatment["source_ref"], AGENCITY_SOURCE_REF)
 
@@ -85,6 +91,7 @@ class SuitePreflightTests(unittest.TestCase):
                 self.assertEqual(agent["max_output_tokens"], EVALUATION_MAX_OUTPUT_TOKENS)
                 self.assertEqual(agent["max_total_tokens"], EVALUATION_MAX_TOTAL_TOKENS)
                 if config["env"]["taskset"]["id"] in {
+                    "agencity-runebench",
                     "agencity-terminal-bench-2",
                     "agencity-terminal-bench-2-1",
                     "agencity-swe-bench-pro",
@@ -95,6 +102,7 @@ class SuitePreflightTests(unittest.TestCase):
 
     def test_full_catalog_configs_validate_without_loading_images(self) -> None:
         for name, expected in (
+            ("runebench-full-adaptive.toml", 32),
             ("terminal-bench-2-full.toml", 89),
             ("terminal-bench-2-1-full.toml", 89),
             ("swe-bench-pro-public-full.toml", 1),

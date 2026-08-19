@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from agencity_oolong_synth.taskset import OolongSynthConfig, OolongSynthTaskset
+from agencity_runebench.taskset import (
+    BENCHMARK as RUNEBENCH_BENCHMARK,
+    CATALOG_PATH as RUNEBENCH_CATALOG,
+    RuneBenchConfig,
+)
 from agencity_swe_bench_pro.taskset import (
     BENCHMARK as SWE_BENCHMARK,
     CATALOG_PATH as SWE_CATALOG,
@@ -30,6 +35,11 @@ from agencity_verifiers.selection import (
 
 
 CATALOG_TASKSETS = {
+    "agencity-runebench": (
+        RuneBenchConfig,
+        RUNEBENCH_BENCHMARK,
+        RUNEBENCH_CATALOG,
+    ),
     "agencity-terminal-bench-2": (
         TerminalBench2Config,
         "terminal-bench-2",

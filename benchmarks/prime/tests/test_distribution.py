@@ -37,6 +37,9 @@ class DistributionTests(unittest.TestCase):
         ]
         self.assertEqual(leaked, [])
         self.assertTrue(
+            any(name.endswith("/manifests/runebench-catalog.json") for name in names)
+        )
+        self.assertTrue(
             any(name.endswith("/manifests/terminal-bench-2-catalog.json") for name in names)
         )
         self.assertTrue(
@@ -70,6 +73,7 @@ class DistributionTests(unittest.TestCase):
             with zipfile.ZipFile(wheel_path) as archive:
                 names = archive.namelist()
 
+        self.assertIn("agencity_runebench/data/catalog.json", names)
         self.assertIn("agencity_terminal_bench_2/data/catalog.json", names)
         self.assertIn("agencity_terminal_bench_2_1/data/catalog.json", names)
         self.assertIn("agencity_swe_bench_pro/data/catalog.json", names)
@@ -147,13 +151,17 @@ class DistributionTests(unittest.TestCase):
                             "-c",
                             (
                                 "from agencity_verifiers.selection import load_catalog;"
+                                "from agencity_runebench.taskset import "
+                                "CATALOG_PATH as RUNEBENCH_CATALOG;"
                                 "from agencity_terminal_bench_2.taskset import "
                                 "CATALOG_PATH;"
                                 "from agencity_oolong_synth.taskset import "
                                 "OolongSynthConfig,SELECTION_MANIFEST_ID,"
                                 "SELECTION_MANIFEST_PATH,SELECTION_MANIFEST_SHA256;"
                                 "c=load_catalog(CATALOG_PATH,'terminal-bench-2');"
+                                "r=load_catalog(RUNEBENCH_CATALOG,'runebench');"
                                 "assert len(c['tasks']) == 89;"
+                                "assert len(r['tasks']) == 32;"
                                 "assert SELECTION_MANIFEST_PATH.is_file();"
                                 "OolongSynthConfig(id='oolong',"
                                 "selection_manifest=SELECTION_MANIFEST_ID,"
