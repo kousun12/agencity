@@ -18,7 +18,7 @@ import {
   type ModelConfiguration,
   type ReasoningEffort,
 } from "./domain/index.ts";
-import { containsCredentialMaterial, inspectModelCredentialStatuses, modelCredentialPathForProfile, scrubText } from "./security/index.ts";
+import { containsBrokeredSecret, inspectModelCredentialStatuses, modelCredentialPathForProfile, scrubText } from "./security/index.ts";
 import {
   ProductCatalog,
   chooseManagedModel,
@@ -124,8 +124,8 @@ async function main(parsed: ParsedCliArgs): Promise<void> {
   if (parsed.command === "version") { await printVersion(); return; }
   assertRuntimeCompatibility();
   const credentialReference = parsed.values.get("credential-ref");
-  if (credentialReference && containsCredentialMaterial(credentialReference)) {
-    throw new ValidationError("Credential references must be non-secret opaque handles");
+  if (credentialReference && containsBrokeredSecret(credentialReference)) {
+    throw new ValidationError("Credential references cannot contain a registered credential value");
   }
   if (parsed.advanced) await runAdvanced(parsed);
   else if (PRODUCT_COMMANDS.has(parsed.command)) await runProduct(parsed);
@@ -776,7 +776,7 @@ async function managedConfig(client: AgentClient, parsed: ParsedCliArgs): Promis
   if (action === "credential-ref") {
     const provider=parsed.positionals[1];const reference=parsed.positionals[2];const label=parsed.positionals.slice(3).join(" ");
     if(!provider||!reference||!label)throw new ValidationError("config credential-ref requires PROVIDER REFERENCE LABEL");
-    if(containsCredentialMaterial(reference)||containsCredentialMaterial(label))throw new ValidationError("Credential references and labels must be non-secret opaque identifiers");
+    if(containsBrokeredSecret(reference)||containsBrokeredSecret(label))throw new ValidationError("Credential references and labels cannot contain registered credential values");
     if(!/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(reference))throw new ValidationError("Credential references must be opaque handles such as env:OPENAI_API_KEY or keychain:item; raw values are rejected");
     await printValue(await client.productCredentialReference(provider,reference,label),parsed.flags.has("json"));return;
   }
@@ -1206,7 +1206,7 @@ async function config(supervisor: Supervisor, workspace: ResolvedWorkspace, pars
   if (action === "credential-ref") {
     const provider = parsed.positionals[1]; const reference = parsed.positionals[2]; const label = parsed.positionals.slice(3).join(" ");
     if (!provider || !reference || !label) throw new ValidationError("config credential-ref requires PROVIDER REFERENCE LABEL");
-    if (containsCredentialMaterial(reference) || containsCredentialMaterial(label)) throw new ValidationError("Credential references and labels must be non-secret opaque identifiers");
+    if (containsBrokeredSecret(reference) || containsBrokeredSecret(label)) throw new ValidationError("Credential references and labels cannot contain registered credential values");
     if (!/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(reference)) throw new ValidationError("Credential references must be opaque handles such as env:OPENAI_API_KEY or keychain:item; raw values are rejected");
     await supervisor.profile.putCredentialReference({ reference, provider, label, metadata: { kind: "opaque-handle" } });
     console.log(`Saved opaque credential reference ${reference} for ${provider}; no credential value was stored.`);

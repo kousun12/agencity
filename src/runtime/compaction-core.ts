@@ -534,10 +534,12 @@ export function validateCompactionInstructions(
       `Compaction instructions exceed their bound (${size}/${maxUtf8Bytes} UTF-8 bytes, ${codePoints}/${maxCodePoints} code points)`,
     );
   }
-  if (containsCredentialMaterial(instructions, bounds.knownSecrets ?? [])) {
+  if ((bounds.knownSecrets ?? []).some((secret) =>
+    secret.length > 0 && instructions.includes(secret)
+  )) {
     throw new CompactionInstructionError(
       "instructions-contain-secret",
-      "Compaction instructions contain credential material and cannot be retained",
+      "Compaction instructions contain a registered credential value and cannot be retained",
     );
   }
   return Object.freeze({ text: instructions, utf8Bytes: size, codePoints });
@@ -892,25 +894,6 @@ ${marker}`;
 
 function summaryTruncationMarker(omittedEvents: number): string {
   return `[TRUNCATED summary omitted_events=${omittedEvents}]`;
-}
-
-function containsCredentialMaterial(text: string, knownSecrets: readonly string[]): boolean {
-  if (knownSecrets.some((secret) => secret.length > 0 && text.includes(secret))) return true;
-  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) return true;
-  if (/(?:^|\s)(?:Bearer|Basic)\s+[A-Za-z0-9+/_.=-]{8,}(?:$|\s)/i.test(text)) return true;
-  if (/(?:^|[^A-Za-z0-9_-])(?:sk-(?:(?:live|test|proj)[-_]?)?|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9_-]{8,}/.test(text)) return true;
-  if (/(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:$|[^A-Za-z0-9_-])/.test(text)) return true;
-  if (/(?:password|passwd|secret|auth[_-]?token|api[_-]?key)\s*[:=]\s*[^\s,;]+/i.test(text)) return true;
-  for (const match of text.matchAll(/(?:https?|libsql):\/\/[^\s]+/gi)) {
-    try {
-      const url = new URL(match[0]);
-      if (url.username || url.password) return true;
-      if ([...url.searchParams.keys()].some((key) => /(?:api_?key|token|secret|password|credential|auth)/i.test(key))) return true;
-    } catch {
-      // Malformed URL-like text has no parsed credential evidence here.
-    }
-  }
-  return false;
 }
 
 function validateIdentity(value: string, name: string, maxLength = 512): void {

@@ -114,6 +114,10 @@ interface ActiveReplContext {
   readonly bindings: ReplBindings;
 }
 const activeReplContext = new AsyncLocalStorage<ActiveReplContext>();
+const noopConsoleMethod = () => undefined;
+const OUT_OF_CELL_CONSOLE = new Proxy(Object.create(null), {
+  get: () => noopConsoleMethod,
+});
 const REPL_BINDING_NAMES: readonly ReplBindingName[] = [
   "sdk",
   "sql",
@@ -650,6 +654,11 @@ function normalizeAgentInput(input: unknown): unknown {
 function currentReplBinding(name: ReplBindingName): unknown {
   const context = activeReplContext.getStore();
   if (!context) {
+    // Imported modules may retain sockets, timers, or event listeners whose
+    // callbacks outlive the cell's AsyncLocalStorage context. Logging from
+    // those callbacks must not crash the worker or bypass bounded cell logs.
+    // Other SDK bindings remain unavailable because they can request effects.
+    if (name === "console") return OUT_OF_CELL_CONSOLE;
     throw new Error(`Console binding ${name} is unavailable outside an active cell`);
   }
   return context.bindings[name];

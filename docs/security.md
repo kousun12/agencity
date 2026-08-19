@@ -2,7 +2,7 @@
 
 ## Supported trust model
 
-The runtime assumes the model-generated program, its workspace, and its operator are trusted to hold the operating-system authority of the Agencity process. The recommended remote deployment places the **entire** runtime inside an independently managed sandbox (container/microVM/host policy) with explicit filesystem, network, resource, and secret controls.
+Agencity is alpha trusted-local software, not a production security boundary. Operators are responsible for the authority, data, and credentials available to the process. The runtime assumes the model-generated program, its workspace, and its operator are trusted to hold the operating-system authority of the Agencity process. The recommended remote deployment places the **entire** runtime inside an independently managed sandbox (container/microVM/host policy) with explicit filesystem, network, resource, and secret controls.
 
 The Bun console worker is a crash/lifecycle boundary only. It is **not** a security sandbox. Generated TypeScript can use ambient Bun/JavaScript capabilities; a shell command can access anything its OS user can access. `workspaceRoot` narrows typed file operations and initial shell cwd but does not confine arbitrary code or a shell command.
 
@@ -30,11 +30,11 @@ Do not expose `ProtocolServer` directly to an untrusted network. The product-man
 
 Supplemental narration is diagnostic-only. There is no text-JSON or TypeScript fallback. Rejected raw argument bodies are not written to events, logs, artifacts, cursorless progress, or model-contract diagnostics. Those surfaces retain only bounded codes, digests, names, byte counts, and scrubbed summaries.
 
-The built-in product transports validate and scrub normalized output before persistence. A custom provider's complete structured result is scanned across submission input, termination reasons, warnings, supplemental text, violation evidence, and every other retained field for registered brokered secrets or credential-shaped material. A match fails closed before the value is returned or persisted and does not echo the observed credential.
+The built-in product transports validate normalized output before persistence. A custom provider's complete structured result is scanned across submission input, termination reasons, warnings, supplemental text, violation evidence, and every other retained field for exact credential values registered by the supervisor. A match fails closed before the value is returned or persisted and does not echo the observed credential.
 
 ### Raw AI generation
 
-`ai.generateText` and `ai.generateObject` receive only their fixed host instruction, explicit prompt or user/assistant messages, and explicitly selected bounded context. Context values are validated as plain acyclic JSON without invoking getters, and artifact ranges must be valid UTF-8. Known or credential-shaped secrets reject the operation; context is not silently scrubbed into different data. Model output is checked for registered and credential-shaped secrets and the hard inline byte bound inside the model executor before an `EffectOutcomeRecorded` success can persist it.
+`ai.generateText` and `ai.generateObject` receive only their fixed host instruction, explicit prompt or user/assistant messages, and explicitly selected bounded context. Context values are validated as plain acyclic JSON without invoking getters, and artifact ranges must be valid UTF-8. Exact registered credential values reject the operation; context is not silently scrubbed into different data. Model output is checked for those registered values and the hard inline byte bound inside the model executor before an `EffectOutcomeRecorded` success can persist it.
 
 Generation lookup, result, and cancellation routes require the exact owning session and branch. A guessed generation ID cannot cross that route boundary. This is product scope enforcement inside the trusted-local service, not multi-tenant network authorization. Read-only SQL references retain the shared-database diagnostic boundary described below; generated code already has the same trusted SQL surface.
 
@@ -54,8 +54,7 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 
 ### Credential exposure reduction
 
-- Credential-shaped environment variables are removed from the console worker.
-- The shell executor receives an environment with credential-shaped names removed.
+- The console worker, shell executor, and generated-skill processes omit the explicit runtime-private variables `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AI_GATEWAY_API_KEY`, and `TURSO_AUTH_TOKEN`, plus Agencity's own `AGENCITY_*` variables. Other environment variables are preserved regardless of names such as `token`, `password`, or `auth`.
 - OpenAI, Anthropic, and Vercel AI Gateway providers resolve stored or environment keys in the supervisor.
 - Provider execution uses the Vercel AI SDK inside the supervisor; provider keys are not passed to the TypeScript console worker.
 - Direct OpenAI requests use the Responses API with `store: false`; Agencity does not ask OpenAI to retain response state or reasoning summaries.
@@ -63,13 +62,14 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 - Provider tool declarations do not receive credentials and have no execute callback. Provider keys remain supervisor-side for the model request.
 - The public Gateway model-catalog request sends no provider credential. Custom provider origins receive execution prompts and authentication and must be treated as trusted network destinations.
 - TUI-stored model keys live in a profile-owned `auth.json` written with mode `0600`, separate from canonical events and profile preferences.
-- Inputs containing an actual known environment or stored model secret value are rejected before durable append.
-- Known secret byte strings are redacted from executor outputs, logs, and errors before they become durable.
-- Shell stdout/stderr and oversized JSON string tokens use streaming scrubbing across chunk boundaries before owner-only staging or CAS placement. Raw unsanitized overflow is not intentionally written to events, artifacts, logs, previews, or errors.
-- Benign domain fields named `token`, `auth`, `password`, and similar are preserved; key names alone never trigger data mutation.
-- Model-visible refinement context and governance evidence excerpts remove known secret values and recognized credential material. The V3 governance record retains only digests and byte counts for the original canonical payload, plus the bounded redacted excerpt and its provenance. Names outside the heuristics, short secret values, encoded values, or credentials reached through ambient trusted-local code remain outside this protection.
+- Stored and environment-backed model keys, plus configured Turso authentication tokens, are explicitly registered while their owning supervisor is open.
+- Inputs containing an exact registered value are rejected before durable append.
+- Exact registered byte strings are redacted from executor outputs, logs, and errors before they become durable.
+- Shell stdout/stderr and oversized JSON string tokens use exact-value streaming scrubbing across chunk boundaries before owner-only staging or CAS placement.
+- Domain fields and text named `token`, `auth`, `password`, `secret`, and similar are preserved. PEM blocks, Bearer-like text, provider-key-like prefixes, JWT-like strings, and credential-looking URL parameters are ordinary data unless they contain an exact registered value.
+- Model-visible refinement context and governance evidence excerpts remove exact registered values. The V3 governance record retains only digests and byte counts for the original canonical payload, plus the bounded redacted excerpt and its provenance.
 
-This is best-effort accidental-leak prevention. Names outside the heuristic, short secret values, credentials in other files/agents/keychains, encoded values, or alternate process channels may still be visible to trusted code. Generated code has the same OS-user authority and can read the profile credential file through ambient filesystem APIs. The model credential store is a narrow supervisor broker, not a general secret vault or hostile-code boundary; opaque references remain available for externally managed credentials.
+This is a narrow accidental-leak guard for credentials the runtime actually brokers. It is not general secret discovery, data-loss prevention, a credential vault, or a hostile-code boundary. Agencity deliberately does not infer secrets from field names or string shapes. Unregistered values, short values, encoded or transformed values, credentials from arbitrary files or keychains, and alternate process channels remain the operator's responsibility. Generated code has the same OS-user authority and can read the profile credential file through ambient filesystem APIs. Opaque references remain available for externally managed credentials.
 
 Owner-only artifact staging uses process-specific directories and mode `0700`/`0600` where supported. Startup removes stale staging owned by dead processes. A CAS object can become unreachable if placement succeeds before its canonical registration batch; no general garbage collector currently removes these orphans. This does not expose raw pre-scrubbed content, but operators must include the artifact directory in sensitive-data handling and disk-retention policy.
 
@@ -109,7 +109,7 @@ Approval is revalidated before application. Profile and non-skill content applie
 
 ### Generated skills
 
-TypeScript skills compile and execute in disposable Bun child processes with credential-shaped environment variables removed and bounded captured output/time. Compile, test, and invocation are durable outbox effects pinned to an immutable version. `Supervisor.open({ skillPermissionAllowlist })` supplies the exact permission-name allowlist (empty by default); validation reports disallowed names and activation plus invocation recheck the configured boundary. Reopening with a narrower allowlist therefore blocks an already-active version from invocation. This is recovery/lifecycle isolation only: skill source retains the OS authority of the trusted-local runtime and may use ambient Bun APIs. Permission declarations are an enforced admission/invocation policy, not an OS capability sandbox, so operators must still sandbox the whole trusted-local runtime.
+TypeScript skills compile and execute in disposable Bun child processes with explicit runtime-private environment variables removed and bounded captured output/time. Compile, test, and invocation are durable outbox effects pinned to an immutable version. `Supervisor.open({ skillPermissionAllowlist })` supplies the exact permission-name allowlist (empty by default); validation reports disallowed names and activation plus invocation recheck the configured boundary. Reopening with a narrower allowlist therefore blocks an already-active version from invocation. This is recovery/lifecycle isolation only: skill source retains the OS authority of the trusted-local runtime and may use ambient Bun APIs. Permission declarations are an enforced admission/invocation policy, not an OS capability sandbox, so operators must still sandbox the whole trusted-local runtime.
 
 ## Secrets and durable state
 

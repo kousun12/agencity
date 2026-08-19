@@ -13,6 +13,7 @@ from agencity_runebench.taskset import (
     BENCHMARK,
     CATALOG_PATH,
     DATASET,
+    REPL_CONNECTION_SOURCE,
     REPL_GUIDANCE,
     WITHIN_RUN_GUIDANCE,
     RuneBenchConfig,
@@ -100,6 +101,8 @@ class RuneBenchCatalogTests(unittest.TestCase):
             )
         )
         self.assertIn(REPL_GUIDANCE, str(fresh.data.prompt))
+        self.assertIn(REPL_CONNECTION_SOURCE, str(fresh.data.prompt))
+        self.assertIn('password: "test"', REPL_CONNECTION_SOURCE)
         self.assertNotIn(WITHIN_RUN_GUIDANCE, str(fresh.data.prompt))
         self.assertIn(WITHIN_RUN_GUIDANCE, str(adaptive.data.prompt))
         self.assertNotEqual(fresh.data.adapted_prompt_sha256, adaptive.data.adapted_prompt_sha256)
@@ -127,7 +130,7 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_task_setup_stages_save_and_adapter_instructions(self) -> None:
+    async def test_task_setup_stages_save_and_repl_instructions(self) -> None:
         writes: dict[str, bytes] = {}
 
         class Runtime:
@@ -149,6 +152,7 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
             writes,
         )
         self.assertIn(b"## Agencity RuneBench treatment", writes["/app/AGENTS.md"])
+        self.assertIn(b'password: "test"', writes["/app/AGENTS.md"])
         self.assertIn(b"within-run adaptive treatment", writes["/app/AGENTS.md"])
         self.assertEqual(trace.info["runebench"]["services"], "staged")
         self.assertFalse(trace.info["runebench"]["cross_episode_learning"])

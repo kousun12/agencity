@@ -137,7 +137,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 
 - local LibSQL canonical event storage, recursive creation of missing file-backed database parents, immutable event guards, deterministic projection/rebuild, branches, snapshots, cursor-based subscriptions, one shared race-safe snapshot-plus-cursor terminal waiter with an explicit bounded polling fallback only for placements that advertise unavailable relational notifications, and candidate-driven startup recovery that shares one cursor-checked current-branch projection and avoids replaying unrelated terminal runs;
 - persistent Bun TypeScript REPL environments in a bounded exact-session-and-branch worker pool with separate resident-process and active-execution permits, deadlock-free capacity-reserved awaited children, queued detached children, isolated namespace/stdout/worker loss, random authoritative epoch IDs with readable adjective-noun-suffix names, final-expression or explicit-return observations, bounded safe inspection/logs, durable working values, retained cell history, read-only analytical SQL, content-addressed artifacts, 128 KiB cell-result IPC with streamed JSON artifact staging above that boundary, one-based bounded file pages, and exact bounded artifact byte ranges;
-- outbox-backed model, shell, file, and skill effects with typed pre-execution origins, crash recovery, explicit unknown outcomes, and `agencity.bounded-output.v1` completeness envelopes; direct failed/cancelled/unknown convenience-helper errors retain validated exact effect-outcome event IDs on new `CellFailed` events through private non-text worker metadata, while wrapped errors and recovery-time abandonment do not invent causality; local shell execution streams scrubbed 24 KiB head/tail previews and spills complete output up to 32 MiB to CAS when available;
+- outbox-backed model, shell, file, and skill effects with typed pre-execution origins, crash recovery, explicit unknown outcomes, and `agencity.bounded-output.v1` completeness envelopes; direct failed/cancelled/unknown convenience-helper errors retain validated exact effect-outcome event IDs on new `CellFailed` events through private non-text worker metadata, while wrapped errors and recovery-time abandonment do not invent causality; local shell execution streams exact registered-value scrubbing into 24 KiB head/tail previews and spills complete output up to 32 MiB to CAS when available;
 - durable root and child sessions, nuclear-family mailboxes with default queued sends and explicit non-waking steering, deterministic immediate run IDs and sender-authorized observation-only result lookup for new non-legacy queued messages, cancellation trees, recursive-model runtime handles, documents/input sets, goals, cached attributable gates, heartbeats, schedules, and wake queues;
 - durable per-session agent profiles embedded in root and child admission, sealed root/task-specialist defaults, specification-source provenance, session-wide active-profile projections, bounded active/history inspection, and exact profile/effective-system-prompt pins across autonomous and recursive invocations;
 - scoped memory with FTS5 candidate retrieval, versioned prompt notes, skills, subagent specifications, governed refinement/evaluation/rollback, and an attributable trajectory refiner with profile-owned automatic-trigger policy;
@@ -272,8 +272,12 @@ ARM Macs use Docker AMD64 emulation rather than changing the audited treatment.
 RuneBench catalogs all 32 skill tasks in its pinned Harbor dataset against one
 immutable game image and the official peak normalized XP-rate verifier. The
 `agencity-runebench-repl-v1` treatment imports the image-owned TypeScript SDK
-directly into Agencity's persistent Bun console instead of advertising generic
-MCP support. It raises the pinned package's 4 GiB memory cap to 8 GiB, matching
+directly in Agencity's persistent Bun console instead of advertising generic
+MCP support. Ordinary domain fields such as RuneBench's local
+`password: "test"` connection option are valid model-generated TypeScript; only
+exact values registered by the supervisor fail admission. It
+raises the pinned package's 4 GiB
+memory cap to 8 GiB, matching
 the current upstream generator's hardening for documented agent OOM failures,
 and retains both limits as treatment provenance. Fresh and within-run learning
 modes are separate and set the policy before the root run: fresh pauses
@@ -281,7 +285,10 @@ automatic learning, while within-run enables it and permits one evidence-backed
 governed review. Every scored task uses fresh Agencity and game state, so no
 learned artifact crosses episodes.
 Gold, collaboration, and cross-episode curriculum treatments remain unavailable,
-and no paid RuneBench rollout is verified.
+and no paid RuneBench score is verified. One paid Luna canary completed 33
+direct-REPL turns in one warm epoch without credential-input or console-worker
+failure, but owned-service shutdown missed the harness cleanup bound before the
+official scorer ran; the displayed zero is an infrastructure error.
 Terminal-Bench 2 and 2.1 each catalog 89/89 compatible official tasks and
 leave the unmodified Harbor verifier authoritative. SWE-bench Pro catalogs all
 731 public rows: one qutebrowser row is compatible, 729 remain incompatible
@@ -493,7 +500,7 @@ The current system is **trusted-local**, not a hostile-code sandbox.
 - Read-only SQL is a shared diagnostic surface, not a confidentiality boundary between candidates or workspaces.
 - Scope filtering controls behavior and context selection; it must not be described as protection against hostile local SQL/code.
 
-Provider credentials remain supervisor-side. Preserve secret stripping, known-value rejection/redaction, non-login shell behavior, and opaque credential references. Never put raw credentials into events, logs, artifacts, profile metadata, sync envelopes, test fixtures committed to Git, or error messages.
+Provider credentials remain supervisor-side. Preserve removal of explicit runtime-private environment variables, exact registered-value rejection/redaction, non-login shell behavior, and structurally valid opaque credential references. Do not infer secrets from property names, assignments, provider-like prefixes, PEM/Bearer/JWT shapes, or URL query-key names. Never intentionally put raw credentials into events, logs, artifacts, profile metadata, sync envelopes, test fixtures committed to Git, or error messages.
 
 Any new UI or entrypoint must state trusted-local authority clearly and must not claim sandboxing that does not exist.
 

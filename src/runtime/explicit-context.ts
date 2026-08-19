@@ -5,12 +5,11 @@ import {
   assertJsonValue,
   canonicalJsonByteLength,
   canonicalJsonDigest,
-  canonicalJsonStringify,
   projectEvents,
   type ArtifactReference,
   type JsonValue,
 } from "../domain/index.ts";
-import { containsBrokeredSecret, containsCredentialMaterial } from "../security/index.ts";
+import { containsBrokeredSecret } from "../security/index.ts";
 import { requireRecursiveStorage, type AgentStorage } from "../storage/index.ts";
 import type { MemoryService } from "./memory.ts";
 
@@ -69,9 +68,8 @@ export class ExplicitContextMaterializer {
       sources.push({ position, ...resolved.provenance });
     }
     const value = values;
-    if (containsBrokeredSecret(value) ||
-        containsCredentialMaterial(canonicalJsonStringify(value))) {
-      throw new ValidationError("Credential material cannot enter explicit AI context");
+    if (containsBrokeredSecret(value)) {
+      throw new ValidationError("Registered credential values cannot enter explicit AI context");
     }
     const exactUtf8Bytes = canonicalJsonByteLength(value);
     if (exactUtf8Bytes > MAX_EXPLICIT_CONTEXT_BYTES) {
@@ -88,9 +86,8 @@ export class ExplicitContextMaterializer {
       omissions,
       sources,
     } satisfies JsonValue;
-    if (containsBrokeredSecret(provenance) ||
-        containsCredentialMaterial(canonicalJsonStringify(provenance))) {
-      throw new ValidationError("Credential material cannot enter explicit AI context provenance");
+    if (containsBrokeredSecret(provenance)) {
+      throw new ValidationError("Registered credential values cannot enter explicit AI context provenance");
     }
     return Object.freeze({
       value,

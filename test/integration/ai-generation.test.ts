@@ -8,6 +8,7 @@ import {
   canonicalJsonByteLength,
   canonicalJsonDigest,
   createModelEffectOutputV2,
+  registerBrokeredSecret,
   stableEffectId,
   type JsonValue,
   type ModelConfiguration,
@@ -478,6 +479,7 @@ describe("durable raw AI generation", () => {
     const missing = new MissingDeclaredObjectProvider("missing-object", null);
     const invalid = new DeclaredObjectProvider("invalid-object", { count: "wrong" });
     const secret = new DeclaredObjectProvider("secret-object", { value: "sk-proj-generation-secret-123456789" });
+    const release = registerBrokeredSecret("sk-proj-generation-secret-123456789");
     const supervisor = await open(temp, [missing, invalid, secret]);
     try {
       const schema: JsonValue = {
@@ -528,7 +530,10 @@ describe("durable raw AI generation", () => {
         event.type === "EffectOutcomeRecorded" &&
         (event.payload as any).effectId === secretResult.provenance.effectId)?.payload)
         .not.toHaveProperty("output");
-    } finally { await supervisor.close(); }
+    } finally {
+      await supervisor.close();
+      release();
+    }
   });
 
   test("rejects getters, cycles, excessive depth, and invalid UTF-8 while reporting bounded omissions", async () => {

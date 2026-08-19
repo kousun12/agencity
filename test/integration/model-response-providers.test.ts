@@ -552,7 +552,7 @@ describe("formal AI SDK model responses", () => {
     ["an unregistered credential in a provider warning", false, "warning"],
     ["an unregistered credential in supplemental text", false, "supplemental"],
   ] as const)(
-    "a custom provider cannot hand structured output with %s to executor callers",
+    "a custom provider handles structured output with %s using exact registration",
     async (_label, registered, placement) => {
     const secret = "sk-live-Section31DeepCover0042";
     const release = registered ? registerBrokeredSecret(secret) : undefined;
@@ -583,16 +583,21 @@ describe("formal AI SDK model responses", () => {
           provider: "secret-fixture",
           model: "fixture/model",
         }).modelDispatch;
-      const rejection = await executor.executeResponseAware(
+      const outcome = await executor.executeResponseAware(
         { messages: [{ role: "user", content: "review" }] },
         dispatch,
         new AbortController().signal,
       ).then(
-        () => { throw new Error("secret-bearing structured output must not be returned"); },
-        (error: unknown) => error as { code?: string; message?: string },
+        (value) => ({ value }),
+        (error: unknown) => ({ error: error as { code?: string; message?: string } }),
       );
-      expect(rejection.code).toBe("stream-failed");
-      expect(rejection.message ?? "").not.toContain(secret);
+      if (registered) {
+        expect(outcome).toHaveProperty("error.code", "stream-failed");
+        expect(("error" in outcome ? outcome.error.message : "") ?? "").not.toContain(secret);
+      } else {
+        expect(outcome).toHaveProperty("value");
+        expect(JSON.stringify("value" in outcome ? outcome.value : null)).toContain(secret);
+      }
     } finally {
       release?.();
     }
@@ -958,6 +963,18 @@ describe("formal AI SDK model responses", () => {
         },
       },
     });
+
+    const credentialNamedDomainField = await consume([
+      ...formalCall(
+        "runebench-connection",
+        "bun_console",
+        JSON.stringify({
+          source: 'const connection = new BotSDK({ password: "test" });',
+        }),
+      ),
+      ...finishParts("tool-calls", "tool_calls"),
+    ]);
+    expect(credentialNamedDomainField.result.kind).toBe("tool-submission");
 
     const truncated = await consume([
       part("tool-input-start", { id: "cut", toolName: "finish" }),

@@ -211,7 +211,7 @@ describe("restricted declared JSON Schema profile", () => {
           type: "string",
           description: `Never retain ${secret}`,
         })
-      ).toThrow("contains credential material");
+      ).toThrow("contains a registered credential value");
     } finally {
       release();
     }

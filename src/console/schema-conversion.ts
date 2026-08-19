@@ -1,14 +1,12 @@
 import { z } from "zod";
 import {
   ValidationError,
-  canonicalJsonStringify,
   resolveDeclaredSchema,
   type JsonValue,
   type ResolvedDeclaredSchema,
 } from "../domain/index.ts";
 import {
   containsBrokeredSecret,
-  containsCredentialMaterial,
 } from "../security/index.ts";
 
 export interface StandardSchemaLike {
@@ -78,12 +76,9 @@ export function resolveConsoleDeclaredSchema(
 
 function resolveSecretSafeSchema(value: unknown): ResolvedDeclaredSchema {
   const resolved = resolveDeclaredSchema(value);
-  if (
-    containsBrokeredSecret(resolved.schema) ||
-    containsCredentialMaterial(canonicalJsonStringify(resolved.schema))
-  ) {
+  if (containsBrokeredSecret(resolved.schema)) {
     throw new ValidationError(
-      "Declared JSON Schema contains credential material",
+      "Declared JSON Schema contains a registered credential value",
     );
   }
   return resolved;

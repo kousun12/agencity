@@ -137,7 +137,9 @@ Catalog: [`manifests/runebench-catalog.json`](./manifests/runebench-catalog.json
 
 The `agencity-runebench-repl-v1` treatment replaces the task prompt's MCP
 wrapper with direct imports of the same image-owned TypeScript SDK inside
-Agencity's persistent Bun console. The official task package, save fixture,
+Agencity's persistent Bun console. The model creates and retains the native game
+objects itself, including RuneBench's benign local `password: "test"` option.
+The official task package, save fixture,
 time horizon, sampling cadence, game image, and Harbor verifier remain pinned.
 The treatment raises the pinned package's 4 GiB memory cap to 8 GiB, matching
 the current upstream generator's hardening for documented agent OOM failures;
@@ -466,8 +468,10 @@ performance claims. No paid full-suite execution has been performed.
 ## Remaining limits
 
 - RuneBench support covers the pinned 32 published skill tasks. Gold,
-  collaboration, and cross-episode curriculum treatments are not included. No
-  paid RuneBench rollout has been run.
+  collaboration, and cross-episode curriculum treatments are not included. One
+  paid Luna canary exercised 33 direct-REPL turns without credential-input or
+  worker failure, but cleanup failed before official scoring; its reported zero
+  is an infrastructure error rather than a RuneBench score.
 - Only 1 of 731 SWE-bench Pro public rows is currently compatible. Of the 730
   incompatible rows, 729 lack audited immutable image pins and one audited Vuls
   row fails the required official no-op parser-evidence control. This blocks a

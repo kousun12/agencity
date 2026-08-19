@@ -4,6 +4,7 @@ import {
   ConflictError,
   OutboxRunner,
   projectEvents,
+  registerBrokeredSecret,
   result,
   type EffectExecutionContext,
   type EffectExecutor,
@@ -36,8 +37,10 @@ class DeterministicExecutor implements EffectExecutor {
 }
 
 const temps: TempRuntime[] = [];
+const secretReleases: Array<() => void> = [];
 const originalSecret = process.env.AGENCITY_OUTBOX_TEST_TOKEN;
 afterEach(async () => {
+  for (const release of secretReleases.splice(0)) release();
   if (originalSecret === undefined) delete process.env.AGENCITY_OUTBOX_TEST_TOKEN;
   else process.env.AGENCITY_OUTBOX_TEST_TOKEN = originalSecret;
   await Promise.all(temps.splice(0).map(removeTempRuntime));
@@ -207,6 +210,7 @@ describe("durable outbox idempotency", () => {
     const { storage, sessionId, branchId } = await setup();
     const secret = "outbox-super-secret-9e91";
     process.env.AGENCITY_OUTBOX_TEST_TOKEN = secret;
+    secretReleases.push(registerBrokeredSecret(secret));
     const executor = new DeterministicExecutor(() => result(
       "failed",
       { nested: { authorization: secret }, token: "pagination-token", auth: "oauth-mode", text: `echo:${secret}` },

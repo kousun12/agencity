@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   COMPACTION_SOURCE_FORMAT,
-  CompactionInstructionError,
   CompactionPlanningError,
   CompactionRematerializationError,
   ProtectedOnlyCompactionError,
@@ -218,7 +217,7 @@ describe("FU-019 pure compaction core", () => {
       .toThrow(expect.objectContaining({ code: "source-order-mismatch" }));
   });
 
-  test("bounds preservation instructions by code points and UTF-8 and rejects credential material", () => {
+  test("bounds preservation instructions and rejects exact registered values", () => {
     expect(validateCompactionInstructions(undefined)).toBeNull();
     expect(validateCompactionInstructions("Preserve failing test names", { maxUtf8Bytes: 100, maxCodePoints: 100 }))
       .toEqual({ text: "Preserve failing test names", utf8Bytes: 27, codePoints: 27 });
@@ -226,8 +225,8 @@ describe("FU-019 pure compaction core", () => {
       .toThrow(expect.objectContaining({ code: "instructions-too-large" }));
     expect(() => validateCompactionInstructions("keep broker-value-123", { knownSecrets: ["broker-value-123"] }))
       .toThrow(expect.objectContaining({ code: "instructions-contain-secret" }));
-    expect(() => validateCompactionInstructions("api_key=sk-proj_abcdefghijk"))
-      .toThrow(CompactionInstructionError);
+    expect(validateCompactionInstructions("sk-proj_abcdefghijk")).not.toBeNull();
+    expect(validateCompactionInstructions("Use password=test for the local fixture")).not.toBeNull();
     expect(validateCompactionInstructions("Keep credential:opaque-reference")).not.toBeNull();
   });
 

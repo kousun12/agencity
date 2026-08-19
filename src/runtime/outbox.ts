@@ -13,7 +13,8 @@ import type { JsonValue } from "../domain/json.ts";
 import type { EffectExecutionProgress, EffectExecutor, ExecutionResult } from "../executors/contract.ts";
 import { result } from "../executors/contract.ts";
 import type { AgentStorage, OutboxRecord } from "../storage/index.ts";
-import { containsBrokeredSecret, isSensitiveEnvironmentKey, scrubJson, scrubText } from "../security/index.ts";
+import { containsBrokeredSecret, scrubJson, scrubText } from "../security/index.ts";
+import { brokeredSecretValues } from "../security/secret-registry.ts";
 import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
 
 export interface EffectRequest {
@@ -347,7 +348,7 @@ export class OutboxRunner {
       execution = result("failed", undefined, "Model executor returned failure provenance for a non-failed outcome", "provider-request-failed");
     }
     if (record.executor === "model" && execution.output !== undefined && containsBrokeredSecret(execution.output)) {
-      execution = result("failed", undefined, "Model output contained brokered credential material", "stream-failed");
+      execution = result("failed", undefined, "Model output contained a registered credential value", "stream-failed");
     }
     if (record.executor !== "model") {
       try {
@@ -523,10 +524,7 @@ function progressJsonBytes(kind: string, value: JsonValue): number {
 }
 
 function brokeredSecretsForProgress(): string[] {
-  return Object.entries(process.env)
-    .filter(([key, value]) => isSensitiveEnvironmentKey(key) && typeof value === "string" && value.length >= 4)
-    .map(([, value]) => value as string)
-    .sort((left, right) => right.length - left.length);
+  return brokeredSecretValues();
 }
 
 function scrubProgressText(text: string, retainedSecrets: readonly string[]): string {

@@ -77,7 +77,7 @@ This contract is supervisor-selected for a durable recursive child. Recursive mo
 
 Capability reporting distinguishes `provider-strict`, `runtime-validated`, `unknown`, and `unavailable`. Transport primitives and exact model support are separate facts. The shipped transports prove the formal streaming primitives, but the ordinary public model catalog does not authoritatively prove exact-model formal-tool support; those models normally remain `unknown`. Known unsupported combinations reject before root-run or runnable-child admission. Missing credentials remain a separate usability fact. No failure changes transport, schema enforcement, model, or response mode.
 
-Formal declarations are not a sandbox. Generated TypeScript retains the trusted-local operating-system authority established by ADR 0001. Provider credentials remain supervisor-side. Product adapters validate and scrub structured output; a custom provider's complete structured output is scanned across every field for registered or credential-shaped material and fails closed before return or persistence.
+Formal declarations are not a sandbox. Generated TypeScript retains the trusted-local operating-system authority established by ADR 0001. Provider credentials remain supervisor-side. Product adapters validate structured output; a custom provider's complete structured output is scanned across every field for exact values registered by the supervisor and fails closed before return or persistence. Unregistered credential-like text is ordinary model data.
 
 ## Consequences
 

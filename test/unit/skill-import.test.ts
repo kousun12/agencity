@@ -9,6 +9,7 @@ import {
   SKILL_BUNDLE_MANIFEST,
   parseSkillImportBundle,
 } from "../../src/runtime/skill-import.ts";
+import { registerBrokeredSecret } from "../../src/security/index.ts";
 
 const SOURCE = `export default function run(input: { value: number }) {\n  return { doubled: input.value * 2 };\n}\n`;
 
@@ -200,27 +201,25 @@ describe("local skill bundle import validation", () => {
     await expect(parseSkillImportBundle(directory)).rejects.toThrow(`${MAX_SKILL_SOURCE_BYTES} bytes`);
   });
 
-  test("rejects recognizable credential material", async () => {
+  test("preserves credential-shaped source text", async () => {
     const source = `const credential = "sk-live-abcdefghijklmnop";\n${SOURCE}`;
     await writeBundle(directory, validManifest(), source);
-    await expect(parseSkillImportBundle(directory)).rejects.toThrow("credential or brokered secret material");
+    expect((await parseSkillImportBundle(directory)).definition.source).toBe(source);
   });
 
-  test("rejects credential material embedded in manifest metadata", async () => {
+  test("preserves credential-shaped manifest metadata", async () => {
     await writeBundle(directory, validManifest({ description: "-----BEGIN PRIVATE KEY----- do not import" }));
-    await expect(parseSkillImportBundle(directory)).rejects.toThrow("credential or brokered secret material");
+    expect((await parseSkillImportBundle(directory)).definition.description)
+      .toBe("-----BEGIN PRIVATE KEY----- do not import");
   });
 
-  test("rejects a currently brokered secret even when it has no recognizable prefix", async () => {
-    const key = "SKILL_IMPORT_TEST_API_KEY";
-    const previous = process.env[key];
-    process.env[key] = "brokered-value-123456";
+  test("rejects an explicitly registered value", async () => {
+    const release = registerBrokeredSecret("brokered-value-123456");
     try {
       await writeBundle(directory, validManifest(), `const value = "brokered-value-123456";\n${SOURCE}`);
-      await expect(parseSkillImportBundle(directory)).rejects.toThrow("credential or brokered secret material");
+      await expect(parseSkillImportBundle(directory)).rejects.toThrow("registered credential value");
     } finally {
-      if (previous === undefined) delete process.env[key];
-      else process.env[key] = previous;
+      release();
     }
   });
 });

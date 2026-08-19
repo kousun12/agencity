@@ -1248,7 +1248,7 @@ function sanitizeJson(value: unknown, secrets: readonly string[]): Sanitized<Ref
     let redacted = false;
     for (const key of Object.keys(current as Record<string, unknown>).sort(compareText)) {
       const safeKey = sanitizeText(key, secrets);
-      if (safeKey.value !== key) throw new RefinementContextError("secret-escape", "Brokered credential material cannot be used as an object key");
+      if (safeKey.value !== key) throw new RefinementContextError("secret-escape", "Registered credential values cannot be used as object keys");
       const item = walk((current as Record<string, unknown>)[key]);
       output[key] = item.value;
       redacted ||= item.redacted;

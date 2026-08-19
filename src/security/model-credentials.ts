@@ -19,6 +19,7 @@ const ENVIRONMENT_KEYS: Readonly<Record<SupportedModelProviderName, string>> = {
   anthropic: "ANTHROPIC_API_KEY",
   vercel: "AI_GATEWAY_API_KEY",
 };
+const ADDITIONAL_BROKERED_ENVIRONMENT_KEYS = ["TURSO_AUTH_TOKEN"] as const;
 
 interface StoredCredentialFile {
   readonly version: 1;
@@ -96,6 +97,8 @@ export async function inspectModelCredentialStatuses(
 export class ModelCredentialStore {
   readonly #keys = new Map<SupportedModelProviderName, string>();
   readonly #releases = new Map<SupportedModelProviderName, () => void>();
+  readonly #environmentReleases = new Map<string, () => void>();
+  readonly #runtimeReleases: Array<() => void> = [];
   #writes: Promise<void> = Promise.resolve();
   #closed = false;
 
@@ -107,10 +110,31 @@ export class ModelCredentialStore {
   static async open(path: string, environment: NodeJS.ProcessEnv = process.env): Promise<ModelCredentialStore> {
     const store = new ModelCredentialStore(path, environment);
     const stored = await readStoredCredentials(path);
-    if (!stored) return store;
-    await chmod(path, 0o600);
-    for (const [provider, apiKey] of stored) store.#install(provider, apiKey);
-    return store;
+    try {
+      const environmentKeys = new Map<string, string>();
+      for (const provider of supportedModelProviderNames) {
+        const apiKey = environment[ENVIRONMENT_KEYS[provider]]?.trim();
+        if (apiKey) {
+          assertApiKey(apiKey);
+          environmentKeys.set(`provider:${provider}`, apiKey);
+        }
+      }
+      for (const key of ADDITIONAL_BROKERED_ENVIRONMENT_KEYS) {
+        const value = environment[key]?.trim();
+        if (value) environmentKeys.set(`runtime:${key}`, value);
+      }
+      if (stored) await chmod(path, 0o600);
+      for (const [provider, apiKey] of environmentKeys) {
+        store.#environmentReleases.set(provider, registerBrokeredSecret(apiKey));
+      }
+      if (stored) {
+        for (const [provider, apiKey] of stored) store.#install(provider, apiKey);
+      }
+      return store;
+    } catch (error) {
+      store.close();
+      throw error;
+    }
   }
 
   resolve(provider: SupportedModelProviderName): string | undefined {
@@ -131,6 +155,12 @@ export class ModelCredentialStore {
 
   statuses(): ModelProviderCredentialStatus[] {
     return supportedModelProviderNames.map(provider => this.status(provider));
+  }
+
+  /** Registers a supervisor-owned non-model credential for this store's lifetime. */
+  registerRuntimeCredential(value: string): void {
+    this.#assertOpen();
+    this.#runtimeReleases.push(registerBrokeredSecret(value));
   }
 
   async set(provider: string, apiKey: string): Promise<ModelProviderCredentialStatus> {
@@ -164,7 +194,10 @@ export class ModelCredentialStore {
     if (this.#closed) return;
     this.#closed = true;
     for (const release of this.#releases.values()) release();
+    for (const release of this.#environmentReleases.values()) release();
+    for (const release of this.#runtimeReleases.splice(0)) release();
     this.#releases.clear();
+    this.#environmentReleases.clear();
     this.#keys.clear();
   }
 

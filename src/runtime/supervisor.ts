@@ -420,7 +420,7 @@ export class Supervisor {
   readonly effectReconciliation: EffectReconciliationService;
   readonly refiner: RefinerService;
   readonly refinementGovernance: RefinementGovernanceService;
-  /** Process-local executor/provider catalog; descriptors contain no credential material. */
+  /** Process-local executor/provider catalog; descriptors contain no registered credential values. */
   readonly modelExecutor: ModelExecutor;
   readonly modelEffectAdmission: ModelEffectAdmissionService;
   readonly modelSelection: ModelSelectionService;
@@ -621,7 +621,16 @@ export class Supervisor {
       }
       const credentialPath = options.modelCredentialPath ??
         modelCredentialPathForProfile(fileURLToPath(new URL(profileDatabaseUrl)));
-      credentials = await ModelCredentialStore.open(credentialPath);
+      const openedCredentials = await ModelCredentialStore.open(credentialPath);
+      try {
+        if (options.sync?.authToken) {
+          openedCredentials.registerRuntimeCredential(options.sync.authToken);
+        }
+      } catch (error) {
+        openedCredentials.close();
+        throw error;
+      }
+      credentials = openedCredentials;
     } catch (error) {
       profile.close();
       throw error;

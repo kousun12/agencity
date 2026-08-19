@@ -9,6 +9,7 @@ import {
   Supervisor,
   EVENT_SCHEMA_VERSION,
   agentProfilePin,
+  registerBrokeredSecret,
   type AgentEvent,
   type BranchWatchHandlers,
   type EffectProgressNotification,
@@ -1459,6 +1460,7 @@ describe("FU-006 terminal interrupt semantics", () => {
 
     const previous = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = secret;
+    const release = registerBrokeredSecret(secret);
     const unhandled: unknown[] = [];
     const capture = (reason: unknown): void => { unhandled.push(reason); };
     process.on("unhandledRejection", capture);
@@ -1473,6 +1475,7 @@ describe("FU-006 terminal interrupt semantics", () => {
       expect(unhandled).toEqual([]);
       expect(output).toContain("Detaching after a cancellation request");
     } finally {
+      release();
       process.off("unhandledRejection", capture);
       if (previous === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previous;

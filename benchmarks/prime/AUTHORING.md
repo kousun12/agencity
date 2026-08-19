@@ -21,7 +21,7 @@ but they are not the main product benchmark.
 
 Interactive action environments, simulated users, generic MCP-backed tasks, and
 multi-agent environments require explicit capability contracts. RuneBench is
-the implemented narrow exception: its benchmark-specific harness imports the
+the implemented narrow exception: its benchmark-specific guidance imports the
 colocated TypeScript SDK directly through Agencity's Bun console and does not
 advertise generic MCP support.
 

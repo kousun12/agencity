@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CliRunInterruptCoordinator } from "../../src/cli/run-interrupt.ts";
 import { ProtocolClientError } from "../../src/protocol/index.ts";
+import { registerBrokeredSecret } from "../../src/security/index.ts";
 
 async function flush(): Promise<void> { await Bun.sleep(0); }
 
@@ -52,6 +53,7 @@ describe("plain product run interrupt semantics", () => {
     const secret = "sk-test-DO-NOT-RENDER-1234567890";
     const prior = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = secret;
+    const release = registerBrokeredSecret(secret);
     try {
       const interrupts = new CliRunInterruptCoordinator(
         async () => { throw new ProtocolClientError("CANCEL_FAILED", `provider rejected ${secret}`, 503); },
@@ -64,6 +66,7 @@ describe("plain product run interrupt semantics", () => {
       expect(output[0]).toContain("Cancellation was not confirmed");
       expect(output.join("\n")).not.toContain(secret);
     } finally {
+      release();
       if (prior === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = prior;
     }

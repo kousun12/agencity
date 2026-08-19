@@ -699,32 +699,42 @@ print(json.dumps({
     }));
   });
 
-  test("credential configuration rejects expanded known secrets and credential-shaped references or labels without disclosure", async () => {
+  test("credential configuration rejects registered values and malformed handles without shape guessing", async () => {
     const value = await fixture();
     // This deliberately does not resemble a provider key: rejection proves the
     // value supplied in argv after shell expansion is matched to the environment.
-    const expandedSecret = "known-shell-expanded-value-4815162342";
+    const expandedSecret = "vault:known-shell-expanded-value-4815162342";
     const shapedReference = "sk-live-CREDENTIALSHAPED0123456789";
     const shapedLabel = "Bearer credentialshapedlabel123456";
-    const cases: Array<{ reference: string; label: string; rejected: string }> = [
-      { reference: expandedSecret, label: "safe label", rejected: expandedSecret },
-      { reference: "env:OPENAI_API_KEY", label: expandedSecret, rejected: expandedSecret },
-      { reference: shapedReference, label: "safe label", rejected: shapedReference },
-      { reference: "env:OPENAI_API_KEY", label: shapedLabel, rejected: shapedLabel },
+    const cases: Array<{ reference: string; label: string; rejected: string; message: string }> = [
+      { reference: expandedSecret, label: "safe label", rejected: expandedSecret, message: "registered credential values" },
+      { reference: "env:OPENAI_API_KEY", label: expandedSecret, rejected: expandedSecret, message: "registered credential values" },
     ];
     for (const candidate of cases) {
       const result = await cli([
         "config", "--workspace", value.workspace, "credential-ref", "openai", candidate.reference, candidate.label,
       ], { home: value.home, extraEnv: { OPENAI_API_KEY: expandedSecret } });
       expect(result.code).not.toBe(0);
-      expect(result.stderr).toContain("must be non-secret opaque identifiers");
+      expect(result.stderr).toContain(candidate.message);
       expect(`${result.stdout}\n${result.stderr}`).not.toContain(candidate.rejected);
     }
+    const malformed = await cli([
+      "config", "--workspace", value.workspace, "credential-ref", "openai", shapedReference, "safe label",
+    ], { home: value.home });
+    expect(malformed.code).not.toBe(0);
+    expect(malformed.stderr).toContain("opaque handles");
+
+    const accepted = await cli([
+      "config", "--workspace", value.workspace, "credential-ref", "openai", "env:OPENAI_API_KEY", shapedLabel,
+    ], { home: value.home });
+    expect(accepted).toMatchObject({ code: 0, stderr: "" });
     const inspected = await cli(["config", "--workspace", value.workspace, "--json"], { home: value.home });
     expect(inspected.code).toBe(0);
-    expect((JSON.parse(inspected.stdout) as { credentialReferences: unknown[] }).credentialReferences).toEqual([]);
+    expect((JSON.parse(inspected.stdout) as { credentialReferences: Array<{ label: string }> }).credentialReferences)
+      .toEqual([expect.objectContaining({ label: shapedLabel })]);
     const durableBytes = await allFileText(value.directory);
-    for (const candidate of [expandedSecret, shapedReference, shapedLabel]) expect(durableBytes).not.toContain(candidate);
+    expect(durableBytes).not.toContain(expandedSecret);
+    expect(durableBytes).toContain(shapedLabel);
   });
 
   test("version and isolated bun link executable work outside the source directory", async () => {

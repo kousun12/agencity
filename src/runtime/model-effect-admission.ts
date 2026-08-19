@@ -1,7 +1,6 @@
 import {
   TEXT_MODEL_RESPONSE_CONTRACT,
   ValidationError,
-  canonicalJsonStringify,
   resolveDeclaredSchema,
   modelDispatchWithResponseAdmission,
   resolveBuiltInModelResponseContract,
@@ -16,7 +15,6 @@ import {
 import type { ModelExecutor } from "../executors/index.ts";
 import {
   containsBrokeredSecret,
-  containsCredentialMaterial,
 } from "../security/index.ts";
 
 export interface ModelEffectAdmission {
@@ -86,12 +84,9 @@ export class ModelEffectAdmissionService {
     configuration: ModelConfigurationInput,
   ): ModelEffectAdmission {
     const checkedSchema = resolveDeclaredSchema(schema);
-    if (
-      containsBrokeredSecret(checkedSchema.schema) ||
-      containsCredentialMaterial(canonicalJsonStringify(checkedSchema.schema))
-    ) {
+    if (containsBrokeredSecret(checkedSchema.schema)) {
       throw new ValidationError(
-        "Declared JSON Schema contains credential material",
+        "Declared JSON Schema contains a registered credential value",
       );
     }
     const execution = this.modelExecutor.resolveExecutionDescriptor(
@@ -124,12 +119,9 @@ export class ModelEffectAdmissionService {
     configuration: ModelConfigurationInput,
   ): ModelEffectAdmission {
     const checkedSchema = resolveDeclaredSchema(schema);
-    if (
-      containsBrokeredSecret(checkedSchema.schema) ||
-      containsCredentialMaterial(canonicalJsonStringify(checkedSchema.schema))
-    ) {
+    if (containsBrokeredSecret(checkedSchema.schema)) {
       throw new ValidationError(
-        "Declared JSON Schema contains credential material",
+        "Declared JSON Schema contains a registered credential value",
       );
     }
     const execution = this.modelExecutor.resolveExecutionDescriptor(

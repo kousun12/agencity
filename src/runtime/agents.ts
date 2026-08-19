@@ -8,7 +8,6 @@ import {
 } from "../storage/index.ts";
 import {
   containsBrokeredSecret,
-  containsCredentialMaterial,
 } from "../security/index.ts";
 import type { OutboxRunner } from "./outbox.ts";
 import type { AgentRunResult, AgentRunService } from "./agent-runs.ts";
@@ -1683,12 +1682,9 @@ function assertInvocationContractSecretFree(
 ): void {
   if (contract.output.kind !== "object") return;
   const schema = contract.output.declaredSchema.schema;
-  if (
-    containsBrokeredSecret(schema) ||
-    containsCredentialMaterial(canonicalJsonStringify(schema))
-  ) {
+  if (containsBrokeredSecret(schema)) {
     throw new ValidationError(
-      "Declared JSON Schema contains credential material",
+      "Declared JSON Schema contains a registered credential value",
     );
   }
 }

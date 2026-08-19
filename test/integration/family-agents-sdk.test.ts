@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   AGENT_ACTION_PROTOCOL, AGENT_ACTION_VERSION, AgentClient, ProtocolServer, ScriptedAgentActionProvider, Supervisor,
-  agentProfilePin, projectEvents, type AgentAction, type AgentRunResult, type ConsoleMailboxMessageResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse,
+  agentProfilePin, projectEvents, registerBrokeredSecret, type AgentAction, type AgentRunResult, type ConsoleMailboxMessageResult, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2, type ModelProvider, type TextModelResponse,
 } from "../../src/index.ts";
 import { formalOutputFromAgentAction } from "../../src/executors/model-response.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
@@ -634,20 +634,25 @@ describe("FU-012 retained family messaging", () => {
           run: false,
         } as any,
       )).rejects.toThrow(/spawn is always detached-running/i);
-      await expect(value.supervisor.agents.spawnRunnable(
-        value.root.sessionId,
-        value.root.branchId,
-        {
-          task: "secret schema",
-          output: {
-            schema: {
-              type: "object",
-              description: "Use sk-proj-1234567890secret",
-              additionalProperties: false,
+      const releaseSchemaSecret = registerBrokeredSecret("sk-proj-1234567890secret");
+      try {
+        await expect(value.supervisor.agents.spawnRunnable(
+          value.root.sessionId,
+          value.root.branchId,
+          {
+            task: "secret schema",
+            output: {
+              schema: {
+                type: "object",
+                description: "Use sk-proj-1234567890secret",
+                additionalProperties: false,
+              },
             },
           },
-        },
-      )).rejects.toThrow(/credential material/i);
+        )).rejects.toThrow(/registered credential value/i);
+      } finally {
+        releaseSchemaSecret();
+      }
       await expect(value.supervisor.agents.spawnManyRunnable(
         value.root.sessionId,
         value.root.branchId,

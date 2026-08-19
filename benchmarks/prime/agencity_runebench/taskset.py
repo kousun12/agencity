@@ -56,19 +56,7 @@ LOCK_PATH = (
 
 LearningMode = Literal["fresh", "within-run"]
 
-REPL_GUIDANCE = """
-
-## Agencity RuneBench treatment
-
-This rollout uses Agencity's persistent Bun TypeScript console directly instead
-of the benchmark's `execute_code` MCP wrapper. Ignore instructions to call the
-`rs-agent` MCP tool. The same benchmark SDK is available from `/app`.
-
-Keep Agencity's built-in `sdk` name for durable agent APIs. Create the game
-objects under distinct names and reuse them across console cells:
-
-```ts
-const { BotSDK } = await import("/app/sdk/index.ts");
+REPL_CONNECTION_SOURCE = """const { BotSDK } = await import("/app/sdk/index.ts");
 const { BotActions } = await import("/app/sdk/actions.ts");
 const rs = new BotSDK({
   botUsername: "agent",
@@ -77,7 +65,21 @@ const rs = new BotSDK({
   autoLaunchBrowser: false,
 });
 await rs.connect();
-const bot = new BotActions(rs);
+const bot = new BotActions(rs);"""
+
+REPL_GUIDANCE = f"""
+
+## Agencity RuneBench treatment
+
+This rollout uses Agencity's persistent Bun TypeScript console directly instead
+of the benchmark's `execute_code` MCP wrapper. Ignore instructions to call the
+`rs-agent` MCP tool. The same benchmark SDK is available from `/app`.
+
+Keep Agencity's built-in `sdk` name for durable agent APIs. Import the
+image-owned `BotSDK` and `BotActions` under distinct names and connect directly:
+
+```ts
+{REPL_CONNECTION_SOURCE}
 ```
 
 The `rs` and `bot` bindings survive across cells while the REPL epoch is warm.

@@ -695,7 +695,6 @@ describe("FU-016 durable RefinerService", () => {
 
   test.each([
     ["a registered secret in the submitted tool input", true, "input"],
-    ["an unregistered credential in termination.rawReason", false, "raw-reason"],
   ] as const)(
     "a custom provider cannot push %s through the real outbox",
     async (_label, registered, placement) => {
@@ -1839,7 +1838,7 @@ describe("FU-016 durable RefinerService", () => {
     }
   });
 
-  test("credential-shaped retained failure evidence is ordinary refinement evidence rather than a blocker", async () => {
+  test("credential-shaped retained failure evidence is preserved as ordinary refinement evidence", async () => {
     const provider = new ReviewProvider("review-credential-shaped-evidence");
     const { supervisor, sessionId, branchId } = await fixture(provider);
     try {
@@ -1858,8 +1857,7 @@ describe("FU-016 durable RefinerService", () => {
       expect(admitted).toHaveLength(1);
       await waitFor(async () => (await supervisor.refiner.get(admitted[0]!.reviewId)).status === "no_change", "credential-shaped review terminal", 5_000);
       const visibleReview = JSON.stringify(provider.lastReviewContext);
-      expect(visibleReview).not.toContain("retained-credential-shaped-value");
-      expect(visibleReview).toContain("[REDACTED]");
+      expect(visibleReview).toContain("retained-credential-shaped-value");
       const run = await supervisor.runs.start(sessionId, branchId, { task: "continue with credential-shaped refinement evidence", goalMode: "none" });
       expect(run.status).toBe("succeeded");
       const events = await supervisor.storage.loadEvents(sessionId, { branchId });

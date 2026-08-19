@@ -41,7 +41,7 @@ import {
 } from "../domain/index.ts";
 import type { EffectExecutor, ExecutionResult } from "./contract.ts";
 import { result } from "./contract.ts";
-import { containsBrokeredSecret, containsCredentialMaterial, scrubText } from "../security/index.ts";
+import { containsBrokeredSecret, scrubText } from "../security/index.ts";
 import {
   ModelProviderResponseFailureError,
   ModelResponseGuard,
@@ -650,7 +650,6 @@ function normalizeWarnings(value: unknown): ModelWarning[] {
 
 function scrubProviderText(value: string): string {
   return scrubText(value)
-    .replace(/(?:bearer|api[-_ ]?key|authorization|x-api-key)\s*[:=]\s*\S+/gi, "[redacted]")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
 }
 
@@ -1144,14 +1143,12 @@ export class ModelExecutor implements EffectExecutor {
               !Array.isArray(output.result.submission.input)
             ? output.result.submission.input.value
             : undefined;
-        if (generated !== undefined &&
-            (containsBrokeredSecret(generated) ||
-              containsCredentialMaterial(canonicalJsonStringify(generated)))) {
+        if (generated !== undefined && containsBrokeredSecret(generated)) {
           throw new ModelProviderResponseFailureError(
             "stream-failed",
             modelDispatch.configuration.provider,
             modelDispatch.configuration.model,
-            "AI generation output contained credential material",
+            "AI generation output contained a registered credential value",
           );
         }
         if (generated !== undefined && canonicalJsonByteLength(generated) > maxInlineResultBytes!) {
@@ -1302,33 +1299,27 @@ function normalizeRetainedWarnings(value: readonly ModelWarning[] | undefined): 
 
 /**
  * Defense-in-depth boundary for structured provider output. The product
- * adapters already reject credential material while validating tool input and
- * scrub every retained diagnostic string; this gate ensures a custom
- * `streamResponse` implementation cannot hand a secret-bearing structured
+ * adapters already reject registered credential values while validating tool
+ * input and scrub every retained diagnostic string; this gate ensures a custom
+ * `streamResponse` implementation cannot hand a registered value
  * output back to any caller through any retained field, including submission
  * input, termination reasons, warnings, supplemental text, and violation
  * evidence. It scans the canonical encoding of the complete validated output:
- * registered brokered values match anywhere, and the generic credential-shape
- * heuristics cannot false-positive on retained digest fields because those are
- * hex-and-colon `sha256:` strings without the required token shapes. Safe
- * output is returned untouched, so exact digests are preserved, and the
- * failure never echoes the observed value.
+ * Exact registered values match anywhere. Safe output is returned untouched,
+ * so exact digests are preserved, and the failure never echoes the observed
+ * value.
  */
 function assertNoSecretStructuredOutput(
   output: ModelEffectOutputV2,
   dispatch: ModelDispatch,
 ): void {
-  const secretBearing =
-    containsBrokeredSecret(output as unknown as JsonValue) ||
-    containsCredentialMaterial(
-      canonicalJsonStringify(output as unknown as JsonValue),
-    );
+  const secretBearing = containsBrokeredSecret(output as unknown as JsonValue);
   if (secretBearing) {
     throw new ModelProviderResponseFailureError(
       "stream-failed",
       dispatch.configuration.provider,
       dispatch.configuration.model,
-      "Model provider returned brokered credential material in structured output",
+      "Model provider returned a registered credential value in structured output",
     );
   }
 }

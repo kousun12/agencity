@@ -8,7 +8,8 @@ import {
   assertReadonlySql,
   containsBrokeredSecret,
   environmentWithoutSecrets,
-  isSensitiveEnvironmentKey,
+  isRuntimePrivateEnvironmentKey,
+  registerBrokeredSecret,
   scrubJson,
   scrubText,
 } from "../../src/index.ts";
@@ -21,9 +22,11 @@ import {
 } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
+const secretReleases: Array<() => void> = [];
 const originalSecret = process.env.AGENCITY_TEST_API_KEY;
 const originalHome = process.env.HOME;
 afterEach(async () => {
+  for (const release of secretReleases.splice(0)) release();
   if (originalSecret === undefined) delete process.env.AGENCITY_TEST_API_KEY;
   else process.env.AGENCITY_TEST_API_KEY = originalSecret;
   if (originalHome === undefined) delete process.env.HOME;
@@ -110,19 +113,60 @@ describe("read-only analytical SQL", () => {
 });
 
 describe("brokered secret handling", () => {
-  test("recognizes, strips, detects, and redacts credential material", () => {
+  test("does not guess secrets from names or value shapes", () => {
+    const values = [
+      'const connection = { password: "test", token: "pagination-cursor" };',
+      'const connection = { password: "sk-proj-abcdefghijklmnopqrstuvwxyz" };',
+      "Bearer placeholder-value",
+      "-----BEGIN PRIVATE KEY-----example-----END PRIVATE KEY-----",
+      "aaaaaaaaaaaaaaaa.bbbbbbbb.cccccccc",
+      "https://example.test/?access_token=page-2",
+    ];
+    for (const value of values) {
+      expect(containsBrokeredSecret(value)).toBe(false);
+      expect(scrubText(value)).toBe(value);
+    }
+  });
+
+  test("does not auto-register values from sensitive-looking environment names", () => {
+    const previous = process.env.SERVICE_PASSWORD;
+    process.env.SERVICE_PASSWORD = "unregistered-environment-value";
+    try {
+      expect(containsBrokeredSecret("unregistered-environment-value")).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.SERVICE_PASSWORD;
+      else process.env.SERVICE_PASSWORD = previous;
+    }
+  });
+
+  test("matches registered values directly in JSON keys and strings", () => {
+    const secret = 'quoted"slash\\credential-value';
+    secretReleases.push(registerBrokeredSecret(secret));
+    expect(containsBrokeredSecret({ [`key:${secret}`]: { value: secret } })).toBe(true);
+    expect(scrubJson({ [`key:${secret}`]: { value: secret } })).toEqual({
+      "key:[REDACTED]": { value: "[REDACTED]" },
+    });
+  });
+
+  test("strips explicit runtime variables and redacts registered values", () => {
     const secret = "test-secret-material-4bc2";
-    process.env.AGENCITY_TEST_API_KEY = secret;
+    secretReleases.push(registerBrokeredSecret(secret));
     const safe = environmentWithoutSecrets({
       PATH: "/bin",
       AGENCITY_TEST_API_KEY: secret,
       SERVICE_AUTH_TOKEN: "other",
+      OPENAI_API_KEY: secret,
       ORDINARY_SETTING: "visible",
     });
-    expect(safe).toEqual({ PATH: "/bin", ORDINARY_SETTING: "visible" });
-    expect(isSensitiveEnvironmentKey("OPENAI_API_KEY")).toBe(true);
-    expect(isSensitiveEnvironmentKey("service_password")).toBe(true);
-    expect(isSensitiveEnvironmentKey("ordinary_setting")).toBe(false);
+    expect(safe).toEqual({
+      PATH: "/bin",
+      SERVICE_AUTH_TOKEN: "other",
+      ORDINARY_SETTING: "visible",
+    });
+    expect(isRuntimePrivateEnvironmentKey("OPENAI_API_KEY")).toBe(true);
+    expect(isRuntimePrivateEnvironmentKey("AGENCITY_INTERNAL_SETTING")).toBe(true);
+    expect(isRuntimePrivateEnvironmentKey("service_password")).toBe(false);
+    expect(isRuntimePrivateEnvironmentKey("ordinary_setting")).toBe(false);
     expect(containsBrokeredSecret({ nested: ["prefix", `${secret}:suffix`] })).toBe(true);
     expect(containsBrokeredSecret({ credentialHandle: "opaque://model/default" })).toBe(false);
     expect(scrubText(`before ${secret} after`)).toBe("before [REDACTED] after");
@@ -145,7 +189,7 @@ describe("brokered secret handling", () => {
 
   test("rejects actual known secret values without corrupting benign key names", async () => {
     const secret = "canonical-secret-value-54ae";
-    process.env.AGENCITY_TEST_API_KEY = secret;
+    secretReleases.push(registerBrokeredSecret(secret));
     const temp = await makeTempRuntime("agencity-secret-canonical-");
     temps.push(temp);
     const storage = await openTempStorage(temp);
@@ -166,20 +210,22 @@ describe("brokered secret handling", () => {
     storage.close();
   });
 
-  test("redacts a private key whose END marker is split across chunks", () => {
+  test("redacts an exact registered value split across chunks", () => {
+    const secret = "private-material-registered-value";
+    secretReleases.push(registerBrokeredSecret(secret));
     const scrubber = new StreamingTextScrubber();
     const encode = (value: string) => new TextEncoder().encode(value);
     const output = [
-      scrubber.push(encode("before -----BEGIN PRIVATE KEY-----private-material-----EN")),
-      scrubber.push(encode("D PRIVATE")),
-      scrubber.push(encode(" KEY----- after")),
+      scrubber.push(encode("before private-material-")),
+      scrubber.push(encode("registered-")),
+      scrubber.push(encode("value after")),
       scrubber.finish(),
     ].join("");
     expect(output).toBe("before [REDACTED] after");
-    expect(output).not.toContain("private-material");
+    expect(output).not.toContain(secret);
   });
 
-  test("bounds retained state for uninterrupted credential-shaped streams", () => {
+  test("preserves unregistered credential-shaped streams without buffering them", () => {
     const prefixes = [
       "Bearer ",
       "Basic ",
@@ -198,10 +244,8 @@ describe("brokered secret handling", () => {
         maximumBuffered = Math.max(maximumBuffered, scrubber.bufferedCharacterCount);
       }
       output += scrubber.finish();
-      expect(maximumBuffered).toBeLessThanOrEqual(8 * 1024);
-      expect(output).toContain("[REDACTED]");
-      expect(output).toEndWith(" end");
-      expect(output.length).toBeLessThan(128);
+      expect(maximumBuffered).toBe(0);
+      expect(output).toBe(source);
     }
   });
 
@@ -217,7 +261,7 @@ describe("brokered secret handling", () => {
     expect(output).toBe(source);
   });
 
-  test("preserves long non-sensitive URLs and redacts late sensitive parameters", () => {
+  test("preserves URL semantics and redacts only an exact registered value", () => {
     const encode = new TextEncoder();
     const stream = (source: string): string => {
       const scrubber = new StreamingTextScrubber();
@@ -230,10 +274,12 @@ describe("brokered secret handling", () => {
     const benign = `https://example.test/path/${"segment".repeat(2_000)}?page=1`;
     expect(stream(benign)).toBe(benign);
 
-    const sensitive = `https://example.test/path/${"segment".repeat(2_000)}?access_token=${"A".repeat(20_000)} end`;
-    const scrubbed = stream(sensitive);
-    expect(scrubbed).toBe(`https://example.test/path/${"segment".repeat(2_000)}?[REDACTED] end`);
-    expect(scrubbed).not.toContain("A".repeat(1_024));
+    const registered = "registered-url-value-123456";
+    secretReleases.push(registerBrokeredSecret(registered));
+    const source = `https://example.test/path/${"segment".repeat(2_000)}?access_token=${registered} end`;
+    expect(stream(source)).toBe(
+      `https://example.test/path/${"segment".repeat(2_000)}?access_token=[REDACTED] end`,
+    );
   });
 
 });

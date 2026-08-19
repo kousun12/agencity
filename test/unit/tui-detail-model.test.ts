@@ -6,6 +6,7 @@ import {
   formatTerminalDetail,
   formatTerminalRaw,
 } from "../../src/tui/detail-model.ts";
+import { registerBrokeredSecret } from "../../src/security/index.ts";
 
 describe("terminal inspector view models", () => {
   test.each([
@@ -350,9 +351,10 @@ describe("terminal inspector view models", () => {
     expect(output).toContain("not proven improvement");
   });
 
-  test("raw diagnostics require an explicit formatter and redact credential fields and known values", () => {
+  test("raw diagnostics preserve named fields and redact registered values", () => {
     const previous = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "known-secret-for-inspector";
+    const release = registerBrokeredSecret("known-secret-for-inspector");
     try {
       const value = {
         status: "ok",
@@ -366,13 +368,13 @@ describe("terminal inspector view models", () => {
       expect(normal).not.toContain("unknown-secret-value");
       expect(normal).not.toContain("known-secret-for-inspector");
       const raw = formatTerminalRaw(value);
-      expect(raw).toContain('"apiKey": "[REDACTED]"');
-      expect(raw).not.toContain("unknown-secret-value");
-      expect(raw).not.toContain("unknown-access-token");
-      expect(raw).not.toContain("unknown-auth-token");
-      expect(raw).not.toContain("unknown-client-secret");
+      expect(raw).toContain('"apiKey": "unknown-secret-value"');
+      expect(raw).toContain("unknown-access-token");
+      expect(raw).toContain("unknown-auth-token");
+      expect(raw).toContain("unknown-client-secret");
       expect(raw).not.toContain("known-secret-for-inspector");
     } finally {
+      release();
       if (previous === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previous;
     }

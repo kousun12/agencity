@@ -164,7 +164,7 @@ The same durable protocol supports non-interactive automation and other clients.
 
 Agencity's first execution mode is trusted local. Model-generated TypeScript and shell commands run with the operating-system authority granted to the runtime. The Bun worker provides lifecycle and crash isolation, not a hostile-code sandbox.
 
-That boundary is shown in the product rather than hidden in documentation. Secrets are kept out of model-visible state and resolved through environment or brokered references where supported, but secret filtering and path validation do not turn local execution into containment.
+That boundary is shown in the product rather than hidden in documentation. Provider credentials remain supervisor-side where supported, and their exact registered values are rejected or redacted on supported durable paths. Agencity does not attempt general secret discovery from names or string shapes, and these narrow checks plus path validation do not turn local execution into containment.
 
 When stronger isolation is required, the complete runtime belongs inside a separately managed sandbox with explicit filesystem, network, resource, and credential policy.
 

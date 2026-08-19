@@ -80,7 +80,7 @@ This acceptance suite is intentionally non-interactive. The `test:core` groups s
 
 The agent-run integration suite verifies zero, duplicate, malformed, truncated, oversized, and unknown formal calls execute nothing; a text-JSON response does not become an action; a typed rejection is delivered once to one correction step; a second consecutive rejection terminates the run; and recovery after committed response or action boundaries does not duplicate the model call, cell, message, or observation.
 
-The integration suite also verifies declaration-only AI SDK tools for OpenAI, Anthropic, and Gateway; direct-transport parallel-call suppression; normalized reasoning mapping; structured and text streaming; bounded warnings and errors; model-catalog normalization, endpoint-keyed cache isolation, stale fallback, and malformed-record rejection; dispatch equality; custom-provider credential failure across complete structured output; schema-1 through schema-4 rejection without deletion; and structured result recovery across rebuild, reopen, and divergent synchronization.
+The integration suite also verifies declaration-only AI SDK tools for OpenAI, Anthropic, and Gateway; direct-transport parallel-call suppression; normalized reasoning mapping; structured and text streaming; bounded warnings and errors; model-catalog normalization, endpoint-keyed cache isolation, stale fallback, and malformed-record rejection; dispatch equality; exact registered-value failure across complete custom-provider structured output while unregistered credential-like text remains ordinary data; schema-1 through schema-4 rejection without deletion; and structured result recovery across rebuild, reopen, and divergent synchronization.
 
 It records a focused family-projection benchmark with 25 relatives and branch histories expanded to 5,000 canonical event records at the storage boundary. It proves that a cold read projects each route once and that a warm refresh reuses current snapshots without replaying the 130,000 retained events. Controller tests separately prove that periodic family refresh requests are coalesced, never overlap, do not accumulate a timer backlog, and stop when the browser is closed and no child is actively working. Workspace Agents catalog tests cover explicit one-shot refresh, stale-row retention, superseded-response rejection, and exact product selection without adding a polling loop.
 
@@ -313,7 +313,8 @@ RuneBench catalogs all 32 skill tasks in its pinned Harbor dataset. It uses one
 immutable game image and the unmodified Harbor XP-rate verifier. The
 `agencity-runebench-repl-v1` treatment replaces the official MCP wrapper with
 direct imports of the same image-owned TypeScript SDK through Agencity's
-persistent Bun console. It applies an 8 GiB runtime memory cap to the pinned
+persistent Bun console. RuneBench's benign `password: "test"` option remains in
+the generated connection cell. It applies an 8 GiB runtime memory cap to the pinned
 package's 4 GiB declaration, matching the current upstream generator's
 hardening for documented agent OOM failures; both values are retained as
 treatment provenance. The separate fresh and within-run treatments set the
@@ -379,8 +380,12 @@ probes, and one zero-score SWE-bench Pro qutebrowser treatment. The
 current-revision Sol-high OOLONG canary completed the repaired infrastructure
 route but returned `Society & Culture` instead of `Sports`, scoring `0` after
 19 Agencity steps, 20 provider calls, 90,951 prompt-plus-completion tokens,
-about four minutes, and $0.89. No paid RuneBench treatment, full paid suite, or
-matched harness comparison has run. Exact catalogs, commands, and limitations are in
+about four minutes, and $0.89. A paid RuneBench Luna canary completed 33 native
+direct-REPL turns without credential-input or console-worker failure, but the
+official scorer did not run because service shutdown missed the harness cleanup
+bound; its displayed zero is an infrastructure error, not a score. No full paid
+RuneBench treatment, full paid suite, or matched harness comparison has run.
+Exact catalogs, commands, and limitations are in
 [`benchmarks/prime/README.md`](../benchmarks/prime/README.md).
 
 Final suite-layer model-free verification on August 11, 2026 recorded:

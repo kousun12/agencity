@@ -31,10 +31,12 @@ describe("owner-only model credential storage", () => {
     try {
       expect(reopened.resolve("anthropic")).toBe(secret);
       expect(reopened.status("anthropic").source).toBe("stored");
+      expect(containsBrokeredSecret({ value: "environment-fallback-123" })).toBe(true);
       await reopened.remove("anthropic");
       expect(reopened.resolve("anthropic")).toBe("environment-fallback-123");
       expect(reopened.status("anthropic").source).toBe("environment");
     } finally { reopened.close(); }
+    expect(containsBrokeredSecret({ secret, environment: "environment-fallback-123" })).toBe(false);
   });
 
   test("rejects unsupported providers and malformed credential values", async () => {
@@ -45,6 +47,17 @@ describe("owner-only model credential storage", () => {
       await expect(store.set("other", "long-enough-secret")).rejects.toThrow("Unsupported model provider");
       await expect(store.set("openai", " short ")).rejects.toThrow("API key");
     } finally { store.close(); }
+  });
+
+  test("registers and releases an explicit supervisor-owned runtime credential", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agencity-runtime-auth-"));
+    directories.push(directory);
+    const value = "runtime-owned-turso-token-123456";
+    const store = await ModelCredentialStore.open(join(directory, "auth.json"), {});
+    store.registerRuntimeCredential(value);
+    expect(containsBrokeredSecret({ value })).toBe(true);
+    store.close();
+    expect(containsBrokeredSecret({ value })).toBe(false);
   });
 
   test("does not register partially validated credential files", async () => {

@@ -9,7 +9,7 @@ import {
   MAX_REFINEMENT_GOVERNANCE_EVIDENCE_EXCERPT_BYTES,
   type FrozenRefinementGovernanceEvidenceExcerpt,
 } from "../domain/refinement-governance.ts";
-import { scrubCredentialText } from "./scrub.ts";
+import { scrubText } from "./scrub.ts";
 
 export type RefinementEvidenceRedaction =
   | "credentials"
@@ -59,7 +59,7 @@ export function sanitizeRefinementEvidencePayload(
     type,
     withoutInstructionFields,
   );
-  const payload = scrubRefinementCredentialEvidence(withoutInstructions);
+  const payload = scrubRefinementKnownSecrets(withoutInstructions);
   const redactions: RefinementEvidenceRedaction[] = [];
   if (canonicalJsonDigest(withoutInstructions) !== canonicalJsonDigest(value)) {
     redactions.push("repository_instructions");
@@ -154,31 +154,24 @@ function truncateUtf8(value: string, maximum: number): string {
   return output;
 }
 
-function scrubRefinementCredentialEvidence(value: JsonValue): JsonValue {
-  if (typeof value === "string") return scrubRefinementCredentialText(value);
+function scrubRefinementKnownSecrets(value: JsonValue): JsonValue {
+  if (typeof value === "string") return scrubText(value);
   if (value === null || typeof value === "boolean" ||
       typeof value === "number") return value;
   if (Array.isArray(value)) {
-    return value.map(scrubRefinementCredentialEvidence);
+    return value.map(scrubRefinementKnownSecrets);
   }
   const result: Record<string, JsonValue> = {};
   for (const [key, item] of Object.entries(value)) {
-    const scrubbedKey = scrubRefinementCredentialText(key);
+    const scrubbedKey = scrubText(key);
     if (Object.hasOwn(result, scrubbedKey)) {
       throw new ValidationError(
-        "Credential redaction produced duplicate refinement evidence keys",
+        "Registered-value redaction produced duplicate refinement evidence keys",
       );
     }
-    result[scrubbedKey] = scrubRefinementCredentialEvidence(item);
+    result[scrubbedKey] = scrubRefinementKnownSecrets(item);
   }
   return result;
-}
-
-function scrubRefinementCredentialText(value: string): string {
-  return scrubCredentialText(value).replace(
-    /(?:password|passwd|secret|authorization|token|(?:access|refresh|auth|id)[_-]?token|api[_-]?key)\s*[:=]\s*\[REDACTED\]/gi,
-    "[REDACTED]",
-  );
 }
 
 function stripRepositoryInstructionFields(value: JsonValue): JsonValue {

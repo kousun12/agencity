@@ -194,7 +194,7 @@ describe("declared-data response contracts", () => {
           provider: "fixture",
           model: "fixture/model",
         })
-      ).toThrow("contains credential material");
+      ).toThrow("contains a registered credential value");
     } finally {
       release();
     }

@@ -2,7 +2,7 @@ import { createClient, type Client, type Row } from "@libsql/client";
 import { connect, type Database as TursoDatabase } from "@tursodatabase/sync";
 import { fileURLToPath } from "node:url";
 import { ConflictError, ValidationError, newId, type JsonValue } from "../domain/index.ts";
-import { containsCredentialMaterial } from "../security/index.ts";
+import { containsBrokeredSecret } from "../security/index.ts";
 import type {
   ProfileDatabase, ProfileGlobalSkillAction, ProfileGlobalSkillAvailability, ProfileGlobalSkillHistory,
   ProfileGlobalSkillProvenance, ProfileGlobalSkillReadOptions, ProfileGlobalSkillRecord,
@@ -57,23 +57,8 @@ function profileMigrationDigest(statements: readonly string[]): string {
   hash.update(statements.join("\n-- statement boundary --\n"));
   return hash.digest("hex");
 }
-function assertSafeRemoteUrl(value:string):void{let url:URL;try{url=new URL(value);}catch{throw new ValidationError("Sync URL is invalid");}for(const key of url.searchParams.keys())if(/token|secret|password|key/i.test(key))throw new ValidationError("Sync URL cannot contain credential query parameters; pass authToken in memory");if(url.username||url.password)throw new ValidationError("Sync URL cannot contain credentials");}
-const SENSITIVE_METADATA_KEY = /pass(word)?|secret|api[_-]?key|auth[_-]?token|access[_-]?token|private[_-]?key|credential/i;
-const OPAQUE_REFERENCE_KEY = /(?:reference|ref|handle|identifier|_id)$/i;
-function looksLikeOpaqueReference(value:unknown):boolean{return typeof value==="string"&&value.length>0&&value.length<=512&&!/[\s\0]/.test(value)&&(/^[a-z][a-z0-9+.-]*:[^?#]+$/i.test(value)||/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/.test(value));}
-function credentialValue(value:string):boolean{return containsCredentialMaterial(value);}
-function opaqueReferenceDescriptor(value:unknown):boolean{if(!value||typeof value!=="object"||Array.isArray(value))return false;const entries=Object.entries(value as Record<string,unknown>);if(!entries.length||entries.some(([key,item])=>!/^(?:reference|ref|handle|identifier|id|provider|label)$/i.test(key)||typeof item!=="string"))return false;const handle=entries.find(([key])=>/^(?:reference|ref|handle|identifier|id)$/i.test(key))?.[1];return looksLikeOpaqueReference(handle);}
-function credentialMaterial(value: unknown, key = "", sensitiveContainer=false): boolean {
-  const sensitiveKey=SENSITIVE_METADATA_KEY.test(key);
-  if(sensitiveKey&&(OPAQUE_REFERENCE_KEY.test(key)&&looksLikeOpaqueReference(value)||opaqueReferenceDescriptor(value)))return false;
-  if(sensitiveKey)return true;
-  if(typeof value==="string")return credentialValue(value)||(sensitiveContainer&&/^(?:value|material|plaintext|contents?)$/i.test(key));
-  if(value===null||typeof value==="number"||typeof value==="boolean")return false;
-  if(!value||typeof value!=="object")return true;
-  if(Array.isArray(value))return value.some((item)=>credentialMaterial(item,"",sensitiveContainer));
-  const entries=Object.entries(value as Record<string,unknown>);
-  return entries.some(([childKey,child])=>credentialMaterial(child,childKey,sensitiveContainer||SENSITIVE_METADATA_KEY.test(key)));
-}
+function assertSafeRemoteUrl(value:string):void{let url:URL;try{url=new URL(value);}catch{throw new ValidationError("Sync URL is invalid");}if(url.username||url.password)throw new ValidationError("Sync URL cannot contain embedded credentials");}
+function assertCredentialReference(value:string):void{if(value.length>512||!/^[A-Za-z][A-Za-z0-9+.-]*:[^\s\0]+$/.test(value))throw new ValidationError("Credential references must be bounded opaque handles");if(containsBrokeredSecret(value))throw new ValidationError("Credential references cannot contain registered credential values");}
 const PROFILE_SKILL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PROFILE_SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PROFILE_SKILL_DIGEST = /^[a-f0-9]{64}$/;
@@ -91,11 +76,10 @@ function assertProfileSkillName(value:unknown):asserts value is string{if(typeof
 function assertProfileSkillDigest(value:unknown,label="Global skill digest"):asserts value is string{if(typeof value!=="string"||!PROFILE_SKILL_DIGEST.test(value))throw new ValidationError(`${label} is invalid`);}
 function assertProfileSkillTimestamp(value:unknown,label:string):asserts value is string{if(typeof value!=="string"||value.length!==24||!Number.isFinite(Date.parse(value))||new Date(Date.parse(value)).toISOString()!==value)throw new ValidationError(`${label} must be a canonical timestamp`);}
 function assertProfileSkillAvailability(value:unknown):asserts value is ProfileGlobalSkillAvailability{if(typeof value!=="string"||!PROFILE_SKILL_AVAILABILITIES.has(value as ProfileGlobalSkillAvailability))throw new ValidationError("Global skill availability is invalid");}
-function assertProfileSkillEffectRef(value:unknown):asserts value is string|null{if(value===null)return;if(typeof value!=="string"||value!==value.trim()||!value||value.length>512||value.includes("\0")||credentialMaterial(value,"effectRef"))throw new ValidationError("Global skill effect reference must be a non-secret opaque reference");}
+function assertProfileSkillEffectRef(value:unknown):asserts value is string|null{if(value===null)return;if(typeof value!=="string"||value!==value.trim()||!value||value.length>512||value.includes("\0")||containsBrokeredSecret(value))throw new ValidationError("Global skill effect reference cannot contain a registered credential value");}
 function profileSkillObject(value:unknown,label:string,allowed:ReadonlySet<string>,required:readonly string[]):Record<string,unknown>{if(!value||typeof value!=="object"||Array.isArray(value)||(Object.getPrototypeOf(value)!==Object.prototype&&Object.getPrototypeOf(value)!==null))throw new ValidationError(`${label} must be an object`);const result=value as Record<string,unknown>;if(Object.keys(result).some(key=>!allowed.has(key))||required.some(key=>!Object.prototype.hasOwnProperty.call(result,key)))throw new ValidationError(`${label} fields do not match the strict schema`);return result;}
 function assertProfileJson(value:unknown,label:string,depth=0,state={nodes:0}):asserts value is JsonValue{state.nodes++;if(depth>24||state.nodes>32768)throw new ValidationError(`${label} is too deep or complex`);if(value===null||typeof value==="string"||typeof value==="boolean")return;if(typeof value==="number"){if(!Number.isFinite(value))throw new ValidationError(`${label} contains a non-finite number`);return;}if(Array.isArray(value)){for(const item of value)assertProfileJson(item,label,depth+1,state);return;}if(!value||typeof value!=="object"||(Object.getPrototypeOf(value)!==Object.prototype&&Object.getPrototypeOf(value)!==null))throw new ValidationError(`${label} must contain JSON values only`);for(const [key,item]of Object.entries(value)){if(!key||key.length>4096)throw new ValidationError(`${label} contains an invalid key`);assertProfileJson(item,label,depth+1,state);}}
 function validateProfileSkillDefinition(value:unknown):JsonValue{
-  if(credentialMaterial(value))throw new ValidationError("Global skill definitions cannot contain credential material");
   const input=profileSkillObject(value,"Global skill definition",PROFILE_SKILL_DEFINITION_FIELDS,["description","source","permissions","tests","runtime"]);
   if(typeof input.description!=="string"||!input.description.trim()||input.description.length>16384)throw new ValidationError("Global skill description is invalid");
   if(typeof input.source!=="string"||!input.source.trim()||new TextEncoder().encode(input.source).byteLength>512*1024)throw new ValidationError("Global skill TypeScript source is invalid");
@@ -117,11 +101,13 @@ function validateProfileSkillDefinition(value:unknown):JsonValue{
   }
   if(input.inputSchema!==undefined){assertProfileJson(input.inputSchema,"Global skill input schema");if(!input.inputSchema||typeof input.inputSchema!=="object"||Array.isArray(input.inputSchema))throw new ValidationError("Global skill input schema must be an object");}
   assertProfileJson(value,"Global skill definition");
+  if(containsBrokeredSecret(value))throw new ValidationError("Global skill definitions cannot contain registered credential values");
   const definition=value as JsonValue;if(new TextEncoder().encode(stableJson(definition)).byteLength>768*1024)throw new ValidationError("Global skill definition exceeds the byte bound");
   return definition;
 }
 function validateProfileSkillProvenance(value:unknown,allowLegacy=false):ProfileGlobalSkillProvenance{
-  if(credentialMaterial(value))throw new ValidationError("Global skill provenance cannot contain credential material");
+  assertProfileJson(value,"Global skill provenance");
+  if(containsBrokeredSecret(value))throw new ValidationError("Global skill provenance cannot contain registered credential values");
   if(!value||typeof value!=="object"||Array.isArray(value))throw new ValidationError("Global skill provenance must be an object");
   const source=(value as Record<string,unknown>).source;
   const reference=(item:unknown,label:string)=>{if(typeof item!=="string"||item!==item.trim()||!item||item.length>4096||item.includes("\0"))throw new ValidationError(`${label} is invalid`);return item;};
@@ -349,20 +335,20 @@ export class ProfileStore implements ProfileDatabase {
     const descriptors=stableJson(record.descriptors);
     if(new TextEncoder().encode(descriptors).byteLength>8*1024*1024)throw new ValidationError("Model catalog cache exceeds its byte bound");
     if(profileSkillDigest(record.descriptors)!==record.revisionDigest)throw new ValidationError("Model catalog cache revision digest does not match its descriptors");
-    if(credentialMaterial(record.descriptors))throw new ValidationError("Model catalog cache cannot contain credential material");
+    if(containsBrokeredSecret(record.descriptors))throw new ValidationError("Model catalog cache cannot contain registered credential values");
     const catalogOrigin=normalizeProfileCatalogOrigin(record.catalogOrigin);
     if(profileCatalogEndpointId(catalogOrigin)!==record.endpointId)throw new ValidationError("Model catalog cache endpoint does not match its origin");
     await this.#client.execute({sql:"INSERT INTO model_catalog_cache(endpoint_id,catalog_origin,descriptors_json,revision_digest,fetched_at,expires_at,schema_version) VALUES(?,?,?,?,?,?,?) ON CONFLICT(endpoint_id) DO UPDATE SET catalog_origin=excluded.catalog_origin,descriptors_json=excluded.descriptors_json,revision_digest=excluded.revision_digest,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at,schema_version=excluded.schema_version",args:[record.endpointId,catalogOrigin,descriptors,record.revisionDigest,record.fetchedAt,record.expiresAt,record.schemaVersion]});
   }
   async deleteModelCatalogCache(endpointId:string):Promise<void>{if(!/^[a-f0-9]{64}$/.test(endpointId))throw new ValidationError("Model catalog endpoint ID is invalid");await this.#client.execute({sql:"DELETE FROM model_catalog_cache WHERE endpoint_id=?",args:[endpointId]});}
-  async putCredentialReference(input:Omit<CredentialReference,"createdAt"|"updatedAt">):Promise<CredentialReference>{if(!input.reference.trim()||!input.provider.trim()||!input.label.trim())throw new ValidationError("Credential reference fields are required");if(containsCredentialMaterial(input.reference)||containsCredentialMaterial(input.label))throw new ValidationError("Credential references and labels must be non-secret opaque identifiers");if(credentialMaterial(input.metadata))throw new ValidationError("Credential metadata may describe a handle but cannot contain credential material");const old=await this.getCredentialReference(input.reference);const now=new Date().toISOString();const result={...input,createdAt:old?.createdAt??now,updatedAt:now};await this.#client.execute({sql:"INSERT INTO credential_references(reference,provider,label,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(reference) DO UPDATE SET provider=excluded.provider,label=excluded.label,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at",args:[result.reference,result.provider,result.label,JSON.stringify(result.metadata),result.createdAt,result.updatedAt]});return result;}
+  async putCredentialReference(input:Omit<CredentialReference,"createdAt"|"updatedAt">):Promise<CredentialReference>{if(!input.reference.trim()||!input.provider.trim()||!input.label.trim())throw new ValidationError("Credential reference fields are required");assertCredentialReference(input.reference);if(containsBrokeredSecret(input.label)||containsBrokeredSecret(input.metadata))throw new ValidationError("Credential reference records cannot contain registered credential values");const old=await this.getCredentialReference(input.reference);const now=new Date().toISOString();const result={...input,createdAt:old?.createdAt??now,updatedAt:now};await this.#client.execute({sql:"INSERT INTO credential_references(reference,provider,label,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(reference) DO UPDATE SET provider=excluded.provider,label=excluded.label,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at",args:[result.reference,result.provider,result.label,JSON.stringify(result.metadata),result.createdAt,result.updatedAt]});return result;}
   async getCredentialReference(reference:string):Promise<CredentialReference|null>{const r=await this.#client.execute({sql:"SELECT * FROM credential_references WHERE reference=?",args:[reference]});const row=r.rows[0];return row?{reference:String(row.reference),provider:String(row.provider),label:String(row.label),metadata:parseJson(row.metadata_json),createdAt:String(row.created_at),updatedAt:String(row.updated_at)}:null;}
   async listCredentialReferences():Promise<CredentialReference[]>{const r=await this.#client.execute("SELECT * FROM credential_references ORDER BY reference");return r.rows.map(row=>({reference:String(row.reference),provider:String(row.provider),label:String(row.label),metadata:parseJson(row.metadata_json),createdAt:String(row.created_at),updatedAt:String(row.updated_at)}));}
   async #profileSkillActionSnapshot(action:ProfileGlobalSkillAction):Promise<ProfileGlobalSkillRecord>{const version=await this.getGlobalSkillVersion(action.versionId);if(!version||version.skillId!==action.skillId||version.digest!==action.digest)throw new ValidationError("Global skill action references a missing immutable version");return{...version,availability:action.availability,status:action.availability,updatedAt:action.createdAt};}
   async installGlobalSkill(input:Omit<ProfileInstalledSkill,"versionId"|"digest"|"createdAt">&{readonly versionId?:string}):Promise<ProfileInstalledSkill>{
     if(!input.skillId.trim()||!input.name.trim())throw new ValidationError("Global skill identity and name are required");
-    if(credentialMaterial(input.definition))throw new ValidationError("Global skill definitions cannot contain credential material");
     assertProfileJson(input.definition,"Global skill definition");
+    if(containsBrokeredSecret(input.definition))throw new ValidationError("Global skill definitions cannot contain registered credential values");
     const versionId=input.versionId??newId(),definitionJson=stableJson(input.definition),digest=profileSkillDigest(input.definition),now=new Date().toISOString(),provenanceJson=stableJson({source:"legacy"});
     const tx=await this.#client.transaction("write");let createdAt=now;
     try{
@@ -445,7 +431,7 @@ export class ProfileStore implements ProfileDatabase {
     }catch(error){if(!tx.closed)await tx.rollback();throw error;}finally{tx.close();}
     return this.#profileSkillActionSnapshot(action);
   }
-  async putWorkspace(x:WorkspaceCatalogEntry):Promise<void>{if(x.syncUrl)assertSafeRemoteUrl(x.syncUrl);if(x.credentialReference&&containsCredentialMaterial(x.credentialReference))throw new ValidationError("Workspace credential references must be non-secret opaque identifiers");await this.#client.execute({sql:"INSERT INTO workspace_catalog(workspace_id,name,database_url,replica_url,sync_url,credential_reference,owner_profile_id,created_at,updated_at,deleted_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET name=excluded.name,database_url=excluded.database_url,replica_url=excluded.replica_url,sync_url=excluded.sync_url,credential_reference=excluded.credential_reference,owner_profile_id=excluded.owner_profile_id,updated_at=excluded.updated_at,deleted_at=excluded.deleted_at",args:[x.workspaceId,x.name,x.databaseUrl,x.replicaUrl,x.syncUrl,x.credentialReference,x.ownerProfileId,x.createdAt,x.updatedAt,x.deletedAt]});}
+  async putWorkspace(x:WorkspaceCatalogEntry):Promise<void>{if(x.syncUrl)assertSafeRemoteUrl(x.syncUrl);if(x.credentialReference)assertCredentialReference(x.credentialReference);await this.#client.execute({sql:"INSERT INTO workspace_catalog(workspace_id,name,database_url,replica_url,sync_url,credential_reference,owner_profile_id,created_at,updated_at,deleted_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET name=excluded.name,database_url=excluded.database_url,replica_url=excluded.replica_url,sync_url=excluded.sync_url,credential_reference=excluded.credential_reference,owner_profile_id=excluded.owner_profile_id,updated_at=excluded.updated_at,deleted_at=excluded.deleted_at",args:[x.workspaceId,x.name,x.databaseUrl,x.replicaUrl,x.syncUrl,x.credentialReference,x.ownerProfileId,x.createdAt,x.updatedAt,x.deletedAt]});}
   async getWorkspace(workspaceId:string):Promise<WorkspaceCatalogEntry|null>{const r=await this.#client.execute({sql:"SELECT * FROM workspace_catalog WHERE workspace_id=?",args:[workspaceId]});return r.rows[0]?rowToWorkspace(r.rows[0]):null;}
   async listWorkspaces(includeDeleted=false):Promise<WorkspaceCatalogEntry[]>{const r=await this.#client.execute(`SELECT * FROM workspace_catalog${includeDeleted?"":" WHERE deleted_at IS NULL"} ORDER BY workspace_id`);return r.rows.map(rowToWorkspace);}
   async markWorkspaceDeleted(workspaceId:string,deletedAt:string):Promise<void>{const r=await this.#client.execute({sql:"UPDATE workspace_catalog SET name='',database_url='',replica_url=NULL,sync_url=NULL,credential_reference=NULL,deleted_at=?,updated_at=? WHERE workspace_id=? AND deleted_at IS NULL",args:[deletedAt,deletedAt,workspaceId]});if(r.rowsAffected!==1)throw new ConflictError("Workspace is missing or already deleted",{workspaceId});}

@@ -25,6 +25,7 @@ import {
 import type { AgentStorage } from "../storage/index.ts";
 import type { ModelExecutor } from "../executors/index.ts";
 import { containsBrokeredSecret } from "../security/index.ts";
+import { brokeredSecretValues } from "../security/secret-registry.ts";
 import { stableEffectId, type OutboxRunner } from "./outbox.ts";
 import { ModelEffectAdmissionService } from "./model-effect-admission.ts";
 import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
@@ -135,7 +136,7 @@ export class CompactionService {
     if (strategy !== "deterministic-extractive-v1" && strategy !== MODEL_SUMMARY_STRATEGY) throw new ValidationError("Unsupported context compaction strategy");
     const reason = input.reason ?? (input.requestedBy === "agent" ? "agent-request" : "user-request");
     const requestedBy = input.requestedBy ?? "user";
-    const validatedInstructions = validateCompactionInstructions(input.instructions, { knownSecrets: brokeredSecrets() });
+    const validatedInstructions = validateCompactionInstructions(input.instructions, { knownSecrets: brokeredSecretValues() });
     if (containsBrokeredSecret(validatedInstructions?.text ?? "")) throw new ValidationError("Brokered credentials cannot enter compaction instructions");
     const retainRecentMessages = input.retainRecentMessages ?? DEFAULT_COMPACTION_RECENT_MESSAGES;
     if (!Number.isSafeInteger(retainRecentMessages) || retainRecentMessages < 1 || retainRecentMessages > 1_000) throw new ValidationError("retainRecentMessages must be an integer from 1 to 1000");
@@ -535,7 +536,6 @@ function canonicalCursor(cursor: string): string { return BigInt(cursor).toStrin
 function validatedJson(value: unknown): JsonValue { return JSON.parse(JSON.stringify(value)) as JsonValue; }
 function sha256(value: string): string { const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex"); }
 function boundedUtf8(value: string, maximum: number): string { const bytes = new TextEncoder().encode(value); return bytes.byteLength <= maximum ? value : new TextDecoder().decode(bytes.slice(0, maximum)); }
-function brokeredSecrets(): string[] { return Object.entries(process.env).filter(([key, value]) => /(?:key|token|secret|password|credential|auth)/i.test(key) && typeof value === "string" && value.length >= 4).map(([, value]) => value!); }
 function providerInputCapacity(
   dispatch: ModelDispatch,
   retained: ContextCapacityProvenance | undefined,

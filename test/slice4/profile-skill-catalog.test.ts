@@ -3,7 +3,7 @@ import { createClient } from "@libsql/client";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ConflictError, ProfileStore, ValidationError } from "../../src/index.ts";
+import { ConflictError, ProfileStore, ValidationError, registerBrokeredSecret } from "../../src/index.ts";
 
 let directory:string|undefined;let profile:ProfileStore|undefined;
 afterEach(async()=>{profile?.close();profile=undefined;if(directory)await rm(directory,{recursive:true,force:true});directory=undefined;});
@@ -49,7 +49,8 @@ describe("profile global skill catalog storage",()=>{
   const next=await store.stageGlobalSkill({skillId:"skill:format",versionId:"version:format:2",name:"format-value",definition:nextDefinition,provenance,testReport:report(),idempotencyKey:"stage:format:2",expectedCurrentVersionId:staged.versionId,expectedCurrentDigest:staged.digest});
   expect(next.versionId).toBe("version:format:2");expect((await store.getGlobalSkillHistory("skill:format"))?.versions).toHaveLength(2);
   await expect(store.stageGlobalSkill({skillId:"skill:bad",name:"bad",definition:{...definition,runtime:"node" as any},provenance,testReport:report(),idempotencyKey:"stage:bad"})).rejects.toBeInstanceOf(ValidationError);
-  await expect(store.stageGlobalSkill({skillId:"skill:secret",name:"secret",definition:{...definition,source:"const token = 'sk-live-CREDENTIALSHAPED0123456789';"},provenance,testReport:report(),idempotencyKey:"stage:secret"})).rejects.toBeInstanceOf(ValidationError);
+  const release=registerBrokeredSecret("sk-live-CREDENTIALSHAPED0123456789");
+  try{await expect(store.stageGlobalSkill({skillId:"skill:secret",name:"secret",definition:{...definition,source:"const token = 'sk-live-CREDENTIALSHAPED0123456789';"},provenance,testReport:report(),idempotencyKey:"stage:secret"})).rejects.toBeInstanceOf(ValidationError);}finally{release();}
   await expect(store.stageGlobalSkill({skillId:"skill:failed",name:"failed",definition,provenance,testReport:report("failed"),availability:"enabled",idempotencyKey:"stage:failed"})).rejects.toBeInstanceOf(ValidationError);
   expect((await store.listGlobalSkillCatalog()).map(item=>item.skillId)).toEqual(["skill:format"]);
  });

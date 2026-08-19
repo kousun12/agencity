@@ -16,7 +16,7 @@ The package is private and is consumed from a source checkout or Bun link. It is
 | `@prime-agent/runtime/console` | Generated-cell SDK, observation helpers, and the private persistent REPL worker host. |
 | `@prime-agent/runtime/runtime` | `Supervisor` and its run, outbox, projection, context, agent, raw-generation, retained private recursive-operation, memory, harness, skill, goal, schedule, and recovery services. |
 | `@prime-agent/runtime/protocol` | `ProtocolServer`, `AgentClient`, HTTP and in-process transports, and wire-facing types. |
-| `@prime-agent/runtime/security` | Secret filtering, scrubbing, and model-credential helpers. |
+| `@prime-agent/runtime/security` | Explicit runtime-private environment filtering, exact registered-value scrubbing, and model-credential helpers. |
 | `@prime-agent/runtime/tui` | The protocol-backed full-screen terminal client and plain-transcript fallback. |
 | `@prime-agent/runtime/sync` | Profile/device state, envelope synchronization, data-control contracts, the Turso transport, and deterministic test transport. |
 | `@prime-agent/runtime/placement` | Local placement descriptors and HTTP-backed relational, content-addressed object, candidate-index, and executor adapters. |

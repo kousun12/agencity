@@ -18,10 +18,10 @@ import {
 } from "../domain/index.ts";
 import {
   containsBrokeredSecret,
-  isSensitiveEnvironmentKey,
   refinementVisibleEventPayload,
   scrubText,
 } from "../security/index.ts";
+import { brokeredSecretValues } from "../security/secret-registry.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { ProfileDatabase, ProfilePreference } from "../sync/index.ts";
 import type { HarnessService } from "./harness.ts";
@@ -944,9 +944,7 @@ function evaluationStatus(status: string): RefinementEvaluationCandidateStatus {
 function parseJson<T>(value: unknown, fallback: T): T { try { return value === null || value === undefined ? fallback : JSON.parse(String(value)) as T; } catch { return fallback; } }
 function knownSecretValues(): string[] {
   const encoder = new TextEncoder();
-  const candidates = Object.entries(process.env)
-    .filter(([key, value]) => isSensitiveEnvironmentKey(key) && typeof value === "string" && encoder.encode(value).byteLength >= 4)
-    .map(([, value]) => value!)
+  const candidates = brokeredSecretValues()
     .sort((a, b) => encoder.encode(b).byteLength - encoder.encode(a).byteLength || a.localeCompare(b));
   const values: string[] = []; let bytes = 0;
   for (const value of candidates) {

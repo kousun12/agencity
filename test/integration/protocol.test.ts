@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { InvalidTransitionError, ProtocolServer, Supervisor } from "../../src/index.ts";
+import { InvalidTransitionError, ProtocolServer, Supervisor, registerBrokeredSecret } from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -130,6 +130,7 @@ describe("HTTP domain error mapping", () => {
   test("scrubs known credentials from protocol error responses", async () => {
     const prior = process.env.REVIEW_API_KEY;
     process.env.REVIEW_API_KEY = "protocol-secret-value";
+    const release = registerBrokeredSecret("protocol-secret-value");
     const supervisor = {
       appendMessage: async () => {
         throw new Error(`provider returned ${process.env.REVIEW_API_KEY}`);
@@ -148,6 +149,7 @@ describe("HTTP domain error mapping", () => {
       expect(body).toContain("[REDACTED]");
       expect(body).not.toContain("protocol-secret-value");
     } finally {
+      release();
       protocol.stop();
       if (prior === undefined) delete process.env.REVIEW_API_KEY;
       else process.env.REVIEW_API_KEY = prior;

@@ -24,7 +24,7 @@ import {
   type ModelWarning,
   type Usage,
 } from "../domain/index.ts";
-import { containsBrokeredSecret, containsCredentialMaterial } from "../security/index.ts";
+import { containsBrokeredSecret } from "../security/index.ts";
 import {
   requireRecursiveStorage,
   type AgentStorage,
@@ -595,9 +595,8 @@ export class AiGenerationService {
       });
       return;
     }
-    if (containsBrokeredSecret(value) ||
-        containsCredentialMaterial(typeof value === "string" ? value : JSON.stringify(value))) {
-      await this.#terminal(current, "failed", "AI generation output contained credential material", {
+    if (containsBrokeredSecret(value)) {
+      await this.#terminal(current, "failed", "AI generation output contained a registered credential value", {
         usage,
         usageSource,
         sourceOutcomeEventId: effect.eventId,
@@ -791,7 +790,7 @@ function normalizeInput(input: AiGenerationInput): AiGenerationInput {
   if (prompt !== undefined) {
     if (typeof prompt !== "string" || !prompt.trim() || bytes(prompt) > MAX_AI_PROMPT_BYTES ||
         containsBrokeredSecret(prompt)) {
-      throw new ValidationError("AI generation prompt is empty, oversized, or contains credential material");
+      throw new ValidationError("AI generation prompt is empty, oversized, or contains a registered credential value");
     }
   }
   if (messages !== undefined) {
@@ -804,7 +803,7 @@ function normalizeInput(input: AiGenerationInput): AiGenerationInput {
           typeof message.content !== "string" || !message.content ||
           Object.keys(message).some((key) => key !== "role" && key !== "content") ||
           bytes(message.content) > MAX_AI_MESSAGE_BYTES || containsBrokeredSecret(message.content)) {
-        throw new ValidationError("AI generation message is invalid, oversized, or contains credential material");
+        throw new ValidationError("AI generation message is invalid, oversized, or contains a registered credential value");
       }
       total += bytes(message.content);
     }

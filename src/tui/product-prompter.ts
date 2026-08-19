@@ -907,10 +907,7 @@ function catalogNotice(
 }
 
 function boundedNotice(value: string): string {
-  const scrubbed = scrubText(value).replace(
-    /(?:bearer|api[-_ ]?key|authorization|x-api-key)\s*[:=]\s*\S+/gi,
-    "[redacted]",
-  );
+  const scrubbed = scrubText(value);
   const bytes = new TextEncoder().encode(scrubbed);
   return new TextDecoder().decode(bytes.slice(0, MAX_NOTICE_BYTES))
     .replace(/[\r\n]+/g, " ");

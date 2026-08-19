@@ -92,7 +92,6 @@ export type TerminalDetail = TerminalInspectionDetail | TerminalModelDetail | Te
 type UnknownRecord = Record<string, unknown>;
 
 const INTERNAL_FIELD = /(?:^|_)(?:id|ids|event|cursor|digest|fingerprint|hash|sequence)(?:_|$)/i;
-const RAW_SECRET_FIELD = /^(?:api_?key|access_?token|refresh_?token|auth_?token|token|client_?secret|private_?key|secret|password|passwd|authorization|credential_?value)$/i;
 
 function record(value: unknown): UnknownRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -1269,8 +1268,7 @@ function safeRaw(value: unknown): unknown {
   if (value === null || typeof value !== "object") return typeof value === "string" ? scrubText(value) : value;
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value as UnknownRecord)) {
-    const normalizedKey = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replaceAll("-", "_");
-    output[key] = RAW_SECRET_FIELD.test(normalizedKey) ? "[REDACTED]" : safeRaw(item);
+    output[scrubText(key)] = safeRaw(item);
   }
   return output;
 }

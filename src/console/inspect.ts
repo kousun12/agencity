@@ -3,7 +3,6 @@ import type { JsonValue } from "../domain/json.ts";
 const encoder = new TextEncoder();
 /** Structured observations above this bound move to the content-addressed store. */
 export const MAX_CELL_OBSERVATION_JSON_BYTES = 128 * 1024;
-const SENSITIVE_PREVIEW_KEY = /(?:api[-_]?key|token|secret|password|passwd|credential|authorization|cookie|private[-_]?key)/i;
 const REDACTED = "[REDACTED]";
 
 export const INSPECT_HARD_LIMITS = Object.freeze({
@@ -105,8 +104,8 @@ function clipped(value: string, maximumBytes: number): { text: string; truncated
   return { text, truncated: false };
 }
 
-function propertyIsSensitive(key: string, budget: PreviewBudget): boolean {
-  return SENSITIVE_PREVIEW_KEY.test(key) || budget.additionalRedactions.has(key.toLowerCase());
+function propertyIsRedacted(key: string, budget: PreviewBudget): boolean {
+  return budget.additionalRedactions.has(key.toLowerCase());
 }
 
 function className(value: object): string {
@@ -204,7 +203,7 @@ function previewValue(value: unknown, depth: number, budget: PreviewBudget): Jso
       budget.entries++;
       const displayedKey = clipped(key, 256);
       if (displayedKey.truncated) budget.truncated = true;
-      if (propertyIsSensitive(key, budget)) {
+      if (propertyIsRedacted(key, budget)) {
         budget.redacted++;
         output[displayedKey.text] = REDACTED;
         continue;
@@ -231,8 +230,8 @@ function previewValue(value: unknown, depth: number, budget: PreviewBudget): Jso
 
 /**
  * Produces a deterministic JSON-shaped textual preview. Accessors are never
- * invoked, circular references are marked, and credential-shaped keys are
- * always redacted. Options can only narrow or raise limits up to the hard caps.
+ * invoked and circular references are marked. Callers can explicitly name
+ * preview keys to redact. Options can only narrow or raise limits up to the hard caps.
  */
 export function inspectValue(value: unknown, options: InspectOptions = {}): InspectPreview {
   const resolved = limits(options);

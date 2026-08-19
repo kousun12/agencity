@@ -1,14 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
-import { LocalArtifactStore, OUTPUT_LIMITS, ShellExecutor } from "../../src/index.ts";
+import { LocalArtifactStore, OUTPUT_LIMITS, ShellExecutor, registerBrokeredSecret } from "../../src/index.ts";
 import { releaseStreamReader } from "../../src/executors/shell.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
-const originalSecret = process.env.AGENCITY_SHELL_STREAM_SECRET;
 afterEach(async () => {
-  if (originalSecret === undefined) delete process.env.AGENCITY_SHELL_STREAM_SECRET;
-  else process.env.AGENCITY_SHELL_STREAM_SECRET = originalSecret;
   await Promise.all(temps.splice(0).map(removeTempRuntime));
 });
 
@@ -78,21 +75,25 @@ describe("bounded streaming shell output", () => {
     expect(await local.verify(output.artifact)).toBe(true);
   });
 
-  test("scrubs known and credential-shaped values split across process writes before staging", async () => {
+  test("scrubs a registered value split across writes and preserves unregistered shapes", async () => {
     const secret = "cross-chunk-secret-91ab";
-    process.env.AGENCITY_SHELL_STREAM_SECRET = secret;
-    const { execute } = await setup();
-    const execution = await execute(
-      `printf 'cross-chunk-'; sleep 0.01; printf 'secret-91ab '; printf 'Bearer abcdef'; sleep 0.01; printf 'ghijklmnop '; printf '%s' '-----BEGIN PRIVATE KEY-----raw'; sleep 0.01; printf '%s' 'material-----END PRIVATE KEY-----'`,
-    );
-    const serialized = JSON.stringify(execution);
-    expect(serialized).not.toContain(secret);
-    expect(serialized).not.toContain("abcdefghijklmnop");
-    expect(serialized).not.toContain("rawmaterial");
-    expect(serialized).toContain("[REDACTED]");
+    const release = registerBrokeredSecret(secret);
+    try {
+      const { execute } = await setup();
+      const execution = await execute(
+        `printf 'cross-chunk-'; sleep 0.01; printf 'secret-91ab '; printf 'Bearer abcdef'; sleep 0.01; printf 'ghijklmnop '; printf '%s' '-----BEGIN PRIVATE KEY-----raw'; sleep 0.01; printf '%s' 'material-----END PRIVATE KEY-----'`,
+      );
+      const serialized = JSON.stringify(execution);
+      expect(serialized).not.toContain(secret);
+      expect(serialized).toContain("Bearer abcdefghijklmnop");
+      expect(serialized).toContain("-----BEGIN PRIVATE KEY-----rawmaterial-----END PRIVATE KEY-----");
+      expect(serialized).toContain("[REDACTED]");
+    } finally {
+      release();
+    }
   });
 
-  test("never stages or previews a long uninterrupted credential-shaped value", async () => {
+  test("preserves long uninterrupted credential-shaped output", async () => {
     const { local, execute } = await setup();
     const execution = await execute(
       `bun -e 'process.stdout.write("P".repeat(15000)+" Bearer "+"A".repeat(30000)+" "+"Q".repeat(15000))'`,
@@ -100,10 +101,8 @@ describe("bounded streaming shell output", () => {
     const output = execution.output as any;
     expect(output.completeness).toBe("spilled");
     const retained = new TextDecoder().decode(await local.resolve(output.artifact));
-    expect(retained).toContain("[REDACTED]");
-    expect(retained).not.toContain("Bearer ");
-    expect(retained).not.toContain("A".repeat(1_024));
-    expect(JSON.stringify(output.preview)).not.toContain("A".repeat(1_024));
+    expect(retained).toContain(`Bearer ${"A".repeat(30_000)}`);
+    expect(JSON.stringify(output.preview)).not.toContain("[REDACTED]");
   });
 
   test("reports unavailable, failed, and over-limit spill without false artifact pointers", async () => {

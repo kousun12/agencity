@@ -7,6 +7,7 @@ import {
   Supervisor,
   ValidationError,
   projectEvents,
+  registerBrokeredSecret,
   type EffectProgressNotification,
   type JsonValue,
   type ModelConfiguration,
@@ -284,6 +285,7 @@ describe("provider output streaming", () => {
     const previous = process.env[environmentKey];
     const secret = "brokered-cross-delta-value";
     process.env[environmentKey] = secret;
+    const releaseSecret = registerBrokeredSecret(secret);
     const provider = new CrossDeltaSecretProvider(secret);
     const { supervisor, sessionId, branchId } = await openWith(provider);
     const progress: EffectProgressNotification[] = [];
@@ -315,6 +317,7 @@ describe("provider output streaming", () => {
       provider.release.resolve();
       unsubscribe();
       await supervisor.close();
+      releaseSecret();
       if (previous === undefined) delete process.env[environmentKey];
       else process.env[environmentKey] = previous;
     }

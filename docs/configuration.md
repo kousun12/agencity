@@ -183,7 +183,7 @@ Agencity fetches language-model metadata from the configured Gateway-compatible 
 
 ### Opaque credential references
 
-`agencity config credential-ref PROVIDER REFERENCE LABEL` stores an opaque handle such as `env:OPENAI_API_KEY` or `keychain:item`. It rejects values that look like raw credentials.
+`agencity config credential-ref PROVIDER REFERENCE LABEL` stores a bounded scheme-prefixed opaque handle such as `env:OPENAI_API_KEY` or `keychain:item`. A handle, label, or metadata value containing an exact credential currently registered by the supervisor is rejected. Agencity does not guess from provider-like prefixes, field names, or other string shapes; callers must not use reference metadata as a raw credential store.
 
 A reference records metadata and provenance only. It does not resolve or inject a secret by itself. In particular, Turso network authentication still comes from `TURSO_AUTH_TOKEN` unless a programmatic integration supplies another credential mechanism.
 
@@ -244,7 +244,7 @@ Options are command-specific even though the shared parser recognizes them globa
 
 - Model-generated TypeScript, shell commands, and installed skills run with the OS authority of the Agencity process.
 - `--workspace-root` and typed file-path checks are not an operating-system sandbox.
-- Provider keys are protected against accidental durable leakage, but trusted code can still use ambient OS access.
+- Exact provider-key values registered by the active supervisor are protected against accidental durable leakage on supported paths. Agencity does not discover arbitrary secrets, and trusted code can still use ambient OS access.
 - Custom database, artifact, profile, replica, and receipt paths may contain sensitive trajectory data. Protect them with filesystem ownership and backup controls.
 - Keep the product-managed service and advanced protocol server on loopback unless an independent authenticated boundary surrounds the entire runtime.
 

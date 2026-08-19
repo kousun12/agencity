@@ -52,7 +52,7 @@ import {
   type Usage,
 } from "../domain/index.ts";
 import {
-  containsCredentialMaterial,
+  containsBrokeredSecret,
   scrubText,
 } from "../security/index.ts";
 
@@ -892,8 +892,8 @@ function validateToolInputValue(
     throw new Error("Tool input is not JSON");
   }
   const encoded = canonicalJsonStringify(value);
-  if (containsCredentialMaterial(encoded)) {
-    throw new Error("Tool input contains credential material");
+  if (containsBrokeredSecret(value)) {
+    throw new Error("Tool input contains a registered credential value");
   }
   const inputBytes = byteLength(encoded);
   if (contract.contractId === AGENT_TOOL_CONTRACT_ID) {

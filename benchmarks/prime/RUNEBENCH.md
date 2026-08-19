@@ -42,6 +42,12 @@ await rs.connect();
 const bot = new BotActions(rs);
 ```
 
+The model constructs the image-owned `BotSDK` and `BotActions` itself. Agencity
+does not classify an ordinary field such as RuneBench's local
+`password: "test"` option as a secret. Only exact credential values registered
+by the supervisor are rejected or redacted. No MCP process, protocol, or
+connection wrapper is involved.
+
 This adaptation is named `agencity-runebench-repl-v1`. It preserves the
 official task package, initial save, game image, time horizon, 15-second sample
 cadence, and Harbor verifier. It changes the agent-to-SDK interface, adds
@@ -53,7 +59,7 @@ digests.
 
 The game starts after the pinned Agencity source and Bun runtime are installed.
 This prevents harness provisioning time from consuming the game horizon. The
-adapter stages the official save first, starts `/entrypoint.sh`, and admits the
+harness stages the official save first, starts `/entrypoint.sh`, and admits the
 agent only after both the tracker and bot report ready.
 
 ## Learning modes
@@ -103,9 +109,14 @@ uv run --locked eval @ configs/runebench-woodcutting-15m-adaptive.toml \
   --model gpt-5.6-sol
 ```
 
-No paid RuneBench result is recorded for this integration. Model-free tests and
-dry-runs, pinned-image game startup, and a direct SDK connection smoke are setup
-evidence, not game-performance evidence.
+One paid Luna canary against the direct-REPL working tree completed 33 model
+turns in one warm REPL epoch and exercised native game actions without a
+credential-input rejection or console-worker loss. The official scorer did not
+run because owned-service shutdown was not confirmed within the harness's
+10-second cleanup bound, so the reported reward zero is an infrastructure error,
+not a benchmark score. Model-free tests, dry-runs, pinned-image startup, and the
+direct SDK connection smoke are setup evidence rather than game-performance
+evidence.
 
 ## Current limitations
 

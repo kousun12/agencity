@@ -9,6 +9,7 @@ import {
   Supervisor,
   jsonBytes,
   projectEvents,
+  registerBrokeredSecret,
 } from "../../src/index.ts";
 import {
   makeTempRuntime,
@@ -17,8 +18,10 @@ import {
 } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
+const secretReleases: Array<() => void> = [];
 const originalSecret = process.env.AGENCITY_RPC_TEST_SECRET;
 afterEach(async () => {
+  for (const release of secretReleases.splice(0)) release();
   if (originalSecret === undefined) delete process.env.AGENCITY_RPC_TEST_SECRET;
   else process.env.AGENCITY_RPC_TEST_SECRET = originalSecret;
   await Promise.all(temps.splice(0).map(removeTempRuntime));
@@ -475,6 +478,7 @@ describe("disposable TypeScript console process", () => {
   test("retains only exact private effect causality for directly escaping convenience errors across reopen", async () => {
     const secret = "rpc-causal-secret-a811";
     process.env.AGENCITY_RPC_TEST_SECRET = secret;
+    secretReleases.push(registerBrokeredSecret(secret));
     const { temp, supervisor, sessionId, branchId } = await open(true);
     await Bun.write(join(temp.workspaceRoot, "secret-source.txt"), secret);
     const command =
@@ -594,6 +598,7 @@ describe("disposable TypeScript console process", () => {
   test("worker, shell, durable inputs, logs, and errors never expose a brokered environment secret", async () => {
     const secret = "rpc-broker-secret-a811";
     process.env.AGENCITY_RPC_TEST_SECRET = secret;
+    secretReleases.push(registerBrokeredSecret(secret));
     const { supervisor, sessionId, branchId } = await open(true);
     const visibility = await supervisor.executeCell(sessionId, branchId, `
       const shellResult = await tools.shell('if [ -z "$AGENCITY_RPC_TEST_SECRET" ]; then printf absent; else printf present; fi');
@@ -687,7 +692,7 @@ describe("disposable TypeScript console process", () => {
     await supervisor.close();
   });
 
-  test("inspect is byte/line/entry/depth bounded, redacts fields, skips getters, and marks circular values", async () => {
+  test("inspect is byte/line/entry/depth bounded, explicitly redacts fields, skips getters, and marks circular values", async () => {
     const { supervisor, sessionId, branchId } = await open(true);
     const inspected = await supervisor.executeCell(sessionId, branchId, `
       let getterCalls = 0;
@@ -695,7 +700,7 @@ describe("disposable TypeScript console process", () => {
       Object.defineProperty(value, "computed", { enumerable: true, get() { getterCalls++; return "unsafe"; } });
       value.circular = value;
       value.nested = { values: Array.from({ length: 500 }, (_, index) => index) };
-      ({ preview: inspect(value, { bytes: 512, lines: 12, entries: 10, depth: 3 }), getterCalls })
+      ({ preview: inspect(value, { bytes: 512, lines: 12, entries: 10, depth: 3, redact: ["password"] }), getterCalls })
     `);
     const result = inspected.result as any;
     expect(result.getterCalls).toBe(0);
@@ -765,6 +770,7 @@ describe("disposable TypeScript console process", () => {
   test("streams oversized JSON through validation and secret scrubbing before CAS placement", async () => {
     const secret = "rpc-broker-secret-a811";
     process.env.AGENCITY_RPC_TEST_SECRET = secret;
+    secretReleases.push(registerBrokeredSecret(secret));
     const { supervisor, sessionId, branchId } = await open(true);
     const cell = await supervisor.executeCell(sessionId, branchId, `
       const reconstructed = ["rpc-broker-", "secret-a811"].join("");
@@ -1047,6 +1053,65 @@ describe("disposable TypeScript console process", () => {
         kind: "json",
         value: { retained: true },
       },
+    });
+    await supervisor.close();
+  });
+
+  test("keeps the worker alive when an imported socket callback logs outside the active cell context", async () => {
+    const { temp, supervisor, sessionId, branchId } = await open(false);
+    await Bun.write(
+      join(temp.workspaceRoot, "async-console-module.ts"),
+      `
+        export async function connectAndLog() {
+          const server = Bun.serve({
+            hostname: "127.0.0.1",
+            port: 0,
+            fetch(request, bunServer) {
+              if (bunServer.upgrade(request)) return;
+              return new Response("upgrade required", { status: 426 });
+            },
+            websocket: {
+              open(socket) { socket.send("ready"); },
+              message() {},
+            },
+          });
+          return await new Promise<string>((resolve, reject) => {
+            const socket = new WebSocket(\`ws://127.0.0.1:\${server.port}\`);
+            const timer = setTimeout(() => {
+              socket.close();
+              void server.stop(true);
+              reject(new Error("socket callback timed out"));
+            }, 5_000);
+            socket.addEventListener("message", () => {
+              console.log("out-of-cell socket callback");
+              clearTimeout(timer);
+              socket.close();
+              void server.stop(true);
+              resolve("connected");
+            });
+            socket.addEventListener("error", () => {
+              clearTimeout(timer);
+              void server.stop(true);
+              reject(new Error("socket callback failed"));
+            });
+          });
+        }
+      `,
+    );
+    const first = await supervisor.executeCell(sessionId, branchId, `
+      const { connectAndLog } = await import("./async-console-module.ts");
+      const value = await connectAndLog();
+      ({ value, pid: process.pid })
+    `);
+    expect(first.result).toMatchObject({ value: "connected" });
+    expect(first.logs).toEqual([]);
+
+    const second = await supervisor.executeCell(sessionId, branchId, `
+      ({ pid: process.pid, alive: true })
+    `);
+    expect(second.result).toEqual({
+      pid: (first.result as any).pid,
+      alive: true,
     });
     await supervisor.close();
   });

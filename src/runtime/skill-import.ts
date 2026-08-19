@@ -9,7 +9,7 @@ import {
   type SkillTestCase,
   type TypeScriptSkillDefinition,
 } from "../domain/index.ts";
-import { containsBrokeredSecret, containsCredentialMaterial } from "../security/index.ts";
+import { containsBrokeredSecret } from "../security/index.ts";
 
 export const SKILL_BUNDLE_MANIFEST = "agencity-skill.json";
 export const SKILL_BUNDLE_ENTRY = "skill.ts";
@@ -148,8 +148,8 @@ export async function parseSkillImportBundle(
   const manifest = parseManifest(manifestText);
   const definition = validateManifest(manifest, source, options.permissionAllowlist ?? []);
 
-  rejectCredentialMaterial(manifestText, "Skill bundle manifest");
-  rejectCredentialMaterial(source, "Skill source");
+  rejectBrokeredSecret(manifestText, "Skill bundle manifest");
+  rejectBrokeredSecret(source, "Skill source");
 
   const manifestSha256 = sha256(manifestBytes);
   const sourceSha256 = sha256(sourceBytes);
@@ -406,9 +406,9 @@ function assertNoUnknownFields(value: Record<string, unknown>, fields: ReadonlyS
   if (unknown.length) throw new ValidationError(`${label} has unknown field(s): ${unknown.sort().join(", ")}`);
 }
 
-function rejectCredentialMaterial(text: string, label: string): void {
-  if (containsCredentialMaterial(text) || containsBrokeredSecret(text)) {
-    throw new ValidationError(`${label} contains credential or brokered secret material`);
+function rejectBrokeredSecret(text: string, label: string): void {
+  if (containsBrokeredSecret(text)) {
+    throw new ValidationError(`${label} contains a registered credential value`);
   }
 }
 
