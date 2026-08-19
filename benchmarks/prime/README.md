@@ -305,6 +305,11 @@ billed-dollar caps; maximum theoretical spend is much higher than the earlier
 12-turn, 48,000-token treatments. Turn and token limits are checked between
 calls and can therefore overshoot by one admitted call.
 
+Catalog-backed Terminal-Bench and SWE-bench Pro configs omit agent-level
+`rollout` and `scoring` timeout overrides. Verifiers therefore applies each
+official task's declared timeout. Suite preflight rejects either override so a
+shared config cannot silently shorten task or evaluator execution.
+
 These commands spend inference credit. Review the resolved config, current
 pricing, selected count, provider-window worst-case, and operator budget first.
 Keep `push = false` during development. Turn and token limits are checked
@@ -340,12 +345,13 @@ uv run --locked python -m agencity_verifiers.reporting \
   --output /path/to/summary.json
 ```
 
-The report separates passes, valid zeros, partial rewards, harness terminal
+The report separates passes, valid zeros, partial rewards, agent terminal
 failures, provider failures, scorer/infrastructure errors, skips, cancellations,
 unknowns, and catalog incompatibility counts. Reward mean uses only officially
 scored tasks and states its denominator. Infrastructure errors are not silently
 averaged as zero. Provider-supplied calls, tokens, timing, and cost are
-aggregated when present.
+aggregated when present. Summary schema v2 emits `agent_terminal_failure`;
+the misleading v1 `harness_terminal_failure` name is not retained.
 
 ## Model-free verification
 

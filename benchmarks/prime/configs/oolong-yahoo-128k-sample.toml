@@ -50,7 +50,7 @@ max_retries = 0
 [env.agent.harness]
 id = "agencity-verifiers"
 source_repo = "https://github.com/kousun12/agencity.git"
-source_ref = "63b35ea5f99dbd3e7fa68b8cc3f376f328b7f4d0"
+source_ref = "52d2209574196a8fbaa3f5df593431ba09870566"
 installation = "portable"
 bun_url = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
 bun_sha256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"

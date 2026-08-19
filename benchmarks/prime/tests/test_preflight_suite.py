@@ -21,7 +21,11 @@ from agencity_verifiers.evaluation_policy import (
 from agencity_verifiers.harness import AgencityHarnessConfig
 from agencity_verifiers.selection import load_catalog
 from agencity_verifiers.source import AGENCITY_SOURCE_REF, AGENCITY_SOURCE_REPO
-from scripts.preflight_suite import _validate_catalog_pins, preflight
+from scripts.preflight_suite import (
+    _validate_catalog_pins,
+    _validate_official_task_timeouts,
+    preflight,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,6 +84,14 @@ class SuitePreflightTests(unittest.TestCase):
                 self.assertEqual(agent["max_input_tokens"], EVALUATION_MAX_INPUT_TOKENS)
                 self.assertEqual(agent["max_output_tokens"], EVALUATION_MAX_OUTPUT_TOKENS)
                 self.assertEqual(agent["max_total_tokens"], EVALUATION_MAX_TOTAL_TOKENS)
+                if config["env"]["taskset"]["id"] in {
+                    "agencity-terminal-bench-2",
+                    "agencity-terminal-bench-2-1",
+                    "agencity-swe-bench-pro",
+                }:
+                    timeout = agent.get("timeout", {})
+                    self.assertNotIn("rollout", timeout)
+                    self.assertNotIn("scoring", timeout)
 
     def test_full_catalog_configs_validate_without_loading_images(self) -> None:
         for name, expected in (
@@ -100,6 +112,21 @@ class SuitePreflightTests(unittest.TestCase):
         catalog = load_catalog(CATALOG_PATH, "terminal-bench-2")
         with self.assertRaisesRegex(ValueError, "do not match"):
             _validate_catalog_pins(changed, catalog)
+
+    def test_preflight_rejects_agent_overrides_of_official_task_timeouts(self) -> None:
+        raw = tomllib.loads(
+            (ROOT / "configs" / "terminal-bench-2-1-full.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        for stage in ("rollout", "scoring"):
+            with self.subTest(stage=stage):
+                changed = copy.deepcopy(raw)
+                changed["env"]["agent"].setdefault("timeout", {})[stage] = 900
+                with self.assertRaisesRegex(
+                    ValueError, "official per-task timeouts remain authoritative"
+                ):
+                    _validate_official_task_timeouts(changed)
 
 
 if __name__ == "__main__":

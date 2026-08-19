@@ -34,7 +34,7 @@ suite.
   runtime inputs, Agencity source, and the Python lock.
 - Prevent hidden tests, reference patches, evaluator code, Docker authority,
   scorer output, and provider credentials from reaching the agent.
-- Keep valid zero rewards, harness terminal failures, provider failures,
+- Keep valid zero rewards, agent terminal failures, provider failures,
   scoring/infrastructure errors, incompatibilities, cancellations, and unknown
   outcomes distinct.
 - Preserve cheap model-free validation and one-task smoke routes.
@@ -263,7 +263,7 @@ data and trace provenance.
 - passed;
 - valid zero;
 - partial reward;
-- harness terminal failure;
+- agent terminal failure;
 - provider failure;
 - scorer or infrastructure error;
 - skipped;
@@ -276,8 +276,8 @@ provider-reported calls/tokens/timing/cost, config digest, and bounded model,
 harness, runtime, benchmark, image, evaluator, source, and lock provenance.
 
 The default reward denominator is officially scored tasks only.
-Infrastructure errors and unscored harness failures are not averaged as zero.
-Any alternate published policy must state both numerator and denominator.
+Infrastructure errors and unscored agent terminal failures are not averaged as
+zero. Any alternate published policy must state both numerator and denominator.
 
 ## Comparison design
 

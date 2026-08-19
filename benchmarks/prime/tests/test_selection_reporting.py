@@ -205,9 +205,11 @@ class ReportingTests(unittest.TestCase):
             },
         )
         counts = summary["counts"]
+        self.assertEqual(summary["schema"], "agencity.benchmark-summary.v2")
         self.assertEqual(counts["passed"], 1)
         self.assertEqual(counts["valid_zero"], 1)
-        self.assertEqual(counts["harness_terminal_failure"], 1)
+        self.assertEqual(counts["agent_terminal_failure"], 1)
+        self.assertNotIn("harness_terminal_failure", counts)
         self.assertEqual(counts["provider_failure"], 1)
         self.assertEqual(counts["scorer_or_infrastructure_error"], 1)
         self.assertEqual(counts["skipped"], 1)

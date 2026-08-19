@@ -12,7 +12,7 @@ OUTCOMES = (
     "passed",
     "valid_zero",
     "partial_reward",
-    "harness_terminal_failure",
+    "agent_terminal_failure",
     "provider_failure",
     "scorer_or_infrastructure_error",
     "skipped",
@@ -133,11 +133,11 @@ def summarize_records(
         selection.get("incompatible", []) if isinstance(selection, dict) else []
     )
     summary = {
-        "schema": "agencity.benchmark-summary.v1",
+        "schema": "agencity.benchmark-summary.v2",
         "failure_policy": {
             "aggregate_denominator": "officially_scored_tasks_only",
             "infrastructure_errors_in_reward": False,
-            "unscored_harness_failures_in_reward": False,
+            "unscored_agent_terminal_failures_in_reward": False,
         },
         "counts": {
             **{name: outcomes[name] for name in OUTCOMES},
@@ -254,7 +254,7 @@ def _classify(
     if terminal == "unknown":
         return "unknown"
     if terminal is not None and terminal != "succeeded":
-        return "harness_terminal_failure"
+        return "agent_terminal_failure"
     if reward is None:
         return "scorer_or_infrastructure_error"
     if reward == 0:

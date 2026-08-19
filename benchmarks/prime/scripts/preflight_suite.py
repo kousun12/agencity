@@ -53,6 +53,7 @@ def preflight(config_path: Path) -> dict[str, Any]:
     if taskset_id in CATALOG_TASKSETS:
         config_type, benchmark, path = CATALOG_TASKSETS[taskset_id]
         config = config_type.model_validate(taskset)
+        _validate_official_task_timeouts(raw)
         catalog = load_catalog(path, benchmark)
         _validate_catalog_pins(raw, catalog)
         selected, manifest = select_catalog_tasks(catalog, config.selection)
@@ -99,6 +100,23 @@ def preflight(config_path: Path) -> dict[str, Any]:
             ],
         }
     raise ValueError(f"unsupported suite taskset {taskset_id!r}")
+
+
+def _validate_official_task_timeouts(raw_config: dict[str, Any]) -> None:
+    env = raw_config.get("env")
+    agent = env.get("agent") if isinstance(env, dict) else None
+    timeout = agent.get("timeout") if isinstance(agent, dict) else None
+    if not isinstance(timeout, dict):
+        return
+    overrides = [
+        stage for stage in ("rollout", "scoring") if timeout.get(stage) is not None
+    ]
+    if overrides:
+        rendered = ", ".join(overrides)
+        raise ValueError(
+            "catalog suite configs must omit env.agent.timeout "
+            f"{rendered} overrides so official per-task timeouts remain authoritative"
+        )
 
 
 def _validate_catalog_pins(

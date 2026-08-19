@@ -296,9 +296,12 @@ reasoning, at least 50 model turns, and a 128,000-token per-response ceiling,
 and retain 800,000 input, 500,000 output, and 1,000,000 total-token per-run
 ceilings; OOLONG retains 64 turns. The limits are permissive bounds rather than
 spend targets, are checked between calls, and can overshoot by one admitted
-call. Configs use native unprefixed OpenAI model IDs and omit unsupported
-temperature sampling; the harness adds `openai/` only for Agencity's canonical
-model identity behind the interception endpoint. Vercel AI Gateway remains an
+call. Catalog-backed Terminal-Bench and SWE-bench Pro configs omit agent-level
+rollout and scoring timeout overrides so each official task's declared limits
+remain authoritative; suite preflight rejects either override. Configs use
+native unprefixed OpenAI model IDs and omit unsupported temperature sampling;
+the harness adds `openai/` only for Agencity's canonical model identity behind
+the interception endpoint. Vercel AI Gateway remains an
 explicit experimental route that changes the client endpoint, credential
 variable, and wire model ID together and requires an exact canary. The bounded
 eight-task Sol treatment uses four explicit IDs from each Yahoo context window. A
@@ -312,7 +315,7 @@ scorer test passed separately, as did all 21 suite preflights, all 22 config
 dry-runs, package builds, lock and source-pin checks, and explicit AMD64
 container startup through Docker emulation on an ARM Mac.
 
-Deterministic summaries separate passes, valid zeros, partial rewards, harness
+Deterministic summaries separate passes, valid zeros, partial rewards, agent
 terminal failures, provider failures, scorer/infrastructure errors,
 cancellations, unknowns, and incompatibilities, and state the official-score
 denominator. Taskset/scorer semantics are separated from harness-specific
