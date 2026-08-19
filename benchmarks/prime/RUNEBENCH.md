@@ -37,7 +37,8 @@ Required software and access:
   limit;
 - network access for the initial Python package, Harbor dataset, game image,
   pinned Agencity source, portable Bun, and model-provider downloads or calls;
-- an OpenAI API key for the committed native OpenAI configs.
+- an OpenAI API key for the preferred native OpenAI route, or a Vercel AI
+  Gateway key for the fallback route.
 
 The official game image and portable Bun are `linux/amd64`. Docker uses AMD64
 emulation on ARM Macs. The platform warning is expected, and startup and game
@@ -55,11 +56,31 @@ The harness installs the exact Agencity source commit and portable Bun declared
 by the selected config inside each task container. A separate host installation
 or build of Agencity is not required.
 
-Agencity's owner-only stored provider key is not automatically exported to
-Verifiers. Set the key in the shell that starts the evaluation:
+Verifiers does not automatically export Agencity's owner-only stored provider
+keys. Before reporting a missing benchmark credential, resolve credentials in
+this order:
+
+1. saved OpenAI key;
+2. `OPENAI_API_KEY`;
+3. saved Vercel AI Gateway key;
+4. `AI_GATEWAY_API_KEY`.
+
+The default saved-key file is `~/.agencity/auth.json`. When
+`AGENCITY_PROFILE` selects another profile database, use `auth.json` in that
+database's directory. Saved values are under `providers.openai.apiKey` and
+`providers.vercel.apiKey`. Read only the selected value into the evaluation
+process environment; never print it or pass it as a command argument.
+
+The OpenAI route uses the committed config unchanged. When only the Vercel key
+is available, change the endpoint, credential variable, and wire model ID
+together:
 
 ```sh
-export OPENAI_API_KEY=...
+uv run --locked eval @ configs/runebench-woodcutting-15m-adaptive.toml \
+  --model openai/gpt-5.6-luna \
+  --client.base-url https://ai-gateway.vercel.sh/v1 \
+  --client.api-key-var AI_GATEWAY_API_KEY \
+  --output-dir outputs/runebench-woodcutting-15m-adaptive-luna-vercel
 ```
 
 Do not put the key in a config, trace, output directory, command argument, or
@@ -221,7 +242,6 @@ Use a new output directory for every attempt. Run the smallest adaptive
 treatment:
 
 ```sh
-export OPENAI_API_KEY=...
 uv run --locked eval @ configs/runebench-woodcutting-15m-adaptive.toml \
   --model gpt-5.6-luna \
   --output-dir outputs/runebench-woodcutting-15m-adaptive-luna
@@ -331,8 +351,9 @@ uv run --locked python -m unittest discover -s tests
 
 Common conditions:
 
-- `OPENAI_API_KEY` missing: export it in the evaluation shell. Agencity's stored
-  owner credential is intentionally not inherited.
+- provider credential missing: apply the saved-key and environment resolution
+  order above before stopping. Prefer OpenAI; use the complete Vercel route
+  override only when OpenAI is unavailable.
 - Docker daemon unavailable or memory too low: start Docker and ensure it can
   grant the task container 8 GiB.
 - AMD64 warning on an ARM Mac: expected for the pinned image and portable Bun.
