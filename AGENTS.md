@@ -312,11 +312,14 @@ portable shutdown/cleanup plus serial execution. Full context and gold answers
 remain private task-object fields outside serialized task data and provenance.
 OOLONG prompts give exact large-file and recursive aggregation guidance. All
 suite configs route directly to OpenAI using `OPENAI_API_KEY`, use `xhigh`
-reasoning, at least 50 model turns, and a 128,000-token per-response ceiling,
-and retain 800,000 input, 500,000 output, and 1,000,000 total-token per-run
-ceilings; OOLONG retains 64 turns. The limits are permissive bounds rather than
-spend targets, are checked between calls, and can overshoot by one admitted
-call. Catalog-backed Terminal-Bench and SWE-bench Pro configs omit agent-level
+reasoning, and retain a 128,000-token per-response ceiling. Terminal-Bench,
+SWE-bench Pro, OOLONG, and smoke configs retain 800,000 input, 500,000 output,
+and 1,000,000 total-token per-run ceilings; their turn bounds are at least 50,
+with OOLONG at 64. RuneBench permits 5,000 turns and omits cumulative token
+ceilings because its official 15- or 30-minute horizon is the primary bound.
+The enforced limits are permissive bounds rather than spend targets, are
+checked between calls, and can overshoot by one admitted call. Catalog-backed
+Terminal-Bench and SWE-bench Pro configs omit agent-level
 rollout and scoring timeout overrides so each official task's declared limits
 remain authoritative; suite preflight rejects either override. Configs use
 native unprefixed OpenAI model IDs and omit unsupported temperature sampling;

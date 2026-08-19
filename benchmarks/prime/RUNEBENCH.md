@@ -209,10 +209,12 @@ fresh-profile RuneBench treatment.
 - `configs/runebench-full-adaptive.toml` — all 32 published skill tasks.
 
 The committed configs use native OpenAI, `xhigh` reasoning, one rollout per
-selected task, at least 50 turns, a 128,000-token response ceiling, and
-800,000 input, 500,000 output, and 1,000,000 total-token run ceilings. Limits
-are checked between calls and may overshoot by one admitted call. Review the
-config before any paid run.
+selected task, up to 5,000 model turns, and a 128,000-token per-response
+ceiling. They deliberately omit cumulative input, output, and total-token
+ceilings. The official 15- or 30-minute task horizon remains authoritative, so
+elapsed task time normally terminates the rollout before the turn allowance.
+This configuration does not bound provider spend; review the model and route
+before any paid run.
 
 ### Preflight and dry-run
 
@@ -316,6 +318,12 @@ An output directory contains at least:
 - `traces.jsonl` — the raw task, model, tool, usage, timing, outcome, and
   provenance trace.
 
+The `eval` process waits for every selected task to reach a terminal evaluation
+outcome. Results do not need to be extracted from the Agencity REPL or game
+container. After task finalization, Verifiers writes the official reward or
+typed infrastructure failure into `traces.jsonl`; the reporting command below
+turns those records into one bounded summary.
+
 Raw traces may contain model text, licensed benchmark content, or private client
 headers. Keep them private and do not commit `outputs/`.
 
@@ -334,6 +342,19 @@ agent failures, provider failures, scorer or infrastructure errors,
 cancellations, unknowns, skips, and incompatibilities. A displayed reward of
 zero is not a valid RuneBench score when the trace reports a harness, cleanup,
 or scorer error.
+
+For a full run, preflight and report against the full selection:
+
+```sh
+uv run --locked python scripts/preflight_suite.py \
+  configs/runebench-full-adaptive.toml \
+  --output outputs/runebench-full-selection.json
+
+uv run --locked python -m agencity_verifiers.reporting \
+  outputs/runebench-full-adaptive \
+  --selection outputs/runebench-full-selection.json \
+  --output outputs/runebench-full-adaptive-summary.json
+```
 
 ## Verification and troubleshooting
 

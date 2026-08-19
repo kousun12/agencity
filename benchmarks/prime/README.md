@@ -328,14 +328,16 @@ Full compatible set:
 uv run --locked eval @ configs/terminal-bench-2-full.toml
 ```
 
-Committed configs use `xhigh` reasoning, at least 50 model turns, Sol's
-128,000-token per-response ceiling, and per-run ceilings of 800,000 input,
-500,000 output, and 1,000,000 total tokens. OOLONG retains its larger 64-turn
-bound. `scripts/apply_evaluation_policy.py` reapplies these shared defaults to
-every retained config. These are permissive rollout bounds, not targets or
-billed-dollar caps; maximum theoretical spend is much higher than the earlier
-12-turn, 48,000-token treatments. Turn and token limits are checked between
-calls and can therefore overshoot by one admitted call.
+Committed configs use `xhigh` reasoning and a 128,000-token per-response
+ceiling. Terminal-Bench, SWE-bench Pro, OOLONG, and smoke configs retain
+per-run ceilings of 800,000 input, 500,000 output, and 1,000,000 total tokens;
+their turn bounds are at least 50, with OOLONG at 64. RuneBench instead permits
+5,000 turns and omits cumulative token ceilings because its official 15- or
+30-minute horizon is the primary bound.
+`scripts/apply_evaluation_policy.py` preserves this RuneBench-specific policy
+while reapplying the shared defaults elsewhere. These are rollout bounds, not
+targets or billed-dollar caps. Enforced turn and token limits are checked
+between calls and can therefore overshoot by one admitted call.
 
 Catalog-backed Terminal-Bench and SWE-bench Pro configs omit agent-level
 `rollout` and `scoring` timeout overrides. Verifiers therefore applies each

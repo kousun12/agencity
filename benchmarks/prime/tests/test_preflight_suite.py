@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -17,10 +18,13 @@ from agencity_verifiers.evaluation_policy import (
     EVALUATION_MAX_RESPONSE_TOKENS,
     EVALUATION_MAX_TOTAL_TOKENS,
     EVALUATION_REASONING_EFFORT,
+    RUNEBENCH_MAX_TURNS,
+    RUNEBENCH_TASKSET_ID,
 )
 from agencity_verifiers.harness import AgencityHarnessConfig
 from agencity_verifiers.selection import load_catalog
 from agencity_verifiers.source import AGENCITY_SOURCE_REF, AGENCITY_SOURCE_REPO
+from scripts.apply_evaluation_policy import apply_policy
 from scripts.preflight_suite import (
     _validate_catalog_pins,
     _validate_official_task_timeouts,
@@ -32,6 +36,31 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class SuitePreflightTests(unittest.TestCase):
+    def test_evaluation_policy_preserves_unbounded_runebench_cumulative_tokens(
+        self,
+    ) -> None:
+        source = ROOT / "configs" / "runebench-woodcutting-15m-adaptive.toml"
+        value = source.read_text(encoding="utf-8").replace(
+            "max_turns = 5000\n",
+            (
+                "max_turns = 50\n"
+                "max_input_tokens = 800000\n"
+                "max_output_tokens = 500000\n"
+                "max_total_tokens = 1000000\n"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / source.name
+            path.write_text(value, encoding="utf-8")
+            self.assertTrue(apply_policy(path))
+            config = tomllib.loads(path.read_text(encoding="utf-8"))
+            agent = config["env"]["agent"]
+            self.assertEqual(agent["max_turns"], RUNEBENCH_MAX_TURNS)
+            self.assertNotIn("max_input_tokens", agent)
+            self.assertNotIn("max_output_tokens", agent)
+            self.assertNotIn("max_total_tokens", agent)
+            self.assertFalse(apply_policy(path))
+
     def test_configs_and_catalogs_share_the_canonical_agencity_source_pin(self) -> None:
         harness_config = AgencityHarnessConfig(id="agencity-verifiers")
         self.assertEqual(harness_config.source_ref, AGENCITY_SOURCE_REF)
@@ -86,10 +115,24 @@ class SuitePreflightTests(unittest.TestCase):
                     EVALUATION_MAX_RESPONSE_TOKENS,
                 )
                 agent = config["env"]["agent"]
-                self.assertGreaterEqual(agent["max_turns"], EVALUATION_MIN_MAX_TURNS)
-                self.assertEqual(agent["max_input_tokens"], EVALUATION_MAX_INPUT_TOKENS)
-                self.assertEqual(agent["max_output_tokens"], EVALUATION_MAX_OUTPUT_TOKENS)
-                self.assertEqual(agent["max_total_tokens"], EVALUATION_MAX_TOTAL_TOKENS)
+                if config["env"]["taskset"]["id"] == RUNEBENCH_TASKSET_ID:
+                    self.assertEqual(agent["max_turns"], RUNEBENCH_MAX_TURNS)
+                    self.assertNotIn("max_input_tokens", agent)
+                    self.assertNotIn("max_output_tokens", agent)
+                    self.assertNotIn("max_total_tokens", agent)
+                else:
+                    self.assertGreaterEqual(
+                        agent["max_turns"], EVALUATION_MIN_MAX_TURNS
+                    )
+                    self.assertEqual(
+                        agent["max_input_tokens"], EVALUATION_MAX_INPUT_TOKENS
+                    )
+                    self.assertEqual(
+                        agent["max_output_tokens"], EVALUATION_MAX_OUTPUT_TOKENS
+                    )
+                    self.assertEqual(
+                        agent["max_total_tokens"], EVALUATION_MAX_TOTAL_TOKENS
+                    )
                 if config["env"]["taskset"]["id"] in {
                     "agencity-runebench",
                     "agencity-terminal-bench-2",

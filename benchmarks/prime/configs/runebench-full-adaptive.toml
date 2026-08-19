@@ -28,10 +28,7 @@ require_image = false
 mode = "all"
 
 [env.agent]
-max_turns = 50
-max_input_tokens = 800000
-max_output_tokens = 500000
-max_total_tokens = 1000000
+max_turns = 5000
 
 [env.agent.timeout]
 setup = 600
