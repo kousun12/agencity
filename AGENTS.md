@@ -314,11 +314,15 @@ same selection and scorer. No second harness integration or matched comparison
 is implemented.
 
 Model-free suite validation is infrastructure evidence, not benchmark
-performance. Paid evidence remains limited to one passing Terminal-Bench 2
-`fix-git` treatment, one passing Terminal-Bench 2.1 `fix-git` treatment, bounded
-OOLONG probes including one revised Sol-high Yahoo 128K pass and one
+performance. Paid evidence remains limited to two passing Terminal-Bench 2
+`fix-git` treatments, one passing Terminal-Bench 2.1 `fix-git` treatment,
+bounded OOLONG probes including one revised Sol-high Yahoo 128K pass and one
 current-revision Sol-high zero, and one zero-score SWE-bench Pro qutebrowser
-treatment that reached Agencity's token bound without a patch. The OOLONG zero
+treatment that reached Agencity's token bound without a patch. The latest
+Terminal-Bench 2 Sol-high pass used commit `3c2f4f6`, 8 model calls, 22,995
+prompt tokens, 3,867 completion tokens, 16,492 cached input tokens, and about
+125 seconds end to end through Vercel AI Gateway; Verifiers did not retain
+provider billing metadata. The OOLONG zero
 completed startup, execution, scoring, and cleanup on commit `5d533d1` but
 returned `Society & Culture` instead of `Sports` after 19 Agencity steps, 20
 provider calls, 90,951 prompt-plus-completion tokens, about four minutes, and

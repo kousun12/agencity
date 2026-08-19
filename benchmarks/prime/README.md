@@ -361,7 +361,13 @@ mapping it to reward zero.
   `Sports`, scoring `0`. It used 19 Agencity steps, 20 provider calls, 90,951
   prompt-plus-completion tokens, about four minutes, and $0.89. No full OOLONG
   run was made.
-- Terminal-Bench 2: one hardened Luna-high `fix-git` task scored `1.0`.
+- Terminal-Bench 2: one hardened Luna-high `fix-git` task scored `1.0`. A
+  later Sol-high canary on commit
+  `3c2f4f648c42fbc684db3de55905661e9f18b27a` also scored `1.0`: it completed
+  in 8 model calls, used 22,995 prompt tokens, 3,867 completion tokens, and
+  16,492 cached input tokens, and took about 125 seconds end to end through
+  Vercel AI Gateway. Verifiers reported provider cost as `0.0`, which is
+  missing billing metadata rather than evidence that the run was free.
 - Terminal-Bench 2.1: one independently pinned Luna-high `fix-git` task scored
   `1.0`.
 - SWE-bench Pro: one attended Luna-high qutebrowser task made nine calls,

@@ -28,7 +28,7 @@ max_retries = 0
 [env.agent.harness]
 id = "agencity-verifiers"
 source_repo = "https://github.com/kousun12/agencity.git"
-source_ref = "e03a2ad264e18589064153252fa7f094b00a4c21"
+source_ref = "3c2f4f648c42fbc684db3de55905661e9f18b27a"
 
 [env.agent.runtime]
 type = "docker"
