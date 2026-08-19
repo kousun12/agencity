@@ -18,7 +18,7 @@ max_tokens = 128000
 id = "agencity-verifiers"
 
 [env.agent]
-max_turns = 4
+max_turns = 50
 max_input_tokens = 800000
 max_output_tokens = 500000
 max_total_tokens = 1000000

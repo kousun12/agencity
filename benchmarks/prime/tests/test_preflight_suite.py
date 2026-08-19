@@ -11,6 +11,7 @@ from agencity_verifiers.evaluation_policy import (
     EVALUATION_CLIENT_API_KEY_VAR,
     EVALUATION_CLIENT_BASE_URL,
     EVALUATION_CLIENT_TYPE,
+    EVALUATION_MIN_MAX_TURNS,
     EVALUATION_MAX_INPUT_TOKENS,
     EVALUATION_MAX_OUTPUT_TOKENS,
     EVALUATION_MAX_RESPONSE_TOKENS,
@@ -75,6 +76,7 @@ class SuitePreflightTests(unittest.TestCase):
                     EVALUATION_MAX_RESPONSE_TOKENS,
                 )
                 agent = config["env"]["agent"]
+                self.assertGreaterEqual(agent["max_turns"], EVALUATION_MIN_MAX_TURNS)
                 self.assertEqual(agent["max_input_tokens"], EVALUATION_MAX_INPUT_TOKENS)
                 self.assertEqual(agent["max_output_tokens"], EVALUATION_MAX_OUTPUT_TOKENS)
                 self.assertEqual(agent["max_total_tokens"], EVALUATION_MAX_TOTAL_TOKENS)

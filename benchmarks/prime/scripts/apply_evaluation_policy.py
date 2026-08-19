@@ -10,6 +10,7 @@ from agencity_verifiers.evaluation_policy import (
     EVALUATION_CLIENT_API_KEY_VAR,
     EVALUATION_CLIENT_BASE_URL,
     EVALUATION_CLIENT_TYPE,
+    EVALUATION_MIN_MAX_TURNS,
     EVALUATION_MAX_INPUT_TOKENS,
     EVALUATION_MAX_OUTPUT_TOKENS,
     EVALUATION_MAX_RESPONSE_TOKENS,
@@ -35,6 +36,13 @@ def apply_policy(path: Path) -> bool:
         count=1,
     )
     updated = re.sub(r"(?m)^temperature = [^\n]+\n", "", updated)
+    updated, turns_count = re.subn(
+        r"(?m)^max_turns = (\d+)$",
+        lambda match: f"max_turns = {max(int(match.group(1)), EVALUATION_MIN_MAX_TURNS)}",
+        updated,
+    )
+    if turns_count != 1:
+        raise RuntimeError(f"{path} must contain exactly one max_turns value")
     updated, reasoning_count = re.subn(
         r'(?m)^reasoning_effort = "[^"]+"$',
         f'reasoning_effort = "{EVALUATION_REASONING_EFFORT}"',
@@ -109,6 +117,7 @@ def apply_policy(path: Path) -> bool:
         }
         or sampling.get("reasoning_effort") != EVALUATION_REASONING_EFFORT
         or sampling.get("max_tokens") != EVALUATION_MAX_RESPONSE_TOKENS
+        or agent.get("max_turns", 0) < EVALUATION_MIN_MAX_TURNS
         or agent.get("max_input_tokens") != EVALUATION_MAX_INPUT_TOKENS
         or agent.get("max_output_tokens") != EVALUATION_MAX_OUTPUT_TOKENS
         or agent.get("max_total_tokens") != EVALUATION_MAX_TOTAL_TOKENS

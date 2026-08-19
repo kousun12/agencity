@@ -121,6 +121,15 @@ limits. Every evaluated model call, including recursive and child work, must use
 the rollout's endpoint and secret. A direct provider fallback invalidates the
 rollout.
 
+Provider route, wire model ID, and Agencity model identity are distinct pins.
+For native OpenAI, Verifiers sends an unprefixed ID such as `gpt-5.6-sol`; for
+Vercel AI Gateway's OpenAI-compatible endpoint it sends the creator-qualified
+`openai/gpt-5.6-sol`. The harness maps both to Agencity's canonical
+`openai/gpt-5.6-sol` identity behind interception. A route change must update the
+client base URL, credential-variable name, and wire model ID together, retain
+the non-secret route in provenance, and pass an exact canary before a larger
+treatment. Never copy a host provider credential into the task runtime.
+
 ## Workspace-scored lifecycle
 
 A workspace benchmark follows this sequence:

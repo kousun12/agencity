@@ -32,7 +32,7 @@ episode = 1800
 finalize = 2100
 
 [env.agent]
-max_turns = 12
+max_turns = 50
 max_input_tokens = 800000
 max_output_tokens = 500000
 max_total_tokens = 1000000

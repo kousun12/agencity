@@ -248,6 +248,8 @@ Set the top-level `model` in a copied config to a Verifiers-supported model that
 can produce Agencity's required formal tool calls. Do not change taskset
 semantics when changing the model.
 
+### Provider routes
+
 Committed configs route evaluation calls directly to OpenAI's native
 OpenAI-compatible endpoint and require an exported `OPENAI_API_KEY`. They do not
 fall back to Vercel AI Gateway: a prior Gateway treatment emitted the
@@ -256,6 +258,31 @@ represent. Configs use OpenAI's native model IDs such as `gpt-5.6-sol`, omit
 unsupported temperature sampling, and let the harness add the `openai/` creator
 namespace only when constructing Agencity's canonical model identity behind the
 interception endpoint. A paid native OpenAI canary has passed this path.
+
+Native OpenAI:
+
+```sh
+export OPENAI_API_KEY=...
+uv run --locked eval @ configs/terminal-bench-2-smoke.toml \
+  --model gpt-5.6-sol
+```
+
+Vercel AI Gateway remains available as an explicit experimental route. Change
+the endpoint, credential variable, and wire model ID together:
+
+```sh
+export AI_GATEWAY_API_KEY=...
+uv run --locked eval @ configs/terminal-bench-2-smoke.toml \
+  --model openai/gpt-5.6-sol \
+  --client.base-url https://ai-gateway.vercel.sh/v1 \
+  --client.api-key-var AI_GATEWAY_API_KEY
+```
+
+Agencity's owner-only stored provider credentials are not automatically
+exported to Verifiers. The resolved run `config.toml` retains the non-secret
+route and model settings. The scrubbed benchmark summary does not yet project
+the client base URL, so a cross-provider comparison must add that field before
+claiming matched route provenance. Run one exact canary after any route change.
 
 Smoke:
 
@@ -269,12 +296,13 @@ Full compatible set:
 uv run --locked eval @ configs/terminal-bench-2-full.toml
 ```
 
-Committed configs use `xhigh` reasoning, Sol's 128,000-token per-response
-ceiling, and per-run ceilings of 800,000 input, 500,000 output, and 1,000,000
-total tokens. `scripts/apply_evaluation_policy.py` reapplies these shared
-defaults to every retained config. These are permissive rollout bounds, not
-targets or billed-dollar caps; maximum theoretical spend is much higher than
-the earlier 48,000-token treatments. Turn and token limits are checked between
+Committed configs use `xhigh` reasoning, at least 50 model turns, Sol's
+128,000-token per-response ceiling, and per-run ceilings of 800,000 input,
+500,000 output, and 1,000,000 total tokens. OOLONG retains its larger 64-turn
+bound. `scripts/apply_evaluation_policy.py` reapplies these shared defaults to
+every retained config. These are permissive rollout bounds, not targets or
+billed-dollar caps; maximum theoretical spend is much higher than the earlier
+12-turn, 48,000-token treatments. Turn and token limits are checked between
 calls and can therefore overshoot by one admitted call.
 
 These commands spend inference credit. Review the resolved config, current

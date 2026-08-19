@@ -292,14 +292,16 @@ portable shutdown/cleanup plus serial execution. Full context and gold answers
 remain private task-object fields outside serialized task data and provenance.
 OOLONG prompts give exact large-file and recursive aggregation guidance. All
 suite configs route directly to OpenAI using `OPENAI_API_KEY`, use `xhigh`
-reasoning and a 128,000-token per-response ceiling, and retain 800,000 input,
-500,000 output, and 1,000,000 total-token per-run ceilings. The limits are
-permissive bounds rather than spend targets, are checked between calls, and can
-overshoot by one admitted call. Configs use native unprefixed OpenAI model IDs
-and omit unsupported temperature sampling; the harness adds `openai/` only for
-Agencity's canonical model identity behind the interception endpoint. The
-bounded eight-task Sol treatment uses four explicit IDs from each Yahoo context
-window. A
+reasoning, at least 50 model turns, and a 128,000-token per-response ceiling,
+and retain 800,000 input, 500,000 output, and 1,000,000 total-token per-run
+ceilings; OOLONG retains 64 turns. The limits are permissive bounds rather than
+spend targets, are checked between calls, and can overshoot by one admitted
+call. Configs use native unprefixed OpenAI model IDs and omit unsupported
+temperature sampling; the harness adds `openai/` only for Agencity's canonical
+model identity behind the interception endpoint. Vercel AI Gateway remains an
+explicit experimental route that changes the client endpoint, credential
+variable, and wire model ID together and requires an exact canary. The bounded
+eight-task Sol treatment uses four explicit IDs from each Yahoo context window. A
 pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
