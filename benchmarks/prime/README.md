@@ -32,7 +32,8 @@ See [`AUTHORING.md`](./AUTHORING.md) for the reusable benchmark contract.
 - `agencity_verifiers.reporting` creates deterministic mixed-outcome summaries.
 - `agencity_runebench` starts the pinned game after harness provisioning and
   maps RuneBench's TypeScript SDK directly into Agencity's persistent Bun
-  console. See [`RUNEBENCH.md`](./RUNEBENCH.md).
+  console. The complete prerequisites, setup, execution, output, reporting, and
+  troubleshooting runbook is [`RUNEBENCH.md`](./RUNEBENCH.md).
 
 Task traces retain the complete selected ID list and digest, catalog and task
 digests, task/image/workdir pins, benchmark-specific evaluator pins, the model,

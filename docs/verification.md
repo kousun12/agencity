@@ -385,7 +385,9 @@ direct-REPL turns without credential-input or console-worker failure, but the
 official scorer did not run because service shutdown missed the harness cleanup
 bound; its displayed zero is an infrastructure error, not a score. No full paid
 RuneBench treatment, full paid suite, or matched harness comparison has run.
-Exact catalogs, commands, and limitations are in
+The complete RuneBench operator runbook is
+[`benchmarks/prime/RUNEBENCH.md`](../benchmarks/prime/RUNEBENCH.md). Shared
+catalog, comparison, and reporting contracts are in
 [`benchmarks/prime/README.md`](../benchmarks/prime/README.md).
 
 Final suite-layer model-free verification on August 11, 2026 recorded:

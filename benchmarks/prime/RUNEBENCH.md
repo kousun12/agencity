@@ -23,6 +23,48 @@ The pinned Harbor dataset contains the 32 skill tasks. The upstream repository
 also defines newer gold and collaboration tasks, but those are not members of
 this immutable dataset version and are outside this treatment.
 
+## Prerequisites and local setup
+
+Run the benchmark from the isolated Python project at
+`benchmarks/prime/`. It does not use the repository-root Bun dependency
+installation.
+
+Required software and access:
+
+- Python 3.12 or 3.13;
+- [uv](https://docs.astral.sh/uv/);
+- a running Docker daemon that can grant the task container its 8 GiB memory
+  limit;
+- network access for the initial Python package, Harbor dataset, game image,
+  pinned Agencity source, portable Bun, and model-provider downloads or calls;
+- an OpenAI API key for the committed native OpenAI configs.
+
+The official game image and portable Bun are `linux/amd64`. Docker uses AMD64
+emulation on ARM Macs. The platform warning is expected, and startup and game
+execution are slower than on an AMD64 host.
+
+From the repository root:
+
+```sh
+cd benchmarks/prime
+uv sync --locked
+docker info
+```
+
+The harness installs the exact Agencity source commit and portable Bun declared
+by the selected config inside each task container. A separate host installation
+or build of Agencity is not required.
+
+Agencity's owner-only stored provider key is not automatically exported to
+Verifiers. Set the key in the shell that starts the evaluation:
+
+```sh
+export OPENAI_API_KEY=...
+```
+
+Do not put the key in a config, trace, output directory, command argument, or
+committed file.
+
 ## Agencity interface adaptation
 
 The official task prompt describes an `execute_code` MCP wrapper that supplies
@@ -62,6 +104,57 @@ This prevents harness provisioning time from consuming the game horizon. The
 harness stages the official save first, starts `/entrypoint.sh`, and admits the
 agent only after both the tracker and bot report ready.
 
+### Files available to the agent
+
+The pinned image includes the game SDK, its documentation, retained learnings,
+and extracted game-wiki Markdown:
+
+- `/app/sdk/API.md` and the TypeScript source under `/app/sdk/`;
+- `/app/learnings/`;
+- `/app/wiki/skills/`;
+- `/app/wiki/shops/`;
+- `/app/wiki/items/`;
+- `/app/wiki/npcs/`;
+- `/app/wiki/quests/`.
+
+Agencity can search and read these files through its ordinary typed file, shell,
+and Bun APIs. They are image-owned files rather than MCP resources. The harness
+does not mount external documentation that is absent from the pinned image.
+
+### Treatment prompting
+
+The adapted task and root `AGENTS.md` tell the model to:
+
+- ignore the task's MCP instructions and use the image-owned TypeScript SDK;
+- preserve Agencity's built-in `sdk` binding and name the game objects `rs` and
+  `bot`;
+- import and connect once, then reuse those live objects while the exact branch
+  REPL epoch remains warm;
+- begin with one short action and a small returned state summary;
+- lengthen only a measured working loop;
+- consult SDK, learning, and wiki files on demand rather than loading all of
+  them into context;
+- measure XP rate after each strategy; and
+- move a proven long-running loop to a background process when training should
+  continue during later model decisions.
+
+The treatment currently does not prescribe a multi-agent strategy.
+
+### Persistent REPL semantics
+
+Top-level imports, variables, functions, classes, module instances, sockets, and
+object identity persist across cells for one exact session and branch while its
+worker remains alive. The model can therefore keep one live game connection and
+incrementally improve helpers and loops without rebuilding them on every turn.
+
+The REPL heap is not durable. Worker loss, service loss, cancellation,
+recycling, or a branch change produces a new epoch. Required recovery data must
+use files, durable state, or artifacts, and the model must reconnect from
+current inputs; prior effectful cells are never replayed automatically.
+Console calls from imported callbacks outside an active cell are no-ops, so a
+background operation should write evidence to an explicit file or durable
+surface when later inspection matters.
+
 ## Learning modes
 
 Every scored task starts with a fresh Agencity workspace, profile database, and
@@ -87,27 +180,174 @@ fresh-profile RuneBench treatment.
 
 ## Configurations
 
-- `runebench-woodcutting-15m-fresh.toml` — matched direct-REPL baseline;
-- `runebench-woodcutting-15m-adaptive.toml` — one within-run adaptive task;
-- `runebench-15m-sample-adaptive.toml` — four fixed 15-minute skills;
-- `runebench-full-adaptive.toml` — all 32 published skill tasks.
+- `configs/runebench-woodcutting-15m-fresh.toml` — one exact Woodcutting task
+  with automatic learning paused;
+- `configs/runebench-woodcutting-15m-adaptive.toml` — the same exact task with
+  within-run learning enabled;
+- `configs/runebench-15m-sample-adaptive.toml` — four fixed 15-minute skills;
+- `configs/runebench-full-adaptive.toml` — all 32 published skill tasks.
 
-Preflight without model inference:
+The committed configs use native OpenAI, `xhigh` reasoning, one rollout per
+selected task, at least 50 turns, a 128,000-token response ceiling, and
+800,000 input, 500,000 output, and 1,000,000 total-token run ceilings. Limits
+are checked between calls and may overshoot by one admitted call. Review the
+config before any paid run.
+
+### Preflight and dry-run
+
+Resolve the exact immutable task selection and retain it for later reporting:
 
 ```sh
 uv run --locked python scripts/preflight_suite.py \
-  configs/runebench-woodcutting-15m-adaptive.toml
+  configs/runebench-woodcutting-15m-adaptive.toml \
+  --output outputs/runebench-woodcutting-selection.json
+```
+
+This checks the dataset, catalog, task, image, evaluator, lock, source,
+selection, and resource pins without model inference. The resulting JSON lists
+the exact selected IDs and digests.
+
+Resolve the complete Verifiers execution without calling a model:
+
+```sh
 uv run --locked eval @ configs/runebench-woodcutting-15m-adaptive.toml --dry-run
 ```
 
-Run one paid treatment only after reviewing the model, route, limits, and
-expected cost:
+Neither command is benchmark-performance evidence.
+
+### Paid execution
+
+Use a new output directory for every attempt. Run the smallest adaptive
+treatment:
 
 ```sh
 export OPENAI_API_KEY=...
 uv run --locked eval @ configs/runebench-woodcutting-15m-adaptive.toml \
-  --model gpt-5.6-sol
+  --model gpt-5.6-luna \
+  --output-dir outputs/runebench-woodcutting-15m-adaptive-luna
 ```
+
+Run the matched fresh baseline:
+
+```sh
+uv run --locked eval @ configs/runebench-woodcutting-15m-fresh.toml \
+  --model gpt-5.6-luna \
+  --output-dir outputs/runebench-woodcutting-15m-fresh-luna
+```
+
+`--model` overrides the model declared by the config without changing the task
+or harness treatment. Keep the model, endpoint class, reasoning effort, token
+limits, runtime resources, and rollout count fixed when comparing fresh and
+adaptive modes.
+
+The four-task sample and 32-task full treatment use the same command shape:
+
+```sh
+uv run --locked eval @ configs/runebench-15m-sample-adaptive.toml \
+  --output-dir outputs/runebench-15m-sample-adaptive
+
+uv run --locked eval @ configs/runebench-full-adaptive.toml \
+  --output-dir outputs/runebench-full-adaptive
+```
+
+These are long paid runs. Start with one exact task and verify scoring and
+cleanup before admitting a sample or full treatment.
+
+### Custom task selections
+
+RuneBench uses the shared deterministic selection contract:
+
+```toml
+[env.taskset.selection]
+mode = "exact"
+ids = ["woodcutting-xp-15m"]
+```
+
+Valid modes are `exact`, `ids`, `smoke`, `sample`, `shard`, and `all`. Use a
+copied config for an experiment, keep its resolved config with the output, and
+run preflight before inference. The immutable catalog is the authority for
+available task IDs. `all` selects the 32 compatible tasks in catalog order.
+
+## Runtime lifecycle
+
+For each selected task and rollout, Verifiers:
+
+1. creates a fresh ephemeral container from the pinned game image;
+2. installs the config's pinned Agencity source and portable Bun;
+3. stages the official character save and treatment `AGENTS.md`;
+4. explicitly pauses or enables automatic learning;
+5. starts the game, tracker, and bot and waits for readiness;
+6. launches one fresh Agencity root through the Verifiers model-interception
+   endpoint;
+7. lets the root use the image SDK through its persistent Bun REPL;
+8. requests owned Agencity service shutdown and removes portable state;
+9. finalizes the task and collects the official Harbor verifier evidence; and
+10. removes the task container.
+
+No Agencity profile, game save, REPL heap, or learned artifact is reused by the
+next scored task.
+
+## Outputs and reporting
+
+An output directory contains at least:
+
+- `config.toml` — the resolved non-secret evaluation config;
+- `eval.log` — evaluator lifecycle and summary logs;
+- `traces.jsonl` — the raw task, model, tool, usage, timing, outcome, and
+  provenance trace.
+
+Raw traces may contain model text, licensed benchmark content, or private client
+headers. Keep them private and do not commit `outputs/`.
+
+Create the scrubbed deterministic summary with the selection retained during
+preflight:
+
+```sh
+uv run --locked python -m agencity_verifiers.reporting \
+  outputs/runebench-woodcutting-15m-adaptive-luna \
+  --selection outputs/runebench-woodcutting-selection.json \
+  --output outputs/runebench-woodcutting-15m-adaptive-luna-summary.json
+```
+
+The summary distinguishes official scores, valid zeroes, partial rewards,
+agent failures, provider failures, scorer or infrastructure errors,
+cancellations, unknowns, skips, and incompatibilities. A displayed reward of
+zero is not a valid RuneBench score when the trace reports a harness, cleanup,
+or scorer error.
+
+## Verification and troubleshooting
+
+Run the focused model-free suite:
+
+```sh
+uv run --locked python -m unittest tests.test_runebench
+```
+
+The broader benchmark project suite is:
+
+```sh
+uv run --locked python -m unittest discover -s tests
+```
+
+Common conditions:
+
+- `OPENAI_API_KEY` missing: export it in the evaluation shell. Agencity's stored
+  owner credential is intentionally not inherited.
+- Docker daemon unavailable or memory too low: start Docker and ensure it can
+  grant the task container 8 GiB.
+- AMD64 warning on an ARM Mac: expected for the pinned image and portable Bun.
+- First run is slow: the dataset, image, Agencity source, and Bun may need to be
+  downloaded.
+- REPL epoch changed: live game objects were lost; reconnect from current
+  inputs. Do not replay prior effectful cells automatically.
+- `HarnessError`, missing scorer evidence, or cleanup failure: classify the
+  attempt as infrastructure error, preserve the output, and do not report its
+  displayed reward as a score.
+- Operator interruption: the container is ephemeral, but there is no public
+  durable cancellation or reconciliation receipt for unattended benchmark
+  runs. Inspect the retained output and Docker state before retrying.
+
+## Paid canary evidence
 
 One paid Luna canary against the direct-REPL working tree completed 33 model
 turns in one warm REPL epoch and exercised native game actions without a
@@ -124,6 +364,8 @@ evidence.
 - The official image is `linux/amd64`; ARM Macs use Docker emulation.
 - Video capture remains enabled because it is part of the official image
   treatment.
+- Owned service shutdown can miss the current 10-second harness cleanup bound;
+  no valid paid RuneBench score is verified for this integration.
 - A full run is long and expensive and remains operator-gated.
 - RuneBench is noisy; one rollout is integration evidence, not a stable harness
   comparison.
