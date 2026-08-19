@@ -45,7 +45,7 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:
-        if self.path != "/v1/chat/completions":
+        if self.path not in {"/v1/chat/completions", "/v1/responses"}:
             self.send_error(404)
             return
         length = int(self.headers.get("content-length", "0"))
@@ -56,6 +56,9 @@ class _ProviderHandler(BaseHTTPRequestHandler):
             separators=(",", ":"),
         )
         model = body.get("model", "gpt-5.6-sol")
+        if self.path == "/v1/responses":
+            self._responses(model, arguments, body.get("stream") is True)
+            return
         if body.get("stream") is not True:
             self._json(
                 {
@@ -148,6 +151,86 @@ class _ProviderHandler(BaseHTTPRequestHandler):
             f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
             for chunk in chunks
         ) + "data: [DONE]\n\n"
+        encoded = payload.encode()
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _responses(self, model: object, arguments: str, streaming: bool) -> None:
+        item = {
+            "type": "function_call",
+            "id": "container-fixture-item",
+            "call_id": "container-fixture-tool",
+            "name": "finish",
+            "arguments": arguments,
+            "status": "completed",
+        }
+        usage = {
+            "input_tokens": 7,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 4,
+            "output_tokens_details": {"reasoning_tokens": 0},
+        }
+        if not streaming:
+            self._json(
+                {
+                    "id": "container-fixture",
+                    "created_at": 1,
+                    "model": model,
+                    "output": [item],
+                    "incomplete_details": None,
+                    "usage": usage,
+                }
+            )
+            return
+        events = [
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "container-fixture",
+                    "created_at": 1,
+                    "model": model,
+                    "service_tier": None,
+                },
+            },
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "container-fixture-item",
+                    "call_id": "container-fixture-tool",
+                    "name": "finish",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "container-fixture-item",
+                "output_index": 0,
+                "delta": arguments,
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": item,
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "incomplete_details": None,
+                    "usage": usage,
+                    "reasoning": None,
+                    "service_tier": None,
+                },
+            },
+        ]
+        payload = "".join(
+            f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+            for event in events
+        )
         encoded = payload.encode()
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
@@ -256,7 +339,7 @@ class ExactContainerStartupTests(unittest.TestCase):
         self.assertEqual(len(_ProviderHandler.requests), 1)
         self.assertEqual(
             [
-                tool.get("function", {}).get("name")
+                tool.get("name") or tool.get("function", {}).get("name")
                 for tool in _ProviderHandler.requests[0].get("tools", [])
             ],
             ["bun_console", "finish"],
