@@ -418,7 +418,9 @@ mapping it to reward zero.
   and removed Gateway-style model namespacing and unsupported temperature
   sampling before this passing treatment.
 - Terminal-Bench 2.1: one independently pinned Luna-high `fix-git` task scored
-  `1.0`.
+  `1.0`. A native OpenAI Sol-xhigh canary on commit `63b35ea` also scored
+  `1.0` in 6 model calls, with 14,473 prompt tokens, 1,695 completion tokens,
+  14,604 cached input tokens, and about 75 seconds end to end.
 - SWE-bench Pro: one attended Luna-high qutebrowser task made nine calls,
   reached Agencity's total-token bound without a patch, and officially scored
   `0.0`. It must not be rerun merely to seek a better result.

@@ -322,7 +322,7 @@ is implemented.
 
 Model-free suite validation is infrastructure evidence, not benchmark
 performance. Paid evidence remains limited to three passing Terminal-Bench 2
-`fix-git` treatments, one passing Terminal-Bench 2.1 `fix-git` treatment,
+`fix-git` treatments, two passing Terminal-Bench 2.1 `fix-git` treatments,
 bounded OOLONG probes including one revised Sol-high Yahoo 128K pass and one
 current-revision Sol-high zero, and one zero-score SWE-bench Pro qutebrowser
 treatment that reached Agencity's token bound without a patch. The latest
@@ -342,7 +342,10 @@ in 6 model calls with 17,388 prompt tokens, 2,507 completion tokens, 12,170
 cached input tokens, and about 81 seconds end to end. The native path uses the
 unprefixed `gpt-5.6-sol` upstream ID while retaining Agencity's canonical
 `openai/gpt-5.6-sol` identity behind interception. No paid full-suite, hosted,
-or matched-harness result is verified. Large
+or matched-harness result is verified. The latest Terminal-Bench 2.1 native
+OpenAI Sol-xhigh canary passed on commit `63b35ea` in 6 model calls with 14,473
+prompt tokens, 1,695 completion tokens, 14,604 cached input tokens, and about 75
+seconds end to end. Large
 unattended runs also remain limited by the absence of a public durable
 cancellation/reconciliation receipt.
 
