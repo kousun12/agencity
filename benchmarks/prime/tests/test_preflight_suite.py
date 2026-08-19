@@ -7,6 +7,16 @@ import unittest
 from pathlib import Path
 
 from agencity_terminal_bench_2.taskset import CATALOG_PATH
+from agencity_verifiers.evaluation_policy import (
+    EVALUATION_CLIENT_API_KEY_VAR,
+    EVALUATION_CLIENT_BASE_URL,
+    EVALUATION_CLIENT_TYPE,
+    EVALUATION_MAX_INPUT_TOKENS,
+    EVALUATION_MAX_OUTPUT_TOKENS,
+    EVALUATION_MAX_RESPONSE_TOKENS,
+    EVALUATION_MAX_TOTAL_TOKENS,
+    EVALUATION_REASONING_EFFORT,
+)
 from agencity_verifiers.harness import AgencityHarnessConfig
 from agencity_verifiers.selection import load_catalog
 from agencity_verifiers.source import AGENCITY_SOURCE_REF, AGENCITY_SOURCE_REPO
@@ -40,20 +50,32 @@ class SuitePreflightTests(unittest.TestCase):
                 self.assertEqual(treatment["source_repo"], AGENCITY_SOURCE_REPO)
                 self.assertEqual(treatment["source_ref"], AGENCITY_SOURCE_REF)
 
-    def test_suite_configs_use_36k_output_limits(self) -> None:
-        config_paths = sorted(
-            path
-            for path in (ROOT / "configs").glob("*.toml")
-            if path.name.startswith(("terminal-bench-", "swe-bench-", "oolong-"))
-        )
+    def test_configs_use_canonical_native_openai_and_high_token_policy(self) -> None:
+        config_paths = sorted((ROOT / "configs").glob("*.toml"))
         self.assertTrue(config_paths)
         for path in config_paths:
             with self.subTest(config=path.name):
                 config = tomllib.loads(path.read_text(encoding="utf-8"))
-                self.assertEqual(config["sampling"]["max_tokens"], 36_000)
+                self.assertEqual(
+                    config["client"],
+                    {
+                        "type": EVALUATION_CLIENT_TYPE,
+                        "base_url": EVALUATION_CLIENT_BASE_URL,
+                        "api_key_var": EVALUATION_CLIENT_API_KEY_VAR,
+                    },
+                )
+                self.assertEqual(
+                    config["sampling"]["reasoning_effort"],
+                    EVALUATION_REASONING_EFFORT,
+                )
+                self.assertEqual(
+                    config["sampling"]["max_tokens"],
+                    EVALUATION_MAX_RESPONSE_TOKENS,
+                )
                 agent = config["env"]["agent"]
-                if "max_output_tokens" in agent:
-                    self.assertEqual(agent["max_output_tokens"], 36_000)
+                self.assertEqual(agent["max_input_tokens"], EVALUATION_MAX_INPUT_TOKENS)
+                self.assertEqual(agent["max_output_tokens"], EVALUATION_MAX_OUTPUT_TOKENS)
+                self.assertEqual(agent["max_total_tokens"], EVALUATION_MAX_TOTAL_TOKENS)
 
     def test_full_catalog_configs_validate_without_loading_images(self) -> None:
         for name, expected in (

@@ -248,6 +248,13 @@ Set the top-level `model` in a copied config to a Verifiers-supported model that
 can produce Agencity's required formal tool calls. Do not change taskset
 semantics when changing the model.
 
+Committed configs route evaluation calls directly to OpenAI's native
+OpenAI-compatible endpoint and require an exported `OPENAI_API_KEY`. They do not
+fall back to Vercel AI Gateway: a prior Gateway treatment emitted the
+nonstandard streaming terminal reason `error`, which Verifiers 0.3.0 could not
+represent. Native routing must pass a paid canary before a full treatment is
+admitted.
+
 Smoke:
 
 ```sh
@@ -260,10 +267,13 @@ Full compatible set:
 uv run --locked eval @ configs/terminal-bench-2-full.toml
 ```
 
-Committed suite configs use a 36,000-token per-response sampling ceiling so
-high-reasoning calls are not cut off at the former 4,096-token limit. Treatments
-with a separate aggregate output ceiling use the same 36,000-token bound.
-Turn and total-token limits remain rollout bounds; none is a billed-dollar cap.
+Committed configs use `xhigh` reasoning, Sol's 128,000-token per-response
+ceiling, and per-run ceilings of 800,000 input, 500,000 output, and 1,000,000
+total tokens. `scripts/apply_evaluation_policy.py` reapplies these shared
+defaults to every retained config. These are permissive rollout bounds, not
+targets or billed-dollar caps; maximum theoretical spend is much higher than
+the earlier 48,000-token treatments. Turn and token limits are checked between
+calls and can therefore overshoot by one admitted call.
 
 These commands spend inference credit. Review the resolved config, current
 pricing, selected count, provider-window worst-case, and operator budget first.
@@ -368,6 +378,10 @@ mapping it to reward zero.
   16,492 cached input tokens, and took about 125 seconds end to end through
   Vercel AI Gateway. Verifiers reported provider cost as `0.0`, which is
   missing billing metadata rather than evidence that the run was free.
+  A subsequent full-set attempt on commit `ffe7bf8` was operator-stopped after
+  six completed tasks and is not a suite result: one passed, five scored zero,
+  three reached the former 48,000-token run bound, and one received Gateway's
+  nonstandard `finish_reason="error"` envelope before any model turn.
 - Terminal-Bench 2.1: one independently pinned Luna-high `fix-git` task scored
   `1.0`.
 - SWE-bench Pro: one attended Luna-high qutebrowser task made nine calls,

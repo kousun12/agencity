@@ -6,10 +6,15 @@ max_concurrent = 1
 push = false
 rich = false
 
+[client]
+type = "eval"
+base_url = "https://api.openai.com/v1"
+api_key_var = "OPENAI_API_KEY"
+
 [sampling]
 temperature = 0
-reasoning_effort = "high"
-max_tokens = 36000
+reasoning_effort = "xhigh"
+max_tokens = 128000
 
 [env.taskset]
 id = "agencity-terminal-bench-2"
@@ -25,7 +30,9 @@ seed = 20260811
 
 [env.agent]
 max_turns = 12
-max_total_tokens = 48000
+max_input_tokens = 800000
+max_output_tokens = 500000
+max_total_tokens = 1000000
 
 [env.agent.timeout]
 setup = 600
@@ -39,7 +46,7 @@ max_retries = 0
 [env.agent.harness]
 id = "agencity-verifiers"
 source_repo = "https://github.com/kousun12/agencity.git"
-source_ref = "3c2f4f648c42fbc684db3de55905661e9f18b27a"
+source_ref = "ffe7bf8d347f2a99649836d4290ca0946a68f65f"
 installation = "portable"
 bun_url = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
 bun_sha256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
