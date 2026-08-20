@@ -122,11 +122,14 @@ class RoutingTests(unittest.TestCase):
             run_deadline_at="2026-08-19T00:30:00.000Z",
             refinement_review_limit=1,
             refinement_evidence_required=1,
+            completion_gate="bun run /app/check.ts",
         )
         self.assertIn("--started-at", command)
         self.assertIn("--deadline-at", command)
         self.assertIn("--refinement-review-limit", command)
         self.assertIn("--refinement-evidence-required", command)
+        self.assertIn("--completion-gate", command)
+        self.assertIn("bun run /app/check.ts", command)
         self.assertEqual(command[-2:], ["--", "train"])
 
     def test_strips_only_root_v1_endpoint(self) -> None:

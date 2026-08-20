@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import shlex
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -18,8 +20,10 @@ from agencity_verifiers.harness import (
 )
 from agencity_runebench.taskset import (
     BENCHMARK,
+    COMPLETION_GATE_PATH,
     RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES,
     RuneBenchData,
+    render_completion_gate_source,
 )
 
 
@@ -77,6 +81,10 @@ class AgencityRuneBenchHarness(AgencityHarness):
             refinement_evidence_required=(
                 1 if data.learning_mode == "within-run" else 0
             ),
+            completion_gate=_completion_gate_command(
+                data,
+                self.config.installation,
+            ),
         )
 
 
@@ -98,6 +106,21 @@ async def _set_automatic_learning(
     if result.exit_code != 0:
         detail = (result.stderr or result.stdout).strip()[-2000:]
         raise RuntimeError(f"could not configure RuneBench automatic learning: {detail}")
+
+
+def _completion_gate_command(data: RuneBenchData, installation: str) -> str:
+    source = render_completion_gate_source(
+        data.skill,
+        data.duration_seconds,
+        data.sample_interval_ms,
+    )
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    bun = PORTABLE_BUN_PATH if installation == "portable" else "bun"
+    return (
+        f"printf '%s  %s\\n' {digest} {shlex.quote(COMPLETION_GATE_PATH)}"
+        " | /usr/bin/sha256sum --check --status"
+        f" && {shlex.quote(bun)} run {shlex.quote(COMPLETION_GATE_PATH)}"
+    )
 
 
 async def _start_game(

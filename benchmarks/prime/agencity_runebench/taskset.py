@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -59,6 +60,7 @@ LearningMode = Literal["fresh", "within-run"]
 
 TREATMENT_DIR = "/app/agencity-runebench"
 CONTROLLER_PATH = f"{TREATMENT_DIR}/controller.ts"
+COMPLETION_GATE_PATH = f"{TREATMENT_DIR}/check-completion.ts"
 TRAINER_DIR = f"{TREATMENT_DIR}/trainers"
 TRACKING_FILE = "/logs/tracking/skill_tracking.json"
 RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES = 1536 * 1024 * 1024
@@ -66,6 +68,8 @@ RATE_COMMAND_TEMPLATE = (
     f"TRACKING_FILE={TRACKING_FILE} "
     "bun /app/benchmark/shared/check_xp_rate.ts {skill}"
 )
+SCORED_SKILL_TOKEN = "__RUNEBENCH_SCORED_SKILL__"
+SCORED_SKILL_SLUG_TOKEN = "__RUNEBENCH_SCORED_SKILL_SLUG__"
 
 CONTROLLER_SOURCE = r"""import {
   mkdir,
@@ -109,6 +113,28 @@ export type ActionLoopOptions<T> = {
   minBackoffMs?: number;
   maxBackoffMs?: number;
   successDelayMs?: number;
+};
+
+export type MeasuredActionLoopOptions<T> = ActionLoopOptions<T> & {
+  measure: () => Promise<number> | number;
+};
+
+export type MeasuredActionLoopSummary = {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  elapsedMs: number;
+  metric: {
+    before: number;
+    after: number;
+    delta: number;
+  };
+  lastFailure: {
+    attempt: number;
+    error: string | null;
+    message: string | null;
+    reason: string | null;
+  } | null;
 };
 
 type ControllerLease = {
@@ -355,11 +381,51 @@ export async function runActionLoop<T extends ActionResult>(
   }
   return attempts;
 }
+
+async function measuredValue(
+  measure: () => Promise<number> | number,
+): Promise<number> {
+  const value = await measure();
+  if (!Number.isFinite(value)) {
+    throw new Error("measured action-loop value must be finite");
+  }
+  return value;
+}
+
+export async function runMeasuredActionLoop<T extends ActionResult>(
+  options: MeasuredActionLoopOptions<T>,
+): Promise<MeasuredActionLoopSummary> {
+  const before = await measuredValue(options.measure);
+  const startedAt = Date.now();
+  const attempts = await runActionLoop(options);
+  const after = await measuredValue(options.measure);
+  const failed = attempts.filter((attempt) => !attempt.ok);
+  const lastFailure = failed.at(-1);
+  const result = lastFailure && "result" in lastFailure
+    ? lastFailure.result
+    : undefined;
+  return {
+    attempted: attempts.length,
+    succeeded: attempts.length - failed.length,
+    failed: failed.length,
+    elapsedMs: Date.now() - startedAt,
+    metric: { before, after, delta: after - before },
+    lastFailure: lastFailure
+      ? {
+          attempt: lastFailure.attempt,
+          error: "error" in lastFailure ? lastFailure.error ?? null : null,
+          message: typeof result?.message === "string" ? result.message : null,
+          reason: typeof result?.reason === "string" ? result.reason : null,
+        }
+      : null,
+  };
+}
 """
 
 REPL_CONNECTION_SOURCE = f"""const {{
   acquireController,
   runActionLoop,
+  runMeasuredActionLoop,
 }} = await import("{CONTROLLER_PATH}");
 const controller = await acquireController("repl");
 const rs = controller.rs;
@@ -437,25 +503,93 @@ and wiki pages as guidance rather than current world state: confirm tools,
 inventory, nearby entities, requirements, and action results through `rs`, and
 confirm exact callable signatures in `/app/sdk/API.md`.
 
-Use the exact loop shape below after one action works. Replace only the action
-with the proven task-relevant call. `minBackoffMs` cannot be below 250.
+The scored skill is **{SCORED_SKILL_TOKEN}**. Use one initial discovery cell,
+not one model turn per file. The cell may read the complete 579-line pinned API,
+the scored skill's wiki page, the matching upstream learning when present, and
+the learning/skill filename index in parallel. Return only those bounded
+documents plus a compact live-state projection; do not return the complete game
+state.
+
+```ts
+const scoredSkill = "{SCORED_SKILL_TOKEN}";
+const skillSlug = "{SCORED_SKILL_SLUG_TOKEN}";
+const [knowledgeIndex, api, skillGuide] = await Promise.all([
+  tools.shell("ls -1 /app/learnings /app/wiki/skills"),
+  tools.readFile("/app/sdk/API.md", {{ startLine: 1, endLine: 579 }}),
+  tools.readFile(`/app/wiki/skills/${{skillSlug}}.md`, {{
+    startLine: 1,
+    endLine: 400,
+  }}),
+]);
+const indexText = knowledgeIndex.completeness === "inline"
+  ? knowledgeIndex.value.stdout
+  : "";
+const matchingLearning = indexText.split("\\n").includes(`${{skillSlug}}.md`)
+  ? await tools.readFile(`/app/learnings/${{skillSlug}}.md`, {{
+      startLine: 1,
+      endLine: 400,
+    }})
+  : null;
+const game = rs.getState();
+const progress = {{
+  skill: scoredSkill,
+  phase: "discovery",
+  xp: rs.getSkillXp(scoredSkill) ?? null,
+  inventory: rs.getInventory(),
+  liveState: inspect(game, {{
+    depth: 4,
+    entries: 100,
+    lines: 80,
+    bytes: 12_000,
+  }}),
+}};
+await state.set("runebench.progress", progress);
+return {{ knowledgeIndex, api, skillGuide, matchingLearning, progress }};
+```
+
+If the exact learning filename is absent, use the returned index to select at
+most one clearly relevant upstream learning in the next experiment cell. Do
+not repeatedly search API or knowledge files after this discovery result.
+
+## Measured experiments
+
+Use one short action to validate a strategy, then use
+`runMeasuredActionLoop` for repeated actions. It preserves the 250 ms minimum
+failure backoff and returns compact counts, nested failure details, elapsed
+time, and measured XP before/after without returning every attempt.
 
 ```ts
 return await (async () => {{
-  const attempts = await runActionLoop({{
+  const strategy = "task-relevant tested action";
+  const report = await runMeasuredActionLoop({{
     iterations: 20,
     minBackoffMs: 250,
     maxBackoffMs: 5_000,
     successDelayMs: 0,
     action: () => bot.chopTree(),
+    measure: () => rs.getSkillXp("{SCORED_SKILL_TOKEN}") ?? 0,
   }});
-  return {{
-    succeeded: attempts.filter((attempt) => attempt.ok).length,
-    failed: attempts.filter((attempt) => !attempt.ok).length,
-    last: attempts.at(-1) ?? null,
+  const rate = await tools.shell(
+    "{RATE_COMMAND_TEMPLATE.format(skill=SCORED_SKILL_TOKEN)}",
+  );
+  const progress = {{
+    skill: "{SCORED_SKILL_TOKEN}",
+    phase: report.metric.delta > 0 ? "productive" : "diagnose",
+    strategy,
+    report,
+    tracker: rate.completeness === "inline" ? rate.value.stdout.trim() : rate,
   }};
+  await state.set("runebench.progress", progress);
+  return progress;
 }})();
 ```
+
+`runebench.progress` is durable and is included in later model context even
+after detailed cell observations age out. Update it after each materially
+different strategy. A successful helper return is not proof of task progress:
+only positive scored-skill XP and tracker evidence are progress. If XP delta is
+zero, diagnose the compact failure and live state, change one assumption, and
+run a different bounded experiment.
 
 Start with one short action and return its small result. Treat a returned
 `{{ success: false, ... }}` as a failure even though it did not throw. Every
@@ -495,6 +629,91 @@ Never use `command &`, `nohup`, `/tmp`, or another unmanaged process. Never
 start a trainer while the REPL controller claim is live. A failed controller
 claim is a lifecycle error to fix, not permission to bypass the wrapper.
 """.strip()
+
+
+def render_repl_guidance(skill: str) -> str:
+    if not re.fullmatch(r"[A-Za-z][A-Za-z ]{0,63}", skill):
+        raise ValueError(f"invalid RuneBench scored skill: {skill!r}")
+    return REPL_GUIDANCE.replace(SCORED_SKILL_TOKEN, skill).replace(
+        SCORED_SKILL_SLUG_TOKEN,
+        skill.lower().replace(" ", "-"),
+    )
+
+
+def render_completion_gate_source(
+    skill: str,
+    duration_seconds: int,
+    sample_interval_ms: int,
+) -> str:
+    if not re.fullmatch(r"[A-Za-z][A-Za-z ]{0,63}", skill):
+        raise ValueError(f"invalid RuneBench scored skill: {skill!r}")
+    if duration_seconds < 1 or sample_interval_ms < 1:
+        raise ValueError("RuneBench completion gate requires positive timing")
+    finish_window_ms = max(60_000, sample_interval_ms * 4)
+    minimum_elapsed_ms = max(0, duration_seconds * 1_000 - finish_window_ms)
+    return f"""const TRACKING_FILE = {json.dumps(TRACKING_FILE)};
+const SKILL = {json.dumps(skill)};
+const MINIMUM_ELAPSED_MS = {minimum_elapsed_ms};
+
+type Sample = {{
+  elapsedMs?: number;
+  skills?: Record<string, {{ xp?: number }}>;
+}};
+
+const fail = (message: string, evidence: unknown = null): never => {{
+  console.error(JSON.stringify({{
+    protocol: "agencity.runebench-completion-gate.v1",
+    passed: false,
+    message,
+    evidence,
+  }}));
+  process.exit(1);
+}};
+
+if (!(await Bun.file(TRACKING_FILE).exists())) {{
+  fail("official skill tracker is unavailable");
+}}
+const tracking = await Bun.file(TRACKING_FILE).json() as {{ samples?: Sample[] }};
+const samples = Array.isArray(tracking.samples) ? tracking.samples : [];
+if (samples.length < 2) {{
+  fail("official skill tracker does not contain two samples", {{
+    sampleCount: samples.length,
+  }});
+}}
+const first = samples[0]!;
+const last = samples.at(-1)!;
+const firstXp = Number(first.skills?.[SKILL]?.xp);
+const lastXp = Number(last.skills?.[SKILL]?.xp);
+const elapsedMs = Number(last.elapsedMs);
+if (![firstXp, lastXp, elapsedMs].every(Number.isFinite)) {{
+  fail("official skill tracker is missing finite scored-skill evidence", {{
+    skill: SKILL,
+    firstXp,
+    lastXp,
+    elapsedMs,
+  }});
+}}
+const evidence = {{
+  skill: SKILL,
+  sampleCount: samples.length,
+  elapsedMs,
+  minimumElapsedMs: MINIMUM_ELAPSED_MS,
+  firstXp,
+  lastXp,
+  xpDelta: lastXp - firstXp,
+}};
+if (lastXp <= firstXp) {{
+  fail("scored-skill XP has not increased", evidence);
+}}
+if (elapsedMs < MINIMUM_ELAPSED_MS) {{
+  fail("official task horizon is not close enough to completion", evidence);
+}}
+console.log(JSON.stringify({{
+  protocol: "agencity.runebench-completion-gate.v1",
+  passed: true,
+  evidence,
+}}));
+"""
 
 WITHIN_RUN_GUIDANCE = """
 
@@ -572,6 +791,14 @@ class RuneBenchTask(HarborSuiteTask):
             detail = (prepared.stderr or prepared.stdout).strip()[-500:]
             raise RuntimeError(f"could not prepare RuneBench treatment directory: {detail}")
         await runtime.write(CONTROLLER_PATH, CONTROLLER_SOURCE.encode("utf-8"))
+        await runtime.write(
+            COMPLETION_GATE_PATH,
+            render_completion_gate_source(
+                self.data.skill,
+                self.data.duration_seconds,
+                self.data.sample_interval_ms,
+            ).encode("utf-8"),
+        )
 
         exists = await runtime.run(["test", "-f", "/app/AGENTS.md"], {})
         if exists.exit_code not in {0, 1}:
@@ -585,10 +812,11 @@ class RuneBenchTask(HarborSuiteTask):
             else b""
         )
         marker = b"## Agencity RuneBench treatment"
+        treatment_guidance = render_repl_guidance(self.data.skill)
         if marker not in instructions:
             adapted = (
                 (instructions.rstrip() + b"\n\n" if instructions else b"")
-                + REPL_GUIDANCE.encode("utf-8")
+                + treatment_guidance.encode("utf-8")
                 + b"\n"
             )
             if self.data.learning_mode == "within-run":
@@ -606,6 +834,7 @@ class RuneBenchTask(HarborSuiteTask):
             "treatment_memory_gb": self.data.treatment_memory_gb,
             "prompt_sha256": self.data.prompt_sha256,
             "adapted_prompt_sha256": self.data.adapted_prompt_sha256,
+            "treatment_guidance_sha256": _sha256_text(treatment_guidance),
             "services": "staged",
         }
 
@@ -625,6 +854,9 @@ class RuneBenchTask(HarborSuiteTask):
                     "source_dockerfile_sha256": self.data.source_dockerfile_sha256,
                     "prompt_sha256": self.data.prompt_sha256,
                     "adapted_prompt_sha256": self.data.adapted_prompt_sha256,
+                    "treatment_guidance_sha256": _sha256_text(
+                        render_repl_guidance(self.data.skill)
+                    ),
                     "source_memory_gb": self.data.source_memory_gb,
                     "treatment_memory_gb": self.data.treatment_memory_gb,
                 }
@@ -752,6 +984,7 @@ def _sha256_text(value: str) -> str:
 __all__ = [
     "BENCHMARK",
     "CATALOG_PATH",
+    "COMPLETION_GATE_PATH",
     "DATASET",
     "CONTROLLER_PATH",
     "CONTROLLER_SOURCE",
@@ -767,4 +1000,6 @@ __all__ = [
     "RuneBenchData",
     "RuneBenchTask",
     "RuneBenchTaskset",
+    "render_completion_gate_source",
+    "render_repl_guidance",
 ]

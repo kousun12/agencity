@@ -162,6 +162,7 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
         run_deadline_at: str | None = None,
         refinement_review_limit: int | None = None,
         refinement_evidence_required: int | None = None,
+        completion_gate: str | None = None,
     ) -> vf.ProgramResult:
         if mcp_urls:
             raise ValueError("The initial Agencity harness does not support MCP tools")
@@ -213,6 +214,7 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
                 run_deadline_at=run_deadline_at,
                 refinement_review_limit=refinement_review_limit,
                 refinement_evidence_required=refinement_evidence_required,
+                completion_gate=completion_gate,
             ),
             environment,
         )
@@ -291,6 +293,7 @@ def _agencity_command(
     run_deadline_at: str | None = None,
     refinement_review_limit: int | None = None,
     refinement_evidence_required: int | None = None,
+    completion_gate: str | None = None,
 ) -> list[str]:
     command = [
         PORTABLE_BUN_PATH if installation == "portable" else "bun",
@@ -350,6 +353,10 @@ def _agencity_command(
                 str(refinement_evidence_required),
             ]
         )
+    if completion_gate is not None:
+        if not completion_gate.strip():
+            raise ValueError("Completion gate command cannot be empty")
+        command.extend(["--completion-gate", completion_gate])
     command.extend(["--", task])
     return command
 

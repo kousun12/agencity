@@ -451,6 +451,7 @@ async function runContextSensitiveScenario(
   readonly cellCount: number;
   readonly fileEffectCount: number;
   readonly modelEffectCount: number;
+  readonly stablePrefixMessages: number;
 }> {
   const temp = await makeTempRuntime(
     recoverAfterFirstCell
@@ -531,6 +532,22 @@ async function runContextSensitiveScenario(
   expect(provider.contexts.every((context) =>
     context && typeof context === "object" && !Array.isArray(context) &&
     Array.isArray(context.messages))).toBe(true);
+  const providerMessages = provider.contexts.map((context) =>
+    (context as { messages: JsonValue[] }).messages);
+  const firstDynamicIndex = providerMessages[0]!.findIndex((message) =>
+    message && typeof message === "object" && !Array.isArray(message) &&
+    message.role === "user" && typeof message.content === "string" &&
+    message.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
+  expect(firstDynamicIndex).toBeGreaterThan(0);
+  const stablePrefix = providerMessages[0]!.slice(0, firstDynamicIndex);
+  for (const messages of providerMessages) {
+    const dynamicIndex = messages.findIndex((message) =>
+      message && typeof message === "object" && !Array.isArray(message) &&
+      message.role === "user" && typeof message.content === "string" &&
+      message.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
+    expect(dynamicIndex).toBe(firstDynamicIndex);
+    expect(messages.slice(0, dynamicIndex)).toEqual(stablePrefix);
+  }
   expect(provider.decisions.map((item) => item.type))
     .toEqual(["typescript", "typescript", "final"]);
   expect(await Bun.file(`${temp.workspaceRoot}/context-stage.txt`).text())
@@ -559,13 +576,14 @@ async function runContextSensitiveScenario(
     cellCount: history.filter((item) => item.type === "CellCommitted").length,
     fileEffectCount: fileEffects.length,
     modelEffectCount: modelEffects.length,
+    stablePrefixMessages: stablePrefix.length,
   };
   await supervisor.close();
   return result;
 }
 
 describe("autonomous durable agent runs", () => {
-  test("derives the same next formal action from reduced provider input across a CellCommitted recovery boundary", async () => {
+  test("derives the same next action across recovery and keeps the provider prefix stable", async () => {
     const normal = await runContextSensitiveScenario(false);
     const recovered = await runContextSensitiveScenario(true);
     expect(recovered.nextActionSource).toBe(normal.nextActionSource);
@@ -574,6 +592,7 @@ describe("autonomous durable agent runs", () => {
       cellCount: 2,
       fileEffectCount: 2,
       modelEffectCount: 3,
+      stablePrefixMessages: 1,
     });
     expect(recovered).toMatchObject({
       providerCalls: 3,

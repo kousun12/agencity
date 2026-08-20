@@ -7,12 +7,14 @@ from unittest.mock import AsyncMock, patch
 from agencity_runebench.harness import (
     AgencityRuneBenchHarness,
     RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES,
+    _completion_gate_command,
     _set_automatic_learning,
     _start_game,
 )
 from agencity_runebench.taskset import (
     BENCHMARK,
     CATALOG_PATH,
+    COMPLETION_GATE_PATH,
     CONTROLLER_PATH,
     CONTROLLER_SOURCE,
     DATASET,
@@ -24,6 +26,8 @@ from agencity_runebench.taskset import (
     RuneBenchConfig,
     RuneBenchTask,
     RuneBenchTaskset,
+    render_completion_gate_source,
+    render_repl_guidance,
 )
 from agencity_verifiers.harbor_suite import HarborSuiteTask
 from agencity_verifiers.selection import SelectionSpec, load_catalog
@@ -144,11 +148,19 @@ class RuneBenchCatalogTests(unittest.TestCase):
         self.assertIn("do not spend opening turns enumerating object surfaces", REPL_GUIDANCE)
         self.assertIn("minBackoffMs: 250", REPL_GUIDANCE)
         self.assertIn("return await (async () =>", REPL_GUIDANCE)
-        self.assertIn("last: attempts.at(-1) ?? null", REPL_GUIDANCE)
+        self.assertIn("nested failure details", REPL_GUIDANCE)
         self.assertIn("Cell results must be JSON-safe", REPL_GUIDANCE)
         self.assertIn("Per-strategy attempt arrays", REPL_GUIDANCE)
         self.assertIn("fewer, longer bounded", REPL_GUIDANCE)
         self.assertIn("runActionLoop", REPL_GUIDANCE)
+        self.assertIn("runMeasuredActionLoop", REPL_GUIDANCE)
+        self.assertIn('state.set("runebench.progress"', REPL_GUIDANCE)
+        self.assertIn("one initial discovery cell", REPL_GUIDANCE)
+        self.assertIn("/app/sdk/API.md", REPL_GUIDANCE)
+        rendered = render_repl_guidance("Woodcutting")
+        self.assertIn('const scoredSkill = "Woodcutting"', rendered)
+        self.assertIn('const skillSlug = "woodcutting"', rendered)
+        self.assertNotIn("__RUNEBENCH_SCORED_SKILL__", rendered)
         self.assertIn("sdk.processes.start", REPL_GUIDANCE)
         self.assertIn("sdk.processes.readLogs", REPL_GUIDANCE)
         self.assertIn("managed process is optional", REPL_GUIDANCE)
@@ -172,6 +184,16 @@ class RuneBenchCatalogTests(unittest.TestCase):
         self.assertIn("result?.success === false", CONTROLLER_SOURCE)
         self.assertIn("Math.min(", CONTROLLER_SOURCE)
         self.assertIn("await Bun.sleep(delay)", CONTROLLER_SOURCE)
+        self.assertIn("export async function runMeasuredActionLoop", CONTROLLER_SOURCE)
+        self.assertIn("lastFailure:", CONTROLLER_SOURCE)
+
+    def test_completion_gate_requires_horizon_and_positive_scored_xp(self) -> None:
+        source = render_completion_gate_source("Cooking", 1800, 15000)
+        self.assertIn('const SKILL = "Cooking"', source)
+        self.assertIn("const MINIMUM_ELAPSED_MS = 1740000", source)
+        self.assertIn("lastXp <= firstXp", source)
+        self.assertIn("elapsedMs < MINIMUM_ELAPSED_MS", source)
+        self.assertIn("agencity.runebench-completion-gate.v1", source)
 
     def test_official_harbor_reward_remains_authoritative(self) -> None:
         self.assertIs(RuneBenchTask.solved, HarborTask.solved)
@@ -222,7 +244,13 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"rs.getInventory()", writes["/app/AGENTS.md"])
         self.assertIn(b"within-run adaptive treatment", writes["/app/AGENTS.md"])
         self.assertEqual(writes[CONTROLLER_PATH], CONTROLLER_SOURCE.encode("utf-8"))
+        completion = writes[COMPLETION_GATE_PATH]
+        self.assertIn(b'const SKILL = "Woodcutting"', completion)
+        self.assertIn(b"MINIMUM_ELAPSED_MS = 840000", completion)
         self.assertIn(TRACKING_FILE.encode("utf-8"), writes["/app/AGENTS.md"])
+        self.assertIn(b'const scoredSkill = "Woodcutting"', writes["/app/AGENTS.md"])
+        self.assertNotIn(b"__RUNEBENCH_SCORED_SKILL__", writes["/app/AGENTS.md"])
+        self.assertEqual(len(trace.info["runebench"]["treatment_guidance_sha256"]), 64)
         self.assertEqual(trace.info["runebench"]["services"], "staged")
         self.assertFalse(trace.info["runebench"]["cross_episode_learning"])
 
@@ -405,6 +433,14 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             base_launch.await_args.kwargs["refinement_evidence_required"],
             1,
+        )
+        self.assertEqual(
+            base_launch.await_args.kwargs["completion_gate"],
+            _completion_gate_command(task.data, "portable"),
+        )
+        self.assertIn(
+            "/usr/bin/sha256sum --check --status",
+            base_launch.await_args.kwargs["completion_gate"],
         )
         self.assertEqual(order, ["learning", "game", "agencity"])
 
