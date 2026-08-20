@@ -329,6 +329,90 @@ uv run --locked eval @ configs/runebench-full-adaptive.toml \
 These are long paid runs. Start with one exact task and verify scoring and
 cleanup before admitting a sample or full treatment.
 
+### Observe an active run
+
+Use a separate terminal for observation. The commands below are read-only and
+do not create another game SDK controller.
+
+Follow evaluator lifecycle events from the host:
+
+```sh
+RUN_DIR=outputs/runebench-leaderboard-full-adaptive
+tail -n 100 -F "$RUN_DIR/eval.log"
+```
+
+This shows rollout and container starts, terminal rewards, turn counts, and stop
+reasons. It does not show each model action. `traces.jsonl` is not a live action
+stream: Verifiers appends a rollout trace after that rollout reaches a terminal
+outcome.
+
+List active rollout containers:
+
+```sh
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+```
+
+The container name is the rollout ID printed in `eval.log`. With concurrent
+execution, each active task has its own container. Set the container to inspect:
+
+```sh
+CONTAINER=<rollout-id>
+```
+
+Read the latest committed Agencity actions and bounded results:
+
+```sh
+docker exec "$CONTAINER" \
+  /opt/agencity/bin/bun /opt/agencity/src/cli.ts \
+  history current --json \
+  --workspace /app \
+  --state-dir /tmp/agencity-eval/state \
+  --artifacts /tmp/agencity-eval/artifacts \
+  --profile /tmp/agencity-eval/profile.db |
+  jq -r '
+    "status=\(.status) cells=\(.cells | length)",
+    (.cells[-5:][] |
+      "[\(.status)] \(.code | split("\n")[0] |
+        sub("^// Purpose: "; ""))\n  => \(
+        (.result // .error // null) | @json
+      )")
+  '
+```
+
+Rerun that command when the cell count changes. The unfiltered history can be
+large and can contain benchmark or model content; keep it local.
+
+For high-frequency SDK actions, follow the entrypoint log inside that rollout:
+
+```sh
+docker exec "$CONTAINER" sh -lc \
+  'tail -n 100 -F /tmp/agencity-runebench-entrypoint.log'
+```
+
+This includes gateway actions and results and is much noisier than retained
+cell history. `docker logs "$CONTAINER"` is normally empty because the pinned
+entrypoint redirects its output to the file above.
+
+Check the current official-style peak rate by replacing `Attack` with the
+capitalized task skill:
+
+```sh
+docker exec \
+  -e TRACKING_FILE=/logs/tracking/skill_tracking.json \
+  "$CONTAINER" \
+  /opt/agencity/bin/bun \
+  /app/benchmark/shared/check_xp_rate.ts Attack
+```
+
+The explicit `TRACKING_FILE` is required until the treatment's documented
+rate-check path matches the active tracker output. A model-created background
+trainer may also write a skill-specific `/tmp/*train*.log`; discover its exact
+path from retained cell results and follow that file with `tail -F`.
+
+Do not observe by starting another `BotSDK`, attaching a second controller, or
+writing into the container. Competing controllers can disconnect or replace
+the scored agent's live game connection.
+
 ### Custom task selections
 
 RuneBench uses the shared deterministic selection contract:
