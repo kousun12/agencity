@@ -160,6 +160,9 @@ tells the model to:
 - keep high-level `BotActions` methods such as `attackNpc` on `bot` and
   lower-level `BotSDK` methods on `rs`, following `/app/sdk/API.md` instead of
   guessing a receiver;
+- use a compact direct-SDK quick start that preserves the official interface
+  examples under the translated `bot` and `rs` names, plus the exact bounded
+  file and shell result shapes for finding additional methods;
 - acquire once, then reuse those live objects while the exact branch REPL epoch
   remains warm;
 - begin with one short action and a small returned state summary;
@@ -167,6 +170,8 @@ tells the model to:
   actions only through the staged bounded-backoff helper;
 - lengthen only a measured working loop and change strategy instead of
   hot-looping an unavailable target;
+- avoid opening-turn object enumeration and repeated unchanged documentation
+  searches while the scored horizon is running;
 - consult SDK, learning, and wiki files on demand rather than loading all of
   them into context;
 - measure XP rate through the active tracker path after each strategy;

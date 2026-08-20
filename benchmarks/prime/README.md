@@ -145,11 +145,12 @@ inside Agencity's persistent Bun console. A process-identity claim permits one
 control owner, release confirms disconnection before trainer handoff, repeated
 actions treat false results as failures with bounded backoff, and long-running
 trainers use Agencity's managed-process API. Root instructions distinguish the
-high-level `bot` receiver from the low-level `rs` receiver and direct a proven
+high-level `bot` receiver from the low-level `rs` receiver, retain a compact
+direct-SDK quick start and bounded documentation lookup, and direct a proven
 non-zero loop into a trainer so game actions continue during provider calls.
-The treatment guidance is not duplicated in the task prompt. The active tracker
-path is supplied explicitly; RuneBench's benign local `password: "test"` option
-remains inside the staged controller.
+The treatment guidance is not duplicated in the task prompt. The active
+tracker path is supplied explicitly; RuneBench's benign local
+`password: "test"` option remains inside the staged controller.
 The official task package, save fixture,
 time horizon, sampling cadence, game image, and Harbor verifier remain pinned.
 The treatment raises the pinned package's 4 GiB memory cap to 8 GiB, matching

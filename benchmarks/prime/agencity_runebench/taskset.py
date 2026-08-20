@@ -382,11 +382,54 @@ REPL epoch is warm. `bot` is the high-level `BotActions` surface (for example,
 the receiver documented in `/app/sdk/API.md` instead of guessing or moving a
 method between `bot` and `rs`.
 
+Direct SDK quick start:
+
+```ts
+await bot.skipTutorial();
+await bot.chopTree();
+await bot.mineRock();
+await bot.attackNpc("chicken");
+rs.getState();
+rs.getInventory();
+rs.findNearbyLoc(/tree/i);
+```
+
+These examples identify the receiver and call shape; select the action relevant
+to the scored skill. The full image-owned API remains authoritative. Read a
+bounded section with `tools.readFile("/app/sdk/API.md", {{ startLine, endLine }})`.
+To locate a symbol first, inspect the exact bounded shell envelope:
+
+```ts
+const match = await tools.shell("grep -n 'attackNpc' /app/sdk/API.md");
+return match.completeness === "inline" ? match.value : match;
+```
+
+Use the exact loop shape below after one action works. Replace only the action
+with the proven task-relevant call. `minBackoffMs` cannot be below 250.
+
+```ts
+const attempts = await runActionLoop({{
+  iterations: 20,
+  minBackoffMs: 250,
+  maxBackoffMs: 5_000,
+  successDelayMs: 0,
+  action: () => bot.chopTree(),
+}});
+return {{
+  succeeded: attempts.filter((attempt) => attempt.ok).length,
+  failed: attempts.filter((attempt) => !attempt.ok).length,
+  last: attempts.at(-1) ?? null,
+}};
+```
+
 Start with one short action and return its small result. Treat a returned
 `{{ success: false, ... }}` as a failure even though it did not throw. Every
 repeated strategy must use `runActionLoop`, which applies bounded exponential
 backoff to false results and thrown errors. Inspect failed messages and change
-the strategy instead of hot-looping an unavailable target.
+the strategy instead of hot-looping an unavailable target. The scored horizon
+is already running: do not spend opening turns enumerating object surfaces or
+repeating unchanged documentation searches. Cell results must be JSON-safe:
+replace optional `undefined` fields with `?? null` or omit them.
 
 Write treatment scripts only under `{TRAINER_DIR}`. Read `/app/sdk/API.md`,
 `/app/learnings/`, and `/app/wiki/` on demand. Measure after each strategy with

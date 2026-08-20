@@ -313,8 +313,9 @@ an initial shutdown rejection from an already-draining service is polled for up
 to 30 seconds, while unconfirmed shutdown retains lifecycle evidence and is an
 infrastructure error. Treatment guidance is supplied once through root
 repository instructions, identifies the high-level `bot` and low-level `rs`
-receiver split, and directs a proven non-zero loop into a managed trainer so
-actions continue during provider calls. A later Luna-xhigh Attack 30-minute
+receiver split with a compact translated SDK quick start and bounded
+documentation lookup, and directs a proven non-zero loop into a managed trainer
+so actions continue during provider calls. A later Luna-xhigh Attack 30-minute
 treatment on commit `2d1b98f` completed the horizon in 97 model turns and showed
 a live peak of 72 XP/min, but a service-authority cleanup conflict prevented the
 official scorer from running. The retained trace showed 16 opening turns before
