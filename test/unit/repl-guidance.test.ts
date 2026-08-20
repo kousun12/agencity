@@ -27,7 +27,7 @@ describe("persistent TypeScript environment guidance", () => {
   test("describes warm bindings and explicit durable state", () => {
     expect(AGENT_RUN_EXECUTION_GUIDANCE).toMatchObject({
       id: "agencity.agent-run.execution-guidance",
-      version: 12,
+      version: 13,
     });
     expect(AGENT_RUN_EXECUTION_GUIDANCE.text).toContain(
       "Cell globals: sdk, sql, session, console, state",

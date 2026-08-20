@@ -329,9 +329,20 @@ opening turns before a working combat baseline, duplicate treatment prompting,
 early automatic refinement, large completed-refinement context, growing
 long-run overhead, and continued foreground action/model alternation. The
 current working tree addresses the cleanup and prompt defects with model-free
-tests. An inner deadline, incremental history processing, bounded recursive
-context, and evidence-gated refinement remain unimplemented, and no paid
-verification covers the current revision.
+tests. It also pins a durable absolute agent-run deadline to the actual game
+start, reports authoritative elapsed and remaining time in each provider step,
+interrupts admitted model and cell work at expiry, and returns
+`budget_exceeded` through the normal JSON result path. Active run, cell,
+context, and refinement paths reuse incremental branch history; automatic
+trigger detection retains a bounded relevant-event frontier. Completed
+recursive work enters later model context only as bounded digest-backed
+summaries while complete evidence remains canonical. Both RuneBench learning
+modes pause automatic triggers. Within-run mode permits one explicit review
+that must cite a canonical compact evidence cell recorded after the treatment
+checks a non-zero tracker rate, a running managed trainer, and a specific
+failure or rate target. Core runtime enforcement covers evidence attribution
+and the one-review limit; RuneBench-specific evidence interpretation remains
+treatment behavior. No paid verification covers the current revision.
 A paid full run remains blocked on a passing exact 30-minute canary. An earlier paid Luna
 canary completed 33 direct-REPL turns in one warm epoch without
 credential-input or console-worker failure, but owned-service shutdown missed
@@ -380,7 +391,7 @@ pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
 stdout/stderr diagnostics instead of collapsing to a parser-only error. The
-August 19, 2026 model-free verification of the RuneBench working tree passed 97
+August 19, 2026 model-free verification of the RuneBench working tree passed 98
 benchmark tests with one intentionally skipped unrelated opt-in SWE-bench Pro
 scorer test, all six RuneBench config preflights and dry-runs, package builds and source compilation,
 actual pinned-image game startup, and a direct image-owned TypeScript SDK

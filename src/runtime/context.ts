@@ -1,10 +1,11 @@
 import {
   BOUNDED_OUTPUT_PROTOCOL, OUTPUT_LIMITS,
-  buildProviderInputCandidate, newId, NotFoundError, projectEvents,
+  buildProviderInputCandidate, canonicalJsonByteLength, canonicalJsonDigest, newId, NotFoundError,
   providerInputAdmission as createProviderInputAdmission,
   type AgentEvent, type ContextRecordReference, type EventPayloads, type EventType,
   type AgentRunState, type HarnessRecord, type InvocationPromptProvenance, type JsonValue,
   type ModelDispatch, type ProviderInputCapacityProvenance,
+  type RecursiveModelState,
 } from "../domain/index.ts";
 import type { AgentStorage } from "../storage/index.ts";
 import type { MemoryService } from "./memory.ts";
@@ -15,9 +16,17 @@ import type { SkillManagementService, SkillManagementView } from "./skill-manage
 import { effectiveCompaction } from "./context-compaction.ts";
 import { AgentProfileService } from "./agent-profiles.ts";
 import type { RepositoryInstructionService } from "./repository-instructions.ts";
+import { IncrementalBranchHistory } from "./branch-history.ts";
 
 export const BASE_POLICY = "You are a durable coding agent running in trusted local mode. Use the TypeScript console and typed SDK for mutation. SQL is read-only. Raw SQL is a trusted diagnostic channel over shared, non-confidential projections; candidate exposure is behavioral isolation, not a confidentiality boundary. run.replNamespace identifies whether the exact-branch console is cold or names its current warm epoch. Top-level TypeScript bindings persist only while that same warm epoch remains alive. Persist every value required after recovery through state or artifacts. REPL_EPOCH_CHANGED means the submitted cell did not execute; rebuild required bindings without replaying prior effectful cells. Never infer success for an unknown external effect. The worker is process-isolated, not a security sandbox.";
 export const IMMUTABLE_BASE_POLICY = Object.freeze({ id: "agencity-base-policy", version: 4, text: BASE_POLICY });
+export const RECURSIVE_CONTEXT_LIMITS = Object.freeze({
+  activeTotalBytes: 24 * 1024,
+  activeItemBytes: 12 * 1024,
+  completedTotalBytes: 12 * 1024,
+  completedItemBytes: 2 * 1024,
+  outcomeSummaryBytes: 768,
+});
 function hash(value: string): string { const hasher = new Bun.CryptoHasher("sha256"); hasher.update(value); return hasher.digest("hex"); }
 
 export interface ContextMaterializeOptions {
@@ -46,6 +55,7 @@ export interface ContextMaterializeOptions {
 
 export class ContextMaterializer {
   #skillCatalog: SkillManagementService | null = null;
+  readonly #history: IncrementalBranchHistory;
   constructor(
     readonly storage: AgentStorage,
     readonly memory?: MemoryService,
@@ -54,13 +64,16 @@ export class ContextMaterializer {
     readonly userScopeKey = "default-user",
     readonly profile?: ProfileDatabase,
     readonly repositoryInstructionService?: RepositoryInstructionService,
-  ) {}
+  ) {
+    this.#history = new IncrementalBranchHistory(storage);
+  }
   attachSkillCatalog(catalog: SkillManagementService): void { this.#skillCatalog = catalog; }
 
   async materialize(sessionId: string, branchId: string, options: ContextMaterializeOptions = {}): Promise<{ contextId: string; context: JsonValue; event: AgentEvent<"ContextMaterialized"> }> {
-    let events = await this.storage.loadEvents(sessionId, { branchId });
+    let loaded = await this.#history.load(sessionId, branchId);
+    let events = loaded.events;
     if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
-    let state = projectEvents(events);
+    let state = loaded.state;
     const profiles = new AgentProfileService(this.storage);
     const agentProfile = options.agentProfileVersionId
       ? await profiles.getVersion(sessionId, options.agentProfileVersionId)
@@ -82,7 +95,11 @@ export class ContextMaterializer {
         newlyExposed ||= row.exposed_at === null;
         candidateProvenance.push({ allocationId: String(row.allocation_id), candidateId: String(row.candidate_id), proposalId: String(row.proposal_id), exposedAt: (exposed as any).exposedAt ?? String(row.exposed_at) });
       }
-      if (newlyExposed) { events = await this.storage.loadEvents(sessionId,{branchId}); state = projectEvents(events); }
+      if (newlyExposed) {
+        loaded = await this.#history.load(sessionId, branchId);
+        events = loaded.events;
+        state = loaded.state;
+      }
     }
 
     const effective = effectiveCompaction(state, events);
@@ -203,7 +220,7 @@ export class ContextMaterializer {
       session: { id:sessionId,branchId,status:state.status,model:state.model,parentSessionId:state.parentSessionId,parentBranchId:state.parentBranchId,rootSessionId:state.rootSessionId,depth:state.depth,taskId:state.taskId },
       budget: state.budget,
       goal: Object.values(state.goals).find((goal) => !["completed","failed","cancelled"].includes(goal.status)) ?? null,
-      tasks:Object.values(state.tasks),mailbox,terminalNotices:Object.values(state.terminalNotices),recursiveModels:Object.values(state.recursiveModels),
+      tasks:Object.values(state.tasks),mailbox,terminalNotices:Object.values(state.terminalNotices),recursiveModels:recursiveModelContext(Object.values(state.recursiveModels)),
       unknownEffectReconciliations:Object.values(state.effectReconciliations),
       documents:Object.values(state.documents).map((document)=>({id:document.id,name:document.name,mediaType:document.mediaType,size:document.size,digest:document.digest,chunkCount:document.chunkCount})),
       inputSets:Object.values(state.inputSets),heartbeats:Object.values(state.heartbeats),schedules:Object.values(state.schedules),wakes:Object.values(state.wakes),
@@ -264,6 +281,152 @@ const MODEL_FACING_PROFILE_PREFERENCE_KEYS = new Set([
 ]);
 function modelFacingPreference(preference:{readonly key:string}):boolean {
   return MODEL_FACING_PROFILE_PREFERENCE_KEYS.has(preference.key);
+}
+
+function recursiveModelContext(handles: readonly RecursiveModelState[]): JsonValue {
+  const active = handles.filter((handle) =>
+    handle.status === "pending" || handle.status === "running");
+  const completed = handles.filter((handle) =>
+    handle.status !== "pending" && handle.status !== "running");
+  const activeProjection = boundedRecursiveItems(
+    active,
+    activeRecursiveModel,
+    RECURSIVE_CONTEXT_LIMITS.activeItemBytes,
+    RECURSIVE_CONTEXT_LIMITS.activeTotalBytes,
+  );
+  const completedProjection = boundedRecursiveItems(
+    [...completed].reverse(),
+    completedRecursiveModel,
+    RECURSIVE_CONTEXT_LIMITS.completedItemBytes,
+    RECURSIVE_CONTEXT_LIMITS.completedTotalBytes,
+  );
+  return {
+    protocol: "agencity.recursive-model-context.v2",
+    limits: RECURSIVE_CONTEXT_LIMITS,
+    active: activeProjection.items,
+    completed: [...completedProjection.items].reverse(),
+    omittedActiveCount: activeProjection.omitted,
+    omittedCompletedCount: completedProjection.omitted,
+    queryGuidance: "Use sdk.agents.result(handle) for retained child results, sdk.harness.reviews for refinement status, or read canonical history by handle/task/child identity for complete evidence.",
+  } as unknown as JsonValue;
+}
+
+function activeRecursiveModel(handle: RecursiveModelState): JsonValue {
+  const base = {
+    handleId: handle.id,
+    taskId: handle.taskId,
+    childSessionId: handle.childSessionId,
+    childBranchId: handle.childBranchId,
+    status: handle.status,
+    model: handle.model,
+    responseAdmission: handle.responseAdmission,
+    profilePin: handle.profilePin,
+    inputSetId: handle.inputSetId,
+    inputDigest: handle.inputHash ??
+      canonicalJsonDigest(handle.input ?? null),
+    inputProvenanceDigest: handle.inputProvenance === undefined
+      ? null
+      : canonicalJsonDigest(handle.inputProvenance),
+    ...(handle.input === undefined ? {} : { input: handle.input }),
+  } as unknown as JsonValue;
+  if (canonicalJsonByteLength(base) <= RECURSIVE_CONTEXT_LIMITS.activeItemBytes) {
+    return base;
+  }
+  return {
+    handleId: handle.id,
+    taskId: handle.taskId,
+    childSessionId: handle.childSessionId,
+    childBranchId: handle.childBranchId,
+    status: handle.status,
+    model: handle.model,
+    inputSetId: handle.inputSetId,
+    inputDigest: handle.inputHash ??
+      canonicalJsonDigest(handle.input ?? null),
+    inputBytes: canonicalJsonByteLength(handle.input ?? null),
+    detailOmitted: "active recursive input exceeded its component item budget",
+  } as unknown as JsonValue;
+}
+
+function completedRecursiveModel(handle: RecursiveModelState): JsonValue {
+  const resultDigest = handle.result === undefined
+    ? null
+    : canonicalJsonDigest(handle.result);
+  const outcomeValue = handle.result ?? handle.error ?? handle.outcome ??
+    handle.status;
+  return {
+    handleId: handle.id,
+    taskId: handle.taskId,
+    childSessionId: handle.childSessionId,
+    childBranchId: handle.childBranchId,
+    status: handle.status,
+    outcome: handle.outcome ?? null,
+    model: handle.model,
+    inputDigest: handle.inputHash ??
+      canonicalJsonDigest(handle.input ?? null),
+    resultDigest,
+    outcomeSummary: boundedUtf8(
+      typeof outcomeValue === "string"
+        ? outcomeValue
+        : JSON.stringify(outcomeValue),
+      RECURSIVE_CONTEXT_LIMITS.outcomeSummaryBytes,
+    ),
+    ...(handle.resultMessageId === undefined
+      ? {}
+      : { resultMessageId: handle.resultMessageId }),
+    ...(handle.resultArtifactId === undefined
+      ? {}
+      : { resultArtifactId: handle.resultArtifactId }),
+    fullEvidence: {
+      handleId: handle.id,
+      taskId: handle.taskId,
+      childSessionId: handle.childSessionId,
+      childBranchId: handle.childBranchId,
+    },
+  } as unknown as JsonValue;
+}
+
+function boundedRecursiveItems(
+  handles: readonly RecursiveModelState[],
+  project: (handle: RecursiveModelState) => JsonValue,
+  itemLimit: number,
+  totalLimit: number,
+): { items: JsonValue[]; omitted: number } {
+  const items: JsonValue[] = [];
+  let bytes = 2;
+  let omitted = 0;
+  for (const handle of handles) {
+    const item = project(handle);
+    const itemBytes = canonicalJsonByteLength(item);
+    if (itemBytes > itemLimit || bytes + itemBytes + (items.length ? 1 : 0) >
+        totalLimit) {
+      omitted++;
+      continue;
+    }
+    items.push(item);
+    bytes += itemBytes + (items.length > 1 ? 1 : 0);
+  }
+  return { items, omitted };
+}
+
+function boundedUtf8(value: string, maxBytes: number): JsonValue {
+  const encoded = new TextEncoder().encode(value);
+  const digest = hash(value);
+  if (encoded.byteLength <= maxBytes) {
+    return {
+      text: value,
+      originalBytes: encoded.byteLength,
+      sha256: digest,
+      truncated: false,
+    };
+  }
+  let end = maxBytes;
+  while (end > 0 && (encoded[end]! & 0xc0) === 0x80) end--;
+  return {
+    text: new TextDecoder().decode(encoded.subarray(0, end)),
+    originalBytes: encoded.byteLength,
+    sha256: digest,
+    truncated: true,
+  };
 }
 
 export function boundedActiveRunProjection(run:AgentRunState):JsonValue {

@@ -466,15 +466,24 @@ claim is a lifecycle error to fix, not permission to bypass the wrapper.
 
 WITHIN_RUN_GUIDANCE = """
 
-This is the within-run adaptive treatment. Do not spend the opening minutes on
-reflection. First establish a non-zero measured baseline. While a proven managed
-loop earns XP, use retained failures and measured rate evidence to improve the
-next attempt. If the trajectory contains a genuinely reusable
-lesson, one focused `sdk.harness.review` request may target `memory`,
-`prompt_note`, or `skill` with `wait: true`; generic advice or an unmeasured
-guess should remain ordinary working notes. Apply an approved lesson only to a
-later measured attempt in this same rollout. Each game starts fresh and no
-learned state is shared across scored tasks.
+This is the within-run adaptive treatment. Automatic triggers are paused. The
+run permits at most one explicit governed review, and that review requires a
+canonical evidence event from this run.
+
+Do not request refinement until one compact evidence cell has verified all
+three conditions: the tracker reports a non-zero XP/min rate; an
+`sdk.processes` trainer inspection reports `running`; and a retained failure or
+measured-rate comparison identifies one specific improvement target. Return
+only a small JSON object with the measured rate, managed process ID and status,
+and target. On the next model step, use that `CellCommitted` observation's
+`eventId` in
+`sdk.harness.review({ instructions, requestedScope: "local", allowedKinds:
+["memory", "prompt_note", "skill"], evidenceEventIds: [eventId], wait: true })`.
+The runtime rejects missing evidence and a second request. Generic advice or an
+unmeasured guess remains an ordinary working note.
+
+Apply an approved lesson only to a later measured attempt in this same rollout.
+Each game starts fresh and no learned state is shared across scored tasks.
 """.strip()
 
 

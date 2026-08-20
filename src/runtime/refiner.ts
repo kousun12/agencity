@@ -7,6 +7,8 @@ import {
   validateRefinementReviewValue,
   type HarnessKind,
   type HarnessScope,
+  type AgentEvent,
+  type AgentState,
   type GovernedRefinementRecord,
   type GovernedRefinementRollbackRecord,
   type GovernedRefinementStatus,
@@ -43,6 +45,7 @@ import {
   type RefinementDetectedTrigger,
   type RefinementTriggerPolicyV1,
 } from "./refinement-triggers.ts";
+import { IncrementalBranchHistory } from "./branch-history.ts";
 
 export const REFINEMENT_TRIGGER_POLICY_PREFERENCE = "refinement.trigger-policy.v1" as const;
 const TERMINAL_REVIEW = new Set<RefinementReviewLifecycleStatus>(["no_change", "candidate", "revision_required", "failed", "cancelled", "unknown"]);
@@ -52,12 +55,24 @@ const ALLOWED_KIND_SET = new Set<HarnessKind>(ALLOWED_KINDS);
 const ALLOWED_SCOPE_SET = new Set<HarnessScope>(["local", "workspace", "user", "global"]);
 const LEARNING_HISTORY_MAX_BYTES = 256 * 1024;
 const LEARNING_HISTORY_SOURCE_IDS = 32;
+const REFINEMENT_SCAN_RELEVANT_RECORD_LIMIT = 4_096;
+const REFINEMENT_SCAN_RELEVANT_TYPES = new Set([
+  "EffectRequested",
+  "EffectOutcomeRecorded",
+  "AgentRunActionCommitted",
+  "CellFailed",
+  "GoalGateEvaluationRecorded",
+  "UserCorrection",
+  "AgentRunStatusChanged",
+]);
 
 export interface StartRefinementReviewInput {
   readonly instructions?: string;
   readonly requestedScope?: HarnessScope;
   readonly allowedKinds?: readonly HarnessKind[];
   readonly wait?: boolean;
+  /** Exact canonical evidence required by an active run admission policy. */
+  readonly evidenceEventIds?: readonly string[];
 }
 
 interface InternalReviewInput extends StartRefinementReviewInput {
@@ -152,6 +167,7 @@ export interface LearningScanActivity {
   readonly sessionId: string;
   readonly branchId: string;
   readonly message: string;
+  readonly durationMs: number | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -190,6 +206,13 @@ class ReviewQueue {
 export class RefinerService {
   readonly #queue = new ReviewQueue();
   readonly #jobs = new Map<string, Promise<void>>();
+  readonly #history: IncrementalBranchHistory;
+  readonly #scanFrontiers = new Map<string, {
+    cursor: string;
+    records: AgentEvent[];
+    effectRequests: Map<string, AgentEvent>;
+    cellOwners: Map<string, AgentEvent>;
+  }>();
   #governance: RefinementGovernanceService | null = null;
 
   constructor(
@@ -200,7 +223,9 @@ export class RefinerService {
     readonly harness: HarnessService,
     readonly profile: ProfileDatabase,
     readonly userScopeKey = "default-user",
-  ) {}
+  ) {
+    this.#history = new IncrementalBranchHistory(storage);
+  }
 
   attachGovernance(service: RefinementGovernanceService): void {
     if (this.#governance && this.#governance !== service) {
@@ -214,7 +239,12 @@ export class RefinerService {
     const internal: InternalReviewInput = {
       ...input,
       mode: "manual",
-      trigger: { kind: "manual", summary: input.instructions?.trim() || "Manual review of the retained trajectory", evidenceEventIds: [] },
+      trigger: {
+        kind: "manual",
+        summary: input.instructions?.trim() ||
+          "Manual review of the retained trajectory",
+        evidenceEventIds: [...(input.evidenceEventIds ?? [])],
+      },
       trajectoryTrigger: { kind: "manual" },
     };
     return this.#admit(sessionId, branchId, internal);
@@ -320,21 +350,42 @@ export class RefinerService {
    * observation rather than authority to wedge the owning run or recovery.
    */
   async scanBoundary(sessionId: string, branchId: string, boundaryKey?: string): Promise<readonly RefinementReviewRecord[]> {
-    void boundaryKey;
     return this.#queue.run("automatic-policy", () =>
       this.profile.withPreferenceLock(
         REFINEMENT_TRIGGER_POLICY_PREFERENCE,
         async (stored, _setValue, assertOwner) => {
+          const scanStarted = performance.now();
+          let scanCursor: string | undefined;
           try {
             const policyState = this.#automaticPolicyStateFrom(stored);
             if (!policyState.policy.automatic) return [];
-            const events = await this.storage.loadEvents(sessionId, { branchId });
+            const loaded = await this.#history.load(sessionId, branchId);
+            scanCursor = loaded.state.cursor;
+            const events = loaded.events;
             if (!events.length) return [];
+            const activeRun = Object.values(loaded.state.agentRuns).find((run) =>
+              run.status === "queued" || run.status === "running");
+            if (activeRun?.refinementPolicy &&
+                reviewsSinceRunStart(
+                  loaded.state,
+                  events,
+                  activeRun.requestEventId,
+                ) >= activeRun.refinementPolicy.manualReviewLimit) {
+              return [];
+            }
             const rows = await this.storage.readonlyQuery({ sql: "SELECT trigger_key,last_consumed_evidence_cursor FROM refinement_trigger_consumptions WHERE session_id=? AND branch_id=? ORDER BY trigger_key", args: [sessionId,branchId] });
             const pending = await this.storage.readonlyQuery({ sql: "SELECT nonterminal_key FROM refinement_reviews WHERE session_id=? AND branch_id=? AND status IN ('requested','running') AND nonterminal_key IS NOT NULL ORDER BY nonterminal_key", args: [sessionId,branchId] });
+            const records = this.#incrementalScanRecords(
+              sessionId,
+              branchId,
+              loaded.state.cursor,
+              events,
+              loaded.eventsById,
+              loaded.newEvents,
+            );
             const detected = scanRefinementTriggers({
               sessionId, branchId, policy: policyState.policy,
-              records: events.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: canonicalCursor(event.cursor), type: event.type, payload: event.payload })),
+              records: records.map((event) => ({ id: event.id, sessionId: event.sessionId, branchId: event.branchId, cursor: canonicalCursor(event.cursor), type: event.type, payload: event.payload })),
               consumptions: (rows as any[]).map((row) => ({ triggerKey: String(row.trigger_key), lastConsumedEvidenceCursor: canonicalCursor(String(row.last_consumed_evidence_cursor)) })),
               nonterminalKeys: (pending as any[]).map((row) => String(row.nonterminal_key)),
               brokeredCredentialValues: knownSecretValues(),
@@ -352,16 +403,33 @@ export class RefinerService {
           } catch (error) {
             // The observation is deliberately fixed-shape: malformed retained policy
             // values or error text are never copied into history.
-            await this.#recordBoundaryScanFailure(sessionId, branchId, error).catch(() => {});
+            await this.#recordBoundaryScanFailure(
+              sessionId,
+              branchId,
+              error,
+              Math.max(0, Math.round(performance.now() - scanStarted)),
+              scanCursor ?? boundaryKey ?? "unavailable",
+            ).catch(() => {});
             return [];
           }
         },
       ));
   }
 
-  async #recordBoundaryScanFailure(sessionId: string, branchId: string, error: unknown): Promise<void> {
+  async #recordBoundaryScanFailure(
+    sessionId: string,
+    branchId: string,
+    error: unknown,
+    durationMs: number,
+    boundary: string,
+  ): Promise<void> {
     const category = error instanceof ValidationError ? "validation_failed" : "scan_unavailable";
-    const fingerprint = stableSha256({ sessionId, branchId, category }).slice(0, 32);
+    const fingerprint = stableSha256({
+      sessionId,
+      branchId,
+      category,
+    }).slice(0, 32);
+    void boundary;
     await this.storage.appendEvents([{
       id: `refinement-scan-observation-${fingerprint}`,
       sessionId, branchId, type: "MessageAppended", producer: "supervisor",
@@ -370,9 +438,87 @@ export class RefinerService {
         messageId: `refinement-scan-observation-${fingerprint}`,
         role: "tool",
         content: `Automatic learning scan skipped at a committed boundary (${category}); task execution remains available and no learning result is implied.`,
-        learningScan: { version: 1, category },
+        learningScan: {
+          version: 1,
+          category,
+          durationMs: Math.min(durationMs, 86_400_000),
+        },
       },
     }]);
+  }
+
+  #incrementalScanRecords(
+    sessionId: string,
+    branchId: string,
+    cursor: string,
+    allEvents: readonly AgentEvent[],
+    eventsById: ReadonlyMap<string, AgentEvent>,
+    newEvents: readonly AgentEvent[],
+  ): AgentEvent[] {
+    const key = `${sessionId}\u0000${branchId}`;
+    let frontier = this.#scanFrontiers.get(key);
+    if (!frontier || BigInt(frontier.cursor) > BigInt(cursor)) {
+      frontier = {
+        cursor: "0",
+        records: [],
+        effectRequests: new Map(),
+        cellOwners: new Map(),
+      };
+    }
+    const additions = frontier.cursor === "0" ? allEvents : newEvents;
+    const relevant = additions.filter((event) =>
+      REFINEMENT_SCAN_RELEVANT_TYPES.has(event.type));
+    const byId = new Map(frontier.records.map((event) => [event.id, event]));
+    for (const event of relevant) byId.set(event.id, event);
+    const retained = [...byId.values()]
+      .sort(compareEventCursor)
+      .slice(-REFINEMENT_SCAN_RELEVANT_RECORD_LIMIT);
+
+    const dependencies = new Set<string>();
+    for (const event of additions) {
+      if (event.type === "EffectRequested") {
+        frontier.effectRequests.set(
+          (event.payload as { effectId: string }).effectId,
+          event,
+        );
+      } else if (event.type === "AgentRunActionCommitted") {
+        frontier.cellOwners.set(
+          `agent-run-cell-${(event.payload as { actionId: string }).actionId}`,
+          event,
+        );
+      }
+    }
+    trimOldestMap(frontier.effectRequests, REFINEMENT_SCAN_RELEVANT_RECORD_LIMIT);
+    trimOldestMap(frontier.cellOwners, REFINEMENT_SCAN_RELEVANT_RECORD_LIMIT);
+
+    for (const event of retained) {
+      if (event.type === "EffectOutcomeRecorded") {
+        const request = frontier.effectRequests.get(
+          (event.payload as { effectId: string }).effectId,
+        );
+        if (request) dependencies.add(request.id);
+      } else if (event.type === "CellFailed") {
+        const owner = frontier.cellOwners.get(
+          (event.payload as { cellId: string }).cellId,
+        );
+        if (owner) dependencies.add(owner.id);
+      } else if (event.type === "UserCorrection") {
+        for (const eventId of (
+          event.payload as { correctedEventIds: string[] }
+        ).correctedEventIds) dependencies.add(eventId);
+      }
+    }
+    const combined = new Map(retained.map((event) => [event.id, event]));
+    for (const eventId of dependencies) {
+      const event = eventsById.get(eventId);
+      if (event) combined.set(event.id, event);
+    }
+    frontier.cursor = cursor;
+    frontier.records = retained;
+    this.#scanFrontiers.set(key, frontier);
+    return [...combined.values()]
+      .sort(compareEventCursor)
+      .slice(-9_000);
   }
 
   async get(reviewId: string): Promise<RefinementReviewRecord> {
@@ -681,9 +827,10 @@ export class RefinerService {
   }
 
   async #admit(sessionId: string, branchId: string, input: InternalReviewInput): Promise<RefinementReviewRecord> {
-    const events = await this.storage.loadEvents(sessionId, { branchId });
+    const loaded = await this.#history.load(sessionId, branchId);
+    const events = loaded.events;
     if (!events.length) throw new ValidationError("Cannot refine a missing session branch");
-    const state = projectEvents(events);
+    const state = loaded.state;
     const requestedScope = input.mode === "automatic" ? "local" : input.requestedScope ?? "local";
     const requestedScopeKey = scopeKey(requestedScope, state.workspaceId, sessionId, this.userScopeKey);
     const allowedKinds = [...new Set(input.allowedKinds ?? ALLOWED_KINDS)];
@@ -703,6 +850,13 @@ export class RefinerService {
       sql: `SELECT * FROM refinement_reviews WHERE review_id=?${input.nonterminalKey === undefined ? "" : " OR (session_id=? AND branch_id=? AND nonterminal_key=? AND status IN ('requested','running'))"} ORDER BY CASE WHEN review_id=? THEN 0 ELSE 1 END LIMIT 1`,
       args: input.nonterminalKey === undefined ? [request.reviewId, request.reviewId] : [request.reviewId, sessionId, branchId, input.nonterminalKey, request.reviewId],
     });
+    if (!existingRows[0] && input.mode === "manual") {
+      assertManualRunRefinementAdmission(
+        state,
+        events,
+        request.trigger.evidenceEventIds,
+      );
+    }
     if (!existingRows[0] && input.automaticPolicyGeneration !== undefined) {
       const current = await this.#automaticPolicyState();
       if (!current.policy.automatic ||
@@ -914,7 +1068,13 @@ export class RefinerService {
 
 function normalizeReviewInput(input: StartRefinementReviewInput): StartRefinementReviewInput {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("Refinement review input must be an object");
-  const allowedFields = new Set(["instructions", "requestedScope", "allowedKinds", "wait"]);
+  const allowedFields = new Set([
+    "instructions",
+    "requestedScope",
+    "allowedKinds",
+    "wait",
+    "evidenceEventIds",
+  ]);
   const unknownFields = Object.keys(input).filter((field) => !allowedFields.has(field));
   if (unknownFields.length > 0) throw new ValidationError(`Refinement review input contains unknown fields: ${unknownFields.sort().join(", ")}`);
   if (input.instructions !== undefined && typeof input.instructions !== "string") throw new ValidationError("Refinement instructions must be a string");
@@ -925,15 +1085,100 @@ function normalizeReviewInput(input: StartRefinementReviewInput): StartRefinemen
       throw new ValidationError("Refinement allowedKinds must contain 1-4 distinct supported harness kinds");
     }
   }
+  if (input.evidenceEventIds !== undefined &&
+      (!Array.isArray(input.evidenceEventIds) ||
+        input.evidenceEventIds.length > 64 ||
+        new Set(input.evidenceEventIds).size !==
+          input.evidenceEventIds.length ||
+        input.evidenceEventIds.some((eventId) =>
+          typeof eventId !== "string" || !eventId))) {
+    throw new ValidationError(
+      "Refinement evidenceEventIds must contain at most 64 distinct event IDs",
+    );
+  }
   return {
     ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
     ...(input.requestedScope === undefined ? {} : { requestedScope: input.requestedScope }),
     ...(input.allowedKinds === undefined ? {} : { allowedKinds: [...input.allowedKinds] }),
     ...(input.wait === undefined ? {} : { wait: input.wait }),
+    ...(input.evidenceEventIds === undefined
+      ? {}
+      : { evidenceEventIds: [...input.evidenceEventIds] }),
   };
 }
 
 function canonicalCursor(cursor: string): string { return BigInt(cursor).toString(); }
+function compareEventCursor(left: AgentEvent, right: AgentEvent): number {
+  const a = BigInt(left.cursor);
+  const b = BigInt(right.cursor);
+  return a < b ? -1 : a > b ? 1 : left.id.localeCompare(right.id);
+}
+function trimOldestMap<K, V>(values: Map<K, V>, limit: number): void {
+  while (values.size > limit) {
+    const oldest = values.keys().next();
+    if (oldest.done) return;
+    values.delete(oldest.value);
+  }
+}
+function reviewsSinceRunStart(
+  state: AgentState,
+  events: readonly AgentEvent[],
+  requestEventId: string,
+): number {
+  const positions = new Map(events.map((event, index) => [event.id, index]));
+  const requestPosition = positions.get(requestEventId) ?? -1;
+  return Object.values(state.refinementReviews).filter((review) =>
+    review.mode === "manual" &&
+    (positions.get(review.requestEventId) ?? -1) > requestPosition
+  ).length;
+}
+function assertManualRunRefinementAdmission(
+  state: AgentState,
+  events: readonly AgentEvent[],
+  evidenceEventIds: readonly string[],
+): void {
+  const activeRun = Object.values(state.agentRuns).find((run) =>
+    run.status === "queued" || run.status === "running");
+  const policy = activeRun?.refinementPolicy;
+  if (!activeRun || !policy) return;
+  const admitted = reviewsSinceRunStart(
+    state,
+    events,
+    activeRun.requestEventId,
+  );
+  if (admitted >= policy.manualReviewLimit) {
+    throw new ValidationError(
+      `Active run permits at most ${policy.manualReviewLimit} explicit refinement review(s)`,
+    );
+  }
+  const distinct = [...new Set(evidenceEventIds)];
+  if (distinct.length < policy.requiredEvidenceEventCount) {
+    throw new ValidationError(
+      `Active run requires at least ${policy.requiredEvidenceEventCount} distinct canonical refinement evidence event(s)`,
+    );
+  }
+  const positions = new Map(events.map((event, index) => [event.id, index]));
+  const requestPosition = positions.get(activeRun.requestEventId) ?? -1;
+  const eventById = new Map(events.map((event) => [event.id, event]));
+  for (const eventId of distinct) {
+    const event = eventById.get(eventId);
+    if (!event || (positions.get(eventId) ?? -1) <= requestPosition) {
+      throw new ValidationError(
+        "Run-scoped refinement evidence must be attributable to the active run",
+      );
+    }
+    if (![
+      "CellCommitted",
+      "CellFailed",
+      "EffectOutcomeRecorded",
+      "ManagedProcessStarted",
+    ].includes(event.type)) {
+      throw new ValidationError(
+        `Run-scoped refinement evidence type is not admissible: ${event.type}`,
+      );
+    }
+  }
+}
 function scopeKey(scope: HarnessScope, workspaceId: string, sessionId: string, userScopeKey: string): string {
   return scope === "local" ? sessionId : scope === "workspace" ? workspaceId : scope === "user" ? userScopeKey : "global";
 }
@@ -1064,7 +1309,7 @@ function learningScanActivity(
   const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
   const message = String(payload.content ?? "");
   const learningScan = payload.learningScan as
-    | { version?: unknown; category?: unknown }
+    | { version?: unknown; category?: unknown; durationMs?: unknown }
     | undefined;
   if (learningScan?.version !== 1 ||
       (learningScan.category !== "validation_failed" &&
@@ -1072,6 +1317,11 @@ function learningScanActivity(
     throw new ValidationError("Learning scan observation payload is malformed");
   }
   const category = learningScan.category;
+  const durationMs = typeof learningScan.durationMs === "number" &&
+    Number.isSafeInteger(learningScan.durationMs) &&
+    learningScan.durationMs >= 0
+    ? learningScan.durationMs
+    : null;
   const createdAt = String(row.committed_at);
   return {
     kind: "scan_observation",
@@ -1080,6 +1330,7 @@ function learningScanActivity(
     sessionId: String(row.session_id),
     branchId: String(row.branch_id),
     message,
+    durationMs,
     createdAt,
     updatedAt: createdAt,
   };

@@ -318,6 +318,38 @@ describe("versioned provider input", () => {
     expect(context.run.instruction).not.toContain("Continue from these");
   });
 
+  test("places authoritative absolute elapsed and remaining time in the run envelope", () => {
+    const modelDispatch = dispatch();
+    const context = agentProviderContext(
+      { messages: [{ role: "user", content: "Respect the horizon." }] },
+      {
+        id: "deadline-run",
+        task: "Respect the horizon.",
+        status: "running",
+        steps: [],
+        goalChecks: {},
+        deadline: {
+          startedAt: "2026-08-19T00:00:00.000Z",
+          deadlineAt: "2026-08-19T00:30:00.000Z",
+        },
+      } as any,
+      1,
+      [],
+      modelDispatch,
+      "system prompt",
+      undefined,
+      Date.parse("2026-08-19T00:10:00.000Z"),
+    ) as any;
+    expect(context.run.deadline).toEqual({
+      startedAt: "2026-08-19T00:00:00.000Z",
+      deadlineAt: "2026-08-19T00:30:00.000Z",
+      observedAt: "2026-08-19T00:10:00.000Z",
+      elapsedMs: 600_000,
+      remainingMs: 1_200_000,
+      expired: false,
+    });
+  });
+
   test("retains detailed source only for the latest failed action and gives focused recovery guidance", () => {
     const modelDispatch = dispatch();
     const source = `// Purpose: repair the reported syntax error\n${"x".repeat(4_000)}`;

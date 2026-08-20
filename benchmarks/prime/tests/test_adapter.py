@@ -53,6 +53,15 @@ class ResultTests(unittest.TestCase):
             4,
         )
         self.assertEqual(result.status, "blocked")
+        expired = parse_run_result(
+            encoded_result(
+                status="budget_exceeded",
+                exitCode=5,
+                final=None,
+            ),
+            5,
+        )
+        self.assertEqual(expired.status, "budget_exceeded")
 
     def test_failure_diagnostics_are_bounded_and_scrub_known_secrets(self) -> None:
         secret = "intercept-secret-value"
@@ -102,6 +111,23 @@ class RoutingTests(unittest.TestCase):
             "--workspace=/tmp/escape",
         )
         self.assertEqual(command[-2:], ["--", "--workspace=/tmp/escape"])
+
+    def test_passes_absolute_deadline_and_refinement_controls(self) -> None:
+        command = _agencity_command(
+            "openai",
+            "openai/gpt-5.6-luna",
+            "provider-default",
+            "train",
+            run_started_at="2026-08-19T00:00:00.000Z",
+            run_deadline_at="2026-08-19T00:30:00.000Z",
+            refinement_review_limit=1,
+            refinement_evidence_required=1,
+        )
+        self.assertIn("--started-at", command)
+        self.assertIn("--deadline-at", command)
+        self.assertIn("--refinement-review-limit", command)
+        self.assertIn("--refinement-evidence-required", command)
+        self.assertEqual(command[-2:], ["--", "train"])
 
     def test_strips_only_root_v1_endpoint(self) -> None:
         self.assertEqual(

@@ -322,7 +322,13 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ) as learning,
             patch(
                 "agencity_runebench.harness._start_game",
-                AsyncMock(side_effect=lambda *_: order.append("game")),
+                AsyncMock(
+                    side_effect=lambda *_: order.append("game")
+                    or (
+                        "2026-08-19T00:00:00.000Z",
+                        "2026-08-19T00:30:00.000Z",
+                    )
+                ),
             ),
             patch(
                 "agencity_verifiers.harness.AgencityHarness.launch",
@@ -330,7 +336,7 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=lambda *_args, **_kwargs: order.append("agencity")
                     or SimpleNamespace()
                 ),
-            ),
+            ) as base_launch,
         ):
             await harness.launch(
                 SimpleNamespace(),
@@ -342,7 +348,23 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 task.data,
             )
         learning.assert_awaited_once()
-        self.assertTrue(learning.await_args.kwargs["enabled"])
+        self.assertFalse(learning.await_args.kwargs["enabled"])
+        self.assertEqual(
+            base_launch.await_args.kwargs["run_started_at"],
+            "2026-08-19T00:00:00.000Z",
+        )
+        self.assertEqual(
+            base_launch.await_args.kwargs["run_deadline_at"],
+            "2026-08-19T00:30:00.000Z",
+        )
+        self.assertEqual(
+            base_launch.await_args.kwargs["refinement_review_limit"],
+            1,
+        )
+        self.assertEqual(
+            base_launch.await_args.kwargs["refinement_evidence_required"],
+            1,
+        )
         self.assertEqual(order, ["learning", "game", "agencity"])
 
 

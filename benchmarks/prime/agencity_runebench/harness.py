@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import verifiers.v1 as vf
@@ -43,17 +44,20 @@ class AgencityRuneBenchHarness(AgencityHarness):
         await _set_automatic_learning(
             runtime,
             installation=self.config.installation,
-            enabled=data.learning_mode == "within-run",
+            enabled=False,
         )
         metadata = trace.info.get("runebench")
         if isinstance(metadata, dict):
-            metadata["automatic_learning"] = (
-                "enabled" if data.learning_mode == "within-run" else "paused"
+            metadata["automatic_learning"] = "paused"
+            metadata["refinement_admission"] = (
+                "explicit-evidence-gated-once"
+                if data.learning_mode == "within-run"
+                else "disabled"
             )
             metadata["console_rss_recycle_bytes"] = (
                 RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES
             )
-        await _start_game(runtime, trace, data)
+        started_at, deadline_at = await _start_game(runtime, trace, data)
         return await super().launch(
             ctx,
             trace,
@@ -62,6 +66,14 @@ class AgencityRuneBenchHarness(AgencityHarness):
             secret,
             mcp_urls,
             data,
+            run_started_at=started_at,
+            run_deadline_at=deadline_at,
+            refinement_review_limit=(
+                1 if data.learning_mode == "within-run" else 0
+            ),
+            refinement_evidence_required=(
+                1 if data.learning_mode == "within-run" else 0
+            ),
         )
 
 
@@ -89,12 +101,17 @@ async def _start_game(
     runtime: vf.Runtime,
     trace: vf.Trace,
     data: RuneBenchData,
-) -> None:
+) -> tuple[str, str]:
     environment = {
         "SAMPLE_INTERVAL_MS": str(data.sample_interval_ms),
         "GATEWAY_URL": "ws://localhost:7780",
         "BENCHMARK_DURATION_SECS": str(data.duration_seconds),
     }
+    started = datetime.now(timezone.utc)
+    started_at = started.isoformat().replace("+00:00", "Z")
+    deadline_at = (started + timedelta(seconds=data.duration_seconds)).isoformat().replace(
+        "+00:00", "Z"
+    )
     await runtime.run_background(["/entrypoint.sh"], environment, STARTUP_LOG)
     last = SimpleNamespace(exit_code=1, stdout="", stderr="")
     for _ in range(STARTUP_ATTEMPTS):
@@ -115,7 +132,9 @@ async def _start_game(
             if isinstance(metadata, dict):
                 metadata["services"] = "ready"
                 metadata["startup_log"] = STARTUP_LOG
-            return
+                metadata["game_started_at"] = started_at
+                metadata["agent_deadline_at"] = deadline_at
+            return started_at, deadline_at
         await asyncio.sleep(1)
 
     diagnostics = await runtime.run(

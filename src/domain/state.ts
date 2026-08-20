@@ -1,5 +1,5 @@
 import type {
-  AgentRunActionSource, AgentRunGoalMode, AgentRunStatus, AgentRunTypedFinishOutcome, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOrigin, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
+  AgentRunActionSource, AgentRunDeadline, AgentRunGoalMode, AgentRunRefinementPolicy, AgentRunStatus, AgentRunTypedFinishOutcome, ArtifactReference, AutonomyOwner, BudgetLimits, ContextCompactionDerivation, ContextCompactionReason, ContextCompactionRequester, ContextCompactionStrategy, ContextCapacityProvenance, ContextRecordReference, EffectOrigin, EffectOutcome, FrozenContextCompactionSource, GoalGateStatus,
   AiGenerationBudgetLimits, AiGenerationKind, AiGenerationStatus, CellLogStream, FamilyRelationship, GoalStatus, HeartbeatStatus, MailboxMessageKind, MailboxReceiptStatus, RecursiveModelOutcome, RecursiveModelStatus,
   ManagedProcessStatus, RefinementReviewLifecycleStatus, ScheduleStatus, SessionStatus, TaskStatus, ModelCallResult, ModelCallTermination, ModelUsageSource, Usage, WakeStatus, WorkingValue,
 } from "./events.ts";
@@ -115,11 +115,13 @@ export interface AgentRunStepState {
   readonly effectId: string; readonly actionId: string; readonly observationEventIds: string[]; readonly modelAttempts: AgentRunModelAttemptState[];
   readonly action?: AgentAction; readonly typedFinish?: AgentRunTypedFinishOutcome;
   readonly typedFinishEventId?: string; readonly actionSource?: AgentRunActionSource;
-  readonly rejection?: string; readonly eventId: string;
+  readonly rejection?: string; readonly startedEventId?: string; readonly eventId: string;
 }
 export interface AgentRunGoalCheckState { readonly actionId: string; readonly goalId: string; readonly requestId: string; readonly status: "passed" | "failed" | "unknown"; readonly summary: string; readonly gateEvaluationEventIds: string[]; readonly eventId: string; }
 export interface AgentRunState {
   readonly id: string; readonly task: string; readonly requestKey: string; readonly profilePin: AgentInvocationProfilePin; readonly goalId: string | null; readonly goalMode: AgentRunGoalMode; readonly wakeId: string | null;
+  readonly deadline?: AgentRunDeadline | null;
+  readonly refinementPolicy?: AgentRunRefinementPolicy | null;
   readonly status: AgentRunStatus; readonly steps: AgentRunStepState[]; readonly goalChecks: Record<string, AgentRunGoalCheckState>;
   readonly cancellationRequested: boolean; readonly cancellationReason?: string; readonly reason?: string;
   readonly invocationContract?: AgentInvocationContract;

@@ -1001,6 +1001,8 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       }
       const run: AgentRunState = {
         id: p.runId, task: p.task, requestKey: p.requestKey, profilePin: p.profilePin, goalId: p.goalId ?? null, goalMode: p.goalMode ?? (p.goalId ? "current" : "none"), wakeId: p.wakeId ?? null, status: "queued",
+        deadline: p.deadline ?? null,
+        refinementPolicy: p.refinementPolicy ?? null,
         steps: [], goalChecks: {}, cancellationRequested: false, requestEventId: event.id, eventId: event.id,
       };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: run } };
@@ -1041,7 +1043,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
             prior.typedFinish === undefined && prior.rejection === undefined)) {
         throw new InvalidTransitionError("agentRunStep", run?.status ?? "missing-run", "started");
       }
-      const step: AgentRunStepState = { id: p.stepId, ordinal: p.ordinal, contextId: p.contextId, callId: p.callId, effectId: p.effectId, actionId: p.actionId, observationEventIds: [...p.observationEventIds], modelAttempts: [], eventId: event.id };
+      const step: AgentRunStepState = { id: p.stepId, ordinal: p.ordinal, contextId: p.contextId, callId: p.callId, effectId: p.effectId, actionId: p.actionId, observationEventIds: [...p.observationEventIds], modelAttempts: [], startedEventId: event.id, eventId: event.id };
       return { ...next, agentRuns: { ...state.agentRuns, [p.runId]: { ...run, status: "running", steps: [...run.steps, step], eventId: event.id } } };
     }
     case "AgentRunModelAttemptStarted": {

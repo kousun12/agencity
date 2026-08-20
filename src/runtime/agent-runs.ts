@@ -31,7 +31,9 @@ import {
   type AgentRunResultReference,
   type AgentRunTypedFinishOutcome,
   type AgentEvent,
+  type AgentRunDeadline,
   type AgentRunGoalMode,
+  type AgentRunRefinementPolicy,
   type AgentRunState,
   type AgentRunStatus,
   type AgentState,
@@ -62,6 +64,7 @@ import { AgentProfileService } from "./agent-profiles.ts";
 import { composeAgentSystemPrompt } from "./agent-system-prompt.ts";
 import { deriveAgentProviderObservations } from "./agent-observations.ts";
 import { ProjectionService, type CurrentBranchProjection } from "./projection.ts";
+import { IncrementalBranchHistory } from "./branch-history.ts";
 
 export interface StartAgentRunInput {
   readonly task: string;
@@ -81,6 +84,10 @@ export interface StartAgentRunInput {
   readonly suppressTaskMessage?: boolean;
   /** Host-resolved compact programmatic output. Omit for text. */
   readonly output?: { readonly schema: JsonValue };
+  /** Optional external absolute run horizon, retained as canonical run state. */
+  readonly deadline?: AgentRunDeadline;
+  /** Optional general limit for explicit refinement during this run. */
+  readonly refinementPolicy?: AgentRunRefinementPolicy;
 }
 
 export interface AgentRunResult {
@@ -101,6 +108,14 @@ export interface AgentRunResult {
   };
   readonly resultReference?: AgentRunResultReference;
   readonly invocationContract?: AgentInvocationContract;
+  readonly deadline?: {
+    readonly startedAt: string;
+    readonly deadlineAt: string;
+    readonly observedAt: string;
+    readonly elapsedMs: number;
+    readonly remainingMs: number;
+    readonly expired: boolean;
+  };
 }
 
 type ExecuteCell = (
@@ -110,6 +125,7 @@ type ExecuteCell = (
   dependencies?: string[],
   stableCellId?: string,
   expectedReplNamespace?: ReplNamespaceStatus | null,
+  deadlineAt?: string,
 ) => Promise<{ cellId: string; result: JsonValue; logs: string[] }>;
 
 type GetReplNamespaceStatus = (
@@ -171,14 +187,14 @@ const SDK_GUIDE = [
   "Raw object example: const { z } = await import(\"zod\"); const verdict = await ai.generateObject({ prompt: \"Decide whether this exact check evidence is complete.\", context: [{ task, checks }], schema: z.object({ complete: z.boolean(), missing: z.array(z.string()) }) }); if (!verdict.object?.complete) { for (const item of verdict.object?.missing ?? []) { /* handle each missing item */ } }",
   "Awaited agent example: const { z } = await import(\"zod\"); const review = await sdk.agents.run({ task: \"Inspect the implementation, run relevant tests, and assess readiness.\", output: { schema: z.object({ ready: z.boolean(), evidence: z.array(z.string()), remainingWork: z.array(z.string()) }) } }); if (review.status === \"succeeded\" && review.output.kind === \"object\" && !review.output.object.ready) return review.output.object.remainingWork;",
   "Detached agent example: const audit = await sdk.agents.spawn({ task: \"Run the slow compatibility audit and report back to the parent.\" }); return { auditTaskId: audit.taskId };",
-  "sdk.harness.review accepts either instructions or { instructions, requestedScope, allowedKinds, wait }. Restrict allowedKinds when the desired artifact mechanism is known. Do not start refinement as a substitute for repairing the current user task or silently broaden that task into standing behavior; automatic repeated-failure review runs only after committed run boundaries.",
+  "sdk.harness.review accepts either instructions or { instructions, requestedScope, allowedKinds, evidenceEventIds, wait }. When the active run requires refinement evidence, cite the exact canonical observation event IDs supplied by the latest run step. Restrict allowedKinds when the desired artifact mechanism is known. Do not start refinement as a substitute for repairing the current user task or silently broaden that task into standing behavior; automatic repeated-failure review runs only after committed run boundaries.",
   "Keep large read, search, and tool results local while transforming them. Do not console.log or return complete tool objects unless the next decision requires them.",
   "A cell's final expression or explicit return is its bounded observation. Return only a focused summary, slice, count, digest, error, status, or reference instead of a large assigned value.",
   "For requested changes, inspect enough to choose a focused edit, verify it with the narrowest relevant evidence, then finish. Run another cell only when a concrete unresolved requirement remains.",
 ].join("\n");
 export const AGENT_RUN_EXECUTION_GUIDANCE = Object.freeze({
   id: "agencity.agent-run.execution-guidance",
-  version: 12,
+  version: 13,
   text: SDK_GUIDE,
 });
 
@@ -199,6 +215,7 @@ class RunQueue {
 /** Autonomous typed model-to-TypeScript loop over canonical run events. */
 export class AgentRunService {
   readonly #runs = new RunQueue();
+  readonly #history: IncrementalBranchHistory;
   #terminalObserver: ((result: AgentRunResult) => Promise<void>) | null = null;
   #boundaryObserver: ((sessionId: string, branchId: string, runId: string) => Promise<void>) | null = null;
   #cancellationObserver:
@@ -228,8 +245,10 @@ export class AgentRunService {
     readonly profiles: AgentProfileService = new AgentProfileService(storage),
     readonly replNamespaceStatus: GetReplNamespaceStatus = () =>
       COLD_REPL_NAMESPACE,
+    readonly clock: () => number = Date.now,
   ) {
     if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) throw new ValidationError("Agent run maxSteps must be positive");
+    this.#history = new IncrementalBranchHistory(storage);
   }
 
   async start(sessionId: string, branchId: string, input: StartAgentRunInput | string): Promise<AgentRunResult> {
@@ -259,6 +278,12 @@ export class AgentRunService {
     if (normalized.wakeId !== undefined && (typeof normalized.wakeId !== "string" || !normalized.wakeId.trim())) throw new ValidationError("Agent run wakeId must be a non-empty string");
     if (normalized.requestedRunId !== undefined && (typeof normalized.requestedRunId !== "string" || !normalized.requestedRunId.trim())) throw new ValidationError("Agent run requestedRunId must be a non-empty string");
     if (normalized.suppressTaskMessage !== undefined && typeof normalized.suppressTaskMessage !== "boolean") throw new ValidationError("Agent run suppressTaskMessage must be boolean");
+    const deadline = normalized.deadline === undefined
+      ? undefined
+      : validateAgentRunDeadline(normalized.deadline);
+    const refinementPolicy = normalized.refinementPolicy === undefined
+      ? undefined
+      : validateAgentRunRefinementPolicy(normalized.refinementPolicy);
     if (normalized.output !== undefined &&
         (!normalized.output || typeof normalized.output !== "object" ||
           Array.isArray(normalized.output) ||
@@ -274,7 +299,11 @@ export class AgentRunService {
       let state = await this.#state(sessionId, branchId);
       const existing = Object.values(state.agentRuns).find((run) => run.requestKey === requestKey);
       if (existing) {
-        if (existing.task !== task || existing.goalMode !== requestedGoalMode || existing.wakeId !== (normalized.wakeId ?? null) || (normalized.goalId !== undefined && existing.goalId !== normalized.goalId)) {
+        if (existing.task !== task || existing.goalMode !== requestedGoalMode ||
+            existing.wakeId !== (normalized.wakeId ?? null) ||
+            (normalized.goalId !== undefined && existing.goalId !== normalized.goalId) ||
+            !Bun.deepEquals(existing.deadline, deadline ?? null) ||
+            !Bun.deepEquals(existing.refinementPolicy, refinementPolicy ?? null)) {
           throw new ValidationError("Agent run requestKey was reused with different durable meaning");
         }
         if ((normalized.output !== undefined) !== (existing.invocationContract?.output.kind === "object")) {
@@ -341,6 +370,8 @@ export class AgentRunService {
           runId, task, requestKey, profilePin: agentProfilePin(profile), goalMode: requestedGoalMode,
           ...(goalId === undefined ? {} : { goalId }),
           ...(normalized.wakeId === undefined ? {} : { wakeId: normalized.wakeId }),
+          ...(deadline === undefined ? {} : { deadline }),
+          ...(refinementPolicy === undefined ? {} : { refinementPolicy }),
         },
       };
       if (!normalized.suppressTaskMessage) atomic.push({
@@ -452,13 +483,31 @@ export class AgentRunService {
   async #advance(sessionId: string, branchId: string, runId: string): Promise<AgentRunResult> {
     await this.#assertExecutionOwner(sessionId);
     while (true) {
-      let { state, events, run } = await this.#load(sessionId, branchId, runId);
+      let { state, events, eventsById, run } = await this.#load(
+        sessionId,
+        branchId,
+        runId,
+      );
       if (isTerminal(run.status)) return this.#result(state, run);
       if (run.cancellationRequested) {
         await this.#terminal(sessionId, branchId, run, "cancelled", run.cancellationReason ?? "Cancellation requested");
         continue;
       }
       let step = run.steps.at(-1);
+      const interruptedAtDeadline = step?.action?.type === "typescript" &&
+        ["proposed", "running", "abandoned"].includes(
+          state.cells[`agent-run-cell-${step.actionId}`]?.status ?? "",
+        );
+      if (deadlineTelemetry(run, this.clock()).expired && !interruptedAtDeadline) {
+        await this.#terminal(
+          sessionId,
+          branchId,
+          run,
+          "budget_exceeded",
+          deadlineReason(run),
+        );
+        continue;
+      }
       if (step?.typedFinish && !this.#typedFinishApplied(state, run, step)) {
         const progressed = await this.#applyTypedFinish(
           sessionId,
@@ -498,7 +547,7 @@ export class AgentRunService {
         await this.#terminal(sessionId, branchId, run, "budget_exceeded", "Session budget is exhausted");
         continue;
       }
-      const unknown = this.#unknownEffectAfterRequest(events, state, run);
+      const unknown = this.#unknownEffectAfterRequest(eventsById, state, run);
       if (unknown) {
         await this.#terminal(sessionId, branchId, run, "unknown", `Effect ${unknown.id} has an unknown outcome: ${unknown.error ?? "manual reconciliation required"}`);
         continue;
@@ -511,10 +560,28 @@ export class AgentRunService {
       if (!step || step.action !== undefined || step.typedFinish !== undefined || step.rejection !== undefined) {
         if (this.#boundaryObserver) {
           await this.#boundaryObserver(sessionId, branchId, run.id);
-          ({ state, events, run } = await this.#load(sessionId, branchId, runId));
+          ({ state, events, eventsById, run } = await this.#load(
+            sessionId,
+            branchId,
+            runId,
+          ));
+          if (deadlineTelemetry(run, this.clock()).expired) {
+            await this.#terminal(
+              sessionId,
+              branchId,
+              run,
+              "budget_exceeded",
+              deadlineReason(run),
+            );
+            continue;
+          }
         }
         const ordinal = (step?.ordinal ?? 0) + 1;
-        const observationEventIds = this.#unobserved(events, run);
+        const observationEventIds = this.#unobserved(
+          events,
+          eventsById,
+          run,
+        );
         const stepId = `agent-run-${run.id}-step-${ordinal}`;
         const contextId = `${stepId}-context`;
         const callId = `${stepId}-call`;
@@ -526,7 +593,11 @@ export class AgentRunService {
           idempotencyKey: `agent-run-step:${run.id}:${ordinal}`,
           payload: { runId: run.id, stepId, ordinal, contextId, callId, effectId, actionId, observationEventIds },
         }]);
-        ({ state, events, run } = await this.#load(sessionId, branchId, runId));
+        ({ state, events, eventsById, run } = await this.#load(
+          sessionId,
+          branchId,
+          runId,
+        ));
         step = run.steps.at(-1)!;
       }
 
@@ -571,6 +642,16 @@ export class AgentRunService {
     run: AgentRunState,
     step: AgentRunState["steps"][number],
   ): Promise<void> {
+    if (deadlineTelemetry(run, this.clock()).expired) {
+      await this.#terminal(
+        sessionId,
+        branchId,
+        run,
+        "budget_exceeded",
+        deadlineReason(run),
+      );
+      return;
+    }
     const observations = deriveAgentProviderObservations(events, step.observationEventIds);
     let attempt = step.modelAttempts.at(-1);
     if (!attempt && state.contexts[step.contextId]) {
@@ -637,6 +718,7 @@ export class AgentRunService {
                 modelDispatch,
                 prompt.content,
                 replNamespace,
+                this.clock(),
               ),
               providerInput: {
                 modelDispatch,
@@ -687,6 +769,7 @@ export class AgentRunService {
               modelDispatch,
               prompt.content,
               replNamespace!,
+              this.clock(),
             ),
             providerInput: {
               modelDispatch,
@@ -705,6 +788,16 @@ export class AgentRunService {
       const estimatedInputTokens =
         estimateProviderInputCandidate(materialized.providerInput).estimatedTokens;
       assertProviderInputWithinProductLimit(materialized.providerInput);
+      if (deadlineTelemetry(run, this.clock()).expired) {
+        await this.#terminal(
+          sessionId,
+          branchId,
+          run,
+          "budget_exceeded",
+          deadlineReason(run),
+        );
+        return;
+      }
       await this.storage.appendEvents([{
         sessionId, branchId, type: "AgentRunModelAttemptStarted", producer: "supervisor",
         idempotencyKey: `agent-run-model-attempt:${run.id}:${step.ordinal}:1`,
@@ -754,6 +847,16 @@ export class AgentRunService {
         capacity: attempt.contextWindow,
       },
     );
+    if (deadlineTelemetry(run, this.clock()).expired) {
+      await this.#terminal(
+        sessionId,
+        branchId,
+        run,
+        "budget_exceeded",
+        deadlineReason(run),
+      );
+      return;
+    }
     if (!current.effects[attempt.effectId]) {
       const requestedEffectId = await this.outbox.request({
         sessionId, branchId, executor: "model", operation: "complete",
@@ -767,19 +870,60 @@ export class AgentRunService {
     let call = current.modelCalls[attempt.callId]!;
     if (call.status === "requested") {
       const effect = current.effects[attempt.effectId];
-      const execution = effect && !["requested", "started"].includes(effect.status)
-        ? { outcome: effect.status, output: effect.output, error: effect.error, modelFailure: effect.modelFailure }
-        : await this.outbox.run(attempt.effectId);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const remainingMs = deadlineTelemetry(run, this.clock()).remainingMs;
+      if (run.deadline && remainingMs > 0) {
+        timeout = setTimeout(() => {
+          if (!this.outbox.cancel(attempt!.effectId)) {
+            void this.outbox.cancelBeforeExecution(
+              attempt!.effectId,
+              deadlineReason(run),
+            ).then((cancelled) => {
+              if (!cancelled) this.outbox.cancel(attempt!.effectId);
+            }).catch(() => {});
+          }
+        }, remainingMs);
+      }
+      const execution = await (async () => {
+        try {
+          return effect && !["requested", "started"].includes(effect.status)
+            ? { outcome: effect.status, output: effect.output, error: effect.error, modelFailure: effect.modelFailure }
+            : await this.outbox.run(attempt!.effectId);
+        } finally {
+          if (timeout !== undefined) clearTimeout(timeout);
+        }
+      })();
       if (execution.outcome === "succeeded") {
         const output = modelOutput(execution.output, retainedDispatch);
-        const terminalEvents = await this.storage.loadEvents(sessionId, { branchId });
-        await this.#finalizeSucceeded(sessionId, branchId, attempt.callId, output, effectElapsedMs(terminalEvents, attempt.effectId));
+        const terminal = await this.#load(
+          sessionId,
+          branchId,
+          run.id,
+        );
+        await this.#finalizeSucceeded(
+          sessionId,
+          branchId,
+          attempt.callId,
+          output,
+          effectElapsedMs(terminal.events, attempt.effectId),
+        );
       } else {
         if (execution.outcome === "requested" || execution.outcome === "started") throw new ValidationError("Model effect remained non-terminal");
         await this.#finalizeTerminated(sessionId, branchId, attempt.callId, execution.outcome, execution.error, execution.modelFailure);
       }
       current = await this.#state(sessionId, branchId);
       call = current.modelCalls[attempt.callId]!;
+    }
+    if (deadlineTelemetry(run, this.clock()).expired) {
+      const currentRun = current.agentRuns[run.id]!;
+      await this.#terminal(
+        sessionId,
+        branchId,
+        currentRun,
+        "budget_exceeded",
+        deadlineReason(currentRun),
+      );
+      return;
     }
     if (call.status !== "succeeded") {
       const effect = current.effects[attempt.effectId];
@@ -811,6 +955,7 @@ export class AgentRunService {
               call.modelDispatch,
               systemPromptFromContext(context),
               nextReplNamespace,
+              this.clock(),
             ),
             providerInput: {
               modelDispatch: call.modelDispatch,
@@ -1338,6 +1483,17 @@ export class AgentRunService {
         return true;
       }
       if (!cell) {
+        const timing = deadlineTelemetry(run, this.clock());
+        if (timing.expired) {
+          await this.#terminal(
+            sessionId,
+            branchId,
+            run,
+            "budget_exceeded",
+            deadlineReason(run),
+          );
+          return true;
+        }
         const expectedReplNamespace = run.steps.find(
           (candidate) => candidate.actionId === actionId,
         )?.modelAttempts.at(-1)?.replNamespace ?? null;
@@ -1349,13 +1505,25 @@ export class AgentRunService {
             [],
             cellId,
             expectedReplNamespace,
+            run.deadline?.deadlineAt,
           );
         }
         catch {
           const after = await this.#state(sessionId, branchId);
           const terminal = after.cells[cellId];
           if (!terminal || terminal.status === "abandoned" || terminal.status === "running" || terminal.status === "proposed") {
-            await this.#terminal(sessionId, branchId, after.agentRuns[run.id]!, "unknown", `Cell ${cellId} ended without a safe committed outcome`);
+            const currentRun = after.agentRuns[run.id]!;
+            if (deadlineTelemetry(currentRun, this.clock()).expired && !terminal) {
+              await this.#terminal(
+                sessionId,
+                branchId,
+                currentRun,
+                "budget_exceeded",
+                deadlineReason(currentRun),
+              );
+            } else {
+              await this.#terminal(sessionId, branchId, currentRun, "unknown", `Cell ${cellId} ended without a safe committed outcome`);
+            }
           }
           // A durable CellFailed observation is intentionally shown to the next
           // model step so the agent can diagnose and correct its program.
@@ -1690,23 +1858,37 @@ export class AgentRunService {
     await this.storage.appendEvents(completion);
   }
 
-  #unobserved(events: readonly AgentEvent[], run: AgentRunState): string[] {
-    const observed = new Set(run.steps.flatMap((step) => step.observationEventIds));
+  #unobserved(
+    events: readonly AgentEvent[],
+    eventsById: ReadonlyMap<string, AgentEvent>,
+    run: AgentRunState,
+  ): string[] {
+    const latestStep = run.steps.at(-1);
+    const frontierId = latestStep?.startedEventId ??
+      latestStep?.eventId ??
+      run.requestEventId;
+    const candidates = eventsAfter(events, eventsById.get(frontierId)?.cursor);
     const modelEffects = new Set(run.steps.flatMap((step) => [step.effectId, ...step.modelAttempts.map((attempt) => attempt.effectId)]));
-    const gateEffects = new Set(events.filter((event) => event.type === "GoalGateEvaluationRecorded").map((event) => (event.payload as EventPayloads["GoalGateEvaluationRecorded"]).effectId).filter((id): id is string => id !== undefined));
-    const requestIndex = events.findIndex((event) => event.id === run.requestEventId);
-    return events.slice(requestIndex + 1).filter((event) => {
-      if (!OBSERVATION_TYPES.has(event.type) || observed.has(event.id)) return false;
+    const gateEffects = new Set(candidates.filter((event) => event.type === "GoalGateEvaluationRecorded").map((event) => (event.payload as EventPayloads["GoalGateEvaluationRecorded"]).effectId).filter((id): id is string => id !== undefined));
+    return candidates.filter((event) => {
+      if (!OBSERVATION_TYPES.has(event.type)) return false;
       if (event.type === "MailboxMessageDelivered" && (event.payload as EventPayloads["MailboxMessageDelivered"]).mode === "queue") return false;
       if (event.type === "EffectOutcomeRecorded" && (modelEffects.has((event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId) || gateEffects.has((event.payload as EventPayloads["EffectOutcomeRecorded"]).effectId))) return false;
       return true;
     }).map((event) => event.id);
   }
 
-  #unknownEffectAfterRequest(events: readonly AgentEvent[], state: AgentState, run: AgentRunState) {
-    const requestIndex = events.findIndex((event) => event.id === run.requestEventId);
-    const after = new Set(events.slice(requestIndex + 1).map((event) => event.id));
-    return Object.values(state.effects).find((effect) => effect.status === "unknown" && after.has(effect.eventId));
+  #unknownEffectAfterRequest(
+    eventsById: ReadonlyMap<string, AgentEvent>,
+    state: AgentState,
+    run: AgentRunState,
+  ) {
+    const requestCursor = eventsById.get(run.requestEventId)?.cursor;
+    if (requestCursor === undefined) return undefined;
+    return Object.values(state.effects).find((effect) =>
+      effect.status === "unknown" &&
+      BigInt(eventsById.get(effect.eventId)?.cursor ?? "0") >
+        BigInt(requestCursor));
   }
 
   async #isExecutionOwner(sessionId: string): Promise<boolean> {
@@ -1725,18 +1907,22 @@ export class AgentRunService {
   }
 
   async #state(sessionId: string, branchId: string): Promise<AgentState> {
-    const events = await this.storage.loadEvents(sessionId, { branchId });
-    if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
-    return projectEvents(events);
+    return (await this.#history.load(sessionId, branchId)).state;
   }
 
-  async #load(sessionId: string, branchId: string, runId: string): Promise<{ state: AgentState; events: AgentEvent[]; run: AgentRunState }> {
-    const events = await this.storage.loadEvents(sessionId, { branchId });
+  async #load(sessionId: string, branchId: string, runId: string): Promise<{
+    state: AgentState;
+    events: AgentEvent[];
+    eventsById: ReadonlyMap<string, AgentEvent>;
+    run: AgentRunState;
+  }> {
+    const loaded = await this.#history.load(sessionId, branchId);
+    const events = [...loaded.events];
     if (!events.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
-    const state = projectEvents(events);
+    const state = loaded.state;
     const run = state.agentRuns[runId];
     if (!run) throw new NotFoundError("agent run", runId);
-    return { state, events, run };
+    return { state, events, eventsById: loaded.eventsById, run };
   }
 
   async #notifyTerminal(result: AgentRunResult): Promise<void> {
@@ -1769,6 +1955,9 @@ export class AgentRunService {
       ...(run.invocationContract === undefined
         ? {}
         : { invocationContract: run.invocationContract }),
+      ...(run.deadline === null
+        ? {}
+        : { deadline: deadlineTelemetry(run, this.clock()) }),
     };
   }
 }
@@ -1831,6 +2020,7 @@ export function agentProviderContext(
   modelDispatch: ModelDispatch,
   systemPrompt: string,
   replNamespace: ReplNamespaceStatus = COLD_REPL_NAMESPACE,
+  observedAtMs: number = Date.now(),
 ): JsonValue {
   if (modelDispatch.responseContract.kind !== "required-tool-set") {
     throw new ValidationError("Agent provider context requires its retained formal tool contract");
@@ -1963,6 +2153,9 @@ export function agentProviderContext(
     task: run.task,
     stepOrdinal,
     status: run.status,
+    ...(run.deadline === null
+      ? {}
+      : { deadline: deadlineTelemetry(run, observedAtMs) }),
     replNamespace,
     recentTrajectory,
     observations,
@@ -2414,6 +2607,111 @@ function effectElapsedMs(events: readonly AgentEvent[], effectId: string): numbe
   if (!started || !outcome) return 0;
   const elapsed = Date.parse(outcome.committedAt) - Date.parse(started.committedAt);
   return Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
+}
+
+function eventsAfter(
+  events: readonly AgentEvent[],
+  cursor: string | undefined,
+): readonly AgentEvent[] {
+  if (cursor === undefined) return events;
+  const target = BigInt(cursor);
+  let low = 0;
+  let high = events.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (BigInt(events[middle]!.cursor) <= target) low = middle + 1;
+    else high = middle;
+  }
+  return events.slice(low);
+}
+
+function validateAgentRunDeadline(value: AgentRunDeadline): AgentRunDeadline {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).some((key) => key !== "startedAt" && key !== "deadlineAt")) {
+    throw new ValidationError(
+      "Agent run deadline must contain only startedAt and deadlineAt",
+    );
+  }
+  const startedAtMs = Date.parse(value.startedAt);
+  const deadlineAtMs = Date.parse(value.deadlineAt);
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(deadlineAtMs) ||
+      deadlineAtMs <= startedAtMs) {
+    throw new ValidationError(
+      "Agent run deadline requires valid timestamps with deadlineAt after startedAt",
+    );
+  }
+  return {
+    startedAt: new Date(startedAtMs).toISOString(),
+    deadlineAt: new Date(deadlineAtMs).toISOString(),
+  };
+}
+
+function validateAgentRunRefinementPolicy(
+  value: AgentRunRefinementPolicy,
+): AgentRunRefinementPolicy {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).some((key) =>
+        key !== "manualReviewLimit" &&
+        key !== "requiredEvidenceEventCount")) {
+    throw new ValidationError(
+      "Agent run refinement policy contains unknown fields",
+    );
+  }
+  if (!Number.isSafeInteger(value.manualReviewLimit) ||
+      value.manualReviewLimit < 0 || value.manualReviewLimit > 64 ||
+      !Number.isSafeInteger(value.requiredEvidenceEventCount) ||
+      value.requiredEvidenceEventCount < 0 ||
+      value.requiredEvidenceEventCount > 64 ||
+      (value.requiredEvidenceEventCount > 0 &&
+        value.manualReviewLimit === 0)) {
+    throw new ValidationError(
+      "Agent run refinement policy requires limits from 0 to 64",
+    );
+  }
+  return {
+    manualReviewLimit: value.manualReviewLimit,
+    requiredEvidenceEventCount: value.requiredEvidenceEventCount,
+  };
+}
+
+function deadlineTelemetry(
+  run: Pick<AgentRunState, "deadline">,
+  observedAtMs: number,
+): {
+  readonly startedAt: string;
+  readonly deadlineAt: string;
+  readonly observedAt: string;
+  readonly elapsedMs: number;
+  readonly remainingMs: number;
+  readonly expired: boolean;
+} {
+  const deadline = run.deadline;
+  if (!deadline) {
+    return {
+      startedAt: new Date(observedAtMs).toISOString(),
+      deadlineAt: new Date(observedAtMs).toISOString(),
+      observedAt: new Date(observedAtMs).toISOString(),
+      elapsedMs: 0,
+      remainingMs: 0,
+      expired: false,
+    };
+  }
+  const startedAtMs = Date.parse(deadline.startedAt);
+  const deadlineAtMs = Date.parse(deadline.deadlineAt);
+  return {
+    startedAt: deadline.startedAt,
+    deadlineAt: deadline.deadlineAt,
+    observedAt: new Date(observedAtMs).toISOString(),
+    elapsedMs: Math.max(0, observedAtMs - startedAtMs),
+    remainingMs: Math.max(0, deadlineAtMs - observedAtMs),
+    expired: observedAtMs >= deadlineAtMs,
+  };
+}
+
+function deadlineReason(run: Pick<AgentRunState, "deadline">): string {
+  return run.deadline
+    ? `Agent run absolute deadline ${run.deadline.deadlineAt} expired`
+    : "Agent run absolute deadline expired";
 }
 
 function budgetReached(

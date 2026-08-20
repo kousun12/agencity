@@ -213,10 +213,13 @@ game character.
 
 - `fresh` explicitly pauses automatic learning before the root run and omits
   manual refinement guidance.
-- `within-run` explicitly enables automatic learning before the root run and
-  first requires a measured non-zero strategy. The agent may request one
-  focused governed refinement from retained failures and rate evidence, then
-  test an approved memory, prompt note, or skill in a later measured attempt.
+- `within-run` also pauses automatic triggers. The run admits at most one
+  explicit governed refinement, and only when it cites a canonical evidence
+  cell from that run. The treatment directs that cell to verify a non-zero
+  tracker rate, a running managed trainer, and one specific failure or
+  rate-based improvement target before requesting review. The runtime enforces
+  the evidence citation and one-review limit; the treatment owns the
+  RuneBench-specific interpretation of the evidence.
 
 No profile or learned artifact crosses scored tasks. This keeps tasks
 independent and avoids curriculum leakage. It also means this integration does
@@ -601,7 +604,7 @@ The broader benchmark project suite is:
 uv run --locked python -m unittest discover -s tests
 ```
 
-On August 19, 2026, the current working tree passed 97 of 98 model-free
+On August 19, 2026, the current working tree passed 98 of 99 model-free
 benchmark tests; the one skip was the unrelated opt-in official SWE-bench Pro
 Docker scorer. All six RuneBench preflights and all six RuneBench dry-runs
 passed, the wheel and source distribution built, and the exact pinned-container
@@ -668,10 +671,26 @@ initial conflicted shutdown request, removes the duplicate treatment prompt,
 adds a compact direct-SDK quick start, identifies the `bot`/`rs` receiver split,
 scopes transient loop data, and directs proven strategies toward fewer, longer
 bounded foreground loops. Managed trainers remain available only when
-provider-call pauses materially prevent sustained training. These changes have
-model-free coverage but no paid canary evidence. An inner benchmark deadline,
-incremental long-run projections, bounded completed-refinement context, and
-evidence-gated refinement remain required before another paid canary.
+provider-call pauses materially prevent sustained training. The harness now
+pins a canonical run start and absolute deadline to the actual game start. The
+runtime retains that deadline, reports exact elapsed and remaining time to
+every provider step, interrupts admitted model and cell execution at expiry,
+and returns `budget_exceeded` through the normal JSON result path so
+finalization and scoring can proceed.
+
+Active run, cell, context, and refinement paths reuse cursor-based branch
+history projections instead of rebuilding complete branch state on every
+transition. Automatic trigger scanning retains a bounded relevant-event
+frontier and processes later deltas. Completed recursive work is projected as
+a digest-backed bounded summary; its full input, contract, result, and
+governance evidence remain canonical and queryable. RuneBench pauses automatic
+triggers in both learning modes. The within-run mode permits one explicit
+review after the treatment records the required compact evidence cell.
+
+These changes have model-free coverage but no paid canary evidence. The
+RuneBench-specific truth of the compact evidence cell remains treatment
+behavior rather than a core runtime semantic, and no current paid run verifies
+deadline finalization, late-run overhead, or adaptive performance.
 
 ## Current limitations
 

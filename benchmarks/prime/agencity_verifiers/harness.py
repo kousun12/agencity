@@ -157,6 +157,11 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
         secret: str,
         mcp_urls: dict[str, str],
         data: vf.TaskData,
+        *,
+        run_started_at: str | None = None,
+        run_deadline_at: str | None = None,
+        refinement_review_limit: int | None = None,
+        refinement_evidence_required: int | None = None,
     ) -> vf.ProgramResult:
         if mcp_urls:
             raise ValueError("The initial Agencity harness does not support MCP tools")
@@ -204,6 +209,10 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
                 workspace=workspace,
                 installation=self.config.installation,
                 console_rss_recycle_bytes=self.CONSOLE_RSS_RECYCLE_BYTES,
+                run_started_at=run_started_at,
+                run_deadline_at=run_deadline_at,
+                refinement_review_limit=refinement_review_limit,
+                refinement_evidence_required=refinement_evidence_required,
             ),
             environment,
         )
@@ -274,6 +283,10 @@ def _agencity_command(
     workspace: str = WORKSPACE_DIR,
     installation: Literal["apt-git", "portable"] = "apt-git",
     console_rss_recycle_bytes: int | None = None,
+    run_started_at: str | None = None,
+    run_deadline_at: str | None = None,
+    refinement_review_limit: int | None = None,
+    refinement_evidence_required: int | None = None,
 ) -> list[str]:
     command = [
         PORTABLE_BUN_PATH if installation == "portable" else "bun",
@@ -300,6 +313,38 @@ def _agencity_command(
             raise ValueError("Console RSS recycle bytes must be positive")
         command.extend(
             ["--console-rss-recycle-bytes", str(console_rss_recycle_bytes)]
+        )
+    if (run_started_at is None) != (run_deadline_at is None):
+        raise ValueError("Run start and deadline must be supplied together")
+    if run_started_at is not None and run_deadline_at is not None:
+        command.extend(
+            [
+                "--started-at",
+                run_started_at,
+                "--deadline-at",
+                run_deadline_at,
+            ]
+        )
+    if refinement_review_limit is not None:
+        if not 0 <= refinement_review_limit <= 64:
+            raise ValueError("Refinement review limit must be from 0 to 64")
+        command.extend(
+            ["--refinement-review-limit", str(refinement_review_limit)]
+        )
+    if refinement_evidence_required is not None:
+        if refinement_review_limit is None:
+            raise ValueError(
+                "Refinement evidence requirement needs a review limit"
+            )
+        if not 0 <= refinement_evidence_required <= 64:
+            raise ValueError(
+                "Refinement evidence requirement must be from 0 to 64"
+            )
+        command.extend(
+            [
+                "--refinement-evidence-required",
+                str(refinement_evidence_required),
+            ]
         )
     command.extend(["--", task])
     return command

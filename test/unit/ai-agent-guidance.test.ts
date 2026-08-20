@@ -5,7 +5,7 @@ describe("explicit AI and typed agent guidance", () => {
   const guidance = AGENT_RUN_EXECUTION_GUIDANCE.text;
 
   test("keeps the deterministic, raw, awaited, and detached choices distinct", () => {
-    expect(AGENT_RUN_EXECUTION_GUIDANCE.version).toBe(12);
+    expect(AGENT_RUN_EXECUTION_GUIDANCE.version).toBe(13);
     expect(guidance).toContain("Use ordinary TypeScript for deterministic work");
     expect(guidance).toContain("Use ai.generateText only when every required fact is already in the explicit prompt/context");
     expect(guidance).toContain("Use ai.generateObject under the same explicit-context constraint");
@@ -19,6 +19,7 @@ describe("explicit AI and typed agent guidance", () => {
     expect(guidance).toContain("worker-local convenience");
     expect(guidance).toContain("send defaults to mode queue");
     expect(guidance).toContain("use mode steer only");
+    expect(guidance).toContain("evidenceEventIds");
   });
 
   test("states raw-generation, schema, fan-out, model, authority, and durability limits", () => {

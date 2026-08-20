@@ -448,7 +448,7 @@ matched its packaged manifest. A Vuls no-op audit returned empty parser
 evidence; the catalog therefore retains that row as incompatible rather than
 mapping it to reward zero.
 
-The August 19, 2026 current working tree passed 97 benchmark tests, skipped one
+The August 19, 2026 current working tree passed 98 benchmark tests, skipped one
 unrelated opt-in SWE-bench Pro scorer test, and had zero failures. All six
 RuneBench preflights and dry-runs, the source/wheel build, and pinned-image
 controller and tracker checks passed without model inference.
@@ -467,9 +467,13 @@ controller and tracker checks passed without model inference.
   calls plus two refinement calls without typed `finish`; finalization and
   official scoring never started, and a separate service-authority cleanup
   conflict followed. The cleanup wait and trace-driven prompt changes on the
-  current working tree have model-free coverage only. Inner deadline,
-  long-history, completed-refinement context, and refinement-admission
-  improvements remain unimplemented.
+  current working tree have model-free coverage only. The current treatment
+  also passes an absolute game-start deadline into durable agent-run state,
+  returns deadline expiry as normal `budget_exceeded` JSON, incrementally
+  advances retained branch history and refinement scan frontiers, bounds
+  completed recursive context, pauses automatic learning, and permits one
+  evidence-citing explicit within-run review. These changes have no paid
+  canary evidence.
 - OOLONG: one revised Sol-high Yahoo 128K task scored `1.0`; a corresponding
   Luna task scored `0`. A later current-revision Sol-high canary on commit
   `5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193` completed the repaired
@@ -510,8 +514,13 @@ performance claims. No paid full-suite execution has been performed.
   collaboration, and cross-episode curriculum treatments are not included. The
   current public-leaderboard comparison uses the 16 30-minute skills. The
   controller, managed trainer, tracker command, draining-service cleanup,
-  prompt de-duplication, and memory preflight have model-free coverage but no
-  passing paid 30-minute canary on this revision.
+  prompt de-duplication, canonical deadline, incremental history,
+  recursive-context bounds, evidence-citing review admission, and memory
+  preflight have model-free coverage but no passing paid 30-minute canary on
+  this revision. The runtime enforces canonical evidence attribution and the
+  one-review limit; the treatment remains responsible for verifying the
+  RuneBench-specific non-zero rate, running trainer, and improvement target
+  inside the cited compact evidence cell.
 - Only 1 of 731 SWE-bench Pro public rows is currently compatible. Of the 730
   incompatible rows, 729 lack audited immutable image pins and one audited Vuls
   row fails the required official no-op parser-evidence control. This blocks a

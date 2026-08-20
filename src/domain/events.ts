@@ -172,6 +172,18 @@ export type ContextCompactionRequester = "user" | "agent" | "supervisor";
 export type ContextCapacitySource = "provider-metadata" | "model-catalog" | "operator-configuration" | "unknown";
 
 export interface BudgetLimits { readonly tokenLimit?: number; readonly costLimitUsd?: number; readonly turnLimit?: number; readonly wallTimeLimitMs?: number; }
+export interface AgentRunDeadline {
+  /** External authoritative start anchor, which may precede run admission. */
+  readonly startedAt: string;
+  /** Absolute UTC deadline. Elapsed time is never derived from budget wall time. */
+  readonly deadlineAt: string;
+}
+export interface AgentRunRefinementPolicy {
+  /** Maximum explicit review requests admitted while this run is active. */
+  readonly manualReviewLimit: number;
+  /** Minimum distinct canonical evidence records each explicit request must cite. */
+  readonly requiredEvidenceEventCount: number;
+}
 export interface Usage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; }
 export type ModelUsageSource = "provider-reported" | "conservative-guard-estimate";
 export type ModelCallTermination =
@@ -219,7 +231,7 @@ export interface EventPayloads {
   BranchNamed: { name: string };
   SessionStatusChanged: { status: SessionStatus; reason?: string };
   SessionModelChanged: { previousModel: ModelConfiguration; model: ModelConfiguration; selectedBy: "user" };
-  MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string; mailbox?: { mailboxMessageId: string; fromSessionId: string; relationship: FamilyRelationship; taskId?: string; artifactIds?: string[]; receiptEventId: string }; learningScan?: { version: 1; category: "scan_unavailable" | "validation_failed" } };
+  MessageAppended: { messageId: string; role: MessageRole; content: string; modelCallId?: string; mailbox?: { mailboxMessageId: string; fromSessionId: string; relationship: FamilyRelationship; taskId?: string; artifactIds?: string[]; receiptEventId: string }; learningScan?: { version: 1; category: "scan_unavailable" | "validation_failed"; durationMs?: number } };
   CellProposed: { cellId: string; code: string; dependencies: string[] };
   CellStarted: { cellId: string; attempt: number };
   CellCommitted: { cellId: string; result: JsonValue; logs: string[]; logStreams?: CellLogStream[]; durationMs: number; exports: string[]; repositoryInstructions?: RepositoryInstructionDiscovery[]; repositoryInstructionOmission?: RepositoryInstructionOmission };
@@ -356,7 +368,12 @@ export interface EventPayloads {
   SkillTestRecorded: { entryId: string; versionId: string; effectId: string; passed: boolean; report: JsonValue };
   SubagentSpecInvoked: { entryId: string; versionId: string; taskId: string; childSessionId: string; childBranchId: string };
   SyncConflictResolved: { conflictId: string; action: "keep-branches" | "choose-claim" | "cancel-duplicate" | "acknowledge"; resolvedBy: string; chosenEventId?: string; note?: string; resolvedAt: string };
-  AgentRunRequested: { runId: string; task: string; requestKey: string; profilePin: AgentInvocationProfilePin; goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string };
+  AgentRunRequested: {
+    runId: string; task: string; requestKey: string; profilePin: AgentInvocationProfilePin;
+    goalId?: string; goalMode?: AgentRunGoalMode; wakeId?: string;
+    deadline?: AgentRunDeadline;
+    refinementPolicy?: AgentRunRefinementPolicy;
+  };
   AgentInvocationContractPinned: { runId: string; contract: AgentInvocationContract };
   AgentRunStepStarted: { runId: string; stepId: string; ordinal: number; contextId: string; callId: string; effectId: string; actionId: string; observationEventIds: string[] };
   AgentRunModelAttemptStarted: { runId: string; stepId: string; ordinal: number; attempt: number; contextId: string; callId: string; effectId: string; reason: "initial" | "proactive-compaction" | "provider-overflow"; providerInputVersion: typeof PROVIDER_INPUT_VERSION; providerInputDigest: Sha256Digest; estimatedInputTokens: number; contextWindow: ContextCapacityProvenance; replNamespace?: ReplNamespaceStatus; retryOfCallId?: string };
@@ -791,7 +808,7 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   BranchNamed: z.object({ name: z.string().min(1) }),
   SessionStatusChanged: z.object({ status: z.enum(["idle", "running", "stopped", "failed", "archived"]), reason: z.string().optional() }),
   SessionModelChanged: z.object({ previousModel: modelSchema, model: modelSchema, selectedBy: z.literal("user") }).strict(),
-  MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional(), mailbox: z.object({ mailboxMessageId: id, fromSessionId: id, relationship: z.enum(["parent", "child", "sibling"]), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), receiptEventId: id }).optional(), learningScan: z.object({ version: z.literal(1), category: z.enum(["scan_unavailable", "validation_failed"]) }).strict().optional() }),
+  MessageAppended: z.object({ messageId: id, role: z.enum(["system", "user", "assistant", "tool"]), content: z.string(), modelCallId: id.optional(), mailbox: z.object({ mailboxMessageId: id, fromSessionId: id, relationship: z.enum(["parent", "child", "sibling"]), taskId: id.optional(), artifactIds: z.array(id).max(8).optional(), receiptEventId: id }).optional(), learningScan: z.object({ version: z.literal(1), category: z.enum(["scan_unavailable", "validation_failed"]), durationMs: z.number().int().nonnegative().max(86_400_000).optional() }).strict().optional() }),
   CellProposed: z.object({ cellId: id, code: z.string(), dependencies: z.array(id) }),
   CellStarted: z.object({ cellId: id, attempt: positiveInteger }),
   CellCommitted: z.object({
@@ -1038,7 +1055,30 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   SkillTestRecorded: z.object({ entryId: id, versionId: id, effectId: id, passed: z.boolean(), report: jsonValueSchema }),
   SubagentSpecInvoked: z.object({ entryId: id, versionId: id, taskId: id, childSessionId: id, childBranchId: id }),
   SyncConflictResolved: z.object({ conflictId: id, action: z.enum(["keep-branches", "choose-claim", "cancel-duplicate", "acknowledge"]), resolvedBy: id, chosenEventId: id.optional(), note: z.string().optional(), resolvedAt: dateTime }),
-  AgentRunRequested: z.object({ runId: id, task: z.string().min(1), requestKey: id, profilePin: profilePinSchema, goalId: id.optional(), goalMode: z.enum(["none", "auto", "current", "create"]).optional(), wakeId: id.optional() }).strict(),
+  AgentRunRequested: z.object({
+    runId: id,
+    task: z.string().min(1),
+    requestKey: id,
+    profilePin: profilePinSchema,
+    goalId: id.optional(),
+    goalMode: z.enum(["none", "auto", "current", "create"]).optional(),
+    wakeId: id.optional(),
+    deadline: z.object({
+      startedAt: dateTime,
+      deadlineAt: dateTime,
+    }).strict().refine(
+      (value) => Date.parse(value.deadlineAt) > Date.parse(value.startedAt),
+      "Agent run deadline must be after its start",
+    ).optional(),
+    refinementPolicy: z.object({
+      manualReviewLimit: z.number().int().min(0).max(64),
+      requiredEvidenceEventCount: z.number().int().min(0).max(64),
+    }).strict().refine(
+      (value) => value.requiredEvidenceEventCount === 0 ||
+        value.manualReviewLimit > 0,
+      "Required refinement evidence needs a positive manual review limit",
+    ).optional(),
+  }).strict(),
   AgentInvocationContractPinned: z.object({
     runId: id,
     contract: z.custom<AgentInvocationContract>((value) => {

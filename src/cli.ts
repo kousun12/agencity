@@ -374,9 +374,38 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       if (!["auto", "current", "create"].includes(goalMode)) throw new ValidationError("--goal must be auto, current, or create");
       const completionGate = option("completion-gate");
       if (completionGate && goalMode === "current") throw new ValidationError("--completion-gate creates a goal and cannot be combined with --goal current");
+      const startedAt = option("started-at");
+      const deadlineAt = option("deadline-at");
+      if ((startedAt === undefined) !== (deadlineAt === undefined)) {
+        throw new ValidationError("--started-at and --deadline-at must be supplied together");
+      }
+      const deadline = startedAt === undefined || deadlineAt === undefined
+        ? undefined
+        : normalizedRunDeadline(startedAt, deadlineAt);
+      const reviewLimitRaw = option("refinement-review-limit");
+      const evidenceRequiredRaw = option("refinement-evidence-required");
+      if (evidenceRequiredRaw !== undefined && reviewLimitRaw === undefined) {
+        throw new ValidationError("--refinement-evidence-required requires --refinement-review-limit");
+      }
+      const refinementPolicy = reviewLimitRaw === undefined
+        ? undefined
+        : {
+            manualReviewLimit: boundedRunOption(
+              reviewLimitRaw,
+              "--refinement-review-limit",
+            ),
+            requiredEvidenceEventCount: evidenceRequiredRaw === undefined
+              ? 0
+              : boundedRunOption(
+                  evidenceRequiredRaw,
+                  "--refinement-evidence-required",
+                ),
+          };
       const input: ProductRunInput = {
         task,
         goalMode: goalMode as "auto" | "current" | "create",
+        ...(deadline === undefined ? {} : { deadline }),
+        ...(refinementPolicy === undefined ? {} : { refinementPolicy }),
         ...(completionGate ? { goal: {
           description: task,
           completionCriteria: `Required shell verification: ${completionGate}`,
@@ -875,7 +904,44 @@ type ProductRunInput = {
     readonly completionCriteria: string;
     readonly gates: readonly { readonly name: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly idempotent: boolean; readonly required: boolean }[];
   };
+  readonly deadline?: {
+    readonly startedAt: string;
+    readonly deadlineAt: string;
+  };
+  readonly refinementPolicy?: {
+    readonly manualReviewLimit: number;
+    readonly requiredEvidenceEventCount: number;
+  };
 };
+
+function normalizedRunDeadline(
+  startedAt: string,
+  deadlineAt: string,
+): { startedAt: string; deadlineAt: string } {
+  const startedAtMs = Date.parse(startedAt);
+  const deadlineAtMs = Date.parse(deadlineAt);
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(deadlineAtMs) ||
+      deadlineAtMs <= startedAtMs) {
+    throw new ValidationError(
+      "--deadline-at must be a valid timestamp after --started-at",
+    );
+  }
+  return {
+    startedAt: new Date(startedAtMs).toISOString(),
+    deadlineAt: new Date(deadlineAtMs).toISOString(),
+  };
+}
+
+function boundedRunOption(value: string, optionName: string): number {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new ValidationError(`${optionName} must be an integer from 0 to 64`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 64) {
+    throw new ValidationError(`${optionName} must be an integer from 0 to 64`);
+  }
+  return parsed;
+}
 
 type RunOperation<T> =
   | { readonly kind: "value"; readonly value: T }

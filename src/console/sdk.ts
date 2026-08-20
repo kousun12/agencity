@@ -167,6 +167,7 @@ export interface HarnessReviewInput {
   readonly requestedScope?: HarnessScope;
   readonly allowedKinds?: readonly HarnessKind[];
   readonly wait?: boolean;
+  readonly evidenceEventIds?: readonly string[];
 }
 export interface HarnessSdk { review(input?: string | HarnessReviewInput): Promise<JsonValue>; reviews(options?: JsonValue): Promise<JsonValue>; propose(input: JsonValue): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue>; history(entryId: string): Promise<JsonValue> }
 export interface SkillsSdk {

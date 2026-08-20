@@ -46,6 +46,8 @@ const action = <T extends Omit<AgentAction, "protocol" | "version">>(value: T): 
 
 const currentProfilePin = async (supervisor: Supervisor, sessionId: string) =>
   agentProfilePin(await supervisor.agentProfiles.active(sessionId));
+const iso = (milliseconds: number): string =>
+  new Date(milliseconds).toISOString();
 
 class RecordingActions extends ScriptedAgentActionProvider {
   readonly contexts: JsonValue[] = [];
@@ -202,14 +204,16 @@ class SlowActions extends ScriptedAgentActionProvider {
 
 class HoldingActions extends ScriptedAgentActionProvider {
   calls = 0;
+  readonly contexts: JsonValue[] = [];
   readonly entered: Promise<void>;
   #markEntered!: () => void;
   constructor() {
     super([action({ type: "final", content: "Must be cancelled." })], "holding-actions");
     this.entered = new Promise(resolve => { this.#markEntered = resolve; });
   }
-  override async complete(_context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
+  override async complete(context: JsonValue, _configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.calls++;
+    this.contexts.push(context);
     this.#markEntered();
     return new Promise<TextModelResponse>((_resolve, reject) => {
       const abort = () => reject(new DOMException("Aborted", "AbortError"));
@@ -1139,6 +1143,208 @@ describe("autonomous durable agent runs", () => {
       expect(Object.values(state.agentRuns)).toHaveLength(1);
       expect(state.messages.map(message => message.content)).toEqual(["Stable task", "Exactly once."]);
     } finally { await value.supervisor.close(); }
+  });
+
+  test("expires an absolute deadline before provider admission and retains it across duplicate replay", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "Must not execute." }),
+    ]);
+    const deadline = {
+      startedAt: iso(Date.now() - 2_000),
+      deadlineAt: iso(Date.now() - 1_000),
+    };
+    try {
+      const first = await value.supervisor.runs.start(
+        value.sessionId,
+        value.branchId,
+        {
+          task: "Stop at the canonical deadline",
+          requestKey: "expired-run",
+          deadline,
+        },
+      );
+      expect(first).toMatchObject({
+        status: "budget_exceeded",
+        steps: 0,
+        reason: expect.stringContaining("absolute deadline"),
+        deadline: {
+          startedAt: deadline.startedAt,
+          deadlineAt: deadline.deadlineAt,
+          expired: true,
+          remainingMs: 0,
+        },
+      });
+      const replay = await value.supervisor.runs.start(
+        value.sessionId,
+        value.branchId,
+        {
+          task: "Stop at the canonical deadline",
+          requestKey: "expired-run",
+          deadline,
+        },
+      );
+      expect(replay).toMatchObject({
+        runId: first.runId,
+        status: "budget_exceeded",
+        steps: 0,
+        deadline: {
+          startedAt: deadline.startedAt,
+          deadlineAt: deadline.deadlineAt,
+          expired: true,
+        },
+      });
+      expect(value.provider.calls).toBe(0);
+      await expect(value.supervisor.runs.start(
+        value.sessionId,
+        value.branchId,
+        {
+          task: "Stop at the canonical deadline",
+          requestKey: "expired-run",
+          deadline: {
+            ...deadline,
+            deadlineAt: iso(Date.parse(deadline.deadlineAt) + 1),
+          },
+        },
+      )).rejects.toThrow("different durable meaning");
+    } finally {
+      await value.supervisor.close();
+    }
+  });
+
+  test("aborts an admitted provider call at the absolute deadline and exposes accurate step time", async () => {
+    const temp = await makeTempRuntime("agencity-agent-deadline-call-");
+    temps.push(temp);
+    const provider = new HoldingActions();
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "deadline-call",
+      model: { provider: provider.name, model: "holding-v1" },
+    });
+    const startedAt = Date.now() - 50;
+    const deadlineAt = Date.now() + 150;
+    try {
+      const result = await supervisor.runs.start(
+        session.sessionId,
+        session.branchId,
+        {
+          task: "Do not outlive the horizon",
+          deadline: {
+            startedAt: iso(startedAt),
+            deadlineAt: iso(deadlineAt),
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        status: "budget_exceeded",
+        steps: 1,
+        deadline: { expired: true, remainingMs: 0 },
+      });
+      expect(provider.calls).toBe(1);
+      const context = provider.contexts[0] as Record<string, JsonValue>;
+      const run = context.run as Record<string, JsonValue>;
+      const timing = run.deadline as Record<string, JsonValue>;
+      expect(timing.startedAt).toBe(iso(startedAt));
+      expect(timing.deadlineAt).toBe(iso(deadlineAt));
+      expect(Number(timing.elapsedMs)).toBeGreaterThanOrEqual(50);
+      expect(Number(timing.remainingMs)).toBeGreaterThan(0);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("recycles an overlong cell at the absolute deadline and commits a typed terminal", async () => {
+    const value = await fixture([
+      action({
+        type: "typescript",
+        code: "// Purpose: prove the cell horizon is enforced.\nwhile (true) {}",
+      }),
+    ]);
+    try {
+      const result = await value.supervisor.runs.start(
+        value.sessionId,
+        value.branchId,
+        {
+          task: "Bound the generated cell",
+          deadline: {
+            startedAt: iso(Date.now()),
+            deadlineAt: iso(Date.now() + 300),
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        status: "budget_exceeded",
+        steps: 1,
+        deadline: { expired: true, remainingMs: 0 },
+      });
+      const state = projectEvents(await value.supervisor.storage.loadEvents(
+        value.sessionId,
+        { branchId: value.branchId },
+      ));
+      expect(Object.values(state.cells)).toHaveLength(1);
+      expect(Object.values(state.cells)[0]).toMatchObject({ status: "failed" });
+    } finally {
+      await value.supervisor.close();
+    }
+  });
+
+  test("recovers an expired queued run without calling the provider", async () => {
+    const temp = await makeTempRuntime("agencity-agent-deadline-recovery-");
+    temps.push(temp);
+    const provider = new RecordingActions([
+      action({ type: "final", content: "Must not execute after restart." }),
+    ], "deadline-recovery");
+    let supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "deadline-recovery",
+      model: { provider: provider.name, model: "v1" },
+    });
+    const admitted = await supervisor.runs.admit(
+      session.sessionId,
+      session.branchId,
+      {
+        task: "Expire while the service is down",
+        deadline: {
+          startedAt: iso(Date.now()),
+          deadlineAt: iso(Date.now() + 40),
+        },
+      },
+    );
+    await supervisor.close();
+    await Bun.sleep(60);
+    supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: true,
+    });
+    try {
+      const result = await supervisor.runs.get(
+        session.sessionId,
+        session.branchId,
+        admitted.runId,
+      );
+      expect(result).toMatchObject({
+        status: "budget_exceeded",
+        steps: 0,
+        deadline: { expired: true },
+      });
+      expect(provider.calls).toBe(0);
+    } finally {
+      await supervisor.close();
+    }
   });
 
   test("materializes a blocked finish exactly and accepts a later instruction as a new run", async () => {

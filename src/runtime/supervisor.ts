@@ -95,6 +95,7 @@ import { HarnessService } from "./harness.ts";
 import { SkillService } from "./skills.ts";
 import { SubagentSpecService } from "./specs.ts";
 import { AgentRunService } from "./agent-runs.ts";
+import { IncrementalBranchHistory } from "./branch-history.ts";
 import { ManagedExecutionLeaseCoordinator, createFencedAgentStorage } from "./execution-leases.ts";
 import { EffectReconciliationService } from "./effect-reconciliation.ts";
 import { RefinerService } from "./refiner.ts";
@@ -437,6 +438,7 @@ export class Supervisor {
   readonly consoleRssRecycleThresholdBytes: number;
   readonly executionLeases: ManagedExecutionLeaseCoordinator | null;
   readonly #cells = new BranchQueue();
+  readonly #branchHistory: IncrementalBranchHistory;
   readonly #sessionCreations = new BranchQueue();
   readonly maxAwaitedAgentDepth: number;
   #closed = false;
@@ -464,6 +466,7 @@ export class Supervisor {
     executionLeases: ManagedExecutionLeaseCoordinator | null,
   ) {
     this.storage = storage;
+    this.#branchHistory = new IncrementalBranchHistory(storage);
     this.profile = profile;
     this.credentials = credentials;
     this.device = device;
@@ -1123,7 +1126,11 @@ export class Supervisor {
     dependencies: string[] = [],
     stableCellId?: string,
     expectedReplNamespace?: ReplNamespaceStatus | null,
+    deadlineAt?: string,
   ): Promise<{ cellId: string; result: JsonValue; logs: string[] }> {
+    if (deadlineAt !== undefined && !Number.isFinite(Date.parse(deadlineAt))) {
+      throw new ValidationError("Cell deadline must be an ISO timestamp");
+    }
     const session = await this.storage.getSession?.(sessionId);
     if (session?.executionOwnerDeviceId && session.executionOwnerDeviceId !== this.device.deviceId) throw new CapabilityUnavailableError(`execution of session owned by device ${session.executionOwnerDeviceId}`, `device ${this.device.deviceId} (automatic ownership failover is unavailable)`);
     return this.#cells.run(
@@ -1140,6 +1147,7 @@ export class Supervisor {
             dependencies,
             stableCellId,
             expectedReplNamespace,
+            deadlineAt,
           ),
         {
           ...(expectedReplNamespace === undefined
@@ -1159,13 +1167,15 @@ export class Supervisor {
     dependencies: string[],
     stableCellId?: string,
     expectedReplNamespace?: ReplNamespaceStatus | null,
+    deadlineAt?: string,
   ): Promise<{ cellId: string; result: JsonValue; logs: string[] }> {
     if (containsBrokeredSecret(code)) {
       throw new ValidationError("Brokered credentials cannot enter console cell source");
     }
-    const history = await this.storage.loadEvents(sessionId, { branchId });
+    const loadedHistory = await this.#branchHistory.load(sessionId, branchId);
+    const history = loadedHistory.events;
     if (!history.length) throw new NotFoundError("session branch", `${sessionId}/${branchId}`);
-    const state = projectEvents(history);
+    const state = loadedHistory.state;
     const cellId = stableCellId ?? newId();
     const existing = state.cells[cellId];
     if (existing) {
@@ -1174,6 +1184,12 @@ export class Supervisor {
       if (payload?.code !== code || !Bun.deepEquals(payload.dependencies ?? [], dependencies)) throw new ValidationError("Stable cell identity was reused with different source or dependencies");
       if (existing.status === "committed") return { cellId, result: existing.result!, logs: [...existing.logs] };
       throw new ValidationError(`Stable cell ${cellId} is ${existing.status}; started cells are never blindly replayed`);
+    }
+    const remainingAtAdmission = deadlineAt === undefined
+      ? null
+      : Date.parse(deadlineAt) - Date.now();
+    if (remainingAtAdmission !== null && remainingAtAdmission <= 0) {
+      throw new ValidationError("Agent run deadline expired before cell admission");
     }
     const started = performance.now();
     await this.storage.appendEvents([{
@@ -1289,7 +1305,7 @@ export class Supervisor {
         return stagedValues.get(name) ?? state.workingValues[name]?.value ?? null;
       }
       if (method === "state.list") {
-        const eventById = new Map(history.map((event) => [event.id, event]));
+        const eventById = loadedHistory.eventsById;
         const names = new Set([...Object.keys(state.workingValues), ...stagedValues.keys()]);
         return [...names].sort().map((name) => {
           const staged = stagedValues.get(name);
@@ -2081,6 +2097,11 @@ export class Supervisor {
     let terminalCommitted = false;
     let runtimeCellFailed = false;
     let workerRssBytes = 0;
+    const deadlineTimer = remainingAtAdmission === null
+      ? undefined
+      : setTimeout(() => {
+          void consoleProcess.recycle("agent-run-deadline").catch(() => {});
+        }, remainingAtAdmission);
     try {
       if (acquisition.epochChanged) {
         if (expectedReplNamespace === undefined) {
@@ -2263,6 +2284,7 @@ export class Supervisor {
       }
       throw error;
     } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       const unfinishedWriter = stagedObservationWriter as StreamingJsonStager | null;
       await unfinishedWriter?.abort();
       if (stagedObservationPath) await rm(stagedObservationPath, { force: true }).catch(() => {});

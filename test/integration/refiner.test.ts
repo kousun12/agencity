@@ -434,6 +434,35 @@ describe("FU-016 durable RefinerService", () => {
       });
       expect(result.resultMessageId).toBeUndefined();
       expect(result.resultArtifactId).toBeUndefined();
+      const compactedContext = await supervisor.contexts.materialize(
+        sessionId,
+        branchId,
+      );
+      const recursive = (compactedContext.context as any).recursiveModels;
+      expect(recursive.protocol).toBe("agencity.recursive-model-context.v2");
+      expect(recursive.active).toEqual([]);
+      expect(recursive.completed).toHaveLength(1);
+      expect(recursive.completed[0]).toMatchObject({
+        handleId: review.handleId,
+        taskId: expect.any(String),
+        status: "completed",
+        inputDigest: expect.any(String),
+        resultDigest: expect.any(String),
+        outcomeSummary: {
+          originalBytes: expect.any(Number),
+          sha256: expect.any(String),
+        },
+      });
+      expect(recursive.completed[0].input).toBeUndefined();
+      expect(recursive.completed[0].result).toBeUndefined();
+      const compactBytes = new TextEncoder().encode(
+        JSON.stringify(recursive),
+      ).byteLength;
+      const retainedBytes = new TextEncoder().encode(JSON.stringify(
+        projectEvents(events).recursiveModels,
+      )).byteLength;
+      expect(compactBytes).toBeLessThan(4 * 1024);
+      expect(compactBytes).toBeLessThan(retainedBytes);
       const childEvents = await supervisor.storage.loadEvents(
         result.provenance.childSessionId,
         { branchId: result.provenance.childBranchId },
@@ -468,7 +497,118 @@ describe("FU-016 durable RefinerService", () => {
       await supervisor.storage.rebuildOperationalProjections?.();
       expect((await supervisor.models.get(review.handleId!)).result)
         .toEqual(result.value);
+      const replayedContext = await supervisor.contexts.materialize(
+        sessionId,
+        branchId,
+      );
+      expect((replayedContext.context as any).recursiveModels)
+        .toEqual(recursive);
     } finally { await supervisor.close(); }
+  });
+
+  test("enforces one evidence-backed explicit review for an active run", async () => {
+    const provider = new ReviewProvider("review-run-admission");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      const run = await supervisor.runs.admit(sessionId, branchId, {
+        task: "Run one bounded adaptive episode",
+        requestKey: "bounded-adaptive-episode",
+        refinementPolicy: {
+          manualReviewLimit: 1,
+          requiredEvidenceEventCount: 1,
+        },
+      });
+      await expect(supervisor.refiner.request(sessionId, branchId, {
+        instructions: "Too early",
+      })).rejects.toThrow("requires at least 1 distinct canonical");
+
+      const cell = await supervisor.executeCell(
+        sessionId,
+        branchId,
+        `return { measuredRate: 12, managedProcessStatus: "running", target: "bounded backoff" };`,
+      );
+      const events = await supervisor.storage.loadEvents(sessionId, {
+        branchId,
+      });
+      const evidenceEvent = events.find((event) =>
+        event.type === "CellCommitted" &&
+        (event.payload as { cellId?: string }).cellId === cell.cellId
+      )!;
+      const review = await supervisor.refiner.request(sessionId, branchId, {
+        instructions: "Improve the retained bounded backoff strategy",
+        evidenceEventIds: [evidenceEvent.id],
+      });
+      expect(review).toMatchObject({
+        status: "no_change",
+        evidenceEventIds: [evidenceEvent.id],
+      });
+      await expect(supervisor.refiner.request(sessionId, branchId, {
+        instructions: "Attempt a second review",
+        evidenceEventIds: [evidenceEvent.id],
+      })).rejects.toThrow("at most 1 explicit refinement");
+      await supervisor.runs.cancel(
+        sessionId,
+        branchId,
+        run.runId,
+        "Test complete",
+      );
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("keeps automatic scans available after thousands of irrelevant branch events", async () => {
+    const provider = new ReviewProvider("review-long-history");
+    const { supervisor, sessionId, branchId } = await fixture(provider);
+    try {
+      await supervisor.storage.appendEvents(Array.from(
+        { length: 2_100 },
+        (_, index) => ({
+          sessionId,
+          branchId,
+          type: "BudgetDebited" as const,
+          producer: "supervisor",
+          idempotencyKey: `long-history-budget:${index}`,
+          payload: {
+            callId: `long-history-call-${index}`,
+            tokens: 0,
+            costUsd: 0,
+            turns: 0,
+            wallTimeMs: 0,
+            usageSource: "provider-reported" as const,
+          },
+        }),
+      ));
+      await expect(
+        supervisor.refiner.scanBoundary(
+          sessionId,
+          branchId,
+          "long-history-first",
+        ),
+      ).resolves.toEqual([]);
+      await supervisor.appendMessage(
+        sessionId,
+        branchId,
+        "user",
+        "one incremental event",
+      );
+      await expect(
+        supervisor.refiner.scanBoundary(
+          sessionId,
+          branchId,
+          "long-history-second",
+        ),
+      ).resolves.toEqual([]);
+      const events = await supervisor.storage.loadEvents(sessionId, {
+        branchId,
+      });
+      expect(events.some((event) =>
+        event.type === "MessageAppended" &&
+        (event.payload as any).learningScan?.category === "scan_unavailable"
+      )).toBe(false);
+    } finally {
+      await supervisor.close();
+    }
   });
 
   test("branch diagnostics count one retained refinement submission without double counting", async () => {
@@ -1798,6 +1938,7 @@ describe("FU-016 durable RefinerService", () => {
       expect((observations[0]!.payload as any).learningScan).toEqual({
         version: 1,
         category: "validation_failed",
+        durationMs: expect.any(Number),
       });
       await reopened.storage.appendEvents([{
         id: "refinement-scan-observation-forged-prose",
@@ -1823,6 +1964,7 @@ describe("FU-016 durable RefinerService", () => {
           kind: "scan_observation",
           effectiveStatus: "validation_failed",
           activityId: observations[0]!.id,
+          durationMs: expect.any(Number),
         }),
       ]);
       expect(await reopened.refiner.learningActivity(
