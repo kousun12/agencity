@@ -124,17 +124,19 @@ class RuneBenchCatalogTests(unittest.TestCase):
         self.assertIn('match.completeness === "inline"', REPL_GUIDANCE)
         self.assertIn("do not spend opening turns enumerating object surfaces", REPL_GUIDANCE)
         self.assertIn("minBackoffMs: 250", REPL_GUIDANCE)
+        self.assertIn("return await (async () =>", REPL_GUIDANCE)
         self.assertIn("last: attempts.at(-1) ?? null", REPL_GUIDANCE)
         self.assertIn("Cell results must be JSON-safe", REPL_GUIDANCE)
+        self.assertIn("Per-strategy attempt arrays", REPL_GUIDANCE)
+        self.assertIn("fewer, longer bounded", REPL_GUIDANCE)
         self.assertIn("runActionLoop", REPL_GUIDANCE)
         self.assertIn("sdk.processes.start", REPL_GUIDANCE)
         self.assertIn("sdk.processes.readLogs", REPL_GUIDANCE)
-        self.assertIn('acquireController("trainer-working-strategy")', REPL_GUIDANCE)
-        self.assertIn("await controller.release();", REPL_GUIDANCE)
+        self.assertIn("managed process is optional", REPL_GUIDANCE)
+        self.assertIn("release the REPL controller", REPL_GUIDANCE)
         self.assertIn("Never use `command &`", REPL_GUIDANCE)
-        self.assertIn("game actions continue during model decisions", REPL_GUIDANCE)
         self.assertLess(
-            REPL_GUIDANCE.index("await controller.release()"),
+            REPL_GUIDANCE.index("release the REPL controller"),
             REPL_GUIDANCE.index("sdk.processes.start"),
         )
         self.assertEqual(fresh.data.adapted_prompt_sha256, adaptive.data.adapted_prompt_sha256)

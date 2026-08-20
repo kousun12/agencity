@@ -177,14 +177,15 @@ tells the model to:
 - consult SDK, learning, and wiki files on demand rather than loading all of
   them into context;
 - measure XP rate through the active tracker path after each strategy;
-- write trainer files only below `/app/agencity-runebench/trainers/`;
-- release and confirm the REPL controller before handing ownership to exactly
-  one trainer;
-- move a proven non-zero loop into that owned trainer so game actions continue
-  during model decisions instead of alternating one foreground action with one
-  provider call; and
-- start, inspect, read logs from, and stop that trainer only through
-  `sdk.processes`.
+- keep only reusable connections, imported helpers, and compact summaries at
+  REPL top level while scoping attempt arrays and complete tool payloads inside
+  the cell that consumes them;
+- use fewer, longer bounded foreground loops after measuring a non-zero
+  strategy instead of alternating short actions with provider calls; and
+- use a managed trainer only when provider-call pauses materially prevent
+  sustained training. If used, write it below
+  `/app/agencity-runebench/trainers/`, release and confirm the REPL controller
+  before handoff, and manage it only through `sdk.processes`.
 
 The treatment currently does not prescribe a multi-agent strategy.
 
@@ -200,10 +201,10 @@ recycling, or a branch change produces a new epoch. Required recovery data must
 use files, durable state, or artifacts, and the model must reconnect from
 current inputs; prior effectful cells are never replayed automatically.
 Console calls from imported callbacks outside an active cell are no-ops. A
-long-running strategy therefore uses `sdk.processes`, whose JSON handle,
-process-group lifecycle, bounded logs, and terminal outcome remain available
-after console-worker loss. Unmanaged `command &`, `nohup`, `/tmp` trainers, and
-second controllers are forbidden.
+long-running strategy may use `sdk.processes` when it must continue during
+model decisions; its JSON handle, process-group lifecycle, bounded logs, and
+terminal outcome remain available after console-worker loss. Unmanaged
+`command &`, `nohup`, `/tmp` trainers, and second controllers are forbidden.
 
 ## Learning modes
 
@@ -213,10 +214,9 @@ game character.
 - `fresh` explicitly pauses automatic learning before the root run and omits
   manual refinement guidance.
 - `within-run` explicitly enables automatic learning before the root run and
-  first requires a measured non-zero strategy. While a proven game loop runs as
-  an owned managed process, the agent may request one focused governed refinement from
-  retained failures and rate evidence, then test an approved memory, prompt
-  note, or skill in a later measured attempt.
+  first requires a measured non-zero strategy. The agent may request one
+  focused governed refinement from retained failures and rate evidence, then
+  test an approved memory, prompt note, or skill in a later measured attempt.
 
 No profile or learned artifact crosses scored tasks. This keeps tasks
 independent and avoids curriculum leakage. It also means this integration does
@@ -515,8 +515,9 @@ For each selected task and rollout, Verifiers:
 5. starts the game, tracker, and bot and waits for readiness;
 6. launches one fresh Agencity root through the Verifiers model-interception
    endpoint;
-7. lets the root use the image SDK through its persistent Bun REPL and, after
-   an explicit controller release, an owned managed trainer;
+7. lets the root use the image SDK through deliberate scoped Bun REPL cells,
+   with an owned managed trainer available after explicit controller release
+   when uninterrupted background action is warranted;
 8. requests owned Agencity service shutdown, then waits up to 30 seconds for a
    stopped lifecycle even if the first request finds an already-draining
    authority conflict; confirmed shutdown stops managed process groups and
@@ -660,16 +661,17 @@ The full trace showed that the same treatment guidance was present in both the
 task and root instructions, the first 16 turns were spent resolving the combat
 API without a successful baseline, automatic refinement ran before the first
 non-zero rate, completed refinement handles added large repeated context, and
-the model continued foreground actions instead of handing a proven loop to a
-managed trainer. Per-step non-provider overhead also grew with branch history.
+the model continued alternating short foreground actions with model calls.
+Per-step non-provider overhead also grew with branch history.
 The current working tree waits for a confirmed stopped lifecycle after an
 initial conflicted shutdown request, removes the duplicate treatment prompt,
-adds a direct-SDK and managed-trainer quick start, identifies the `bot`/`rs`
-receiver split, and directs proven loops into managed processes. These changes
-have model-free coverage but no paid canary evidence. An inner benchmark
-deadline, incremental long-run projections, bounded completed-refinement
-context, and evidence-gated refinement remain required before another paid
-canary.
+adds a compact direct-SDK quick start, identifies the `bot`/`rs` receiver split,
+scopes transient loop data, and directs proven strategies toward fewer, longer
+bounded foreground loops. Managed trainers remain available only when
+provider-call pauses materially prevent sustained training. These changes have
+model-free coverage but no paid canary evidence. An inner benchmark deadline,
+incremental long-run projections, bounded completed-refinement context, and
+evidence-gated refinement remain required before another paid canary.
 
 ## Current limitations
 

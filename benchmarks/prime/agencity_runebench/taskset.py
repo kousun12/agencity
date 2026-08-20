@@ -408,18 +408,20 @@ Use the exact loop shape below after one action works. Replace only the action
 with the proven task-relevant call. `minBackoffMs` cannot be below 250.
 
 ```ts
-const attempts = await runActionLoop({{
-  iterations: 20,
-  minBackoffMs: 250,
-  maxBackoffMs: 5_000,
-  successDelayMs: 0,
-  action: () => bot.chopTree(),
-}});
-return {{
-  succeeded: attempts.filter((attempt) => attempt.ok).length,
-  failed: attempts.filter((attempt) => !attempt.ok).length,
-  last: attempts.at(-1) ?? null,
-}};
+return await (async () => {{
+  const attempts = await runActionLoop({{
+    iterations: 20,
+    minBackoffMs: 250,
+    maxBackoffMs: 5_000,
+    successDelayMs: 0,
+    action: () => bot.chopTree(),
+  }});
+  return {{
+    succeeded: attempts.filter((attempt) => attempt.ok).length,
+    failed: attempts.filter((attempt) => !attempt.ok).length,
+    last: attempts.at(-1) ?? null,
+  }};
+}})();
 ```
 
 Start with one short action and return its small result. Treat a returned
@@ -431,58 +433,31 @@ is already running: do not spend opening turns enumerating object surfaces or
 repeating unchanged documentation searches. Cell results must be JSON-safe:
 replace optional `undefined` fields with `?? null` or omit them.
 
+Keep only reusable connections, imported helpers, and small strategy summaries
+at REPL top level. Per-strategy attempt arrays, complete tool payloads, and
+other transient values belong inside an async function or local block so they
+can be collected after the cell returns. Return aggregate counts, the latest
+useful failure, elapsed time, and the measured rate instead of retaining or
+returning complete attempt history.
+
 Write treatment scripts only under `{TRAINER_DIR}`. Read `/app/sdk/API.md`,
 `/app/learnings/`, and `/app/wiki/` on demand. Measure after each strategy with
 the exact `TRACKING_FILE={TRACKING_FILE} bun ... check_xp_rate.ts <Skill>`
 command stated in the task.
 
-Once a measured loop produces non-zero XP, prefer moving it into one managed
-process so game actions continue during model decisions. Do not keep alternating
-one foreground action with one model call after proving a repeatable strategy.
-The trainer script must import `acquireController` and
-`runActionLoop` from `{CONTROLLER_PATH}`, acquire one unique trainer owner, and
-release that controller in `finally`. Hand ownership over in this exact order:
+Once a measured loop produces non-zero XP, prefer fewer, longer bounded
+foreground loops and fewer model decisions. Reconsider the strategy only when
+the measured rate stalls, the action begins failing, or stronger evidence
+justifies a change. Do not alternate one short foreground action with one model
+call after proving a repeatable strategy.
 
-1. write the trainer under `{TRAINER_DIR}` with `tools.writeFile`;
-2. call `await controller.release()` and do not use the old `rs` or `bot` again;
-3. start exactly one trainer with
-   `sdk.processes.start({{ command: "bun {TRAINER_DIR}/<name>.ts",
-   cwd: "/app", idempotencyKey: "<stable-strategy-key>" }})`;
-4. retain the returned JSON handle and use `sdk.processes.inspect`,
-   `sdk.processes.readLogs`, or `sdk.processes.stop` for its lifecycle.
-
-Use this lifecycle template after replacing `bot.chopTree()` with the proven
-task action and choosing unique names:
-
-```ts
-const trainerPath = "{TRAINER_DIR}/working-strategy.ts";
-const trainerSource = `
-import {{ acquireController, runActionLoop }} from "{CONTROLLER_PATH}";
-const controller = await acquireController("trainer-working-strategy");
-try {{
-  const bot = controller.bot;
-  while (true) {{
-    await runActionLoop({{
-      iterations: 100,
-      minBackoffMs: 250,
-      maxBackoffMs: 5_000,
-      successDelayMs: 0,
-      action: () => bot.chopTree(),
-    }});
-  }}
-}} finally {{
-  await controller.release();
-}}
-`;
-await tools.writeFile(trainerPath, trainerSource);
-await controller.release();
-const trainer = await sdk.processes.start({{
-  command: `bun ${{trainerPath}}`,
-  cwd: "/app",
-  idempotencyKey: "runebench-working-strategy",
-}});
-return trainer;
-```
+A managed process is optional rather than the default next step. Use one only
+when pauses during model decisions materially prevent sustained training. If
+used, write the trainer under `{TRAINER_DIR}`, import `acquireController` and
+`runActionLoop` from `{CONTROLLER_PATH}`, release the REPL controller before
+calling `sdk.processes.start`, and release the trainer's unique controller in
+`finally`. Retain only the returned JSON handle; inspect or stop it with
+`sdk.processes.inspect`, `sdk.processes.readLogs`, and `sdk.processes.stop`.
 
 Never use `command &`, `nohup`, `/tmp`, or another unmanaged process. Never
 start a trainer while the REPL controller claim is live. A failed controller

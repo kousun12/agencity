@@ -309,15 +309,18 @@ competing-controller, action-backoff, and tracker-path defects in the earlier
 direct treatment. The current model-free treatment replaces the upstream MCP
 prompt, stages one token-and-process-identity controller claim, requires bounded
 backoff for false action results, gives the active tracker path explicitly, and
-hands long-running trainers to `sdk.processes`. Benchmark cleanup removes
+keeps transient loop data out of persistent REPL top-level bindings. Proven
+strategies use fewer, longer bounded foreground loops; `sdk.processes` remains
+an optional handoff when provider-call pauses materially prevent sustained
+training. Benchmark cleanup removes
 portable state only after owned-service shutdown confirms process cleanup;
 an initial shutdown rejection from an already-draining service is polled for up
 to 30 seconds, while unconfirmed shutdown retains lifecycle evidence and is an
 infrastructure error. Treatment guidance is supplied once through root
 repository instructions, identifies the high-level `bot` and low-level `rs`
 receiver split with a compact translated SDK quick start and bounded
-documentation lookup, and directs a proven non-zero loop into a managed trainer
-so actions continue during provider calls. A later Luna-xhigh Attack 30-minute
+documentation lookup, and directs a proven non-zero strategy toward deliberate
+bounded execution with compact observations. A later Luna-xhigh Attack 30-minute
 treatment on commit `2d1b98f` reached a live peak of 72 XP/min but hit the outer
 1,920-second timeout after 95 root model calls plus two refinement calls without
 a typed `finish`; finalization and the official scorer never ran. A separate
