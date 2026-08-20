@@ -322,8 +322,11 @@ unconfirmed shutdown retains lifecycle evidence and is an infrastructure error.
 Treatment guidance is supplied once through root
 repository instructions, identifies the high-level `bot` and low-level `rs`
 receiver split with a compact translated SDK quick start and bounded
-documentation lookup, and directs a proven non-zero strategy toward deliberate
-bounded execution with compact observations. A later Luna-xhigh Attack 30-minute
+documentation lookup, distinguishes upstream `rs-sdk` operational learnings
+from the extracted skill/item/NPC/shop/quest wiki, directs focused linked
+navigation with live-state verification, and directs a proven non-zero strategy
+toward deliberate bounded execution with compact observations. A later
+Luna-xhigh Attack 30-minute
 treatment on commit `2d1b98f` reached a live peak of 72 XP/min but hit the outer
 1,920-second timeout after 95 root model calls plus two refinement calls without
 a typed `finish`; finalization and the official scorer never ran. A separate

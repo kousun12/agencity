@@ -388,7 +388,7 @@ Direct SDK quick start:
 ```ts
 await bot.skipTutorial();
 await bot.chopTree();
-await bot.mineRock();
+await bot.interactLoc(/rocks?/i, "Mine");
 await bot.attackNpc("chicken");
 rs.getState();
 rs.getInventory();
@@ -404,6 +404,38 @@ To locate a symbol first, inspect the exact bounded shell envelope:
 const match = await tools.shell("grep -n 'attackNpc' /app/sdk/API.md");
 return match.completeness === "inline" ? match.value : match;
 ```
+
+## Image-owned knowledge
+
+The pinned image provides two complementary model-facing knowledge sources:
+
+- `/app/learnings/` contains upstream `rs-sdk` operational notes, tested
+  interaction patterns, known obstacles, and skill examples. These files are
+  intended for agent use. Check for a relevant filename early instead of
+  rediscovering a documented game or SDK behavior.
+- `/app/wiki/` contains broad extracted game knowledge. Start in
+  `/app/wiki/skills/` with the scored skill's Markdown file for training
+  methods and requirements, then
+  follow its Markdown links or search the focused directories:
+  `/app/wiki/items/` for tools and ingredients, `/app/wiki/npcs/` for targets
+  and locations, `/app/wiki/shops/` for stock and prices, and
+  `/app/wiki/quests/` for access requirements and walkthroughs.
+
+List likely files once with a bounded shell call, then read only the relevant
+pages:
+
+```ts
+const files = await tools.shell(
+  "ls -1 /app/learnings /app/wiki/skills",
+);
+return files.completeness === "inline" ? files.value : files;
+```
+
+Use targeted case-insensitive searches when the filename is uncertain. Do not
+load the wiki corpus wholesale or repeat unchanged searches. Treat learnings
+and wiki pages as guidance rather than current world state: confirm tools,
+inventory, nearby entities, requirements, and action results through `rs`, and
+confirm exact callable signatures in `/app/sdk/API.md`.
 
 Use the exact loop shape below after one action works. Replace only the action
 with the proven task-relevant call. `minBackoffMs` cannot be below 250.
@@ -441,9 +473,8 @@ can be collected after the cell returns. Return aggregate counts, the latest
 useful failure, elapsed time, and the measured rate instead of retaining or
 returning complete attempt history.
 
-Write treatment scripts only under `{TRAINER_DIR}`. Read `/app/sdk/API.md`,
-`/app/learnings/`, and `/app/wiki/` on demand. Measure after each strategy with
-the exact `TRACKING_FILE={TRACKING_FILE} bun ... check_xp_rate.ts <Skill>`
+Write treatment scripts only under `{TRAINER_DIR}`. Measure after each strategy
+with the exact `TRACKING_FILE={TRACKING_FILE} bun ... check_xp_rate.ts <Skill>`
 command stated in the task.
 
 Once a measured loop produces non-zero XP, prefer fewer, longer bounded

@@ -127,8 +127,20 @@ class RuneBenchCatalogTests(unittest.TestCase):
         self.assertIn("Never construct `BotSDK` yourself", REPL_GUIDANCE)
         self.assertIn("`bot` is the high-level `BotActions` surface", REPL_GUIDANCE)
         self.assertIn('await bot.attackNpc("chicken")', REPL_GUIDANCE)
+        self.assertIn('await bot.interactLoc(/rocks?/i, "Mine")', REPL_GUIDANCE)
+        self.assertNotIn("bot.mineRock", REPL_GUIDANCE)
         self.assertIn("rs.getState()", REPL_GUIDANCE)
         self.assertIn('match.completeness === "inline"', REPL_GUIDANCE)
+        self.assertIn("## Image-owned knowledge", REPL_GUIDANCE)
+        self.assertIn(
+            "`/app/learnings/` contains upstream `rs-sdk` operational notes",
+            REPL_GUIDANCE,
+        )
+        for wiki_section in ("skills", "items", "npcs", "shops", "quests"):
+            self.assertIn(f"`/app/wiki/{wiki_section}/`", REPL_GUIDANCE)
+        self.assertIn("follow its Markdown links", REPL_GUIDANCE)
+        self.assertIn("Do not\nload the wiki corpus wholesale", REPL_GUIDANCE)
+        self.assertIn("confirm exact callable signatures", REPL_GUIDANCE)
         self.assertIn("do not spend opening turns enumerating object surfaces", REPL_GUIDANCE)
         self.assertIn("minBackoffMs: 250", REPL_GUIDANCE)
         self.assertIn("return await (async () =>", REPL_GUIDANCE)

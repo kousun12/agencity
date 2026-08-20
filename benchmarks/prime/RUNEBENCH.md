@@ -135,8 +135,8 @@ agent only after both the tracker and bot report ready.
 
 ### Files available to the agent
 
-The pinned image includes the game SDK, its documentation, retained learnings,
-and extracted game-wiki Markdown:
+The pinned image includes the game SDK, its documentation, upstream `rs-sdk`
+learnings intended for agent use, and extracted game-wiki Markdown:
 
 - `/app/sdk/API.md` and the TypeScript source under `/app/sdk/`;
 - `/app/learnings/`;
@@ -147,8 +147,25 @@ and extracted game-wiki Markdown:
 - `/app/wiki/quests/`.
 
 Agencity can search and read these files through its ordinary typed file, shell,
-and Bun APIs. They are image-owned files rather than MCP resources. The harness
+and Bun APIs. The official MCP treatment exposes the SDK API as a resource;
+Agencity reads the equivalent pinned `/app/sdk/API.md` file. The learning and
+wiki directories are image-owned files rather than MCP resources. The harness
 does not mount external documentation that is absent from the pinned image.
+
+The two game-knowledge sources serve different purposes:
+
+- `/app/learnings/` contains upstream operational notes, tested interaction
+  patterns, known obstacles, and skill examples. These are model-facing
+  `rs-sdk` materials, not Agencity-generated memories and not artifacts learned
+  from Agencity benchmark runs.
+- `/app/wiki/skills/` describes training methods and requirements. Its Markdown
+  links lead to factual item, NPC, shop, and quest pages under the corresponding
+  wiki directories.
+
+Treatment guidance tells the model to inspect likely learning and skill files
+early, follow focused wiki links or searches for prerequisites and acquisition,
+and verify the result against live game state. It does not inline the full API,
+learning files, or wiki corpus into every provider call.
 
 ### Treatment prompting
 
@@ -165,6 +182,11 @@ tells the model to:
 - use a compact direct-SDK quick start that preserves the official interface
   examples under the translated `bot` and `rs` names, plus the exact bounded
   file and shell result shapes for finding additional methods;
+- distinguish upstream operational learnings from the broader extracted wiki,
+  inspect relevant filenames early, and navigate from a skill page to focused
+  item, NPC, shop, or quest facts instead of searching the complete corpus;
+- treat documentation as guidance, verify it against live `rs` state, and use
+  the pinned SDK API as the authority for exact callable signatures;
 - acquire once, then reuse those live objects while the exact branch REPL epoch
   remains warm;
 - begin with one short action and a small returned state summary;
@@ -175,7 +197,7 @@ tells the model to:
 - avoid opening-turn object enumeration and repeated unchanged documentation
   searches while the scored horizon is running;
 - consult SDK, learning, and wiki files on demand rather than loading all of
-  them into context;
+  them into context or repeating unchanged searches;
 - measure XP rate through the active tracker path after each strategy;
 - keep only reusable connections, imported helpers, and compact summaries at
   REPL top level while scoping attempt arrays and complete tool payloads inside
