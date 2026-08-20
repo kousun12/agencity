@@ -116,6 +116,7 @@ export const LEGACY_CLI_VALUE_OPTIONS = Object.freeze([
   "replica",
   "credential-ref",
   "sync-interval",
+  "console-rss-recycle-bytes",
   "scope",
   "scope-id",
   "confirmation",

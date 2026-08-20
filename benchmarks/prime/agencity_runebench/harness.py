@@ -20,10 +20,13 @@ from agencity_runebench.taskset import BENCHMARK, RuneBenchData
 
 STARTUP_LOG = "/tmp/agencity-runebench-entrypoint.log"
 STARTUP_ATTEMPTS = 240
+RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES = 1536 * 1024 * 1024
 
 
 class AgencityRuneBenchHarness(AgencityHarness):
     """Start the staged game immediately before the autonomous model run."""
+
+    CONSOLE_RSS_RECYCLE_BYTES = RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES
 
     async def launch(
         self,
@@ -46,6 +49,9 @@ class AgencityRuneBenchHarness(AgencityHarness):
         if isinstance(metadata, dict):
             metadata["automatic_learning"] = (
                 "enabled" if data.learning_mode == "within-run" else "paused"
+            )
+            metadata["console_rss_recycle_bytes"] = (
+                RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES
             )
         await _start_game(runtime, trace, data)
         return await super().launch(

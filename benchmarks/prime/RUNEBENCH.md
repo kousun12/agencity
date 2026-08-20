@@ -121,10 +121,12 @@ cadence, and Harbor verifier. It changes the agent-to-SDK interface, stages
 explicit console guidance in the root `AGENTS.md`, and raises the runtime
 memory cap from the pinned package's 4 GiB to 8 GiB. The current upstream
 generator made the same memory change after documenting agent OOM failures at
-4 GiB. The adapted task removes the unavailable MCP instructions and corrects
-the tracker command without duplicating the root treatment guidance. The
-catalog and task trace retain both memory values and both the original and
-adapted prompt digests.
+4 GiB. Every RuneBench configuration also sets Agencity's per-console-worker
+RSS recycle threshold to 1.5 GiB (`1610612736` bytes); other benchmark suites
+and ordinary product runs retain the 512 MiB default. The adapted task removes
+the unavailable MCP instructions and corrects the tracker command without
+duplicating the root treatment guidance. The catalog and task trace retain
+both memory values and both the original and adapted prompt digests.
 
 The game starts after the pinned Agencity source and Bun runtime are installed.
 This prevents harness provisioning time from consuming the game horizon. The

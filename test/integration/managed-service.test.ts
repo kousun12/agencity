@@ -23,6 +23,7 @@ import {
 } from "../../src/product/index.ts";
 import { TerminalUI } from "../../src/tui/index.ts";
 import { REFINEMENT_GOVERNANCE_CONTRACT_ID, type JsonValue, type ModelConfiguration, type ModelDispatch, type ModelEffectOutputV2 } from "../../src/domain/index.ts";
+import { DEFAULT_CONSOLE_RSS_RECYCLE_BYTES } from "../../src/console/index.ts";
 import { makeTempRuntime, removeTempRuntime, waitFor, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -186,6 +187,7 @@ describe("managed workspace service", () => {
       Buffer.from(encodeManagedServiceConfiguration(config), "base64url")
         .toString("utf8"),
     ) as Record<string, unknown>;
+    delete serialized.consoleRssRecycleThresholdBytes;
     delete serialized.maxConsoleResidentProcesses;
     delete serialized.maxConsoleActiveExecutions;
     delete serialized.maxAwaitedAgentDepth;
@@ -193,6 +195,7 @@ describe("managed workspace service", () => {
       Buffer.from(JSON.stringify(serialized)).toString("base64url"),
     );
     expect(decoded).toMatchObject({
+      consoleRssRecycleThresholdBytes: DEFAULT_CONSOLE_RSS_RECYCLE_BYTES,
       maxConsoleResidentProcesses: 17,
       maxConsoleActiveExecutions: 4,
       maxAwaitedAgentDepth: 8,
@@ -200,6 +203,19 @@ describe("managed workspace service", () => {
     });
     expect(managedServiceConfigurationHash(decoded))
       .toBe(managedServiceConfigurationHash(config));
+
+    const runebenchLimit = 1536 * 1024 * 1024;
+    const tuned = {
+      ...config,
+      consoleRssRecycleThresholdBytes: runebenchLimit,
+    };
+    expect(
+      decodeManagedServiceConfiguration(
+        encodeManagedServiceConfiguration(tuned),
+      ).consoleRssRecycleThresholdBytes,
+    ).toBe(runebenchLimit);
+    expect(managedServiceConfigurationHash(tuned))
+      .not.toBe(managedServiceConfigurationHash(config));
   });
 
   test("brokers stored provider keys and durable model selection through the public client", async () => {

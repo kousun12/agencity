@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from agencity_runebench.harness import (
     AgencityRuneBenchHarness,
+    RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES,
     _set_automatic_learning,
     _start_game,
 )
@@ -301,6 +302,14 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_harness_starts_game_immediately_before_agencity_launch(self) -> None:
         harness = AgencityRuneBenchHarness(
             SimpleNamespace(installation="portable")
+        )
+        self.assertEqual(
+            harness.CONSOLE_RSS_RECYCLE_BYTES,
+            1536 * 1024 * 1024,
+        )
+        self.assertEqual(
+            RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES,
+            1536 * 1024 * 1024,
         )
         order: list[str] = []
         task = self.task()

@@ -31,6 +31,16 @@ describe("CLI option parsing", () => {
     expect(parsed.values.get("session")).toBe("s");
     expect(parsed.values.get("branch")).toBe("b");
     expect(parsed.positionals).toEqual(["return 1"]);
+    const tuned = parseCliArgs([
+      "run",
+      "--console-rss-recycle-bytes",
+      "1610612736",
+      "--",
+      "train",
+    ]);
+    expect(tuned.values.get("console-rss-recycle-bytes"))
+      .toBe("1610612736");
+    expect(tuned.positionals).toEqual(["train"]);
     expect(() => parseCliArgs(["cell", "--session", "--branch", "b"]))
       .toThrow(/session.*requires a value/i);
   });

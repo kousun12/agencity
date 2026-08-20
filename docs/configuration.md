@@ -41,6 +41,7 @@ For ordinary `agencity` product commands:
 - provider credential file: `~/.agencity/auth.json`
 - managed-service manifest: `<workspace-root>/.agencity/service/manifest.json`
 - managed-service quiescent shutdown: one hour (`3600000` milliseconds)
+- console-worker RSS recycle threshold: 512 MiB (`536870912` bytes)
 
 Overrides:
 
@@ -48,6 +49,10 @@ Overrides:
 - `--db PATH` changes the workspace database.
 - `--artifacts PATH` changes the content-addressed artifact directory.
 - `--profile PATH` changes the profile database. Its credential file is `auth.json` in the same directory.
+- `--console-rss-recycle-bytes N` changes the positive integer RSS threshold
+  applied after each console cell. The normalized value participates in
+  managed-service discovery, so a live service with a different threshold
+  produces `CONFIG_MISMATCH`.
 
 Writable product startup creates missing parent directories for file-backed
 workspace databases, profile databases, and artifact stores. Read-only
@@ -62,7 +67,8 @@ The one-hour timeout begins whenever the managed service becomes quiescent. It i
 
 There is no product CLI override for the idle timeout. Embedding and deterministic lifecycle tests may set `ManagedServiceConfiguration.idleShutdownMs` within the accepted bounds. The normalized value is included in the service discovery configuration hash. A client using a different default receives `CONFIG_MISMATCH` while the existing owner is live rather than taking ownership or deleting its manifest.
 
-Direct `Supervisor.open` and managed-service embedding support three console-capacity options:
+Direct `Supervisor.open` and managed-service embedding support the same
+`consoleRssRecycleThresholdBytes` setting plus three console-capacity options:
 
 - `maxConsoleResidentProcesses`, default `17`, bounds one caller plus the maximum 16-member `runMany` batch without retaining dozens of Bun worker processes;
 - `maxConsoleActiveExecutions`, default `4`, bounds generated JavaScript that is actively running; a cell waiting in an SDK RPC does not consume this permit; and

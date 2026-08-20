@@ -613,16 +613,34 @@ function acceptanceLeaseMs(): number | undefined {
   return value;
 }
 
+function consoleRssRecycleThresholdBytes(
+  parsed: ParsedCliArgs,
+): number | undefined {
+  const raw = parsed.values.get("console-rss-recycle-bytes");
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new ValidationError(
+      "--console-rss-recycle-bytes must be a positive integer",
+    );
+  }
+  return value;
+}
+
 function managedConfiguration(parsed: ParsedCliArgs, workspace: ResolvedWorkspace): ManagedServiceConfiguration {
   const option = (name: string): string | undefined => parsed.values.get(name);
   const syncUrl = option("sync-url") ?? process.env.TURSO_DATABASE_URL;
   const leaseMs = acceptanceLeaseMs();
+  const consoleRssRecycleBytes = consoleRssRecycleThresholdBytes(parsed);
   return {
     workspace,
     databasePath: resolve(option("db") ?? `${workspace.stateDirectory}/agent.db`),
     artifactDirectory: resolve(option("artifacts") ?? `${workspace.stateDirectory}/artifacts`),
     profileDatabasePath: option("profile") ? resolve(option("profile")!) : defaultProfilePath(),
     restartConsoleAfterCell: parsed.flags.has("restart-console-after-cell"),
+    ...(consoleRssRecycleBytes === undefined
+      ? {}
+      : { consoleRssRecycleThresholdBytes: consoleRssRecycleBytes }),
     ...(leaseMs === undefined ? {} : { leaseMs }),
     sync: {
       ...(syncUrl ? { syncUrl } : {}),
@@ -1387,12 +1405,16 @@ async function openSupervisor(parsed: ParsedCliArgs, workspace: ResolvedWorkspac
   const artifacts = resolve(option("artifacts") ?? `${stateDir}/artifacts`);
   const syncUrl = option("sync-url") ?? process.env.TURSO_DATABASE_URL;
   const profile = option("profile") ? resolve(option("profile")!) : legacy ? undefined : defaultProfilePath();
+  const consoleRssRecycleBytes = consoleRssRecycleThresholdBytes(parsed);
   return Supervisor.open({
     databaseUrl: `file:${database}`,
     artifactDirectory: artifacts,
     artifactDirectoryOwnership: parsed.flags.has("exclusive-artifacts") ? "exclusive" : "shared",
     workspaceRoot: workspace.root,
     restartConsoleAfterCell: parsed.flags.has("restart-console-after-cell"),
+    ...(consoleRssRecycleBytes === undefined
+      ? {}
+      : { consoleRssRecycleThresholdBytes: consoleRssRecycleBytes }),
     ...(profile ? { profileDatabaseUrl: `file:${profile}` } : {}),
     sync: {
       workspaceId: workspace.workspaceId,

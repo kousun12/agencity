@@ -20,6 +20,7 @@ const PRODUCT_ROUTE_COMMANDS = new Set<string>(PRODUCT_CLI_COMMANDS.filter((item
 const VALUE_OPTIONS = new Set([
   "state-dir", "db", "artifacts", "workspace-root", "workspace",
   "session", "branch", "cursor", "name", "select", "model", "effort", "goal", "port", "profile", "sync-url", "replica", "credential-ref", "sync-interval",
+  "console-rss-recycle-bytes",
   "scope", "scope-id", "kind", "confirmation", "receipt-dir", "destination", "requested-by", "reconciliation-id", "evidence", "strategy", "from-context", "completion-gate",
 ]);
 const BOOLEAN_OPTIONS = new Set([

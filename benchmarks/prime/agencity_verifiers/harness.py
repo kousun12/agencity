@@ -49,6 +49,7 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
     SUPPORTS_RESUME = False
     EXECUTES_CODE = True
     NEEDS_CONTAINER = True
+    CONSOLE_RSS_RECYCLE_BYTES: int | None = None
 
     async def setup(self, runtime: vf.Runtime) -> None:
         if self.config.installation == "portable":
@@ -202,6 +203,7 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
                 task,
                 workspace=workspace,
                 installation=self.config.installation,
+                console_rss_recycle_bytes=self.CONSOLE_RSS_RECYCLE_BYTES,
             ),
             environment,
         )
@@ -271,6 +273,7 @@ def _agencity_command(
     *,
     workspace: str = WORKSPACE_DIR,
     installation: Literal["apt-git", "portable"] = "apt-git",
+    console_rss_recycle_bytes: int | None = None,
 ) -> list[str]:
     command = [
         PORTABLE_BUN_PATH if installation == "portable" else "bun",
@@ -291,9 +294,14 @@ def _agencity_command(
         f"{provider}:{model}",
         "--effort",
         effort,
-        "--",
-        task,
     ]
+    if console_rss_recycle_bytes is not None:
+        if console_rss_recycle_bytes < 1:
+            raise ValueError("Console RSS recycle bytes must be positive")
+        command.extend(
+            ["--console-rss-recycle-bytes", str(console_rss_recycle_bytes)]
+        )
+    command.extend(["--", task])
     return command
 
 

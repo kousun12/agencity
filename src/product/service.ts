@@ -5,6 +5,7 @@ import { REASONING_EFFORTS, ValidationError, newId, projectEvents, type Reasonin
 import { AgentClient, ProtocolServer } from "../protocol/index.ts";
 import { Supervisor, type AgentRunResult, type StartAgentRunInput, type SupervisorOptions } from "../runtime/index.ts";
 import {
+  DEFAULT_CONSOLE_RSS_RECYCLE_BYTES,
   DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
   DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
   type ConsoleExecutionPoolStatus,
@@ -46,6 +47,7 @@ export interface ManagedServiceConfiguration {
   readonly artifactDirectory: string;
   readonly profileDatabasePath: string;
   readonly restartConsoleAfterCell?: boolean;
+  readonly consoleRssRecycleThresholdBytes?: number;
   readonly maxConsoleResidentProcesses?: number;
   readonly maxConsoleActiveExecutions?: number;
   readonly maxAwaitedAgentDepth?: number;
@@ -67,6 +69,7 @@ interface SerializedManagedServiceConfiguration {
   readonly artifactDirectory: string;
   readonly profileDatabasePath: string;
   readonly restartConsoleAfterCell: boolean;
+  readonly consoleRssRecycleThresholdBytes: number;
   readonly maxConsoleResidentProcesses: number;
   readonly maxConsoleActiveExecutions: number;
   readonly maxAwaitedAgentDepth: number;
@@ -121,6 +124,18 @@ function normalizedIdleShutdownMs(value: number | undefined): number {
   return candidate;
 }
 
+function normalizedConsoleRssRecycleThresholdBytes(
+  value: number | undefined,
+): number {
+  const candidate = value ?? DEFAULT_CONSOLE_RSS_RECYCLE_BYTES;
+  if (!Number.isSafeInteger(candidate) || candidate < 1) {
+    throw new ValidationError(
+      "Console RSS recycle threshold must be a positive integer",
+    );
+  }
+  return candidate;
+}
+
 function normalizedConfiguration(input: ManagedServiceConfiguration): ManagedServiceConfiguration {
   return {
     workspace: { root: resolve(input.workspace.root), workspaceId: input.workspace.workspaceId, name: input.workspace.name, stateDirectory: resolve(input.workspace.stateDirectory) },
@@ -128,6 +143,10 @@ function normalizedConfiguration(input: ManagedServiceConfiguration): ManagedSer
     artifactDirectory: resolve(input.artifactDirectory),
     profileDatabasePath: resolve(input.profileDatabasePath),
     restartConsoleAfterCell: input.restartConsoleAfterCell ?? false,
+    consoleRssRecycleThresholdBytes:
+      normalizedConsoleRssRecycleThresholdBytes(
+        input.consoleRssRecycleThresholdBytes,
+      ),
     maxConsoleResidentProcesses: input.maxConsoleResidentProcesses ??
       DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
     maxConsoleActiveExecutions: input.maxConsoleActiveExecutions ??
@@ -157,6 +176,9 @@ function serializedConfiguration(input: ManagedServiceConfiguration): Serialized
     artifactDirectory: resolve(normalized.artifactDirectory),
     profileDatabasePath: resolve(normalized.profileDatabasePath),
     restartConsoleAfterCell: normalized.restartConsoleAfterCell ?? false,
+    consoleRssRecycleThresholdBytes:
+      normalized.consoleRssRecycleThresholdBytes ??
+      DEFAULT_CONSOLE_RSS_RECYCLE_BYTES,
     maxConsoleResidentProcesses: normalized.maxConsoleResidentProcesses ??
       DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
     maxConsoleActiveExecutions: normalized.maxConsoleActiveExecutions ??
@@ -194,6 +216,8 @@ export function decodeManagedServiceConfiguration(value: string): ManagedService
   return normalizedConfiguration({
     workspace: serialized.workspace!, databasePath: serialized.databasePath!, artifactDirectory: serialized.artifactDirectory!, profileDatabasePath: serialized.profileDatabasePath!,
     restartConsoleAfterCell: serialized.restartConsoleAfterCell,
+    consoleRssRecycleThresholdBytes:
+      serialized.consoleRssRecycleThresholdBytes,
     maxConsoleResidentProcesses: serialized.maxConsoleResidentProcesses,
     maxConsoleActiveExecutions: serialized.maxConsoleActiveExecutions,
     maxAwaitedAgentDepth: serialized.maxAwaitedAgentDepth,
@@ -290,6 +314,9 @@ export class ManagedWorkspaceService {
       workspaceRoot: normalized.workspace.root,
       profileDatabaseUrl: `file:${normalized.profileDatabasePath}`,
       restartConsoleAfterCell: normalized.restartConsoleAfterCell ?? false,
+      consoleRssRecycleThresholdBytes:
+        normalized.consoleRssRecycleThresholdBytes ??
+        DEFAULT_CONSOLE_RSS_RECYCLE_BYTES,
       maxConsoleResidentProcesses: normalized.maxConsoleResidentProcesses ??
         DEFAULT_MAX_CONSOLE_RESIDENT_PROCESSES,
       maxConsoleActiveExecutions: normalized.maxConsoleActiveExecutions ??

@@ -37,6 +37,7 @@ const COMMON_OPTIONS: readonly HelpRow[] = Object.freeze([
 const ADVANCED_OPTIONS: readonly HelpRow[] = Object.freeze([
   { label: "--session ID  --branch ID  --cursor N", description: "Address retained diagnostic state.", labelTone: "option" },
   { label: "--db PATH  --artifacts PATH  --workspace-root PATH", description: "Override low-level local storage paths.", labelTone: "option" },
+  { label: "--console-rss-recycle-bytes N", description: "Recycle a console worker after its reported RSS exceeds N bytes.", labelTone: "option" },
   { label: "--sync-url URL  --replica PATH", description: "Configure optional synchronization.", labelTone: "option" },
   { label: "--scope KIND  --scope-id ID  --destination PATH", description: "Select an owned data scope and export destination.", labelTone: "option" },
   { label: "--confirmation 'DELETE <scope> <id>'", description: "Provide exact confirmation for guarded deletion.", labelTone: "option" },

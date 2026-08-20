@@ -139,10 +139,13 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
             "--workspace=/escape",
             workspace="/app/personal-site",
             installation="portable",
+            console_rss_recycle_bytes=1536 * 1024 * 1024,
         )
         self.assertIn(PORTABLE_STATE_DIR, command)
         self.assertIn(PORTABLE_ARTIFACTS_DIR, command)
         self.assertIn(PORTABLE_PROFILE_PATH, command)
+        self.assertIn("--console-rss-recycle-bytes", command)
+        self.assertIn(str(1536 * 1024 * 1024), command)
         self.assertEqual(command[-2:], ["--", "--workspace=/escape"])
 
     def test_only_interception_credentials_reach_agencity(self) -> None:

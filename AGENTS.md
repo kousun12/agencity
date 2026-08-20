@@ -290,7 +290,9 @@ exact values registered by the supervisor fail admission. It
 raises the pinned package's 4 GiB
 memory cap to 8 GiB, matching
 the current upstream generator's hardening for documented agent OOM failures,
-and retains both limits as treatment provenance. Fresh and within-run learning
+and retains both limits as treatment provenance. Every RuneBench run also sets
+the console-worker RSS recycle threshold to 1.5 GiB while ordinary product and
+other benchmark runs retain the 512 MiB default. Fresh and within-run learning
 modes are separate and set the policy before the root run: fresh pauses
 automatic learning, while within-run enables it and permits one evidence-backed
 governed review. Every scored task uses fresh Agencity and game state, so no
