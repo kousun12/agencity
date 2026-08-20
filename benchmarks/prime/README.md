@@ -106,8 +106,10 @@ uv run --locked eval @ configs/terminal-bench-2-full.toml --dry-run
 Suite configs are provided for:
 
 - RuneBench: `runebench-woodcutting-15m-{fresh,adaptive}.toml`,
-  `runebench-15m-sample-adaptive.toml`, and
-  `runebench-full-adaptive.toml`;
+  `runebench-15m-sample-adaptive.toml`,
+  `runebench-leaderboard-full-adaptive.toml` for the current public
+  leaderboard's 16 30-minute skills, and `runebench-full-adaptive.toml` for all
+  32 pinned 15- and 30-minute skill tasks;
 - Terminal-Bench 2: `terminal-bench-2-{smoke,sample,full}.toml` and
   `terminal-bench-2-shard-0-of-4.toml`;
 - Terminal-Bench 2.1: `terminal-bench-2-1-{smoke,sample,full}.toml` and
@@ -434,6 +436,12 @@ mapping it to reward zero.
 
 ## Recorded model evidence
 
+- RuneBench: one Luna-xhigh Woodcutting 15-minute treatment on commit
+  `1b2cebf` produced an official `100.0` XP/min score with successful scoring
+  and cleanup. The agent ended failed at the then-current cumulative input-token
+  bound before a typed `finish`; RuneBench configs have since removed that
+  bound. The run exposed unresolved competing-controller, action-backoff, and
+  tracker-path defects, so it is not readiness evidence for a paid full run.
 - OOLONG: one revised Sol-high Yahoo 128K task scored `1.0`; a corresponding
   Luna task scored `0`. A later current-revision Sol-high canary on commit
   `5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193` completed the repaired
@@ -471,10 +479,10 @@ performance claims. No paid full-suite execution has been performed.
 ## Remaining limits
 
 - RuneBench support covers the pinned 32 published skill tasks. Gold,
-  collaboration, and cross-episode curriculum treatments are not included. One
-  paid Luna canary exercised 33 direct-REPL turns without credential-input or
-  worker failure, but cleanup failed before official scoring; its reported zero
-  is an infrastructure error rather than a RuneBench score.
+  collaboration, and cross-episode curriculum treatments are not included. The
+  current public-leaderboard comparison uses the 16 30-minute skills. The
+  direct treatment still needs one-controller background execution and a
+  canonical tracker/rate-check path before a paid 16-skill run.
 - Only 1 of 731 SWE-bench Pro public rows is currently compatible. Of the 730
   incompatible rows, 729 lack audited immutable image pins and one audited Vuls
   row fails the required official no-op parser-evidence control. This blocks a

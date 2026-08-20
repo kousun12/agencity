@@ -206,7 +206,10 @@ fresh-profile RuneBench treatment.
 - `configs/runebench-woodcutting-15m-adaptive.toml` — the same exact task with
   within-run learning enabled;
 - `configs/runebench-15m-sample-adaptive.toml` — four fixed 15-minute skills;
-- `configs/runebench-full-adaptive.toml` — all 32 published skill tasks.
+- `configs/runebench-leaderboard-full-adaptive.toml` — the 16 30-minute skill
+  tasks used by the current public leaderboard;
+- `configs/runebench-full-adaptive.toml` — the exhaustive local selection of all
+  32 published 15- and 30-minute skill tasks.
 
 The committed configs use native OpenAI, `xhigh` reasoning, one rollout per
 selected task, up to 5,000 model turns, and a 128,000-token per-response
@@ -215,6 +218,53 @@ ceilings. The official 15- or 30-minute task horizon remains authoritative, so
 elapsed task time normally terminates the rollout before the turn allowance.
 This configuration does not bound provider spend; review the model and route
 before any paid run.
+
+### Full leaderboard run
+
+The [public RuneBench leaderboard](https://maxbittker.github.io/runebench/)
+currently loads the 30-minute skill results and presents one best-of-one result
+for each of 16 skills. Its ranking value is the mean of
+`ln(1 + peak XP/min)` across those 16 skills. A single task reward such as
+Woodcutting `100.0` is one XP/min cell, not a percentage or complete benchmark
+score.
+
+`configs/runebench-leaderboard-full-adaptive.toml` is the full
+leaderboard-comparable selection. Claim a complete row only when all 16 tasks
+have valid official scores. Keep provider, model, reasoning effort, task
+treatment, rollout count, and task horizon fixed. A local complete run does not
+automatically publish a row; public inclusion remains subject to upstream
+source-provenance and submission requirements.
+
+Do not admit the paid full run until one exact 30-minute canary proves that the
+direct-REPL treatment has one bot controller, the background trainer handles
+non-throwing action failures with bounded backoff, and the documented rate
+command reads the tracker's actual output path. The latest paid 15-minute
+canary exposed defects in all three areas even though official scoring
+completed.
+
+The serial task horizon is eight hours before setup and scoring overhead:
+16 tasks × 30 minutes. Verifiers can run independent episodes concurrently:
+
+```sh
+uv run --locked eval @ configs/runebench-leaderboard-full-adaptive.toml \
+  --max-concurrent 4 \
+  --output-dir outputs/runebench-leaderboard-full-adaptive
+```
+
+Each episode receives a separate 8 GiB container and fresh Agencity/game state.
+Four concurrent episodes therefore require at least 32 GiB for task containers
+plus Docker and host overhead, as well as provider quota for four simultaneous
+Luna calls. The committed config keeps `max_concurrent = 1` because it is the
+portable safe default. Start at two on a suitably provisioned host, inspect one
+completed task, then raise to four only when memory, CPU, provider limits,
+scoring, and cleanup remain healthy. Do not lower the pinned 8 GiB task memory
+to increase concurrency.
+
+On a host that cannot hold multiple 8 GiB containers, run serially or partition
+the explicit 16 task IDs across separate machines and output directories.
+Multi-machine partitions must be disjoint, preserve the exact treatment, and be
+combined only after every task has valid official evidence. Infrastructure
+errors remain unscored rather than becoming zeroes.
 
 ### Preflight and dry-run
 
@@ -262,11 +312,15 @@ or harness treatment. Keep the model, endpoint class, reasoning effort, token
 limits, runtime resources, and rollout count fixed when comparing fresh and
 adaptive modes.
 
-The four-task sample and 32-task full treatment use the same command shape:
+The four-task sample, 16-task leaderboard full run, and exhaustive 32-task
+selection use the same command shape:
 
 ```sh
 uv run --locked eval @ configs/runebench-15m-sample-adaptive.toml \
   --output-dir outputs/runebench-15m-sample-adaptive
+
+uv run --locked eval @ configs/runebench-leaderboard-full-adaptive.toml \
+  --output-dir outputs/runebench-leaderboard-full-adaptive
 
 uv run --locked eval @ configs/runebench-full-adaptive.toml \
   --output-dir outputs/runebench-full-adaptive
@@ -343,18 +397,25 @@ cancellations, unknowns, skips, and incompatibilities. A displayed reward of
 zero is not a valid RuneBench score when the trace reports a harness, cleanup,
 or scorer error.
 
-For a full run, preflight and report against the full selection:
+For the full leaderboard-comparable run, preflight and report against the exact
+16-task selection:
 
 ```sh
 uv run --locked python scripts/preflight_suite.py \
-  configs/runebench-full-adaptive.toml \
-  --output outputs/runebench-full-selection.json
+  configs/runebench-leaderboard-full-adaptive.toml \
+  --output outputs/runebench-leaderboard-full-selection.json
 
 uv run --locked python -m agencity_verifiers.reporting \
-  outputs/runebench-full-adaptive \
-  --selection outputs/runebench-full-selection.json \
-  --output outputs/runebench-full-adaptive-summary.json
+  outputs/runebench-leaderboard-full-adaptive \
+  --selection outputs/runebench-leaderboard-full-selection.json \
+  --output outputs/runebench-leaderboard-full-adaptive-summary.json
 ```
+
+The bounded Agencity summary reports official task rewards and outcome classes;
+it does not replace the leaderboard's 16-skill log-mean calculation or publish
+results upstream. `configs/runebench-full-adaptive.toml` remains available when
+the intended local experiment is the broader 32-task dataset rather than the
+current website comparison.
 
 ## Verification and troubleshooting
 
@@ -391,14 +452,23 @@ Common conditions:
 
 ## Paid canary evidence
 
-One paid Luna canary against the direct-REPL working tree completed 33 model
-turns in one warm REPL epoch and exercised native game actions without a
-credential-input rejection or console-worker loss. The official scorer did not
+One paid Luna-xhigh Woodcutting 15-minute treatment using Agencity commit
+`1b2cebf` produced an official score of `100.0` XP/min with successful scorer
+evidence, service shutdown, and cleanup. The agent itself ended failed after 43
+model calls because the then-current 800,000 cumulative input-token bound was
+reached before a typed `finish`. That RuneBench limit has since been removed.
+The run also exposed unresolved direct-treatment defects: competing control-mode
+SDK connections, a generated hot loop that ignored non-throwing `No tree found`
+results, and a rate-check path that did not read the active tracker output.
+
+An earlier paid Luna canary against the direct-REPL working tree completed 33
+model turns in one warm REPL epoch and exercised native game actions without a
+credential-input rejection or console-worker loss. Its official scorer did not
 run because owned-service shutdown was not confirmed within the harness's
-10-second cleanup bound, so the reported reward zero is an infrastructure error,
-not a benchmark score. Model-free tests, dry-runs, pinned-image startup, and the
-direct SDK connection smoke are setup evidence rather than game-performance
-evidence.
+cleanup bound, so the reported reward zero is an infrastructure error rather
+than a benchmark score. Model-free tests, dry-runs, pinned-image startup, and
+the direct SDK connection smoke remain setup evidence rather than
+game-performance evidence.
 
 ## Current limitations
 
@@ -406,8 +476,9 @@ evidence.
 - The official image is `linux/amd64`; ARM Macs use Docker emulation.
 - Video capture remains enabled because it is part of the official image
   treatment.
-- Owned service shutdown can miss the current 10-second harness cleanup bound;
-  no valid paid RuneBench score is verified for this integration.
-- A full run is long and expensive and remains operator-gated.
+- The direct treatment still needs a single-controller background-runner fix
+  and one canonical tracker/rate-check path before a paid full run.
+- No paid 16-skill leaderboard-comparable run is verified.
+- A full run is long, expensive, and operator-gated.
 - RuneBench is noisy; one rollout is integration evidence, not a stable harness
   comparison.

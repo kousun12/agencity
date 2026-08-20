@@ -271,6 +271,13 @@ images and the portable Bun executable remain explicitly `linux/amd64`; local
 ARM Macs use Docker AMD64 emulation rather than changing the audited treatment.
 RuneBench catalogs all 32 skill tasks in its pinned Harbor dataset against one
 immutable game image and the official peak normalized XP-rate verifier. The
+leaderboard-comparable full selection contains the 16 30-minute skills used by
+the current public website, whose ranking is the mean of `ln(1 + peak XP/min)`
+across those skills; the exhaustive local selection additionally includes all
+16 15-minute variants. The committed default is serial because every task
+receives an independent 8 GiB container. Verifiers episode concurrency may
+parallelize the 16-task selection only when host memory, CPU, provider quota,
+cleanup, and scoring remain healthy. The
 `agencity-runebench-repl-v1` treatment imports the image-owned TypeScript SDK
 directly in Agencity's persistent Bun console instead of advertising generic
 MCP support. Ordinary domain fields such as RuneBench's local
@@ -285,10 +292,20 @@ automatic learning, while within-run enables it and permits one evidence-backed
 governed review. Every scored task uses fresh Agencity and game state, so no
 learned artifact crosses episodes.
 Gold, collaboration, and cross-episode curriculum treatments remain unavailable,
-and no paid RuneBench score is verified. One paid Luna canary completed 33
-direct-REPL turns in one warm epoch without credential-input or console-worker
-failure, but owned-service shutdown missed the harness cleanup bound before the
-official scorer ran; the displayed zero is an infrastructure error.
+and no full 16-skill leaderboard treatment is verified. One paid Luna-xhigh
+Woodcutting 15-minute treatment on commit `1b2cebf` produced an official score
+of 100 XP/min with successful scorer evidence, service shutdown, and cleanup,
+but its agent terminal status was failed after the then-current 800,000
+cumulative input-token bound stopped it at 43 model calls before a typed
+`finish`. That RuneBench cumulative-token bound has since been removed in favor
+of the official task horizon and 5,000-turn allowance. The run exposed
+unresolved competing-controller, action-backoff, and tracker-path defects in
+the direct treatment, so a paid full run remains blocked on a passing exact
+30-minute canary. An earlier paid Luna
+canary completed 33 direct-REPL turns in one warm epoch without
+credential-input or console-worker failure, but owned-service shutdown missed
+the harness cleanup bound before the official scorer ran; that displayed zero
+is an infrastructure error.
 Terminal-Bench 2 and 2.1 each catalog 89/89 compatible official tasks and
 leave the unmodified Harbor verifier authoritative. SWE-bench Pro catalogs all
 731 public rows: one qutebrowser row is compatible, 729 remain incompatible

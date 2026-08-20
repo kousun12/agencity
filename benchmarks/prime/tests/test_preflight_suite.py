@@ -145,6 +145,7 @@ class SuitePreflightTests(unittest.TestCase):
 
     def test_full_catalog_configs_validate_without_loading_images(self) -> None:
         for name, expected in (
+            ("runebench-leaderboard-full-adaptive.toml", 16),
             ("runebench-full-adaptive.toml", 32),
             ("terminal-bench-2-full.toml", 89),
             ("terminal-bench-2-1-full.toml", 89),
@@ -154,6 +155,27 @@ class SuitePreflightTests(unittest.TestCase):
                 manifest = preflight(ROOT / "configs" / name)
                 self.assertEqual(manifest["selected_count"], expected)
                 self.assertEqual(len(manifest["selected_pins"]), expected)
+
+    def test_runebench_leaderboard_full_selects_every_30_minute_skill(self) -> None:
+        manifest = preflight(
+            ROOT / "configs" / "runebench-leaderboard-full-adaptive.toml"
+        )
+        self.assertEqual(len(manifest["selected_ids"]), 16)
+        self.assertTrue(
+            all(
+                identifier.endswith("-xp-30m")
+                for identifier in manifest["selected_ids"]
+            )
+        )
+        self.assertEqual(
+            len(
+                {
+                    identifier.removesuffix("-xp-30m")
+                    for identifier in manifest["selected_ids"]
+                }
+            ),
+            16,
+        )
 
     def test_preflight_rejects_harness_pin_drift(self) -> None:
         config_path = ROOT / "configs" / "terminal-bench-2-full.toml"
