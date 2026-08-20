@@ -61,6 +61,7 @@ TREATMENT_DIR = "/app/agencity-runebench"
 CONTROLLER_PATH = f"{TREATMENT_DIR}/controller.ts"
 TRAINER_DIR = f"{TREATMENT_DIR}/trainers"
 TRACKING_FILE = "/logs/tracking/skill_tracking.json"
+RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES = 1536 * 1024 * 1024
 RATE_COMMAND_TEMPLATE = (
     f"TRACKING_FILE={TRACKING_FILE} "
     "bun /app/benchmark/shared/check_xp_rate.ts {skill}"
@@ -664,6 +665,9 @@ class RuneBenchTaskset(vf.Taskset[RuneBenchTask, RuneBenchConfig]):
                     "image_manifest_digest": entry["image_manifest_digest"],
                     "image_config_digest": entry["image_config_digest"],
                     "treatment": self.config.treatment,
+                    "console_rss_recycle_bytes": (
+                        RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES
+                    ),
                     "skill": entry["skill"],
                     "duration_seconds": entry["duration_seconds"],
                     "sample_interval_ms": entry["sample_interval_ms"],
@@ -723,6 +727,7 @@ __all__ = [
     "RATE_COMMAND_TEMPLATE",
     "REPL_CONNECTION_SOURCE",
     "REPL_GUIDANCE",
+    "RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES",
     "TREATMENT",
     "TRACKING_FILE",
     "TRAINER_DIR",

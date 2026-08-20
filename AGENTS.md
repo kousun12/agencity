@@ -314,9 +314,12 @@ strategies use fewer, longer bounded foreground loops; `sdk.processes` remains
 an optional handoff when provider-call pauses materially prevent sustained
 training. Benchmark cleanup removes
 portable state only after owned-service shutdown confirms process cleanup;
-an initial shutdown rejection from an already-draining service is polled for up
-to 30 seconds, while unconfirmed shutdown retains lifecycle evidence and is an
-infrastructure error. Treatment guidance is supplied once through root
+shutdown and status carry the exact non-default console RSS configuration used
+at service launch, and one monotonic 30-second deadline bounds the request and
+all probes. An initial rejection from an already-draining service remains
+observable while the matching service is polled for a confirmed stop;
+unconfirmed shutdown retains lifecycle evidence and is an infrastructure error.
+Treatment guidance is supplied once through root
 repository instructions, identifies the high-level `bot` and low-level `rs`
 receiver split with a compact translated SDK quick start and bounded
 documentation lookup, and directs a proven non-zero strategy toward deliberate
@@ -342,7 +345,18 @@ that must cite a canonical compact evidence cell recorded after the treatment
 checks a non-zero tracker rate, a running managed trainer, and a specific
 failure or rate target. Core runtime enforcement covers evidence attribution
 and the one-review limit; RuneBench-specific evidence interpretation remains
-treatment behavior. No paid verification covers the current revision.
+treatment behavior. An August 20 Luna-xhigh Attack treatment on commit
+`161040cd62c78c606c7d09511bde90d779ae916a` established working combat by its
+third cell and committed a successful typed `finish` at the 30-minute deadline
+after 26 model calls and 25 cells. It reported 214,252 input and 21,049 output
+tokens and a live peak of 38 XP/min, with no admitted refinement. Official
+scoring did not run because the then-current task finalizer omitted RuneBench's
+1.5 GiB console RSS threshold from service shutdown and status, producing
+`CONFIG_MISMATCH`; its attempt-count cleanup loop also exceeded the nominal
+30-second wait. The current working tree passes that configuration through
+Harbor and fallback harness cleanup and uses the monotonic deadline. Focused
+model-free tests and the pinned-container startup-to-confirmed-shutdown path
+pass, but no paid run verifies official scoring after the repair.
 A paid full run remains blocked on a passing exact 30-minute canary. An earlier paid Luna
 canary completed 33 direct-REPL turns in one warm epoch without
 credential-input or console-worker failure, but owned-service shutdown missed
@@ -391,12 +405,12 @@ pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
 stdout/stderr diagnostics instead of collapsing to a parser-only error. The
-August 19, 2026 model-free verification of the RuneBench working tree passed 98
-benchmark tests with one intentionally skipped unrelated opt-in SWE-bench Pro
-scorer test, all six RuneBench config preflights and dry-runs, package builds and source compilation,
-actual pinned-image game startup, and a direct image-owned TypeScript SDK
-connection plus explicit fresh-mode automatic-learning pause through Docker
-emulation on an ARM Mac. The August 18 verification against commit `e03a2ad`
+August 20, 2026 model-free verification of the RuneBench working tree passed
+102 benchmark tests with one intentionally skipped unrelated opt-in SWE-bench
+Pro scorer test and zero failures. The exact paid-canary preflight and dry-run,
+package build, source compilation, and pinned `linux/amd64`
+startup-to-configuration-matched-shutdown path passed through Docker emulation
+on an ARM Mac. The August 18 verification against commit `e03a2ad`
 separately passed the opt-in official scorer test, all 21 then-existing suite
 preflights, all 22 then-existing config dry-runs, lock and source-pin checks,
 and explicit AMD64 container startup.

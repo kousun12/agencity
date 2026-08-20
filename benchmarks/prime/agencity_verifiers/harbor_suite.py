@@ -53,6 +53,7 @@ class HarborSuiteData(HarborData):
     image_manifest_digest: str
     image_config_digest: str
     treatment: str
+    console_rss_recycle_bytes: int | None = None
 
 
 class HarborSuiteTask(HarborTask):
@@ -86,7 +87,11 @@ class HarborSuiteTask(HarborTask):
                     raise ValueError("Agencity trace metadata is malformed")
                 try:
                     metadata["service_shutdown"] = await _shutdown_portable(
-                        runtime, self.data.workdir
+                        runtime,
+                        self.data.workdir,
+                        console_rss_recycle_bytes=(
+                            self.data.console_rss_recycle_bytes
+                        ),
                     )
                 except Exception:
                     metadata["service_shutdown"] = "unconfirmed"

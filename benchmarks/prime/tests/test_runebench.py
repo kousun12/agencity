@@ -77,6 +77,13 @@ class RuneBenchCatalogTests(unittest.TestCase):
                 self.assertEqual(len(tasks), expected[name])
                 self.assertTrue(all(isinstance(task, RuneBenchTask) for task in tasks))
                 self.assertTrue(all(task.data.resources.memory == 8 for task in tasks))
+                self.assertTrue(
+                    all(
+                        task.data.console_rss_recycle_bytes
+                        == RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES
+                        for task in tasks
+                    )
+                )
 
     def test_fresh_and_within_run_modes_are_explicit_and_isolated(self) -> None:
         selection = SelectionSpec(
@@ -275,6 +282,28 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
             enabled=True,
         )
         self.assertIn("refinement.trigger-policy.v1',true", calls[1][2])
+
+    async def test_finalize_reuses_runebench_service_configuration(self) -> None:
+        task = self.task()
+        trace = SimpleNamespace(info={})
+        runtime = SimpleNamespace()
+        with (
+            patch.object(HarborTask, "finalize", AsyncMock()),
+            patch(
+                "agencity_verifiers.harbor_suite._shutdown_portable",
+                AsyncMock(return_value="stopped"),
+            ) as shutdown,
+            patch(
+                "agencity_verifiers.harbor_suite._cleanup_portable",
+                AsyncMock(return_value="workspace-metadata-and-state-removed"),
+            ),
+        ):
+            await task.finalize(trace, runtime)
+        shutdown.assert_awaited_once_with(
+            runtime,
+            "/app",
+            console_rss_recycle_bytes=RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES,
+        )
 
     async def test_startup_timeout_is_infrastructure_error_with_bounded_log(self) -> None:
         class Runtime:

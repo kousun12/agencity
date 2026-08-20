@@ -16,12 +16,15 @@ from agencity_verifiers.harness import (
     PROFILE_PATH,
     AgencityHarness,
 )
-from agencity_runebench.taskset import BENCHMARK, RuneBenchData
+from agencity_runebench.taskset import (
+    BENCHMARK,
+    RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES,
+    RuneBenchData,
+)
 
 
 STARTUP_LOG = "/tmp/agencity-runebench-entrypoint.log"
 STARTUP_ATTEMPTS = 240
-RUNEBENCH_CONSOLE_RSS_RECYCLE_BYTES = 1536 * 1024 * 1024
 
 
 class AgencityRuneBenchHarness(AgencityHarness):

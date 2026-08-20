@@ -448,10 +448,11 @@ matched its packaged manifest. A Vuls no-op audit returned empty parser
 evidence; the catalog therefore retains that row as incompatible rather than
 mapping it to reward zero.
 
-The August 19, 2026 current working tree passed 98 benchmark tests, skipped one
-unrelated opt-in SWE-bench Pro scorer test, and had zero failures. All six
-RuneBench preflights and dry-runs, the source/wheel build, and pinned-image
-controller and tracker checks passed without model inference.
+The August 20, 2026 current working tree passed 102 benchmark tests, skipped one
+unrelated opt-in SWE-bench Pro scorer test, and had zero failures. The exact
+paid-canary preflight and dry-run, source/wheel build, Python compilation, and
+pinned `linux/amd64` startup-to-configuration-matched-shutdown path passed
+without model inference.
 
 ## Recorded model evidence
 
@@ -466,14 +467,23 @@ controller and tracker checks passed without model inference.
   live `72` XP/min peak but hit the outer 1,920-second timeout after 95 root
   calls plus two refinement calls without typed `finish`; finalization and
   official scoring never started, and a separate service-authority cleanup
-  conflict followed. The cleanup wait and trace-driven prompt changes on the
-  current working tree have model-free coverage only. The current treatment
-  also passes an absolute game-start deadline into durable agent-run state,
-  returns deadline expiry as normal `budget_exceeded` JSON, incrementally
-  advances retained branch history and refinement scan frontiers, bounds
-  completed recursive context, pauses automatic learning, and permits one
-  evidence-citing explicit within-run review. These changes have no paid
-  canary evidence.
+  conflict followed. An August 20 Luna-xhigh Attack treatment on commit
+  `161040cd62c78c606c7d09511bde90d779ae916a` then established working combat
+  by its third cell and committed a successful typed `finish` at the 30-minute
+  deadline after 26 model calls and 25 cells. It reported 214,252 input and
+  21,049 output tokens and a live peak of `38` XP/min, with no admitted
+  refinement. Official scoring did not run: task cleanup omitted RuneBench's
+  non-default 1.5 GiB console RSS threshold from service shutdown and status,
+  producing `CONFIG_MISMATCH`, and its attempt-count cleanup loop exceeded the
+  nominal 30-second wait. The current working tree carries the exact service
+  setting through Harbor and fallback harness cleanup and applies one monotonic
+  deadline to the request and probes. Focused tests and the pinned-container
+  startup-to-confirmed-shutdown path pass; no paid run verifies the repair.
+  The treatment also passes an absolute game-start deadline into durable
+  agent-run state, returns deadline expiry as normal `budget_exceeded` JSON,
+  incrementally advances retained branch history and refinement scan frontiers,
+  bounds completed recursive context, pauses automatic learning, and permits
+  one evidence-citing explicit within-run review.
 - OOLONG: one revised Sol-high Yahoo 128K task scored `1.0`; a corresponding
   Luna task scored `0`. A later current-revision Sol-high canary on commit
   `5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193` completed the repaired
@@ -516,8 +526,9 @@ performance claims. No paid full-suite execution has been performed.
   controller, managed trainer, tracker command, draining-service cleanup,
   prompt de-duplication, canonical deadline, incremental history,
   recursive-context bounds, evidence-citing review admission, and memory
-  preflight have model-free coverage but no passing paid 30-minute canary on
-  this revision. The runtime enforces canonical evidence attribution and the
+  preflight have model-free coverage. The latest paid 30-minute agent run
+  completed, but official scoring was blocked by the pre-repair cleanup
+  mismatch. The runtime enforces canonical evidence attribution and the
   one-review limit; the treatment remains responsible for verifying the
   RuneBench-specific non-zero rate, running trainer, and improvement target
   inside the cited compact evidence cell.

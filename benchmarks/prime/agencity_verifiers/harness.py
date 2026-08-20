@@ -262,7 +262,11 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
             return
         workspace = _workspace(trace.task.data, "portable")
         try:
-            metadata["service_shutdown"] = await _shutdown_portable(runtime, workspace)
+            metadata["service_shutdown"] = await _shutdown_portable(
+                runtime,
+                workspace,
+                console_rss_recycle_bytes=self.CONSOLE_RSS_RECYCLE_BYTES,
+            )
         except Exception:
             metadata["service_shutdown"] = "unconfirmed"
             metadata["cleanup"] = "retained-after-unconfirmed-shutdown"
@@ -350,8 +354,13 @@ def _agencity_command(
     return command
 
 
-def _agencity_service_command(action: Literal["status", "shutdown"], workspace: str) -> list[str]:
-    return [
+def _agencity_service_command(
+    action: Literal["status", "shutdown"],
+    workspace: str,
+    *,
+    console_rss_recycle_bytes: int | None = None,
+) -> list[str]:
+    command = [
         PORTABLE_BUN_PATH,
         "run",
         f"{AGENCITY_DIR}/src/cli.ts",
@@ -367,6 +376,13 @@ def _agencity_service_command(action: Literal["status", "shutdown"], workspace: 
         "--profile",
         PORTABLE_PROFILE_PATH,
     ]
+    if console_rss_recycle_bytes is not None:
+        if console_rss_recycle_bytes < 1:
+            raise ValueError("Console RSS recycle bytes must be positive")
+        command.extend(
+            ["--console-rss-recycle-bytes", str(console_rss_recycle_bytes)]
+        )
+    return command
 
 
 def _workspace(data: vf.TaskData, installation: Literal["apt-git", "portable"]) -> str:
@@ -507,27 +523,60 @@ async def _cleanup_portable(runtime: vf.Runtime, workspace: str) -> str:
     return "workspace-metadata-and-state-removed"
 
 
-async def _shutdown_portable(runtime: vf.Runtime, workspace: str) -> str:
+async def _shutdown_portable(
+    runtime: vf.Runtime,
+    workspace: str,
+    *,
+    console_rss_recycle_bytes: int | None = None,
+) -> str:
     environment = _evaluation_environment({}, "portable")
-    requested = await runtime.run(
-        _agencity_service_command("shutdown", workspace),
-        environment,
-    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + PORTABLE_SHUTDOWN_TIMEOUT_SECONDS
+
+    async def run_before_deadline(command: list[str]):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        return await asyncio.wait_for(
+            runtime.run(command, environment),
+            timeout=remaining,
+        )
+
+    try:
+        requested = await run_before_deadline(
+            _agencity_service_command(
+                "shutdown",
+                workspace,
+                console_rss_recycle_bytes=console_rss_recycle_bytes,
+            )
+        )
+    except TimeoutError:
+        requested = None
     # A service that already entered fail-closed draining can retain its
     # manifest while refusing a second shutdown request. Preserve that failure,
     # but still require the existing service to publish a confirmed stop before
     # portable state is removed.
     request_failure = (
-        (requested.stderr or requested.stdout).strip()[-500:]
-        if requested.exit_code != 0
-        else None
+        "shutdown request did not complete before the cleanup deadline"
+        if requested is None
+        else (
+            (requested.stderr or requested.stdout).strip()[-500:]
+            if requested.exit_code != 0
+            else None
+        )
     )
 
-    for _ in range(PORTABLE_SHUTDOWN_TIMEOUT_SECONDS * 10):
-        observed = await runtime.run(
-            _agencity_service_command("status", workspace),
-            environment,
-        )
+    while loop.time() < deadline:
+        try:
+            observed = await run_before_deadline(
+                _agencity_service_command(
+                    "status",
+                    workspace,
+                    console_rss_recycle_bytes=console_rss_recycle_bytes,
+                )
+            )
+        except TimeoutError:
+            break
         if observed.exit_code == 0:
             try:
                 value = json.loads(observed.stdout)
@@ -535,7 +584,9 @@ async def _shutdown_portable(runtime: vf.Runtime, workspace: str) -> str:
                 value = None
             if isinstance(value, dict) and value.get("lifecycle") == "stopped":
                 return "stopped"
-        await asyncio.sleep(0.1)
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(min(0.1, remaining))
     if request_failure is not None:
         raise RuntimeError(
             "Agencity service shutdown request failed and the existing service "

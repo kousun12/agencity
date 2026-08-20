@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import tarfile
@@ -148,6 +149,20 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(str(1536 * 1024 * 1024), command)
         self.assertEqual(command[-2:], ["--", "--workspace=/escape"])
 
+    def test_service_command_preserves_non_default_console_rss_configuration(
+        self,
+    ) -> None:
+        threshold = 1536 * 1024 * 1024
+        command = _agencity_service_command(
+            "shutdown",
+            "/app/personal-site",
+            console_rss_recycle_bytes=threshold,
+        )
+        self.assertEqual(
+            command[-2:],
+            ["--console-rss-recycle-bytes", str(threshold)],
+        )
+
     def test_only_interception_credentials_reach_agencity(self) -> None:
         environment = _evaluation_environment(
             {
@@ -219,6 +234,38 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
                 "stopped",
             )
 
+    async def test_shutdown_reuses_non_default_console_rss_configuration(
+        self,
+    ) -> None:
+        threshold = 1536 * 1024 * 1024
+        calls: list[list[str]] = []
+
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                calls.append(command)
+                if "status" in command:
+                    return SimpleNamespace(
+                        exit_code=0,
+                        stdout=json.dumps({"lifecycle": "stopped"}),
+                        stderr="",
+                    )
+                return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+        self.assertEqual(
+            await _shutdown_portable(
+                Runtime(),
+                "/app/personal-site",
+                console_rss_recycle_bytes=threshold,
+            ),
+            "stopped",
+        )
+        self.assertEqual(len(calls), 2)
+        for command in calls:
+            self.assertEqual(
+                command[-2:],
+                ["--console-rss-recycle-bytes", str(threshold)],
+            )
+
     async def test_shutdown_retains_request_failure_when_stop_is_unconfirmed(
         self,
     ) -> None:
@@ -237,13 +284,43 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         with (
-            patch("agencity_verifiers.harness.asyncio.sleep", return_value=None),
+            patch(
+                "agencity_verifiers.harness.PORTABLE_SHUTDOWN_TIMEOUT_SECONDS",
+                0.01,
+            ),
             self.assertRaisesRegex(
                 RuntimeError,
-                "did not confirm shutdown within 30 seconds: authority conflict",
+                "did not confirm shutdown within 0.01 seconds: authority conflict",
             ),
         ):
             await _shutdown_portable(Runtime(), "/app/personal-site")
+
+    async def test_shutdown_deadline_bounds_a_slow_status_probe(self) -> None:
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                if "status" in command:
+                    await asyncio.sleep(60)
+                    raise AssertionError("slow status probe should be cancelled")
+                return SimpleNamespace(
+                    exit_code=1,
+                    stdout="",
+                    stderr="authority conflict",
+                )
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with (
+            patch(
+                "agencity_verifiers.harness.PORTABLE_SHUTDOWN_TIMEOUT_SECONDS",
+                0.02,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "did not confirm shutdown within 0.02 seconds: authority conflict",
+            ),
+        ):
+            await _shutdown_portable(Runtime(), "/app/personal-site")
+        self.assertLess(loop.time() - started, 0.5)
 
     async def test_harbor_collection_precedes_task_cleanup(self) -> None:
         selected = list(
@@ -254,7 +331,7 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
         trace = SimpleNamespace(info={"agencity": {"status": "succeeded"}})
         events: list[str] = []
         shutdown = AsyncMock(
-            side_effect=lambda *_: events.append("shutdown") or "stopped"
+            side_effect=lambda *_, **__: events.append("shutdown") or "stopped"
         )
         cleanup = AsyncMock(
             side_effect=lambda *_: events.append("cleanup")

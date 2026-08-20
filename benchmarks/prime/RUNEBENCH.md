@@ -604,11 +604,13 @@ The broader benchmark project suite is:
 uv run --locked python -m unittest discover -s tests
 ```
 
-On August 19, 2026, the current working tree passed 98 of 99 model-free
-benchmark tests; the one skip was the unrelated opt-in official SWE-bench Pro
-Docker scorer. All six RuneBench preflights and all six RuneBench dry-runs
-passed, the wheel and source distribution built, and the exact pinned-container
-controller and tracker tests passed. No model inference ran.
+On August 20, 2026, the current working tree passed 102 model-free benchmark
+tests, skipped the one unrelated opt-in official SWE-bench Pro Docker scorer,
+and had zero failures. The exact paid-canary preflight and dry-run passed, the
+wheel and source distribution built, Python source compilation passed, and the
+pinned `linux/amd64` container completed startup, one fixture-model action, and
+configuration-matched service shutdown. No model inference ran during this
+verification.
 
 Common conditions:
 
@@ -687,10 +689,28 @@ governance evidence remain canonical and queryable. RuneBench pauses automatic
 triggers in both learning modes. The within-run mode permits one explicit
 review after the treatment records the required compact evidence cell.
 
-These changes have model-free coverage but no paid canary evidence. The
+An August 20, 2026 Luna-xhigh Attack 30-minute treatment on commit
+`161040cd62c78c606c7d09511bde90d779ae916a` reached a live peak of `38`
+Attack XP/min. The agent established a working rat attack by its third cell,
+used 26 model calls and 25 cells, reported 214,252 input and 21,049 output
+tokens, and committed a successful typed `finish` at the game deadline. No
+refinement was admitted. The official scorer did not run because task
+finalization invoked service shutdown and status without the treatment's
+non-default 1.5 GiB console-worker RSS threshold. Those commands computed the
+ordinary 512 MiB service configuration, failed with `CONFIG_MISMATCH`, and
+could not stop the live service. The cleanup loop counted 300 external probes
+instead of enforcing a wall-clock deadline, so slow Docker/Bun status commands
+extended the nominal 30-second wait until the operator stopped the run. This is
+an infrastructure error and the live peak is not an official score.
+
+The current working tree carries the exact RSS threshold through RuneBench task
+data, Harbor finalization, and fallback harness cleanup. Shutdown and status use
+the same service configuration as launch, and cleanup applies one monotonic
+30-second deadline to the request and all probes. Focused harness/RuneBench
+tests and the pinned `linux/amd64` container startup-to-confirmed-shutdown path
+pass. No paid run verifies official scoring and cleanup after this repair. The
 RuneBench-specific truth of the compact evidence cell remains treatment
-behavior rather than a core runtime semantic, and no current paid run verifies
-deadline finalization, late-run overhead, or adaptive performance.
+behavior rather than a core runtime semantic.
 
 ## Current limitations
 
@@ -699,8 +719,10 @@ deadline finalization, late-run overhead, or adaptive performance.
 - Video capture remains enabled because it is part of the official image
   treatment.
 - The controller, bounded action retry, active tracker command, managed trainer,
-  draining-service cleanup, prompt de-duplication, and Docker-memory preflight
-  have model-free coverage but no paid 30-minute canary on this revision.
+  configuration-matched draining-service cleanup, prompt de-duplication, and
+  Docker-memory preflight have model-free coverage. The latest paid 30-minute
+  canary completed its agent run but predates paid verification of the cleanup
+  repair, so it produced no official score.
 - No paid 16-skill leaderboard-comparable run is verified.
 - A full run is long, expensive, and operator-gated.
 - RuneBench is noisy; one rollout is integration evidence, not a stable harness
