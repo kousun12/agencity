@@ -309,9 +309,19 @@ prompt, stages one token-and-process-identity controller claim, requires bounded
 backoff for false action results, gives the active tracker path explicitly, and
 hands long-running trainers to `sdk.processes`. Benchmark cleanup removes
 portable state only after owned-service shutdown confirms process cleanup;
-unconfirmed shutdown retains lifecycle evidence and is an infrastructure error.
-A paid full run remains blocked
-on a passing exact 30-minute canary. An earlier paid Luna
+an initial shutdown rejection from an already-draining service is polled for up
+to 30 seconds, while unconfirmed shutdown retains lifecycle evidence and is an
+infrastructure error. Treatment guidance is supplied once through root
+repository instructions, identifies the high-level `bot` and low-level `rs`
+receiver split, and directs a proven non-zero loop into a managed trainer so
+actions continue during provider calls. A later Luna-xhigh Attack 30-minute
+treatment on commit `2d1b98f` completed the horizon in 97 model turns and showed
+a live peak of 72 XP/min, but a service-authority cleanup conflict prevented the
+official scorer from running. The retained trace showed 16 opening turns before
+a working combat baseline, duplicate treatment prompting, and continued
+foreground action/model alternation; the current working tree addresses those
+harness and prompt defects with model-free tests but has no paid verification.
+A paid full run remains blocked on a passing exact 30-minute canary. An earlier paid Luna
 canary completed 33 direct-REPL turns in one warm epoch without
 credential-input or console-worker failure, but owned-service shutdown missed
 the harness cleanup bound before the official scorer ran; that displayed zero
@@ -359,7 +369,7 @@ pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
 stdout/stderr diagnostics instead of collapsing to a parser-only error. The
-August 19, 2026 model-free verification of the RuneBench working tree passed 95
+August 19, 2026 model-free verification of the RuneBench working tree passed 97
 benchmark tests with one intentionally skipped unrelated opt-in SWE-bench Pro
 scorer test, all six RuneBench config preflights and dry-runs, package builds and source compilation,
 actual pinned-image game startup, and a direct image-owned TypeScript SDK

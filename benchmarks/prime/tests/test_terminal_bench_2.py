@@ -188,6 +188,60 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(_agencity_service_command("shutdown", workspace), calls)
 
+    async def test_shutdown_waits_for_an_already_draining_conflicted_service(
+        self,
+    ) -> None:
+        statuses = iter(("conflict", "conflict", "stopped"))
+
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                if "status" in command:
+                    return SimpleNamespace(
+                        exit_code=0,
+                        stdout=json.dumps({"lifecycle": next(statuses)}),
+                        stderr="",
+                    )
+                return SimpleNamespace(
+                    exit_code=1,
+                    stdout="",
+                    stderr=(
+                        "Agencity error [VALIDATION_ERROR]: Service authority is "
+                        "conflicted; refusing unauthenticated shutdown"
+                    ),
+                )
+
+        with patch("agencity_verifiers.harness.asyncio.sleep", return_value=None):
+            self.assertEqual(
+                await _shutdown_portable(Runtime(), "/app/personal-site"),
+                "stopped",
+            )
+
+    async def test_shutdown_retains_request_failure_when_stop_is_unconfirmed(
+        self,
+    ) -> None:
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                if "status" in command:
+                    return SimpleNamespace(
+                        exit_code=0,
+                        stdout=json.dumps({"lifecycle": "conflict"}),
+                        stderr="",
+                    )
+                return SimpleNamespace(
+                    exit_code=1,
+                    stdout="",
+                    stderr="authority conflict",
+                )
+
+        with (
+            patch("agencity_verifiers.harness.asyncio.sleep", return_value=None),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "did not confirm shutdown within 30 seconds: authority conflict",
+            ),
+        ):
+            await _shutdown_portable(Runtime(), "/app/personal-site")
+
     async def test_harbor_collection_precedes_task_cleanup(self) -> None:
         selected = list(
             TerminalBench2Taskset(

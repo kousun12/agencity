@@ -17576,7 +17576,7 @@
       "bun_archive_sha256": "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f",
       "bun_version": "1.3.14",
       "harness": "agencity-verifiers",
-      "source_ref": "1b2cebfccc01e7e2289c6445c8a563d13cb06711",
+      "source_ref": "2d1b98f02f9945751d6492297d80fc5af5ad95c5",
       "source_repo": "https://github.com/kousun12/agencity.git"
     },
     "harness-native": {

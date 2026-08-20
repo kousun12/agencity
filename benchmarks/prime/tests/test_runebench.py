@@ -104,11 +104,11 @@ class RuneBenchCatalogTests(unittest.TestCase):
                 ).load()
             )
         )
-        self.assertIn(REPL_GUIDANCE, str(fresh.data.prompt))
-        self.assertIn(REPL_CONNECTION_SOURCE, str(fresh.data.prompt))
+        self.assertNotIn(REPL_GUIDANCE, str(fresh.data.prompt))
+        self.assertNotIn(REPL_CONNECTION_SOURCE, str(fresh.data.prompt))
         self.assertIn('password: "test"', CONTROLLER_SOURCE)
         self.assertNotIn(WITHIN_RUN_GUIDANCE, str(fresh.data.prompt))
-        self.assertIn(WITHIN_RUN_GUIDANCE, str(adaptive.data.prompt))
+        self.assertNotIn(WITHIN_RUN_GUIDANCE, str(adaptive.data.prompt))
         for unsupported in ("execute_code", "rs-agent", "MCP server", "bun /tmp/"):
             self.assertNotIn(unsupported, str(fresh.data.prompt))
             self.assertNotIn(unsupported, str(adaptive.data.prompt))
@@ -116,16 +116,18 @@ class RuneBenchCatalogTests(unittest.TestCase):
             RATE_COMMAND_TEMPLATE.format(skill="Woodcutting"),
             str(fresh.data.prompt),
         )
-        self.assertIn("Never construct `BotSDK` yourself", str(fresh.data.prompt))
-        self.assertIn("runActionLoop", str(fresh.data.prompt))
-        self.assertIn("sdk.processes.start", str(fresh.data.prompt))
-        self.assertIn("sdk.processes.readLogs", str(fresh.data.prompt))
-        self.assertIn("Never use `command &`", str(fresh.data.prompt))
+        self.assertIn("Never construct `BotSDK` yourself", REPL_GUIDANCE)
+        self.assertIn("`bot` is the high-level `BotActions` surface", REPL_GUIDANCE)
+        self.assertIn("runActionLoop", REPL_GUIDANCE)
+        self.assertIn("sdk.processes.start", REPL_GUIDANCE)
+        self.assertIn("sdk.processes.readLogs", REPL_GUIDANCE)
+        self.assertIn("Never use `command &`", REPL_GUIDANCE)
+        self.assertIn("game actions continue during model decisions", REPL_GUIDANCE)
         self.assertLess(
-            str(fresh.data.prompt).index("await controller.release()"),
-            str(fresh.data.prompt).index("sdk.processes.start"),
+            REPL_GUIDANCE.index("await controller.release()"),
+            REPL_GUIDANCE.index("sdk.processes.start"),
         )
-        self.assertNotEqual(fresh.data.adapted_prompt_sha256, adaptive.data.adapted_prompt_sha256)
+        self.assertEqual(fresh.data.adapted_prompt_sha256, adaptive.data.adapted_prompt_sha256)
         self.assertEqual(fresh.data.selected_ids, adaptive.data.selected_ids)
 
     def test_controller_protocol_is_single_owner_and_backs_off_false_results(

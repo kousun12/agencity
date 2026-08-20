@@ -377,7 +377,10 @@ Use only Agencity's persistent Bun TypeScript console. Keep Agencity's built-in
 
 The controller claim prevents a second live process from controlling the bot.
 Never construct `BotSDK` yourself. Reuse `controller`, `rs`, and `bot` while the
-REPL epoch is warm.
+REPL epoch is warm. `bot` is the high-level `BotActions` surface (for example,
+`bot.attackNpc(...)`); `rs` is the lower-level `BotSDK` surface. Keep methods on
+the receiver documented in `/app/sdk/API.md` instead of guessing or moving a
+method between `bot` and `rs`.
 
 Start with one short action and return its small result. Treat a returned
 `{{ success: false, ... }}` as a failure even though it did not throw. Every
@@ -390,8 +393,10 @@ Write treatment scripts only under `{TRAINER_DIR}`. Read `/app/sdk/API.md`,
 the exact `TRACKING_FILE={TRACKING_FILE} bun ... check_xp_rate.ts <Skill>`
 command stated in the task.
 
-Use a managed process only after a measured loop is proven and must continue
-between model decisions. Its script must import `acquireController` and
+Once a measured loop produces non-zero XP, prefer moving it into one managed
+process so game actions continue during model decisions. Do not keep alternating
+one foreground action with one model call after proving a repeatable strategy.
+The trainer script must import `acquireController` and
 `runActionLoop` from `{CONTROLLER_PATH}`, acquire one unique trainer owner, and
 release that controller in `finally`. Hand ownership over in this exact order:
 
@@ -578,10 +583,7 @@ class RuneBenchTaskset(vf.Taskset[RuneBenchTask, RuneBenchConfig]):
             ):
                 raise ValueError(f"RuneBench task {identifier} save fixture drifted")
 
-            prompt = _adapt_prompt(
-                str(data.prompt),
-                self.config.learning_mode,
-            )
+            prompt = _adapt_prompt(str(data.prompt))
             suite_data = RuneBenchData.model_validate(
                 data.model_dump()
                 | {
@@ -617,12 +619,8 @@ class RuneBenchTaskset(vf.Taskset[RuneBenchTask, RuneBenchConfig]):
             yield RuneBenchTask(suite_data, task.config)
 
 
-def _adapt_prompt(prompt: str, learning_mode: LearningMode) -> str:
-    direct_prompt = _remove_upstream_mcp_instructions(prompt)
-    parts = [direct_prompt, REPL_GUIDANCE]
-    if learning_mode == "within-run":
-        parts.append(WITHIN_RUN_GUIDANCE)
-    adapted = "\n\n".join(parts)
+def _adapt_prompt(prompt: str) -> str:
+    adapted = _remove_upstream_mcp_instructions(prompt)
     forbidden = ("execute_code", "rs-agent", "MCP server", "bun /tmp/")
     present = [value for value in forbidden if value in adapted]
     if present:

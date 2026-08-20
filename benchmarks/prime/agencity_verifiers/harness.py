@@ -27,6 +27,7 @@ PORTABLE_ARTIFACTS_DIR = f"{PORTABLE_ROOT}/artifacts"
 PORTABLE_BUNDLE_PATH = "/tmp/agencity-bootstrap.tgz"
 PORTABLE_BUN_PATH = f"{AGENCITY_DIR}/bin/bun"
 PORTABLE_GIT_EXCLUDES_PATH = f"{PORTABLE_ROOT}/git-excludes"
+PORTABLE_SHUTDOWN_TIMEOUT_SECONDS = 30
 ADAPTER_DIAGNOSTIC_STREAM_BYTES = 4 * 1024
 BUN_LINUX_X64_URL = (
     "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
@@ -459,11 +460,17 @@ async def _shutdown_portable(runtime: vf.Runtime, workspace: str) -> str:
         _agencity_service_command("shutdown", workspace),
         environment,
     )
-    if requested.exit_code != 0:
-        detail = (requested.stderr or requested.stdout).strip()[-500:]
-        raise RuntimeError(f"Agencity service shutdown request failed: {detail}")
+    # A service that already entered fail-closed draining can retain its
+    # manifest while refusing a second shutdown request. Preserve that failure,
+    # but still require the existing service to publish a confirmed stop before
+    # portable state is removed.
+    request_failure = (
+        (requested.stderr or requested.stdout).strip()[-500:]
+        if requested.exit_code != 0
+        else None
+    )
 
-    for _ in range(100):
+    for _ in range(PORTABLE_SHUTDOWN_TIMEOUT_SECONDS * 10):
         observed = await runtime.run(
             _agencity_service_command("status", workspace),
             environment,
@@ -476,7 +483,16 @@ async def _shutdown_portable(runtime: vf.Runtime, workspace: str) -> str:
             if isinstance(value, dict) and value.get("lifecycle") == "stopped":
                 return "stopped"
         await asyncio.sleep(0.1)
-    raise RuntimeError("Agencity service did not confirm shutdown within 10 seconds")
+    if request_failure is not None:
+        raise RuntimeError(
+            "Agencity service shutdown request failed and the existing service "
+            "did not confirm shutdown within "
+            f"{PORTABLE_SHUTDOWN_TIMEOUT_SECONDS} seconds: {request_failure}"
+        )
+    raise RuntimeError(
+        "Agencity service did not confirm shutdown within "
+        f"{PORTABLE_SHUTDOWN_TIMEOUT_SECONDS} seconds"
+    )
 
 
 async def _checked(runtime: vf.Runtime, command: list[str]) -> None:

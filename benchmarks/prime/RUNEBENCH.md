@@ -117,12 +117,14 @@ process or protocol is involved.
 
 This adaptation is named `agencity-runebench-repl-v1`. It preserves the
 official task package, initial save, game image, time horizon, 15-second sample
-cadence, and Harbor verifier. It changes the agent-to-SDK interface, adds
-explicit console guidance, and raises the runtime memory cap from the pinned
-package's 4 GiB to 8 GiB. The current upstream generator made the same memory
-change after documenting agent OOM failures at 4 GiB. The catalog and task
-trace retain both memory values and both the original and adapted prompt
-digests.
+cadence, and Harbor verifier. It changes the agent-to-SDK interface, stages
+explicit console guidance in the root `AGENTS.md`, and raises the runtime
+memory cap from the pinned package's 4 GiB to 8 GiB. The current upstream
+generator made the same memory change after documenting agent OOM failures at
+4 GiB. The adapted task removes the unavailable MCP instructions and corrects
+the tracker command without duplicating the root treatment guidance. The
+catalog and task trace retain both memory values and both the original and
+adapted prompt digests.
 
 The game starts after the pinned Agencity source and Bun runtime are installed.
 This prevents harness provisioning time from consuming the game horizon. The
@@ -148,11 +150,16 @@ does not mount external documentation that is absent from the pinned image.
 
 ### Treatment prompting
 
-The adapted task and root `AGENTS.md` tell the model to:
+The adapted task retains the benchmark objective, rules, and active tracker
+command. The root `AGENTS.md` supplies the Agencity-specific treatment once. It
+tells the model to:
 
 - use only the staged direct-console controller and never construct `BotSDK`;
 - preserve Agencity's built-in `sdk` binding and name the acquired game objects
   `rs` and `bot`;
+- keep high-level `BotActions` methods such as `attackNpc` on `bot` and
+  lower-level `BotSDK` methods on `rs`, following `/app/sdk/API.md` instead of
+  guessing a receiver;
 - acquire once, then reuse those live objects while the exact branch REPL epoch
   remains warm;
 - begin with one short action and a small returned state summary;
@@ -165,7 +172,10 @@ The adapted task and root `AGENTS.md` tell the model to:
 - measure XP rate through the active tracker path after each strategy;
 - write trainer files only below `/app/agencity-runebench/trainers/`;
 - release and confirm the REPL controller before handing ownership to exactly
-  one trainer; and
+  one trainer;
+- move a proven non-zero loop into that owned trainer so game actions continue
+  during model decisions instead of alternating one foreground action with one
+  provider call; and
 - start, inspect, read logs from, and stop that trainer only through
   `sdk.processes`.
 
@@ -436,6 +446,10 @@ docker exec "$CONTAINER" \
 
 Rerun that command when the cell count changes. The unfiltered history can be
 large and can contain benchmark or model content; keep it local.
+If it reports a service-authority conflict, the managed service has already
+entered a fail-closed or otherwise ambiguous ownership state. Do not start
+another service. Continue observing the entrypoint and tracker logs below; the
+cleanup boundary will wait for the existing service to finish draining.
 
 For high-frequency SDK actions, follow the entrypoint log inside that rollout:
 
@@ -496,9 +510,10 @@ For each selected task and rollout, Verifiers:
    endpoint;
 7. lets the root use the image SDK through its persistent Bun REPL and, after
    an explicit controller release, an owned managed trainer;
-8. requests owned Agencity service shutdown, which stops managed process groups
-   and confirms their terminal or unknown outcomes before removing portable
-   state;
+8. requests owned Agencity service shutdown, then waits up to 30 seconds for a
+   stopped lifecycle even if the first request finds an already-draining
+   authority conflict; confirmed shutdown stops managed process groups and
+   records their terminal or unknown outcomes before portable state is removed;
 9. finalizes the task and collects the official Harbor verifier evidence; and
 10. removes the task container.
 
@@ -578,7 +593,7 @@ The broader benchmark project suite is:
 uv run --locked python -m unittest discover -s tests
 ```
 
-On August 19, 2026, the current working tree passed 95 of 96 model-free
+On August 19, 2026, the current working tree passed 97 of 98 model-free
 benchmark tests; the one skip was the unrelated opt-in official SWE-bench Pro
 Docker scorer. All six RuneBench preflights and all six RuneBench dry-runs
 passed, the wheel and source distribution built, and the exact pinned-container
@@ -625,6 +640,23 @@ than a benchmark score. Model-free tests, dry-runs, pinned-image startup, and
 the direct SDK connection smoke remain setup evidence rather than
 game-performance evidence.
 
+A later Luna-xhigh Attack 30-minute treatment on commit `2d1b98f` completed the
+game horizon in 97 model turns and the live tracker observed a peak of `72`
+Attack XP/min. It did not produce official scorer evidence: a prior execution
+authority conflict had already left the published service unhealthy or
+draining, and the cleanup boundary rejected the initial shutdown request
+instead of waiting for that shutdown to finish. The retained output does not
+distinguish an expired lease, a failed health probe, or another service failure;
+the read-only observer only exposed the existing conflict. The retained trace
+also showed that the same treatment guidance was present in both the task and
+root instructions, the first 16 turns were spent resolving the combat API
+without a successful baseline, and the model continued foreground actions
+instead of handing a proven loop to a managed trainer. The current working tree
+waits for a confirmed stopped lifecycle after an initial conflicted shutdown
+request, removes the duplicate treatment prompt, identifies the `bot`/`rs`
+receiver split, and directs proven loops into managed processes. These changes
+have model-free coverage but no paid canary evidence.
+
 ## Current limitations
 
 - Only the pinned 32-task skill dataset is supported.
@@ -632,8 +664,8 @@ game-performance evidence.
 - Video capture remains enabled because it is part of the official image
   treatment.
 - The controller, bounded action retry, active tracker command, managed trainer,
-  and Docker-memory preflight have model-free coverage but no paid 30-minute
-  canary on this revision.
+  draining-service cleanup, prompt de-duplication, and Docker-memory preflight
+  have model-free coverage but no paid 30-minute canary on this revision.
 - No paid 16-skill leaderboard-comparable run is verified.
 - A full run is long, expensive, and operator-gated.
 - RuneBench is noisy; one rollout is integration evidence, not a stable harness
