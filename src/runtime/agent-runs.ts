@@ -2169,7 +2169,10 @@ export function agentProviderContext(
       ? "Decide whether the request can be answered directly. If execution is necessary, call bun_console for the smallest first action that resolves a specific requirement; otherwise call finish."
       : "Decide whether the task is complete from recentTrajectory and the new observations. If the evidence is sufficient, call finish now. Otherwise call bun_console for the single smallest action that resolves one specific remaining requirement. Do not repeat an unchanged inspection or reconstruct the active run from notebook history.",
   };
-  const providerStep = { run: stepInput, durableContext };
+  // Keep the stable durable projection before volatile per-step telemetry.
+  // Provider prefix caches can then reuse unchanged runtime/profile/task state
+  // without changing any model-visible facts or the retained exact candidate.
+  const providerStep = { durableContext, run: stepInput };
   return JSON.parse(JSON.stringify({
     ...providerDurable,
     recentActivity,

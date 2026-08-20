@@ -540,6 +540,7 @@ async function runContextSensitiveScenario(
     message.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
   expect(firstDynamicIndex).toBeGreaterThan(0);
   const stablePrefix = providerMessages[0]!.slice(0, firstDynamicIndex);
+  const dynamicStepContents: string[] = [];
   for (const messages of providerMessages) {
     const dynamicIndex = messages.findIndex((message) =>
       message && typeof message === "object" && !Array.isArray(message) &&
@@ -547,7 +548,17 @@ async function runContextSensitiveScenario(
       message.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
     expect(dynamicIndex).toBe(firstDynamicIndex);
     expect(messages.slice(0, dynamicIndex)).toEqual(stablePrefix);
+    const dynamic = messages[dynamicIndex] as { content: string };
+    expect(dynamic.content).toStartWith(
+      'AGENCITY DURABLE RUN STEP\n{"durableContext":',
+    );
+    dynamicStepContents.push(dynamic.content);
   }
+  const reusableDynamicPrefixBytes = [...dynamicStepContents[0]!]
+    .findIndex((_, index) =>
+      dynamicStepContents.some((value) =>
+        value.codePointAt(index) !== dynamicStepContents[0]!.codePointAt(index)));
+  expect(reusableDynamicPrefixBytes).toBeGreaterThan(256);
   expect(provider.decisions.map((item) => item.type))
     .toEqual(["typescript", "typescript", "final"]);
   expect(await Bun.file(`${temp.workspaceRoot}/context-stage.txt`).text())
@@ -583,6 +594,82 @@ async function runContextSensitiveScenario(
 }
 
 describe("autonomous durable agent runs", () => {
+  test("keeps a compact working-value checkpoint after its source step leaves recent trajectory", async () => {
+    const script: AgentAction[] = [
+      action({
+        type: "typescript",
+        code: `
+          // Purpose: retain the task progress that later steps still need.
+          await state.set("task.progress", {
+            phase: "productive",
+            metric: { before: 0, after: 25, delta: 25 },
+            lastFailure: null,
+          });
+          return { checkpointed: true };
+        `,
+      }),
+      ...Array.from({ length: 9 }, (_, index) =>
+        action({
+          type: "typescript",
+          code: `// Purpose: advance independent step ${index + 2}.\nreturn { step: ${index + 2} };`,
+        })),
+      action({ type: "final", content: "Completed with durable progress evidence." }),
+    ];
+    const { supervisor, provider, sessionId, branchId } = await fixture(script);
+    await expect(supervisor.runs.start(sessionId, branchId, {
+      task: "Complete a long task while retaining compact progress.",
+      requestKey: "sticky-progress",
+    })).resolves.toMatchObject({
+      status: "succeeded",
+      steps: 11,
+    });
+
+    const context = provider.contexts.at(-1);
+    if (!context || typeof context !== "object" || Array.isArray(context) ||
+        !Array.isArray(context.messages)) {
+      throw new Error("Final provider input is missing normalized messages");
+    }
+    const message = [...context.messages].reverse().find((item) =>
+      item && typeof item === "object" && !Array.isArray(item) &&
+      item.role === "user" && typeof item.content === "string" &&
+      item.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
+    if (!message || typeof message !== "object" || Array.isArray(message) ||
+        typeof message.content !== "string") {
+      throw new Error("Final provider input is missing its durable run step");
+    }
+    const envelope = JSON.parse(
+      message.content.slice("AGENCITY DURABLE RUN STEP\n".length),
+    ) as {
+      durableContext: {
+        workingValues: Array<{
+          name: string;
+          version: number;
+          value: JsonValue;
+          eventId: string;
+        }>;
+      };
+      run: {
+        recentTrajectory: Array<{ ordinal: number }>;
+      };
+    };
+    expect(envelope.run.recentTrajectory).toHaveLength(8);
+    expect(envelope.run.recentTrajectory.map((item) => item.ordinal))
+      .not.toContain(1);
+    expect(envelope.durableContext.workingValues).toContainEqual({
+      name: "task.progress",
+      version: 1,
+      value: {
+        kind: "json",
+        value: {
+          phase: "productive",
+          metric: { before: 0, after: 25, delta: 25 },
+          lastFailure: null,
+        },
+      },
+      eventId: expect.any(String),
+    });
+  });
+
   test("derives the same next action across recovery and keeps the provider prefix stable", async () => {
     const normal = await runContextSensitiveScenario(false);
     const recovered = await runContextSensitiveScenario(true);
@@ -592,7 +679,7 @@ describe("autonomous durable agent runs", () => {
       cellCount: 2,
       fileEffectCount: 2,
       modelEffectCount: 3,
-      stablePrefixMessages: 1,
+      stablePrefixMessages: 2,
     });
     expect(recovered).toMatchObject({
       providerCalls: 3,

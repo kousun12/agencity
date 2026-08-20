@@ -235,6 +235,14 @@ Cancellation is best effort: an abort signal can stop an in-process executor, bu
 
 `ContextMaterializer` deterministically selects the pinned agent profile, base policy, session/branch/status, recent messages, active working values and artifact references, budget events, completed/failed activity, scoped harness entries, and attributable retrieval provenance. Provider-facing active-run state is a bounded control projection that excludes accumulated action source, and user-profile preference exposure uses a default-deny model-facing allowlist. For autonomous and recursive invocations it composes the fixed system prompt and records the profile version, agent-prompt digest, effective-system-prompt digest, and immutable component references. It also records every selected source event ID, event type, schema version, reason, and a hash of the exact JSON context in immutable `context_records`. The exact retained context remains canonical, while only normalized `providerInput.messages` and the sealed request contract/options are sent. `AgentState.contexts` projects provenance metadata rather than copying every historical full context into snapshots.
 
+An autonomous provider step places its durable context projection before
+volatile step ordinal, deadline, trajectory, and exact-once observations inside
+the final run-step message. This preserves a longer unchanged provider-cache
+prefix without dropping facts or weakening exact candidate retention and
+recovery. Active working values remain part of that durable projection, so a
+small replaceable checkpoint can preserve important progress after its original
+cell leaves the bounded recent trajectory.
+
 The document service imports ordered chunks and creates exact input sets; agent and recursive-model services delegate those references through normal child sessions. Relational memory and refinement are implemented through canonical harness events, rebuildable projections, and a disposable FTS5 candidate index. `HttpMemoryCandidateIndex` provides the same candidate-generation boundary over capability-negotiated HTTP. Local and HTTP candidate-index adapters return stable entry/version IDs and ranks only; authoritative scope, status, policy, conflict, and exposure filtering remains in the runtime and is recorded in context provenance.
 
 The runtime does not provide embedding-based retrieval or a hosted semantic index. A replacement candidate source must preserve stable domain IDs and query/rule provenance; engine-specific objects must not escape the adapter.

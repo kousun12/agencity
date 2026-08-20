@@ -10,7 +10,11 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agencity_runebench.taskset import CONTROLLER_SOURCE, RATE_COMMAND_TEMPLATE
+from agencity_runebench.taskset import (
+    CONTROLLER_SOURCE,
+    RATE_COMMAND_TEMPLATE,
+    render_completion_gate_source,
+)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -486,6 +490,78 @@ console.log(JSON.stringify({
             completed.stderr or completed.stdout,
         )
         self.assertIn("Overall:          4,000 XP/min", completed.stdout)
+
+    def test_completion_gate_rejects_zero_or_early_xp_and_accepts_near_horizon(
+        self,
+    ) -> None:
+        source = render_completion_gate_source("Cooking", 120, 15_000)
+
+        def execute(
+            directory: str,
+            samples: list[dict[str, object]],
+        ) -> subprocess.CompletedProcess[str]:
+            root = Path(directory)
+            gate = root / "check-completion.ts"
+            tracker = root / "skill_tracking.json"
+            gate.write_text(source, encoding="utf-8")
+            tracker.write_text(json.dumps({"samples": samples}), encoding="utf-8")
+            return subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--platform",
+                    "linux/amd64",
+                    "--entrypoint",
+                    "/bin/bash",
+                    "-v",
+                    f"{gate}:/tmp/check-completion.ts:ro",
+                    "-v",
+                    f"{tracker}:/logs/tracking/skill_tracking.json:ro",
+                    RUNEBENCH_IMAGE,
+                    "-lc",
+                    "bun /tmp/check-completion.ts",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            zero = execute(
+                directory,
+                [
+                    {"elapsedMs": 0, "skills": {"Cooking": {"xp": 0}}},
+                    {"elapsedMs": 60_000, "skills": {"Cooking": {"xp": 0}}},
+                ],
+            )
+            early = execute(
+                directory,
+                [
+                    {"elapsedMs": 0, "skills": {"Cooking": {"xp": 0}}},
+                    {"elapsedMs": 45_000, "skills": {"Cooking": {"xp": 25}}},
+                ],
+            )
+            passing = execute(
+                directory,
+                [
+                    {"elapsedMs": 0, "skills": {"Cooking": {"xp": 0}}},
+                    {"elapsedMs": 60_000, "skills": {"Cooking": {"xp": 25}}},
+                ],
+            )
+
+        self.assertNotEqual(zero.returncode, 0)
+        self.assertIn("scored-skill XP has not increased", zero.stderr)
+        self.assertNotEqual(early.returncode, 0)
+        self.assertIn("not close enough to completion", early.stderr)
+        self.assertEqual(
+            passing.returncode,
+            0,
+            passing.stderr or passing.stdout,
+        )
+        evidence = json.loads(passing.stdout.strip().splitlines()[-1])
+        self.assertTrue(evidence["passed"])
+        self.assertEqual(evidence["evidence"]["xpDelta"], 25)
 
 
 if __name__ == "__main__":

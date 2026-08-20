@@ -100,6 +100,7 @@ the one controller allowed in its persistent Bun console:
 const {
   acquireController,
   runActionLoop,
+  runMeasuredActionLoop,
 } = await import("/app/agencity-runebench/controller.ts");
 const controller = await acquireController("repl");
 const rs = controller.rs;
@@ -107,13 +108,15 @@ const bot = controller.bot;
 ```
 
 The treatment-owned module constructs the pinned image's `BotSDK` and
-`BotActions`. Its atomic owner claim includes the process identity, rejects a
-second live controller, and removes a stale claim only after the recorded
-process identity is no longer live. Release waits for SDK disconnection and
-confirms disconnected state before relinquishing ownership. The local
-`password: "test"` option remains ordinary benchmark configuration; only exact
-credential values registered by Agencity are rejected or redacted. No MCP
-process or protocol is involved.
+`BotActions`. It also provides `runActionLoop` and `runMeasuredActionLoop`; the
+measured form reduces repeated attempts into success/failure counts, the latest
+actionable failure, elapsed time, and a caller-selected metric delta. Its atomic
+owner claim includes the process identity, rejects a second live controller,
+and removes a stale claim only after the recorded process identity is no longer
+live. Release waits for SDK disconnection and confirms disconnected state
+before relinquishing ownership. The local `password: "test"` option remains
+ordinary benchmark configuration; only exact credential values registered by
+Agencity are rejected or redacted. No MCP process or protocol is involved.
 
 This adaptation is named `agencity-runebench-repl-v1`. It preserves the
 official task package, initial save, game image, time horizon, 15-second sample
@@ -163,9 +166,11 @@ The two game-knowledge sources serve different purposes:
   wiki directories.
 
 Treatment guidance tells the model to inspect likely learning and skill files
-early, follow focused wiki links or searches for prerequisites and acquisition,
-and verify the result against live game state. It does not inline the full API,
-learning files, or wiki corpus into every provider call.
+in one initial discovery cell, follow focused wiki links or searches for
+prerequisites and acquisition, and verify the result against live game state.
+That cell may read the pinned API once together with the relevant skill page
+and matching learning. The treatment does not inline those documents or the
+wiki corpus into every provider call.
 
 ### Treatment prompting
 
@@ -183,8 +188,9 @@ tells the model to:
   examples under the translated `bot` and `rs` names, plus the exact bounded
   file and shell result shapes for finding additional methods;
 - distinguish upstream operational learnings from the broader extracted wiki,
-  inspect relevant filenames early, and navigate from a skill page to focused
-  item, NPC, shop, or quest facts instead of searching the complete corpus;
+  batch the filename index, pinned API, scored-skill page, matching learning,
+  inventory, XP, and bounded live state into one initial discovery cell, and
+  navigate to at most the focused item, NPC, shop, or quest facts needed next;
 - treat documentation as guidance, verify it against live `rs` state, and use
   the pinned SDK API as the authority for exact callable signatures;
 - acquire once, then reuse those live objects while the exact branch REPL epoch
@@ -192,8 +198,13 @@ tells the model to:
 - begin with one short action and a small returned state summary;
 - treat a returned `{ success: false, message }` as failure and run repeated
   actions only through the staged bounded-backoff helper;
-- lengthen only a measured working loop and change strategy instead of
-  hot-looping an unavailable target;
+- use `runMeasuredActionLoop` to reduce each repeated batch into counts, the
+  latest nested failure, elapsed time, and exact scored-skill XP delta;
+- write the current strategy, compact measured result, and tracker output to
+  the replaceable durable `runebench.progress` working value so progress remains
+  visible after the eight-action trajectory window has advanced;
+- lengthen only a positive-XP measured loop and change one assumption when XP
+  remains unchanged instead of hot-looping an unavailable target;
 - avoid opening-turn object enumeration and repeated unchanged documentation
   searches while the scored horizon is running;
 - consult SDK, learning, and wiki files on demand rather than loading all of
@@ -210,6 +221,24 @@ tells the model to:
   before handoff, and manage it only through `sdk.processes`.
 
 The treatment currently does not prescribe a multi-agent strategy.
+
+### Completion enforcement
+
+The harness creates a user-authoritative completion goal for each rollout. A
+successful `finish` must pass a staged shell gate that reads the official
+tracker and proves both:
+
+- the scored skill increased from its first tracker sample; and
+- the latest tracker sample is within the final 60 seconds of the official
+  horizon, or within four tracker intervals when that is longer.
+
+The harness pins the staged gate script by SHA-256 before execution. A failed
+gate becomes durable evidence in the next model step and the run continues; it
+cannot become a successful terminal result. Exact-deadline gating is not used
+because the durable deadline interrupts admitted model and cell work at expiry.
+If the model continues training through the horizon, the normal
+`budget_exceeded` result still permits task finalization and official scoring.
+The unchanged Harbor verifier remains the only source of the benchmark score.
 
 ### Persistent REPL semantics
 

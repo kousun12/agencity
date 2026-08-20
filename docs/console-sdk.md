@@ -122,6 +122,12 @@ return { stored, restored, inventory };
 
 At or below 128 KiB after serialization, a value is retained as `{ kind: "json", value }`. Larger JSON is written to the artifact store and retained as `{ kind: "artifact", artifactId }`. Each committed name receives a monotonically increasing version.
 
+For a long run, overwrite one small progress value after each materially
+different strategy or verified milestone. Include the current phase, compact
+metric or result, latest actionable failure, and evidence IDs or artifact
+references rather than copying full tool output. Active working values remain
+in later context after the originating cell leaves the recent action window.
+
 `state.restored` is the branch's working-value view captured at cell start. `state.get` includes this cell's staged updates. `state.list` returns name, version, handle, `committed` or `staged` status, and event provenance. It does not resolve artifact-backed values.
 
 Each committed write appends retained history, including overwrites across cells; there is no ordinary state-delete operation. Keep a small stable key set, checkpoint only meaningful recovery boundaries, and do not copy temporary caches, repeated summaries, raw tool output, or values already available through retained cells into state.

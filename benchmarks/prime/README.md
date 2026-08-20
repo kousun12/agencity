@@ -143,23 +143,26 @@ The `agencity-runebench-repl-v1` treatment replaces the task prompt's MCP
 wrapper with one staged controller around the same image-owned TypeScript SDK
 inside Agencity's persistent Bun console. A process-identity claim permits one
 control owner, release confirms disconnection before trainer handoff, repeated
-actions treat false results as failures with bounded backoff, and long-running
-trainers use Agencity's managed-process API. Root instructions distinguish the
-high-level `bot` receiver from the low-level `rs` receiver, retain a compact
-direct-SDK quick start and bounded documentation lookup, and direct a proven
-non-zero loop into a trainer so game actions continue during provider calls.
+actions treat false results as failures with bounded backoff, and the measured
+loop helper reduces a batch to counts, the latest failure, elapsed time, and XP
+delta. Root instructions distinguish the high-level `bot` receiver from the
+low-level `rs` receiver, batch one initial API/learning/wiki/live-state
+discovery cell, and keep compact strategy evidence in the durable
+`runebench.progress` working value. Managed trainers remain optional for loops
+whose progress would materially stop during provider calls.
 The treatment guidance is not duplicated in the task prompt. The active
-tracker path is supplied explicitly; RuneBench's benign local
-`password: "test"` option remains inside the staged controller.
+tracker path is supplied explicitly. Successful `finish` is gate-checked
+against positive scored-skill XP and a tracker sample near the official
+horizon; the unchanged Harbor verifier remains authoritative. RuneBench's
+benign local `password: "test"` option remains inside the staged controller.
 The official task package, save fixture,
 time horizon, sampling cadence, game image, and Harbor verifier remain pinned.
 The treatment raises the pinned package's 4 GiB memory cap to 8 GiB, matching
 the current upstream generator's hardening for documented agent OOM failures;
 both values remain explicit in the catalog. Fresh and within-run learning modes
-are separate configs: fresh pauses automatic learning before the run, while
-within-run explicitly enables it and permits one evidence-backed governed
-review. Every scored task has fresh Agencity and game state; no learned artifact
-crosses episodes.
+are separate configs. Both pause automatic learning before the run; within-run
+additionally permits one evidence-backed explicit governed review. Every scored
+task has fresh Agencity and game state; no learned artifact crosses episodes.
 
 RuneBench preflight compares effective concurrency times 8 GiB plus a 2 GiB
 Docker/host reserve with Docker daemon capacity. An unavailable probe or unsafe
