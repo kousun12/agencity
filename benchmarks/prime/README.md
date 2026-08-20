@@ -462,11 +462,14 @@ controller and tracker checks passed without model inference.
   bound. The run exposed competing-controller, action-backoff, and tracker-path
   defects in that earlier revision. The current model-free treatment addresses
   them, but this paid result predates the fixes and is not readiness evidence.
-  A later Luna-xhigh Attack 30-minute treatment on commit `2d1b98f` completed
-  the horizon in 97 turns and showed a live `72` XP/min peak, but a
-  service-authority cleanup conflict prevented official scoring. The cleanup
-  wait and trace-driven prompt changes on the current working tree have
-  model-free coverage only.
+  A later Luna-xhigh Attack 30-minute treatment on commit `2d1b98f` reached a
+  live `72` XP/min peak but hit the outer 1,920-second timeout after 95 root
+  calls plus two refinement calls without typed `finish`; finalization and
+  official scoring never started, and a separate service-authority cleanup
+  conflict followed. The cleanup wait and trace-driven prompt changes on the
+  current working tree have model-free coverage only. Inner deadline,
+  long-history, completed-refinement context, and refinement-admission
+  improvements remain unimplemented.
 - OOLONG: one revised Sol-high Yahoo 128K task scored `1.0`; a corresponding
   Luna task scored `0`. A later current-revision Sol-high canary on commit
   `5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193` completed the repaired

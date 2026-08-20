@@ -316,12 +316,17 @@ repository instructions, identifies the high-level `bot` and low-level `rs`
 receiver split with a compact translated SDK quick start and bounded
 documentation lookup, and directs a proven non-zero loop into a managed trainer
 so actions continue during provider calls. A later Luna-xhigh Attack 30-minute
-treatment on commit `2d1b98f` completed the horizon in 97 model turns and showed
-a live peak of 72 XP/min, but a service-authority cleanup conflict prevented the
-official scorer from running. The retained trace showed 16 opening turns before
-a working combat baseline, duplicate treatment prompting, and continued
-foreground action/model alternation; the current working tree addresses those
-harness and prompt defects with model-free tests but has no paid verification.
+treatment on commit `2d1b98f` reached a live peak of 72 XP/min but hit the outer
+1,920-second timeout after 95 root model calls plus two refinement calls without
+a typed `finish`; finalization and the official scorer never ran. A separate
+service-authority cleanup conflict followed. The retained trace showed 16
+opening turns before a working combat baseline, duplicate treatment prompting,
+early automatic refinement, large completed-refinement context, growing
+long-run overhead, and continued foreground action/model alternation. The
+current working tree addresses the cleanup and prompt defects with model-free
+tests. An inner deadline, incremental history processing, bounded recursive
+context, and evidence-gated refinement remain unimplemented, and no paid
+verification covers the current revision.
 A paid full run remains blocked on a passing exact 30-minute canary. An earlier paid Luna
 canary completed 33 direct-REPL turns in one warm epoch without
 credential-input or console-worker failure, but owned-service shutdown missed

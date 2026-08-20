@@ -451,6 +451,39 @@ release that controller in `finally`. Hand ownership over in this exact order:
 4. retain the returned JSON handle and use `sdk.processes.inspect`,
    `sdk.processes.readLogs`, or `sdk.processes.stop` for its lifecycle.
 
+Use this lifecycle template after replacing `bot.chopTree()` with the proven
+task action and choosing unique names:
+
+```ts
+const trainerPath = "{TRAINER_DIR}/working-strategy.ts";
+const trainerSource = `
+import {{ acquireController, runActionLoop }} from "{CONTROLLER_PATH}";
+const controller = await acquireController("trainer-working-strategy");
+try {{
+  const bot = controller.bot;
+  while (true) {{
+    await runActionLoop({{
+      iterations: 100,
+      minBackoffMs: 250,
+      maxBackoffMs: 5_000,
+      successDelayMs: 0,
+      action: () => bot.chopTree(),
+    }});
+  }}
+}} finally {{
+  await controller.release();
+}}
+`;
+await tools.writeFile(trainerPath, trainerSource);
+await controller.release();
+const trainer = await sdk.processes.start({{
+  command: `bun ${{trainerPath}}`,
+  cwd: "/app",
+  idempotencyKey: "runebench-working-strategy",
+}});
+return trainer;
+```
+
 Never use `command &`, `nohup`, `/tmp`, or another unmanaged process. Never
 start a trainer while the REPL controller claim is live. A failed controller
 claim is a lifecycle error to fix, not permission to bypass the wrapper.

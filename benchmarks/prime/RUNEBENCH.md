@@ -645,22 +645,29 @@ than a benchmark score. Model-free tests, dry-runs, pinned-image startup, and
 the direct SDK connection smoke remain setup evidence rather than
 game-performance evidence.
 
-A later Luna-xhigh Attack 30-minute treatment on commit `2d1b98f` completed the
-game horizon in 97 model turns and the live tracker observed a peak of `72`
-Attack XP/min. It did not produce official scorer evidence: a prior execution
-authority conflict had already left the published service unhealthy or
-draining, and the cleanup boundary rejected the initial shutdown request
-instead of waiting for that shutdown to finish. The retained output does not
-distinguish an expired lease, a failed health probe, or another service failure;
-the read-only observer only exposed the existing conflict. The retained trace
-also showed that the same treatment guidance was present in both the task and
-root instructions, the first 16 turns were spent resolving the combat API
-without a successful baseline, and the model continued foreground actions
-instead of handing a proven loop to a managed trainer. The current working tree
-waits for a confirmed stopped lifecycle after an initial conflicted shutdown
-request, removes the duplicate treatment prompt, identifies the `bot`/`rs`
+A later Luna-xhigh Attack 30-minute treatment on commit `2d1b98f` reached a live
+peak of `72` Attack XP/min but produced no official score. The outer 1,920-second
+agent timeout interrupted the run after 95 root model calls plus two refinement
+calls; the model never called typed `finish`, and task finalization and scoring
+never started. A separate cleanup attempt then found the published service in
+an authority-conflicted unhealthy or draining state. The retained output does
+not distinguish an expired lease, a failed health probe, or another service
+failure; the read-only observer only exposed the existing conflict.
+
+The full trace showed that the same treatment guidance was present in both the
+task and root instructions, the first 16 turns were spent resolving the combat
+API without a successful baseline, automatic refinement ran before the first
+non-zero rate, completed refinement handles added large repeated context, and
+the model continued foreground actions instead of handing a proven loop to a
+managed trainer. Per-step non-provider overhead also grew with branch history.
+The current working tree waits for a confirmed stopped lifecycle after an
+initial conflicted shutdown request, removes the duplicate treatment prompt,
+adds a direct-SDK and managed-trainer quick start, identifies the `bot`/`rs`
 receiver split, and directs proven loops into managed processes. These changes
-have model-free coverage but no paid canary evidence.
+have model-free coverage but no paid canary evidence. An inner benchmark
+deadline, incremental long-run projections, bounded completed-refinement
+context, and evidence-gated refinement remain required before another paid
+canary.
 
 ## Current limitations
 
