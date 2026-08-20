@@ -88,28 +88,32 @@ committed file.
 
 ## Agencity interface adaptation
 
-The official task prompt describes an `execute_code` MCP wrapper that supplies
-`bot` and `sdk` globals. Agencity instead imports the same image-owned
-TypeScript SDK directly into its persistent Bun console:
+The official source task describes an `execute_code` MCP wrapper. The treatment
+deterministically removes that interface section before the task reaches the
+model. The final task contains only Agencity's TypeScript-console interface and
+the official objective, horizon, legitimate-action rule, and scoring semantics.
+
+The harness stages `/app/agencity-runebench/controller.ts`. The model acquires
+the one controller allowed in its persistent Bun console:
 
 ```ts
-const { BotSDK } = await import("/app/sdk/index.ts");
-const { BotActions } = await import("/app/sdk/actions.ts");
-const rs = new BotSDK({
-  botUsername: "agent",
-  password: "test",
-  gatewayUrl: "ws://localhost:7780",
-  autoLaunchBrowser: false,
-});
-await rs.connect();
-const bot = new BotActions(rs);
+const {
+  acquireController,
+  runActionLoop,
+} = await import("/app/agencity-runebench/controller.ts");
+const controller = await acquireController("repl");
+const rs = controller.rs;
+const bot = controller.bot;
 ```
 
-The model constructs the image-owned `BotSDK` and `BotActions` itself. Agencity
-does not classify an ordinary field such as RuneBench's local
-`password: "test"` option as a secret. Only exact credential values registered
-by the supervisor are rejected or redacted. No MCP process, protocol, or
-connection wrapper is involved.
+The treatment-owned module constructs the pinned image's `BotSDK` and
+`BotActions`. Its atomic owner claim includes the process identity, rejects a
+second live controller, and removes a stale claim only after the recorded
+process identity is no longer live. Release waits for SDK disconnection and
+confirms disconnected state before relinquishing ownership. The local
+`password: "test"` option remains ordinary benchmark configuration; only exact
+credential values registered by Agencity are rejected or redacted. No MCP
+process or protocol is involved.
 
 This adaptation is named `agencity-runebench-repl-v1`. It preserves the
 official task package, initial save, game image, time horizon, 15-second sample
@@ -146,18 +150,24 @@ does not mount external documentation that is absent from the pinned image.
 
 The adapted task and root `AGENTS.md` tell the model to:
 
-- ignore the task's MCP instructions and use the image-owned TypeScript SDK;
-- preserve Agencity's built-in `sdk` binding and name the game objects `rs` and
-  `bot`;
-- import and connect once, then reuse those live objects while the exact branch
-  REPL epoch remains warm;
+- use only the staged direct-console controller and never construct `BotSDK`;
+- preserve Agencity's built-in `sdk` binding and name the acquired game objects
+  `rs` and `bot`;
+- acquire once, then reuse those live objects while the exact branch REPL epoch
+  remains warm;
 - begin with one short action and a small returned state summary;
-- lengthen only a measured working loop;
+- treat a returned `{ success: false, message }` as failure and run repeated
+  actions only through the staged bounded-backoff helper;
+- lengthen only a measured working loop and change strategy instead of
+  hot-looping an unavailable target;
 - consult SDK, learning, and wiki files on demand rather than loading all of
   them into context;
-- measure XP rate after each strategy; and
-- move a proven long-running loop to a background process when training should
-  continue during later model decisions.
+- measure XP rate through the active tracker path after each strategy;
+- write trainer files only below `/app/agencity-runebench/trainers/`;
+- release and confirm the REPL controller before handing ownership to exactly
+  one trainer; and
+- start, inspect, read logs from, and stop that trainer only through
+  `sdk.processes`.
 
 The treatment currently does not prescribe a multi-agent strategy.
 
@@ -172,9 +182,11 @@ The REPL heap is not durable. Worker loss, service loss, cancellation,
 recycling, or a branch change produces a new epoch. Required recovery data must
 use files, durable state, or artifacts, and the model must reconnect from
 current inputs; prior effectful cells are never replayed automatically.
-Console calls from imported callbacks outside an active cell are no-ops, so a
-background operation should write evidence to an explicit file or durable
-surface when later inspection matters.
+Console calls from imported callbacks outside an active cell are no-ops. A
+long-running strategy therefore uses `sdk.processes`, whose JSON handle,
+process-group lifecycle, bounded logs, and terminal outcome remain available
+after console-worker loss. Unmanaged `command &`, `nohup`, `/tmp` trainers, and
+second controllers are forbidden.
 
 ## Learning modes
 
@@ -184,8 +196,8 @@ game character.
 - `fresh` explicitly pauses automatic learning before the root run and omits
   manual refinement guidance.
 - `within-run` explicitly enables automatic learning before the root run and
-  first requires a measured non-zero strategy. While a proven game loop runs in
-  the background, the agent may request one focused governed refinement from
+  first requires a measured non-zero strategy. While a proven game loop runs as
+  an owned managed process, the agent may request one focused governed refinement from
   retained failures and rate evidence, then test an approved memory, prompt
   note, or skill in a later measured attempt.
 
@@ -243,22 +255,63 @@ canary exposed defects in all three areas even though official scoring
 completed.
 
 The serial task horizon is eight hours before setup and scoring overhead:
-16 tasks × 30 minutes. Verifiers can run independent episodes concurrently:
+16 tasks × 30 minutes. The committed serial configuration is the portable
+default:
 
 ```sh
 uv run --locked eval @ configs/runebench-leaderboard-full-adaptive.toml \
-  --max-concurrent 4 \
   --output-dir outputs/runebench-leaderboard-full-adaptive
 ```
 
 Each episode receives a separate 8 GiB container and fresh Agencity/game state.
 Four concurrent episodes therefore require at least 32 GiB for task containers
-plus Docker and host overhead, as well as provider quota for four simultaneous
-Luna calls. The committed config keeps `max_concurrent = 1` because it is the
-portable safe default. Start at two on a suitably provisioned host, inspect one
-completed task, then raise to four only when memory, CPU, provider limits,
-scoring, and cleanup remain healthy. Do not lower the pinned 8 GiB task memory
-to increase concurrency.
+plus the explicit 2 GiB Docker/host reserve used by preflight, as well as
+provider quota for simultaneous calls. Before changing concurrency, validate
+the exact effective value:
+
+```sh
+uv run --locked python scripts/preflight_suite.py \
+  configs/runebench-leaderboard-full-adaptive.toml \
+  --max-concurrent 4
+```
+
+This rejects four-way admission unless the Docker daemon reports at least 34
+GiB. A missing or unreadable daemon capacity is unavailable, not a pass.
+Passing this memory check does not prove CPU, provider quota, scoring, or
+cleanup health. Start at two only on a suitably provisioned host, inspect one
+completed task, and raise further only when every resource and cleanup signal
+remains healthy. Do not lower the pinned 8 GiB task memory to increase
+concurrency.
+
+### Recommended paid canary
+
+`configs/runebench-attack-30m-adaptive.toml` selects exactly
+`attack-xp-30m`, one rollout, and serial execution. Before using it, the
+configured `source_ref` must be a remotely fetchable immutable commit containing
+the controller and managed-process changes in this document. After that commit
+reaches the configured source repository's `main`, synchronize and check every
+benchmark source pin:
+
+```sh
+uv run --locked python scripts/refresh_agencity_source.py
+uv run --locked python scripts/refresh_agencity_source.py --check
+```
+
+Then preflight and run the one paid canary:
+
+```sh
+uv run --locked python scripts/preflight_suite.py \
+  configs/runebench-attack-30m-adaptive.toml \
+  --output outputs/runebench-attack-30m-adaptive-selection.json
+
+OPENAI_API_KEY=... uv run --locked eval @ \
+  configs/runebench-attack-30m-adaptive.toml \
+  --output-dir outputs/runebench-attack-30m-adaptive-luna-xhigh
+```
+
+Do not start the 16-skill treatment until this exact canary has valid official
+scorer evidence, confirmed service/process cleanup, and no controller or tracker
+regression.
 
 On a host that cannot hold multiple 8 GiB containers, run serially or partition
 the explicit 16 task IDs across separate machines and output directories.
@@ -277,8 +330,10 @@ uv run --locked python scripts/preflight_suite.py \
 ```
 
 This checks the dataset, catalog, task, image, evaluator, lock, source,
-selection, and resource pins without model inference. The resulting JSON lists
-the exact selected IDs and digests.
+selection, and resource pins plus effective Docker memory without model
+inference. It reserves 2 GiB beyond the selected containers and reports its
+memory-only scope explicitly. The resulting JSON lists the exact selected IDs,
+digests, and resource calculation.
 
 Resolve the complete Verifiers execution without calling a model:
 
@@ -404,10 +459,10 @@ docker exec \
   /app/benchmark/shared/check_xp_rate.ts Attack
 ```
 
-The explicit `TRACKING_FILE` is required until the treatment's documented
-rate-check path matches the active tracker output. A model-created background
-trainer may also write a skill-specific `/tmp/*train*.log`; discover its exact
-path from retained cell results and follow that file with `tail -F`.
+The same exact `TRACKING_FILE` command is included in the model-facing task.
+Managed trainer output is available through
+`sdk.processes.readLogs(handle)`; the treatment does not use trainer logs under
+`/tmp`.
 
 Do not observe by starting another `BotSDK`, attaching a second controller, or
 writing into the container. Competing controllers can disconnect or replace
@@ -439,10 +494,18 @@ For each selected task and rollout, Verifiers:
 5. starts the game, tracker, and bot and waits for readiness;
 6. launches one fresh Agencity root through the Verifiers model-interception
    endpoint;
-7. lets the root use the image SDK through its persistent Bun REPL;
-8. requests owned Agencity service shutdown and removes portable state;
+7. lets the root use the image SDK through its persistent Bun REPL and, after
+   an explicit controller release, an owned managed trainer;
+8. requests owned Agencity service shutdown, which stops managed process groups
+   and confirms their terminal or unknown outcomes before removing portable
+   state;
 9. finalizes the task and collects the official Harbor verifier evidence; and
 10. removes the task container.
+
+If service shutdown is not confirmed, portable state and lifecycle evidence
+remain in the container, cleanup raises an infrastructure error, and scoring
+does not proceed as though the trainer stopped cleanly. The outer Verifiers
+runtime remains responsible for container teardown.
 
 No Agencity profile, game save, REPL heap, or learned artifact is reused by the
 next scored task.
@@ -515,6 +578,12 @@ The broader benchmark project suite is:
 uv run --locked python -m unittest discover -s tests
 ```
 
+On August 19, 2026, the current working tree passed 95 of 96 model-free
+benchmark tests; the one skip was the unrelated opt-in official SWE-bench Pro
+Docker scorer. All six RuneBench preflights and all six RuneBench dry-runs
+passed, the wheel and source distribution built, and the exact pinned-container
+controller and tracker tests passed. No model inference ran.
+
 Common conditions:
 
 - provider credential missing: apply the saved-key and environment resolution
@@ -541,9 +610,11 @@ One paid Luna-xhigh Woodcutting 15-minute treatment using Agencity commit
 evidence, service shutdown, and cleanup. The agent itself ended failed after 43
 model calls because the then-current 800,000 cumulative input-token bound was
 reached before a typed `finish`. That RuneBench limit has since been removed.
-The run also exposed unresolved direct-treatment defects: competing control-mode
-SDK connections, a generated hot loop that ignored non-throwing `No tree found`
-results, and a rate-check path that did not read the active tracker output.
+The run exposed the earlier direct treatment's competing control-mode SDK
+connections, generated hot loop that ignored non-throwing `No tree found`
+results, and mismatched rate-check path. The current model-free revision
+addresses those defects, but the paid result predates the fixes and is not
+evidence for them.
 
 An earlier paid Luna canary against the direct-REPL working tree completed 33
 model turns in one warm REPL epoch and exercised native game actions without a
@@ -560,8 +631,9 @@ game-performance evidence.
 - The official image is `linux/amd64`; ARM Macs use Docker emulation.
 - Video capture remains enabled because it is part of the official image
   treatment.
-- The direct treatment still needs a single-controller background-runner fix
-  and one canonical tracker/rate-check path before a paid full run.
+- The controller, bounded action retry, active tracker command, managed trainer,
+  and Docker-memory preflight have model-free coverage but no paid 30-minute
+  canary on this revision.
 - No paid 16-skill leaderboard-comparable run is verified.
 - A full run is long, expensive, and operator-gated.
 - RuneBench is noisy; one rollout is integration evidence, not a stable harness

@@ -308,6 +308,42 @@ describe("managed workspace service", () => {
     expect(idleRemainingMs).toBeLessThanOrEqual(DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS);
   });
 
+  test("reports managed processes as keep-alive work and terminates them during shutdown", async () => {
+    const config = await configuration("agencity-managed-process-service-");
+    const service = await opened(config);
+    const session = await service.supervisor.createSession({
+      workspaceId: config.workspace.workspaceId,
+      model: { provider: "echo", model: "echo-1" },
+    });
+    const started = await service.supervisor.executeCell(
+      session.sessionId,
+      session.branchId,
+      `
+        return sdk.processes.start({
+          command: "sleep 30",
+          idempotencyKey: "managed-service-process",
+        });
+      `,
+    );
+    const handle = started.result as { processId: string };
+    const process = await service.supervisor.processes.inspect(
+      session.sessionId,
+      session.branchId,
+      handle.processId,
+    );
+    expect(process.status).toBe("running");
+    expect(await service.status()).toMatchObject({
+      mode: "trusted-local",
+      keepAliveReasons: expect.arrayContaining([
+        expect.objectContaining({ kind: "managed_processes", count: 1 }),
+      ]),
+    });
+
+    services.splice(services.indexOf(service), 1);
+    await service.close();
+    expect(processIsLive(process.pid!)).toBe(false);
+  });
+
   test("detached service child retains the one-hour default", async () => {
     const config = await configuration("agencity-managed-child-default-");
     const connection = await connectManagedService(config, { timeoutMs: 5_000 });

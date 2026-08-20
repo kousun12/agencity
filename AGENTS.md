@@ -107,7 +107,8 @@ Agencity does not claim or require:
 - A **goal** is a durable autonomous objective. **Completion gates** record required evidence and must pass against attributable workspace state before completion is accepted.
 - A **cell** is a proposed TypeScript program plus its dependencies, logs, observed result, exports, and terminal status. A committed cell boundary is a recovery boundary.
 - A **console namespace** is the noncanonical Bun TypeScript REPL environment owned by one exact session and branch. Top-level variables, functions, classes, imports, module instances, and object identity remain available across cells while that worker lives. The namespace may disappear on cancellation, RSS recycling, worker/service/process loss, or branch change. It is never task ownership, completion evidence, synchronization, export, automatic context, or a recovery requirement; required recovery data uses state or artifacts.
-- An **effect** is external work such as a model, shell, file, or skill request. The outbox records the request before execution and records `succeeded`, `failed`, `cancelled`, or `unknown`.
+- An **effect** is external work such as a model, shell, managed-process, file, or skill request. The outbox records the request before execution and records `succeeded`, `failed`, `cancelled`, or `unknown`.
+- A **managed process** is a trusted-local background OS process group owned by one workspace/session/branch/originating cell and optional agent run. Its queued/running/terminal lifecycle, effect, random recovery identity, bounded scrubbed logs, and artifact spill are durable; its live child-process object is not.
 - **Context** is a bounded projection assembled for a model call from attributable messages, state, memory, tasks, policy, and harness versions. It is not the complete durable record.
 - A **working value** is durable typed JSON. Larger or byte-oriented content belongs in an immutable **artifact** identified by content digest.
 - **Memory** records scoped claims, observations, preferences, and decisions. The **continual harness** adds versioned prompt notes, executable skills, and reusable subagent specifications with evidence and lifecycle state.
@@ -137,7 +138,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 
 - local LibSQL canonical event storage, recursive creation of missing file-backed database parents, immutable event guards, deterministic projection/rebuild, branches, snapshots, cursor-based subscriptions, one shared race-safe snapshot-plus-cursor terminal waiter with an explicit bounded polling fallback only for placements that advertise unavailable relational notifications, and candidate-driven startup recovery that shares one cursor-checked current-branch projection and avoids replaying unrelated terminal runs;
 - persistent Bun TypeScript REPL environments in a bounded exact-session-and-branch worker pool with separate resident-process and active-execution permits, deadlock-free capacity-reserved awaited children, queued detached children, isolated namespace/stdout/worker loss, random authoritative epoch IDs with readable adjective-noun-suffix names, final-expression or explicit-return observations, bounded safe inspection/logs, durable working values, retained cell history, read-only analytical SQL, content-addressed artifacts, 128 KiB cell-result IPC with streamed JSON artifact staging above that boundary, one-based bounded file pages, and exact bounded artifact byte ranges;
-- outbox-backed model, shell, file, and skill effects with typed pre-execution origins, crash recovery, explicit unknown outcomes, and `agencity.bounded-output.v1` completeness envelopes; direct failed/cancelled/unknown convenience-helper errors retain validated exact effect-outcome event IDs on new `CellFailed` events through private non-text worker metadata, while wrapped errors and recovery-time abandonment do not invent causality; local shell execution streams exact registered-value scrubbing into 24 KiB head/tail previews and spills complete output up to 32 MiB to CAS when available;
+- outbox-backed model, shell, managed-process, file, and skill effects with typed pre-execution origins, crash recovery, explicit unknown outcomes, and `agencity.bounded-output.v1` completeness envelopes; direct failed/cancelled/unknown convenience-helper errors retain validated exact effect-outcome event IDs on new `CellFailed` events through private non-text worker metadata, while wrapped errors and recovery-time abandonment do not invent causality; local shell and managed-process execution stream exact registered-value scrubbing into 24 KiB head/tail previews and spill complete output up to 32 MiB to CAS when available; `sdk.processes.start/inspect/readLogs/stop/list` returns durable JSON handles, ties process groups to their owning run/cell/effect, survives console-worker loss, authenticates restart cleanup with a random token rather than PID alone, and never retries uncertain work;
 - durable root and child sessions, nuclear-family mailboxes with default queued sends and explicit non-waking steering, deterministic immediate run IDs and sender-authorized observation-only result lookup for new non-legacy queued messages, cancellation trees, recursive-model runtime handles, documents/input sets, goals, cached attributable gates, heartbeats, schedules, and wake queues;
 - durable per-session agent profiles embedded in root and child admission, sealed root/task-specialist defaults, specification-source provenance, session-wide active-profile projections, bounded active/history inspection, and exact profile/effective-system-prompt pins across autonomous and recursive invocations;
 - scoped memory with FTS5 candidate retrieval, versioned prompt notes, skills, subagent specifications, governed refinement/evaluation/rollback, and an attributable trajectory refiner with profile-owned automatic-trigger policy;
@@ -167,7 +168,7 @@ The TUI and other clients observe this lifecycle through snapshot-plus-cursor ev
 - The family browser uses a highlighted selected card, dimmed activity-colored alternatives, and bounded single-line task and model metadata with ellipses instead of wrapped option blocks.
 - Streaming-capable providers emit bounded cursorless progress before an atomic committed response; non-streaming providers truthfully report committed-only behavior. Real-provider streaming remains credential-gated.
 - Unknown effects are retained and visible through startup/status plus `unknown` and evidence-only `reconcile` product flows. Reconciliation deliberately does not rewrite the unknown outcome or authorize automatic retry.
-- The on-demand managed workspace service owns detached runs, schedules, and recovery behind the same authenticated loopback protocol, with process fencing and tested client detach/reattach. A quiescent service exits after one hour by default; active runs, effects, wakes, schedules, heartbeats, resident workers, active console executions, and attached clients keep it alive and are reported by `service status`; idle console workers are retired at the final quiescence check, so a terminal blocked branch and its live REPL namespace do not become durable keep-alive identity. The exact normalized timeout remains part of the discovery configuration hash, so a live former one-minute owner produces `CONFIG_MISMATCH` rather than takeover by a new default client. Graceful shutdown stops admission, drains admitted protocol handlers and resident workers, stops the console pool, and preserves sessions. The service is not an OS-login service and has no cross-device execution-owner failover.
+- The on-demand managed workspace service owns detached runs, managed background processes, schedules, and recovery behind the same authenticated loopback protocol, with process fencing and tested client detach/reattach. A quiescent service exits after one hour by default; active runs, effects, managed processes, wakes, schedules, heartbeats, resident workers, active console executions, and attached clients keep it alive and are reported by `service status`; idle console workers are retired at the final quiescence check, so a terminal blocked branch and its live REPL namespace do not become durable keep-alive identity. The exact normalized timeout remains part of the discovery configuration hash, so a live former one-minute owner produces `CONFIG_MISMATCH` rather than takeover by a new default client. Graceful shutdown stops admission, drains admitted protocol handlers and resident workers, sends TERM then KILL to owned process groups within bounded waits, records terminal or unknown outcomes, confirms no authenticated owned group remains, stops the console pool, and preserves sessions. The service is not an OS-login service and has no cross-device execution-owner failover.
 - Release acceptance invokes only an isolated `bun link` executable from fresh external repositories. Its guarded black-box matrix covers truthful missing-provider behavior, explicit fixture-model selection, searchable first-run provider/model selection, coding cells/tools, compact observations, bounded durable-state use, persistent exact-branch REPL bindings and deliberate reconstruction after worker or service loss, raw generation, awaited and detached typed child agents, durable family message queues, failed-gate repair, detach/client loss/service recovery, named head branch/resume/history/tree, distinct JSON run exits, post-commit crash recovery and unknown/no-retry reconciliation, refinement, installed skills, streaming, compaction, schedules, and governed profiles. The installed learning journey proves that a fresh device profile admits repeated-success reflection without first enabling it. The governed-profile journey proves exact root and child profiles, old/new invocation pins, blocking approval, rejection, bounded reproposal, exact rollback, detached managed-service restart, deduplication, and no-ID inspection. The full-screen renderer has deterministic OpenTUI frame/input/resize coverage for Markdown, retained cells, bottom following, responsive layout, notices, inspectors, family navigation, and the searchable workspace root selector. The linked-executable pseudo-terminal journey begins with first-run provider search, hidden fixture credential entry, and fuzzy display-name model selection before it expands a retained TypeScript cell, opens retained child and grandchild routes, climbs back through the ancestry, creates a second root, selects the original root through the workspace Agents view, detaches, and resumes the remembered selection without internal IDs; the release matrix remains non-interactive. Deterministic selection, TTY, catalog, malformed-default, partial-persistence, admission, aggregate, and installed acceptance-matrix verification passed for the typeahead revision. The real-provider, official Turso, and Cloud rows remain explicitly opt-in and unverified for this revision.
 
 ### Deliberately unavailable or deferred
@@ -275,7 +276,10 @@ leaderboard-comparable full selection contains the 16 30-minute skills used by
 the current public website, whose ranking is the mean of `ln(1 + peak XP/min)`
 across those skills; the exhaustive local selection additionally includes all
 16 15-minute variants. The committed default is serial because every task
-receives an independent 8 GiB container. Verifiers episode concurrency may
+receives an independent 8 GiB container. Suite preflight probes Docker daemon
+memory, reserves 2 GiB for Docker/host overhead, rejects unsafe effective
+concurrency, and reports an unavailable probe as unavailable; passing memory
+does not prove CPU, provider quota, cleanup, or scoring health. Verifiers episode concurrency may
 parallelize the 16-task selection only when host memory, CPU, provider quota,
 cleanup, and scoring remain healthy. The
 `agencity-runebench-repl-v1` treatment imports the image-owned TypeScript SDK
@@ -299,9 +303,15 @@ but its agent terminal status was failed after the then-current 800,000
 cumulative input-token bound stopped it at 43 model calls before a typed
 `finish`. That RuneBench cumulative-token bound has since been removed in favor
 of the official task horizon and 5,000-turn allowance. The run exposed
-unresolved competing-controller, action-backoff, and tracker-path defects in
-the direct treatment, so a paid full run remains blocked on a passing exact
-30-minute canary. An earlier paid Luna
+competing-controller, action-backoff, and tracker-path defects in the earlier
+direct treatment. The current model-free treatment replaces the upstream MCP
+prompt, stages one token-and-process-identity controller claim, requires bounded
+backoff for false action results, gives the active tracker path explicitly, and
+hands long-running trainers to `sdk.processes`. Benchmark cleanup removes
+portable state only after owned-service shutdown confirms process cleanup;
+unconfirmed shutdown retains lifecycle evidence and is an infrastructure error.
+A paid full run remains blocked
+on a passing exact 30-minute canary. An earlier paid Luna
 canary completed 33 direct-REPL turns in one warm epoch without
 credential-input or console-worker failure, but owned-service shutdown missed
 the harness cleanup bound before the official scorer ran; that displayed zero
@@ -349,9 +359,9 @@ pinned-container fake-provider
 test exercises the exact JSON product startup path with an initially missing
 explicit state directory. Malformed launch results retain bounded scrubbed
 stdout/stderr diagnostics instead of collapsing to a parser-only error. The
-August 19, 2026 model-free verification of the RuneBench working tree passed 85
-benchmark tests with one intentionally skipped opt-in scorer test, all four
-RuneBench config preflights and dry-runs, package builds and source compilation,
+August 19, 2026 model-free verification of the RuneBench working tree passed 95
+benchmark tests with one intentionally skipped unrelated opt-in SWE-bench Pro
+scorer test, all six RuneBench config preflights and dry-runs, package builds and source compilation,
 actual pinned-image game startup, and a direct image-owned TypeScript SDK
 connection plus explicit fresh-mode automatic-learning pause through Docker
 emulation on an ARM Mac. The August 18 verification against commit `e03a2ad`
@@ -451,7 +461,7 @@ Physical owned-scope deletion is a separate, guarded data-control operation. Do 
 
 ### Event evolution is versioned
 
-Released event meanings are immutable. Before the first release, an architecture cutover may replace the accepted workspace schema and require local state reset instead of implementing compatibility. The current runtime accepts event schema version 5 only, uses reducer version 20, and rejects version-1/version-2/version-3/version-4 workspaces with reset guidance before migration, row decode, projection, sync ingestion, and recovery. There is no general event-version registry or upcaster pipeline.
+Released event meanings are immutable. Before the first release, an architecture cutover may replace the accepted workspace schema and require local state reset instead of implementing compatibility. The current runtime accepts event schema version 5 only, uses reducer version 21, and rejects version-1/version-2/version-3/version-4 workspaces with reset guidance before migration, row decode, projection, sync ingestion, and recovery. There is no general event-version registry or upcaster pipeline.
 
 After release, changing event meaning requires explicit version acceptance, deterministic projection/upcasting, retained-history fixtures, protocol compatibility tests, and updated event documentation. Pre-release cutovers must still fail closed before projection and must never silently reinterpret an older workspace.
 
@@ -514,7 +524,7 @@ The current system is **trusted-local**, not a hostile-code sandbox.
 
 - Model-generated TypeScript and shell commands can exercise the OS authority of the runtime process.
 - The separate Bun console worker provides crash and protocol isolation, not security isolation.
-- The shell executor constrains its initial working directory but is not an OS sandbox.
+- The shell and managed-process executors constrain their initial working directory but are not OS sandboxes. Managed-process ownership, process-group termination, and token-authenticated restart cleanup are lifecycle controls, not CPU, memory, network, syscall, or descendant isolation.
 - Automatically loaded repository `AGENTS.md` files are untrusted model-facing behavioral guidance. They are bounded, source-attributed, and scrubbed for known brokered secrets, but they cannot grant runtime authority or become sealed refinement-review policy. Repository authors must not store secrets in them.
 - The product-managed HTTP service is bearer-authenticated from an owner-only discovery manifest and binds to loopback. The advanced embedded diagnostic server is unauthenticated and must remain on loopback unless protected by an external boundary.
 - Read-only SQL is a shared diagnostic surface, not a confidentiality boundary between candidates or workspaces.
@@ -572,7 +582,7 @@ For changes to:
 
 - reducers/events: add unit replay, duplicate, invalid-transition, and rebuild tests;
 - storage/migrations: add reopen, idempotency, physical-constraint, and architecture checks;
-- effects/recovery: test crash boundaries before request, after request, during execution, and after committed outcome;
+- effects/recovery: test crash boundaries before request, after request, during execution, and after committed outcome; managed processes additionally require queued cancellation, false-result/log scrubbing, worker loss, run cancellation, token-authenticated restart, process-group TERM/KILL, and confirmed service-shutdown coverage;
 - console RPC: test worker restart, stdout isolation, secret handling, and failed-cell atomicity;
 - recursive agents: test restart, cancellation trees, task budgets, mailbox authorization, and terminal delivery;
 - memory/refinement: test scope, provenance, deterministic validation, proposer/reviewer separation, standing authority, skill tests, activation conflicts, terminal delivery, outcome evidence, and rollback;

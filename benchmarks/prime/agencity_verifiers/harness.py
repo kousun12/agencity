@@ -251,8 +251,15 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
         workspace = _workspace(trace.task.data, "portable")
         try:
             metadata["service_shutdown"] = await _shutdown_portable(runtime, workspace)
-        finally:
+        except Exception:
+            metadata["service_shutdown"] = "unconfirmed"
+            metadata["cleanup"] = "retained-after-unconfirmed-shutdown"
+            raise
+        try:
             metadata["cleanup"] = await _cleanup_portable(runtime, workspace)
+        except Exception:
+            metadata["cleanup"] = "failed"
+            raise
 
 
 def _agencity_command(

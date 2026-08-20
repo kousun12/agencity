@@ -65,7 +65,7 @@ agencity service status
 agencity service status --json
 ```
 
-The status reports lifecycle, recovery, attached clients, idle deadline, retained roots, and reasons the service remains resident. Human output renders the default duration as `1 hour`; `--json` retains the exact `idleShutdownMs: 3600000`. Active runs, pending effects, queued wakes, schedules, heartbeats, resident managed run-queue work, and clients can keep it alive. A terminal blocked branch, an idle console worker, and its live REPL namespace do not.
+The status reports lifecycle, recovery, attached clients, idle deadline, retained roots, and reasons the service remains resident. Human output renders the default duration as `1 hour`; `--json` retains the exact `idleShutdownMs: 3600000`. Active runs, pending effects, owned managed background processes, queued wakes, schedules, heartbeats, resident managed run-queue work, and clients can keep it alive. A terminal blocked branch, an idle console worker, and its live REPL namespace do not.
 
 The service normally exits one hour after becoming quiescent. This is an idle process-lifetime bound, not a task timeout or REPL-namespace retention guarantee. It is not registered as an OS boot or login service.
 
@@ -75,7 +75,12 @@ The service normally exits one hour after becoming quiescent. This is an idle pr
 agencity service shutdown
 ```
 
-Shutdown stops new admission, drains admitted protocol handlers and resident workers, stops schedulers, releases local execution leases, and preserves sessions. It does not mean "cancel all work" and does not delete data.
+Shutdown stops new admission, drains admitted protocol handlers and resident workers, stops schedulers, and cancels owned managed background processes. Process cleanup sends a graceful signal to each owned process group, waits for a bounded grace period, force-stops survivors, commits terminal or unknown outcomes, and confirms that no authenticated owned group remains before discovery reports the service stopped. Shutdown then releases local execution leases and preserves sessions. It does not cancel already-terminal work and does not delete data.
+
+If shutdown cannot prove managed-process cleanup, it fails instead of reporting
+`stopped`. Preserve the workspace database and artifact directory, inspect the
+unknown effect, and do not manually retry the command until external evidence
+shows that no prior process or side effect remains.
 
 Use shutdown before raw backups, runtime upgrades, path changes, environment-only credential changes, or advanced database operations. Confirm no separate diagnostic process is using the same database.
 
@@ -172,7 +177,8 @@ Startup recovery:
 - finalizes already-committed model outcomes and applies retained formal actions without another provider call;
 - restores each autonomous or recursive invocation from its retained agent-profile pin and effective-system-prompt provenance rather than selecting the currently active profile;
 - recovers trajectory proposals and governed refinement from retained recursive `responseAdmission`, frozen reviewer input, current-model dispatch, exact child-completion evidence, application boundary, and terminal notice;
-- restores branch status, cancellation, goals, schedules, child work, and typed runs from retained boundaries; and
+- restores branch status, cancellation, goals, schedules, child work, typed runs, and managed-process ownership from retained boundaries;
+- authenticates a surviving managed process group with its retained random token, stops it, and records the interrupted non-idempotent outcome as unknown without retry; and
 - never re-executes effects during projection rebuild.
 
 Inspect attention:
@@ -332,7 +338,7 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
 
-The current workspace format accepts only event schema version 5 and reducer version 20. Workspace histories containing schema version 1, 2, 3, or 4 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-5 sessions with complete initial profiles, typed effect origins, and exact provider-input admission; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
+The current workspace format accepts only event schema version 5 and reducer version 21. Workspace histories containing schema version 1, 2, 3, or 4 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-5 sessions with complete initial profiles, typed effect origins, managed-process lifecycle records, and exact provider-input admission; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

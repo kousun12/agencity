@@ -169,10 +169,17 @@ class SWEProTask(vf.Task[SWEProData]):
                 metadata["service_shutdown"] = await _shutdown_portable(
                     runtime, self.data.workdir
                 )
-            finally:
+            except Exception:
+                metadata["service_shutdown"] = "unconfirmed"
+                metadata["cleanup"] = "retained-after-unconfirmed-shutdown"
+                raise
+            try:
                 metadata["cleanup"] = await _cleanup_portable(
                     runtime, self.data.workdir
                 )
+            except Exception:
+                metadata["cleanup"] = "failed"
+                raise
 
         baseline = self._baselines.pop(trace.id, None)
         if baseline is None:

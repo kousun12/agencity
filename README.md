@@ -2,11 +2,11 @@
 
 Agencity is a terminal-first autonomous agent runtime for work that may outlive one model context, terminal, or process. It keeps agent sessions, tasks, branches, tool effects, subagents, and evidence in a durable local event history—an append-only sequence of records. Generated work runs in an exact-branch TypeScript REPL whose bindings remain available while its worker lives, while committed state can be inspected and resumed after restart.
 
-A **session** is a durable agent identity. A **branch** is one retained line of that session's history. An **effect** is an external action such as a model call, shell command, or file operation. Agencity records effect intent before execution and keeps success, failure, cancellation, and uncertainty distinct.
+A **session** is a durable agent identity. A **branch** is one retained line of that session's history. An **effect** is an external action such as a model call, shell command, managed background process, or file operation. Agencity records effect intent before execution and keeps success, failure, cancellation, and uncertainty distinct. Managed processes have reconstructable JSON handles, bounded scrubbed logs, cancellation, and restart-aware cleanup.
 
 ## Trust warning
 
-Agencity is **trusted-local software, not a hostile-code sandbox**. Model-generated TypeScript, shell commands, and installed skills have the operating-system authority of the Agencity process. The separate Bun worker provides crash isolation only.
+Agencity is **trusted-local software, not a hostile-code sandbox**. Model-generated TypeScript, shell commands, managed processes, and installed skills have the operating-system authority of the Agencity process. The separate Bun worker provides crash isolation only.
 
 Run Agencity with a minimally privileged OS account or place the entire runtime inside an independently managed sandbox when the workspace or generated code is not fully trusted. Keep protocol surfaces on loopback. See [Security](./docs/security.md).
 

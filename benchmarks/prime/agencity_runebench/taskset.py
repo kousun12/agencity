@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
@@ -56,46 +57,363 @@ LOCK_PATH = (
 
 LearningMode = Literal["fresh", "within-run"]
 
-REPL_CONNECTION_SOURCE = """const { BotSDK } = await import("/app/sdk/index.ts");
-const { BotActions } = await import("/app/sdk/actions.ts");
-const rs = new BotSDK({
-  botUsername: "agent",
-  password: "test",
-  gatewayUrl: "ws://localhost:7780",
-  autoLaunchBrowser: false,
-});
-await rs.connect();
-const bot = new BotActions(rs);"""
+TREATMENT_DIR = "/app/agencity-runebench"
+CONTROLLER_PATH = f"{TREATMENT_DIR}/controller.ts"
+TRAINER_DIR = f"{TREATMENT_DIR}/trainers"
+TRACKING_FILE = "/logs/tracking/skill_tracking.json"
+RATE_COMMAND_TEMPLATE = (
+    f"TRACKING_FILE={TRACKING_FILE} "
+    "bun /app/benchmark/shared/check_xp_rate.ts {skill}"
+)
+
+CONTROLLER_SOURCE = r"""import {
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { BotSDK } from "/app/sdk/index.ts";
+import { BotActions } from "/app/sdk/actions.ts";
+
+const LOCK_DIR = "/app/agencity-runebench/controller.lock";
+const CLAIM_PATH = `${LOCK_DIR}/claim.json`;
+const CLAIM_SCHEMA = "agencity.runebench-controller-claim.v1";
+const MIN_BACKOFF_MS = 250;
+const MAX_BACKOFF_MS = 5_000;
+
+type Claim = {
+  schema: typeof CLAIM_SCHEMA;
+  owner: string;
+  pid: number;
+  processStartTime: string;
+  token: string;
+  createdAt: string;
+};
+
+export type ActionResult = {
+  success?: boolean;
+  message?: string;
+  [key: string]: unknown;
+};
+
+export type ActionAttempt<T> =
+  | { ok: true; attempt: number; result: T }
+  | { ok: false; attempt: number; failureCount: number; result?: T; error?: string };
+
+export type ActionLoopOptions<T> = {
+  action: () => Promise<T>;
+  iterations: number;
+  onAttempt?: (attempt: ActionAttempt<T>) => Promise<void> | void;
+  minBackoffMs?: number;
+  maxBackoffMs?: number;
+  successDelayMs?: number;
+};
+
+type ControllerLease = {
+  readonly owner: string;
+  readonly claim: Readonly<Claim>;
+  release(): Promise<void>;
+};
+
+let activeController: RuneBenchController | undefined;
+
+function processStartTime(pid: number): Promise<string> {
+  return readFile(`/proc/${pid}/stat`, "utf8").then((value) => {
+    const close = value.lastIndexOf(")");
+    const fields = value.slice(close + 2).trim().split(/\s+/);
+    const startTime = fields[19];
+    if (!startTime) throw new Error(`cannot read process identity for pid ${pid}`);
+    return startTime;
+  });
+}
+
+async function claimIsLive(claim: Claim): Promise<boolean> {
+  if (
+    claim.schema !== CLAIM_SCHEMA ||
+    !Number.isInteger(claim.pid) ||
+    claim.pid <= 0 ||
+    !claim.processStartTime
+  ) {
+    return false;
+  }
+  try {
+    return (await processStartTime(claim.pid)) === claim.processStartTime;
+  } catch {
+    return false;
+  }
+}
+
+async function readClaim(): Promise<Claim | undefined> {
+  try {
+    return JSON.parse(await readFile(CLAIM_PATH, "utf8")) as Claim;
+  } catch {
+    return undefined;
+  }
+}
+
+async function retireStaleClaim(observed: Claim | undefined): Promise<void> {
+  if (observed && await claimIsLive(observed)) {
+    throw new Error(
+      `RUNEBENCH_CONTROLLER_BUSY: ${observed.owner} owns the bot in process ` +
+      `${observed.pid}`,
+    );
+  }
+  const quarantine = `${LOCK_DIR}.stale-${crypto.randomUUID()}`;
+  try {
+    await rename(LOCK_DIR, quarantine);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+    return;
+  }
+  await rm(quarantine, { recursive: true, force: true });
+}
+
+export async function acquireControllerLease(owner: string): Promise<ControllerLease> {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(owner)) {
+    throw new Error("controller owner must be 1-64 safe identifier characters");
+  }
+  const claim: Claim = {
+    schema: CLAIM_SCHEMA,
+    owner,
+    pid: process.pid,
+    processStartTime: await processStartTime(process.pid),
+    token: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+  };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await mkdir(LOCK_DIR);
+      await writeFile(CLAIM_PATH, `${JSON.stringify(claim)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      let released = false;
+      return {
+        owner,
+        claim,
+        async release() {
+          if (released) return;
+          const current = await readClaim();
+          if (!current || current.token !== claim.token) {
+            throw new Error("RUNEBENCH_CONTROLLER_CLAIM_CHANGED");
+          }
+          await rm(LOCK_DIR, { recursive: true });
+          released = true;
+        },
+      };
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") throw error;
+      const observed = await readClaim();
+      if (!observed && attempt < 2) {
+        await Bun.sleep(50);
+        continue;
+      }
+      await retireStaleClaim(observed);
+    }
+  }
+  throw new Error("RUNEBENCH_CONTROLLER_CLAIM_UNAVAILABLE");
+}
+
+export class RuneBenchController {
+  readonly bot: BotActions;
+  readonly rs: BotSDK;
+  readonly owner: string;
+  #lease: ControllerLease;
+  #released = false;
+
+  constructor(owner: string, lease: ControllerLease, rs: BotSDK) {
+    this.owner = owner;
+    this.#lease = lease;
+    this.rs = rs;
+    this.bot = new BotActions(rs);
+  }
+
+  async release(): Promise<void> {
+    if (this.#released) return;
+    await this.rs.disconnect();
+    if (this.rs.getConnectionState() !== "disconnected") {
+      throw new Error("RUNEBENCH_CONTROLLER_DISCONNECT_UNCONFIRMED");
+    }
+    await this.#lease.release();
+    this.#released = true;
+    if (activeController === this) activeController = undefined;
+  }
+}
+
+export async function acquireController(owner = "repl"): Promise<RuneBenchController> {
+  if (activeController) {
+    if (activeController.owner !== owner) {
+      throw new Error(
+        `RUNEBENCH_CONTROLLER_BUSY: ${activeController.owner} owns this process`,
+      );
+    }
+    return activeController;
+  }
+  const lease = await acquireControllerLease(owner);
+  const rs = new BotSDK({
+    botUsername: "agent",
+    password: "test",
+    gatewayUrl: "ws://localhost:7780",
+    autoLaunchBrowser: false,
+  });
+  try {
+    await rs.connect();
+  } catch (error) {
+    await lease.release();
+    throw error;
+  }
+  activeController = new RuneBenchController(owner, lease, rs);
+  return activeController;
+}
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  label: string,
+): number {
+  const selected = value ?? fallback;
+  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
+    throw new Error(`${label} must be an integer from ${minimum} through ${maximum}`);
+  }
+  return selected;
+}
+
+export async function runActionLoop<T extends ActionResult>(
+  options: ActionLoopOptions<T>,
+): Promise<ActionAttempt<T>[]> {
+  const iterations = boundedInteger(options.iterations, 1, 1, 10_000, "iterations");
+  const minBackoffMs = boundedInteger(
+    options.minBackoffMs,
+    MIN_BACKOFF_MS,
+    MIN_BACKOFF_MS,
+    MAX_BACKOFF_MS,
+    "minBackoffMs",
+  );
+  const maxBackoffMs = boundedInteger(
+    options.maxBackoffMs,
+    MAX_BACKOFF_MS,
+    minBackoffMs,
+    MAX_BACKOFF_MS,
+    "maxBackoffMs",
+  );
+  const successDelayMs = boundedInteger(
+    options.successDelayMs,
+    0,
+    0,
+    MAX_BACKOFF_MS,
+    "successDelayMs",
+  );
+  const attempts: ActionAttempt<T>[] = [];
+  let failureCount = 0;
+
+  for (let attempt = 1; attempt <= iterations; attempt += 1) {
+    try {
+      const result = await options.action();
+      if (result?.success === false) {
+        failureCount += 1;
+        const failed: ActionAttempt<T> = {
+          ok: false,
+          attempt,
+          failureCount,
+          result,
+        };
+        attempts.push(failed);
+        await options.onAttempt?.(failed);
+        const delay = Math.min(
+          maxBackoffMs,
+          minBackoffMs * (2 ** Math.min(failureCount - 1, 8)),
+        );
+        await Bun.sleep(delay);
+        continue;
+      }
+      failureCount = 0;
+      const succeeded: ActionAttempt<T> = { ok: true, attempt, result };
+      attempts.push(succeeded);
+      await options.onAttempt?.(succeeded);
+      if (successDelayMs > 0) await Bun.sleep(successDelayMs);
+    } catch (error) {
+      failureCount += 1;
+      const failed: ActionAttempt<T> = {
+        ok: false,
+        attempt,
+        failureCount,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      attempts.push(failed);
+      await options.onAttempt?.(failed);
+      const delay = Math.min(
+        maxBackoffMs,
+        minBackoffMs * (2 ** Math.min(failureCount - 1, 8)),
+      );
+      await Bun.sleep(delay);
+    }
+  }
+  return attempts;
+}
+"""
+
+REPL_CONNECTION_SOURCE = f"""const {{
+  acquireController,
+  runActionLoop,
+}} = await import("{CONTROLLER_PATH}");
+const controller = await acquireController("repl");
+const rs = controller.rs;
+const bot = controller.bot;"""
 
 REPL_GUIDANCE = f"""
 
 ## Agencity RuneBench treatment
 
-This rollout uses Agencity's persistent Bun TypeScript console directly instead
-of the benchmark's `execute_code` MCP wrapper. Ignore instructions to call the
-`rs-agent` MCP tool. The same benchmark SDK is available from `/app`.
-
-Keep Agencity's built-in `sdk` name for durable agent APIs. Import the
-image-owned `BotSDK` and `BotActions` under distinct names and connect directly:
+Use only Agencity's persistent Bun TypeScript console. Keep Agencity's built-in
+`sdk` name for durable agent APIs. Acquire the one permitted game controller:
 
 ```ts
 {REPL_CONNECTION_SOURCE}
 ```
 
-The `rs` and `bot` bindings survive across cells while the REPL epoch is warm.
-Start with one short action, return a small state summary, then lengthen only a
-measured working loop. Read `/app/sdk/API.md`, `/app/learnings/`, and
-`/app/wiki/` on demand. Use the benchmark's rate-check command after each
-strategy. Put a proven loop in a background script only when work must continue
-while you inspect results or make another model decision.
+The controller claim prevents a second live process from controlling the bot.
+Never construct `BotSDK` yourself. Reuse `controller`, `rs`, and `bot` while the
+REPL epoch is warm.
+
+Start with one short action and return its small result. Treat a returned
+`{{ success: false, ... }}` as a failure even though it did not throw. Every
+repeated strategy must use `runActionLoop`, which applies bounded exponential
+backoff to false results and thrown errors. Inspect failed messages and change
+the strategy instead of hot-looping an unavailable target.
+
+Write treatment scripts only under `{TRAINER_DIR}`. Read `/app/sdk/API.md`,
+`/app/learnings/`, and `/app/wiki/` on demand. Measure after each strategy with
+the exact `TRACKING_FILE={TRACKING_FILE} bun ... check_xp_rate.ts <Skill>`
+command stated in the task.
+
+Use a managed process only after a measured loop is proven and must continue
+between model decisions. Its script must import `acquireController` and
+`runActionLoop` from `{CONTROLLER_PATH}`, acquire one unique trainer owner, and
+release that controller in `finally`. Hand ownership over in this exact order:
+
+1. write the trainer under `{TRAINER_DIR}` with `tools.writeFile`;
+2. call `await controller.release()` and do not use the old `rs` or `bot` again;
+3. start exactly one trainer with
+   `sdk.processes.start({{ command: "bun {TRAINER_DIR}/<name>.ts",
+   cwd: "/app", idempotencyKey: "<stable-strategy-key>" }})`;
+4. retain the returned JSON handle and use `sdk.processes.inspect`,
+   `sdk.processes.readLogs`, or `sdk.processes.stop` for its lifecycle.
+
+Never use `command &`, `nohup`, `/tmp`, or another unmanaged process. Never
+start a trainer while the REPL controller claim is live. A failed controller
+claim is a lifecycle error to fix, not permission to bypass the wrapper.
 """.strip()
 
 WITHIN_RUN_GUIDANCE = """
 
 This is the within-run adaptive treatment. Do not spend the opening minutes on
-reflection. First establish a non-zero measured baseline. While a proven
-background loop is earning XP, use retained failures and measured rate evidence
-to improve the next attempt. If the trajectory contains a genuinely reusable
+reflection. First establish a non-zero measured baseline. While a proven managed
+loop earns XP, use retained failures and measured rate evidence to improve the
+next attempt. If the trajectory contains a genuinely reusable
 lesson, one focused `sdk.harness.review` request may target `memory`,
 `prompt_note`, or `skill` with `wait: true`; generic advice or an unmeasured
 guess should remain ordinary working notes. Apply an approved lesson only to a
@@ -149,6 +467,14 @@ class RuneBenchTask(HarborSuiteTask):
             "/app/server/engine/data/players/main/agent.sav",
             save.read_bytes(),
         )
+        prepared = await runtime.run(
+            ["mkdir", "-p", TREATMENT_DIR, TRAINER_DIR],
+            {},
+        )
+        if prepared.exit_code != 0:
+            detail = (prepared.stderr or prepared.stdout).strip()[-500:]
+            raise RuntimeError(f"could not prepare RuneBench treatment directory: {detail}")
+        await runtime.write(CONTROLLER_PATH, CONTROLLER_SOURCE.encode("utf-8"))
 
         exists = await runtime.run(["test", "-f", "/app/AGENTS.md"], {})
         if exists.exit_code not in {0, 1}:
@@ -292,10 +618,38 @@ class RuneBenchTaskset(vf.Taskset[RuneBenchTask, RuneBenchConfig]):
 
 
 def _adapt_prompt(prompt: str, learning_mode: LearningMode) -> str:
-    parts = [prompt.rstrip(), REPL_GUIDANCE]
+    direct_prompt = _remove_upstream_mcp_instructions(prompt)
+    parts = [direct_prompt, REPL_GUIDANCE]
     if learning_mode == "within-run":
         parts.append(WITHIN_RUN_GUIDANCE)
-    return "\n\n".join(parts)
+    adapted = "\n\n".join(parts)
+    forbidden = ("execute_code", "rs-agent", "MCP server", "bun /tmp/")
+    present = [value for value in forbidden if value in adapted]
+    if present:
+        raise ValueError(
+            "RuneBench prompt adaptation retained unsupported interfaces: "
+            + ", ".join(present)
+        )
+    return adapted
+
+
+def _remove_upstream_mcp_instructions(prompt: str) -> str:
+    start = "\nYou control the bot via the `rs-agent` MCP server."
+    end = "\nRULES:"
+    if prompt.count(start) != 1 or prompt.count(end) != 1:
+        raise ValueError("RuneBench upstream prompt interface shape drifted")
+    prefix, remainder = prompt.split(start, 1)
+    _, rules = remainder.split(end, 1)
+    rate_pattern = re.compile(
+        r"`bun /app/benchmark/shared/check_xp_rate\.ts ([A-Za-z]+)`"
+    )
+    prefix, replacements = rate_pattern.subn(
+        lambda match: f"`{RATE_COMMAND_TEMPLATE.format(skill=match.group(1))}`",
+        prefix,
+    )
+    if replacements != 1:
+        raise ValueError("RuneBench upstream rate command shape drifted")
+    return f"{prefix.rstrip()}\n\nRULES:{rules}".strip()
 
 
 def _sha256_text(value: str) -> str:
@@ -306,7 +660,15 @@ __all__ = [
     "BENCHMARK",
     "CATALOG_PATH",
     "DATASET",
+    "CONTROLLER_PATH",
+    "CONTROLLER_SOURCE",
+    "RATE_COMMAND_TEMPLATE",
+    "REPL_CONNECTION_SOURCE",
+    "REPL_GUIDANCE",
     "TREATMENT",
+    "TRACKING_FILE",
+    "TRAINER_DIR",
+    "WITHIN_RUN_GUIDANCE",
     "RuneBenchConfig",
     "RuneBenchData",
     "RuneBenchTask",

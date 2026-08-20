@@ -12,9 +12,9 @@ The package is private and is consumed from a source checkout or Bun link. It is
 | `@prime-agent/runtime/domain` | Events, payloads, reducer state, JSON constraints, and stable errors. |
 | `@prime-agent/runtime/storage` | `AgentStorage`, storage capabilities, `LibSqlStorage`, and the Turso transport adapter. |
 | `@prime-agent/runtime/artifacts` | `ArtifactStore` and `LocalArtifactStore`. |
-| `@prime-agent/runtime/executors` | Effect contracts and file, shell, model, and skill executors. |
+| `@prime-agent/runtime/executors` | Effect contracts and file, shell, managed-process, model, and skill executors. |
 | `@prime-agent/runtime/console` | Generated-cell SDK, observation helpers, and the private persistent REPL worker host. |
-| `@prime-agent/runtime/runtime` | `Supervisor` and its run, outbox, projection, context, agent, raw-generation, retained private recursive-operation, memory, harness, skill, goal, schedule, and recovery services. |
+| `@prime-agent/runtime/runtime` | `Supervisor` and its run, outbox, managed-process, projection, context, agent, raw-generation, retained private recursive-operation, memory, harness, skill, goal, schedule, and recovery services. |
 | `@prime-agent/runtime/protocol` | `ProtocolServer`, `AgentClient`, HTTP and in-process transports, and wire-facing types. |
 | `@prime-agent/runtime/security` | Explicit runtime-private environment filtering, exact registered-value scrubbing, and model-credential helpers. |
 | `@prime-agent/runtime/tui` | The protocol-backed full-screen terminal client and plain-transcript fallback. |
@@ -70,13 +70,13 @@ async function usingRuntime() {
 }
 ```
 
-`Supervisor.open` migrates the local stores, opens the content-addressed artifact store and profile-owned credential store, installs the standard executors, and optionally performs recovery. It creates persistent Bun REPL workers keyed by exact session and branch as cells are admitted. Their namespaces are noncanonical and are never checkpointed or replayed. `close` stops local schedulers, drains admitted recursive and agent work, stops the branch-aware console pool, releases registered credential-redaction values, and closes storage.
+`Supervisor.open` migrates the local stores, opens the content-addressed artifact store and profile-owned credential store, installs the standard executors, and optionally performs recovery. It creates persistent Bun REPL workers keyed by exact session and branch as cells are admitted. Their namespaces are noncanonical and are never checkpointed or replayed. `Supervisor.processes` exposes owned process start/inspect/log/list/stop operations to embedded integrations. `close` stops local schedulers, terminates owned managed process groups with bounded TERM/KILL cleanup, drains admitted recursive and agent work, stops the branch-aware console pool, releases registered credential-redaction values, and closes storage.
 
 An embedded supervisor does not by itself provide the managed product service's discovery manifest, bearer authentication, resident run queue, process fencing, or idle shutdown. If an embedded host creates a `ProtocolServer`, it also owns network exposure and authentication policy.
 
 ### Managed product service
 
-Ordinary `agencity` product flows discover or start a per-workspace `ManagedWorkspaceService`. That service owns the `Supervisor`, local process lease, startup recovery, resident run advancement, schedules, loopback listener, bearer token, one-hour default quiescent shutdown, and graceful drain. Clients attach through `AgentClient` and do not open the workspace database directly.
+Ordinary `agencity` product flows discover or start a per-workspace `ManagedWorkspaceService`. That service owns the `Supervisor`, local process lease, startup recovery, resident run advancement, managed background processes, schedules, loopback listener, bearer token, one-hour default quiescent shutdown, and graceful drain. Clients attach through `AgentClient` and do not open the workspace database directly.
 
 `ManagedServiceConfiguration.idleShutdownMs` remains available for embedding and deterministic tests. Its normalized value defaults to `3_600_000` and participates in the discovery configuration hash. `ManagedServiceStatus.idleShutdownMs` and JSON output retain exact milliseconds; the product CLI formats the default human duration as one hour. A live REPL namespace and the mere existence of an idle console worker do not count as resident work.
 

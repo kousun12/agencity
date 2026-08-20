@@ -23,7 +23,7 @@ Unless `recover: false`, `Supervisor.open` performs:
 
 Before this sequence, storage admission verifies that every retained event uses schema version 5. A workspace containing schema version 1, 2, 3, or 4 fails closed with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. The runtime does not upcast, rewrite, or delete that history. Back up or move aside the incompatible workspace state before creating a fresh schema-version-5 workspace.
 
-1. **Staging cleanup and outbox reconciliation.** Dead-process owner-only artifact staging directories are removed. Each mutable `running` row whose owner disappeared is inspected. Unreachable CAS objects are not treated as registered evidence.
+1. **Staging cleanup and managed-process reconciliation.** Dead-process owner-only artifact staging directories are inspected. A never-started managed-process request is cancelled. A started request is authenticated by its random retained identity token and process group rather than by PID alone, terminated without retry, and recorded `unknown`. Only then does generic outbox reconciliation inspect the remaining mutable `running` rows. Unreachable CAS objects are not treated as registered evidence.
 2. **Safe requeue.** An effect declared idempotent returns to `pending` with its attempt count retained.
 3. **Visible uncertainty.** A non-idempotent running effect gets a canonical `EffectOutcomeRecorded { outcome: "unknown" }`; it is not requeued. An anomalous pending non-idempotent row with a retained prior attempt is treated the same way; a normal pending first attempt remains safe to drain because it was never claimed.
 4. **Cell abandonment.** Every branch projection with a `proposed`/`running` cell gets a branch-scoped idempotent `CellAbandoned` event. This includes a child fork that inherited an incomplete ancestor cell, without reusing the ancestor's idempotency key. Recovery does not infer or synthesize effect-to-cell causality; abandonment remains uncertain.
@@ -42,6 +42,30 @@ Before this sequence, storage admission verifies that every retained event uses 
 17. **Agent-run recovery.** Queued/running typed runs reconcile retained formal submissions or violations, cells, gate evidence, cancellation, and unknown effects before another model call. Recovery resolves the immutable profile version named by `AgentRunRequested.profilePin`; it does not substitute a later active profile. Context, call, and effect prompt provenance must agree with that invocation pin before dependent work continues. An accepted action is applied from its digest-linked committed source rather than resubmitted. Blocked and failed finishes use one atomic message/status batch; successful finishes materialize a message only after gates pass. Family queued-work terminal replies use the same retained run/message IDs and are not regenerated on repeated startup.
 
 Recovery commands use stable branch-scoped idempotency keys, so repeating startup does not duplicate terminal state. Projection rebuild is a separate effect-free replay operation and does not run any of these schedulers or queues. Family message acceptance is one atomic sender/recipient append batch. Queue dispatch durably admits the stable run before the atomic context-insertion, linked-artifact, and endpoint-receipt batch; advancement is asynchronous only after both boundaries commit.
+
+## Managed background-process recovery
+
+`ManagedProcessRegistered` and the paired `EffectRequested` commit before spawn.
+`ManagedProcessStarted` records the OS PID and process-group ID only after the
+outbox attempt starts. The retained process identity also includes a random
+token inherited by the owned process group. Recovery requires that token before
+signalling a retained group, so an unrelated process that later reuses the PID
+is never killed.
+
+A queued request with no attempt is cancelled after owner loss rather than
+started without its originating cell. A started request may already have
+changed the external world. Startup sends a bounded graceful signal and then a
+force signal to an authenticated surviving group, retains any scrubbed log
+prefix available from owner-only staging, and records `unknown`. It never
+restarts the command. A worker recycle does not end a healthy managed process;
+the workspace service remains its owner and a serialized JSON handle can inspect
+or stop it from a later worker.
+
+Graceful service shutdown stops process admission before draining work. It
+signals all owned groups, waits for their outbox outcomes, force-stops
+survivors, and confirms that no token-authenticated group remains before service
+discovery is unpublished. A failure to prove cleanup makes shutdown fail rather
+than report `stopped`.
 
 ## Agent-profile and prompt-pin recovery
 
@@ -108,6 +132,7 @@ Automatic retry requires the executor/caller to establish idempotency for the lo
 Current defaults:
 
 - shell run: non-idempotent;
+- managed-process start: non-idempotent and never retried after a started attempt;
 - model completion: non-idempotent;
 - file read/write/delete through console helpers/default request policy: idempotent;
 - file exact-text replace: non-idempotent.
@@ -130,6 +155,9 @@ File write helps make retry safe by writing atomically, accepting an expected pr
 | Shell spill staged before CAS placement | No artifact reference or terminal effect. | Remove stale owner staging at startup; apply ordinary idempotent/unknown effect recovery. |
 | Shell spill placed in CAS before atomic artifact/outcome append | Unreachable CAS bytes, no canonical success evidence. | Do not expose or infer success; unreferenced bytes may remain until a future garbage collector. |
 | Shell spill artifact registration and effect outcome append succeeds | Both canonical records are visible in one batch. | Reconstruct the bounded `spilled` envelope; do not rerun the command. |
+| Managed process registered, but no attempt started | Queued process plus pending outbox request; no spawn is attributable. | Cancel it during restart recovery rather than starting ownerless work. |
+| Managed process spawned, owner lost before terminal outcome | Registered token plus a started or ambiguous non-idempotent effect. | Authenticate and stop the owned process group, retain bounded scrubbed logs when available, and record `unknown`; never retry. |
+| Managed service receives graceful shutdown with running processes | Draining service plus queued/running process projections. | Stop admission, TERM then KILL owned groups within bounds, commit outcomes, and publish `stopped` only after no owned group remains. |
 | Oversized cell JSON staged or placed before cell commit | No `ArtifactRegistered`/`CellCommitted` event. | Remove stale staging and do not expose it. Unreferenced CAS bytes may remain. |
 | Staged state/artifact reference before cell commit | No `WorkingValueSet`/`ArtifactRegistered` event. | Do not expose it. Unreferenced CAS bytes may remain. |
 | Cell commit succeeds, process dies before notification | Complete canonical batch. | Snapshot/subscriber catch-up reads it from storage. |

@@ -26,6 +26,8 @@ from agencity_verifiers.selection import load_catalog
 from agencity_verifiers.source import AGENCITY_SOURCE_REF, AGENCITY_SOURCE_REPO
 from scripts.apply_evaluation_policy import apply_policy
 from scripts.preflight_suite import (
+    GIB,
+    DockerCapacityUnavailable,
     _validate_catalog_pins,
     _validate_official_task_timeouts,
     preflight,
@@ -36,6 +38,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class SuitePreflightTests(unittest.TestCase):
+    docker_memory_probe = staticmethod(lambda: 64 * GIB)
+
     def test_evaluation_policy_preserves_unbounded_runebench_cumulative_tokens(
         self,
     ) -> None:
@@ -152,13 +156,20 @@ class SuitePreflightTests(unittest.TestCase):
             ("swe-bench-pro-public-full.toml", 1),
         ):
             with self.subTest(config=name):
-                manifest = preflight(ROOT / "configs" / name)
+                if name.startswith("runebench"):
+                    manifest = preflight(
+                        ROOT / "configs" / name,
+                        docker_memory_probe=self.docker_memory_probe,
+                    )
+                else:
+                    manifest = preflight(ROOT / "configs" / name)
                 self.assertEqual(manifest["selected_count"], expected)
                 self.assertEqual(len(manifest["selected_pins"]), expected)
 
     def test_runebench_leaderboard_full_selects_every_30_minute_skill(self) -> None:
         manifest = preflight(
-            ROOT / "configs" / "runebench-leaderboard-full-adaptive.toml"
+            ROOT / "configs" / "runebench-leaderboard-full-adaptive.toml",
+            docker_memory_probe=self.docker_memory_probe,
         )
         self.assertEqual(len(manifest["selected_ids"]), 16)
         self.assertTrue(
@@ -176,6 +187,62 @@ class SuitePreflightTests(unittest.TestCase):
             ),
             16,
         )
+
+    def test_runebench_paid_canary_config_is_exact_serial_attack_30m(self) -> None:
+        manifest = preflight(
+            ROOT / "configs" / "runebench-attack-30m-adaptive.toml",
+            docker_memory_probe=self.docker_memory_probe,
+        )
+        self.assertEqual(manifest["mode"], "exact")
+        self.assertEqual(manifest["selected_ids"], ["attack-xp-30m"])
+        self.assertEqual(
+            manifest["resource_preflight"]["max_concurrent"],
+            1,
+        )
+
+    def test_runebench_memory_preflight_accepts_committed_serial_config(self) -> None:
+        manifest = preflight(
+            ROOT / "configs" / "runebench-leaderboard-full-adaptive.toml",
+            docker_memory_probe=lambda: 16 * GIB,
+        )
+        resources = manifest["resource_preflight"]
+        self.assertEqual(resources["status"], "passed")
+        self.assertEqual(resources["max_concurrent"], 1)
+        self.assertEqual(resources["episode_memory_gib"], 8)
+        self.assertEqual(resources["required_memory_gib"], 10)
+        self.assertEqual(resources["scope"], "memory-only")
+        self.assertEqual(
+            resources["does_not_verify"],
+            ["cpu", "provider_quota", "scoring", "cleanup"],
+        )
+
+    def test_runebench_memory_preflight_rejects_four_tasks_on_8_gib_daemon(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            r"4 × 8 GiB.*requires 34\.0 GiB.*reports 8\.0 GiB",
+        ):
+            preflight(
+                ROOT / "configs" / "runebench-leaderboard-full-adaptive.toml",
+                docker_memory_probe=lambda: 8 * GIB,
+                max_concurrent=4,
+            )
+
+    def test_runebench_memory_preflight_reports_unavailable_capacity(
+        self,
+    ) -> None:
+        def unavailable() -> int:
+            raise DockerCapacityUnavailable("Docker memory capacity is unavailable")
+
+        with self.assertRaisesRegex(
+            DockerCapacityUnavailable,
+            "capacity is unavailable",
+        ):
+            preflight(
+                ROOT / "configs" / "runebench-woodcutting-15m-adaptive.toml",
+                docker_memory_probe=unavailable,
+            )
 
     def test_preflight_rejects_harness_pin_drift(self) -> None:
         config_path = ROOT / "configs" / "terminal-bench-2-full.toml"

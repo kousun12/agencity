@@ -178,6 +178,14 @@ External work such as a model request, shell command, file operation, or skill i
 
 The rebuildable operational queue derived from committed effect requests. Executors claim work from it, but canonical effect events—not mutable claims or leases—remain the durable truth.
 
+### Managed process
+
+A trusted-local background process group started through `sdk.processes`. Its
+JSON handle, route ownership, effect, lifecycle, recovery identity, bounded
+scrubbed logs, and terminal outcome are durable; the live child-process object
+is not. Managed-process ownership provides cancellation and cleanup, not a
+security sandbox or resource isolation.
+
 ### Unknown outcome
 
 An explicit terminal state used when the runtime cannot determine whether an external effect occurred or what it returned. Unknown is not treated as failure or success and does not authorize a blind retry of non-idempotent work.
@@ -350,7 +358,11 @@ The full-screen terminal client that presents conversation, runs, cells, effects
 
 ### Managed workspace service
 
-The authenticated loopback process that owns detached run advancement, recovery, schedules, wakes, and same-device execution fencing for product use. It stops after one hour of quiescence by default without deleting durable agent identity. A live REPL namespace and an idle console worker are not keep-alive reasons.
+The authenticated loopback process that owns detached run advancement, managed
+background processes, recovery, schedules, wakes, and same-device execution
+fencing for product use. It stops after one hour of quiescence by default
+without deleting durable agent identity. Active managed processes keep it alive;
+a live REPL namespace and an idle console worker do not.
 
 ### Placement
 

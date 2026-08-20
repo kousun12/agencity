@@ -54,7 +54,7 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 
 ### Credential exposure reduction
 
-- The console worker, shell executor, and generated-skill processes omit the explicit runtime-private variables `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AI_GATEWAY_API_KEY`, and `TURSO_AUTH_TOKEN`, plus Agencity's own `AGENCITY_*` variables. Other environment variables are preserved regardless of names such as `token`, `password`, or `auth`.
+- The console worker, shell executor, managed background processes, and generated-skill processes omit the explicit runtime-private variables `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AI_GATEWAY_API_KEY`, and `TURSO_AUTH_TOKEN`, plus Agencity's own `AGENCITY_*` variables. Other environment variables are preserved regardless of names such as `token`, `password`, or `auth`.
 - OpenAI, Anthropic, and Vercel AI Gateway providers resolve stored or environment keys in the supervisor.
 - Provider execution uses the Vercel AI SDK inside the supervisor; provider keys are not passed to the TypeScript console worker.
 - Direct OpenAI requests use the Responses API with `store: false`; Agencity does not ask OpenAI to retain response state or reasoning summaries.
@@ -66,12 +66,30 @@ Raw SQL is a **trusted diagnostic channel over the shared local database**, not 
 - Inputs containing an exact registered value are rejected before durable append.
 - Exact registered byte strings are redacted from executor outputs, logs, and errors before they become durable.
 - Shell stdout/stderr and oversized JSON string tokens use exact-value streaming scrubbing across chunk boundaries before owner-only staging or CAS placement.
+- Managed-process stdout/stderr uses the same exact-value streaming scrubbing before bounded previews, owner-only staging, or CAS placement. The private process-identity token is retained for lifecycle authentication and is not returned in the console handle.
 - Domain fields and text named `token`, `auth`, `password`, `secret`, and similar are preserved. PEM blocks, Bearer-like text, provider-key-like prefixes, JWT-like strings, and credential-looking URL parameters are ordinary data unless they contain an exact registered value.
 - Model-visible refinement context and governance evidence excerpts remove exact registered values. The V3 governance record retains only digests and byte counts for the original canonical payload, plus the bounded redacted excerpt and its provenance.
 
 This is a narrow accidental-leak guard for credentials the runtime actually brokers. It is not general secret discovery, data-loss prevention, a credential vault, or a hostile-code boundary. Agencity deliberately does not infer secrets from field names or string shapes. Unregistered values, short values, encoded or transformed values, credentials from arbitrary files or keychains, and alternate process channels remain the operator's responsibility. Generated code has the same OS-user authority and can read the profile credential file through ambient filesystem APIs. Opaque references remain available for externally managed credentials.
 
 Owner-only artifact staging uses process-specific directories and mode `0700`/`0600` where supported. Startup removes stale staging owned by dead processes. A CAS object can become unreachable if placement succeeds before its canonical registration batch; no general garbage collector currently removes these orphans. This does not expose raw pre-scrubbed content, but operators must include the artifact directory in sensitive-data handling and disk-retention policy.
+
+### Managed background processes
+
+`sdk.processes` gives the managed workspace service lifecycle ownership of a
+trusted-local process group. It does not restrict syscalls, filesystem access,
+network access, CPU, memory, descendants, or process count. Commands retain the
+same OS-user authority as `tools.shell`, and the configured working-directory
+check limits only the initial directory.
+
+The durable process record binds workspace, session, branch, originating cell,
+optional run, effect, command, and a random process identity. Restart recovery
+checks the identity token before signalling a process group; PID alone is never
+authority to kill. Cancellation and graceful shutdown use bounded TERM/KILL
+cleanup. If ownership or outcome cannot be proved, the effect is `unknown`
+rather than success. These controls prevent accidental orphaning on supported
+paths; generated code can still bypass them with ambient Bun or shell process
+APIs because the runtime is not a sandbox.
 
 ### Typed file adapter
 

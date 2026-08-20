@@ -12,9 +12,13 @@ from agencity_runebench.harness import (
 from agencity_runebench.taskset import (
     BENCHMARK,
     CATALOG_PATH,
+    CONTROLLER_PATH,
+    CONTROLLER_SOURCE,
     DATASET,
+    RATE_COMMAND_TEMPLATE,
     REPL_CONNECTION_SOURCE,
     REPL_GUIDANCE,
+    TRACKING_FILE,
     WITHIN_RUN_GUIDANCE,
     RuneBenchConfig,
     RuneBenchTask,
@@ -102,11 +106,39 @@ class RuneBenchCatalogTests(unittest.TestCase):
         )
         self.assertIn(REPL_GUIDANCE, str(fresh.data.prompt))
         self.assertIn(REPL_CONNECTION_SOURCE, str(fresh.data.prompt))
-        self.assertIn('password: "test"', REPL_CONNECTION_SOURCE)
+        self.assertIn('password: "test"', CONTROLLER_SOURCE)
         self.assertNotIn(WITHIN_RUN_GUIDANCE, str(fresh.data.prompt))
         self.assertIn(WITHIN_RUN_GUIDANCE, str(adaptive.data.prompt))
+        for unsupported in ("execute_code", "rs-agent", "MCP server", "bun /tmp/"):
+            self.assertNotIn(unsupported, str(fresh.data.prompt))
+            self.assertNotIn(unsupported, str(adaptive.data.prompt))
+        self.assertIn(
+            RATE_COMMAND_TEMPLATE.format(skill="Woodcutting"),
+            str(fresh.data.prompt),
+        )
+        self.assertIn("Never construct `BotSDK` yourself", str(fresh.data.prompt))
+        self.assertIn("runActionLoop", str(fresh.data.prompt))
+        self.assertIn("sdk.processes.start", str(fresh.data.prompt))
+        self.assertIn("sdk.processes.readLogs", str(fresh.data.prompt))
+        self.assertIn("Never use `command &`", str(fresh.data.prompt))
+        self.assertLess(
+            str(fresh.data.prompt).index("await controller.release()"),
+            str(fresh.data.prompt).index("sdk.processes.start"),
+        )
         self.assertNotEqual(fresh.data.adapted_prompt_sha256, adaptive.data.adapted_prompt_sha256)
         self.assertEqual(fresh.data.selected_ids, adaptive.data.selected_ids)
+
+    def test_controller_protocol_is_single_owner_and_backs_off_false_results(
+        self,
+    ) -> None:
+        self.assertIn('mkdir(LOCK_DIR)', CONTROLLER_SOURCE)
+        self.assertIn("RUNEBENCH_CONTROLLER_BUSY", CONTROLLER_SOURCE)
+        self.assertIn("processStartTime", CONTROLLER_SOURCE)
+        self.assertIn("await this.rs.disconnect()", CONTROLLER_SOURCE)
+        self.assertIn("RUNEBENCH_CONTROLLER_DISCONNECT_UNCONFIRMED", CONTROLLER_SOURCE)
+        self.assertIn("result?.success === false", CONTROLLER_SOURCE)
+        self.assertIn("Math.min(", CONTROLLER_SOURCE)
+        self.assertIn("await Bun.sleep(delay)", CONTROLLER_SOURCE)
 
     def test_official_harbor_reward_remains_authoritative(self) -> None:
         self.assertIs(RuneBenchTask.solved, HarborTask.solved)
@@ -152,8 +184,10 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
             writes,
         )
         self.assertIn(b"## Agencity RuneBench treatment", writes["/app/AGENTS.md"])
-        self.assertIn(b'password: "test"', writes["/app/AGENTS.md"])
+        self.assertIn(b'acquireController("repl")', writes["/app/AGENTS.md"])
         self.assertIn(b"within-run adaptive treatment", writes["/app/AGENTS.md"])
+        self.assertEqual(writes[CONTROLLER_PATH], CONTROLLER_SOURCE.encode("utf-8"))
+        self.assertIn(TRACKING_FILE.encode("utf-8"), writes["/app/AGENTS.md"])
         self.assertEqual(trace.info["runebench"]["services"], "staged")
         self.assertFalse(trace.info["runebench"]["cross_episode_learning"])
 
@@ -162,6 +196,8 @@ class RuneBenchLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         class Runtime:
             async def run(self, command: list[str], environment: dict[str, str]):
+                if command[:2] == ["mkdir", "-p"]:
+                    return SimpleNamespace(exit_code=0, stdout="", stderr="")
                 return SimpleNamespace(exit_code=1, stdout="", stderr="")
 
             async def read(self, path: str, max_bytes: int) -> bytes:

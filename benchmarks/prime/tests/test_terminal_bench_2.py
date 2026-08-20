@@ -215,6 +215,35 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
         parent.assert_awaited_once()
         self.assertEqual(events, ["collect", "shutdown", "cleanup"])
 
+    async def test_harbor_task_retains_state_when_shutdown_is_unconfirmed(
+        self,
+    ) -> None:
+        selected = list(
+            TerminalBench2Taskset(
+                TerminalBench2Config(id="agencity-terminal-bench-2")
+            ).load()
+        )[0]
+        trace = SimpleNamespace(id="trace-shutdown-failed", info={})
+        cleanup = AsyncMock()
+        with (
+            patch(
+                "agencity_verifiers.harbor_suite._shutdown_portable",
+                AsyncMock(side_effect=RuntimeError("shutdown unconfirmed")),
+            ),
+            patch("agencity_verifiers.harbor_suite._cleanup_portable", cleanup),
+            patch.object(HarborTask, "finalize", AsyncMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "shutdown unconfirmed"):
+                await selected.finalize(trace, SimpleNamespace())
+        cleanup.assert_not_awaited()
+        self.assertEqual(
+            trace.info["agencity"],
+            {
+                "service_shutdown": "unconfirmed",
+                "cleanup": "retained-after-unconfirmed-shutdown",
+            },
+        )
+
     async def test_harness_cleanup_recovers_failed_rollout(self) -> None:
         harness = AgencityHarness(
             AgencityHarnessConfig(id="agencity-verifiers", installation="portable")
@@ -242,6 +271,41 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             trace.info["agencity"]["cleanup"],
             "workspace-metadata-and-state-removed",
+        )
+
+    async def test_harness_cleanup_retains_state_when_shutdown_is_unconfirmed(
+        self,
+    ) -> None:
+        harness = AgencityHarness(
+            AgencityHarnessConfig(id="agencity-verifiers", installation="portable")
+        )
+        selected = list(
+            TerminalBench2Taskset(
+                TerminalBench2Config(id="agencity-terminal-bench-2")
+            ).load()
+        )[0]
+        trace = SimpleNamespace(
+            info={"agencity": {"status": "failed"}},
+            task=SimpleNamespace(data=selected.data),
+        )
+        cleanup = AsyncMock()
+        with (
+            patch(
+                "agencity_verifiers.harness._shutdown_portable",
+                AsyncMock(side_effect=RuntimeError("shutdown unconfirmed")),
+            ),
+            patch("agencity_verifiers.harness._cleanup_portable", cleanup),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "shutdown unconfirmed"):
+                await harness.cleanup(trace, SimpleNamespace())
+        cleanup.assert_not_awaited()
+        self.assertEqual(
+            trace.info["agencity"],
+            {
+                "status": "failed",
+                "service_shutdown": "unconfirmed",
+                "cleanup": "retained-after-unconfirmed-shutdown",
+            },
         )
 
 

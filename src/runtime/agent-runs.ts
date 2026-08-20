@@ -162,7 +162,7 @@ const SDK_GUIDE = [
   "After a validation or shell failure, use any reliable path, line, column, or named-symbol diagnostic to inspect only a small surrounding range (about 20 lines on each side). If no diagnostic maps reliably to source, inspect the smallest relevant function or section; do not reread the whole file.",
   "Use sql`SELECT ... ${value}` only for read-only relational queries. run.replNamespace reports the exact branch console as cold or as a warm named epoch. Top-level TypeScript bindings, functions, classes, imports, and object identity remain available only while that same warm epoch lives. Put small recovery-critical JSON in state and large durable content in artifacts.",
   "The in-memory TypeScript environment is noncanonical and may disappear after cancellation, memory recycling, service shutdown, or process loss. It never crosses agents or branches, including parent, child, sibling, and forked work. A REPL_EPOCH_CHANGED failure means the submitted cell was not executed; rebuild bindings from durable inputs or recompute them in a new cell. Never replay a prior cell automatically because it may have performed effects.",
-  "Use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes; sdk.agents provides run, runMany, detached spawn, spawnMany, result, list, send, messages, acknowledge, and cancel. sdk.agents.list() is an on-demand nuclear-family snapshot; consult it before admitting a child when retained family work may already cover the proposed subtask, but do not poll it on every step. send defaults to mode queue, which gives each message one durable FIFO run and wakes an idle recipient; use mode steer only to enter an active run at its next boundary or retain context without waking an idle recipient. sdk.memory, sdk.harness, sdk.skills, and sdk.specs provide adaptation and delegation.",
+  "Use sdk.context.inspect/compact for attributable context-window control; sdk.goals is read-only; sdk.heartbeats and sdk.schedules manage only agent-owned wakes. sdk.processes.start/inspect/readLogs/stop/list manages durable trusted-local background processes; retain its JSON handle, inspect terminal status, and stop work that is no longer needed. sdk.agents provides run, runMany, detached spawn, spawnMany, result, list, send, messages, acknowledge, and cancel. sdk.agents.list() is an on-demand nuclear-family snapshot; consult it before admitting a child when retained family work may already cover the proposed subtask, but do not poll it on every step. send defaults to mode queue, which gives each message one durable FIFO run and wakes an idle recipient; use mode steer only to enter an active run at its next boundary or retain context without waking an idle recipient. sdk.memory, sdk.harness, sdk.skills, and sdk.specs provide adaptation and delegation.",
   "Choose the smallest correct operation. Use ordinary TypeScript for deterministic work. Use ai.generateText only when every required fact is already in the explicit prompt/context and one text transformation, such as summarization or rewriting, is sufficient. Use ai.generateObject under the same explicit-context constraint when later TypeScript must branch, loop, filter, aggregate, or validate fields. Keep object schemas small and decision-oriented, not unbounded reports encoded as JSON.",
   "Raw ai calls cannot inspect files, run commands, use skills, call tools, read ambient branch messages, profiles, memory, or repository instructions, or continue autonomously. Use sdk.agents.run when a strictly narrower child task must inspect the workspace, use tools, run commands, or iterate before this cell continues. Do not hand off your entire assigned task, restate it as a child task, or recurse solely because the work is agentic; continue directly unless the child has a bounded independent outcome that you will use. Give agents.run an output schema when its conclusion must be program data; omit output when a textual report is enough.",
   "Use sdk.agents.spawn when a child should work independently and its result is not needed before this cell continues. Retain the handle and use messaging, terminal notices, handle.result(options), or sdk.agents.result(handle, options) later. Handle.result is a worker-local convenience; the durable JSON handle remains the task/run identity. Use runMany or spawnMany only for bounded independent tasks, never for dependent steps. All generation and agent operations use the same canonical creator/model IDs and caller-narrowing model policy.",
@@ -202,12 +202,16 @@ export class AgentRunService {
   #terminalObserver: ((result: AgentRunResult) => Promise<void>) | null = null;
   #boundaryObserver: ((sessionId: string, branchId: string, runId: string) => Promise<void>) | null = null;
   #cancellationObserver:
-    ((sessionId: string, branchId: string) => Promise<void>) | null = null;
+    ((sessionId: string, branchId: string, runId: string) => Promise<void>) | null = null;
 
   setTerminalObserver(observer: (result: AgentRunResult) => Promise<void>): void { this.#terminalObserver = observer; }
   setBoundaryObserver(observer: (sessionId: string, branchId: string, runId: string) => Promise<void>): void { this.#boundaryObserver = observer; }
   setCancellationObserver(
-    observer: (sessionId: string, branchId: string) => Promise<void>,
+    observer: (
+      sessionId: string,
+      branchId: string,
+      runId: string,
+    ) => Promise<void>,
   ): void {
     this.#cancellationObserver = observer;
   }
@@ -391,7 +395,7 @@ export class AgentRunService {
       const effect = state.effects[effectId];
       if (effect?.status === "requested" || effect?.status === "started") this.outbox.cancel(effect.id);
     }
-    await this.#cancellationObserver?.(sessionId, branchId);
+    await this.#cancellationObserver?.(sessionId, branchId, runId);
     return this.advance(sessionId, branchId, runId);
   }
 

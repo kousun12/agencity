@@ -70,7 +70,8 @@ export const eventTypes = [
   "SessionCreated", "AgentProfileVersionCreated", "AgentProfileActivated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
   "WorkingValueSet", "ArtifactRegistered", "EffectRequested", "EffectAttemptStarted",
-  "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ContextCompactionRequested", "ContextCompactionFailed",
+  "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ManagedProcessRegistered", "ManagedProcessStarted",
+  "ContextCompactionRequested", "ContextCompactionFailed",
   "ContextMaterialized", "ModelCallRequested", "ModelOutputChunk",
   "ModelCallCompleted", "ModelCallTerminated", "BudgetDebited", "BudgetExceeded", "RecoveryPerformed",
   "TaskCreated", "SubagentAdmitted", "TaskStatusChanged", "SubagentCancellationRequested", "TaskUsageAttributed",
@@ -104,6 +105,7 @@ export type CellLogStream = "stdout" | "stderr";
 export type SessionStatus = "idle" | "running" | "stopped" | "failed" | "archived";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 export type EffectOutcome = "succeeded" | "failed" | "cancelled" | "unknown";
+export type ManagedProcessStatus = "queued" | "running" | EffectOutcome;
 export type GovernedRefinementRollbackAction =
   | {
       readonly operation: "restore";
@@ -242,6 +244,14 @@ export interface EventPayloads {
   EffectAttemptStarted: { effectId: string; attempt: number };
   EffectOutcomeRecorded: { effectId: string; attempt: number; outcome: EffectOutcome; output?: JsonValue; error?: string; modelFailure?: { code: ModelEffectFailureCode }; observedAt: string };
   EffectReconciliationRecorded: { reconciliationId: string; effectId: string; assessment: "succeeded" | "failed" | "no_effect" | "still_unknown"; summary: string; evidence?: JsonValue; recordedBy: string; recordedAt: string };
+  ManagedProcessRegistered: {
+    processId: string; effectId: string; workspaceId: string; runId?: string; cellId: string;
+    command: string; cwd?: string; identityToken: string; requestedAt: string;
+  };
+  ManagedProcessStarted: {
+    processId: string; effectId: string; identityToken: string; pid: number;
+    processGroupId: number; startedAt: string;
+  };
   ContextCompactionRequested: {
     compactionId: string; strategy: ContextCompactionStrategy; reason: ContextCompactionReason;
     requestedBy: ContextCompactionRequester; instructions?: string; throughCursor: string;
@@ -832,6 +842,15 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   EffectAttemptStarted: z.object({ effectId: id, attempt: positiveInteger }),
   EffectOutcomeRecorded: z.object({ effectId: id, attempt: positiveInteger, outcome: z.enum(["succeeded", "failed", "cancelled", "unknown"]), output: jsonValueSchema.optional(), error: z.string().optional(), modelFailure: z.object({ code: modelFailureCodeSchema }).strict().optional(), observedAt: dateTime }).strict(),
   EffectReconciliationRecorded: z.object({ reconciliationId: id, effectId: id, assessment: z.enum(["succeeded", "failed", "no_effect", "still_unknown"]), summary: z.string().min(1).max(16384), evidence: jsonValueSchema.optional(), recordedBy: id, recordedAt: dateTime }).strict(),
+  ManagedProcessRegistered: z.object({
+    processId: id, effectId: id, workspaceId: id, runId: id.optional(), cellId: id,
+    command: z.string().min(1).max(1024 * 1024), cwd: z.string().min(1).max(4096).optional(),
+    identityToken: z.string().regex(/^[a-f0-9]{64}$/), requestedAt: dateTime,
+  }).strict(),
+  ManagedProcessStarted: z.object({
+    processId: id, effectId: id, identityToken: z.string().regex(/^[a-f0-9]{64}$/),
+    pid: positiveInteger, processGroupId: positiveInteger, startedAt: dateTime,
+  }).strict(),
   ContextCompactionRequested: z.object({
     compactionId: id, strategy: compactionStrategySchema, reason: compactionReasonSchema,
     requestedBy: z.enum(["user", "agent", "supervisor"]), instructions: z.string().max(8192).optional(), throughCursor: z.string().regex(/^\d+$/),

@@ -18,8 +18,8 @@ See [`AUTHORING.md`](./AUTHORING.md) for the reusable benchmark contract.
 - `agencity_verifiers.harness.AgencityHarness` installs one pinned Agencity
   revision, routes all model calls through Verifiers, keeps state outside scored
   workspaces, preserves typed terminal outcomes, retains bounded scrubbed
-  stdout/stderr evidence for malformed startup results, and performs treatment
-  cleanup.
+  stdout/stderr evidence for malformed startup results, and removes portable
+  state only after owned-service shutdown is confirmed.
 - Benchmark tasksets load pinned datasets, select tasks deterministically,
   construct authorized workspaces, retain public provenance, and invoke the
   official scorer.
@@ -105,7 +105,8 @@ uv run --locked eval @ configs/terminal-bench-2-full.toml --dry-run
 
 Suite configs are provided for:
 
-- RuneBench: `runebench-woodcutting-15m-{fresh,adaptive}.toml`,
+- RuneBench: `runebench-attack-30m-adaptive.toml` for the exact paid canary,
+  `runebench-woodcutting-15m-{fresh,adaptive}.toml`,
   `runebench-15m-sample-adaptive.toml`,
   `runebench-leaderboard-full-adaptive.toml` for the current public
   leaderboard's 16 30-minute skills, and `runebench-full-adaptive.toml` for all
@@ -139,9 +140,13 @@ Catalog: [`manifests/runebench-catalog.json`](./manifests/runebench-catalog.json
   `ghcr.io/maxbittker/rs-agent-benchmark@sha256:0961663ac1dc23d6cd00b88e79ff106cb1f0c7b7340659a914f96a8454124016`.
 
 The `agencity-runebench-repl-v1` treatment replaces the task prompt's MCP
-wrapper with direct imports of the same image-owned TypeScript SDK inside
-Agencity's persistent Bun console. The model creates and retains the native game
-objects itself, including RuneBench's benign local `password: "test"` option.
+wrapper with one staged controller around the same image-owned TypeScript SDK
+inside Agencity's persistent Bun console. A process-identity claim permits one
+control owner, release confirms disconnection before trainer handoff, repeated
+actions treat false results as failures with bounded backoff, and long-running
+trainers use Agencity's managed-process API. The active tracker path is supplied
+explicitly; RuneBench's benign local `password: "test"` option remains inside
+the staged controller.
 The official task package, save fixture,
 time horizon, sampling cadence, game image, and Harbor verifier remain pinned.
 The treatment raises the pinned package's 4 GiB memory cap to 8 GiB, matching
@@ -151,6 +156,11 @@ are separate configs: fresh pauses automatic learning before the run, while
 within-run explicitly enables it and permits one evidence-backed governed
 review. Every scored task has fresh Agencity and game state; no learned artifact
 crosses episodes.
+
+RuneBench preflight compares effective concurrency times 8 GiB plus a 2 GiB
+Docker/host reserve with Docker daemon capacity. An unavailable probe or unsafe
+capacity is an error. This memory-only check does not prove CPU, provider quota,
+scoring, or cleanup health.
 
 ### Terminal-Bench 2
 
@@ -434,14 +444,20 @@ matched its packaged manifest. A Vuls no-op audit returned empty parser
 evidence; the catalog therefore retains that row as incompatible rather than
 mapping it to reward zero.
 
+The August 19, 2026 current working tree passed 95 benchmark tests, skipped one
+unrelated opt-in SWE-bench Pro scorer test, and had zero failures. All six
+RuneBench preflights and dry-runs, the source/wheel build, and pinned-image
+controller and tracker checks passed without model inference.
+
 ## Recorded model evidence
 
 - RuneBench: one Luna-xhigh Woodcutting 15-minute treatment on commit
   `1b2cebf` produced an official `100.0` XP/min score with successful scoring
   and cleanup. The agent ended failed at the then-current cumulative input-token
   bound before a typed `finish`; RuneBench configs have since removed that
-  bound. The run exposed unresolved competing-controller, action-backoff, and
-  tracker-path defects, so it is not readiness evidence for a paid full run.
+  bound. The run exposed competing-controller, action-backoff, and tracker-path
+  defects in that earlier revision. The current model-free treatment addresses
+  them, but this paid result predates the fixes and is not readiness evidence.
 - OOLONG: one revised Sol-high Yahoo 128K task scored `1.0`; a corresponding
   Luna task scored `0`. A later current-revision Sol-high canary on commit
   `5d533d1bb03c1b1f5f45ecdb65df1cc7612bf193` completed the repaired
@@ -481,8 +497,8 @@ performance claims. No paid full-suite execution has been performed.
 - RuneBench support covers the pinned 32 published skill tasks. Gold,
   collaboration, and cross-episode curriculum treatments are not included. The
   current public-leaderboard comparison uses the 16 30-minute skills. The
-  direct treatment still needs one-controller background execution and a
-  canonical tracker/rate-check path before a paid 16-skill run.
+  controller, managed trainer, tracker command, cleanup, and memory preflight
+  have model-free coverage but no paid 30-minute canary on this revision.
 - Only 1 of 731 SWE-bench Pro public rows is currently compatible. Of the 730
   incompatible rows, 729 lack audited immutable image pins and one audited Vuls
   row fails the required official no-op parser-evidence control. This blocks a

@@ -13,7 +13,7 @@ At every **committed cell boundary**, state needed later must be one of:
 - a registered content-addressed artifact reference plus available bytes;
 - an external resource reference/outcome explicitly represented by an effect event.
 
-The Bun REPL namespace and heap, open handles, child processes, notifications, snapshots, and outbox leases are not durable identity. `events` is canonical. The reducer plus retained artifact contents projects `AgentState`; snapshots accelerate this and may be discarded. External files/services remain external and can change independently.
+The Bun REPL namespace and heap, live child-process objects, notifications, snapshots, and outbox leases are not durable identity. A managed-process JSON handle is durable because canonical events retain its route, effect, lifecycle, and recovery identity; the underlying OS object remains disposable external state. `events` is canonical. The reducer plus retained artifact contents projects `AgentState`; snapshots accelerate this and may be discarded. External files/services remain external and can change independently.
 
 ### Persistent console REPL
 
@@ -24,6 +24,24 @@ Resident-process permits are separate from active-execution permits. A generated
 A runtime throw records failure but leaves declarations and mutations already completed in the live namespace. The failed cell's staged state and artifact writes remain uncommitted, while independently committed effects retain their outcomes. Parse/transpilation failure, cancellation, worker loss, or failure after execution but before canonical commit recycles the worker.
 
 The namespace may also disappear on RSS recycling, service/process loss, or branch change. Every live worker gets a random authoritative epoch ID and a readable adjective-noun-suffix name. Autonomous provider input reports the exact branch as cold or as that warm epoch, and `AgentRunModelAttemptStarted` pins the status the model saw. The namespace still has no checkpoint, synchronization, export, gate, or completion-evidence role. Any value required after recovery uses state or artifacts. Recovery constructs a fresh namespace and never replays retained cell source automatically.
+
+### Managed background processes
+
+`ManagedProcessService` and the `managed-process` executor own long-running
+trusted-local commands outside the console worker. Registration and the
+non-idempotent outbox request commit before spawn. The projected record links
+workspace, session, branch, optional agent run, cell, effect, command, working
+directory, process group, random identity token, bounded scrubbed output, and
+terminal status.
+
+The managed workspace service includes queued/running processes in keep-alive.
+Worker recycling leaves them under service ownership. Run cancellation and
+graceful shutdown signal the owned process group, wait, force-stop survivors,
+and require a terminal or unknown durable effect outcome. Restart scans only for
+the retained token and never treats a reused PID as ownership. It stops
+authenticated surviving work and records unknown instead of retrying. This
+component provides lifecycle ownership only; it does not sandbox commands or
+isolate resources.
 
 ## Dependency direction
 

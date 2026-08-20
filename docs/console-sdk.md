@@ -77,7 +77,7 @@ flowchart TD
 ```
 
 - Top-level variables, functions, classes, imports, module instances, closures, and object identity persist across cells while the exact-branch worker lives.
-- Do not keep long-lived timers, streams, sockets, subprocesses, or the only copy of required evidence in the namespace. Worker loss discards them without recovery.
+- Do not keep long-lived timers, streams, sockets, unmanaged subprocesses, or the only copy of required evidence in the namespace. Worker loss discards them without recovery. Use `sdk.processes` when a background OS process needs lifecycle ownership beyond one cell.
 - `state.set` stages JSON working values for atomic commit with the cell.
 - `artifacts.put` stages an immutable artifact reference for atomic registration with the cell.
 - Most effectful SDK calls commit their own outbox or domain events as they occur. A later cell failure does not erase an already committed external effect.
@@ -297,6 +297,48 @@ The convenience helpers return structured output:
 `tools.shell`, `tools.readFile`, and `tools.writeFile` throw unless the outcome is `succeeded`. Use `tools.request` when an expected failed outcome must be inspected without failing the cell. Shell defaults to non-idempotent. File operations default to idempotent except exact-text replace. The flag is a caller assertion about logical effect semantics, not proof that an external system is safe to retry.
 
 The file executor constrains typed file operations to its configured root and checks symlink escapes. The shell executor constrains only its initial working directory. Generated TypeScript and shell commands retain ambient OS authority.
+
+## `sdk.processes`
+
+```ts
+const trainer = await sdk.processes.start({
+  command: "bun scripts/train.ts",
+  cwd: ".",
+  idempotencyKey: "train-v1",
+});
+await state.set("trainer", trainer);
+
+const current = await sdk.processes.inspect(trainer);
+const logs = await sdk.processes.readLogs(trainer);
+const stopped = await sdk.processes.stop(trainer, "strategy replaced");
+return { current, logs, stopped };
+```
+
+`start`, `inspect`, `readLogs`, `stop`, and `list` operate on JSON process
+handles. A serialized handle remains usable after console-worker loss because
+the managed workspace service, not the REPL heap, owns the process group.
+Lifecycle states are `queued`, `running`, `succeeded`, `failed`, `cancelled`,
+and `unknown`.
+
+Starting a process atomically registers its workspace, session, branch,
+originating cell, optional agent run, command, working directory, and random
+OS-process identity with a non-idempotent outbox request before spawn. The
+working directory must resolve inside the workspace. The returned handle does
+not expose the private identity token or a live child-process object.
+
+Logs use `agencity.bounded-output.v1`. Running processes expose a bounded
+scrubbed snapshot. Terminal output is inline while small, spills complete
+scrubbed stdout/stderr through the artifact store up to the existing 32 MiB
+limit, or remains explicitly truncated/unknown. A process interrupted after
+spawn but before a durable outcome is `unknown` and is never retried.
+
+Run cancellation and graceful service shutdown own process cleanup. Shutdown
+stops admission, signals owned process groups, waits a bounded grace period,
+force-stops survivors, commits terminal or unknown outcomes, and reports
+completion only after no authenticated owned group remains. This is lifecycle
+management, not sandboxing or a CPU, memory, network, or process-count limit.
+Do not use `command &`, `nohup`, or ambient Bun spawning when durable ownership
+is required.
 
 ### Repository instructions
 

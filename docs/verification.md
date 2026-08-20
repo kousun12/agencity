@@ -41,7 +41,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 
 These are static constraints. They do not replace replay, recovery, protocol, security, or product behavior tests.
 
-`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-5 event replay and reducer-20 rebuild, typed effect origins, exact provider-input admission, bounded observation ownership, bounded shell/file/artifact/cell output, root and nested repository-instruction loading, durable initial agent profiles and prompt pins, persistent exact-branch REPL bindings and object identity, readable epoch replacement, pre-execution stale-epoch rejection, runtime-throw mutation retention, namespace loss and durable reconstruction, branch-aware console capacity, outbox recovery, explicit raw text/object generation and its cancellation/budget/context boundaries, typed text/object child-agent results and retained lifecycle lookup, formal autonomous actions, structured refinement, retained terminal refinement outcomes across reopen, recursive sessions and queue/steer mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, one-hour managed-service defaults and keep-alive behavior, model streaming semantics, first-run and branch-attached provider/model selection, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
+`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-5 event replay and reducer-21 rebuild, typed effect origins, exact provider-input admission, bounded observation ownership, bounded shell/managed-process/file/artifact/cell output, root and nested repository-instruction loading, durable initial agent profiles and prompt pins, persistent exact-branch REPL bindings and object identity, readable epoch replacement, pre-execution stale-epoch rejection, runtime-throw mutation retention, namespace loss and durable reconstruction, branch-aware console capacity, outbox recovery, durable managed-process handles, run cancellation, token-authenticated crash cleanup, descendant process-group cleanup, explicit raw text/object generation and its cancellation/budget/context boundaries, typed text/object child-agent results and retained lifecycle lookup, formal autonomous actions, structured refinement, retained terminal refinement outcomes across reopen, recursive sessions and queue/steer mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, one-hour managed-service defaults and managed-process keep-alive behavior, model streaming semantics, first-run and branch-attached provider/model selection, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
 
 Those tests use local fixtures, temporary databases, deterministic providers, and in-process or loopback test services where appropriate. A pass supports the behaviors exercised by those tests. It does not establish hostile-code isolation, exactly-once external effects, automatic cross-device failover, or correctness at every possible machine-instruction crash boundary.
 
@@ -312,12 +312,17 @@ one terminal result, and container cleanup without paid inference.
 RuneBench catalogs all 32 skill tasks in its pinned Harbor dataset. It uses one
 immutable game image and the unmodified Harbor XP-rate verifier. The
 `agencity-runebench-repl-v1` treatment replaces the official MCP wrapper with
-direct imports of the same image-owned TypeScript SDK through Agencity's
-persistent Bun console. RuneBench's benign `password: "test"` option remains in
-the generated connection cell. It applies an 8 GiB runtime memory cap to the pinned
-package's 4 GiB declaration, matching the current upstream generator's
-hardening for documented agent OOM failures; both values are retained as
-treatment provenance. The separate fresh and within-run treatments set the
+one staged single-owner controller around the same image-owned TypeScript SDK
+through Agencity's persistent Bun console. Controller release confirms
+disconnection before a managed trainer starts; repeated actions back off on
+false results and thrown errors; and the task states the active tracker path
+exactly. RuneBench's benign `password: "test"` option remains in the staged
+controller. It applies an 8 GiB runtime memory cap to the pinned package's 4 GiB
+declaration, matching the current upstream generator's hardening for documented
+agent OOM failures; both values are retained as treatment provenance. Preflight
+reserves 2 GiB beyond effective container concurrency and fails when Docker
+capacity is unavailable or insufficient; this does not verify CPU, provider
+quota, scoring, or cleanup health. The separate fresh and within-run treatments set the
 automatic-learning policy explicitly before each root run: fresh pauses it and
 within-run enables it. No profile or learned artifact crosses scored tasks.
 Gold, collaboration, and cross-episode curriculum treatments are not included.
@@ -330,6 +335,8 @@ sample, shard, and full-compatible selections. The portable harness does not
 assume a task image package manager and keeps all Agencity state outside the
 scored workspace. Harbor collection hooks run before task cleanup; Agencity
 shutdown and generated-state removal complete before Harbor reward scoring.
+Unconfirmed shutdown retains portable lifecycle evidence and becomes an
+infrastructure error rather than deleting evidence or proceeding as clean.
 
 The SWE-bench Pro public catalog covers all 731 public rows. One qutebrowser row
 is compatible. Of the 730 incompatible rows, 729 have typed reason
@@ -380,15 +387,24 @@ probes, and one zero-score SWE-bench Pro qutebrowser treatment. The
 current-revision Sol-high OOLONG canary completed the repaired infrastructure
 route but returned `Society & Culture` instead of `Sports`, scoring `0` after
 19 Agencity steps, 20 provider calls, 90,951 prompt-plus-completion tokens,
-about four minutes, and $0.89. A paid RuneBench Luna canary completed 33 native
-direct-REPL turns without credential-input or console-worker failure, but the
-official scorer did not run because service shutdown missed the harness cleanup
-bound; its displayed zero is an infrastructure error, not a score. No full paid
-RuneBench treatment, full paid suite, or matched harness comparison has run.
+about four minutes, and $0.89. One paid RuneBench Luna-xhigh Woodcutting
+15-minute treatment on commit `1b2cebf` produced an official 100 XP/min score
+with successful scorer and cleanup evidence, but its agent terminated at the
+then-current cumulative token bound. It exposed controller, action-backoff, and
+tracker-path defects in that earlier revision. Another direct-REPL canary
+completed 33 turns but never reached official scoring because service shutdown
+missed the cleanup bound; its displayed zero is an infrastructure error. Both
+predate the model-free fixes. No paid 30-minute canary, full RuneBench treatment,
+full paid suite, or matched harness comparison has run.
 The complete RuneBench operator runbook is
 [`benchmarks/prime/RUNEBENCH.md`](../benchmarks/prime/RUNEBENCH.md). Shared
 catalog, comparison, and reporting contracts are in
 [`benchmarks/prime/README.md`](../benchmarks/prime/README.md).
+
+The August 19, 2026 benchmark working tree passed 95 of 96 model-free tests;
+the one skip was the unrelated opt-in SWE-bench Pro scorer. All six RuneBench
+preflights and dry-runs, source/wheel build, and pinned-image controller and
+tracker checks passed without model inference.
 
 Final suite-layer model-free verification on August 11, 2026 recorded:
 

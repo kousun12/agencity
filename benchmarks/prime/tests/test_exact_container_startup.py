@@ -10,11 +10,17 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from agencity_runebench.taskset import CONTROLLER_SOURCE, RATE_COMMAND_TEMPLATE
+
 
 ROOT = Path(__file__).resolve().parents[3]
 IMAGE = (
     "oven/bun@sha256:"
     "e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4"
+)
+RUNEBENCH_IMAGE = (
+    "ghcr.io/maxbittker/rs-agent-benchmark@sha256:"
+    "0961663ac1dc23d6cd00b88e79ff106cb1f0c7b7340659a914f96a8454124016"
 )
 
 
@@ -344,6 +350,121 @@ class ExactContainerStartupTests(unittest.TestCase):
             ],
             ["bun_console", "finish"],
         )
+
+
+@unittest.skipUnless(shutil.which("docker"), "Docker is unavailable")
+class ExactRuneBenchTreatmentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        daemon = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=30,
+        )
+        if daemon.returncode != 0:
+            self.skipTest("Docker daemon is unavailable")
+
+    def test_controller_excludes_competitors_and_backs_off_false_results(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Path(directory) / "controller.ts"
+            controller.write_text(CONTROLLER_SOURCE, encoding="utf-8")
+            test_script = Path(directory) / "controller-test.ts"
+            source = """
+import {
+  acquireControllerLease,
+  runActionLoop,
+} from "/app/agencity-runebench/controller.ts";
+const first = await acquireControllerLease("first");
+let blocked = false;
+try {
+  await acquireControllerLease("competitor");
+} catch (error) {
+  blocked = String(error).includes("RUNEBENCH_CONTROLLER_BUSY");
+}
+const started = Date.now();
+const attempts = await runActionLoop({
+  iterations: 2,
+  minBackoffMs: 250,
+  maxBackoffMs: 250,
+  action: async () => ({ success: false, message: "No target found" }),
+});
+await first.release();
+const successor = await acquireControllerLease("successor");
+await successor.release();
+console.log(JSON.stringify({
+  blocked,
+  elapsedMs: Date.now() - started,
+  failures: attempts.filter((attempt) => !attempt.ok).length,
+}));
+"""
+            test_script.write_text(source, encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--platform",
+                    "linux/amd64",
+                    "--entrypoint",
+                    "/bin/bash",
+                    "-v",
+                    f"{controller}:/app/agencity-runebench/controller.ts:ro",
+                    "-v",
+                    f"{test_script}:/tmp/controller-test.ts:ro",
+                    RUNEBENCH_IMAGE,
+                    "-lc",
+                    "bun /tmp/controller-test.ts",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stderr or completed.stdout,
+        )
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["failures"], 2)
+        self.assertGreaterEqual(result["elapsedMs"], 450)
+
+    def test_documented_rate_command_reads_active_tracker_file(self) -> None:
+        tracker = {
+            "samples": [
+                {"elapsedMs": 0, "skills": {"Woodcutting": {"xp": 0}}},
+                {"elapsedMs": 15_000, "skills": {"Woodcutting": {"xp": 200_000}}},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tracking_file = Path(directory) / "skill_tracking.json"
+            tracking_file.write_text(json.dumps(tracker), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--platform",
+                    "linux/amd64",
+                    "--entrypoint",
+                    "/bin/bash",
+                    "-v",
+                    f"{tracking_file}:/logs/tracking/skill_tracking.json:ro",
+                    RUNEBENCH_IMAGE,
+                    "-lc",
+                    RATE_COMMAND_TEMPLATE.format(skill="Woodcutting"),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stderr or completed.stdout,
+        )
+        self.assertIn("Overall:          4,000 XP/min", completed.stdout)
 
 
 if __name__ == "__main__":

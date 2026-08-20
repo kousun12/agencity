@@ -11,7 +11,7 @@ import {
 } from "./events.ts";
 import type {
   AgentRunState, AgentRunStepState, AgentState, AiGenerationState, CellState, DocumentChunkState, EffectState, GoalGateState,
-  MailboxMessageState, ModelCallState, RecursiveModelState, TaskState, TerminalNoticeState,
+  MailboxMessageState, ManagedProcessState, ModelCallState, RecursiveModelState, TaskState, TerminalNoticeState,
 } from "./state.ts";
 import { REDUCER_VERSION } from "./state.ts";
 import { InvalidTransitionError, ValidationError } from "./errors.ts";
@@ -95,7 +95,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       agentProfiles: { [p.agentProfile.profileVersionId]: p.agentProfile },
       activeAgentProfileVersionId: p.agentProfile.profileVersionId,
       branch: { id: p.initialBranchId, parentBranchId: null, forkCursor: null, name: p.initialBranchName ?? null }, model: p.model,
-      status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, contexts: {}, compactions: {}, modelCalls: {},
+      status: "idle", cursor: event.cursor, appliedEventIds: [event.id], messages: [], cells: {}, workingValues: {}, artifacts: {}, effects: {}, effectReconciliations: {}, managedProcesses: {}, contexts: {}, compactions: {}, modelCalls: {},
       budget: { limits: p.budget, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: false },
       tasks: {}, mailbox: {}, taskUsageAttributions: {}, terminalNotices: {}, documents: {}, inputSets: {}, goals: {}, heartbeats: {}, schedules: {}, wakes: {}, recursiveModels: {}, aiGenerations: {}, agentRuns: {}, userCorrections: {}, refinementReviews: {}, refinementTriggerConsumptions: {},
     };
@@ -232,7 +232,27 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         ...(p.error === undefined ? {} : { error: p.error }),
         ...(p.modelFailure === undefined ? {} : { modelFailure: p.modelFailure.code }),
       };
-      return { ...next, effects: { ...state.effects, [p.effectId]: updated } };
+      const process = Object.values(state.managedProcesses).find(
+        (candidate) => candidate.effectId === p.effectId,
+      );
+      return {
+        ...next,
+        effects: { ...state.effects, [p.effectId]: updated },
+        ...(process
+          ? {
+              managedProcesses: {
+                ...state.managedProcesses,
+                [process.id]: {
+                  ...process,
+                  status: p.outcome,
+                  ...(p.output === undefined ? {} : { output: p.output }),
+                  ...(p.error === undefined ? {} : { error: p.error }),
+                  eventId: event.id,
+                },
+              },
+            }
+          : {}),
+      };
     }
     case "EffectReconciliationRecorded": {
       const p = event.payload as EventPayloads["EffectReconciliationRecorded"];
@@ -244,6 +264,74 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         ...(p.evidence === undefined ? {} : { evidence: p.evidence }), recordedBy: p.recordedBy,
         recordedAt: p.recordedAt, eventId: event.id,
       } } };
+    }
+    case "ManagedProcessRegistered": {
+      const p = event.payload as EventPayloads["ManagedProcessRegistered"];
+      const effect = state.effects[p.effectId];
+      if (state.managedProcesses[p.processId] || !effect ||
+          effect.executor !== "managed-process" || effect.operation !== "start" ||
+          effect.origin.kind !== "cell" || effect.origin.cellId !== p.cellId ||
+          p.workspaceId !== state.workspaceId) {
+        throw new InvalidTransitionError(
+          "managedProcess",
+          state.managedProcesses[p.processId]?.status ?? effect?.status ?? "missing",
+          "queued",
+        );
+      }
+      const process: ManagedProcessState = {
+        id: p.processId,
+        effectId: p.effectId,
+        workspaceId: p.workspaceId,
+        sessionId: event.sessionId,
+        branchId: event.branchId,
+        runId: p.runId ?? null,
+        cellId: p.cellId,
+        command: p.command,
+        cwd: p.cwd ?? null,
+        identityToken: p.identityToken,
+        status: "queued",
+        pid: null,
+        processGroupId: null,
+        requestedAt: p.requestedAt,
+        startedAt: null,
+        eventId: event.id,
+      };
+      return {
+        ...next,
+        managedProcesses: {
+          ...state.managedProcesses,
+          [p.processId]: process,
+        },
+      };
+    }
+    case "ManagedProcessStarted": {
+      const p = event.payload as EventPayloads["ManagedProcessStarted"];
+      const process = state.managedProcesses[p.processId];
+      const effect = state.effects[p.effectId];
+      if (!process || process.status !== "queued" ||
+          process.effectId !== p.effectId ||
+          process.identityToken !== p.identityToken ||
+          effect?.status !== "started") {
+        throw new InvalidTransitionError(
+          "managedProcess",
+          process?.status ?? "missing",
+          "running",
+        );
+      }
+      return {
+        ...next,
+        managedProcesses: {
+          ...state.managedProcesses,
+          [p.processId]: {
+            ...process,
+            status: "running",
+            pid: p.pid,
+            processGroupId: p.processGroupId,
+            startedAt: p.startedAt,
+            eventId: event.id,
+          },
+        },
+      };
     }
     case "ContextCompactionRequested": {
       const p = event.payload as EventPayloads["ContextCompactionRequested"];

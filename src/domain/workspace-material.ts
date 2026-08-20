@@ -28,6 +28,8 @@ export const WORKSPACE_MATERIAL_EVENT_CLASS = {
   EffectAttemptStarted: "non-material",
   EffectOutcomeRecorded: "file-effect",
   EffectReconciliationRecorded: "non-material",
+  ManagedProcessRegistered: "non-material",
+  ManagedProcessStarted: "non-material",
   ContextCompactionRequested: "non-material",
   ContextCompactionFailed: "non-material",
   ContextMaterialized: "non-material",

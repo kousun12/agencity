@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import tomllib
+from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -53,8 +55,21 @@ CATALOG_TASKSETS = {
     "agencity-swe-bench-pro": (SWEProConfig, SWE_BENCHMARK, SWE_CATALOG),
 }
 
+GIB = 1024**3
+RUNEBENCH_DOCKER_OVERHEAD_GIB = 2
+DockerMemoryProbe = Callable[[], int]
 
-def preflight(config_path: Path) -> dict[str, Any]:
+
+class DockerCapacityUnavailable(RuntimeError):
+    """The Docker daemon's memory capacity could not be established."""
+
+
+def preflight(
+    config_path: Path,
+    *,
+    docker_memory_probe: DockerMemoryProbe | None = None,
+    max_concurrent: int | None = None,
+) -> dict[str, Any]:
     raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     taskset = raw.get("env", {}).get("taskset")
     if not isinstance(taskset, dict) or not isinstance(taskset.get("id"), str):
@@ -67,10 +82,25 @@ def preflight(config_path: Path) -> dict[str, Any]:
         catalog = load_catalog(path, benchmark)
         _validate_catalog_pins(raw, catalog)
         selected, manifest = select_catalog_tasks(catalog, config.selection)
+        resource_preflight = (
+            _validate_runebench_resources(
+                raw,
+                selected,
+                docker_memory_probe=docker_memory_probe or probe_docker_memory_bytes,
+                max_concurrent=max_concurrent,
+            )
+            if taskset_id == "agencity-runebench"
+            else None
+        )
         return {
             **manifest,
             "config": str(config_path),
             "catalog_sha256": catalog_digest(path),
+            **(
+                {"resource_preflight": resource_preflight}
+                if resource_preflight is not None
+                else {}
+            ),
             "selected_pins": [
                 {
                     key: task.get(key)
@@ -110,6 +140,90 @@ def preflight(config_path: Path) -> dict[str, Any]:
             ],
         }
     raise ValueError(f"unsupported suite taskset {taskset_id!r}")
+
+
+def probe_docker_memory_bytes() -> int:
+    try:
+        completed = subprocess.run(
+            ["docker", "info", "--format", "{{json .MemTotal}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+        raise DockerCapacityUnavailable(
+            f"Docker memory capacity is unavailable: {error}"
+        ) from error
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()[-500:]
+        raise DockerCapacityUnavailable(
+            f"Docker memory capacity is unavailable: {detail or 'docker info failed'}"
+        )
+    try:
+        capacity = int(json.loads(completed.stdout))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise DockerCapacityUnavailable(
+            "Docker memory capacity is unavailable: docker info returned invalid MemTotal"
+        ) from error
+    if capacity <= 0:
+        raise DockerCapacityUnavailable(
+            "Docker memory capacity is unavailable: MemTotal was not positive"
+        )
+    return capacity
+
+
+def _validate_runebench_resources(
+    raw_config: dict[str, Any],
+    selected: list[dict[str, Any]],
+    *,
+    docker_memory_probe: DockerMemoryProbe,
+    max_concurrent: int | None,
+) -> dict[str, Any]:
+    configured_concurrency = raw_config.get("max_concurrent", 1)
+    concurrency = max_concurrent if max_concurrent is not None else configured_concurrency
+    if not isinstance(concurrency, int) or isinstance(concurrency, bool) or concurrency <= 0:
+        raise ValueError("RuneBench max_concurrent must be a positive integer")
+
+    env = raw_config.get("env")
+    agent = env.get("agent") if isinstance(env, dict) else None
+    runtime = agent.get("runtime") if isinstance(agent, dict) else None
+    configured_memory = runtime.get("memory") if isinstance(runtime, dict) else None
+    task_memories = {task.get("treatment_memory_gb") for task in selected}
+    if (
+        len(task_memories) != 1
+        or not isinstance(configured_memory, (int, float))
+        or isinstance(configured_memory, bool)
+        or configured_memory not in task_memories
+    ):
+        raise ValueError(
+            "RuneBench runtime memory must match the selected treatment memory pin"
+        )
+
+    daemon_bytes = docker_memory_probe()
+    episode_bytes = int(float(configured_memory) * GIB)
+    overhead_bytes = RUNEBENCH_DOCKER_OVERHEAD_GIB * GIB
+    required_bytes = concurrency * episode_bytes + overhead_bytes
+    if required_bytes > daemon_bytes:
+        raise ValueError(
+            "unsafe RuneBench concurrency: "
+            f"{concurrency} × {float(configured_memory):g} GiB task containers "
+            f"+ {RUNEBENCH_DOCKER_OVERHEAD_GIB} GiB Docker/host overhead requires "
+            f"{required_bytes / GIB:.1f} GiB, but the Docker daemon reports "
+            f"{daemon_bytes / GIB:.1f} GiB"
+        )
+    return {
+        "schema": "agencity.runebench-resource-preflight.v1",
+        "status": "passed",
+        "max_concurrent": concurrency,
+        "episode_memory_gib": float(configured_memory),
+        "episode_memory_total_gib": concurrency * float(configured_memory),
+        "docker_host_overhead_gib": RUNEBENCH_DOCKER_OVERHEAD_GIB,
+        "required_memory_gib": required_bytes / GIB,
+        "docker_daemon_memory_gib": daemon_bytes / GIB,
+        "scope": "memory-only",
+        "does_not_verify": ["cpu", "provider_quota", "scoring", "cleanup"],
+    }
 
 
 def _validate_official_task_timeouts(raw_config: dict[str, Any]) -> None:
@@ -195,8 +309,13 @@ def main() -> None:
     )
     parser.add_argument("config", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        help="validate an effective concurrency override before model admission",
+    )
     args = parser.parse_args()
-    value = preflight(args.config)
+    value = preflight(args.config, max_concurrent=args.max_concurrent)
     encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

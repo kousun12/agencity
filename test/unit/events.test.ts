@@ -33,6 +33,131 @@ async function setup(): Promise<{ temp: TempRuntime; storage: LibSqlStorage; ses
 }
 
 describe("canonical event storage", () => {
+  test("projects the managed process lifecycle and rejects mismatched spawn identity", async () => {
+    const { storage, sessionId, branchId } = await setup();
+    const token = "b".repeat(64);
+    await storage.appendEvents([
+      {
+        sessionId,
+        branchId,
+        type: "CellProposed",
+        producer: "console",
+        idempotencyKey: "managed-unit-cell-proposed",
+        payload: {
+          cellId: "managed-unit-cell",
+          code: "unit fixture",
+          dependencies: [],
+        },
+      },
+      {
+        sessionId,
+        branchId,
+        type: "CellStarted",
+        producer: "console",
+        idempotencyKey: "managed-unit-cell-started",
+        payload: { cellId: "managed-unit-cell", attempt: 1 },
+      },
+      {
+        sessionId,
+        branchId,
+        type: "EffectRequested",
+        producer: "supervisor",
+        idempotencyKey: "managed-unit-effect-requested",
+        payload: {
+          effectId: "managed-unit-effect",
+          executor: "managed-process",
+          operation: "start",
+          input: {
+            processId: "managed-unit-process",
+            command: "true",
+            identityToken: token,
+          },
+          origin: { kind: "cell", cellId: "managed-unit-cell" },
+          idempotencyKey: "managed-unit-effect",
+          idempotent: false,
+        },
+      },
+      {
+        sessionId,
+        branchId,
+        type: "ManagedProcessRegistered",
+        producer: "supervisor",
+        idempotencyKey: "managed-unit-process-registered",
+        payload: {
+          processId: "managed-unit-process",
+          effectId: "managed-unit-effect",
+          workspaceId: "workspace-1",
+          cellId: "managed-unit-cell",
+          command: "true",
+          identityToken: token,
+          requestedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      {
+        sessionId,
+        branchId,
+        type: "EffectAttemptStarted",
+        producer: "executor",
+        idempotencyKey: "managed-unit-effect-started",
+        payload: { effectId: "managed-unit-effect", attempt: 1 },
+      },
+    ]);
+    await expect(storage.appendEvents([{
+      sessionId,
+      branchId,
+      type: "ManagedProcessStarted",
+      producer: "executor",
+      idempotencyKey: "managed-unit-process-bad-token",
+      payload: {
+        processId: "managed-unit-process",
+        effectId: "managed-unit-effect",
+        identityToken: "c".repeat(64),
+        pid: 42,
+        processGroupId: 42,
+        startedAt: "2026-01-01T00:00:01.000Z",
+      },
+    }])).rejects.toThrow();
+    await storage.appendEvents([
+      {
+        sessionId,
+        branchId,
+        type: "ManagedProcessStarted",
+        producer: "executor",
+        idempotencyKey: "managed-unit-process-started",
+        payload: {
+          processId: "managed-unit-process",
+          effectId: "managed-unit-effect",
+          identityToken: token,
+          pid: 42,
+          processGroupId: 42,
+          startedAt: "2026-01-01T00:00:01.000Z",
+        },
+      },
+      {
+        sessionId,
+        branchId,
+        type: "EffectOutcomeRecorded",
+        producer: "executor",
+        idempotencyKey: "managed-unit-effect-outcome",
+        payload: {
+          effectId: "managed-unit-effect",
+          attempt: 1,
+          outcome: "succeeded",
+          observedAt: "2026-01-01T00:00:02.000Z",
+        },
+      },
+    ]);
+    const state = projectEvents(await storage.loadEvents(sessionId, {
+      branchId,
+    }));
+    expect(state.managedProcesses["managed-unit-process"]).toMatchObject({
+      status: "succeeded",
+      pid: 42,
+      processGroupId: 42,
+    });
+    storage.close();
+  });
+
   test("decodes retained automatic governed proposals without evaluation", () => {
     const proposal = {
       proposalId: "retained-automatic-governed-proposal",

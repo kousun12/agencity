@@ -98,7 +98,7 @@ export interface ManagedServiceStatus {
   readonly idleShutdownAt: string;
   readonly attachedClients: number;
   readonly keepAliveReasons: readonly {
-    readonly kind: "attached_clients" | "resident_workers" | "active_executions" | "active_runs" | "pending_effects" | "queued_wakes" | "active_schedules" | "active_heartbeats";
+    readonly kind: "attached_clients" | "resident_workers" | "active_executions" | "active_runs" | "pending_effects" | "managed_processes" | "queued_wakes" | "active_schedules" | "active_heartbeats";
     readonly count: number;
     readonly summary: string;
   }[];
@@ -540,24 +540,43 @@ export class ManagedWorkspaceService {
     this.#idleTimer = null;
     this.#closePromise = (async () => {
       if (this.#lifecycle !== "failed") this.#lifecycle = "draining";
+      this.supervisor.processes.stopAdmission();
       const failures: unknown[] = [];
       const settle = async (operation: () => Promise<unknown>): Promise<void> => {
         try { await operation(); } catch (error) { failures.push(error); }
       };
       await this.#recoveryPromise?.catch(error => { failures.push(error); });
       this.protocol.stopAccepting();
+      await settle(() => this.supervisor.processes.shutdown());
       await settle(() => this.protocol.drainHandlers());
       await settle(() => this.#workers.drain());
       await settle(() => this.supervisor.heartbeats.close());
       await settle(() => this.supervisor.schedules.close());
       await settle(() => this.protocol.closeActiveConnections());
-      await unpublishServiceManifest({
-        workspaceRoot: this.config.workspace.root,
-        workspaceId: this.config.workspace.workspaceId,
-        manifest: this.manifest,
-      }).catch(() => {});
-      await settle(() => this.supervisor.close());
-      if (this.#lifecycle !== "failed") this.#lifecycle = "stopped";
+      let ownedProcessesConfirmedStopped = false;
+      try {
+        await this.supervisor.close();
+        ownedProcessesConfirmedStopped = true;
+      } catch (error) {
+        failures.push(error);
+      }
+      if (ownedProcessesConfirmedStopped) {
+        await unpublishServiceManifest({
+          workspaceRoot: this.config.workspace.root,
+          workspaceId: this.config.workspace.workspaceId,
+          manifest: this.manifest,
+        }).catch(() => {});
+      }
+      if (this.#lifecycle !== "failed" && failures.length === 0) {
+        this.#lifecycle = "stopped";
+      } else {
+        this.#lifecycle = "failed";
+        this.#recoveryError ??= scrubText(
+          failures[0] instanceof Error
+            ? failures[0].message
+            : String(failures[0] ?? "Managed service shutdown failed"),
+        );
+      }
       if (this.#exitProcessWhenClosed) {
         const code = this.#lifecycle === "failed" || failures.length > 0 ? 1 : 0;
         setTimeout(() => process.exit(code), 0);
@@ -665,7 +684,13 @@ export class ManagedWorkspaceService {
       if (events.length) {
         const state = projectEvents(events);
         add("active_runs", Object.values(state.agentRuns).filter(run => run.status === "queued" || run.status === "running").length);
-        add("pending_effects", Object.values(state.effects).filter(effect => effect.status === "requested" || effect.status === "started").length);
+        add("pending_effects", Object.values(state.effects).filter(effect =>
+          effect.executor !== "managed-process" &&
+          (effect.status === "requested" || effect.status === "started")
+        ).length);
+        add("managed_processes", Object.values(state.managedProcesses).filter(process =>
+          process.status === "queued" || process.status === "running"
+        ).length);
       }
       add("queued_wakes", (await storage.listWakes?.(route.sessionId, route.branchId, ["queued", "claimed"]))?.length ?? 0);
       add("active_schedules", (await storage.listSchedules?.(route.sessionId, route.branchId))?.filter(schedule => schedule.status === "active").length ?? 0);
@@ -677,6 +702,7 @@ export class ManagedWorkspaceService {
       active_executions: ["active console execution", "active console executions"],
       active_runs: ["active run", "active runs"],
       pending_effects: ["pending effect", "pending effects"],
+      managed_processes: ["managed process", "managed processes"],
       queued_wakes: ["queued wake", "queued wakes"],
       active_schedules: ["active schedule", "active schedules"],
       active_heartbeats: ["active heartbeat", "active heartbeats"],

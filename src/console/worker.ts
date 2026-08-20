@@ -392,6 +392,28 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       );
     },
   };
+  const processTarget = (target: unknown): { processId: string } => {
+    if (typeof target === "string" && target) return { processId: target };
+    if (target && typeof target === "object" && !Array.isArray(target) &&
+        typeof (target as Record<string, unknown>).processId === "string") {
+      return { processId: (target as Record<string, string>).processId! };
+    }
+    throw new TypeError(
+      "Managed process target must be a process ID or durable handle",
+    );
+  };
+  const processes = {
+    start: (input: unknown) => call("processes.start", [
+      typeof input === "string" ? { command: input } : input,
+    ]),
+    inspect: (target: unknown) =>
+      call("processes.inspect", [processTarget(target)]),
+    readLogs: (target: unknown) =>
+      call("processes.readLogs", [processTarget(target)]),
+    stop: (target: unknown, reason?: string) =>
+      callWithOptional("processes.stop", [processTarget(target)], reason),
+    list: () => call("processes.list", []),
+  };
   const memory = {
     search: (query: string, options: JsonValue = {}) => call("memory.search", [query, options]),
     create: (input: JsonValue | string) => call("memory.create", [input]),
@@ -548,7 +570,7 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       prepareReplCellSource(message.code),
     );
     failurePhase = "runtime";
-    const sdk = { state, cells, artifacts, tools, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, ai, inspect } as unknown as ConsoleSdk;
+    const sdk = { state, cells, artifacts, tools, processes, memory, harness, skills, specs, agents, goals, heartbeats, schedules, context, ai, inspect } as unknown as ConsoleSdk;
     const bindings: ReplBindings = {
       sdk,
       sql,

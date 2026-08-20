@@ -197,6 +197,65 @@ export class OutboxRunner {
     return true;
   }
 
+  async waitForInflight(
+    effectIds: readonly string[],
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const pending = [...new Set(effectIds)].flatMap((effectId) => {
+      const promise = this.#inflight.get(effectId);
+      return promise ? [promise] : [];
+    });
+    if (!pending.length) return true;
+    return Promise.race([
+      Promise.allSettled(pending).then(() => true),
+      Bun.sleep(timeoutMs).then(() => false),
+    ]);
+  }
+
+  /**
+   * Claims a never-started effect and records cancellation without entering its
+   * executor. A concurrent runner may win the claim, in which case callers must
+   * cancel the admitted execution through the ordinary abort path.
+   */
+  async cancelBeforeExecution(
+    effectId: string,
+    reason: string,
+    producer: "supervisor" | "recovery" = "supervisor",
+  ): Promise<boolean> {
+    const existing = await this.storage.getOutbox(effectId);
+    if (!existing || existing.status !== "pending" || existing.attempt !== 0) {
+      return false;
+    }
+    const claimed = await this.storage.claimEffect(effectId, this.owner);
+    if (!claimed) return false;
+    const attempt = 1;
+    await this.storage.appendEvents([
+      {
+        sessionId: claimed.sessionId,
+        branchId: claimed.branchId,
+        type: "EffectAttemptStarted",
+        producer,
+        idempotencyKey: `effect-attempt:${claimed.effectId}:${attempt}`,
+        payload: { effectId: claimed.effectId, attempt },
+      },
+      {
+        sessionId: claimed.sessionId,
+        branchId: claimed.branchId,
+        type: "EffectOutcomeRecorded",
+        producer,
+        idempotencyKey: `effect-outcome:${claimed.effectId}:${attempt}`,
+        payload: {
+          effectId: claimed.effectId,
+          attempt,
+          outcome: "cancelled",
+          error: reason,
+          observedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+    return true;
+  }
+
   #startExecution(record: OutboxRecord): Promise<ExecutionResult> {
     if (this.#deletionQuiesced) return Promise.reject(new ValidationError("Outbox is quiesced for physical deletion"));
     const existing = this.#inflight.get(record.effectId);
@@ -432,6 +491,10 @@ export class OutboxRunner {
     const unknownEffectIds: string[] = [];
     const retriedEffectIds: string[] = [];
     for (const record of await this.storage.listOutbox(["pending", "running"])) {
+      // Managed background processes have process-token and process-group-aware
+      // recovery before generic outbox reconciliation. Generic recovery must
+      // never race that specialized termination or append a second outcome.
+      if (record.executor === "managed-process") continue;
       // A pending first attempt has never been claimed locally and remains safe
       // to drain. A pending non-idempotent row with a retained attempt is an
       // anomalous/ambiguous recovery state and must never be replayed.

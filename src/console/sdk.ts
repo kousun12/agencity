@@ -128,6 +128,39 @@ export interface ToolsSdk {
   }): Promise<FilePageBoundedOutput>;
   writeFile(path: string, content: string, expectedSha256?: string): Promise<JsonValue>;
 }
+export interface ConsoleManagedProcessStartInput {
+  readonly command: string;
+  readonly cwd?: string;
+  readonly idempotencyKey?: string;
+}
+export interface ConsoleManagedProcessHandle {
+  readonly processId: string;
+  readonly effectId: string;
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly runId: string | null;
+  readonly cellId: string;
+  readonly status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "unknown";
+}
+export interface ConsoleManagedProcessInspection
+  extends ConsoleManagedProcessHandle {
+  readonly command: string;
+  readonly cwd: string | null;
+  readonly pid: number | null;
+  readonly processGroupId: number | null;
+  readonly requestedAt: string;
+  readonly startedAt: string | null;
+  readonly output?: JsonValue;
+  readonly error?: string;
+}
+export interface ProcessesSdk {
+  start(input: string | ConsoleManagedProcessStartInput): Promise<ConsoleManagedProcessHandle>;
+  inspect(target: string | Pick<ConsoleManagedProcessHandle, "processId">): Promise<ConsoleManagedProcessInspection>;
+  readLogs(target: string | Pick<ConsoleManagedProcessHandle, "processId">): Promise<JsonValue>;
+  stop(target: string | Pick<ConsoleManagedProcessHandle, "processId">, reason?: string): Promise<ConsoleManagedProcessInspection>;
+  list(): Promise<ConsoleManagedProcessInspection[]>;
+}
 export interface MemorySdk { search(query: string, options?: JsonValue): Promise<JsonValue>; create(input: JsonValue | string): Promise<JsonValue>; list(options?: JsonValue): Promise<JsonValue> }
 export interface HarnessReviewInput {
   readonly instructions?: string;
@@ -373,6 +406,7 @@ export interface ConsoleSdk {
   readonly cells: CellsSdk;
   readonly artifacts: ArtifactsSdk;
   readonly tools: ToolsSdk;
+  readonly processes: ProcessesSdk;
   readonly memory: MemorySdk;
   readonly harness: HarnessSdk;
   readonly skills: SkillsSdk;

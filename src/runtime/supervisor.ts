@@ -51,6 +51,7 @@ import {
 import {
   EchoModelProvider,
   FileExecutor,
+  ManagedProcessExecutor,
   ModelExecutor,
   ShellExecutor,
   SkillExecutor,
@@ -106,6 +107,10 @@ import { ModelSelectionService } from "./model-selection.ts";
 import { RepositoryInstructionService } from "./repository-instructions.ts";
 import { AiGenerationService } from "./ai-generation.ts";
 import { ExplicitContextMaterializer } from "./explicit-context.ts";
+import {
+  ManagedProcessService,
+  managedProcessLogRoot,
+} from "./managed-processes.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -398,6 +403,7 @@ export class Supervisor {
   readonly artifacts: LocalArtifactStore;
   readonly console: ConsoleExecutionPool;
   readonly outbox: OutboxRunner;
+  readonly processes: ManagedProcessService;
   readonly projections: ProjectionService;
   readonly contexts: ContextMaterializer;
   readonly compactions: CompactionService;
@@ -444,6 +450,7 @@ export class Supervisor {
     artifacts: LocalArtifactStore,
     consoleProcess: ConsoleExecutionPool,
     outbox: OutboxRunner,
+    processExecutor: ManagedProcessExecutor,
     restartConsoleAfterCell: boolean,
     consoleRssRecycleThresholdBytes: number,
     maxSessionDepth: number,
@@ -464,6 +471,11 @@ export class Supervisor {
     this.artifacts = artifacts;
     this.console = consoleProcess;
     this.outbox = outbox;
+    this.processes = new ManagedProcessService(
+      storage,
+      outbox,
+      processExecutor,
+    );
     this.projections = new ProjectionService(storage);
     this.modelSelection = new ModelSelectionService(modelExecutor, profile);
     this.agents = new AgentService(
@@ -570,12 +582,20 @@ export class Supervisor {
     this.contexts.attachSkillCatalog(this.skillManagement);
     this.schedules.attachRunService(this.runs);
     this.agents.attachRunService(this.runs);
-    this.runs.setCancellationObserver((sessionId, branchId) =>
-      this.console.recycleScope(
-        { sessionId, branchId },
-        "branch-cancelled",
-      )
-    );
+    this.runs.setCancellationObserver(async (sessionId, branchId, runId) => {
+      await Promise.all([
+        this.console.recycleScope(
+          { sessionId, branchId },
+          "branch-cancelled",
+        ),
+        this.processes.cancelRun(
+          sessionId,
+          branchId,
+          runId,
+          "Originating agent run cancelled",
+        ),
+      ]);
+    });
     this.runs.setBoundaryObserver(async (sessionId, branchId, runId) => { await this.agents.deliverSteeringAtBoundary(sessionId, branchId, runId); await this.refiner.scanBoundary(sessionId, branchId, runId); });
   }
 
@@ -723,10 +743,17 @@ export class Supervisor {
       availability: () => availability("anthropic"),
     }));
     const modelExecutor = new ModelExecutor(providers, options.providerConcurrency ?? 1, modelCatalog);
+    const processExecutor = new ManagedProcessExecutor(
+      storage,
+      workspaceRoot,
+      managedProcessLogRoot(options.artifactDirectory),
+      artifacts,
+    );
     const executors = [
       new ShellExecutor(workspaceRoot, artifacts),
       new FileExecutor(workspaceRoot),
       new SkillExecutor(),
+      processExecutor,
       modelExecutor,
     ];
     const supervisor = new Supervisor(
@@ -743,6 +770,7 @@ export class Supervisor {
           DEFAULT_MAX_CONSOLE_ACTIVE_EXECUTIONS,
       }),
       new OutboxRunner(storage, executors),
+      processExecutor,
       options.restartConsoleAfterCell ?? false,
       options.consoleRssRecycleThresholdBytes ?? DEFAULT_CONSOLE_RSS_RECYCLE_BYTES,
       maxSessionDepth,
@@ -788,6 +816,7 @@ export class Supervisor {
   /** Reconciles retained work only after managed lease admission. */
   async recoverExecution(options: { readonly drainPending?: boolean } = {}): Promise<void> {
     const currentBranches = await this.projections.currentBranches();
+    await this.processes.recover();
     await this.outbox.recover(currentBranches);
     await this.agents.recoverCancellations(currentBranches);
     if (options.drainPending !== false) await this.outbox.drain();
@@ -816,18 +845,30 @@ export class Supervisor {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    await this.heartbeats.close();
-    await this.schedules.close();
-    await this.console.stop();
-    await this.refiner.close();
-    await this.refinementGovernance.close();
-    await this.ai.close();
-    await this.#recursiveModels.close();
-    await this.sync.stop();
-    await this.executionLeases?.close();
+    const failures: unknown[] = [];
+    const settle = async (operation: () => Promise<unknown>): Promise<void> => {
+      try {
+        await operation();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+    await settle(() => this.processes.shutdown());
+    await settle(() => this.heartbeats.close());
+    await settle(() => this.schedules.close());
+    await settle(() => this.console.stop());
+    await settle(() => this.refiner.close());
+    await settle(() => this.refinementGovernance.close());
+    await settle(() => this.ai.close());
+    await settle(() => this.#recursiveModels.close());
+    await settle(() => this.sync.stop());
+    await settle(async () => {
+      await this.executionLeases?.close();
+    });
     this.storage.close();
     this.credentials.close();
     this.profile.close();
+    if (failures.length) throw failures[0];
   }
 
   /** Quiesces all workers before invoking the terminal physical deletion path. */
@@ -835,6 +876,7 @@ export class Supervisor {
     if (this.#closed) throw new ValidationError("Supervisor is closed");
     await this.heartbeats.close();
     await this.schedules.close();
+    await this.processes.shutdown();
     await this.console.stop();
     await this.refiner.close();
     await this.refinementGovernance.close();
@@ -1409,6 +1451,62 @@ export class Supervisor {
       if (method === "schedules.pause") return this.schedules.pauseAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Schedule pause reason"));
       if (method === "schedules.resume") return this.schedules.resumeAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Schedule next tick"));
       if (method === "schedules.clear") return this.schedules.clearAgent(sessionId, branchId, String(args[0] ?? ""), optionalStringArgument(args[1], "Schedule clear reason"));
+      if (method === "processes.start") {
+        const input = optionalRecordArgument(args[0], "Managed process input");
+        assertOptionalPropertyType(
+          input,
+          "command",
+          "string",
+          "Managed process command",
+        );
+        assertOptionalPropertyType(
+          input,
+          "cwd",
+          "string",
+          "Managed process cwd",
+        );
+        assertOptionalPropertyType(
+          input,
+          "idempotencyKey",
+          "string",
+          "Managed process idempotency key",
+        );
+        return this.processes.start(
+          sessionId,
+          branchId,
+          cellId,
+          input as any,
+          nextRpcKey(method),
+        );
+      }
+      if (method === "processes.inspect") {
+        return this.processes.inspect(
+          sessionId,
+          branchId,
+          args[0] as any,
+        );
+      }
+      if (method === "processes.readLogs") {
+        return this.processes.readLogs(
+          sessionId,
+          branchId,
+          args[0] as any,
+        );
+      }
+      if (method === "processes.stop") {
+        return this.processes.stop(
+          sessionId,
+          branchId,
+          args[0] as any,
+          optionalStringArgument(
+            args[1],
+            "Managed process stop reason",
+          ) ?? "Stopped by agent",
+        );
+      }
+      if (method === "processes.list") {
+        return this.processes.list(sessionId, branchId);
+      }
       if (method === "memory.search") {
         const options = optionalRecordArgument(args[1], "Memory search options");
         for (const [property, name] of [
