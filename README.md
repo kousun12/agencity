@@ -10,12 +10,6 @@ Agencity is a durable, client-independent runtime for autonomous agents whose wo
 - **Safe, bounded autonomy:** Autonomous work operates within explicit limits such as budgets, deadlines, permissions, cancellation, and completion gates. External effects are recorded before execution, and uncertain outcomes remain marked as unknown rather than being retried or reported as successful. The agent cannot expand its own authority. Agencity remains trusted-local software, not a security sandbox.
 - **Governed learning:** Agencity can learn from completed work by proposing improvements to memories, prompt notes, skills, and subagent roles. Changes require evidence, deterministic validation, and independent review before activation. Every accepted refinement is versioned, attributable, and reversible, keeping adaptation under user control.
 
-## Trust warning
-
-Agencity is **trusted-local software, not a hostile-code sandbox**. Model-generated TypeScript, shell commands, managed processes, and installed skills have the operating-system authority of the Agencity process. The separate Bun worker provides crash isolation only.
-
-Run Agencity with a minimally privileged OS account or place the entire runtime inside an independently managed sandbox when the workspace or generated code is not fully trusted. Keep protocol surfaces on loopback. See [Security](./docs/security.md).
-
 ## Install and first run
 
 Requirements:
@@ -164,6 +158,12 @@ Reconciliation appends evidence without rewriting the unknown outcome or trigger
 - Installation is limited to the tested source-checkout and local-link workflows.
 
 See [Capabilities](./docs/capabilities.md) and [Data lifecycle](./docs/data-lifecycle.md).
+
+## Trust warning
+
+Agencity is **trusted-local software, not a hostile-code sandbox**. Model-generated TypeScript, shell commands, managed processes, and installed skills have the operating-system authority of the Agencity process. The separate Bun worker provides crash isolation only.
+
+Run Agencity with a minimally privileged OS account or place the entire runtime inside an independently managed sandbox when the workspace or generated code is not fully trusted. Keep protocol surfaces on loopback. See [Security](./docs/security.md).
 
 ## Verification
 
