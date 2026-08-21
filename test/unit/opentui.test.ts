@@ -441,14 +441,20 @@ describe("OpenTUI interactive terminal", () => {
       expect(frame).not.toContain("Approved after application-time revalidation.");
       setup.mockInput.pressKey("y", { ctrl: true });
       frame = await setup.waitForFrame(value =>
-        value.includes("Ctrl-Y collapse")
+        value.includes("Ctrl-Y dismiss")
         && value.includes("Request Automatic repeated cell failure review")
         && value.includes("Approved after application-time revalidation."));
       expect(frame).toContain("Status Applied");
       setup.mockInput.pressKey("y", { ctrl: true });
       frame = await setup.waitForFrame(value =>
-        value.includes("Ctrl-Y expand")
+        !value.includes("LEARNING")
         && !value.includes("Approved after application-time revalidation."));
+      setup.mockInput.pressKey("y", { ctrl: true });
+      frame = await setup.waitForFrame(value =>
+        value.includes("Ctrl-Y dismiss")
+        && value.includes("Approved after application-time revalidation."));
+      setup.mockInput.pressKey("y", { ctrl: true });
+      frame = await setup.waitForFrame(value => !value.includes("LEARNING"));
       expect(initialLines[composerLine + 1]?.trim()).toBe("");
       const composer = setup.renderer.root.findDescendantById("agencity-composer") as TextareaRenderable;
 

@@ -840,16 +840,8 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
   const ancestry = presentation.family.ancestry.length
     ? [...presentation.family.ancestry.slice(0, -1), sessionTitle.text]
     : [sessionTitle.text];
-  const effects = Object.values(state.effects);
-  const unknownEffects = effects.filter(effect => effect.status === "unknown").length;
-  const pendingEffects = effects.filter(effect => effect.status === "requested" || effect.status === "started").length;
-  const activeTasks = Object.values(state.tasks).filter(task => ["pending", "admitted", "running"].includes(task.status)).length;
-  const attentionGates = Object.values(state.goals).flatMap(goal => Object.values(goal.gates))
-    .filter(gate => ["failed", "unknown", "running"].includes(gate.status)).length;
-  const cancellationPending = Object.values(state.agentRuns).filter(run => run.cancellationRequested && !isTerminalRunStatus(run.status)).length;
-  const attentionCount = unknownEffects + attentionGates + cancellationPending;
+  const { attentionCount, recoveryCount } = terminalAttentionState(state);
   const streaming = provider?.capabilities.streaming ? "incremental" : "committed";
-  const recoveryCount = pendingEffects + unknownEffects + activeTasks + attentionGates;
 
   return {
     workspaceId: state.workspaceId,
@@ -891,6 +883,32 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
       : `${recoveryCount} recovery item${recoveryCount === 1 ? "" : "s"}`,
     budgetLabel: `${state.budget.turns} turns · ${state.budget.tokens} tokens${state.budget.exceeded ? " · exceeded" : ""}`,
     trustLabel: "TRUSTED-LOCAL",
+  };
+}
+
+export function terminalAttentionState(
+  state: AgentState,
+): { readonly attentionCount: number; readonly recoveryCount: number } {
+  const effects = Object.values(state.effects);
+  const unknownEffects = effects.filter(effect => effect.status === "unknown").length;
+  const pendingEffects = effects.filter(
+    effect => effect.status === "requested" || effect.status === "started",
+  ).length;
+  const activeRun = Object.values(state.agentRuns).some(
+    run => !isTerminalRunStatus(run.status),
+  );
+  const attentionGates = Object.values(state.goals)
+    .flatMap(goal => Object.values(goal.gates))
+    .filter(gate => ["failed", "unknown"].includes(gate.status))
+    .length;
+  const cancellationPending = Object.values(state.agentRuns).filter(
+    run => run.cancellationRequested && !isTerminalRunStatus(run.status),
+  ).length;
+  const attentionCount = unknownEffects + attentionGates + cancellationPending;
+  return {
+    attentionCount,
+    recoveryCount: unknownEffects + attentionGates + cancellationPending +
+      (activeRun ? 0 : pendingEffects),
   };
 }
 

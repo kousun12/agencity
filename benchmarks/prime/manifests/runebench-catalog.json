@@ -824,7 +824,7 @@
       ],
       "memory_reason": "The current upstream generator uses an 8 GiB hard cap after documented 4 GiB agent OOM failures; this treatment applies that runtime hardening to the pinned task package.",
       "source_memory_gb": 4,
-      "source_ref": "4afa0c778cbe5fd4302a9528025631ceef2ab02c",
+      "source_ref": "81ba6f96eeb806e73b9c2734eb95573a76a06f3c",
       "source_repo": "https://github.com/kousun12/agencity.git",
       "treatment_memory_gb": 8
     },

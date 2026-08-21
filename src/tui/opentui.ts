@@ -547,7 +547,7 @@ export function learningDockLines(
   }
   const count = learning.items.length;
   return [
-    `▾ LEARNING · ${count} retained update${count === 1 ? "" : "s"}${refresh} · Ctrl-Y collapse`,
+    `▾ LEARNING · ${count} retained update${count === 1 ? "" : "s"}${refresh} · Ctrl-Y dismiss`,
     `Request  ${latest.request}`,
     `Status   ${latest.status}`,
     `Result   ${latest.result}`,
@@ -659,6 +659,7 @@ export class OpenTuiApp {
   #activeOperation: Promise<void> | null = null;
   #secretBuffer = "";
   #learningExpanded = false;
+  readonly #learningDismissedThroughIdByRoute = new Map<string, string>();
   #familyFocus: "composer" | "summary" | "browser" = "composer";
   #familySelectedKey: string | null = null;
   readonly #familyBrowserStateByRoute = new Map<string, { selectedKey: string; scrollTop: number }>();
@@ -1433,7 +1434,16 @@ export class OpenTuiApp {
     ) {
       key.preventDefault();
       key.stopPropagation();
-      this.#learningExpanded = !this.#learningExpanded;
+      const canExpand = selectTerminalHeightLayout(this.renderer.terminalHeight).mode === "normal";
+      if (this.#isLearningDockDismissed()) {
+        this.#clearLearningDockDismissed();
+        this.#learningExpanded = canExpand;
+      } else if (this.#learningExpanded && canExpand) {
+        this.#dismissLearningDock();
+        this.#learningExpanded = false;
+      } else if (canExpand) {
+        this.#learningExpanded = true;
+      }
       this.#render();
       return;
     }
@@ -1759,6 +1769,32 @@ export class OpenTuiApp {
   #currentRouteKey(): string {
     const state = this.controller.presentation.state;
     return `${state.sessionId}\u0000${state.branch.id}`;
+  }
+
+  #latestLearningItemId(): string | null {
+    return this.#view.learning.items.at(-1)?.id ?? null;
+  }
+
+  #isLearningDockDismissed(): boolean {
+    const latestId = this.#latestLearningItemId();
+    if (!latestId) return false;
+    return this.#learningDismissedThroughIdByRoute.get(this.#currentRouteKey()) === latestId;
+  }
+
+  #dismissLearningDock(): void {
+    const latestId = this.#latestLearningItemId();
+    if (!latestId) return;
+    const routeKey = this.#currentRouteKey();
+    this.#learningDismissedThroughIdByRoute.delete(routeKey);
+    this.#learningDismissedThroughIdByRoute.set(routeKey, latestId);
+    if (this.#learningDismissedThroughIdByRoute.size > 64) {
+      const oldest = this.#learningDismissedThroughIdByRoute.keys().next().value;
+      if (oldest !== undefined) this.#learningDismissedThroughIdByRoute.delete(oldest);
+    }
+  }
+
+  #clearLearningDockDismissed(): void {
+    this.#learningDismissedThroughIdByRoute.delete(this.#currentRouteKey());
   }
 
   #rememberFamilyBrowserState(): void {
@@ -2109,7 +2145,8 @@ export class OpenTuiApp {
       && !workspaceAgentsActive
       && layout.mode !== "minimum"
       && width >= 20
-      && this.#view.learning.items.length > 0;
+      && this.#view.learning.items.length > 0
+      && !this.#isLearningDockDismissed();
     const learningExpanded = learningVisible
       && layout.mode === "normal"
       && this.#learningExpanded;

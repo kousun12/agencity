@@ -138,6 +138,18 @@ describe("observer browser assets", () => {
     expect(javascript).toContain('firstValue(titleSource, ["intentSummary"]');
     expect(javascript).toContain('text(button, node.model, "node-meta")');
     expect(javascript).not.toContain('text(button, node.branchName + " · depth " + node.depth, "node-meta")');
+    expect(javascript).toContain("const SUMMARY_TITLE_LIMIT = 160");
+    expect(javascript).toContain('card.classList.add("run-detail-card")');
+    expect(css).toContain(".current-work-heading > div");
+    expect(css).toContain(".run-detail-card h3");
+    expect(css).toContain("overflow-x: hidden");
+    expect(css).toContain(".detail-card {\n  min-width: 0;");
+    expect(css).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(css).toContain(".detail-card dt:first-child");
+    expect(css).not.toContain("linear-gradient(120deg");
+    expect(css).not.toContain("radial-gradient");
+    expect(css).toContain('font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text"');
+    expect(css.match(/text-overflow: ellipsis/g)?.length).toBeGreaterThanOrEqual(4);
     expect(css).toContain("min-height: clamp(32rem, 68vh, 52rem)");
   });
 

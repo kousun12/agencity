@@ -8,6 +8,7 @@
   const MAX_RAIL_ITEMS = 200;
   const MAX_RAIL_BYTES = 1024 * 1024;
   const MAX_TEXT = 12_000;
+  const SUMMARY_TITLE_LIMIT = 160;
   const GRAPH_NODE_WIDTH = 200;
   const GRAPH_NODE_HEIGHT = 112;
   const GRAPH_COLUMN_GAP = 72;
@@ -185,6 +186,12 @@
     }
     if (raw.length <= maximum) return raw;
     return raw.slice(0, maximum) + "… [truncated in browser]";
+  }
+
+  function conciseTitle(value) {
+    const title = boundedText(value);
+    if (title.length <= SUMMARY_TITLE_LIMIT) return title;
+    return title.slice(0, SUMMARY_TITLE_LIMIT).trimEnd() + "…";
   }
 
   function truncationSuffix(value) {
@@ -616,7 +623,7 @@
     const progress = currentProgressFor(node.route);
     const activity = latestActivityFor(node.route);
     view["current-work-title"].textContent =
-      boundedText(run?.task || node.taskSummary || node.name || "Task summary unavailable", 1_000);
+      conciseTitle(run?.task || node.taskSummary || node.name || "Task summary unavailable");
     view["current-work-status"].textContent = humanState(node.activity);
     view["current-work-status"].dataset.activity = node.activity;
     view["current-work-agent"].textContent = node.name;
@@ -1010,6 +1017,7 @@
     const id = boundedText(firstValue(item, ["id", "eventId"], ""), 256);
     const card = document.createElement("article");
     card.className = "detail-card";
+    if (kind === "runs") card.classList.add("run-detail-card");
     const title = document.createElement("h3");
     title.textContent = detailTitle(kind, id, data);
     card.appendChild(title);
@@ -1041,7 +1049,7 @@
       const title = asObject(data.sessionTitle);
       return boundedText(firstValue(title, ["text"], data.sessionName), 180) || "Agent identity";
     }
-    if (kind === "runs") return boundedText(data.task, 240) || "Agent run";
+    if (kind === "runs") return conciseTitle(data.task) || "Agent run";
     if (kind === "model_attempts") return "Model attempt " + boundedText(data.attempt, 20);
     if (kind === "cells") return "TypeScript cell" + (status ? " · " + humanState(status) : "");
     if (kind === "effects") {

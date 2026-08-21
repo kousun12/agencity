@@ -8,6 +8,7 @@ import {
   type AgentState,
   type TaskRecord,
 } from "../../src/index.ts";
+import { terminalAttentionState } from "../../src/tui/view-model.ts";
 import { fixtureAgentProfile } from "../helpers.ts";
 
 const model = { provider: "fixture", model: "test", reasoningEffort: "provider-default" as const };
@@ -133,6 +134,52 @@ describe("family activity projection", () => {
         },
       },
     }), task({ status: "completed" }))).toEqual({ activity: "attention", activityReason: "unknown" });
+  });
+
+  test("keeps background title uncertainty out of family attention", () => {
+    expect(deriveFamilyAgentActivity(state({
+      status: "stopped",
+      effects: {
+        title: {
+          id: "title",
+          executor: "model",
+          operation: "complete",
+          input: {},
+          origin: { kind: "session-title", requestId: "title-request" },
+          idempotencyKey: "title",
+          idempotent: false,
+          attempts: 1,
+          status: "unknown",
+          eventId: "title-event",
+        },
+      },
+    }), task({ status: "completed" }))).toEqual({
+      activity: "idle",
+      activityReason: null,
+    });
+  });
+
+  test("does not label healthy active effects as recovery work", () => {
+    const pending = {
+      id: "effect",
+      executor: "model",
+      operation: "complete",
+      input: {},
+      origin: { kind: "model-call" as const, callId: "call" },
+      idempotencyKey: "effect",
+      idempotent: false,
+      attempts: 1,
+      status: "started" as const,
+      eventId: "effect-event",
+    };
+    expect(terminalAttentionState(state({
+      appliedEventIds: ["created", "run-event"],
+      effects: { effect: pending },
+      agentRuns: { run: run("running") },
+    }))).toEqual({ attentionCount: 0, recoveryCount: 0 });
+    expect(terminalAttentionState(state({
+      effects: { effect: pending },
+    }))).toEqual({ attentionCount: 0, recoveryCount: 1 });
   });
 
   test("uses the latest run by canonical event order", () => {

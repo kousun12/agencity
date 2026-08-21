@@ -1784,7 +1784,10 @@ export function deriveFamilyAgentActivity(
 ): { readonly activity: FamilyAgentActivity; readonly activityReason: FamilyAgentActivityReason } {
   if (!state || taskExpected && !task) return { activity: "unavailable", activityReason: "missing_state" };
   const latestRun = latestAgentRun(state);
-  const unknownEffect = Object.values(state.effects).some(effect => effect.status === "unknown");
+  const unknownEffect = Object.values(state.effects).some(
+    effect => effect.status === "unknown" &&
+      effect.origin.kind !== "session-title",
+  );
   if (task?.cancellationRequested && !["completed", "failed", "cancelled"].includes(task.status) ||
       latestRun?.cancellationRequested && latestRun.status !== "cancelled") {
     return { activity: "attention", activityReason: "cancellation_pending" };
