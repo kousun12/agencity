@@ -91,8 +91,25 @@ agencity run --detach "continue after this terminal closes"
 agencity attach
 agencity agents
 agencity doctor
+agencity observe
 agencity service status
 ```
+
+## Observe one agent family
+
+`agencity observe` runs a foreground, read-only web observer on `127.0.0.1`. It prints a bootstrap URL but does not open a browser:
+
+```sh
+agencity observe
+agencity observe --workspace /path/to/repository
+agencity observe --port 43127
+```
+
+Without `--port`, the operating system selects an ephemeral port. An explicit port must be a decimal integer from 1 through 65,535 and fails on a bind conflict. `--workspace-root` is a compatible alias for `--workspace`; `observe --help` and `observe --version` are also supported. Task text and execution, model, storage, sync, mutation, detach, and JSON options are rejected.
+
+The observer does not initialize a workspace, open its database, start or stop the managed service, recover or wake work, change the remembered product route, call managed mutations, or persist observer state. It passively reports uninitialized, stopped, stale, conflicting, incompatible, connecting, connected, resyncing, unavailable-route, and truncated-family states. While a browser is actively attached, the observer reads the existing revision-4 managed protocol and may keep that service attached; closing the last browser releases its managed reads and streams. Multiple tabs share one process-wide selected root family.
+
+The browser receives bounded read-only projections, lazy detail pages, and a bounded live event rail. It never receives a full `AgentState`, artifact bytes, or the managed-service bearer token. Agent names, tasks, messages, code, logs, and errors are sensitive and are rendered as inert text. See [User guide](./docs/user-guide.md), [Protocol](./docs/protocol.md), and [Security](./docs/security.md).
 
 Each session has one immutable-versioned behavioral profile. Inspect or govern the selected route without copying internal IDs:
 
@@ -135,7 +152,7 @@ Reconciliation appends evidence without rewriting the unknown outcome or trigger
 - Arbitrary external effects are not exactly-once.
 - Optional Turso synchronization exchanges never-rewritten event envelopes; it does not replace the authoritative local workspace database or replicate artifact bytes.
 - The shipped CLI has no production Turso Cloud administrative-deletion adapter.
-- PostgreSQL coordination, embedding retrieval, browser execution, artifact garbage collection, and hostile-code isolation are unavailable.
+- PostgreSQL coordination, embedding retrieval, browser execution, artifact garbage collection, and hostile-code isolation are unavailable. The Observe web interface is a viewing client, not a browser executor or model tool.
 - Workspace-charter and user-constraint governance configuration, caller-selected reviewers, and an organization control plane are unavailable.
 - Export bundles do not have a general import or supported round-trip restore command.
 - Installation is limited to the tested source-checkout and local-link workflows.
@@ -153,6 +170,8 @@ bun run verify
 ```
 
 It runs type checking, architecture checks, the core test suites, and linked-executable acceptance tests. External provider, official Turso server, and real Turso Cloud checks are credential- or dependency-gated and may be skipped. A skipped external check is not evidence that the integration passed.
+
+The optional browser journey is separate from `verify`. After a one-time `bunx playwright install chromium`, run `bun run test:acceptance:observe-web`. If Chromium is unavailable, the command fails with setup guidance; an unrun browser journey remains unverified.
 
 See [Verification](./docs/verification.md) and [Installation](./docs/install.md) for the tested executable workflows.
 

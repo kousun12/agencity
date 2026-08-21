@@ -96,7 +96,27 @@ If status reports a conflict:
 
 The normalized idle timeout is part of the service configuration hash. During an upgrade from the former 60-second default, a new client using the one-hour default receives `CONFIG_MISMATCH` while the old owner is live. It does not take ownership or delete discovery state. Wait for the old owner to exit, or use the matching old binary to request authenticated shutdown, then start the new client.
 
-## Observe and control work
+## Read-only web observation
+
+Start the disposable foreground observer from the target repository:
+
+```sh
+agencity observe
+agencity observe --workspace /path/to/repository
+agencity observe --port 43127
+```
+
+The command prints a `http://127.0.0.1:<port>/#token=...` URL and does not open a browser. Omit `--port` for an ephemeral port. An explicit port must be 1–65,535 and fails on conflict. `--workspace-root` is a compatible alias for `--workspace`.
+
+Observe is not a managed-service command. It does not initialize the workspace, start or stop the service, compare its execution configuration, open LibSQL, recover runs, tick wakes, append events, execute effects, change product selection, or retain observer state. It passively reports workspace and service availability. Ctrl-C stops only the observer.
+
+An actively attached browser causes the observer to authenticate to an existing revision-4 managed service and open bounded snapshot and branch-stream reads. These attached clients can defer the service's normal quiescent shutdown. Closing the final browser releases every upstream stream and pending read; an open observer process with no attached browser does not send authenticated managed requests.
+
+Treat the URL fragment as a process-lifetime bootstrap credential and agent strings as sensitive local data. The fragment is exchanged for an `HttpOnly`, `SameSite=Strict`, `/api` cookie and removed from the address bar. Do not proxy or expose the observer outside its exact loopback origin. A restarted observer invalidates prior browser sessions and prints a new URL.
+
+Availability remains explicit: uninitialized workspace, stopped/stale/conflicting/incompatible service, connecting, connected, resyncing, unavailable route, and truncated family. A stale or conflicting service is never repaired or selected by the observer. Managed-service replacement, stream heartbeat silence, browser replay loss, and slow-client overflow trigger a bounded fresh snapshot rather than mixing generations.
+
+## Inspect and control work
 
 ```sh
 agencity sessions

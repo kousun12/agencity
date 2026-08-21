@@ -76,6 +76,8 @@ export interface AgentStreamHandlers {
   readonly onEvent: (event: AgentEvent) => unknown | Promise<unknown>;
   readonly onProgress?: (progress: EffectProgressNotification) => unknown | Promise<unknown>;
   readonly onOpen?: () => unknown | Promise<unknown>;
+  /** SSE comments carry connection liveness only; they never advance a cursor. */
+  readonly onComment?: (comment: string) => unknown | Promise<unknown>;
 }
 
 export class AgentClient {
@@ -94,8 +96,11 @@ export class AgentClient {
   abortPendingRequests(reason = "Protocol client detached"): void {
     for (const controller of this.#pendingRequests) controller.abort(new DOMException(reason, "AbortError"));
   }
-  health(): Promise<{ ok: boolean; authenticated?: boolean; workspaceId?: string; instanceId?: string; appVersion?: string; protocolMin?: number; protocolMax?: number; configHash?: string }> { return this.#json("/health"); }
-  capabilities(): Promise<ProtocolCapabilities> {
+  health(signal?: AbortSignal): Promise<{ ok: boolean; authenticated?: boolean; ready?: boolean; workspaceId?: string; instanceId?: string; appVersion?: string; protocolMin?: number; protocolMax?: number; configHash?: string }> {
+    return this.#json("/health", signal === undefined ? undefined : { signal });
+  }
+  capabilities(signal?: AbortSignal): Promise<ProtocolCapabilities> {
+    if (signal !== undefined) return this.#json<ProtocolCapabilities>("/capabilities", { signal });
     if (this.#capabilitiesSnapshot === null) {
       const request = this.#json<ProtocolCapabilities>("/capabilities");
       this.#capabilitiesSnapshot = request;
@@ -140,7 +145,9 @@ export class AgentClient {
   }
   serviceStatus(): Promise<unknown> { return this.#json("/service/status"); }
   shutdownService(): Promise<unknown> { return this.#post("/service/shutdown"); }
-  serviceAgents(): Promise<any[]> { return this.#json("/service/agents"); }
+  serviceAgents(signal?: AbortSignal): Promise<any[]> {
+    return this.#json("/service/agents", signal === undefined ? undefined : { signal });
+  }
   productSessions(): Promise<ProductBranchSummary[]> { return this.#json("/product/sessions"); }
   productSelect(target?: string, branchId?: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/product/select", { ...(target === undefined ? {} : { target }), ...(branchId === undefined ? {} : { branchId }) }); }
   productRename(sessionId: string, branchId: string | undefined, name: string): Promise<unknown> { return this.#post("/product/rename", { sessionId, ...(branchId === undefined ? {} : { branchId }), name }); }
@@ -158,7 +165,12 @@ export class AgentClient {
     const model = await this.#compatibleModel(options.model);
     return this.#post("/sessions", { workspaceId, ...options, ...(model === undefined ? {} : { model }) });
   }
-  snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
+  snapshot(sessionId: string, branchId: string, signal?: AbortSignal): Promise<{ cursor: string; state: AgentState }> {
+    return this.#json(
+      `/sessions/${encodeURIComponent(sessionId)}/snapshot?branch=${encodeURIComponent(branchId)}`,
+      signal === undefined ? undefined : { signal },
+    );
+  }
   agentProfile(sessionId: string, includePrompt = false): Promise<AgentProfileSummary | AgentProfileDetail> { return this.#json(`/sessions/${sessionId}/agent-profile${includePrompt ? "?detail=full" : ""}`); }
   agentProfiles(sessionId: string, options: { readonly includePrompt?: boolean; readonly limit?: number } = {}): Promise<{ activeProfileVersionId: string; items: Array<AgentProfileSummary | AgentProfileDetail> }> {
     const query = new URLSearchParams();
@@ -245,7 +257,7 @@ export class AgentClient {
         if (BigInt(event.cursor) <= BigInt(cursor)) return;
         await handlers.onEvent(event);
         cursor = event.cursor;
-      }, signal);
+      }, signal, handlers.onComment);
     } catch (error) {
       if (!signal?.aborted) throw error;
     } finally {
@@ -619,6 +631,7 @@ async function readProtocolStream(
   body: ReadableStream<Uint8Array>,
   onItem: (eventName: string, data: string) => void | Promise<void>,
   signal?: AbortSignal,
+  onComment?: (comment: string) => unknown | Promise<unknown>,
 ): Promise<void> {
   const reader = body.getReader();
   const abort = (): void => { void reader.cancel(signal?.reason).catch(() => {}); };
@@ -650,6 +663,7 @@ async function readProtocolStream(
         let line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
         if (line.endsWith("\r")) line = line.slice(0, -1);
         if (line === "") await dispatch();
+        else if (line.startsWith(":")) await onComment?.(line.slice(1).replace(/^ /, ""));
         else if (line.startsWith("event:")) eventName = line.slice(6).replace(/^ /, "");
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
       }

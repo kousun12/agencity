@@ -34,6 +34,49 @@ To use a command-like phrase as task text, put `--` before it:
 agencity -- run the benchmark and explain the result
 ```
 
+## Observe an agent family in a browser
+
+Run the read-only observer from the repository to inspect:
+
+```sh
+agencity observe
+agencity observe --workspace /path/to/repository
+agencity observe --workspace-root /path/to/repository --port 43127
+```
+
+The command stays in the foreground and prints a URL such as:
+
+```text
+http://127.0.0.1:43127/#token=<observer-bootstrap-token>
+```
+
+Open that URL manually; Agencity does not open a browser. Without `--port`, it asks the operating system for an ephemeral port and prints the actual port. An explicit port must be a decimal integer from 1 through 65,535 and fails if unavailable. `observe --help` prints the full CLI help, and `observe --version` prints the application and Bun versions. Observe rejects task text and unrelated product options, including model, execution, storage, sync, mutation, detach, and JSON options.
+
+Observe is disposable and strictly read-only. Starting it:
+
+- does not create `.agencity`, initialize a workspace, open LibSQL, run migrations, or persist observer state;
+- does not start, stop, configure, recover, wake, or take ownership of the managed service or its work;
+- does not append events, execute effects, call managed mutations, or change the workspace's remembered product selection; and
+- does not keep a durable family selection. Restarting Observe creates a new browser token, sessions, generation, and live-activity boundary.
+
+The process passively watches the workspace identity marker and service manifest. It authenticates to the existing managed service only while a browser request or family stream is attached. Those attached streams can defer normal managed-service quiescence. Closing the final browser releases every upstream request and stream; leaving only the foreground Observe process running sends no authenticated managed request. Stopping Observe with Ctrl-C, SIGINT, or SIGTERM stops only the observer and does not cancel Agencity work.
+
+The availability display keeps these states distinct: `workspace_uninitialized`, `service_stopped`, `service_stale`, `service_conflict`, `service_incompatible`, `connecting`, `connected`, `resyncing`, `route_unavailable`, and `family_truncated`. Connection requires a managed service whose protocol range includes revision 4 and whose capabilities include managed service, product catalog, snapshot-plus-cursor resume, committed-event deduplication, and cursorless progress.
+
+### Select and inspect a family
+
+Observe lists initial-branch root agents from the managed root catalog. Failed and archived roots remain visible but cannot be selected. One selectable root is chosen automatically; zero or multiple roots leave the selector open. Selection is shared process-wide, so selecting another family in one authenticated tab replaces it in every tab. It never calls product selection and does not affect what a later plain `agencity` resumes.
+
+The Overview leads with the root agent's bounded current-run summary: task, activity, latest action category, model, step count, and durable budget usage. It also shows an auto-fitted family graph derived from durable child-task edges and current route activity. The activity timeline gives committed event types readable labels, groups adjacent related events, and keeps event IDs, cursors, and producers inside expandable detail. Connection service and generation IDs are available under Connection details rather than occupying the primary status row.
+
+Family discovery is breadth-first with at most four concurrent reads and 64 loaded routes. Referenced routes that cannot be loaded remain visible, and reaching a bound reports truncation without inventing an omitted count. Branch names can be shown, but branch-fork topology, multiple simultaneous families, multiple workspaces, and full historical playback are not available.
+
+Selecting a graph node opens an in-context route-detail drawer without replacing the Overview. The drawer fetches detail only after a route and section are selected. Available sections are identity, runs, model attempts, cells, effects, tasks, mailbox, budget, goals, gates, artifact metadata, and terminal outcomes. Each page contains at most 50 items and 128 KiB; oversized text is bounded with explicit completeness metadata. Artifact bytes are not exposed. The Events view contains at most the current observer process's bounded live activity, not a reconstructed historical log. Current projection items carry their retained event ID and enclosing snapshot cursor; only newly observed committed events have exact event cursors.
+
+The browser takes a bounded snapshot, then follows server-sent events. Managed revision-4 streams and browser streams send comment heartbeats with no durable meaning. Duplicate or older committed cursors are ignored, provisional progress is discarded on its terminal outcome or disconnect, and service replacement, family replacement, heartbeat silence, replay loss, or a slow-client overflow causes a fresh generation and bounded resync. Refresh can replay only what remains in the process-local buffer.
+
+Agent tasks, messages, model output, TypeScript source, logs, errors, and repository data can be sensitive. Observe is loopback-only and authenticated, but it remains part of Agencity's trusted-local boundary and is not a sandbox. See [Security](./security.md) and [Protocol](./protocol.md).
+
 ## First-run provider setup
 
 New work requires an explicit model provider and canonical model ID. An explicit `--model` or a valid retained workspace default bypasses setup. Otherwise, interactive startup always uses an inline keyboard picker, even when exactly one provider is authenticated or provider-specific model environment variables are set:

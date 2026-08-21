@@ -22,6 +22,15 @@ bun run dev -- --version
 
 `bun run dev`, `bun run src/cli.ts`, and the executable aliases invoke the same `src/cli.ts` entrypoint. There is no separate development product behavior.
 
+Run the foreground web observer from the same source entrypoint:
+
+```sh
+bun run dev -- observe
+bun run dev -- observe --workspace /path/to/repository
+```
+
+It prints a loopback bootstrap URL and does not open a browser. The observer is read-only and can serve its unavailable-state interface before the target workspace or managed service exists.
+
 ## Local link
 
 After installing dependencies, register the executable with Bun:
@@ -35,11 +44,12 @@ export PATH="$HOME/.bun/bin:$PATH"
 cd /path/to/another/repository
 agencity --version
 agencity
+agencity observe
 ```
 
 `bun link` exposes both declared executable names, `agencity` and the compatibility alias `prime-agent-ts`, under Bun's install bin directory, normally `~/.bun/bin`.
 
-The link points to the source checkout. Keep that checkout, its `node_modules`, and the platform-specific OpenTUI dependency available. Runtime assets are resolved relative to the executable module, so the command can run from another repository.
+The link points to the source checkout. Keep that checkout, its `node_modules`, and the platform-specific OpenTUI dependency available. Runtime assets are resolved relative to the executable module, so the command can run from another repository. Observe's checked-in HTML, JavaScript, and CSS are likewise resolved from `src/observe/web/` relative to the installed module, not from the current repository. The black-box suite includes an isolated-link case that requests every initial observer asset from an external working directory; see [Verification](./verification.md) for its current evidence.
 
 The checked-in `src/cli.ts` has executable Git mode `100755`. A packaging or copy process that drops that bit is not a valid installation. No manual `chmod` is part of the supported workflow.
 
@@ -130,6 +140,20 @@ bun run test:acceptance:matrix
 ```
 
 The deterministic acceptance endpoint is an external loopback OpenAI Responses-compatible fixture that implements `/v1/responses`, typed actions, and Responses streaming events. Coverage includes provider setup failure, explicit model configuration, TypeScript cells and effects, retained child work, completion-gate repair, detach and reattach, branching, history, interruption, recovery, unknown outcomes without automatic retry, refinement, skills, compaction, streaming, and scheduled wakes.
+
+Observe's browser-rendering journey is optional and is not part of `bun run verify`. Install its pinned Chromium prerequisite once:
+
+```sh
+bunx playwright install chromium
+```
+
+Then run:
+
+```sh
+bun run test:acceptance:observe-web
+```
+
+When Chromium is unavailable, the optional command fails with installation guidance. Do not report an unrun journey as passed. The package remains private; installing this test browser does not create a standalone Agencity release channel.
 
 ## Gated external verification
 

@@ -7,7 +7,7 @@ import {
 
 export const PRODUCT_CLI_COMMANDS = [
   "product", "help", "version", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules",
-  "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact",
+  "doctor", "observe", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact",
 ] as const;
 export const LEGACY_CLI_COMMANDS = [
   "create", "chat", "cell", "snapshot", "history", "rebuild", "branch", "tui", "serve",
@@ -86,7 +86,9 @@ function parseOptions(
     if (value === undefined || (inline === undefined && value.startsWith("--"))) throw new Error(`--${name} requires a value`);
     values.set(name, value);
   }
-  if (flags.has("help")) command = "help";
-  else if (flags.has("version")) command = "version";
+  if (initialCommand !== "observe") {
+    if (flags.has("help")) command = "help";
+    else if (flags.has("version")) command = "version";
+  }
   return { command, values, flags, positionals, ...(advanced === undefined ? {} : { advanced }) };
 }

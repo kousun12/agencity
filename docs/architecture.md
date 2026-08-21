@@ -57,8 +57,11 @@ isolate resources.
                runtime services
              /        |        \
        console host  protocol    TUI
-                         ^
-                        CLI (composition entrypoint)
+                         ^       ^
+                         |       |
+                  Observe source |
+                         ^       |
+                         CLI (composition entrypoint)
 ```
 
 - `src/domain` has no adapter/runtime imports. Its event and state semantics are placement-independent.
@@ -66,8 +69,31 @@ isolate resources.
 - Artifact and executor interfaces expose stable IDs, JSON requests, four-way outcomes, and explicit failures rather than filesystem/child-process types.
 - Runtime services compose contracts and own valid writes. Generated console SQL is analytical/read-only; SDK RPC invokes typed commands.
 - Protocol and UI adapt runtime operations. The product TUI is a full-screen OpenTUI client over the authenticated loopback `AgentClient`; explicit diagnostic TUI routes use `InProcessProtocolTransport` through the same public `ProtocolServer.handle` router. Both retain snapshot-plus-cursor semantics and keep presentation state non-canonical.
+- `src/observe` is a separate disposable viewing client. Only `source-adapter.ts` may construct `AgentClient` or import `src/protocol`; the rest of the observer receives a closed read-only source with health, capabilities, root catalog, snapshot, and stream operations. It cannot import runtime ownership, storage, executors, console, sync, or product-service composition.
 
 `bun run check:architecture` makes the first two boundaries, package barrels, migration classifications, immutable guards, and canonical SQL rules executable.
+
+## Disposable browser observation
+
+The foreground `agencity observe` process owns only a loopback browser server and process-local projections:
+
+```text
+Browser
+  -> authenticated observer HTTP/SSE
+  -> bounded observer DTOs
+  -> disposable full-state family projection + pure reducer
+  -> narrow read-only source adapter
+  -> authenticated managed protocol revision 4
+  -> canonical events and runtime projections
+```
+
+Observe performs read-only workspace and owner-only service-manifest discovery before ordinary product bootstrap. It never creates directories, opens the workspace database, constructs a supervisor, runs recovery, owns a lease, ticks wakes, executes effects, calls a managed/product mutation, or changes product selection. The manifest and workspace marker are discovery metadata only; agent state comes through authenticated managed health, capabilities, root catalog, route snapshots, and branch streams.
+
+For each loaded exact `{ sessionId, branchId }` route, the process keeps one full `AgentState` obtained from a snapshot and advances it by applying committed events with the pure domain reducer. Full states remain process-internal. Browser responses contain versioned bounded DTOs: at most 64 breadth-first family routes, four concurrent family reads, 512 KiB per family snapshot, 50 items and 128 KiB per lazy detail page, and bounded activity, queue, envelope, and replay buffers. Artifact metadata may be projected, but artifact bytes and a full `AgentState` are never browser responses.
+
+One observer process has one selected initial-root family. A sole selectable root is automatic; otherwise the browser presents bounded root pages. Selection is shared by all authenticated tabs and replaces the process-local generation without changing the ordinary product resume route. Family edges come only from retained task identities, mailbox lifecycles are exact-route records grouped by message identity, and branch-fork topology is not inferred.
+
+One managed stream per loaded route is shared across browser tabs. Canonical decimal route cursors remain authoritative; process-local observer generation and sequence exist only for browser catch-up. Managed and browser SSE comments provide liveness without durable meaning. Duplicate/older cursors are ignored, provisional progress is discarded on outcome or disconnect, and service replacement, heartbeat silence, generation mismatch, replay loss, or queue overflow causes bounded resynchronization. The final browser disconnect aborts every upstream read and stream so the otherwise idle observer process does not keep the managed service attached.
 
 ## Relational storage
 

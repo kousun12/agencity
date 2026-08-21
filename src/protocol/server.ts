@@ -35,13 +35,29 @@ export interface ProtocolServiceHooks {
   readonly productCredentialReference?: (provider: string, reference: string, label: string) => Promise<unknown>;
 }
 
+export const DEFAULT_BRANCH_STREAM_HEARTBEAT_INTERVAL_MS = 15_000;
+
+export interface ProtocolIntervalScheduler {
+  setInterval(callback: () => void, intervalMs: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
 export interface ProtocolServerOptions {
   /** Owner-only bearer read from discovery state; never accepted in a URL. */
   readonly bearerToken?: string;
   readonly service?: ProtocolServiceHooks;
   /** Internal/test override for Bun's server-wide HTTP idle timeout. */
   readonly httpIdleTimeoutSeconds?: number;
+  /** Internal/test override; production defaults to the maximum 15-second interval. */
+  readonly branchStreamHeartbeatIntervalMs?: number;
+  /** Internal/test scheduler used to prove heartbeat timer cleanup. */
+  readonly branchStreamHeartbeatScheduler?: ProtocolIntervalScheduler;
 }
+
+const DEFAULT_INTERVAL_SCHEDULER: ProtocolIntervalScheduler = {
+  setInterval: (callback, intervalMs) => globalThis.setInterval(callback, intervalMs),
+  clearInterval: handle => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
+};
 
 export class ProtocolServer {
   #server: ReturnType<typeof Bun.serve> | null = null;
@@ -49,7 +65,19 @@ export class ProtocolServer {
   #stopAcceptingResult: Promise<unknown | null> | null = null;
   #activeHandlers = 0;
   readonly #handlerDrainResolvers = new Set<() => void>();
-  constructor(readonly supervisor: Supervisor, readonly options: ProtocolServerOptions = {}) {}
+  constructor(readonly supervisor: Supervisor, readonly options: ProtocolServerOptions = {}) {
+    const heartbeatInterval = options.branchStreamHeartbeatIntervalMs
+      ?? DEFAULT_BRANCH_STREAM_HEARTBEAT_INTERVAL_MS;
+    if (
+      !Number.isSafeInteger(heartbeatInterval)
+      || heartbeatInterval < 1
+      || heartbeatInterval > DEFAULT_BRANCH_STREAM_HEARTBEAT_INTERVAL_MS
+    ) {
+      throw new ValidationError(
+        `Branch stream heartbeat interval must be from 1 to ${DEFAULT_BRANCH_STREAM_HEARTBEAT_INTERVAL_MS}ms`,
+      );
+    }
+  }
 
   listen(port = 0, hostname = "127.0.0.1"): ReturnType<typeof Bun.serve> {
     if (this.#server) return this.#server;
@@ -581,7 +609,13 @@ export class ProtocolServer {
 
   #stream(sessionId: string, branchId: string, after: string, signal: AbortSignal): Response {
     const encoder = new TextEncoder();
+    const heartbeatInterval = this.options.branchStreamHeartbeatIntervalMs
+      ?? DEFAULT_BRANCH_STREAM_HEARTBEAT_INTERVAL_MS;
+    const heartbeatScheduler = this.options.branchStreamHeartbeatScheduler
+      ?? DEFAULT_INTERVAL_SCHEDULER;
     let active = true;
+    let heartbeatTimer: unknown | null = null;
+    let removeAbortListener = () => {};
     let unsubscribeEvents = () => {};
     let unsubscribeProgress = () => {};
     const unsubscribe = (): void => {
@@ -595,44 +629,64 @@ export class ProtocolServer {
     const deactivate = (): void => {
       if (!active) return;
       active = false;
+      if (heartbeatTimer !== null) {
+        heartbeatScheduler.clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      removeAbortListener();
+      removeAbortListener = () => {};
       unsubscribe();
     };
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        const enqueue = (frame: string): void => {
-          if (!active) return;
-          try { controller.enqueue(encoder.encode(frame)); }
-          catch { deactivate(); }
-        };
-        // Flush response headers immediately even when the branch has no new
-        // events. SSE comments carry no protocol event or cursor.
-        enqueue(": connected\n\n");
-        // Committed events retain their cursor ID and original data shape for
-        // backwards compatibility. Progress is explicitly named and has no ID:
-        // EventSource reconnect cursors therefore never advance on progress.
-        const events = this.supervisor.projections.subscribe(
-          sessionId,
-          branchId,
-          after,
-          (event) => enqueue(`id: ${event.cursor}\ndata: ${JSON.stringify(event)}\n\n`),
-        );
-        unsubscribeEvents = events;
-        if (!active) { events(); unsubscribeEvents = () => {}; }
-        if (active) {
-          const progress = this.supervisor.outbox.onProgress((notification) => {
-            if (notification.sessionId === sessionId && notification.branchId === branchId) {
-              enqueue(`event: progress\ndata: ${JSON.stringify(notification)}\n\n`);
-            }
-          });
-          unsubscribeProgress = progress;
-          if (!active) { progress(); unsubscribeProgress = () => {}; }
-        }
-        const abort = (): void => {
+        try {
+          const enqueue = (frame: string): void => {
+            if (!active) return;
+            try { controller.enqueue(encoder.encode(frame)); }
+            catch { deactivate(); }
+          };
+          // Flush response headers immediately even when the branch has no new
+          // events. SSE comments carry no protocol event or cursor.
+          enqueue(": connected\n\n");
+          if (active) {
+            heartbeatTimer = heartbeatScheduler.setInterval(
+              () => enqueue(": heartbeat\n\n"),
+              heartbeatInterval,
+            );
+          }
+          // Committed events retain their cursor ID and original data shape for
+          // backwards compatibility. Progress is explicitly named and has no ID:
+          // EventSource reconnect cursors therefore never advance on progress.
+          const events = this.supervisor.projections.subscribe(
+            sessionId,
+            branchId,
+            after,
+            (event) => enqueue(`id: ${event.cursor}\ndata: ${JSON.stringify(event)}\n\n`),
+          );
+          unsubscribeEvents = events;
+          if (!active) { events(); unsubscribeEvents = () => {}; }
+          if (active) {
+            const progress = this.supervisor.outbox.onProgress((notification) => {
+              if (notification.sessionId === sessionId && notification.branchId === branchId) {
+                enqueue(`event: progress\ndata: ${JSON.stringify(notification)}\n\n`);
+              }
+            });
+            unsubscribeProgress = progress;
+            if (!active) { progress(); unsubscribeProgress = () => {}; }
+          }
+          const abort = (): void => {
+            deactivate();
+            try { controller.close(); } catch {}
+          };
+          if (signal.aborted) abort();
+          else {
+            signal.addEventListener("abort", abort, { once: true });
+            removeAbortListener = () => signal.removeEventListener("abort", abort);
+          }
+        } catch (error) {
           deactivate();
-          try { controller.close(); } catch {}
-        };
-        if (signal.aborted) abort();
-        else signal.addEventListener("abort", abort, { once: true });
+          throw error;
+        }
       },
       cancel: deactivate,
     });

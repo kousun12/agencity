@@ -24,6 +24,20 @@ Do not expose `ProtocolServer` directly to an untrusted network. The product-man
 
 ## Defense in depth that is implemented
 
+### Browser observer
+
+`agencity observe` is a trusted-local viewing client, not a sandbox, remote service, or browser-execution tool. Its foreground server binds only `127.0.0.1` and accepts only the exact `Host` value `127.0.0.1:<actual-port>`. Browser API requests require `Sec-Fetch-Site: same-origin`; POST requests also require the exact observer `Origin`. Duplicate, malformed, unexpected-host, cross-site, unauthorized, unknown-route, and generic-proxy requests fail closed. Responses emit no permissive CORS headers.
+
+The printed URL carries a random process-lifetime bootstrap token in its fragment. Browser JavaScript sends the token once in `X-Agencity-Observe-Bootstrap` to establish a random process-local cookie with `HttpOnly`, `SameSite=Strict`, and `Path=/api`, then removes the fragment with `history.replaceState`. The cookie intentionally omits `Secure` for loopback HTTP compatibility. Restarting the observer invalidates prior tokens and sessions.
+
+The managed workspace service's broad owner-local bearer token remains only in the observer's server-side source adapter. It is not sent to browser JavaScript, HTML, URLs, cookies, storage, logs, errors, or child-process data. The closed adapter and browser routes reduce accidental exposure but do not create a least-privilege managed credential; a protocol-level read-only bearer remains unavailable.
+
+Browser responses contain bounded observer DTOs. Full `AgentState` values remain inside the observer process, and no route serves artifact bytes, SQL, arbitrary managed paths, or mutation forwarding. The interface receives sensitive bounded values only when required; prompts, cell source, effect values, logs, errors, message bodies, and other detail are loaded lazily.
+
+Every response applies a restrictive policy: `default-src 'none'`, same-origin scripts, styles, connections, and images, with `base-uri`, `form-action`, and `frame-ancestors` disabled; `nosniff`, frame denial, same-origin resource policy, no referrer, and no-store cache controls also apply. The initial HTML contains no agent or workspace data and uses only checked-in external script/style assets.
+
+Agent and repository strings remain untrusted and sensitive. Native browser code creates text nodes or assigns `textContent`; it does not parse agent Markdown as HTML or use HTML insertion, dynamic evaluation, executable URLs, inline script/style, SVG `foreignObject`, or untrusted event/style/URL attributes. Tags, SVG handlers, `javascript:` strings, bidi controls, CSP-breaking text, and credential-shaped values therefore remain inert display text. This does not prevent an authorized local viewer from reading sensitive content already available to the observer.
+
 ### Formal model responses
 
 `bun_console`, `finish`, and the sealed refinement-review tool are declaration-only response contracts, not sandboxes or provider-hosted executors. Formal input deltas are provisional, private, and non-executable. Agencity executes only a validated `bun_console` action after its canonical commit; the later persistent REPL evaluation retains the same trusted-local OS authority described above.

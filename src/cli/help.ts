@@ -83,6 +83,7 @@ export function renderCliHelp(options: CliHelpRenderOptions = {}): string {
       ['agencity "find and fix the flaky test"', "Start ordinary agent work."],
       ["agencity", "Resume the selected branch and open the terminal client."],
       ['agencity run "update dependencies" --completion-gate "bun test"', "Run to a typed terminal outcome."],
+      ["agencity observe", "Watch one active agent family in a read-only localhost interface."],
     ], renderOptions),
   ];
 

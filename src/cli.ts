@@ -54,13 +54,14 @@ import {
 } from "./runtime/index.ts";
 import { TerminalUI } from "./tui/index.ts";
 import { OpenTerminalUI } from "./tui/opentui.ts";
+import { runObserveCommand, validateObserveCli } from "./observe/command.ts";
 import {
   ProductPrompter,
   ProductPromptCancelledError,
 } from "./tui/product-prompter.ts";
 
 const REQUIRED_BUN_VERSION = "1.3.13";
-const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact"]);
+const PRODUCT_COMMANDS = new Set(["product", "new", "resume", "sessions", "run", "branch", "history", "tree", "goals", "heartbeats", "schedules", "doctor", "observe", "config", "service", "agents", "status", "attach", "send", "stop", "unknown", "reconcile", "profile", "refine", "skills", "context", "compact"]);
 
 let activeParsed: ParsedCliArgs | null = null;
 let canonicalHint: { path: AdvancedCommandPath; json: boolean } | null = null;
@@ -122,7 +123,13 @@ async function runServiceChild(): Promise<void> {
 async function main(parsed: ParsedCliArgs): Promise<void> {
   if (parsed.command === "help") { printHelp(); return; }
   if (parsed.command === "version") { await printVersion(); return; }
+  if (parsed.command === "observe") {
+    validateObserveCli(parsed);
+    if (parsed.flags.has("help")) { printHelp(); return; }
+    if (parsed.flags.has("version")) { await printVersion(); return; }
+  }
   assertRuntimeCompatibility();
+  if (parsed.command === "observe") { await runObserveCommand(parsed); return; }
   const credentialReference = parsed.values.get("credential-ref");
   if (credentialReference && containsBrokeredSecret(credentialReference)) {
     throw new ValidationError("Credential references cannot contain a registered credential value");

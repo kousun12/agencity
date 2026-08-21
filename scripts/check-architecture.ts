@@ -63,6 +63,58 @@ for (const file of sourceFiles) {
   }
 }
 
+const observerAdapter = "observe/source-adapter.ts";
+for (const file of sourceFiles.filter(file => rel(file).startsWith("observe/"))) {
+  const source = await Bun.file(file).text();
+  const fileRel = rel(file);
+  for (const imported of source.matchAll(importSpecifier)) {
+    const specifier = imported[1]!;
+    if (specifier.includes("/protocol/") && fileRel !== observerAdapter) {
+      violations.push(`${fileRel}: observer protocol imports are confined to ${observerAdapter}`);
+    }
+    if (specifier.includes("/runtime/") || specifier.includes("/storage/") ||
+        specifier.includes("/executors/") || specifier.includes("/console/") ||
+        specifier.includes("/sync/") ||
+        /\/product\/(?:service|index)(?:\.ts)?$/.test(specifier)) {
+      violations.push(`${fileRel}: observer UI/lifecycle cannot import service ownership module ${specifier}`);
+    }
+  }
+}
+const observerAdapterSource = await Bun.file(resolve(src, observerAdapter)).text();
+const approvedObserverClientCalls = new Set([
+  "abortPendingRequests", "health", "capabilities", "serviceAgents", "snapshot", "stream",
+]);
+for (const match of observerAdapterSource.matchAll(/\bclient\.(\w+)\s*\(/g)) {
+  if (!approvedObserverClientCalls.has(match[1]!)) {
+    violations.push(`${observerAdapter}: AgentClient call ${match[1]} is outside the observer read allowlist`);
+  }
+}
+if ((observerAdapterSource.match(/\bnew\s+AgentClient\s*\(/g) ?? []).length !== 1) {
+  violations.push(`${observerAdapter}: exactly one AgentClient construction site is required`);
+}
+for (const forbidden of [/\bSupervisor\b/, /\bProtocolServer\b/, /\bLibSQL\b/i, /\bTurso\b/i]) {
+  if (forbidden.test(observerAdapterSource)) {
+    violations.push(`${observerAdapter}: observer source adapter contains a forbidden ownership primitive`);
+  }
+}
+for (const name of ["index.html", "app.js", "app.css"]) {
+  if (!await exists(resolve(src, "observe/web", name))) {
+    violations.push(`observe/web/${name}: checked-in observer asset is required`);
+  }
+}
+const observerServerSource = await Bun.file(resolve(src, "observe/server.ts")).text();
+if (!observerServerSource.includes('new URL("./web/index.html", import.meta.url)') ||
+    !observerServerSource.includes('new URL("./web/app.js", import.meta.url)') ||
+    !observerServerSource.includes('new URL("./web/app.css", import.meta.url)')) {
+  violations.push("observe/server.ts: observer assets must resolve relative to import.meta.url");
+}
+for (const name of ["index.html", "app.js", "app.css"]) {
+  const source = await Bun.file(resolve(src, "observe/web", name)).text();
+  if (/\bBearer\b|\/(?:health|capabilities|service|product|sessions|proxy)\b|generic.?proxy/i.test(source)) {
+    violations.push(`observe/web/${name}: browser assets contain a managed credential, route, or generic proxy marker`);
+  }
+}
+
 interface PackageMetadata {
   readonly bin?: Record<string, string>;
   readonly exports?: Record<string, string>;

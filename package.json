@@ -35,6 +35,7 @@
     "benchmark:context-efficiency": "bun run scripts/agent-context-efficiency-benchmark.ts",
     "test:core": "bun test --timeout 30000 --parallel=4 test/unit test/integration test/slice2 test/slice3 test/slice3-adversarial test/slice4 test/placement && bun run test:e2e",
     "test:acceptance": "bun test --timeout 120000 --parallel=4 test/acceptance",
+    "test:acceptance:observe-web": "bun run scripts/test-observe-web.ts",
     "test:acceptance:external": "AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 bun test --timeout 120000 test/acceptance/external-provider.test.ts",
     "test:acceptance:matrix": "bun run scripts/release-acceptance-matrix.ts"
   },
@@ -51,7 +52,8 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "playwright": "^1.62.1"
   },
   "engines": {
     "bun": ">=1.3.13"

@@ -135,10 +135,88 @@ describe("FU-005 protocol transport contract", () => {
     }
   });
 
+  test("branch streams emit periodic comment heartbeats and clear their timer on abort", async () => {
+    const { supervisor } = await fixture("agencity-sse-heartbeat-");
+    const session = await supervisor.createSession({ workspaceId: "sse-heartbeat" });
+    const after = (await supervisor.projections.getSnapshot(session.sessionId, session.branchId)).cursor;
+    let heartbeat: (() => void) | null = null;
+    const timers = new Set<object>();
+    const protocol = new ProtocolServer(supervisor, {
+      branchStreamHeartbeatIntervalMs: 7,
+      branchStreamHeartbeatScheduler: {
+        setInterval(callback, intervalMs) {
+          expect(intervalMs).toBe(7);
+          heartbeat = callback;
+          const handle = {};
+          timers.add(handle);
+          return handle;
+        },
+        clearInterval(handle) { timers.delete(handle as object); },
+      },
+    });
+    const controller = new AbortController();
+    const response = await protocol.handle(new Request(
+      `http://agencity.local/sessions/${session.sessionId}/stream?branch=${session.branchId}&after=${after}`,
+      { signal: controller.signal },
+    ));
+    const reader = response.body!.getReader();
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+      expect(timers.size).toBe(1);
+      expect(heartbeat).not.toBeNull();
+      (heartbeat as unknown as () => void)();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
+      controller.abort();
+      await waitFor(() => timers.size === 0, "SSE heartbeat timer cleanup");
+    } finally {
+      controller.abort();
+      await reader.cancel().catch(() => {});
+      await supervisor.close();
+    }
+  });
+
+  test("stream clients tolerate comments and may observe them for liveness", async () => {
+    const { supervisor } = await fixture("agencity-sse-comment-client-");
+    const session = await supervisor.createSession({ workspaceId: "sse-comment-client" });
+    const event = await supervisor.appendMessage(session.sessionId, session.branchId, "user", "after comments");
+    const transport: ProtocolTransport = {
+      kind: "in-process",
+      request: async () => new Response(
+        `: connected\n\n: heartbeat\n\nid: ${event.cursor}\ndata: ${JSON.stringify(event)}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    };
+    const received: AgentEvent[] = [];
+    const comments: string[] = [];
+    await new AgentClient(transport).stream(
+      session.sessionId,
+      session.branchId,
+      String(BigInt(event.cursor) - 1n),
+      {
+        onEvent: item => { received.push(item); },
+        onComment: comment => { comments.push(comment); },
+      },
+    );
+    expect(received.map(item => item.id)).toEqual([event.id]);
+    expect(comments).toEqual(["connected", "heartbeat"]);
+    await supervisor.close();
+  });
+
   test("an SSE enqueue failure immediately unsubscribes committed-event and progress listeners", async () => {
     const { supervisor } = await fixture("agencity-sse-enqueue-failure-");
     const session = await supervisor.createSession({ workspaceId: "sse-enqueue" });
-    const protocol = new ProtocolServer(supervisor);
+    const timers = new Set<object>();
+    const protocol = new ProtocolServer(supervisor, {
+      branchStreamHeartbeatIntervalMs: 5,
+      branchStreamHeartbeatScheduler: {
+        setInterval() {
+          const handle = {};
+          timers.add(handle);
+          return handle;
+        },
+        clearInterval(handle) { timers.delete(handle as object); },
+      },
+    });
     const after = (await supervisor.projections.getSnapshot(session.sessionId, session.branchId)).cursor;
 
     let eventListeners = 0;
@@ -177,7 +255,10 @@ describe("FU-005 protocol transport contract", () => {
     };
     try {
       await supervisor.appendMessage(session.sessionId, session.branchId, "user", "force SSE delivery");
-      await waitFor(() => eventListeners === 0 && progressListeners === 0, "SSE listener cleanup after enqueue failure");
+      await waitFor(
+        () => eventListeners === 0 && progressListeners === 0 && timers.size === 0,
+        "SSE listener and heartbeat cleanup after enqueue failure",
+      );
     } finally {
       prototype.enqueue = originalEnqueue;
       controller.abort();

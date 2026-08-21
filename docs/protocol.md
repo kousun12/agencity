@@ -27,6 +27,38 @@ This is authenticated local process access, not multi-tenant authorization or a 
 
 `ProtocolServer` also accepts an optional bearer token for a custom embedded host, but the host remains responsible for discovery, authorization, TLS, execution ownership, and lifecycle.
 
+### Read-only Observe server
+
+`agencity observe` hosts a separate foreground HTTP/SSE server on `127.0.0.1`. It is a disposable viewing client of the managed product protocol, not another `ProtocolServer` mode. It does not initialize a workspace, own service lifecycle, open storage, perform recovery, fire wakes, execute effects, or forward managed mutations.
+
+The observer source adapter uses only authenticated managed reads:
+
+- `GET /health`;
+- `GET /capabilities`;
+- `GET /service/agents`;
+- `GET /sessions/:session/snapshot?branch=:branch`; and
+- `GET /sessions/:session/stream?branch=:branch&after=:cursor`.
+
+Admission requires a managed protocol range containing revision 4 plus `managedService`, `productCatalog`, `snapshotCursorResume`, `committedEventDeduplication`, and `cursorlessProgress`. Older services lack the required heartbeat liveness guarantee and appear as `service_incompatible`.
+
+Observe exposes only checked-in static assets and these browser routes:
+
+| Method and path | Meaning |
+|---|---|
+| `GET /` and `GET /app.js`, `/app.css` | Native checked-in interface assets. |
+| `POST /api/session` | Exchange the process-lifetime fragment bootstrap token for a process-local browser cookie. |
+| `GET /api/bootstrap` | Read availability, bounded root-selector page, current generation, and selected family snapshot. |
+| `POST /api/family/select` | Replace the process-wide disposable family selection after generation validation. This does not call `/product/select`. |
+| `GET /api/family/snapshot` | Read the current bounded family projection and observer sequence. |
+| `GET /api/family/detail` | Read one allowlisted, lazy, bounded inspector page for an exact projected route and optional item. |
+| `GET /api/family/stream` | Follow process-local observer envelopes after one observer sequence within one generation. |
+
+Every API response uses the `agencity.observe.v1` envelope. The API has no generic proxy, SQL route, artifact-byte route, managed URL route, or control action. Browser-facing family snapshots are capped at 512 KiB, load at most 64 routes with four concurrent reads, and retain bounded graph/message metadata. Root pages contain at most 100 rows and 256 KiB. Detail pages contain at most 50 items and 128 KiB. One observer SSE envelope is at most 64 KiB; pending browser queues, the 200-item/1 MiB activity rail, and the 512-envelope/2 MiB replay buffer are bounded.
+
+The browser first reads `#token=...`, sends it in `X-Agencity-Observe-Bootstrap`, receives an `HttpOnly; SameSite=Strict; Path=/api` cookie, and removes the fragment. The managed bearer remains in the server-side source adapter. The observer accepts only the exact `Host` value `127.0.0.1:<actual-port>`, requires `Sec-Fetch-Site: same-origin` on API requests and the exact `Origin` on POST requests, emits no permissive CORS policy, and applies a restrictive content security policy.
+
+The observer SSE stream uses a process-local generation and sequence only for bounded browser catch-up. Canonical decimal route cursors remain authoritative. The browser receives comment heartbeats, resynchronizes when replay is unavailable or a generation changes, and discards provisional progress on disconnect. Managed-service replacement aborts old reads and creates a fresh generation. None of these observer sequences or projections is persisted.
+
 ## Response and error envelopes
 
 Successful non-streaming responses are route-specific JSON values. Failures use:
@@ -368,6 +400,7 @@ sequenceDiagram
     Client->>Protocol: Open SSE with after=C
     Protocol-->>Client: Comment prelude without event data or cursor
     Client->>Client: Mark stream connected
+    Protocol-->>Client: Periodic heartbeat comment without data or cursor
     Protocol->>Storage: Read committed events after C
     Storage-->>Protocol: Event at cursor C+1
     Protocol-->>Client: Committed event with id C+1
@@ -410,11 +443,11 @@ data: <EffectProgressNotification JSON>
 
 Progress has no cursor, is not replayed, and may be bounded or dropped. Structured model progress exposes only a bounded phase, a sealed tool name, or a byte count. Provider/model/call identities and provisional arguments remain private and non-executable. Text operations may still stream bounded provisional text. Only a validated terminal text result or accepted `finish` message can enter assistant conversation.
 
-The endpoint begins with the SSE comment `: connected` so a quiet branch opens immediately. The comment has no event name, data, cursor, or durable meaning, and clients ignore it after recognizing that the HTTP stream is connected. The loopback HTTP server disables Bun's request idle timeout for this route only, so a quiet attached client remains connected without periodic heartbeat frames.
+The endpoint begins with the SSE comment `: connected` so a quiet branch opens immediately and emits `: heartbeat` comments at least every 15 seconds while it remains attached. These comments have no event name, data, cursor, or durable meaning, and clients ignore them. The loopback HTTP server also disables Bun's request idle timeout for this route only.
 
-The endpoint does not emit the initial snapshot, periodic heartbeat frames, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
+The endpoint does not emit the initial snapshot, heartbeat protocol events, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
 
-`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded. `runAgent`, `generateText`, and `generateObject` use this shared watch path for terminal waiting and always perform one final retained result read on terminal detection or timeout; they do not maintain independent short-interval polling loops. When a revision-3 TUI observes a still-running revision-2 managed service, it follows incompatible schema-5 events by refreshing the service's cursor-pinned snapshot instead of applying those events with the schema-6 client reducer.
+`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded. `AgentClient.stream` can also report comment receipt to liveness-aware clients without treating comments as events. `runAgent`, `generateText`, and `generateObject` use the shared watch path for terminal waiting and always perform one final retained result read on terminal detection or timeout; they do not maintain independent short-interval polling loops. When a revision-4 TUI observes a still-running revision-2 managed service, it follows incompatible schema-5 events by refreshing the service's cursor-pinned snapshot instead of applying those events with the schema-6 client reducer.
 
 ## Exported protocol types
 
@@ -424,7 +457,7 @@ The exported `ProtocolRequest` and `ProtocolResponse` unions in `protocol/types.
 
 ## Security and compatibility limits
 
-- Managed service protocol revision 3 is the current trusted-local pre-release contract. Revision-3 clients may attach read/write product flows to a still-running revision-2 service so admitted work can finish; snapshot refresh supplies TUI compatibility across the schema-5/schema-6 reducer boundary. Revision-2 clients cannot attach to a revision-3 service, and other incompatible ranges fail discovery with `PROTOCOL_MISMATCH`. No removed recursive-model or `/models` route is emulated.
+- Managed service protocol revision 4 is the current trusted-local pre-release contract and adds periodic branch-stream comment heartbeats. Revision-4 product clients may attach read/write product flows to still-running revision-2 or revision-3 services so admitted work can finish; snapshot refresh supplies TUI compatibility across the schema-5/schema-6 reducer boundary. Observe requires revision 4. Revision-2 and revision-3 clients cannot attach to revision-4 services, and other incompatible ranges fail discovery with `PROTOCOL_MISMATCH`. No removed recursive-model or `/models` route is emulated.
 - Additive capabilities are negotiated through `/capabilities`; effort-aware clients must not send an effort field when `reasoningEffortSelection` is absent.
 - Managed authentication is owner-local bearer access, not multi-tenant authorization.
 - The embedded diagnostic server is unauthenticated.

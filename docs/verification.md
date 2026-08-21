@@ -34,6 +34,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 - package entrypoints, subpath exports, and required scripts;
 - domain-layer dependency direction;
 - confinement of LibSQL and Turso SDK imports and emitted public types to their adapters;
+- confinement of Observe's managed-protocol access to one narrow read-only adapter, exclusion of runtime/storage/executor ownership imports, and installed-module-relative checked-in web assets;
 - the exact supported Turso Sync dependency version;
 - migration numbering and table classification;
 - update and delete guards for canonical and immutable derived tables; and
@@ -41,7 +42,7 @@ With external opt-in variables unset, this is the reproducible default claim. It
 
 These are static constraints. They do not replace replay, recovery, protocol, security, or product behavior tests.
 
-`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-6 event replay and reducer-22 rebuild, typed effect origins, exact provider-input-v2 admission, bounded observation ownership, bounded shell/managed-process/file/artifact/cell output, root and nested repository-instruction loading, durable initial agent profiles and prompt pins, persistent exact-branch REPL bindings and object identity, readable epoch replacement, pre-execution stale-epoch rejection, runtime-throw mutation retention, namespace loss and durable reconstruction, branch-aware console capacity, outbox recovery, durable managed-process handles, run cancellation, token-authenticated crash cleanup, descendant process-group cleanup, explicit raw text/object generation and its cancellation/budget/context boundaries, typed text/object child-agent results and retained lifecycle lookup, formal autonomous actions, structured refinement, retained terminal refinement outcomes across reopen, recursive sessions and queue/steer mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery, one-hour managed-service defaults and managed-process keep-alive behavior, model streaming semantics, first-run and branch-attached provider/model selection, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
+`bun run test:core` runs the deterministic unit, integration, end-to-end, and placement suites used by the main gate. Independent test files run in four isolated Bun workers; the process-heavy end-to-end files run afterward in one worker. Together, their current coverage includes schema-6 event replay and reducer-22 rebuild, typed effect origins, exact provider-input-v2 admission, bounded observation ownership, bounded shell/managed-process/file/artifact/cell output, root and nested repository-instruction loading, durable initial agent profiles and prompt pins, persistent exact-branch REPL bindings and object identity, readable epoch replacement, pre-execution stale-epoch rejection, runtime-throw mutation retention, namespace loss and durable reconstruction, branch-aware console capacity, outbox recovery, durable managed-process handles, run cancellation, token-authenticated crash cleanup, descendant process-group cleanup, explicit raw text/object generation and its cancellation/budget/context boundaries, typed text/object child-agent results and retained lifecycle lookup, formal autonomous actions, structured refinement, retained terminal refinement outcomes across reopen, recursive sessions and queue/steer mailboxes, goals and gates, memory and refinement, local synchronization logic, execution leases and fencing, protocol cursor recovery and revision-4 stream heartbeats, foreground read-only Observe admission/source/projection/server behavior, one-hour managed-service defaults and managed-process keep-alive behavior, model streaming semantics, first-run and branch-attached provider/model selection, terminal family and workspace-root navigation, structured Markdown and TypeScript cell rendering, responsive terminal layout, and placement contracts.
 
 Those tests use local fixtures, temporary databases, deterministic providers, and in-process or loopback test services where appropriate. A pass supports the behaviors exercised by those tests. It does not establish hostile-code isolation, exactly-once external effects, automatic cross-device failover, or correctness at every possible machine-instruction crash boundary.
 
@@ -83,6 +84,37 @@ The agent-run integration suite verifies zero, duplicate, malformed, truncated, 
 The integration suite also verifies declaration-only AI SDK tools for OpenAI, Anthropic, and Gateway; direct-transport parallel-call suppression; normalized reasoning mapping; structured and text streaming; bounded warnings and errors; model-catalog normalization, endpoint-keyed cache isolation, stale fallback, and malformed-record rejection; dispatch equality; exact registered-value failure across complete custom-provider structured output while unregistered credential-like text remains ordinary data; schema-1 through schema-5 rejection without deletion; and structured result recovery across rebuild, reopen, and divergent synchronization.
 
 It records a focused family-projection benchmark with 25 relatives and branch histories expanded to 5,000 canonical event records at the storage boundary. It proves that a cold read projects each route once and that a warm refresh reuses current snapshots without replaying the 130,000 retained events. Controller tests separately prove that periodic family refresh requests are coalesced, never overlap, do not accumulate a timer backlog, and stop when the browser is closed and no child is actively working. Workspace Agents catalog tests cover explicit one-shot refresh, stale-row retention, superseded-response rejection, and exact product selection without adding a polling loop.
+
+### Observe verification
+
+Required deterministic Observe coverage is part of the ordinary unit, integration, end-to-end, architecture, and linked-product gates. The focused files are:
+
+```sh
+bun test --timeout 30000 \
+  test/unit/observe-model.test.ts \
+  test/unit/observe-command.test.ts \
+  test/unit/observe-web-assets.test.ts \
+  test/integration/observe-source.test.ts \
+  test/integration/observe-server.test.ts
+bun test --timeout 30000 test/e2e/observe-cli.test.ts
+```
+
+These tests cover UTF-8, item, byte, route, activity, queue, and replay bounds; breadth-first family discovery and placeholders; exact-route mailbox aggregation; status derivation; stale-generation rejection; committed-event deduplication; provisional-progress cleanup; inert checked-in assets; CLI option and port admission; managed-service availability and capability classification; the narrow read-method allowlist; snapshot validation; fragment/session authentication; exact Host, fetch metadata, Origin, no-CORS, no-store, and CSP behavior; browser attachment release; shared process-wide selection; service replacement; live child discovery; source-checkout ephemeral/explicit port behavior; signal shutdown; no fresh-workspace state creation; and linked asset resolution.
+
+The actual web-interface journey is optional:
+
+```sh
+bunx playwright install chromium
+bun run test:acceptance:observe-web
+```
+
+The first command installs the pinned Playwright Chromium prerequisite once. The journey covers token exchange and fragment removal, refresh, root selection, family rendering, live child/message updates, lazy detail, managed-service replacement, and final-browser disconnect. It is deliberately not part of `bun run verify`. If Chromium is unavailable, the script fails with installation guidance. If the command was not run, report the browser journey as unverified rather than passed.
+
+On August 21, 2026, the exact final tree passed 46 deterministic observer tests with 0 failures and 0 skips. Source-checkout and isolated linked-asset cases passed; an earlier linked timeout came from a test helper discarding concurrent stream reads and was fixed by retaining one outstanding read. The opt-in Playwright Chromium journey passed 1 test with 0 failures and 0 skips through the actual foreground CLI, browser, and server against a protocol-compatible managed fixture.
+
+A clean `bun run verify` passed typecheck and architecture, 1,286 deterministic core tests with 2 gated external skips, 13 end-to-end tests with no skips, and 27 acceptance tests with 1 real-provider skip. The aggregate result was 1,326 passes, 3 skips, and 0 failures. A preceding shared aggregate hit the known parallel SQLite contention in `ai-generation`; that file passed 12 of 12 tests in isolation, and the immediate clean aggregate rerun passed. Independent final review found no blocking code defects and independently passed typecheck, architecture, and 45 focused observer tests. `git diff --check` and the local documentation-link audit also passed.
+
+The review recorded three non-blocking first-version risks: child admission performs a bounded family resync instead of an incremental child-only load; read-only confidence combines static allowlists with fixture no-mutation coverage rather than a real-runtime canonical before/after diff; and snapshot-pinned detail cursors may require refresh on a busy route. Real-provider, official Turso Sync, and Turso Cloud checks were not run and remain gated and unverified.
 
 ### First-run provider/model typeahead coverage
 
