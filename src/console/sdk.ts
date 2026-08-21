@@ -189,7 +189,7 @@ export interface SkillsSdk {
 export interface SpecsSdk { spawn(entryId: string, input?: JsonValue): Promise<JsonValue> }
 
 export interface ConsoleAgentSpawnInput {
-  readonly task: string; readonly completionCriteria?: string; readonly name?: string;
+  readonly task: string; readonly completionCriteria?: string; readonly name: string;
   readonly model?: string | ModelConfigurationInput; readonly budget?: BudgetLimits; readonly idempotencyKey?: string;
   readonly output?: { readonly schema: unknown };
 }
@@ -197,7 +197,7 @@ export interface ConsoleAgentResultOptions {
   readonly wait?: boolean;
   readonly timeoutMs?: number;
 }
-export interface ConsoleAgentHandleIdentity<I = ConsoleAgentSpawnInput | string> {
+export interface ConsoleAgentHandleIdentity<I = ConsoleAgentSpawnInput> {
   readonly taskId: string;
   readonly runId: string;
   readonly sessionId: string;
@@ -297,15 +297,15 @@ export type ConsoleMailboxMessageResult =
     };
 export interface ConsoleAgentMessageOptions { readonly direction?: "inbound" | "outbound" | "all"; readonly limit?: number; readonly before?: string; readonly pendingOnly?: boolean; }
 export interface AgentsSdk {
-  spawn<I extends ConsoleAgentSpawnInput | string>(input: I): Promise<ConsoleAgentHandle<I>>;
-  spawnMany<I extends readonly (ConsoleAgentSpawnInput | string)[]>(inputs: I): Promise<{
+  spawn<I extends ConsoleAgentSpawnInput>(input: I): Promise<ConsoleAgentHandle<I>>;
+  spawnMany<I extends readonly ConsoleAgentSpawnInput[]>(inputs: I): Promise<{
     readonly [K in keyof I]: ConsoleAgentHandle<I[K]>;
   }>;
-  run<I extends ConsoleAgentSpawnInput | string>(input: I): Promise<ConsoleAgentRunResult<I>>;
-  runMany<I extends readonly (ConsoleAgentSpawnInput | string)[]>(inputs: I): Promise<{
+  run<I extends ConsoleAgentSpawnInput>(input: I): Promise<ConsoleAgentRunResult<I>>;
+  runMany<I extends readonly ConsoleAgentSpawnInput[]>(inputs: I): Promise<{
     readonly [K in keyof I]: ConsoleAgentRunResult<I[K]>;
   }>;
-  result<I extends ConsoleAgentSpawnInput | string>(
+  result<I extends ConsoleAgentSpawnInput>(
     handle: string | ConsoleAgentHandleIdentity<I>,
     options?: ConsoleAgentResultOptions,
   ): Promise<ConsoleAgentRunResult<I>>;

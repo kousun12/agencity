@@ -439,11 +439,17 @@ Generated code cannot import, install, enable, disable, or remove skills. Those 
 
 ## `sdk.agents`
 
+Every autonomous child admission must include a concise, stable `name`. When
+the task establishes a named identity, use that exact name and keep the `task`
+as a separate description of the assigned work. The durable name is the
+family address shown by terminal and browser clients.
+
 ```ts
 const { z } = await import("zod");
 
 // Wait because the parent needs the child's conclusion as program data.
 const review = await sdk.agents.run({
+  name: "Readiness Reviewer",
   task: "Inspect the implementation, run relevant tests, and assess readiness.",
   output: {
     schema: z.object({
@@ -462,6 +468,7 @@ if (review.status === "succeeded" && review.output.kind === "object") {
 
 // Detach because this cell does not need the result before continuing.
 const audit = await sdk.agents.spawn({
+  name: "Compatibility Auditor",
   task: "Run the slow compatibility audit and report back to the parent.",
 });
 const queued = await sdk.agents.send(

@@ -5,11 +5,13 @@ describe("explicit AI and typed agent guidance", () => {
   const guidance = AGENT_RUN_EXECUTION_GUIDANCE.text;
 
   test("keeps the deterministic, raw, awaited, and detached choices distinct", () => {
-    expect(AGENT_RUN_EXECUTION_GUIDANCE.version).toBe(13);
+    expect(AGENT_RUN_EXECUTION_GUIDANCE.version).toBe(14);
     expect(guidance).toContain("Use ordinary TypeScript for deterministic work");
     expect(guidance).toContain("Use ai.generateText only when every required fact is already in the explicit prompt/context");
     expect(guidance).toContain("Use ai.generateObject under the same explicit-context constraint");
     expect(guidance).toContain("Use sdk.agents.run when a strictly narrower child task must inspect the workspace");
+    expect(guidance).toContain("Every run, runMany, spawn, or spawnMany child input must include a concise stable human-readable name");
+    expect(guidance).toContain("use that exact declared name");
     expect(guidance).toContain("Do not hand off your entire assigned task");
     expect(guidance).toContain("sdk.agents.list() is an on-demand nuclear-family snapshot");
     expect(guidance).toContain("do not poll it on every step");
@@ -47,8 +49,10 @@ describe("explicit AI and typed agent guidance", () => {
     expect(guidance).toContain("const verdict = await ai.generateObject");
     expect(guidance).toContain("schema: z.object({ complete: z.boolean(), missing: z.array(z.string()) })");
     expect(guidance).toContain("const review = await sdk.agents.run");
+    expect(guidance).toContain('name: "Readiness Reviewer"');
     expect(guidance).toContain("remainingWork: z.array(z.string())");
     expect(guidance).toContain("const audit = await sdk.agents.spawn");
+    expect(guidance).toContain('name: "Compatibility Auditor"');
     expect(guidance).toContain("return { auditTaskId: audit.taskId }");
   });
 });
