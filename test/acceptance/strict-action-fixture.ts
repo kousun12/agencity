@@ -217,7 +217,11 @@ export class StrictActionFixture {
     const body = await request.json() as {
       model?: unknown;
       stream?: unknown;
-      input?: Array<{ role?: unknown; content?: unknown }>;
+      input?: Array<{
+        role?: unknown;
+        content?: unknown;
+        output?: unknown;
+      }>;
       tools?: Array<{ name?: unknown }>;
       tool_choice?: unknown;
       parallel_tool_calls?: unknown;
@@ -227,7 +231,7 @@ export class StrictActionFixture {
     const firstUser = body.input.find(item => item.role === "user");
     const messageRoles = body.input.map(item => String(item.role ?? ""));
     const allMessageText = body.input.map(item =>
-      messageText(item.content)
+      messageText(item.content) || messageText(item.output)
     ).join("\n");
     const firstUserText = messageText(firstUser?.content);
     const lastUserText = messageText(lastUser?.content);
@@ -335,19 +339,17 @@ export class StrictActionFixture {
   }
 
   private readDurableStep(text: string): { task: string; stepOrdinal: number } | null {
-    const marker = "AGENCITY DURABLE RUN STEP\n";
+    const marker = "AGENCITY NEXT ACTION\n";
     const offset = text.indexOf(marker);
     if (offset < 0) return null;
     try {
       const value = JSON.parse(text.slice(offset + marker.length)) as {
         task?: unknown;
         stepOrdinal?: unknown;
-        run?: { task?: unknown; stepOrdinal?: unknown };
       };
-      const durableRun = value.run ?? value;
-      return typeof durableRun.task === "string" &&
-          typeof durableRun.stepOrdinal === "number"
-        ? { task: durableRun.task, stepOrdinal: durableRun.stepOrdinal }
+      return typeof value.task === "string" &&
+          typeof value.stepOrdinal === "number"
+        ? { task: value.task, stepOrdinal: value.stepOrdinal }
         : null;
     } catch { return null; }
   }

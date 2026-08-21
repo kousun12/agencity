@@ -628,7 +628,7 @@ describe("versioned provider input", () => {
       outcome: {
         status: "failed",
         eventId: "cell-failed-1",
-        details: "run.observations",
+        details: "segment.observations",
       },
     });
     expect(context.run.instruction).toContain("about 20 lines on each side");

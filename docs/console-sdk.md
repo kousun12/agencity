@@ -146,7 +146,7 @@ const prior = recent.items[0]
 
 `cells.list({ limit?, status?, beforeCursor? })` is newest-first and cursor-paginated. The default statuses are committed, failed, and abandoned; the maximum page size is 100. `cells.get(cellId)` returns `null` outside the current branch lineage.
 
-Entries include retained source, observation, logs, status, dependencies, attempts, duration, exports or error, optional `causalEffectOutcomeEventIds`, and proposed/start/terminal event provenance. The causal field is omitted on earlier schema-version-5 failures; a present empty array means no direct effect cause was proven. Reading history never replays code or effects.
+Entries include retained source, observation, logs, status, dependencies, attempts, duration, exports or error, optional `causalEffectOutcomeEventIds`, and proposed/start/terminal event provenance. Directly escaping convenience-helper failures retain the exact validated effect-outcome event IDs. Wrapped errors and recovery-time abandonment omit the field rather than inventing causality; a present empty array means execution proved no direct effect cause. Reading history never replays code or effects.
 
 ## Observations, artifact spill, and logs
 

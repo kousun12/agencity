@@ -141,8 +141,8 @@ const TERMINAL_RUN_STATUSES: readonly AgentRunStatus[] = [
 /**
  * Events produced by execution that are delivered through the exact-once run
  * observation ledger. Persistent state and conversation remain available in
- * the ordinary bounded durable context, but these event payloads occur in the
- * provider-facing `run.observations` array only on the dependent step.
+ * the ordinary bounded durable context, but these event payloads occur only in
+ * the dependent appended tool result or a replacement segment's observation block.
  */
 const OBSERVATION_TYPES = new Set([
   "CellCommitted", "CellFailed", "CellAbandoned", "EffectOutcomeRecorded",
@@ -161,6 +161,7 @@ const RUN_TRAJECTORY_SOURCE_BYTES = 2_048;
 const RUN_TRAJECTORY_RESULT_BYTES = 3_072;
 const RUN_TRAJECTORY_PURPOSE_BYTES = 256;
 const RUN_TRAJECTORY_ERROR_SUMMARY_BYTES = 768;
+const SEGMENT_RESET_OBSERVATION_BYTES = 32 * 1_024;
 
 const SDK_GUIDE = [
   "Treat every model step as a decision boundary: call finish when the user request is resolved, or call bun_console for one necessary next action. Do not execute merely because another step is available.",
@@ -760,7 +761,7 @@ export class AgentRunService {
             estimateProviderInputCandidate(candidate.providerInput).estimatedTokens,
           measureUtf8Bytes: (candidate) =>
             candidate.providerInput.exactUtf8Bytes,
-          compact: async ({ iteration }) => {
+          compact: async ({ iteration, candidate }) => {
             const compacted = await this.compactions!.compact(sessionId, branchId, {
               strategy: "deterministic-extractive-v1", reason: "automatic-threshold", requestedBy: "supervisor",
               idempotencyKey: `agent-run-threshold:${run.id}:${step.ordinal}:${iteration}`,
@@ -768,7 +769,29 @@ export class AgentRunService {
             });
             if (compacted.status === "completed") {
               proactiveCompactions++;
-              return { outcome: "compacted" as const, provenance: { compactionId: compacted.compactionId, contextId: compacted.contextId, sourceDigest: compacted.sourceDigest } };
+              return {
+                outcome: "compacted" as const,
+                provenance: {
+                  kind: "canonical-context-compaction",
+                  compactionId: compacted.compactionId,
+                  contextId: compacted.contextId ?? null,
+                  sourceDigest: compacted.sourceDigest,
+                } as JsonValue,
+              };
+            }
+            if (previousTranscript !== undefined) {
+              proactiveCompactions++;
+              return {
+                outcome: "compacted" as const,
+                provenance: {
+                  kind: "provider-transcript-segment-reset",
+                  runId: run.id,
+                  throughStepOrdinal: previousTranscript.stepOrdinal,
+                  sourceProviderInputDigest:
+                    candidate.providerInput.digest,
+                  sourceRecordIds: additionalRecordIds,
+                } as JsonValue,
+              };
             }
             return { outcome: "protected-only" as const, protectedSourceCount: Math.max(0, events.length - compacted.sourceEventIds.length) };
           },
@@ -963,7 +986,15 @@ export class AgentRunService {
           idempotencyKey: `agent-run-overflow:${run.id}:${step.ordinal}:${attempt.attempt}`,
           retainRecentMessages: Math.max(1, AUTOMATIC_COMPACTION_RECENT_MESSAGES - attempt.attempt), capacity: window.provenance,
         });
-        if (compacted.status === "completed") {
+        const providerTranscriptResetAvailable =
+          previousProviderTranscript(
+            current,
+            events,
+            current.agentRuns[run.id] ?? run,
+            step.ordinal,
+          ) !== undefined;
+        if (compacted.status === "completed" ||
+            providerTranscriptResetAvailable) {
           const nextAttempt = attempt.attempt + 1;
           const nextReplNamespace = this.replNamespaceStatus(
             sessionId,
@@ -2168,7 +2199,7 @@ export function agentProviderContext(
     schemaEnforcement: modelDispatch.responseContract.schemaEnforcement,
     selection: modelDispatch.responseContract.selection,
   };
-  const cacheEnabled = modelDispatch.configuration.provider === "openai";
+  const cacheEnabled = modelDispatch.configuration?.provider === "openai";
   const prior = transcriptOptions.resetReason === undefined
     ? transcriptOptions.previousTranscript
     : undefined;
@@ -2259,6 +2290,7 @@ export function agentProviderContext(
             Array.isArray(durable.recentActivity) ? durable.recentActivity : [],
             observations,
           ),
+          observations: boundedSegmentResetObservations(observations),
         }),
     responseContract,
   };
@@ -2513,6 +2545,64 @@ function providerObservation(value: JsonValue): ProviderRunObservation[] {
   }];
 }
 
+function boundedSegmentResetObservations(
+  observations: readonly ProviderRunObservation[],
+): JsonValue[] {
+  let remaining = SEGMENT_RESET_OBSERVATION_BYTES;
+  return observations.map((observation) => {
+    const serialized = JSON.stringify(observation);
+    const byteLength = new TextEncoder().encode(serialized).byteLength;
+    if (byteLength <= remaining) {
+      remaining -= byteLength;
+      return observation as unknown as JsonValue;
+    }
+    const payload = observation.payload && typeof observation.payload === "object" &&
+        !Array.isArray(observation.payload)
+      ? observation.payload as Record<string, JsonValue>
+      : {};
+    return {
+      eventId: observation.eventId,
+      type: observation.type,
+      payload: {
+        protocol: "agencity.provider-observation-summary.v1",
+        originalByteLength: byteLength,
+        sha256: sha256Text(serialized),
+        omitted: true,
+        ...(typeof payload.status === "string" ? { status: payload.status } : {}),
+        ...(typeof payload.error === "string"
+          ? { error: promptText(payload.error, RUN_TRAJECTORY_ERROR_SUMMARY_BYTES) }
+          : {}),
+        ...(Object.hasOwn(payload, "result")
+          ? { result: promptJsonIdentity(payload.result ?? null) }
+          : {}),
+        artifacts: collectObservationArtifactReferences(observation.payload),
+      },
+    };
+  });
+}
+
+function collectObservationArtifactReferences(value: JsonValue): JsonValue[] {
+  const references: JsonValue[] = [];
+  const visit = (candidate: JsonValue, depth: number): void => {
+    if (references.length >= 4 || depth > 8 || candidate === null ||
+        typeof candidate !== "object") return;
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) visit(item, depth + 1);
+      return;
+    }
+    if (typeof candidate.artifactId === "string") {
+      references.push({
+        artifactId: candidate.artifactId,
+        ...(typeof candidate.digest === "string" ? { digest: candidate.digest } : {}),
+        ...(typeof candidate.size === "number" ? { size: candidate.size } : {}),
+      });
+    }
+    for (const nested of Object.values(candidate)) visit(nested, depth + 1);
+  };
+  visit(value, 0);
+  return references;
+}
+
 function trajectoryTerminalNeedsDetailedAction(
   terminal: ProviderRunObservation | undefined,
 ): boolean {
@@ -2591,7 +2681,7 @@ function trajectoryOutcome(
       status: "committed",
       eventId: observation.eventId,
       ...(detail === "observation-reference"
-        ? { details: "run.observations" }
+        ? { details: "segment.observations" }
         : {
             result: promptJsonIdentity(payload.result ?? null),
             ...trajectoryEffectSummary(payload.effectManifest),
@@ -2602,7 +2692,7 @@ function trajectoryOutcome(
     status: observation.type === "CellFailed" ? "failed" : "abandoned",
     eventId: observation.eventId,
     ...(detail === "observation-reference"
-      ? { details: "run.observations" }
+        ? { details: "segment.observations" }
       : {
           ...(typeof payload.error === "string"
             ? {

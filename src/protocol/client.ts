@@ -1,4 +1,4 @@
-import { reduceAgentState, type AgentEvent, type AgentInvocationContract, type AgentProfileInput, type AgentState, type ModelConfigurationInput, type ModelDescriptor, type ObjectiveEvaluation, type ReasoningEffort } from "../domain/index.ts";
+import { EVENT_SCHEMA_VERSION, REDUCER_VERSION, reduceAgentState, type AgentEvent, type AgentInvocationContract, type AgentProfileInput, type AgentState, type ModelConfigurationInput, type ModelDescriptor, type ObjectiveEvaluation, type ReasoningEffort } from "../domain/index.ts";
 import { HttpProtocolTransport, type ProtocolTransport } from "./transport.ts";
 import type { ModelProviderDescriptor } from "../executors/index.ts";
 import type {
@@ -524,9 +524,16 @@ export class AgentClient {
           state = snapshot.state;
           if (terminal(state)) controller.abort();
         },
-        onEvent: (event) => {
+        onEvent: async (event) => {
           if (!state) return;
-          state = reduceAgentState(state, event);
+          if (
+            event.schemaVersion !== EVENT_SCHEMA_VERSION ||
+            state.reducerVersion !== REDUCER_VERSION
+          ) {
+            state = (await this.snapshot(sessionId, branchId)).state;
+          } else {
+            state = reduceAgentState(state, event);
+          }
           if (terminal(state)) controller.abort();
         },
       }, { signal: controller.signal });

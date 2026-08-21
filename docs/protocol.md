@@ -414,7 +414,7 @@ The endpoint begins with the SSE comment `: connected` so a quiet branch opens i
 
 The endpoint does not emit the initial snapshot, periodic heartbeat frames, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
 
-`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded. `runAgent`, `generateText`, and `generateObject` use this shared watch path for terminal waiting and always perform one final retained result read on terminal detection or timeout; they do not maintain independent short-interval polling loops.
+`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded. `runAgent`, `generateText`, and `generateObject` use this shared watch path for terminal waiting and always perform one final retained result read on terminal detection or timeout; they do not maintain independent short-interval polling loops. When a revision-3 TUI observes a still-running revision-2 managed service, it follows incompatible schema-5 events by refreshing the service's cursor-pinned snapshot instead of applying those events with the schema-6 client reducer.
 
 ## Exported protocol types
 
@@ -424,7 +424,7 @@ The exported `ProtocolRequest` and `ProtocolResponse` unions in `protocol/types.
 
 ## Security and compatibility limits
 
-- Managed service protocol revision 2 is a pre-release exact-match contract and is trusted-local. Incompatible client/service revisions fail discovery with `PROTOCOL_MISMATCH`; no old recursive-model or `/models` route is emulated.
+- Managed service protocol revision 3 is the current trusted-local pre-release contract. Revision-3 clients may attach read/write product flows to a still-running revision-2 service so admitted work can finish; snapshot refresh supplies TUI compatibility across the schema-5/schema-6 reducer boundary. Revision-2 clients cannot attach to a revision-3 service, and other incompatible ranges fail discovery with `PROTOCOL_MISMATCH`. No removed recursive-model or `/models` route is emulated.
 - Additive capabilities are negotiated through `/capabilities`; effort-aware clients must not send an effort field when `reasoningEffortSelection` is absent.
 - Managed authentication is owner-local bearer access, not multi-tenant authorization.
 - The embedded diagnostic server is unauthenticated.

@@ -261,9 +261,9 @@ stateDiagram-v2
     Unknown --> [*]
 ```
 
-Every step context records its source events and a complete exact-once `observationEventIds` ledger. The provider-facing `run.observations` is a deterministic bounded projection of that ledger: a selected terminal cell owns successful cell-effect presentation and receives a compact effect manifest, while duplicate successful `EffectOutcomeRecorded` payloads are omitted. Failed, cancelled, and unknown outcomes remain actionable. One item is limited to 56 KiB and one dependent step to 64 KiB; required terminal/uncertainty status is preserved even when previews or informational events are reduced. Canonical history and the raw ledger are unchanged.
+Every step context records its source events and a complete exact-once `observationEventIds` ledger. The provider transcript appends one deterministic bounded tool result or rejection-observation message for that ledger: a selected terminal cell owns successful cell-effect presentation and receives a compact effect manifest, while duplicate successful `EffectOutcomeRecorded` payloads are omitted. Failed, cancelled, and unknown outcomes remain actionable. One item is limited to 56 KiB and one dependent step to 64 KiB; required terminal/uncertainty status is preserved even when previews or informational events are reduced. The next-action message repeats the delivered event IDs without duplicating their payloads. Canonical history and the raw ledger are unchanged.
 
-The provider-facing run input also derives a bounded `recentTrajectory` from canonical run actions and terminal cell outcomes. It retains at most eight recent actions. Completed actions collapse deterministically to the declared purpose, source digest and byte count, grouped effect status, and result digest and byte count; they do not replay source or result text. Only the latest failed or unresolved action retains bounded source and detailed error context. When an outcome is already present in the new exact-once observations, the trajectory references that observation instead of duplicating it. This continuity projection does not alter the canonical observation ledger and lets each new model call reason about what it already attempted while the step instruction independently asks whether to call `finish` or execute one necessary `bun_console` action. After a failed cell or effect, the instruction directs any follow-up inspection to a small range around a reliable diagnostic location, or to the smallest relevant function or section when no reliable location exists. Formal submissions remain internal. A successful `finish` publishes its exact assistant message only after required gates pass; failed or unknown gate evidence does not publish it.
+Ordinary continuation preserves all earlier transcript messages byte-for-byte and appends the prior formal assistant action, its bounded result, changed durable facts, and the next instruction. A new segment boundary derives a bounded `recentTrajectory` from canonical run actions and terminal cell outcomes. That reset summary retains at most eight recent actions: completed actions collapse to declared purpose, source/result digests and byte counts, and grouped effect status; only the latest failed or unresolved action retains bounded source and detailed error context. The summary is a derived view and does not alter canonical history or the observation ledger. After a failed cell or effect, the next instruction directs any inspection to a small range around a reliable diagnostic location, or to the smallest relevant function or section when no reliable location exists. Formal submissions remain internal. A successful `finish` publishes its exact assistant message only after required gates pass; failed or unknown gate evidence does not publish it.
 
 ### Goal gate and heartbeat
 
@@ -277,7 +277,7 @@ A heartbeat's `tick` is monotonic. One append batch contains both `HeartbeatTick
 - A branch read consists of inherited ancestor events plus branch-local events. Every ancestor upper bound is clamped to the minimum fork cursor among all descendants, because a nested fork may target a cursor inherited from a grandparent rather than a direct-parent-local event.
 - The reducer ignores an already-applied event ID, making duplicate delivery projection-neutral.
 - The local storage command path rejects nonexistent session/branch targets and invalid transitions (for example, committing a missing/unstarted cell) inside the append transaction, so poison events never commit. Exact idempotency-key duplicates are returned before transition validation. Synchronized envelopes use a separate ingestion path that quarantines invalid remote rows rather than weakening local validation.
-- Snapshots include `reducerVersion: 15`; rebuilding always reads canonical events and checks deterministic equality.
+- Snapshots include `reducerVersion: 22`; rebuilding always reads canonical events and checks deterministic equality.
 
 ## Publication contract
 
@@ -285,12 +285,12 @@ Events are made visible to subscribers only after database commit. Durable commi
 
 ## Current evolution limitations
 
-The runtime validates one uniform `EVENT_SCHEMA_VERSION = 5`. Workspaces containing version 1, 2, 3, or 4 reject before product migration, decoding, projection, synchronization, and recovery. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
+The runtime validates one uniform `EVENT_SCHEMA_VERSION = 6`. Workspaces containing version 1, 2, 3, 4, or 5 reject before product migration, decoding, projection, synchronization, and recovery. There is no per-event version registry, persisted reducer package hash, or upcaster. After release, changing payload meaning requires a new accepted version, an explicit deterministic projection path, retained-history fixtures, and protocol compatibility tests.
 
 
 ## Harness, evaluation, and exact-version events
 
-Embedded harness and refinement content retains its own versioned formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-5 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
+Embedded harness and refinement content retains its own versioned formats and stable entry/version/proposal/candidate/allocation/observation/decision identifiers inside version-6 events. Harness content is JSON validated against the payload kind. Projection rows can be rebuilt; these events are authority.
 
 | Event | Durable meaning |
 |---|---|

@@ -200,6 +200,29 @@ class SlowActions extends ScriptedAgentActionProvider {
   }
 }
 
+class CacheUsageActions extends ScriptedAgentActionProvider {
+  override async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    const output = await super.streamResponse(context, dispatch, signal);
+    const usage = output.response.usage;
+    if (!usage) throw new Error("Cache usage fixture requires provider usage");
+    return {
+      ...output,
+      response: {
+        ...output.response,
+        usage: {
+          ...usage,
+          cacheReadTokens: 8_000,
+          cacheWriteTokens: 400,
+        },
+      },
+    };
+  }
+}
+
 class HoldingActions extends ScriptedAgentActionProvider {
   calls = 0;
   readonly contexts: JsonValue[] = [];
@@ -410,6 +433,19 @@ function nextActionFromProviderMessages(
 function providerObservations(context: JsonValue): Array<{ eventId: string; type: string; payload: JsonValue }> {
   if (!context || typeof context !== "object" || Array.isArray(context) ||
       !Array.isArray(context.messages)) return [];
+  let expectedIds = new Set<string>();
+  try {
+    const action = nextActionFromProviderMessages(context);
+    expectedIds = new Set(
+      Array.isArray(action.observationEventIds)
+        ? action.observationEventIds.filter(
+            (value): value is string => typeof value === "string",
+          )
+        : [],
+    );
+  } catch {
+    return [];
+  }
   const observations: Array<{ eventId: string; type: string; payload: JsonValue }> = [];
   for (const message of context.messages) {
     if (!message || typeof message !== "object" || Array.isArray(message) ||
@@ -423,7 +459,10 @@ function providerObservations(context: JsonValue): Array<{ eventId: string; type
         const parsed = JSON.parse(message.content.slice(prefix.length)) as {
           observations?: Array<{ eventId: string; type: string; payload: JsonValue }>;
         };
-        if (Array.isArray(parsed.observations)) observations.push(...parsed.observations);
+        if (Array.isArray(parsed.observations)) {
+          observations.push(...parsed.observations.filter((observation) =>
+            expectedIds.has(observation.eventId)));
+        }
       } catch {
         // Non-transcript tool output remains irrelevant to this focused helper.
       }
@@ -659,6 +698,52 @@ describe("autonomous durable agent runs", () => {
     }
   });
 
+  test("retains cache read and write usage without debiting cached tokens twice", async () => {
+    const temp = await makeTempRuntime("agencity-agent-cache-usage-");
+    temps.push(temp);
+    const provider = new CacheUsageActions([
+      action({ type: "final", content: "Cache usage retained." }),
+    ], "cache-usage-actions");
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "cache-usage",
+      model: { provider: provider.name, model: "v1" },
+    });
+    try {
+      await expect(supervisor.runs.start(
+        session.sessionId,
+        session.branchId,
+        "Retain cache diagnostics.",
+      )).resolves.toMatchObject({ status: "succeeded" });
+      const events = await supervisor.storage.loadEvents(session.sessionId, {
+        branchId: session.branchId,
+      });
+      const completed = events.find((event) =>
+        event.type === "ModelCallCompleted");
+      const debit = events.find((event) => event.type === "BudgetDebited");
+      expect(completed?.payload).toMatchObject({
+        usage: {
+          cacheReadTokens: 8_000,
+          cacheWriteTokens: 400,
+        },
+      });
+      const usage = (completed?.payload as
+        | EventPayloads["ModelCallCompleted"]
+        | undefined)?.usage;
+      expect(debit?.payload).toMatchObject({
+        tokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
+      });
+    } finally {
+      await supervisor.close();
+    }
+  });
+
   test("keeps a working-value checkpoint in an appended durable state delta", async () => {
     const script: AgentAction[] = [
       action({
@@ -730,6 +815,80 @@ describe("autonomous durable agent runs", () => {
       },
       eventId: expect.any(String),
     });
+  });
+
+  test("resets one attributable transcript segment at the context bound and resumes append-only growth", async () => {
+    const temp = await makeTempRuntime("agencity-agent-transcript-reset-");
+    temps.push(temp);
+    const provider = new RecordingActions([
+      action({
+        type: "typescript",
+        code: `// Purpose: produce one oversized but bounded observation.\nreturn { phase: "large", blob: "x".repeat(90_000) };`,
+      }),
+      action({
+        type: "typescript",
+        code: `// Purpose: prove work continues after the transcript reset.\nreturn { phase: "after-reset" };`,
+      }),
+      action({ type: "final", content: "Completed after one transcript reset." }),
+    ], "transcript-reset-actions");
+    Object.defineProperty(provider, "capabilities", {
+      configurable: true,
+      value: {
+        ...provider.capabilities,
+        contextWindowTokens: 16_000,
+      },
+    });
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      restartConsoleAfterCell: true,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "transcript-reset",
+      model: { provider: provider.name, model: "bounded-v1" },
+    });
+    try {
+      await expect(supervisor.runs.start(session.sessionId, session.branchId, {
+        task: "Exercise one bounded transcript reset.",
+        requestKey: "transcript-reset",
+      })).resolves.toMatchObject({
+        status: "succeeded",
+        steps: 3,
+      });
+      const events = await supervisor.storage.loadEvents(session.sessionId, {
+        branchId: session.branchId,
+      });
+      const candidates = modelCallCandidates(events);
+      expect(candidates).toHaveLength(3);
+      expect(JSON.stringify(
+        candidates[1]!.messages.slice(0, candidates[0]!.messages.length),
+      )).not.toBe(JSON.stringify(candidates[0]!.messages));
+      const resetMessage = candidates[1]!.messages.find((message) =>
+        message.kind === "text" &&
+        message.content.startsWith("AGENCITY DURABLE RUN TRANSCRIPT\n"));
+      expect(resetMessage?.kind).toBe("text");
+      if (!resetMessage || resetMessage.kind !== "text") {
+        throw new Error("Reset candidate omitted its transcript boundary");
+      }
+      const resetEnvelope = JSON.parse(resetMessage.content.slice(
+        "AGENCITY DURABLE RUN TRANSCRIPT\n".length,
+      )) as {
+        protocol?: string;
+        resetReason?: string;
+      };
+      expect(resetEnvelope.protocol).toBe("agencity.provider-transcript.v1");
+      expect(resetEnvelope.resetReason).toBe("automatic-compaction-1");
+      expectStrictMessagePrefix(candidates[1]!, candidates[2]!);
+      expect(events.filter((event) =>
+        event.type === "ContextCompactionRequested" &&
+        (event.payload as EventPayloads["ContextCompactionRequested"]).reason ===
+          "automatic-threshold")).toHaveLength(1);
+    } finally {
+      await supervisor.close();
+    }
   });
 
   test("derives the same next action across recovery and keeps the provider prefix stable", async () => {
@@ -1006,6 +1165,12 @@ describe("autonomous durable agent runs", () => {
           expect(current.cache).toMatchObject({
             mode: "openai-explicit",
             ttl: "30m",
+          });
+          expect(current.cache).toEqual(previous.cache);
+          expect(current.messages.at(-1)).toMatchObject({
+            kind: "text",
+            role: "user",
+            cacheBreakpoint: true,
           });
           const reusableMessageBytes = new TextEncoder().encode(
             JSON.stringify(previous.messages),

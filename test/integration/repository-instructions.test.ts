@@ -140,7 +140,7 @@ describe("repository AGENTS.md instructions", () => {
     const providerContext = agentProviderContext(
       context.context,
       { id: "run", task: "edit the file", status: "running" } as any,
-      2,
+      1,
       [],
       {
         responseContract: {

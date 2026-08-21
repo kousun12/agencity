@@ -2,6 +2,8 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import { stdin, stdout } from "node:process";
 import {
   AgentRuntimeError,
+  EVENT_SCHEMA_VERSION,
+  REDUCER_VERSION,
   normalizeReasoningEffort,
   projectEvents,
   reduceAgentState,
@@ -961,17 +963,36 @@ export class TerminalUI {
       navigationGeneration === this.#navigationGeneration
       && sessionId === this.#sessionId
       && branchId === this.#branchId;
+    const applySnapshot = (snapshot: { cursor: string; state: AgentState }): void => {
+      if (!currentRoute()) return;
+      this.#liveState = snapshot.state;
+      if (this.#historicalCursor === null) this.#viewState = snapshot.state;
+      this.#publish();
+    };
     return {
-      onSnapshot: (snapshot) => {
-        if (!currentRoute()) return;
-        this.#liveState = snapshot.state;
-        if (this.#historicalCursor === null) this.#viewState = snapshot.state;
-        this.#publish();
-      },
-      onEvent: (event) => {
+      onSnapshot: applySnapshot,
+      onEvent: async (event) => {
         if (!currentRoute()) return;
         if (!this.#liveState) return;
-        this.#liveState = reduceAgentState(this.#liveState, event);
+        if (
+          event.schemaVersion !== EVENT_SCHEMA_VERSION ||
+          this.#liveState.reducerVersion !== REDUCER_VERSION
+        ) {
+          // A managed service may still be finishing work admitted by the
+          // immediately preceding pre-release protocol revision. The service
+          // remains the authoritative reducer; refresh its cursor-pinned
+          // snapshot instead of applying an incompatible raw event locally.
+          const snapshot = await this.client.snapshot(sessionId, branchId);
+          if (!currentRoute()) return;
+          if (BigInt(snapshot.cursor) < BigInt(event.cursor)) {
+            throw new Error(
+              `Protocol snapshot ${snapshot.cursor} did not include event ${event.cursor}`,
+            );
+          }
+          applySnapshot(snapshot);
+        } else {
+          this.#liveState = reduceAgentState(this.#liveState, event);
+        }
         if (event.type === "EffectOutcomeRecorded") {
           const effectId = String((event.payload as { effectId?: string }).effectId ?? "");
           if (this.#streamedEffectIds.has(effectId)) {

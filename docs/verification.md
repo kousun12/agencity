@@ -200,7 +200,7 @@ Deterministic checks cover:
 - provider handling of up to 50 recent read breakpoints in very long segments, with prior breakpoints read-only and only the latest four writable per request; and
 - retained cache read/write token diagnostics without changing input-plus-output budget debit.
 
-Focused validation reported for the append-only implementation on August 20, 2026 is: TypeScript typecheck passed; provider-input tests passed 12 with 0 failures; model-provider tests passed 38 with 0 failures. The aggregate deterministic gate is pending and is not claimed here. No paid benchmark or credentialed live-provider validation was run; cache behavior is supported by deterministic candidate and wire tests, not provider billing or performance evidence.
+Final deterministic validation for the append-only implementation on August 20, 2026 passed. `bun run benchmark:context-efficiency` recorded 69 strict-prefix transitions, reusable prefixes growing from 4,397 to 19,907 estimated tokens, and 91.15% conservative aggregate reuse across three 24-step runs. `bun run verify` passed with 1,236 core tests, 10 end-to-end tests, and 27 installed acceptance tests. Three external checks skipped and zero tests failed. The first aggregate attempt encountered a transient pseudo-terminal input-timing failure; the case passed in isolation and the complete gate then passed on rerun. No paid benchmark or credentialed live-provider validation was run; cache behavior is supported by deterministic candidate and wire tests, not provider billing or performance evidence.
 
 Final context-efficiency verification on August 10, 2026 passed:
 

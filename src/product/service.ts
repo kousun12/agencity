@@ -33,7 +33,8 @@ import {
   type ServiceManifestV1,
 } from "./service-discovery.ts";
 
-export const MANAGED_SERVICE_PROTOCOL_VERSION = 2;
+export const MANAGED_SERVICE_PROTOCOL_VERSION = 3;
+export const MANAGED_SERVICE_CLIENT_PROTOCOL_MIN_VERSION = 2;
 export const MANAGED_SERVICE_CONFIG_ENV = "AGENCITY_SERVICE_CONFIG";
 export const DEFAULT_MANAGED_SERVICE_IDLE_SHUTDOWN_MS = 3_600_000;
 export const DEFAULT_MANAGED_SERVICE_LEASE_MS = 30_000;
@@ -801,7 +802,7 @@ async function assessment(config: ManagedServiceConfiguration): Promise<ServiceA
     workspaceId: config.workspace.workspaceId,
     compatibility: {
       configHash: managedServiceConfigurationHash(config),
-      protocolMin: MANAGED_SERVICE_PROTOCOL_VERSION,
+      protocolMin: MANAGED_SERVICE_CLIENT_PROTOCOL_MIN_VERSION,
       protocolMax: MANAGED_SERVICE_PROTOCOL_VERSION,
     },
     probeHealth: async () => {
@@ -898,7 +899,11 @@ export async function observeManagedService(config: ManagedServiceConfiguration)
   const manifest = await readServiceManifest({ workspaceRoot: config.workspace.root, workspaceId: config.workspace.workspaceId });
   if (!manifest) return { state: "stopped" };
   try {
-    assertServiceCompatibility(manifest, { configHash: managedServiceConfigurationHash(config), protocolMin: MANAGED_SERVICE_PROTOCOL_VERSION, protocolMax: MANAGED_SERVICE_PROTOCOL_VERSION });
+    assertServiceCompatibility(manifest, {
+      configHash: managedServiceConfigurationHash(config),
+      protocolMin: MANAGED_SERVICE_CLIENT_PROTOCOL_MIN_VERSION,
+      protocolMax: MANAGED_SERVICE_PROTOCOL_VERSION,
+    });
   } catch { return { state: "conflict", manifest }; }
   const health = await probeManifest(manifest);
   if (health.status !== "healthy" || !health.authenticated) return { state: "conflict", manifest, health };

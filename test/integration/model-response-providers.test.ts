@@ -228,9 +228,12 @@ describe("formal AI SDK model responses", () => {
           callId: "call-prior",
           name: "bun_console",
           content: "{\"value\":1}",
+        },
+        {
+          role: "user",
+          content: "finish",
           cacheBreakpoint: true,
         },
-        { role: "user", content: "finish" },
       ],
     });
     const privateDeltas: string[] = [];
@@ -298,6 +301,13 @@ describe("formal AI SDK model responses", () => {
         output: [{
           type: "input_text",
           text: "{\"value\":1}",
+        }],
+      },
+      {
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: "finish",
           prompt_cache_breakpoint: { mode: "explicit" },
         }],
       },
