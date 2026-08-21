@@ -667,3 +667,27 @@ The first version does not render disabled controls that imply unavailable autho
 - Validation: `bun test --timeout 30000 test/unit/service-discovery.test.ts test/integration/fu005-fu006-protocol.test.ts test/integration/managed-service.test.ts` passed with 52 tests and 0 failures.
 - Plan notes: The heartbeat guarantee advances the managed-service protocol from revision 3 to revision 4. Ordinary revision-4 product clients retain compatibility with revision-2 and revision-3 services, while Observe requires revision 4.
 - Remaining: Authenticated health and capability classification, observer source/projection, web server and UI, complete acceptance coverage, documentation, and aggregate verification.
+
+### 2026-08-21 — Pure family model and native web interface
+- Completed: Added the pure bounded-text helpers, breadth-first 64-route family discovery, exact-route task and mailbox derivation, route activity classification, lazy detail-page projection, generation-safe event/progress application, bounded replay and activity retention, and checked-in native HTML/JavaScript/CSS interface. Browser rendering uses inert DOM text, closed detail sections, bounded rails, and no frontend build step.
+- Validation: `test/unit/observe-model.test.ts` and `test/unit/observe-web-assets.test.ts` passed 16 tests with 0 failures.
+- Plan notes: Full `AgentState` values remain process-internal projection sources. The browser interface accepts only bounded observer DTOs and treats current projection provenance separately from exact cursors for newly observed committed events.
+- Remaining: Authenticated foreground lifecycle, managed source admission, HTTP/SSE security, source/link black-box coverage, optional browser journey, aggregate verification, and final review.
+
+### 2026-08-21 — Authenticated foreground server and managed source
+- Completed: Added pre-bootstrap `agencity observe` CLI admission, ephemeral and explicit port handling, signal-bounded foreground lifecycle, strictly read-only workspace discovery, revision-4 health/capability classification, one narrow `AgentClient` source adapter, process-wide family selection, attachment-aware managed reads, service replacement, stream-silence rediscovery, fragment bootstrap and HttpOnly browser sessions, exact Host/fetch-site/origin enforcement, closed bounded API routes, CSP/no-CORS/no-store responses, browser SSE heartbeat/replay/resync, and architecture guards.
+- Validation: The 16 pure model/UI tests plus 14 command, source-adapter, authenticated-server, lifecycle, and source-checkout CLI tests passed as one 30-test focused milestone with 0 failures.
+- Plan notes: Observe does not initialize state, open LibSQL, start or stop the managed service, recover or wake work, call mutations, change product selection, or persist observer state. Managed authentication is held only by the server-side source adapter; browser attachments share process-owned managed streams and release them on final disconnect.
+- Remaining: Linked-install asset coverage, opt-in Playwright journey, public/canonical documentation, aggregate verification, and final review.
+
+### 2026-08-21 — Linked executable asset coverage
+- Completed: Added an isolated `bun link` black-box case that launches `agencity observe` from another repository and requests the initial HTML, JavaScript, and CSS assets. Assets resolve relative to `import.meta.url`, not the caller's working directory.
+- Validation: The source-checkout ephemeral-port, explicit-port/conflict, and isolated linked-asset cases passed together. A discarded concurrent stream read in the test helper caused an earlier false timeout; the helper now keeps one outstanding read and the complete 43-test observer rerun passed.
+- Plan notes: The package remains private. This coverage exercises the supported source/link workflow and does not imply a registry or standalone release.
+- Remaining: Aggregate `bun run verify` and final independent review. Public and canonical documentation is updated; `bun run check:architecture`, the local documentation-link audit, and `git diff --check` pass. The plan remains **In progress** until the remaining results are recorded.
+
+### 2026-08-21 — Deterministic audit and browser journey
+- Completed: Added acceptance-focused coverage for selector filtering and pagination, 64-route truncation, mailbox conflict/provenance, all route activity states, overview content isolation, every lazy inspector, malformed source responses, managed-read cancellation, later workspace initialization, HTTP/query/body hardening, SSE replay and generation mismatch, stream silence, stale async work, and read-only projection preservation. Added the opt-in Playwright Chromium black-box journey through the foreground CLI with a protocol-compatible managed fixture.
+- Validation: The deterministic observer suite passed 43 tests with 0 failures and 0 skips. `bun run test:acceptance:observe-web` passed 1 test with 0 failures and 0 skips, covering fragment exchange/removal, HttpOnly-cookie refresh, root selection, graph rendering, live child and message updates, inert hostile detail content, managed-instance replacement, generation reset, CSP/no-external-request checks, and final-stream release.
+- Plan notes: The browser fixture implements the managed protocol boundary rather than running a full autonomous runtime. The browser command remains opt-in and outside `bun run verify`; missing Chromium fails with exact installation guidance.
+- Remaining: Aggregate `bun run verify` and final independent review.

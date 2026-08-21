@@ -2,8 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import {
+  EVENT_SCHEMA_VERSION,
+  reduceAgentState,
+  type AgentEvent,
+  type AgentState,
+} from "../../src/domain/index.ts";
 import { createServiceManifest } from "../../src/product/service-discovery.ts";
 import { agentClientObserverSourceFactory } from "../../src/observe/source-adapter.ts";
+import { fixtureAgentProfile } from "../helpers.ts";
 
 const temporaryDirectories: string[] = [];
 const servers: Bun.Server<unknown>[] = [];
@@ -50,12 +57,42 @@ async function manifest(root: string, input: {
   );
 }
 
+function routeState(cursor: string): AgentState {
+  const created: AgentEvent<"SessionCreated"> = {
+    id: "created-root",
+    sessionId: "root",
+    branchId: "main",
+    causationId: null,
+    correlationId: null,
+    type: "SessionCreated",
+    schemaVersion: EVENT_SCHEMA_VERSION,
+    producer: "supervisor",
+    idempotencyKey: "created-root",
+    committedAt: "2026-08-21T00:00:00.000Z",
+    cursor,
+    originDeviceId: "device",
+    originSequence: 1,
+    streamParentId: null,
+    payload: {
+      workspaceId,
+      initialBranchId: "main",
+      initialBranchName: "main",
+      sessionName: "Root",
+      model: { provider: "fixture", model: "fixture-v1", reasoningEffort: "provider-default" },
+      budget: {},
+      agentProfile: fixtureAgentProfile("root"),
+    },
+  };
+  return reduceAgentState(undefined, created);
+}
+
 function protocolServer(input: {
   readonly health?: Record<string, unknown>;
   readonly capabilities?: Record<string, unknown>;
   readonly token?: string;
   readonly paths?: string[];
   readonly roots?: unknown;
+  readonly snapshot?: unknown;
   readonly healthAbort?: { aborted: boolean };
 } = {}): Bun.Server<unknown> {
   const server = Bun.serve({
@@ -109,7 +146,7 @@ function protocolServer(input: {
         }]);
       }
       if (url.pathname === "/sessions/root/snapshot") {
-        return Response.json({ cursor: "1", state: {} });
+        return Response.json(input.snapshot ?? { cursor: "1", state: {} });
       }
       if (url.pathname === "/sessions/root/stream") {
         return new Response(": connected\n\n", {
@@ -202,6 +239,33 @@ describe("AgentClient observer source adapter", () => {
       "/sessions/root/stream",
     ]);
     expect(paths).not.toContain("/product/sessions");
+    connected.source.close();
+  });
+
+  test("accepts canonical zero-padded managed snapshot cursors", async () => {
+    const root = await workspace();
+    const rawToken = Buffer.alloc(32, 7).toString("base64url");
+    const cursor = "00000000000000000001";
+    const server = protocolServer({
+      token: rawToken,
+      snapshot: { cursor, state: routeState(cursor) },
+    });
+    await manifest(root, {
+      url: `http://127.0.0.1:${server.port}`,
+      bearerToken: rawToken,
+    });
+    const connected = await agentClientObserverSourceFactory.connect({
+      workspaceRoot: root,
+      workspaceId,
+    });
+    expect(connected.kind).toBe("connected");
+    if (connected.kind !== "connected") return;
+    const snapshot = await connected.source.loadRouteSnapshot({
+      sessionId: "root",
+      branchId: "main",
+    });
+    expect(snapshot.cursor).toBe(cursor);
+    expect(snapshot.state.cursor).toBe(cursor);
     connected.source.close();
   });
 

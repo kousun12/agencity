@@ -298,6 +298,13 @@ export class ObserverController {
     }
     const snapshot = this.#family?.routes.get(observerRouteKey(input.route));
     if (!snapshot) throw new ObserverControllerError("ROUTE_UNAVAILABLE", "Observer route is unavailable", 404);
+    if (!snapshot.state || snapshot.cursor === null) {
+      throw new ObserverControllerError(
+        "ROUTE_UNAVAILABLE",
+        "Observer route snapshot is unavailable",
+        404,
+      );
+    }
     let page;
     try {
       page = deriveObserverDetailPage(snapshot, input.section as ObserverDetailSection, {

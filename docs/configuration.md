@@ -63,6 +63,17 @@ The profile default is intentionally not derived from the workspace database. Th
 
 `--db`, `--artifacts`, and `--profile` do not move the workspace identity marker or managed-service discovery files.
 
+### Observe options
+
+`agencity observe` accepts only:
+
+- `--workspace PATH` or its compatible `--workspace-root PATH` alias, but not both;
+- `--port PORT`, where omission requests an ephemeral loopback port and an explicit value is a decimal integer from 1 through 65,535;
+- `--help`; or
+- `--version`.
+
+An explicit bind conflict fails instead of choosing another port. Observe has no browser-auto-open, detach, JSON, model, effort, state-directory, database, artifact, profile, sync, execution, or mutation configuration. It discovers the ordinary workspace root read-only, does not create missing metadata, and does not reconstruct or compare a managed-service execution configuration hash. The existing service remains authoritative for its own configuration.
+
 The one-hour timeout begins whenever the managed service becomes quiescent. It is not a task timeout or REPL-namespace retention promise. Attached clients, resident managed run-queue work, active runs, pending effects, queued wakes, active schedules, and active heartbeats defer shutdown. Service status reports resident console workers and active console executions while they exist. At the final idle check, replaceable idle console workers are retired before quiescence is decided, so a live namespace is not a durable keep-alive or retention promise. Human `service status` formats the default as `1 hour`, while `service status --json` returns exact milliseconds.
 
 There is no product CLI override for the idle timeout. Embedding and deterministic lifecycle tests may set `ManagedServiceConfiguration.idleShutdownMs` within the accepted bounds. The normalized value is included in the service discovery configuration hash. A client using a different default receives `CONFIG_MISMATCH` while the existing owner is live rather than taking ownership or deleting its manifest.
@@ -230,7 +241,7 @@ Turso data-plane credentials do not grant administrative deletion authority. The
 - `--name NAME` names or renames supported session or branch operations.
 - `--strategy extractive|summary` selects context compaction or low-level branch context strategy.
 - `--from-context CONTEXT_ID` rematerializes an exact retained context source for compaction.
-- `--port PORT` selects the loopback port for `debug protocol-serve`; its default is `3131`.
+- `--port PORT` selects an explicit loopback port for `agencity observe` or `debug protocol-serve`. Observe omits the option by default and receives an ephemeral port; `debug protocol-serve` defaults to `3131`.
 
 ## Sync and data-control options
 

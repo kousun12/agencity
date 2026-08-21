@@ -27,6 +27,38 @@ This is authenticated local process access, not multi-tenant authorization or a 
 
 `ProtocolServer` also accepts an optional bearer token for a custom embedded host, but the host remains responsible for discovery, authorization, TLS, execution ownership, and lifecycle.
 
+### Read-only Observe server
+
+`agencity observe` hosts a separate foreground HTTP/SSE server on `127.0.0.1`. It is a disposable viewing client of the managed product protocol, not another `ProtocolServer` mode. It does not initialize a workspace, own service lifecycle, open storage, perform recovery, fire wakes, execute effects, or forward managed mutations.
+
+The observer source adapter uses only authenticated managed reads:
+
+- `GET /health`;
+- `GET /capabilities`;
+- `GET /service/agents`;
+- `GET /sessions/:session/snapshot?branch=:branch`; and
+- `GET /sessions/:session/stream?branch=:branch&after=:cursor`.
+
+Admission requires a managed protocol range containing revision 4 plus `managedService`, `productCatalog`, `snapshotCursorResume`, `committedEventDeduplication`, and `cursorlessProgress`. Older services lack the required heartbeat liveness guarantee and appear as `service_incompatible`.
+
+Observe exposes only checked-in static assets and these browser routes:
+
+| Method and path | Meaning |
+|---|---|
+| `GET /` and `GET /app.js`, `/app.css` | Native checked-in interface assets. |
+| `POST /api/session` | Exchange the process-lifetime fragment bootstrap token for a process-local browser cookie. |
+| `GET /api/bootstrap` | Read availability, bounded root-selector page, current generation, and selected family snapshot. |
+| `POST /api/family/select` | Replace the process-wide disposable family selection after generation validation. This does not call `/product/select`. |
+| `GET /api/family/snapshot` | Read the current bounded family projection and observer sequence. |
+| `GET /api/family/detail` | Read one allowlisted, lazy, bounded inspector page for an exact projected route and optional item. |
+| `GET /api/family/stream` | Follow process-local observer envelopes after one observer sequence within one generation. |
+
+Every API response uses the `agencity.observe.v1` envelope. The API has no generic proxy, SQL route, artifact-byte route, managed URL route, or control action. Browser-facing family snapshots are capped at 512 KiB, load at most 64 routes with four concurrent reads, and retain bounded graph/message metadata. Root pages contain at most 100 rows and 256 KiB. Detail pages contain at most 50 items and 128 KiB. One observer SSE envelope is at most 64 KiB; pending browser queues, the 200-item/1 MiB activity rail, and the 512-envelope/2 MiB replay buffer are bounded.
+
+The browser first reads `#token=...`, sends it in `X-Agencity-Observe-Bootstrap`, receives an `HttpOnly; SameSite=Strict; Path=/api` cookie, and removes the fragment. The managed bearer remains in the server-side source adapter. The observer accepts only the exact `Host` value `127.0.0.1:<actual-port>`, requires `Sec-Fetch-Site: same-origin` on API requests and the exact `Origin` on POST requests, emits no permissive CORS policy, and applies a restrictive content security policy.
+
+The observer SSE stream uses a process-local generation and sequence only for bounded browser catch-up. Canonical decimal route cursors remain authoritative. The browser receives comment heartbeats, resynchronizes when replay is unavailable or a generation changes, and discards provisional progress on disconnect. Managed-service replacement aborts old reads and creates a fresh generation. None of these observer sequences or projections is persisted.
+
 ## Response and error envelopes
 
 Successful non-streaming responses are route-specific JSON values. Failures use:

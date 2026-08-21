@@ -5,7 +5,7 @@ This index is the public documentation entrypoint. Start with the user guide for
 ## Get started
 
 - [Installation](./install.md) — supported source-checkout and local-link installation.
-- [User guide](./user-guide.md) — first run, normal tasks, sessions, governed profiles, branches, and the terminal interface.
+- [User guide](./user-guide.md) — first run, normal tasks, sessions, governed profiles, branches, the terminal interface, and the read-only browser observer.
 - [Configuration](./configuration.md) — paths, command options, providers, environment variables, and precedence.
 
 ## Use
@@ -15,15 +15,15 @@ This index is the public documentation entrypoint. Start with the user guide for
 
 ## Operate
 
-- [Operator runbook](./operator-guide.md) — health checks, managed-service operation, sync, recovery, and incidents.
+- [Operator runbook](./operator-guide.md) — health checks, read-only browser observation, managed-service operation, sync, recovery, and incidents.
 - [Data lifecycle](./data-lifecycle.md) — storage, backup, export, restore limits, and deletion.
 - [Recovery](./recovery.md) — committed boundaries, crash handling, and unknown effects.
-- [Security](./security.md) — the trusted-local boundary and deployment precautions.
+- [Security](./security.md) — the trusted-local runtime and browser-observer boundaries and deployment precautions.
 
 ## Integrate
 
 - [TypeScript API](./api.md) — public package exports and runtime services.
-- [Protocol](./protocol.md) — loopback HTTP, JSON, server-sent events, and client behavior.
+- [Protocol](./protocol.md) — managed and Observe loopback HTTP, JSON, server-sent events, and client behavior.
 - [Console SDK](./console-sdk.md) — model-facing TypeScript execution APIs.
 - [Placement](./placement.md) — local and remote adapter contracts.
 
@@ -52,7 +52,7 @@ This index is the public documentation entrypoint. Start with the user guide for
 
 ## Verification
 
-- [Verification guide](./verification.md) — deterministic checks, external gates, benchmark integration, and how to report skips.
+- [Verification guide](./verification.md) — deterministic checks, optional Observe browser coverage, external gates, benchmark integration, and how to report skips.
 - [Prime Verifiers benchmarks](../benchmarks/prime/README.md) — suite-capable
   selection, immutable task catalogs, Harbor and split agent/scorer adapters,
   mixed-outcome reporting, run commands, and matched-harness methodology.

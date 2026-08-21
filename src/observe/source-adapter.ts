@@ -77,13 +77,18 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function validCursor(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^\d{1,20}$/.test(value) &&
+    Number.isSafeInteger(Number(value));
+}
+
 function validateSnapshot(
   route: ObserverRoute,
   workspaceId: string,
   value: unknown,
 ): ObserverSnapshotLoadResult {
-  if (!record(value) || typeof value.cursor !== "string" ||
-      !/^(0|[1-9][0-9]*)$/.test(value.cursor) || !record(value.state)) {
+  if (!record(value) || !validCursor(value.cursor) || !record(value.state)) {
     throw new Error("Managed route snapshot is invalid");
   }
   const state = value.state;
