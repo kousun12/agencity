@@ -98,11 +98,23 @@
                 <p class="eyebrow">Durable routes</p>
                 <h2 id="graph-title">Family graph</h2>
               </div>
-              <p id="graph-status" class="state-note"></p>
+              <div class="graph-heading-actions">
+                <p id="graph-status" class="state-note"></p>
+                <div class="graph-controls" role="group" aria-label="Family graph zoom">
+                  <button id="graph-zoom-out" type="button" aria-label="Zoom out">−</button>
+                  <button id="graph-zoom-fit" type="button">Fit</button>
+                  <span id="graph-zoom-level" aria-live="polite">100%</span>
+                  <button id="graph-zoom-in" type="button" aria-label="Zoom in">+</button>
+                </div>
+              </div>
             </div>
             <div id="family-graph" class="family-graph">
-              <svg id="graph-edges" class="graph-edges" aria-hidden="true"></svg>
-              <div id="graph-nodes" class="graph-nodes"></div>
+              <div id="graph-stage" class="graph-stage">
+                <div id="graph-canvas" class="graph-canvas">
+                  <svg id="graph-edges" class="graph-edges" aria-hidden="true"></svg>
+                  <div id="graph-nodes" class="graph-nodes"></div>
+                </div>
+              </div>
             </div>
           </section>
 

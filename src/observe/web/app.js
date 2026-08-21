@@ -8,6 +8,14 @@
   const MAX_RAIL_ITEMS = 200;
   const MAX_RAIL_BYTES = 1024 * 1024;
   const MAX_TEXT = 12_000;
+  const GRAPH_NODE_WIDTH = 200;
+  const GRAPH_NODE_HEIGHT = 112;
+  const GRAPH_COLUMN_GAP = 72;
+  const GRAPH_ROW_GAP = 28;
+  const GRAPH_PADDING = 28;
+  const GRAPH_MIN_ZOOM = 0.08;
+  const GRAPH_MAX_ZOOM = 1.6;
+  const GRAPH_ZOOM_FACTOR = 1.2;
   const DETAIL_SECTIONS = Object.freeze([
     ["identity", "Identity"],
     ["runs", "Runs"],
@@ -65,6 +73,8 @@
     selectedRoute: null,
     selectedItemId: "",
     positions: new Map(),
+    graphZoom: 1,
+    graphZoomMode: "fit",
     inspectorOpen: false,
     activities: [],
     activityBytes: 0,
@@ -119,8 +129,14 @@
       "current-work-note",
       "graph-status",
       "family-graph",
+      "graph-stage",
+      "graph-canvas",
       "graph-edges",
       "graph-nodes",
+      "graph-zoom-out",
+      "graph-zoom-fit",
+      "graph-zoom-level",
+      "graph-zoom-in",
       "activity-count",
       "activity-list",
       "selected-route",
@@ -468,6 +484,7 @@
     const generationChanged = Boolean(nextGeneration && nextGeneration !== state.generation);
     if (generationChanged) {
       state.positions.clear();
+      state.graphZoomMode = "fit";
       state.activities = [];
       state.activityBytes = 0;
       state.progress.clear();
@@ -618,40 +635,165 @@
 
   function placeNodes() {
     state.positions.clear();
-    const sorted = [...state.nodes].sort((left, right) =>
-      left.depth - right.depth || left.order - right.order || routeKey(left.route).localeCompare(routeKey(right.route))
-    );
-    const byDepth = new Map();
-    for (const node of sorted) {
-      const group = byDepth.get(node.depth) || [];
-      group.push(node);
-      byDepth.set(node.depth, group);
+    const compareNodes = (left, right) =>
+      left.order - right.order || routeKey(left.route).localeCompare(routeKey(right.route));
+    const sorted = [...state.nodes].sort(compareNodes);
+    const nodesByKey = new Map(sorted.map((node) => [routeKey(node.route), node]));
+    const childrenByParent = new Map();
+    const parentByChild = new Map();
+
+    for (const edge of state.edges) {
+      const parentKey = routeKey(edge.parent);
+      const childKey = routeKey(edge.child);
+      if (
+        parentKey === childKey ||
+        !nodesByKey.has(parentKey) ||
+        !nodesByKey.has(childKey) ||
+        parentByChild.has(childKey)
+      ) {
+        continue;
+      }
+      parentByChild.set(childKey, parentKey);
+      const children = childrenByParent.get(parentKey) || [];
+      children.push(childKey);
+      childrenByParent.set(parentKey, children);
     }
-    const depths = [...byDepth.keys()].sort((left, right) => left - right);
-    const nodeWidth = 200;
-    const nodeHeight = 112;
-    const columnGap = 56;
-    const rowGap = 24;
-    const maxRows = Math.max(1, ...[...byDepth.values()].map((nodes) => nodes.length));
-    const contentWidth = Math.max(nodeWidth, depths.length * nodeWidth + Math.max(0, depths.length - 1) * columnGap);
-    const contentHeight = Math.max(nodeHeight, maxRows * nodeHeight + Math.max(0, maxRows - 1) * rowGap);
-    const viewportWidth = Math.max(320, view["family-graph"].clientWidth || 520);
-    const viewportHeight = Math.max(288, view["family-graph"].clientHeight || 400);
-    const width = Math.max(viewportWidth, contentWidth + 48);
-    const height = Math.max(viewportHeight, contentHeight + 48);
-    const originX = Math.max(24, (width - contentWidth) / 2);
-    for (let depthIndex = 0; depthIndex < depths.length; depthIndex += 1) {
-      const nodes = byDepth.get(depths[depthIndex]) || [];
-      const columnHeight = nodes.length * nodeHeight + Math.max(0, nodes.length - 1) * rowGap;
-      const originY = Math.max(24, (height - columnHeight) / 2);
-      nodes.forEach((node, row) => {
-        state.positions.set(routeKey(node.route), {
-          x: originX + depthIndex * (nodeWidth + columnGap),
-          y: originY + row * (nodeHeight + rowGap),
-        });
+    for (const children of childrenByParent.values()) {
+      children.sort((left, right) => compareNodes(nodesByKey.get(left), nodesByKey.get(right)));
+    }
+
+    const spanMemo = new Map();
+    function subtreeSpan(key, ancestors) {
+      if (ancestors.has(key)) return GRAPH_NODE_HEIGHT;
+      if (spanMemo.has(key)) return spanMemo.get(key);
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(key);
+      const children = (childrenByParent.get(key) || []).filter((childKey) => !nextAncestors.has(childKey));
+      const childSpan = children.reduce(
+        (total, childKey, index) =>
+          total + subtreeSpan(childKey, nextAncestors) + (index ? GRAPH_ROW_GAP : 0),
+        0
+      );
+      const span = Math.max(GRAPH_NODE_HEIGHT, childSpan);
+      spanMemo.set(key, span);
+      return span;
+    }
+
+    const placed = new Set();
+    let maximumDepth = 0;
+    let contentBottom = GRAPH_PADDING;
+    function placeSubtree(key, depth, top, ancestors) {
+      if (placed.has(key) || ancestors.has(key)) return;
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(key);
+      const children = (childrenByParent.get(key) || []).filter(
+        (childKey) => !placed.has(childKey) && !nextAncestors.has(childKey)
+      );
+      const childSpans = children.map((childKey) => subtreeSpan(childKey, nextAncestors));
+      const childrenHeight = childSpans.reduce(
+        (total, span, index) => total + span + (index ? GRAPH_ROW_GAP : 0),
+        0
+      );
+      const span = Math.max(GRAPH_NODE_HEIGHT, childrenHeight);
+      let childTop = top + Math.max(0, (span - childrenHeight) / 2);
+      for (let index = 0; index < children.length; index += 1) {
+        placeSubtree(children[index], depth + 1, childTop, nextAncestors);
+        childTop += childSpans[index] + GRAPH_ROW_GAP;
+      }
+
+      const childPositions = children.map((childKey) => state.positions.get(childKey)).filter(Boolean);
+      const y = childPositions.length
+        ? (
+            childPositions[0].y +
+            GRAPH_NODE_HEIGHT / 2 +
+            childPositions[childPositions.length - 1].y +
+            GRAPH_NODE_HEIGHT / 2
+          ) / 2 - GRAPH_NODE_HEIGHT / 2
+        : top + (span - GRAPH_NODE_HEIGHT) / 2;
+      state.positions.set(key, {
+        x: GRAPH_PADDING + depth * (GRAPH_NODE_WIDTH + GRAPH_COLUMN_GAP),
+        y,
       });
+      placed.add(key);
+      maximumDepth = Math.max(maximumDepth, depth);
+      contentBottom = Math.max(contentBottom, top + span);
     }
-    return { width, height };
+
+    const roots = sorted.filter((node) => !parentByChild.has(routeKey(node.route)));
+    let nextTop = GRAPH_PADDING;
+    for (const node of roots) {
+      const key = routeKey(node.route);
+      const span = subtreeSpan(key, new Set());
+      placeSubtree(key, 0, nextTop, new Set());
+      nextTop += span + GRAPH_ROW_GAP * 2;
+    }
+    for (const node of sorted) {
+      const key = routeKey(node.route);
+      if (placed.has(key)) continue;
+      const span = subtreeSpan(key, new Set());
+      placeSubtree(key, Math.max(0, node.depth), nextTop, new Set());
+      nextTop += span + GRAPH_ROW_GAP * 2;
+    }
+
+    return {
+      width:
+        GRAPH_PADDING * 2 +
+        (maximumDepth + 1) * GRAPH_NODE_WIDTH +
+        maximumDepth * GRAPH_COLUMN_GAP,
+      height: Math.max(GRAPH_NODE_HEIGHT + GRAPH_PADDING * 2, contentBottom + GRAPH_PADDING),
+    };
+  }
+
+  function clampGraphZoom(value) {
+    return Math.max(GRAPH_MIN_ZOOM, Math.min(GRAPH_MAX_ZOOM, value));
+  }
+
+  function fittedGraphZoom(bounds) {
+    const viewportWidth = Math.max(1, view["family-graph"].clientWidth - GRAPH_PADDING);
+    const viewportHeight = Math.max(1, view["family-graph"].clientHeight - GRAPH_PADDING);
+    return clampGraphZoom(Math.min(1, viewportWidth / bounds.width, viewportHeight / bounds.height));
+  }
+
+  function applyGraphViewport(bounds) {
+    if (state.graphZoomMode === "fit") state.graphZoom = fittedGraphZoom(bounds);
+    const zoom = state.graphZoom;
+    const viewportWidth = Math.max(1, view["family-graph"].clientWidth);
+    const viewportHeight = Math.max(1, view["family-graph"].clientHeight);
+    const scaledWidth = bounds.width * zoom;
+    const scaledHeight = bounds.height * zoom;
+    const stageWidth = Math.max(viewportWidth, scaledWidth);
+    const stageHeight = Math.max(viewportHeight, scaledHeight);
+
+    view["graph-stage"].style.width = stageWidth + "px";
+    view["graph-stage"].style.height = stageHeight + "px";
+    view["graph-canvas"].style.width = bounds.width + "px";
+    view["graph-canvas"].style.height = bounds.height + "px";
+    view["graph-canvas"].style.left = Math.max(0, (stageWidth - scaledWidth) / 2) + "px";
+    view["graph-canvas"].style.top = Math.max(0, (stageHeight - scaledHeight) / 2) + "px";
+    view["graph-canvas"].style.transform = "scale(" + zoom + ")";
+    view["graph-zoom-level"].textContent = Math.round(zoom * 100) + "%";
+    view["graph-zoom-out"].disabled = zoom <= GRAPH_MIN_ZOOM;
+    view["graph-zoom-in"].disabled = zoom >= GRAPH_MAX_ZOOM;
+  }
+
+  function setGraphZoom(zoom) {
+    const viewport = view["family-graph"];
+    const centerX = viewport.scrollLeft + viewport.clientWidth / 2;
+    const centerY = viewport.scrollTop + viewport.clientHeight / 2;
+    const priorWidth = Math.max(1, viewport.scrollWidth);
+    const priorHeight = Math.max(1, viewport.scrollHeight);
+    state.graphZoomMode = "manual";
+    state.graphZoom = clampGraphZoom(zoom);
+    renderGraph();
+    viewport.scrollLeft = centerX / priorWidth * viewport.scrollWidth - viewport.clientWidth / 2;
+    viewport.scrollTop = centerY / priorHeight * viewport.scrollHeight - viewport.clientHeight / 2;
+  }
+
+  function fitGraph() {
+    state.graphZoomMode = "fit";
+    renderGraph();
+    view["family-graph"].scrollLeft = 0;
+    view["family-graph"].scrollTop = 0;
   }
 
   function renderGraph() {
@@ -663,6 +805,7 @@
     view["graph-edges"].setAttribute("height", String(bounds.height));
     view["graph-nodes"].style.width = bounds.width + "px";
     view["graph-nodes"].style.height = bounds.height + "px";
+    applyGraphViewport(bounds);
 
     for (const edge of state.edges) drawEdge(edge, false);
     for (const edge of state.messageEdges) drawEdge(edge, true);
@@ -674,12 +817,27 @@
     const to = state.positions.get(routeKey(edge.child));
     if (!from || !to) return;
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    const startX = from.x + 200;
-    const startY = from.y + 55;
+    const startX = from.x + GRAPH_NODE_WIDTH;
+    const startY = from.y + GRAPH_NODE_HEIGHT / 2;
     const endX = to.x;
-    const endY = to.y + 55;
+    const endY = to.y + GRAPH_NODE_HEIGHT / 2;
     const middleX = startX + (endX - startX) / 2;
-    path.setAttribute("d", "M " + startX + " " + startY + " C " + middleX + " " + startY + ", " + middleX + " " + endY + ", " + endX + " " + endY);
+    const horizontalDirection = endX >= startX ? 1 : -1;
+    const verticalDirection = endY >= startY ? 1 : -1;
+    const radius = Math.min(12, Math.abs(endX - startX) / 4, Math.abs(endY - startY) / 2);
+    const firstSweep = horizontalDirection === verticalDirection ? 1 : 0;
+    const secondSweep = firstSweep ? 0 : 1;
+    const commands = Math.abs(endY - startY) < 1 || radius < 1
+      ? ["M", startX, startY, "L", endX, endY]
+      : [
+          "M", startX, startY,
+          "L", middleX - horizontalDirection * radius, startY,
+          "A", radius, radius, 0, 0, firstSweep, middleX, startY + verticalDirection * radius,
+          "L", middleX, endY - verticalDirection * radius,
+          "A", radius, radius, 0, 0, secondSweep, middleX + horizontalDirection * radius, endY,
+          "L", endX, endY,
+        ];
+    path.setAttribute("d", commands.join(" "));
     path.setAttribute("class", message ? "graph-edge message" : "graph-edge");
     view["graph-edges"].appendChild(path);
   }
@@ -1323,6 +1481,7 @@
       state.progress.clear();
       state.events = [];
       state.eventKeys.clear();
+      state.graphZoomMode = "fit";
       renderActivities();
       renderEvents();
       applySnapshot(data);
@@ -1392,6 +1551,14 @@
         void loadDetail(state.detailSection, state.detailNextCursor, true);
       }
     });
+    view["graph-zoom-out"].addEventListener("click", () => setGraphZoom(state.graphZoom / GRAPH_ZOOM_FACTOR));
+    view["graph-zoom-fit"].addEventListener("click", fitGraph);
+    view["graph-zoom-in"].addEventListener("click", () => setGraphZoom(state.graphZoom * GRAPH_ZOOM_FACTOR));
+    view["family-graph"].addEventListener("wheel", (event) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      setGraphZoom(state.graphZoom * (event.deltaY < 0 ? GRAPH_ZOOM_FACTOR : 1 / GRAPH_ZOOM_FACTOR));
+    }, { passive: false });
     view["inspector-close"].addEventListener("click", closeInspector);
     window.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && state.inspectorOpen) closeInspector();

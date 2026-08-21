@@ -147,6 +147,11 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     expect(await page.locator("#family-graph").evaluate(element =>
       element.scrollWidth <= element.clientWidth + 1
     )).toBe(true);
+    expect(await page.locator("#graph-zoom-level").textContent()).toBe("100%");
+    await page.getByRole("button", { name: "Zoom out" }).click();
+    expect(await page.locator("#graph-zoom-level").textContent()).not.toBe("100%");
+    await page.getByRole("button", { name: "Fit" }).click();
+    expect(await page.locator("#graph-zoom-level").textContent()).toBe("100%");
     expect(await page.locator(".graph-panel").evaluate(panel => {
       const graph = panel.querySelector("#family-graph");
       if (!(graph instanceof HTMLElement)) return false;
@@ -162,6 +167,7 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     fixtureOne.admitChild();
     await page.getByRole("button", { name: "Inspect Live Child" }).waitFor();
     expect(await page.locator(".route-node").count()).toBe(2);
+    expect(await page.locator(".graph-edge").first().getAttribute("d")).not.toContain("C");
     expect(await page.locator("#activity-count").textContent()).toContain("update");
     await waitFor(
       () => fixtureOne.activeStreams === 2,

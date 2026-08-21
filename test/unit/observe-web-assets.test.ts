@@ -120,4 +120,20 @@ describe("observer browser assets", () => {
     expect(javascript).toContain('firstValue(titleSource, ["intentSummary"]');
     expect(css).toContain("min-height: clamp(32rem, 68vh, 52rem)");
   });
+
+  test("ships fitted hierarchical graph controls and orthogonal routing", async () => {
+    const html = await readAsset("index.html");
+    const javascript = await readAsset("app.js");
+    const css = await readAsset("app.css");
+
+    expect(html).toContain('id="graph-zoom-out"');
+    expect(html).toContain('id="graph-zoom-fit"');
+    expect(html).toContain('id="graph-zoom-in"');
+    expect(javascript).toContain("function subtreeSpan");
+    expect(javascript).toContain("function fittedGraphZoom");
+    expect(javascript).toContain('"A", radius, radius');
+    expect(javascript).not.toContain('"Q", middleX');
+    expect(javascript).not.toContain('" C "');
+    expect(css).toContain("vector-effect: non-scaling-stroke");
+  });
 });

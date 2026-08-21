@@ -1,8 +1,14 @@
 # Agencity
 
-Agencity is a terminal-first autonomous agent runtime for work that may outlive one model context, terminal, or process. It keeps agent sessions, tasks, branches, tool effects, subagents, and evidence in a durable local event history—an append-only sequence of records. Generated work runs in an exact-branch TypeScript REPL whose bindings remain available while its worker lives, while committed state can be inspected and resumed after restart.
+Agencity is a terminal-first autonomous agent runtime for work that may outlive a single prompt, process, or context window. Instead of treating an agent as a temporary chat session, it makes tasks, decisions, evidence, tool effects, and subagent relationships durable and inspectable. The model works through a general TypeScript environment, while committed state lives in a local event history that can be recovered after interruption. The result is a foundation for agents that can work longer, resume safely, improve from experience, and remain accountable to the user.
 
-A **session** is a durable agent identity. A **branch** is one retained line of that session's history. An **effect** is an external action such as a model call, shell command, managed background process, or file operation. Agencity records effect intent before execution and keeps success, failure, cancellation, and uncertainty distinct. Managed processes have reconstructable JSON handles, bounded scrubbed logs, cancellation, and restart-aware cleanup.
+## Why Agencity
+
+- **Durable by design:** Agencity treats committed state—not the live process or model context—as the source of truth. Tasks, messages, decisions, effects, goals, and agent relationships survive terminal closure, worker crashes, and restarts. Work can resume from the last committed boundary without depending on a preserved language heap.
+- **Programmatic agency:** The model receives a persistent TypeScript console rather than a growing menu of rigid workflows. It can query context, transform data, call models and tools, run shell commands, manage files, delegate to subagents, and combine results into new programs. Repeated successful workflows can become reusable skills.
+- **Complete provenance:** Important results can be traced back to what the model knew and did. Agencity retains model inputs, tool calls, code cells, effects, observations, usage, artifacts, and supporting evidence. Users can inspect not only the answer, but the path that produced it.
+- **Safe, bounded autonomy:** Autonomous work operates within explicit limits such as budgets, deadlines, permissions, cancellation, and completion gates. External effects are recorded before execution, and uncertain outcomes remain marked as unknown rather than being retried or reported as successful. The agent cannot expand its own authority. Agencity remains trusted-local software, not a security sandbox.
+- **Governed learning:** Agencity can learn from completed work by proposing improvements to memories, prompt notes, skills, and subagent roles. Changes require evidence, deterministic validation, and independent review before activation. Every accepted refinement is versioned, attributable, and reversible, keeping adaptation under user control.
 
 ## Trust warning
 

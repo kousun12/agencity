@@ -307,7 +307,7 @@ describe("AgentClient observer source adapter", () => {
       sessionId: "root",
       branchId: "main",
     });
-    expect(snapshot.state.reducerVersion).toBe(24);
+    expect(Number(snapshot.state.reducerVersion)).toBe(24);
     expect(snapshot.state.sessionName).toBe("Root");
     connected.source.close();
   });
