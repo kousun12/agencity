@@ -152,7 +152,7 @@ test("Chromium observes a live family through the foreground CLI", async () => {
       if (!(graph instanceof HTMLElement)) return false;
       const panelBounds = panel.getBoundingClientRect();
       const graphBounds = graph.getBoundingClientRect();
-      return graphBounds.height >= 288 && panelBounds.bottom - graphBounds.bottom <= 18;
+      return graphBounds.height >= 512 && panelBounds.bottom - graphBounds.bottom <= 18;
     })).toBe(true);
     await waitFor(
       () => fixtureOne.activeStreams === 1,

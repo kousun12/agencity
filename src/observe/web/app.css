@@ -403,8 +403,8 @@ main {
 
 .family-graph {
   position: relative;
-  flex: 1 1 18rem;
-  min-height: 18rem;
+  flex: 1 1 clamp(32rem, 68vh, 52rem);
+  min-height: clamp(32rem, 68vh, 52rem);
   overflow: auto;
   border: 1px solid #212a38;
   border-radius: 0.6rem;

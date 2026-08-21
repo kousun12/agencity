@@ -115,6 +115,6 @@ describe("observer browser assets", () => {
     expect(javascript).toContain("TypeScript action completed");
     expect(javascript).toContain("state.inspectorOpen = true");
     expect(javascript).toContain("new ResizeObserver(scheduleGraphLayout)");
-    expect(css).toContain("flex: 1 1 18rem");
+    expect(css).toContain("min-height: clamp(32rem, 68vh, 52rem)");
   });
 });
