@@ -203,7 +203,7 @@ export function deterministicSessionTitleFallback(
   return validateSessionTitleFields({
     verb,
     subject,
-    intentSummary: latest.slice(0, SESSION_TITLE_FIELD_LIMITS.intentSummary),
+    intentSummary: latest.slice(0, SESSION_TITLE_FIELD_LIMITS.intentSummary).trimEnd(),
   });
 }
 

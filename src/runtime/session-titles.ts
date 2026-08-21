@@ -144,11 +144,32 @@ export class SessionTitleService {
     const existing = state.sessionTitle.requests[requestId];
     if (existing) {
       if (existing.status === "resolved") return;
-      if (existing.effectId) await this.#settleModelRequest(
-        source.sessionId,
-        source.branchId,
-        requestId,
-      );
+      if (existing.effectId) {
+        await this.#settleModelRequest(
+          source.sessionId,
+          source.branchId,
+          requestId,
+        );
+      } else if (existing.mode === "fallback") {
+        const requested = events.find((event) =>
+          event.id === existing.eventId && event.type === "SessionTitleRequested");
+        const fallbackReason = requested
+          ? (requested.payload as EventPayloads["SessionTitleRequested"]).fallbackReason
+          : undefined;
+        const userMessages = existing.sourceMessageEventIds.map((eventId) =>
+          state.messages.find((message) => message.eventId === eventId)?.content ?? "");
+        await this.#appendResolution(
+          source.sessionId,
+          existing.sourceBranchId,
+          existing,
+          deterministicSessionTitleFallback(userMessages),
+          {
+            method: "fallback",
+            fallbackReason: fallbackReason ??
+              "Automatic title generation was unavailable",
+          },
+        );
+      }
       return;
     }
     const userEvents = events.filter((event): event is AgentEvent<"MessageAppended"> =>

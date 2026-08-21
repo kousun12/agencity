@@ -213,6 +213,7 @@ export function deriveObserverFamilyOverview(
       ? boundedSessionTitle(resolveSessionTitlePresentation(
           state,
           deterministicSessionTitleFallback([titleFallback]).title,
+          true,
         ))
       : null;
     const latestStep = run
@@ -391,7 +392,11 @@ function detailItems(
   switch (section) {
     case "identity": {
       const profile = state.agentProfiles[state.activeAgentProfileVersionId];
-      const sessionTitle = boundedSessionTitle(resolveSessionTitlePresentation(state));
+      const sessionTitle = boundedSessionTitle(resolveSessionTitlePresentation(
+        state,
+        "Unnamed session",
+        true,
+      ));
       return [item("identity", state.sessionId, provenance(cursor, null), {
         sessionId: state.sessionId,
         workspaceId: state.workspaceId,

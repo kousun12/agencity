@@ -151,6 +151,12 @@ async function titleState(
   return projectEvents(await supervisor.storage.loadEvents(sessionId, { branchId }));
 }
 
+function automaticTitleRequestId(sessionId: string, sourceMessageEventId: string): string {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(`${sessionId}\0${sourceMessageEventId}`);
+  return `session-title-${hash.digest("hex").slice(0, 32)}`;
+}
+
 describe("automatic maintained session titles", () => {
   test("rejects title results that disagree with structured fields", () => {
     expect(() => validateNewEvent({
@@ -373,6 +379,18 @@ describe("automatic maintained session titles", () => {
       });
       expect(Object.keys(state.sessionTitle.resolutions)).toHaveLength(0);
       expect(Object.keys(state.effects)).toHaveLength(0);
+      await supervisor.appendMessage(
+        session.sessionId,
+        session.branchId,
+        "user",
+        "Repair local state indexes",
+      );
+      const summary = (await new ProductCatalog(supervisor, "echo-title").list())[0]!;
+      expect(summary.sessionName).toBe("Repair local state indexes");
+      expect(summary.sessionTitle).toMatchObject({
+        text: "Repair local state indexes",
+        source: "deterministic_fallback",
+      });
     } finally {
       await supervisor.close();
     }
@@ -476,6 +494,82 @@ describe("automatic maintained session titles", () => {
         supervisor, seeded.sessionId, seeded.branchId,
       )).sessionName === "Fix flaky payment integration tests", "recovered title");
       expect(provider.dispatches).toHaveLength(1);
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("recovery resolves a fallback request interrupted after its first append", async () => {
+    const temp = await makeTempRuntime("agencity-session-title-fallback-recovery-");
+    temps.push(temp);
+    const provider = new TitleProvider("openai");
+    const first = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const seeded = await first.createSession({
+      workspaceId: "recover-fallback-title",
+      model: { provider: "openai", model: "openai/gpt-5.6-sol" },
+    });
+    const deviceId = first.device.deviceId;
+    await first.close();
+
+    const storage = new LibSqlStorage({ url: temp.databaseUrl, deviceId });
+    await storage.migrate();
+    const [message] = await storage.appendEvents([{
+      sessionId: seeded.sessionId,
+      branchId: seeded.branchId,
+      type: "MessageAppended",
+      producer: "client",
+      idempotencyKey: "recover-fallback-title-message",
+      payload: {
+        messageId: "recover-fallback-title-message",
+        role: "user",
+        content: "Recover interrupted fallback title",
+      },
+    }]);
+    const requestId = automaticTitleRequestId(seeded.sessionId, message!.id);
+    await storage.appendEvents([{
+      id: requestId,
+      sessionId: seeded.sessionId,
+      branchId: seeded.branchId,
+      type: "SessionTitleRequested",
+      producer: "supervisor",
+      idempotencyKey: `session-title-request:${requestId}`,
+      payload: {
+        requestId,
+        sourceMessageEventId: message!.id,
+        sourceMessageCursor: message!.cursor,
+        sourceMessageEventIds: [message!.id],
+        mode: "fallback",
+        fallbackReason: "Simulated interruption after request commit",
+      },
+    }]);
+    storage.close();
+
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      modelProviders: [provider],
+      recover: true,
+    });
+    try {
+      await waitFor(async () => (await titleState(
+        supervisor,
+        seeded.sessionId,
+        seeded.branchId,
+      )).sessionTitle.requests[requestId]?.status === "resolved", "recovered fallback title");
+      const state = await titleState(supervisor, seeded.sessionId, seeded.branchId);
+      expect(state.sessionName).toBe("Recover interrupted fallback title");
+      expect(state.sessionTitle.resolutions[requestId]).toMatchObject({
+        method: "fallback",
+        intentSummary: "Recover interrupted fallback title",
+      });
+      expect(provider.dispatches).toHaveLength(0);
     } finally {
       await supervisor.close();
     }

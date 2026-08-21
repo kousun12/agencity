@@ -542,6 +542,56 @@ describe("observer projections", () => {
     expect(terminalOverview.nodes[0]?.latestRun?.currentAction).toBeNull();
   });
 
+  test("derives fallback titles from durable user messages", () => {
+    const root = { sessionId: "root", branchId: "main" };
+    const value = state("root", "main", {
+      messages: [
+        {
+          id: "message-1",
+          role: "user",
+          content: "Inspect the initial state",
+          eventId: "message-event-1",
+          eventCursor: "2",
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          modelCallId: null,
+          producer: "client",
+          idempotencyKey: "message-1",
+        },
+        {
+          id: "message-2",
+          role: "user",
+          content: "Repair the latest state",
+          eventId: "message-event-2",
+          eventCursor: "3",
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          modelCallId: null,
+          producer: "client",
+          idempotencyKey: "message-2",
+        },
+      ],
+      appliedEventIds: ["created-root", "message-event-1", "message-event-2"],
+    });
+    const snapshot = routeSnapshot(root, value);
+    const overview = deriveObserverFamilyOverview({
+      root,
+      routes: new Map([[observerRouteKey(root), snapshot]]),
+      edges: [],
+      truncated: false,
+      edgesTruncated: false,
+    });
+
+    expect(overview.nodes[0]?.sessionTitle).toMatchObject({
+      source: "deterministic_fallback",
+      text: { kind: "complete", text: "Repair the latest state" },
+      intentSummary: { kind: "complete", text: "Repair the latest state" },
+    });
+    expect(deriveObserverDetailPage(snapshot, "identity").items[0]?.data.sessionTitle)
+      .toMatchObject({
+        source: "deterministic_fallback",
+        text: { kind: "complete", text: "Repair the latest state" },
+      });
+  });
+
   test("distinguishes working, idle, attention, ended, and unavailable activity", () => {
     expect(deriveObserverRouteStatus(state("idle", "main"))).toEqual({
       activity: "idle",
@@ -571,7 +621,7 @@ describe("observer projections", () => {
     const route = { sessionId: "root", branchId: "main" };
     const rawCode = "RAW_CODE_SENTINEL";
     const rawEffect = "RAW_EFFECT_SENTINEL";
-    const rawMessage = "RAW_MESSAGE_SENTINEL";
+    const rawMessage = `${"message-content ".repeat(40)}RAW_MESSAGE_SENTINEL`;
     const rawArtifactBytes = "RAW_ARTIFACT_BYTES_SENTINEL";
     const value = state("root", "main", {
       messages: [{

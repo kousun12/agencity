@@ -84,17 +84,18 @@ export class ProductCatalog {
       const unresolvedEffects = Object.values(state.effects).filter(effect => ["requested", "started", "failed", "unknown"].includes(effect.status)).length;
       const unresolvedTasks = Object.values(state.tasks).filter(task => !["completed", "cancelled"].includes(task.status)).length;
       const activeGoals = Object.values(state.goals).filter(goal => ["active", "completion_requested", "blocked"].includes(goal.status)).length;
-      const sessionName = sessionNames.get(route.sessionId)!;
+      const fallbackName = sessionNames.get(route.sessionId)!;
       const sessionTitle = explicitNames.has(route.sessionId)
         ? {
-            text: sessionName,
+            text: fallbackName,
             source: "explicit" as const,
             verb: null,
             subject: null,
             intentSummary: null,
             sourceMessageCursor: null,
           }
-        : resolveSessionTitlePresentation(state, sessionName, true);
+        : resolveSessionTitlePresentation(state, fallbackName, true);
+      const sessionName = sessionTitle.text;
       summaries.push({
         sessionId: route.sessionId,
         branchId: route.branchId,
