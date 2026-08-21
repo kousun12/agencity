@@ -1511,7 +1511,7 @@ function validateUsage(value: unknown): void {
   assertExactKeys(
     record,
     ["inputTokens", "outputTokens", "costUsd"],
-    [],
+    ["cacheReadTokens", "cacheWriteTokens"],
     "Model usage",
   );
   for (const [key, item] of Object.entries(record)) {

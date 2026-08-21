@@ -212,7 +212,7 @@ async function largeShellEnvelope(): Promise<JsonValue> {
   }
 }
 
-const RUN_STEP_PREFIX = "AGENCITY DURABLE RUN STEP\n";
+const RUN_STEP_PREFIX = "AGENCITY NEXT ACTION\n";
 
 type FormalDecision = {
   readonly tool: "bun_console" | "finish";
@@ -234,11 +234,15 @@ function providerStep(
   candidate: ReturnType<typeof buildProviderInputCandidate>,
 ): Record<string, JsonValue> {
   const message = [...candidate.messages].reverse().find((item) =>
-    item.role === "user" && item.content.startsWith(RUN_STEP_PREFIX));
-  if (!message) throw new Error("Provider input omitted the durable run step");
+    item.kind === "text" &&
+    item.role === "user" &&
+    item.content.startsWith(RUN_STEP_PREFIX));
+  if (!message || message.kind !== "text") {
+    throw new Error("Provider input omitted the durable run step");
+  }
   const parsed = JSON.parse(message.content.slice(RUN_STEP_PREFIX.length)) as JsonValue;
   const step = record(parsed);
-  if (!step.run || typeof step.run !== "object" || Array.isArray(step.run)) {
+  if (typeof step.stepOrdinal !== "number") {
     throw new Error("Provider input durable run step is malformed");
   }
   return step;
@@ -278,7 +282,7 @@ function artifactReference(value: JsonValue): FormalDecision["artifact"] | undef
 function nextFormalAction(
   candidate: ReturnType<typeof buildProviderInputCandidate>,
 ): FormalDecision {
-  const run = record(providerStep(candidate).run);
+  const run = providerStep(candidate);
   const observations = Array.isArray(run.observations)
     ? run.observations.map(record)
     : [];
@@ -393,6 +397,11 @@ function semanticCandidate(input: {
     input.observations,
     modelDispatch,
     SYSTEM_PROMPT,
+    undefined,
+    undefined,
+    input.step === 1
+      ? {}
+      : { resetReason: `context-efficiency-benchmark-step-${input.step}` },
   );
   return buildProviderInputCandidate({
     context,
@@ -434,7 +443,7 @@ function verifyDecisionContract(shellOutput: JsonValue): {
     step: 2,
     observations: continuationObservations.derived,
   });
-  const continuationStep = record(providerStep(continuation).run);
+  const continuationStep = providerStep(continuation);
   const continuationTrajectory = Array.isArray(continuationStep.recentTrajectory)
     ? continuationStep.recentTrajectory.map(record)
     : [];
@@ -493,7 +502,7 @@ function verifyDecisionContract(shellOutput: JsonValue): {
     observations: failureObservations.derived,
     recentActivity: continuationObservations.derived as unknown as JsonValue[],
   });
-  const recoveryStep = record(providerStep(recovery).run);
+  const recoveryStep = providerStep(recovery);
   const recoveryTrajectory = Array.isArray(recoveryStep.recentTrajectory)
     ? recoveryStep.recentTrajectory.map(record)
     : [];
@@ -541,7 +550,7 @@ function verifyDecisionContract(shellOutput: JsonValue): {
     step: 2,
     observations: completionObservations.derived,
   });
-  const completionStep = record(providerStep(completion).run);
+  const completionStep = providerStep(completion);
   const completionDecision = nextFormalAction(completion);
   require(completionStep.task === TASK && completionStep.stepOrdinal === 2,
     "completion preserves task and step identity");
@@ -601,6 +610,11 @@ for (let step = 1; step <= 5; step++) {
     observations.derived,
     modelDispatch,
     SYSTEM_PROMPT,
+    undefined,
+    undefined,
+    step === 1
+      ? {}
+      : { resetReason: `context-efficiency-measurement-step-${step}` },
   );
   const candidate = buildProviderInputCandidate({
     context,

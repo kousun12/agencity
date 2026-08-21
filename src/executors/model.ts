@@ -10,6 +10,8 @@ import {
   STANDARD_UNVERIFIED_REASONING_LEVELS,
   TEXT_MODEL_RESPONSE_CONTRACT,
   PROVIDER_INPUT_ESTIMATOR_ID,
+  PROVIDER_INPUT_OPENAI_CACHE_TTL,
+  PROVIDER_INPUT_VERSION,
   ValidationError,
   assertNoReservedModelDispatchInputFields,
   assertProviderInputWithinProductLimit,
@@ -35,6 +37,7 @@ import {
   type ModelWarning,
   type ProviderInputCandidate,
   type ProviderInputCapacityProvenance,
+  type ProviderInputMessage,
   type RequiredToolSetCapability,
   type ResolvedModelExecutionDescriptor,
   type Usage,
@@ -395,14 +398,7 @@ class AiSdkModelProvider implements ModelProvider {
       );
     }
     const guard = new ModelResponseGuard(signal);
-    const retainedCandidate = validateProviderInputCandidate(context);
-    const candidate = validateProviderInputCandidate(retainedCandidate, {
-      context: {
-        messages: retainedCandidate.messages as unknown as JsonValue,
-      },
-      modelDispatch: dispatch,
-      capacity: retainedCandidate.provenance.capacity,
-    });
+    const candidate = validatedProviderInputForDispatch(context, dispatch);
     if (candidate.policy.toolChoice !== "required") {
       throw new ValidationError(
         "Structured provider input requires one required tool choice",
@@ -416,7 +412,6 @@ class AiSdkModelProvider implements ModelProvider {
           candidate.tools,
           candidate.policy.toolChoice,
         ),
-        ...this.#formalProviderOptions(candidate),
         model: this.#model(dispatch.configuration),
         onError: () => {},
       });
@@ -457,8 +452,10 @@ class AiSdkModelProvider implements ModelProvider {
       ? validateProviderInputCandidate(context)
       : undefined;
     return {
-      messages: (candidate?.messages ??
-        normalizeProviderMessages(context)) as ModelMessage[],
+      messages: toAiSdkModelMessages(
+        candidate?.messages ?? normalizeProviderMessages(context),
+        this.name,
+      ),
       allowSystemInMessages: true,
       maxRetries: 0,
       abortSignal: signal,
@@ -474,33 +471,38 @@ class AiSdkModelProvider implements ModelProvider {
               : configuration.reasoningEffort)) === undefined
         ? {}
         : { reasoning: candidate?.options.reasoningEffort ?? configuration.reasoningEffort }),
-      ...(this.name === "openai"
-        ? {
-            providerOptions: {
-              openai: {
-                store: false,
-                reasoningSummary: null,
-              },
-            },
-          }
-        : {}),
+      ...this.#providerOptions(candidate),
     };
   }
 
-  #formalProviderOptions(candidate: ProviderInputCandidate) {
-    if (candidate.policy.parallelCalls !== "provider-disabled") return {};
+  #providerOptions(candidate: ProviderInputCandidate | undefined) {
     if (this.name === "openai") {
+      const cache = providerInputCache(candidate);
       return {
         providerOptions: {
           openai: {
             store: false,
             reasoningSummary: null,
-            parallelToolCalls: false,
+            ...(candidate?.policy.parallelCalls === "provider-disabled"
+              ? { parallelToolCalls: false }
+              : {}),
+            ...(cache.mode === "openai-explicit"
+              ? {
+                  promptCacheKey: cache.promptCacheKey,
+                  promptCacheOptions: {
+                    mode: "explicit" as const,
+                    ttl: PROVIDER_INPUT_OPENAI_CACHE_TTL,
+                  },
+                }
+              : {}),
           },
         },
       };
     }
-    if (this.name === "anthropic") {
+    if (
+      this.name === "anthropic" &&
+      candidate?.policy.parallelCalls === "provider-disabled"
+    ) {
       return {
         providerOptions: {
           anthropic: { disableParallelToolUse: true },
@@ -597,11 +599,103 @@ function executionBaseUrl(transport: AiSdkTransport, value: string): string {
 
 function normalizeUsage(value: unknown, costUsd: number): Usage {
   const usage = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const details = usage.inputTokenDetails &&
+      typeof usage.inputTokenDetails === "object" &&
+      !Array.isArray(usage.inputTokenDetails)
+    ? usage.inputTokenDetails as Record<string, unknown>
+    : {};
+  const cacheReadTokens = optionalFiniteTokenCount(details.cacheReadTokens);
+  const cacheWriteTokens = optionalFiniteTokenCount(details.cacheWriteTokens);
   return {
     inputTokens: finiteTokenCount(usage.inputTokens),
     outputTokens: finiteTokenCount(usage.outputTokens),
     costUsd: Number.isFinite(costUsd) && costUsd >= 0 ? costUsd : 0,
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
   };
+}
+
+function providerInputCache(
+  candidate: ProviderInputCandidate | undefined,
+) {
+  return candidate?.cache ?? { mode: "disabled" as const };
+}
+
+function toAiSdkModelMessages(
+  messages: readonly ProviderInputMessage[],
+  transport: AiSdkTransport,
+): ModelMessage[] {
+  return messages.map((message) => {
+    if (message.kind === "text") {
+      const providerOptions = openAiBreakpointOptions(
+        transport,
+        message.cacheBreakpoint,
+      );
+      if (message.role === "system") {
+        return {
+          role: "system",
+          content: message.content,
+          ...(providerOptions === undefined ? {} : { providerOptions }),
+        } as ModelMessage;
+      }
+      if (message.role === "user" || message.role === "assistant") {
+        return providerOptions === undefined
+          ? { role: message.role, content: message.content } as ModelMessage
+          : {
+              role: message.role,
+              content: [{
+                type: "text",
+                text: message.content,
+                providerOptions,
+              }],
+            } as ModelMessage;
+      }
+      throw new ValidationError("Provider transcript text role is invalid");
+    }
+    if (message.kind === "assistant-tool-call") {
+      return {
+        role: "assistant",
+        content: [{
+          type: "tool-call",
+          toolCallId: message.callId,
+          toolName: message.name,
+          input: message.input,
+        }],
+      } as ModelMessage;
+    }
+    if (message.kind === "tool-result") {
+      const providerOptions = openAiBreakpointOptions(
+        transport,
+        message.cacheBreakpoint,
+      );
+      return {
+        role: "tool",
+        content: [{
+          type: "tool-result",
+          toolCallId: message.callId,
+          toolName: message.name,
+          output: {
+            type: "content",
+            value: [{
+              type: "text",
+              text: message.content,
+              ...(providerOptions === undefined ? {} : { providerOptions }),
+            }],
+          },
+        }],
+      } as ModelMessage;
+    }
+    throw new ValidationError("Provider transcript message is invalid");
+  });
+}
+
+function openAiBreakpointOptions(
+  transport: AiSdkTransport,
+  breakpoint: true | undefined,
+) {
+  return transport === "openai" && breakpoint === true
+    ? { openai: { promptCacheBreakpoint: { mode: "explicit" as const } } }
+    : undefined;
 }
 
 function normalizeFinishReason(value: unknown): string {
@@ -613,6 +707,12 @@ function normalizeFinishReason(value: unknown): string {
 
 function finiteTokenCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function optionalFiniteTokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 function gatewayCost(value: unknown): number {
@@ -681,7 +781,7 @@ function parse(input: JsonValue): { providerInput: ProviderInputCandidate; model
 function isProviderInputCandidate(value: JsonValue): boolean {
   return Boolean(
     value && typeof value === "object" && !Array.isArray(value) &&
-      value.version === "agencity.provider-input.v1",
+      value.version === PROVIDER_INPUT_VERSION,
   );
 }
 
@@ -691,37 +791,96 @@ function isProviderInputCandidate(value: JsonValue): boolean {
  * normalized request fields.
  */
 function providerContext(candidate: ProviderInputCandidate): JsonValue {
-  const last = [...candidate.messages].reverse().find((message) =>
-    message.role === "user" &&
-    message.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
-  let step: Record<string, JsonValue> | undefined;
-  if (last) {
-    try {
-      const parsed = JSON.parse(
-        last.content.slice("AGENCITY DURABLE RUN STEP\n".length),
-      ) as JsonValue;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        step = parsed;
+  const durable: Record<string, JsonValue> = {};
+  let run: Record<string, JsonValue> | undefined;
+  const observations: JsonValue[] = [];
+  for (const message of candidate.messages) {
+    if (message.kind === "tool-result") {
+      appendProviderObservations(
+        observations,
+        parsedProviderEnvelope(message.content, ""),
+      );
+      continue;
+    }
+    if (message.kind !== "text" || message.role !== "user") continue;
+    if (message.content.startsWith("AGENCITY DURABLE RUN TRANSCRIPT\n")) {
+      const envelope = parsedProviderEnvelope(
+        message.content,
+        "AGENCITY DURABLE RUN TRANSCRIPT\n",
+      );
+      const baseline = envelope?.durableContext;
+      if (baseline && typeof baseline === "object" &&
+          !Array.isArray(baseline)) {
+        Object.assign(durable, baseline);
       }
-    } catch {
-      // The exact message remains available even if it is not a run envelope.
+      continue;
+    }
+    if (message.content.startsWith("AGENCITY DURABLE STATE DELTA\n")) {
+      const envelope = parsedProviderEnvelope(
+        message.content,
+        "AGENCITY DURABLE STATE DELTA\n",
+      );
+      const changed = envelope?.changed;
+      if (changed && typeof changed === "object" && !Array.isArray(changed)) {
+        for (const [key, value] of Object.entries(changed)) {
+          if (value === null) delete durable[key];
+          else durable[key] = value;
+        }
+      }
+      continue;
+    }
+    if (message.content.startsWith("AGENCITY ACTION REJECTION OBSERVATION\n")) {
+      appendProviderObservations(
+        observations,
+        parsedProviderEnvelope(
+          message.content,
+          "AGENCITY ACTION REJECTION OBSERVATION\n",
+        ),
+      );
+      continue;
+    }
+    if (message.content.startsWith("AGENCITY NEXT ACTION\n")) {
+      run = parsedProviderEnvelope(
+        message.content,
+        "AGENCITY NEXT ACTION\n",
+      );
     }
   }
-  const durable = step?.durableContext &&
-      typeof step.durableContext === "object" &&
-      !Array.isArray(step.durableContext)
-    ? step.durableContext
-    : {};
   return {
     ...durable,
     messages: candidate.messages as unknown as JsonValue,
-    ...(step?.run === undefined ? {} : { run: step.run }),
+    ...(run === undefined
+      ? {}
+      : { run: { ...run, observations } }),
     responseContract: {
       ...candidate.provenance.responseContract,
       schemaEnforcement: candidate.policy.schemaEnforcement,
       selection: candidate.policy.selection,
     } as unknown as JsonValue,
   };
+}
+
+function parsedProviderEnvelope(
+  content: string,
+  prefix: string,
+): Record<string, JsonValue> | undefined {
+  try {
+    const parsed = JSON.parse(content.slice(prefix.length)) as JsonValue;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function appendProviderObservations(
+  target: JsonValue[],
+  envelope: Record<string, JsonValue> | undefined,
+): void {
+  if (!Array.isArray(envelope?.observations)) return;
+  target.splice(0, target.length);
+  target.push(...envelope.observations);
 }
 
 export type ProviderConcurrency = number | Readonly<Record<string, number>>;
@@ -948,11 +1107,7 @@ export class ModelExecutor implements EffectExecutor {
       ? input as unknown as ProviderInputCandidate
       : undefined;
     const candidate = retainedCandidate
-      ? validateProviderInputCandidate(retainedCandidate, {
-          context: { messages: retainedCandidate.messages as unknown as JsonValue },
-          modelDispatch: dispatch,
-          capacity: retainedCandidate.provenance.capacity,
-        })
+      ? validatedProviderInputForDispatch(retainedCandidate, dispatch)
       : buildProviderInputCandidate({
           context: input,
           modelDispatch: dispatch,
@@ -1274,11 +1429,30 @@ function normalizeModelResponse(value: TextModelResponse): TextModelResponse {
   )) {
     throw new ValidationError("Model provider returned invalid usage");
   }
+  if (
+    [usage.cacheReadTokens, usage.cacheWriteTokens].some(
+      (item) =>
+        item !== undefined &&
+        (typeof item !== "number" || !Number.isFinite(item) || item < 0),
+    )
+  ) {
+    throw new ValidationError("Model provider returned invalid cache usage");
+  }
   const warnings = normalizeRetainedWarnings(value.warnings);
   return {
     text: value.text,
     finishReason: normalizeFinishReason(value.finishReason),
-    usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd },
+    usage: {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      costUsd: usage.costUsd,
+      ...(usage.cacheReadTokens === undefined
+        ? {}
+        : { cacheReadTokens: usage.cacheReadTokens }),
+      ...(usage.cacheWriteTokens === undefined
+        ? {}
+        : { cacheWriteTokens: usage.cacheWriteTokens }),
+    },
     ...(warnings.length ? { warnings } : {}),
   };
 }
@@ -1322,6 +1496,30 @@ function assertNoSecretStructuredOutput(
       "Model provider returned a registered credential value in structured output",
     );
   }
+}
+
+function validatedProviderInputForDispatch(
+  value: unknown,
+  dispatch: ModelDispatch,
+): ProviderInputCandidate {
+  const candidate = validateProviderInputCandidate(value);
+  const provenance = candidate.provenance;
+  if (
+    provenance.dispatchDigest !== canonicalJsonDigest(
+      dispatch as unknown as JsonValue,
+    ) ||
+    provenance.dispatchVersion !== dispatch.dispatchVersion ||
+    provenance.provider !== dispatch.configuration.provider ||
+    provenance.model !== dispatch.configuration.model ||
+    provenance.executionEndpointId !== (dispatch.executionEndpointId ?? null) ||
+    provenance.capacity.provider !== dispatch.configuration.provider ||
+    provenance.capacity.model !== dispatch.configuration.model
+  ) {
+    throw new ValidationError(
+      "Retained provider-input candidate differs from the admitted model dispatch",
+    );
+  }
+  return candidate;
 }
 
 function retainedModelIdentity(input: JsonValue): { provider: string; model: string } {

@@ -52,6 +52,23 @@ const iso = (milliseconds: number): string =>
 class RecordingActions extends ScriptedAgentActionProvider {
   readonly contexts: JsonValue[] = [];
   calls = 0;
+  override async streamResponse(
+    context: JsonValue,
+    dispatch: ModelDispatch,
+    signal: AbortSignal,
+  ): Promise<ModelEffectOutputV2> {
+    let run: Record<string, JsonValue> | undefined;
+    try {
+      run = nextActionFromProviderMessages(context);
+    } catch {
+      // Recovery fixtures may intentionally retain a minimal pre-admitted
+      // candidate that predates an autonomous transcript envelope.
+    }
+    return super.streamResponse({
+      ...(context as Record<string, JsonValue>),
+      ...(run === undefined ? {} : { run }),
+    }, dispatch, signal);
+  }
   override async complete(context: JsonValue, configuration: ModelConfiguration, signal: AbortSignal): Promise<TextModelResponse> {
     this.contexts.push(context);
     this.calls++;
@@ -91,7 +108,7 @@ class ContextSensitiveActions implements ModelProvider {
     this.calls++;
     this.contexts.push(JSON.parse(JSON.stringify(context)) as JsonValue);
     const run = this.#runFromProviderMessages(context);
-    const selected = this.#decide(run);
+    const selected = this.#decide(context, run);
     this.decisions.push(selected);
     return formalOutputFromAgentAction({
       action: selected,
@@ -112,33 +129,14 @@ class ContextSensitiveActions implements ModelProvider {
         !Array.isArray(context.messages)) {
       throw new Error("Context-sensitive fixture requires normalized provider messages");
     }
-    const message = [...context.messages].reverse().find((item) =>
-      item && typeof item === "object" && !Array.isArray(item) &&
-      item.role === "user" && typeof item.content === "string" &&
-      item.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
-    if (!message || typeof message !== "object" || Array.isArray(message) ||
-        typeof message.content !== "string") {
-      throw new Error("Context-sensitive fixture did not receive the durable run step");
-    }
-    const envelope = JSON.parse(
-      message.content.slice("AGENCITY DURABLE RUN STEP\n".length),
-    ) as JsonValue;
-    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) ||
-        !envelope.run || typeof envelope.run !== "object" ||
-        Array.isArray(envelope.run)) {
-      throw new Error("Context-sensitive fixture received a malformed run envelope");
-    }
-    return envelope.run as Record<string, JsonValue>;
+    return nextActionFromProviderMessages(context);
   }
 
-  #decide(run: Record<string, JsonValue>): AgentAction {
+  #decide(context: JsonValue, run: Record<string, JsonValue>): AgentAction {
     if (run.task !== "Build the artifact-backed answer in two durable cells.") {
       throw new Error(`Context-sensitive fixture received an unexpected task: ${run.task}`);
     }
-    const observations = Array.isArray(run.observations)
-      ? run.observations.filter((item): item is Record<string, JsonValue> =>
-          Boolean(item && typeof item === "object" && !Array.isArray(item)))
-      : [];
+    const observations = providerObservations(context);
     const committed = [...observations].reverse().find((item) =>
       item.type === "CellCommitted");
     if (!committed) {
@@ -386,11 +384,73 @@ function fixtureContextWindow(provider: string, model: string) {
   };
 }
 
+function nextActionFromProviderMessages(
+  context: JsonValue,
+): Record<string, JsonValue> {
+  if (!context || typeof context !== "object" || Array.isArray(context) ||
+      !Array.isArray(context.messages)) {
+    throw new Error("Fixture requires normalized provider messages");
+  }
+  const prefix = "AGENCITY NEXT ACTION\n";
+  const message = [...context.messages].reverse().find((item) =>
+    item && typeof item === "object" && !Array.isArray(item) &&
+    item.kind === "text" && item.role === "user" &&
+    typeof item.content === "string" && item.content.startsWith(prefix));
+  if (!message || typeof message !== "object" || Array.isArray(message) ||
+      typeof message.content !== "string") {
+    throw new Error("Fixture did not receive AGENCITY NEXT ACTION");
+  }
+  const parsed = JSON.parse(message.content.slice(prefix.length)) as JsonValue;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Fixture received a malformed next-action envelope");
+  }
+  return parsed as Record<string, JsonValue>;
+}
+
 function providerObservations(context: JsonValue): Array<{ eventId: string; type: string; payload: JsonValue }> {
   if (!context || typeof context !== "object" || Array.isArray(context) ||
-      !context.run || typeof context.run !== "object" || Array.isArray(context.run) ||
-      !Array.isArray(context.run.observations)) return [];
-  return context.run.observations as Array<{ eventId: string; type: string; payload: JsonValue }>;
+      !Array.isArray(context.messages)) return [];
+  const observations: Array<{ eventId: string; type: string; payload: JsonValue }> = [];
+  for (const message of context.messages) {
+    if (!message || typeof message !== "object" || Array.isArray(message) ||
+        typeof message.content !== "string") continue;
+    const prefixes = message.kind === "tool-result"
+      ? [""]
+      : ["AGENCITY ACTION REJECTION OBSERVATION\n"];
+    for (const prefix of prefixes) {
+      if (!message.content.startsWith(prefix)) continue;
+      try {
+        const parsed = JSON.parse(message.content.slice(prefix.length)) as {
+          observations?: Array<{ eventId: string; type: string; payload: JsonValue }>;
+        };
+        if (Array.isArray(parsed.observations)) observations.push(...parsed.observations);
+      } catch {
+        // Non-transcript tool output remains irrelevant to this focused helper.
+      }
+    }
+  }
+  return observations;
+}
+
+function modelCallCandidates(
+  events: readonly { type: string; payload: unknown }[],
+): Array<ReturnType<typeof buildProviderInputCandidate>> {
+  return events
+    .filter((event) => event.type === "ModelCallRequested")
+    .map((event) =>
+      (event.payload as unknown as {
+        providerInput: ReturnType<typeof buildProviderInputCandidate>;
+      })
+        .providerInput);
+}
+
+function expectStrictMessagePrefix(
+  previous: ReturnType<typeof buildProviderInputCandidate>,
+  current: ReturnType<typeof buildProviderInputCandidate>,
+): void {
+  expect(current.messages.length).toBeGreaterThan(previous.messages.length);
+  expect(JSON.stringify(current.messages.slice(0, previous.messages.length)))
+    .toBe(JSON.stringify(previous.messages));
 }
 
 function crashAfterNextActionCommit(supervisor: Supervisor): () => void {
@@ -532,43 +592,29 @@ async function runContextSensitiveScenario(
   expect(provider.contexts.every((context) =>
     context && typeof context === "object" && !Array.isArray(context) &&
     Array.isArray(context.messages))).toBe(true);
-  const providerMessages = provider.contexts.map((context) =>
-    (context as { messages: JsonValue[] }).messages);
-  const firstDynamicIndex = providerMessages[0]!.findIndex((message) =>
-    message && typeof message === "object" && !Array.isArray(message) &&
-    message.role === "user" && typeof message.content === "string" &&
-    message.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
-  expect(firstDynamicIndex).toBeGreaterThan(0);
-  const stablePrefix = providerMessages[0]!.slice(0, firstDynamicIndex);
-  const dynamicStepContents: string[] = [];
-  for (const messages of providerMessages) {
-    const dynamicIndex = messages.findIndex((message) =>
-      message && typeof message === "object" && !Array.isArray(message) &&
-      message.role === "user" && typeof message.content === "string" &&
-      message.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
-    expect(dynamicIndex).toBe(firstDynamicIndex);
-    expect(messages.slice(0, dynamicIndex)).toEqual(stablePrefix);
-    const dynamic = messages[dynamicIndex] as { content: string };
-    expect(dynamic.content).toStartWith(
-      'AGENCITY DURABLE RUN STEP\n{"durableContext":',
-    );
-    dynamicStepContents.push(dynamic.content);
+  const candidates = modelCallCandidates(history);
+  expect(candidates).toHaveLength(3);
+  for (let index = 1; index < candidates.length; index++) {
+    expectStrictMessagePrefix(candidates[index - 1]!, candidates[index]!);
+    expect(candidates[index]!.tools).toEqual(candidates[0]!.tools);
+    expect(candidates[index]!.tools.map((tool) => tool.name))
+      .toEqual(["bun_console", "finish"]);
   }
-  const reusableDynamicPrefixBytes = [...dynamicStepContents[0]!]
-    .findIndex((_, index) =>
-      dynamicStepContents.some((value) =>
-        value.codePointAt(index) !== dynamicStepContents[0]!.codePointAt(index)));
-  expect(reusableDynamicPrefixBytes).toBeGreaterThan(1_500);
+  const transcript = candidates[0]!.messages.find((message) =>
+    message.kind === "text" &&
+    message.content.startsWith("AGENCITY DURABLE RUN TRANSCRIPT\n"));
+  expect(transcript?.kind).toBe("text");
+  if (!transcript || transcript.kind !== "text") {
+    throw new Error("Initial provider input omitted its durable transcript");
+  }
   const firstEnvelope = JSON.parse(
-    dynamicStepContents[0]!.slice("AGENCITY DURABLE RUN STEP\n".length),
+    transcript.content.slice("AGENCITY DURABLE RUN TRANSCRIPT\n".length),
   ) as { durableContext: Record<string, JsonValue> };
   const durableKeys = Object.keys(firstEnvelope.durableContext);
   expect(durableKeys.indexOf("harness")).toBeLessThan(
     durableKeys.indexOf("budget"),
   );
-  expect(durableKeys.indexOf("messages")).toBeLessThan(
-    durableKeys.indexOf("budget"),
-  );
+  expect(durableKeys).not.toContain("messages");
   expect(provider.decisions.map((item) => item.type))
     .toEqual(["typescript", "typescript", "final"]);
   expect(await Bun.file(`${temp.workspaceRoot}/context-stage.txt`).text())
@@ -597,7 +643,7 @@ async function runContextSensitiveScenario(
     cellCount: history.filter((item) => item.type === "CellCommitted").length,
     fileEffectCount: fileEffects.length,
     modelEffectCount: modelEffects.length,
-    stablePrefixMessages: stablePrefix.length,
+    stablePrefixMessages: candidates[0]!.messages.length - 1,
   };
   await supervisor.close();
   return result;
@@ -613,7 +659,7 @@ describe("autonomous durable agent runs", () => {
     }
   });
 
-  test("keeps a compact working-value checkpoint after its source step leaves recent trajectory", async () => {
+  test("keeps a working-value checkpoint in an appended durable state delta", async () => {
     const script: AgentAction[] = [
       action({
         type: "typescript",
@@ -643,38 +689,35 @@ describe("autonomous durable agent runs", () => {
       steps: 11,
     });
 
-    const context = provider.contexts.at(-1);
-    if (!context || typeof context !== "object" || Array.isArray(context) ||
-        !Array.isArray(context.messages)) {
-      throw new Error("Final provider input is missing normalized messages");
+    const events = await supervisor.storage.loadEvents(sessionId, {
+      branchId,
+    });
+    const candidates = modelCallCandidates(events);
+    expect(candidates).toHaveLength(11);
+    for (let index = 1; index < candidates.length; index++) {
+      expectStrictMessagePrefix(candidates[index - 1]!, candidates[index]!);
     }
-    const message = [...context.messages].reverse().find((item) =>
-      item && typeof item === "object" && !Array.isArray(item) &&
-      item.role === "user" && typeof item.content === "string" &&
-      item.content.startsWith("AGENCITY DURABLE RUN STEP\n"));
-    if (!message || typeof message !== "object" || Array.isArray(message) ||
-        typeof message.content !== "string") {
-      throw new Error("Final provider input is missing its durable run step");
-    }
-    const envelope = JSON.parse(
-      message.content.slice("AGENCITY DURABLE RUN STEP\n".length),
-    ) as {
-      durableContext: {
-        workingValues: Array<{
-          name: string;
-          version: number;
-          value: JsonValue;
-          eventId: string;
-        }>;
-      };
-      run: {
-        recentTrajectory: Array<{ ordinal: number }>;
-      };
-    };
-    expect(envelope.run.recentTrajectory).toHaveLength(8);
-    expect(envelope.run.recentTrajectory.map((item) => item.ordinal))
-      .not.toContain(1);
-    expect(envelope.durableContext.workingValues).toContainEqual({
+    const stateDeltas = candidates.at(-1)!.messages.filter((message) =>
+      message.kind === "text" &&
+      message.content.startsWith("AGENCITY DURABLE STATE DELTA\n"));
+    const workingValueDelta = stateDeltas.map((message) =>
+      JSON.parse(
+        (message as { content: string }).content.slice(
+          "AGENCITY DURABLE STATE DELTA\n".length,
+        ),
+      ) as {
+        changed?: {
+          workingValues?: Array<{
+            name: string;
+            version: number;
+            value: JsonValue;
+            eventId: string;
+          }>;
+        };
+      }
+    ).find((delta) => delta.changed?.workingValues?.some((value) =>
+      value.name === "task.progress"));
+    expect(workingValueDelta?.changed?.workingValues).toContainEqual({
       name: "task.progress",
       version: 1,
       value: {
@@ -698,8 +741,8 @@ describe("autonomous durable agent runs", () => {
       cellCount: 2,
       fileEffectCount: 2,
       modelEffectCount: 3,
-      stablePrefixMessages: 2,
     });
+    expect(normal.stablePrefixMessages).toBeGreaterThan(1);
     expect(recovered).toMatchObject({
       providerCalls: 3,
       cellCount: 2,
@@ -707,6 +750,291 @@ describe("autonomous durable agent runs", () => {
       modelEffectCount: 3,
     });
   });
+
+  test("appends budget, deadline, working state, paired calls, and exact-once observations without mutating prior messages", async () => {
+    const value = await fixture([
+      action({
+        type: "typescript",
+        code: `// Purpose: commit the first durable checkpoint.\nawait state.set("append.progress", { phase: 1 });\nreturn { phase: 1 };`,
+      }),
+      action({
+        type: "typescript",
+        code: `// Purpose: advance the durable checkpoint.\nawait state.set("append.progress", { phase: 2 });\nreturn { phase: 2 };`,
+      }),
+      action({ type: "final", content: "Append-only transcript verified." }),
+    ]);
+    try {
+      const startedAt = Date.now();
+      const result = await value.supervisor.runs.start(
+        value.sessionId,
+        value.branchId,
+        {
+          task: "Verify append-only state changes.",
+          requestKey: "append-only-state",
+          deadline: {
+            startedAt: iso(startedAt),
+            deadlineAt: iso(startedAt + 60_000),
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        status: "succeeded",
+        steps: 3,
+        final: "Append-only transcript verified.",
+      });
+      const events = await value.supervisor.storage.loadEvents(
+        value.sessionId,
+        { branchId: value.branchId },
+      );
+      const candidates = modelCallCandidates(events);
+      expect(candidates).toHaveLength(3);
+      const firstMessages = JSON.stringify(candidates[0]!.messages);
+      const deliveredIds = new Set<string>();
+      for (let index = 1; index < candidates.length; index++) {
+        const previous = candidates[index - 1]!;
+        const current = candidates[index]!;
+        expectStrictMessagePrefix(previous, current);
+        expect(JSON.stringify(current.messages.slice(
+          0,
+          candidates[0]!.messages.length,
+        ))).toBe(firstMessages);
+        expect(current.tools).toEqual(candidates[0]!.tools);
+        expect(current.tools.map((tool) => tool.name))
+          .toEqual(["bun_console", "finish"]);
+
+        const appended = current.messages.slice(previous.messages.length);
+        const calls = appended.filter((message) =>
+          message.kind === "assistant-tool-call");
+        const results = appended.filter((message) =>
+          message.kind === "tool-result");
+        expect(calls).toHaveLength(1);
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({
+          callId: calls[0]?.kind === "assistant-tool-call"
+            ? calls[0].callId
+            : "",
+          name: calls[0]?.kind === "assistant-tool-call"
+            ? calls[0].name
+            : "",
+        });
+        if (results[0]?.kind !== "tool-result") {
+          throw new Error("Appended provider result is missing");
+        }
+        const observation = JSON.parse(results[0].content) as {
+          observationEventIds: string[];
+          observations: Array<{ eventId: string }>;
+        };
+        expect(observation.observationEventIds)
+          .toEqual(observation.observations.map((item) => item.eventId));
+        for (const eventId of observation.observationEventIds) {
+          expect(deliveredIds.has(eventId)).toBe(false);
+          deliveredIds.add(eventId);
+        }
+        const nextAction = appended.find((message) =>
+          message.kind === "text" &&
+          message.content.startsWith("AGENCITY NEXT ACTION\n"));
+        expect(nextAction?.kind).toBe("text");
+        if (!nextAction || nextAction.kind !== "text") continue;
+        const envelope = JSON.parse(
+          nextAction.content.slice("AGENCITY NEXT ACTION\n".length),
+        ) as {
+          budget: { turns: number; tokens: number };
+          deadline: { remainingMs: number };
+          observationEventIds: string[];
+        };
+        expect(envelope.budget.turns).toBe(index);
+        expect(envelope.budget.tokens).toBeGreaterThan(0);
+        expect(envelope.deadline.remainingMs).toBeLessThanOrEqual(60_000);
+        expect(envelope.observationEventIds)
+          .toEqual(observation.observationEventIds);
+      }
+      expect(candidates[1]!.messages.some((message) =>
+        message.kind === "text" &&
+        message.content.startsWith("AGENCITY DURABLE STATE DELTA\n") &&
+        message.content.includes('"workingValues"') &&
+        message.content.includes('"append.progress"'))).toBe(true);
+      const state = projectEvents(events);
+      const run = state.agentRuns[result.runId]!;
+      expect(run.steps[1]?.observationEventIds.every((eventId) =>
+        deliveredIds.has(eventId))).toBe(true);
+      expect(run.steps[2]?.observationEventIds.every((eventId) =>
+        deliveredIds.has(eventId))).toBe(true);
+    } finally {
+      await value.supervisor.close();
+    }
+  });
+
+  test("recovers a retained next provider input byte-for-byte before choosing the same action", async () => {
+    const temp = await makeTempRuntime("agencity-transcript-recovery-");
+    temps.push(temp);
+    const provider = new RecordingActions([
+      action({
+        type: "typescript",
+        code: `// Purpose: commit recovery evidence.\nreturn { recovered: true };`,
+      }),
+      action({ type: "final", content: "Recovered exact provider input." }),
+    ], "transcript-recovery");
+    let supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      restartConsoleAfterCell: true,
+      modelProviders: [provider],
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "transcript-recovery",
+      model: { provider: provider.name, model: "v1" },
+    });
+    const appendEvents = supervisor.storage.appendEvents.bind(
+      supervisor.storage,
+    );
+    let interrupted = false;
+    Object.defineProperty(supervisor.storage, "appendEvents", {
+      configurable: true,
+      value: async (events: Parameters<typeof appendEvents>[0]) => {
+        const appended = await appendEvents(events);
+        if (!interrupted && events.some((event) =>
+          event.type === "ModelCallRequested"
+        ) && provider.calls === 1) {
+          interrupted = true;
+          throw new Error("simulated restart after next provider input");
+        }
+        return appended;
+      },
+    });
+    await expect(supervisor.runs.start(
+      session.sessionId,
+      session.branchId,
+      "Recover the exact next provider request.",
+    )).rejects.toThrow("simulated restart after next provider input");
+    const interruptedEvents = await supervisor.storage.loadEvents(
+      session.sessionId,
+      { branchId: session.branchId },
+    );
+    const retained = modelCallCandidates(interruptedEvents);
+    expect(retained).toHaveLength(2);
+    expectStrictMessagePrefix(retained[0]!, retained[1]!);
+    const expectedMessages = JSON.stringify(retained[1]!.messages);
+    Object.defineProperty(supervisor.storage, "appendEvents", {
+      configurable: true,
+      value: appendEvents,
+    });
+    await supervisor.close();
+
+    supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      restartConsoleAfterCell: true,
+      modelProviders: [provider],
+      recover: true,
+    });
+    try {
+      expect(provider.calls).toBe(2);
+      const recoveredMessages = (
+        provider.contexts.at(-1) as { messages: JsonValue[] }
+      ).messages;
+      expect(JSON.stringify(recoveredMessages)).toBe(expectedMessages);
+      const state = projectEvents(await supervisor.storage.loadEvents(
+        session.sessionId,
+        { branchId: session.branchId },
+      ));
+      expect(Object.values(state.agentRuns)[0]).toMatchObject({
+        status: "succeeded",
+        result: { value: "Recovered exact provider input." },
+      });
+    } finally {
+      await supervisor.close();
+    }
+  });
+
+  test("RuneBench-like long transcripts conservatively exceed 90 percent aggregate cache reuse after cold calls", async () => {
+    const minimumCacheEligibleTokens = 2_496;
+    const runCount = 3;
+    const actionCount = 20;
+    const script: AgentAction[] = [
+      ...Array.from({ length: actionCount }, (_, index) =>
+        action({
+          type: "typescript",
+          code: `// Purpose: record measured training sample ${index + 1}.\nreturn { sample: ${index + 1}, xpPerMinute: ${40 + index}, accepted: true };`,
+        })),
+      action({ type: "final", content: "Measured training horizon complete." }),
+    ];
+    const temp = await makeTempRuntime("agencity-cacheability-");
+    temps.push(temp);
+    const provider = new RecordingActions(script, "openai");
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      restartConsoleAfterCell: true,
+      modelProviders: [provider],
+      recover: false,
+    });
+    let aggregateReusedTokens = 0;
+    let aggregateInputTokens = 0;
+    try {
+      for (let runIndex = 0; runIndex < runCount; runIndex++) {
+        const session = await supervisor.createSession({
+          workspaceId: `cacheability-${runIndex}`,
+          model: { provider: provider.name, model: "gpt-5.6-sol" },
+        });
+        const result = await supervisor.runs.start(
+          session.sessionId,
+          session.branchId,
+          {
+            task: `Sustain measured RuneBench-like training run ${runIndex + 1}.`,
+            requestKey: `cacheability-${runIndex}`,
+          },
+        );
+        expect(result).toMatchObject({
+          status: "succeeded",
+          steps: actionCount + 1,
+        });
+        const candidates = modelCallCandidates(
+          await supervisor.storage.loadEvents(session.sessionId, {
+            branchId: session.branchId,
+          }),
+        );
+        expect(candidates).toHaveLength(actionCount + 1);
+        const cacheablePrefixTokens: number[] = [];
+        for (let index = 1; index < candidates.length; index++) {
+          const previous = candidates[index - 1]!;
+          const current = candidates[index]!;
+          expectStrictMessagePrefix(previous, current);
+          expect(current.cache).toMatchObject({
+            mode: "openai-explicit",
+            ttl: "30m",
+          });
+          const reusableMessageBytes = new TextEncoder().encode(
+            JSON.stringify(previous.messages),
+          ).byteLength;
+          const conservativeReusedTokens = Math.floor(
+            reusableMessageBytes / 4,
+          );
+          const inputTokens = estimateProviderInputCandidate(current)
+            .estimatedTokens;
+          cacheablePrefixTokens.push(conservativeReusedTokens);
+          expect(conservativeReusedTokens)
+            .toBeGreaterThan(minimumCacheEligibleTokens);
+          aggregateReusedTokens += conservativeReusedTokens;
+          aggregateInputTokens += inputTokens;
+        }
+        for (let index = 1; index < cacheablePrefixTokens.length; index++) {
+          expect(cacheablePrefixTokens[index]!)
+            .toBeGreaterThan(cacheablePrefixTokens[index - 1]!);
+        }
+      }
+      // This intentionally counts only byte-identical prior messages as
+      // reusable and charges the complete serialized request as input.
+      const aggregateReusedInputRatio =
+        aggregateReusedTokens / aggregateInputTokens;
+      expect(aggregateReusedInputRatio).toBeGreaterThan(0.90);
+    } finally {
+      await supervisor.close();
+    }
+  }, 30_000);
 
   test("rejects a known unsupported root run before task, goal, run, model, or effect events", async () => {
     const temp = await makeTempRuntime("agencity-agent-unsupported-root-"); temps.push(temp);
@@ -896,27 +1224,30 @@ describe("autonomous durable agent runs", () => {
       expect(firstContext).toContain("about 20 lines on each side");
       expect(firstContext).toContain("do not reread the whole file");
       expect(firstContext).not.toContain("Use cells.list/get for retained notebook history");
-      const secondContext = value.provider.contexts[1] as any;
-      expect(secondContext.run.instruction).toContain("If the evidence is sufficient, call finish now");
-      expect(secondContext.run.instruction).not.toContain("Continue from these");
-      expect(secondContext.run.recentTrajectory).toHaveLength(1);
-      expect(secondContext.run.recentTrajectory[0]).toMatchObject({
-        ordinal: 1,
-        action: {
-          type: "bun_console",
-          declaredPurpose: {
-            text: "create and verify the requested answer file.",
-            truncated: false,
-          },
-          source: {
-            originalByteLength: expect.any(Number),
-            sha256: expect.any(String),
-          },
-        },
-        outcome: {
-          status: "committed",
-          details: "run.observations",
-        },
+      const secondAction = nextActionFromProviderMessages(
+        value.provider.contexts[1]!,
+      );
+      expect(secondAction.instruction)
+        .toContain("If the evidence is sufficient, call finish now");
+      expect(secondAction.instruction).not.toContain("Continue from these");
+      const history = await value.supervisor.storage.loadEvents(
+        value.sessionId,
+        { branchId: value.branchId },
+      );
+      const candidates = modelCallCandidates(history);
+      expect(candidates).toHaveLength(2);
+      expectStrictMessagePrefix(candidates[0]!, candidates[1]!);
+      expect(candidates[0]!.tools.map((tool) => tool.name))
+        .toEqual(["bun_console", "finish"]);
+      expect(candidates[1]!.tools).toEqual(candidates[0]!.tools);
+      const call = candidates[1]!.messages.find((message) =>
+        message.kind === "assistant-tool-call");
+      const toolResult = candidates[1]!.messages.find((message) =>
+        message.kind === "tool-result");
+      expect(call).toMatchObject({ name: "bun_console" });
+      expect(toolResult).toMatchObject({
+        callId: call?.kind === "assistant-tool-call" ? call.callId : "",
+        name: "bun_console",
       });
 
       const observations = value.provider.contexts.flatMap(providerObservations);
@@ -953,7 +1284,6 @@ describe("autonomous durable agent runs", () => {
         contractDigest: responseContract.kind === "required-tool-set" ? responseContract.contractDigest : "unreachable",
         selection: "exactly-one-of",
       });
-      const history = await value.supervisor.storage.loadEvents(value.sessionId, { branchId: value.branchId });
       const contexts = history.filter(event => event.type === "ContextMaterialized");
       expect((contexts[1]!.payload as any).records.some((record: any) => record.eventId === cells[0]!.eventId)).toBe(true);
       const actionEvents = history.filter(event => event.type === "AgentRunActionCommitted");
@@ -979,7 +1309,9 @@ describe("autonomous durable agent runs", () => {
       const correctionObservations = providerObservations(value.provider.contexts[1]!)
         .filter(item => item.type === "AgentRunActionRejected");
       expect(correctionObservations).toHaveLength(1);
-      expect((value.provider.contexts[1] as any).run.instruction)
+      expect(nextActionFromProviderMessages(
+        value.provider.contexts[1]!,
+      ).instruction)
         .toContain("call exactly one provided tool");
       expect(correctionObservations[0]?.payload).toMatchObject({
         runId: result.runId,
@@ -1371,8 +1703,7 @@ describe("autonomous durable agent runs", () => {
         deadline: { expired: true, remainingMs: 0 },
       });
       expect(provider.calls).toBe(1);
-      const context = provider.contexts[0] as Record<string, JsonValue>;
-      const run = context.run as Record<string, JsonValue>;
+      const run = nextActionFromProviderMessages(provider.contexts[0]!);
       const timing = run.deadline as Record<string, JsonValue>;
       expect(timing.startedAt).toBe(iso(startedAt));
       expect(timing.deadlineAt).toBe(iso(deadlineAt));

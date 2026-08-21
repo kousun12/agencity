@@ -78,7 +78,12 @@ describe("AI SDK product model providers", () => {
     expect(response).toMatchObject({
       text: "hello world",
       finishReason: "stop",
-      usage: { inputTokens: 4, outputTokens: 2 },
+      usage: {
+        inputTokens: 4,
+        outputTokens: 2,
+        cacheReadTokens: 2,
+        cacheWriteTokens: 1,
+      },
     });
   });
 
@@ -293,7 +298,13 @@ describe("AI SDK product model providers", () => {
         complete: async () => ({
           text: "done",
           finishReason: "stop",
-          usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+          usage: {
+            inputTokens: 8,
+            outputTokens: 1,
+            costUsd: 0,
+            cacheReadTokens: 5,
+            cacheWriteTokens: 2,
+          },
           warnings: [{ kind: "provider", message: `provider echoed ${secret}` }],
         }),
       }]);
@@ -323,6 +334,16 @@ describe("AI SDK product model providers", () => {
         attempt: 1,
       }, { signal: new AbortController().signal });
       expect(execution.outcome).toBe("succeeded");
+      expect(execution.output).toMatchObject({
+        response: {
+          usage: {
+            inputTokens: 8,
+            outputTokens: 1,
+            cacheReadTokens: 5,
+            cacheWriteTokens: 2,
+          },
+        },
+      });
       expect(JSON.stringify(execution.output)).toContain("[REDACTED]");
       expect(JSON.stringify(execution.output)).not.toContain(secret);
     } finally {
@@ -382,7 +403,10 @@ function openAiResponsesTextStream(deltas: readonly string[]): Response {
       incomplete_details: null,
       usage: {
         input_tokens: 4,
-        input_tokens_details: { cached_tokens: 0 },
+        input_tokens_details: {
+          cached_tokens: 2,
+          cache_write_tokens: 1,
+        },
         output_tokens: 2,
         output_tokens_details: { reasoning_tokens: 0 },
       },

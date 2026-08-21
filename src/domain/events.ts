@@ -65,7 +65,7 @@ import {
   type ReplNamespaceStatus,
 } from "./repl-namespace.ts";
 
-export const EVENT_SCHEMA_VERSION = 5 as const;
+export const EVENT_SCHEMA_VERSION = 6 as const;
 export const eventTypes = [
   "SessionCreated", "AgentProfileVersionCreated", "AgentProfileActivated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
@@ -184,7 +184,13 @@ export interface AgentRunRefinementPolicy {
   /** Minimum distinct canonical evidence records each explicit request must cite. */
   readonly requiredEvidenceEventCount: number;
 }
-export interface Usage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; }
+export interface Usage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly costUsd: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+}
 export type ModelUsageSource = "provider-reported" | "conservative-guard-estimate";
 export type ModelCallTermination =
   | { readonly kind: ModelTerminationKind; readonly rawReason?: string }
@@ -439,7 +445,13 @@ const modelWarningSchema = z.object({
   kind: z.enum(["coerced", "unsupported", "provider", "truncated"]),
   message: boundedWarningMessage,
 }).strict();
-const usageSchema = z.object({ inputTokens: nonnegative, outputTokens: nonnegative, costUsd: nonnegative });
+const usageSchema = z.object({
+  inputTokens: nonnegative,
+  outputTokens: nonnegative,
+  costUsd: nonnegative,
+  cacheReadTokens: nonnegative.optional(),
+  cacheWriteTokens: nonnegative.optional(),
+}).strict();
 const modelFailureCodeSchema = z.enum(MODEL_EFFECT_FAILURE_CODES as [ModelEffectFailureCode, ...ModelEffectFailureCode[]]);
 const usageSourceSchema = z.enum(["provider-reported", "conservative-guard-estimate"]);
 const terminationSchema = z.union([
