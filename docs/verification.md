@@ -340,20 +340,25 @@ one terminal result, and container cleanup without paid inference.
 
 RuneBench catalogs all 32 skill tasks in its pinned Harbor dataset. It uses one
 immutable game image and the unmodified Harbor XP-rate verifier. The
-`agencity-runebench-repl-v1` treatment replaces the official MCP wrapper with
+`agencity-runebench-repl-v2` treatment replaces the official MCP wrapper with
 one staged single-owner controller around the same image-owned TypeScript SDK
 through Agencity's persistent Bun console. Controller release confirms
 disconnection before a managed trainer starts; repeated actions back off on
 false results and thrown errors; and the task states the active tracker path
-exactly. RuneBench's benign `password: "test"` option remains in the staged
-controller. It applies an 8 GiB runtime memory cap to the pinned package's 4 GiB
-declaration, matching the current upstream generator's hardening for documented
-agent OOM failures; both values are retained as treatment provenance. Preflight
+exactly. Its prompt requires initial discovery and a retained plan before the
+first game action, then permits focused discovery and evidence-driven strategy
+revision throughout the run. RuneBench's benign `password: "test"` option
+remains in the staged controller. It applies an 8 GiB runtime memory cap to the
+pinned package's 4 GiB declaration, matching the current upstream generator's
+hardening for documented agent OOM failures; both values are retained as
+treatment provenance. Preflight
 reserves 2 GiB beyond effective container concurrency and fails when Docker
 capacity is unavailable or insufficient; this does not verify CPU, provider
-quota, scoring, or cleanup health. The separate fresh and within-run treatments set the
-automatic-learning policy explicitly before each root run: fresh pauses it and
-within-run enables it. No profile or learned artifact crosses scored tasks.
+quota, scoring, or cleanup health. The fresh and within-run modes both pause
+automatic learning before each root run; within-run additionally permits one
+evidence-backed explicit governed review. No profile or learned artifact
+crosses scored tasks. Version 2 has model-free coverage; recorded paid
+RuneBench results predate it.
 Gold, collaboration, and cross-episode curriculum treatments are not included.
 
 Terminal-Bench 2 and 2.1 each catalog and pin all 89 official tasks. Every

@@ -118,7 +118,7 @@ before relinquishing ownership. The local `password: "test"` option remains
 ordinary benchmark configuration; only exact credential values registered by
 Agencity are rejected or redacted. No MCP process or protocol is involved.
 
-This adaptation is named `agencity-runebench-repl-v1`. It preserves the
+This adaptation is named `agencity-runebench-repl-v2`. It preserves the
 official task package, initial save, game image, time horizon, 15-second sample
 cadence, and Harbor verifier. It changes the agent-to-SDK interface, stages
 explicit console guidance in the root `AGENTS.md`, and raises the runtime
@@ -130,6 +130,11 @@ and ordinary product runs retain the 512 MiB default. The adapted task removes
 the unavailable MCP instructions and corrects the tracker command without
 duplicating the root treatment guidance. The catalog and task trace retain
 both memory values and both the original and adapted prompt digests.
+Version 2 replaces version 1's single-discovery-cell prescription with an
+initial discovery phase, a required initial plan and strategy before game
+actions, and focused discovery plus evidence-driven strategy revision
+throughout the run. Paid results recorded below predate version 2; the current
+version has model-free prompt and configuration coverage only.
 
 The game starts after the pinned Agencity source and Bun runtime are installed.
 This prevents harness provisioning time from consuming the game horizon. The
@@ -174,11 +179,14 @@ The API and two game-knowledge sources serve different purposes:
 Treatment guidance lists learning and skill-guide directories independently,
 then reads only exact filenames present in each source. A wiki filename cannot
 be mistaken for a learning filename, and a missing optional learning does not
-fail the discovery cell. That cell may read the pinned API once together with
-the relevant skill page and matching learning, then reduces the sources into
-inputs, acquisition, target or station, exact receiver and method, and a
-measurable success condition. The treatment does not inline those documents or
-the wiki corpus into every provider call.
+fail discovery. The initial phase may batch the pinned API together with the
+relevant skill page, matching learning, inventory, XP, and bounded live state
+in one or more focused cells. Before the first game action, the model reduces
+the evidence into an initial acquisition, action, and verification plan and
+records its strategy, alternatives, open questions, and next experiment.
+Discovery remains available throughout the run when new evidence or a specific
+unknown warrants it. The treatment avoids repeated unchanged reads and does not
+inline those documents or the wiki corpus into every provider call.
 
 ### Treatment prompting
 
@@ -197,9 +205,15 @@ tells the model to:
   file and shell result shapes for finding additional methods;
 - distinguish the executable API, optional upstream operational learnings, and
   factual extracted wiki; list learning and skill filenames independently;
-  batch the pinned API, scored-skill page, matching learning, inventory, XP, and
-  bounded live state into one initial discovery cell; and navigate to at most
-  the focused item, NPC, shop, or quest facts needed next;
+- begin with a discovery phase before game actions, batching the pinned API,
+  scored-skill page, matching learning, inventory, XP, and bounded live state
+  efficiently across focused cells as needed;
+- turn the initial evidence into a retained plan and strategy covering required
+  inputs, acquisition, action, verification, alternatives, open questions, and
+  the next experiment before the first game action;
+- treat the plan as a hypothesis, return to targeted documentation or live-state
+  discovery whenever new evidence creates a specific question, and record each
+  evidence-driven strategy change and its reason;
 - treat documentation as guidance, verify it against live `rs` state, and use
   the pinned SDK API as the authority for exact callable signatures;
 - acquire once, then reuse those live objects while the exact branch REPL epoch
@@ -219,7 +233,7 @@ tells the model to:
   checks without improvement, or a failure rate above 25 percent unless a named
   prerequisite, target, receiver, route, or world-state assumption changes;
 - avoid opening-turn object enumeration and repeated unchanged documentation
-  searches while the scored horizon is running;
+  searches while preserving focused discovery throughout the scored horizon;
 - consult SDK, learning, and wiki files on demand rather than loading all of
   them into context or repeating unchanged searches;
 - select strategies by official peak rate rather than cumulative XP, compare

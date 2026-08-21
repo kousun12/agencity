@@ -293,7 +293,7 @@ concurrency, and reports an unavailable probe as unavailable; passing memory
 does not prove CPU, provider quota, cleanup, or scoring health. Verifiers episode concurrency may
 parallelize the 16-task selection only when host memory, CPU, provider quota,
 cleanup, and scoring remain healthy. The
-`agencity-runebench-repl-v1` treatment imports the image-owned TypeScript SDK
+`agencity-runebench-repl-v2` treatment imports the image-owned TypeScript SDK
 directly in Agencity's persistent Bun console instead of advertising generic
 MCP support. Ordinary domain fields such as RuneBench's local
 `password: "test"` connection option are valid model-generated TypeScript; only
@@ -342,11 +342,13 @@ receiver split with a compact translated SDK quick start, and distinguishes
 three image-owned sources: the executable API contract, optional upstream
 `rs-sdk` operational learnings, and factual skill/item/NPC/shop/quest wiki.
 Learning and skill-guide filenames are indexed independently so a wiki page
-cannot be mistaken for a missing learning. One discovery cell batches the
-pinned API, exact available learning and skill guide, inventory, XP, and
-bounded live state, then reduces them into an executable acquisition/action/
-verification pipeline. Optional reads retain explicit read, absent, or
-unavailable status without discarding successful sibling sources. Measured
+cannot be mistaken for a missing learning. The model begins with a focused
+discovery phase, records an initial acquisition/action/verification plan and
+strategy before acting, and can return to targeted documentation or live-state
+discovery whenever new evidence creates a specific question. Plans are
+hypotheses and evidence-driven changes remain attributable in the durable
+progress value. Optional reads retain explicit read, absent, or unavailable
+status without discarding successful sibling sources. Measured
 loops accept only explicit `{ success: true }`, classify reported failure,
 invalid results, and throws separately, distinguish command acceptance from
 metric progress, and retain confirmed facts, rejected strategies, blockers,
@@ -354,6 +356,8 @@ and next hypotheses. A strategy retires after repeated zero progress, stalled of
 peak, or excessive action failures unless a named assumption changes. Long
 execution remains bounded by authoritative remaining time and reserves the
 final gate window for tracker verification and typed completion.
+This version-2 treatment has model-free prompt and configuration coverage; all
+recorded paid RuneBench results predate it.
 A later
 Luna-xhigh Attack 30-minute
 treatment on commit `2d1b98f` reached a live peak of 72 XP/min but hit the outer
@@ -461,6 +465,11 @@ by default, refreshes every pin to remote `main` only when explicitly requested,
 runs preflight and dry-run before inference, retains raw and summary artifacts,
 and exits nonzero unless every exact selected task has one official numeric
 score; valid official zeroes and scored agent terminal failures remain scored.
+Its opt-in debug mode exports a credential-free local inspection copy after
+official Harbor collection and confirmed managed-service/process shutdown,
+before portable state is removed. The copy includes exact source provenance and
+commands for starting an isolated local managed service and attaching
+`agencity observe`; export failure remains separate from official scoring.
 The August 18 verification against commit `e03a2ad`
 separately passed the opt-in official scorer test, all 21 then-existing suite
 preflights, all 22 then-existing config dry-runs, lock and source-pin checks,
