@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentState, SessionStatus } from "../domain/index.ts";
+import type { AgentEvent, AgentRunState, AgentState, SessionStatus } from "../domain/index.ts";
 
 export const OBSERVER_PROTOCOL = "agencity.observe.v1" as const;
 
@@ -88,6 +88,22 @@ export interface ObserverFamilyNodeDto {
   readonly sessionStatus: SessionStatus | null;
   readonly activity: ObserverRouteActivity;
   readonly activityReason: ObserverRouteActivityReason;
+  readonly latestRun: {
+    readonly id: string;
+    readonly task: ObserverBoundedText;
+    readonly status: AgentRunState["status"];
+    readonly stepCount: number;
+    readonly currentAction: "typescript" | "final" | "blocked" | "failed" | "awaiting_model" | null;
+    readonly reason: ObserverBoundedText | null;
+    readonly deadline: AgentRunState["deadline"] | null;
+  } | null;
+  readonly budget: {
+    readonly tokens: number;
+    readonly costUsd: number;
+    readonly turns: number;
+    readonly wallTimeMs: number;
+    readonly exceeded: boolean;
+  } | null;
   readonly snapshotCursor: string | null;
 }
 

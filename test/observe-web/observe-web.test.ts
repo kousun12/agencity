@@ -139,7 +139,13 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     await page.getByRole("button", { name: /Root Alpha/ }).click();
     await page.locator("#observer-main").waitFor({ state: "visible" });
     await page.getByRole("button", { name: "Inspect Root Alpha" }).waitFor();
+    expect(await page.locator("#current-work-title").textContent()).toBe("Root Alpha");
+    expect(await page.locator(".connection-details").evaluate(element => element.hasAttribute("open"))).toBe(false);
+    expect(await page.locator(".trust-notice").evaluate(element => element.hasAttribute("open"))).toBe(false);
     expect(await page.locator(".route-node").count()).toBe(1);
+    expect(await page.locator("#family-graph").evaluate(element =>
+      element.scrollWidth <= element.clientWidth + 1
+    )).toBe(true);
     await waitFor(
       () => fixtureOne.activeStreams === 1,
       "Observer did not attach the root branch stream",
@@ -148,6 +154,7 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     fixtureOne.admitChild();
     await page.getByRole("button", { name: "Inspect Live Child" }).waitFor();
     expect(await page.locator(".route-node").count()).toBe(2);
+    expect(await page.locator("#activity-count").textContent()).toContain("update");
     await waitFor(
       () => fixtureOne.activeStreams === 2,
       "Observer did not attach the child branch stream",
@@ -158,9 +165,13 @@ test("Chromium observes a live family through the foreground CLI", async () => {
       async () => await page!.locator(".graph-edge.message").count() === 1,
       "Committed mailbox message did not render a message edge",
     );
+    await page.locator(".activity-group").first().waitFor();
+    expect(Number.parseInt((await page.locator("#activity-count").textContent()) || "0", 10)).toBeGreaterThan(0);
     expect(await page.locator("#family-graph").textContent()).toContain("Live Child");
 
     await page.getByRole("button", { name: "Inspect Root Alpha" }).click();
+    await page.locator("#inspect-panel").waitFor({ state: "visible" });
+    await page.locator("#overview-panel").waitFor({ state: "visible" });
     await page.getByRole("button", { name: "Cells", exact: true }).click();
     await page.locator("#detail-list .detail-card").waitFor();
     const detailText = await page.locator("#detail-list").textContent();
@@ -172,6 +183,8 @@ test("Chromium observes a live family through the foreground CLI", async () => {
       const target = globalThis as typeof globalThis & { __agencityHostile?: boolean };
       return target.__agencityHostile;
     })).toBeUndefined();
+    await page.getByRole("button", { name: "Close route details" }).click();
+    await page.locator("#inspect-panel").waitFor({ state: "hidden" });
 
     const firstGeneration = (await page.locator("#generation-name").textContent())!;
     fixtureTwo = new ObserveProtocolFixture("instance-two", fixtureOne.exportStates());

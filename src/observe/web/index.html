@@ -14,7 +14,7 @@
         <p class="eyebrow">Agencity</p>
         <h1>Observe</h1>
       </div>
-      <dl class="connection-grid" aria-label="Observer connection">
+      <dl class="connection-summary" aria-label="Observer connection summary">
         <div>
           <dt>Availability</dt>
           <dd id="connection-state" data-state="connecting">Connecting</dd>
@@ -28,24 +28,32 @@
           <dd id="family-name">Not selected</dd>
         </div>
         <div>
-          <dt>Service</dt>
-          <dd id="instance-name">Unavailable</dd>
-        </div>
-        <div>
-          <dt>Generation</dt>
-          <dd id="generation-name">—</dd>
-        </div>
-        <div>
           <dt>Stream</dt>
           <dd id="stream-state">Disconnected</dd>
         </div>
       </dl>
+      <details class="connection-details">
+        <summary>Connection details</summary>
+        <dl>
+          <div>
+            <dt>Service</dt>
+            <dd id="instance-name">Unavailable</dd>
+          </div>
+          <div>
+            <dt>Generation</dt>
+            <dd id="generation-name">—</dd>
+          </div>
+        </dl>
+      </details>
     </header>
 
-    <aside class="trust-notice">
-      <strong>Trusted local observer.</strong>
-      <span>Agent tasks, model output, logs, and repository data can be sensitive. This page is read-only but is not a security sandbox.</span>
-    </aside>
+    <details class="trust-notice">
+      <summary>
+        <strong>Trusted local · Read-only</strong>
+        <span>Sensitive agent and repository data may appear here.</span>
+      </summary>
+      <p><strong>Trusted local observer.</strong> Agent tasks, model output, logs, and repository data can be sensitive. This page is read-only but is not a security sandbox. While a browser is attached, observation streams can defer managed-service quiescence.</p>
+    </details>
 
     <p id="app-status" class="app-status" role="status" aria-live="polite">Starting observer session…</p>
 
@@ -66,11 +74,30 @@
     <main id="observer-main" hidden>
       <nav class="depth-tabs" aria-label="Observer depth">
         <button type="button" data-depth="overview" aria-selected="true">Overview</button>
-        <button type="button" data-depth="inspect" aria-selected="false">Inspect</button>
         <button type="button" data-depth="events" aria-selected="false">Events</button>
       </nav>
 
       <section id="overview-panel" class="depth-panel">
+        <section class="current-work-panel" aria-labelledby="current-work-title">
+          <div class="current-work-heading">
+            <div>
+              <p class="eyebrow">Current work</p>
+              <h2 id="current-work-title">Waiting for family state</h2>
+            </div>
+            <span id="current-work-status" class="status-badge" data-activity="idle">Idle</span>
+          </div>
+          <p id="current-work-action" class="current-action">No active action.</p>
+          <dl class="work-metrics" aria-label="Current work metrics">
+            <div><dt>Agent</dt><dd id="current-work-agent">—</dd></div>
+            <div><dt>Model</dt><dd id="current-work-model">—</dd></div>
+            <div><dt>Steps</dt><dd id="current-work-steps">0</dd></div>
+            <div><dt>Turns</dt><dd id="current-work-turns">0</dd></div>
+            <div><dt>Tokens</dt><dd id="current-work-tokens">0</dd></div>
+            <div><dt>Elapsed</dt><dd id="current-work-elapsed">0s</dd></div>
+          </dl>
+          <p id="current-work-note" class="state-note"></p>
+        </section>
+
         <div class="overview-grid">
           <section class="graph-panel" aria-labelledby="graph-title">
             <div class="section-heading">
@@ -89,30 +116,31 @@
           <aside class="activity-panel" aria-labelledby="activity-title">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">This connection</p>
-                <h2 id="activity-title">Live activity</h2>
+                <p class="eyebrow">Since attached</p>
+                <h2 id="activity-title">Activity timeline</h2>
               </div>
-              <span id="activity-count" class="count-badge">0</span>
+              <span id="activity-count" class="count-badge">0 updates</span>
             </div>
             <ol id="activity-list" class="activity-list"></ol>
           </aside>
         </div>
-      </section>
 
-      <section id="inspect-panel" class="depth-panel" hidden>
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Lazy bounded detail</p>
-            <h2>Inspect route</h2>
+        <aside id="inspect-panel" class="route-inspector" aria-labelledby="inspector-title" hidden>
+          <div class="inspector-header">
+            <div>
+              <p class="eyebrow">Route details</p>
+              <h2 id="inspector-title">Inspect agent</h2>
+              <p id="selected-route" class="state-note">Select a graph node.</p>
+            </div>
+            <button id="inspector-close" class="icon-button" type="button" aria-label="Close route details">Close</button>
           </div>
-          <p id="selected-route" class="state-note">Select a graph node.</p>
-        </div>
-        <div id="detail-sections" class="detail-sections" aria-label="Detail sections"></div>
-        <p id="detail-state" class="state-note">No detail loaded.</p>
-        <div id="detail-list" class="detail-list"></div>
-        <div id="detail-pager" class="pager" hidden>
-          <button id="detail-more" type="button">Load next page</button>
-        </div>
+          <div id="detail-sections" class="detail-sections" aria-label="Detail sections"></div>
+          <p id="detail-state" class="state-note">Choose a section to load bounded detail.</p>
+          <div id="detail-list" class="detail-list"></div>
+          <div id="detail-pager" class="pager" hidden>
+            <button id="detail-more" type="button">Load next page</button>
+          </div>
+        </aside>
       </section>
 
       <section id="events-panel" class="depth-panel" hidden>

@@ -61,9 +61,11 @@
     nodes: [],
     edges: [],
     messageEdges: [],
+    rootRoute: null,
     selectedRoute: null,
     selectedItemId: "",
     positions: new Map(),
+    inspectorOpen: false,
     activities: [],
     activityBytes: 0,
     progress: new Map(),
@@ -72,10 +74,12 @@
     detailSection: "",
     detailNextCursor: "",
     detailTruncated: false,
+    detailRequest: 0,
     stream: null,
     reconnectTimer: 0,
     reconnectAttempts: 0,
     refreshTimer: 0,
+    layoutTimer: 0,
     resyncing: false,
   };
 
@@ -102,6 +106,16 @@
       "overview-panel",
       "inspect-panel",
       "events-panel",
+      "current-work-title",
+      "current-work-status",
+      "current-work-action",
+      "current-work-agent",
+      "current-work-model",
+      "current-work-steps",
+      "current-work-turns",
+      "current-work-tokens",
+      "current-work-elapsed",
+      "current-work-note",
       "graph-status",
       "family-graph",
       "graph-edges",
@@ -109,6 +123,8 @@
       "activity-count",
       "activity-list",
       "selected-route",
+      "inspector-title",
+      "inspector-close",
       "detail-sections",
       "detail-state",
       "detail-list",
@@ -259,7 +275,10 @@
   }
 
   function humanState(value) {
-    return boundedText(String(value || "unknown").replaceAll("_", " "), 80);
+    return boundedText(String(value || "unknown")
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replaceAll("_", " ")
+      .toLowerCase(), 80);
   }
 
   function applyHeader(source) {
@@ -377,6 +396,8 @@
     const route = routeFrom(source);
     if (!route) return null;
     const modelSource = asObject(firstValue(source, ["model"], {}));
+    const latestRunSource = asObject(firstValue(source, ["latestRun"], {}));
+    const budgetSource = asObject(firstValue(source, ["budget"], {}));
     const model = modelSource.provider || modelSource.model
       ? boundedText(modelSource.provider, 80) + "/" + boundedText(modelSource.model, 120)
       : boundedText(firstValue(source, ["modelId"], "Model unavailable"), 180);
@@ -387,7 +408,25 @@
       depth: Math.max(0, Math.min(63, Number(firstValue(source, ["depth"], 0)) || 0)),
       model,
       taskSummary: boundedText(firstValue(source, ["taskSummary", "task", "summary"], ""), 360),
-      status: boundedText(firstValue(source, ["status", "sessionStatus", "activity"], "unknown"), 80),
+      status: boundedText(firstValue(source, ["status", "sessionStatus"], "unknown"), 80),
+      activity: boundedText(firstValue(source, ["activity"], "idle"), 80),
+      activityReason: boundedText(firstValue(source, ["activityReason"], ""), 120),
+      latestRun: latestRunSource.id ? {
+        id: boundedText(latestRunSource.id, 256),
+        task: boundedText(latestRunSource.task, 1024),
+        status: boundedText(latestRunSource.status, 80),
+        stepCount: Math.max(0, Number(latestRunSource.stepCount) || 0),
+        currentAction: boundedText(latestRunSource.currentAction, 80),
+        reason: boundedText(latestRunSource.reason, 360),
+        deadline: asObject(latestRunSource.deadline),
+      } : null,
+      budget: Object.keys(budgetSource).length ? {
+        tokens: Math.max(0, Number(budgetSource.tokens) || 0),
+        costUsd: Math.max(0, Number(budgetSource.costUsd) || 0),
+        turns: Math.max(0, Number(budgetSource.turns) || 0),
+        wallTimeMs: Math.max(0, Number(budgetSource.wallTimeMs) || 0),
+        exceeded: budgetSource.exceeded === true,
+      } : null,
       unavailable:
         firstValue(source, ["availability"], "") === "route_unavailable" ||
         Boolean(firstValue(source, ["unavailable", "routeUnavailable"], false)),
@@ -447,6 +486,7 @@
 
     const selectedRoot = routeFrom(firstValue(snapshot, ["selectedRoot", "selectedRoute"], firstValue(family, ["root"], null)));
     if (selectedRoot) {
+      state.rootRoute = selectedRoot;
       view["family-name"].textContent = familyNameFor(selectedRoot);
     }
     if (!state.selectedRoute || !state.nodes.some((node) => sameRoute(node.route, state.selectedRoute))) {
@@ -481,6 +521,7 @@
     view["root-panel"].hidden = true;
     view["observer-main"].hidden = false;
     renderGraph();
+    renderCurrentWork();
     renderSelectedRoute();
     setStatus(
       routeTruncated
@@ -498,49 +539,125 @@
     return node ? node.name : route ? route.sessionId : "Not selected";
   }
 
+  function formatCount(value) {
+    return new Intl.NumberFormat(undefined, { notation: value >= 10_000 ? "compact" : "standard" }).format(value);
+  }
+
+  function formatDuration(milliseconds) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    if (seconds < 60) return seconds + "s";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + "m " + (seconds % 60) + "s";
+    const hours = Math.floor(minutes / 60);
+    return hours + "h " + (minutes % 60) + "m";
+  }
+
+  function actionLabel(action) {
+    const labels = {
+      awaiting_model: "Waiting for the next model action",
+      typescript: "Running a TypeScript action",
+      final: "Completing the task",
+      blocked: "Reporting a blocker",
+      failed: "Reporting a failure",
+    };
+    return labels[action] || "No active action";
+  }
+
+  function currentProgressFor(route) {
+    for (const progress of state.progress.values()) {
+      if (sameRoute(progress.route, route)) return progress;
+    }
+    return null;
+  }
+
+  function latestActivityFor(route) {
+    return state.activities.find((item) => sameRoute(item.route, route)) || null;
+  }
+
+  function renderCurrentWork() {
+    const node = state.nodes.find((candidate) => sameRoute(candidate.route, state.rootRoute)) || state.nodes[0] || null;
+    if (!node) {
+      view["current-work-title"].textContent = "Waiting for family state";
+      view["current-work-status"].textContent = "Unavailable";
+      view["current-work-status"].dataset.activity = "unavailable";
+      view["current-work-action"].textContent = "No current route is available.";
+      return;
+    }
+    const run = node.latestRun;
+    const budget = node.budget;
+    const progress = currentProgressFor(node.route);
+    const activity = latestActivityFor(node.route);
+    view["current-work-title"].textContent =
+      boundedText(run?.task || node.taskSummary || node.name || "Task summary unavailable", 1_000);
+    view["current-work-status"].textContent = humanState(node.activity);
+    view["current-work-status"].dataset.activity = node.activity;
+    view["current-work-agent"].textContent = node.name;
+    view["current-work-model"].textContent = node.model;
+    view["current-work-steps"].textContent = String(run?.stepCount || 0);
+    view["current-work-turns"].textContent = formatCount(budget?.turns || 0);
+    view["current-work-tokens"].textContent = formatCount(budget?.tokens || 0);
+    view["current-work-elapsed"].textContent = formatDuration(budget?.wallTimeMs || 0);
+
+    const semantic = activity ? semanticEvent(activity.kind, false) : null;
+    view["current-work-action"].textContent = progress
+      ? boundedText(progress.message || humanState(progress.stage), 600)
+      : run?.currentAction
+        ? actionLabel(run.currentAction)
+        : semantic?.label || (node.activity === "idle" ? "Waiting for work." : "Current action unavailable.");
+    const notes = [];
+    if (node.activityReason) notes.push("Attention: " + humanState(node.activityReason) + ".");
+    if (run?.reason) notes.push(run.reason);
+    if (budget?.exceeded) notes.push("The durable budget is exceeded.");
+    view["current-work-note"].textContent = notes.join(" ");
+  }
+
   function placeNodes() {
-    const depthCounts = new Map();
+    state.positions.clear();
     const sorted = [...state.nodes].sort((left, right) =>
       left.depth - right.depth || left.order - right.order || routeKey(left.route).localeCompare(routeKey(right.route))
     );
+    const byDepth = new Map();
     for (const node of sorted) {
-      const position = state.positions.get(routeKey(node.route));
-      if (!position) continue;
-      const occupiedSlot = Math.max(0, Math.round((position.y - 28) / 142));
-      depthCounts.set(node.depth, Math.max(depthCounts.get(node.depth) || 0, occupiedSlot + 1));
+      const group = byDepth.get(node.depth) || [];
+      group.push(node);
+      byDepth.set(node.depth, group);
     }
-    for (const node of sorted) {
-      const key = routeKey(node.route);
-      if (state.positions.has(key)) continue;
-      const slot = depthCounts.get(node.depth) || 0;
-      depthCounts.set(node.depth, slot + 1);
-      state.positions.set(key, {
-        x: 28 + node.depth * 260,
-        y: 28 + slot * 142,
+    const depths = [...byDepth.keys()].sort((left, right) => left - right);
+    const nodeWidth = 200;
+    const nodeHeight = 112;
+    const columnGap = 56;
+    const rowGap = 24;
+    const maxRows = Math.max(1, ...[...byDepth.values()].map((nodes) => nodes.length));
+    const contentWidth = Math.max(nodeWidth, depths.length * nodeWidth + Math.max(0, depths.length - 1) * columnGap);
+    const contentHeight = Math.max(nodeHeight, maxRows * nodeHeight + Math.max(0, maxRows - 1) * rowGap);
+    const viewportWidth = Math.max(320, view["family-graph"].clientWidth || 520);
+    const viewportHeight = Math.max(288, view["family-graph"].clientHeight || 400);
+    const width = Math.max(viewportWidth, contentWidth + 48);
+    const height = Math.max(viewportHeight, contentHeight + 48);
+    const originX = Math.max(24, (width - contentWidth) / 2);
+    for (let depthIndex = 0; depthIndex < depths.length; depthIndex += 1) {
+      const nodes = byDepth.get(depths[depthIndex]) || [];
+      const columnHeight = nodes.length * nodeHeight + Math.max(0, nodes.length - 1) * rowGap;
+      const originY = Math.max(24, (height - columnHeight) / 2);
+      nodes.forEach((node, row) => {
+        state.positions.set(routeKey(node.route), {
+          x: originX + depthIndex * (nodeWidth + columnGap),
+          y: originY + row * (nodeHeight + rowGap),
+        });
       });
     }
+    return { width, height };
   }
 
   function renderGraph() {
-    placeNodes();
+    const bounds = placeNodes();
     view["graph-nodes"].replaceChildren();
     view["graph-edges"].replaceChildren();
-
-    let width = 520;
-    let height = 400;
-    for (const node of state.nodes) {
-      const position = state.positions.get(routeKey(node.route));
-      if (!position) continue;
-      width = Math.max(width, position.x + 244);
-      height = Math.max(height, position.y + 132);
-    }
-    view["family-graph"].style.minWidth = width + "px";
-    view["family-graph"].style.minHeight = height + "px";
-    view["graph-edges"].setAttribute("viewBox", "0 0 " + width + " " + height);
-    view["graph-edges"].setAttribute("width", String(width));
-    view["graph-edges"].setAttribute("height", String(height));
-    view["graph-nodes"].style.width = width + "px";
-    view["graph-nodes"].style.height = height + "px";
+    view["graph-edges"].setAttribute("viewBox", "0 0 " + bounds.width + " " + bounds.height);
+    view["graph-edges"].setAttribute("width", String(bounds.width));
+    view["graph-edges"].setAttribute("height", String(bounds.height));
+    view["graph-nodes"].style.width = bounds.width + "px";
+    view["graph-nodes"].style.height = bounds.height + "px";
 
     for (const edge of state.edges) drawEdge(edge, false);
     for (const edge of state.messageEdges) drawEdge(edge, true);
@@ -552,7 +669,7 @@
     const to = state.positions.get(routeKey(edge.child));
     if (!from || !to) return;
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    const startX = from.x + 216;
+    const startX = from.x + 200;
     const startY = from.y + 55;
     const endX = to.x;
     const endY = to.y + 55;
@@ -570,30 +687,32 @@
     button.className = "route-node" + (sameRoute(node.route, state.selectedRoute) ? " selected" : "");
     button.style.left = position.x + "px";
     button.style.top = position.y + "px";
+    button.dataset.activity = node.activity;
     button.setAttribute("aria-label", "Inspect " + boundedText(node.name, 120));
     text(button, node.name, "node-title");
     text(button, node.branchName + " · depth " + node.depth, "node-meta");
     text(button, node.model, "node-meta");
     text(button, node.taskSummary || "No task summary", "node-task");
-    text(button, node.unavailable ? "route unavailable" : humanState(node.status), "node-state");
+    if (node.latestRun?.currentAction) text(button, actionLabel(node.latestRun.currentAction), "node-action");
+    text(button, node.unavailable ? "route unavailable" : humanState(node.activity), "node-state");
     button.addEventListener("click", () => {
       state.selectedRoute = node.route;
       state.selectedItemId = "";
+      state.inspectorOpen = true;
       clearDetail();
       renderGraph();
       renderSelectedRoute();
-      switchDepth("inspect");
+      void loadDetail("identity", "", false);
     });
     view["graph-nodes"].appendChild(button);
   }
 
   function switchDepth(depth) {
-    const selected = depth === "inspect" || depth === "events" ? depth : "overview";
+    const selected = depth === "events" ? "events" : "overview";
     for (const button of document.querySelectorAll("[data-depth]")) {
       button.setAttribute("aria-selected", button.getAttribute("data-depth") === selected ? "true" : "false");
     }
     view["overview-panel"].hidden = selected !== "overview";
-    view["inspect-panel"].hidden = selected !== "inspect";
     view["events-panel"].hidden = selected !== "events";
   }
 
@@ -613,27 +732,38 @@
   }
 
   function renderSelectedRoute() {
+    const selectedNode = state.nodes.find((node) => sameRoute(node.route, state.selectedRoute));
+    view["inspector-title"].textContent = selectedNode?.name || "Inspect agent";
     view["selected-route"].textContent = state.selectedRoute
-      ? state.selectedRoute.sessionId + " / " + state.selectedRoute.branchId
+      ? (selectedNode?.branchName || state.selectedRoute.branchId) + " · " + humanState(selectedNode?.activity || "unknown")
       : "Select a graph node.";
+    view["inspect-panel"].hidden = !state.inspectorOpen || !state.selectedRoute;
     renderDetailSectionButtons();
   }
 
+  function closeInspector() {
+    state.inspectorOpen = false;
+    view["inspect-panel"].hidden = true;
+  }
+
   function clearDetail() {
+    state.detailRequest += 1;
     state.detailSection = "";
     state.detailNextCursor = "";
     state.detailTruncated = false;
     view["detail-list"].replaceChildren();
-    view["detail-state"].textContent = "No detail loaded.";
+    view["detail-state"].textContent = "Choose a section to load bounded detail.";
     view["detail-pager"].hidden = true;
     renderDetailSectionButtons();
   }
 
   async function loadDetail(section, cursor, append) {
     if (!state.selectedRoute || !DETAIL_SECTIONS.some((entry) => entry[0] === section)) return;
+    const requestId = ++state.detailRequest;
     state.detailSection = section;
     renderDetailSectionButtons();
     view["detail-state"].textContent = "Loading bounded " + humanState(section) + " detail…";
+    if (!append) view["detail-list"].replaceChildren();
     const query = new URLSearchParams();
     query.set("section", section);
     query.set("sessionId", state.selectedRoute.sessionId);
@@ -643,8 +773,10 @@
     if (cursor) query.set("cursor", cursor);
     try {
       const page = await request("/api/family/detail?" + query.toString());
+      if (requestId !== state.detailRequest) return;
       applyDetailPage(page, append);
     } catch (error) {
+      if (requestId !== state.detailRequest) return;
       view["detail-state"].textContent = safeError(error);
       view["detail-pager"].hidden = true;
     }
@@ -700,21 +832,26 @@
 
   function renderDetailItem(itemValue) {
     const item = asObject(itemValue);
+    const data = asObject(firstValue(item, ["data"], {}));
+    const kind = boundedText(firstValue(item, ["kind", "type"], state.detailSection || "detail"), 80);
+    const id = boundedText(firstValue(item, ["id", "eventId"], ""), 256);
     const card = document.createElement("article");
     card.className = "detail-card";
     const title = document.createElement("h3");
-    title.textContent = boundedText(firstValue(item, ["name", "type", "status", "id", "eventId"], "Detail item"), 240);
+    title.textContent = detailTitle(kind, id, data);
     card.appendChild(title);
     const list = document.createElement("dl");
-    const entries = Object.entries(item).slice(0, 40);
+    const entries = Object.entries(data).slice(0, 38);
+    if (id) entries.push(["id", id]);
+    if (item.provenance) entries.push(["provenance", item.provenance]);
     for (const entry of entries) {
       const term = document.createElement("dt");
-      term.textContent = boundedText(entry[0], 120);
+      term.textContent = fieldLabel(entry[0]);
       const description = document.createElement("dd");
       description.textContent = formatValue(entry[1], 0);
       list.append(term, description);
     }
-    if (Object.keys(item).length > entries.length) {
+    if (Object.keys(data).length > 38) {
       const term = document.createElement("dt");
       term.textContent = "Browser bound";
       const description = document.createElement("dd");
@@ -723,6 +860,32 @@
     }
     card.appendChild(list);
     view["detail-list"].appendChild(card);
+  }
+
+  function detailTitle(kind, id, data) {
+    const status = boundedText(data.status, 80);
+    if (kind === "identity") return boundedText(data.sessionName, 180) || "Agent identity";
+    if (kind === "runs") return boundedText(data.task, 240) || "Agent run";
+    if (kind === "model_attempts") return "Model attempt " + boundedText(data.attempt, 20);
+    if (kind === "cells") return "TypeScript cell" + (status ? " · " + humanState(status) : "");
+    if (kind === "effects") {
+      return [boundedText(data.executor, 80), boundedText(data.operation, 100)].filter(Boolean).join(" · ") || "Tool effect";
+    }
+    if (kind === "tasks") return boundedText(data.task, 240) || "Child task";
+    if (kind === "mailbox") return "Agent message · " + humanState(data.direction || data.kind);
+    if (kind === "budget") return data.exceeded ? "Budget · exceeded" : "Budget usage";
+    if (kind === "goals") return boundedText(data.description, 240) || "Goal";
+    if (kind === "gates") return boundedText(data.name, 180) || "Completion gate";
+    if (kind === "artifacts") return boundedText(data.mediaType, 120) || "Artifact";
+    if (kind.startsWith("terminal_")) return "Outcome · " + humanState(status || kind.replace("terminal_", ""));
+    return id || humanState(kind);
+  }
+
+  function fieldLabel(value) {
+    return boundedText(String(value)
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replaceAll("_", " ")
+      .replace(/^./, (character) => character.toUpperCase()), 120);
   }
 
   function formatValue(value, depth) {
@@ -755,7 +918,7 @@
     const route = routeFrom(firstValue(data, ["route"], null));
     return {
       kind: boundedText(firstValue(data, ["type", "kind", "eventType"], kind || "activity"), 120),
-      summary: boundedText(firstValue(data, ["summary", "message", "status", "operation"], "Observer update"), 600),
+      summary: boundedText(firstValue(data, ["summary", "message", "status", "operation"], ""), 600),
       route,
       eventId: boundedText(firstValue(data, ["eventId", "canonicalEventId"], ""), 256),
       cursor: boundedText(firstValue(data, ["routeCursor", "cursor"], ""), 128),
@@ -778,31 +941,154 @@
     if (item.eventId || item.cursor) addEvent(item);
   }
 
-  function renderActivities() {
-    view["activity-list"].replaceChildren();
-    for (const item of state.progress.values()) {
-      const row = document.createElement("li");
-      row.className = "activity-item";
-      const title = document.createElement("strong");
-      title.textContent = "Provisional · " + humanState(item.stage);
-      row.appendChild(title);
-      if (item.message) text(row, item.message);
-      if (item.route) text(row, item.route.sessionId + " / " + item.route.branchId);
-      view["activity-list"].appendChild(row);
+  function semanticEvent(kind, provisional) {
+    const value = String(kind || "activity");
+    if (provisional) {
+      if (/model|tool/i.test(value)) return { category: "model", label: "Model is responding" };
+      return { category: "action", label: humanState(value) };
+    }
+    const exact = {
+      ModelCallRequested: ["model", "Model response requested"],
+      ModelCallCompleted: ["model", "Model response completed"],
+      ModelCallTerminated: ["attention", "Model response ended without success"],
+      EffectRequested: ["action", "Tool request recorded"],
+      EffectAttemptStarted: ["action", "Tool execution started"],
+      EffectOutcomeRecorded: ["action", "Tool outcome recorded"],
+      CellProposed: ["action", "TypeScript action proposed"],
+      CellStarted: ["action", "TypeScript action started"],
+      CellCommitted: ["action", "TypeScript action completed"],
+      CellFailed: ["attention", "TypeScript action failed"],
+      AgentRunRequested: ["family", "Agent run requested"],
+      AgentRunStepStarted: ["model", "Agent step started"],
+      AgentRunModelAttemptStarted: ["model", "Model attempt started"],
+      AgentRunActionCommitted: ["action", "Model chose the next action"],
+      AgentRunActionRejected: ["attention", "Model action rejected"],
+      AgentRunTypedFinishCommitted: ["family", "Agent submitted a final outcome"],
+      AgentRunTypedActionViolationCommitted: ["attention", "Model action violated its contract"],
+      AgentRunResultCommitted: ["family", "Agent result committed"],
+      AgentRunStatusChanged: ["family", "Agent run status changed"],
+      SessionStatusChanged: ["family", "Agent status changed"],
+      TaskCreated: ["family", "Child task created"],
+      TaskStatusChanged: ["family", "Child task status changed"],
+      MailboxMessageSent: ["family", "Agent message sent"],
+      MailboxMessageDelivered: ["family", "Agent message delivered"],
+      MailboxMessageContextDelivered: ["family", "Agent message entered context"],
+      MailboxMessageDeliveryFailed: ["attention", "Agent message delivery failed"],
+      GoalGateEvaluationRecorded: ["family", "Completion gate evaluated"],
+    };
+    if (exact[value]) return { category: exact[value][0], label: exact[value][1] };
+    if (/failed|blocked|unknown|cancel/i.test(value)) {
+      return { category: "attention", label: humanState(value) };
+    }
+    if (/model|provider/i.test(value)) return { category: "model", label: humanState(value) };
+    if (/cell|effect|process|generation|skill/i.test(value)) return { category: "action", label: humanState(value) };
+    if (/task|session|run|mailbox|goal|gate|agent/i.test(value)) return { category: "family", label: humanState(value) };
+    return { category: "system", label: humanState(value) };
+  }
+
+  function relativeTime(value) {
+    if (!value) return "";
+    const time = Date.parse(value);
+    if (!Number.isFinite(time)) return boundedText(value, 80);
+    const difference = Math.round((time - Date.now()) / 1000);
+    const absolute = Math.abs(difference);
+    const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+    if (absolute < 60) return formatter.format(difference, "second");
+    if (absolute < 3600) return formatter.format(Math.round(difference / 60), "minute");
+    if (absolute < 86_400) return formatter.format(Math.round(difference / 3600), "hour");
+    return formatter.format(Math.round(difference / 86_400), "day");
+  }
+
+  function groupedActivities() {
+    const groups = [];
+    for (const progress of state.progress.values()) {
+      const semantic = semanticEvent(progress.stage, true);
+      groups.push({
+        category: semantic.category,
+        label: semantic.label,
+        route: progress.route,
+        provisional: true,
+        items: [{
+          kind: progress.stage,
+          summary: boundedText(progress.message, 600),
+          route: progress.route,
+          eventId: "",
+          cursor: "",
+          time: "",
+          producer: "",
+        }],
+      });
     }
     for (const item of state.activities) {
-      const row = document.createElement("li");
-      row.className = "activity-item";
-      const title = document.createElement("strong");
-      title.textContent = humanState(item.kind);
-      row.appendChild(title);
-      text(row, item.summary);
-      if (item.route) text(row, item.route.sessionId + " / " + item.route.branchId);
-      if (item.producer) text(row, "Producer: " + item.producer);
-      if (item.time) text(row, item.time);
-      view["activity-list"].appendChild(row);
+      const semantic = semanticEvent(item.kind, false);
+      const previous = groups.at(-1);
+      if (previous && !previous.provisional && previous.category === semantic.category &&
+          sameRoute(previous.route, item.route) && previous.items.length < 8) {
+        previous.items.push(item);
+        continue;
+      }
+      groups.push({
+        category: semantic.category,
+        label: semantic.label,
+        route: item.route,
+        provisional: false,
+        items: [item],
+      });
     }
-    view["activity-count"].textContent = String(state.activities.length + state.progress.size);
+    return groups;
+  }
+
+  function renderActivityGroup(group) {
+    const row = document.createElement("li");
+    const details = document.createElement("details");
+    details.className = "activity-group";
+    const summary = document.createElement("summary");
+    const indicator = document.createElement("span");
+    indicator.className = "activity-kind";
+    indicator.dataset.kind = group.category;
+    summary.appendChild(indicator);
+    const copy = document.createElement("span");
+    copy.className = "activity-summary";
+    const title = document.createElement("strong");
+    title.textContent = group.provisional ? "Live · " + group.label : group.label;
+    copy.appendChild(title);
+    const route = document.createElement("span");
+    route.textContent = group.route ? familyNameFor(group.route) : "Observer";
+    if (group.items.length > 1) route.textContent += " · " + group.items.length + " related events";
+    copy.appendChild(route);
+    summary.appendChild(copy);
+    const time = document.createElement("time");
+    time.className = "activity-time";
+    time.textContent = relativeTime(group.items[0]?.time);
+    if (group.items[0]?.time) time.title = group.items[0].time;
+    summary.appendChild(time);
+    details.appendChild(summary);
+
+    const list = document.createElement("ol");
+    list.className = "activity-details";
+    for (const item of group.items) {
+      const entry = document.createElement("li");
+      const semantic = semanticEvent(item.kind, group.provisional);
+      const heading = document.createElement("strong");
+      heading.textContent = semantic.label;
+      entry.appendChild(heading);
+      if (item.summary) text(entry, item.summary);
+      if (item.producer) text(entry, "Producer: " + item.producer);
+      if (item.eventId) text(entry, "Event: " + item.eventId);
+      if (item.cursor) text(entry, "Cursor: " + item.cursor);
+      list.appendChild(entry);
+    }
+    details.appendChild(list);
+    row.appendChild(details);
+    view["activity-list"].appendChild(row);
+  }
+
+  function renderActivities() {
+    view["activity-list"].replaceChildren();
+    for (const group of groupedActivities()) renderActivityGroup(group);
+    const count = state.activities.length + state.progress.size;
+    view["activity-count"].textContent = count + " update" + (count === 1 ? "" : "s");
+    renderCurrentWork();
   }
 
   function addEvent(item) {
@@ -1092,6 +1378,14 @@
       if (state.detailSection && state.detailNextCursor) {
         void loadDetail(state.detailSection, state.detailNextCursor, true);
       }
+    });
+    view["inspector-close"].addEventListener("click", closeInspector);
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && state.inspectorOpen) closeInspector();
+    });
+    window.addEventListener("resize", () => {
+      window.clearTimeout(state.layoutTimer);
+      state.layoutTimer = window.setTimeout(renderGraph, 100);
     });
     window.addEventListener("beforeunload", closeStream);
   }

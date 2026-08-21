@@ -99,5 +99,20 @@ describe("observer browser assets", () => {
     expect(html).toContain("Trusted local observer.");
     expect(html).toContain("can be sensitive");
     expect(html).toContain("not a security sandbox");
+    expect(html).toContain("observation streams can defer managed-service quiescence");
+  });
+
+  test("prioritizes current work and keeps route detail in context", async () => {
+    const html = await readAsset("index.html");
+    const javascript = await readAsset("app.js");
+
+    expect(html).toContain('id="current-work-title"');
+    expect(html).toContain('class="connection-details"');
+    expect(html).toContain('class="route-inspector"');
+    expect(html).not.toContain('data-depth="inspect"');
+    expect(javascript).toContain("groupedActivities");
+    expect(javascript).toContain("Model response requested");
+    expect(javascript).toContain("TypeScript action completed");
+    expect(javascript).toContain("state.inspectorOpen = true");
   });
 });

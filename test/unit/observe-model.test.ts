@@ -441,6 +441,31 @@ describe("observer projections", () => {
     });
     expect(overview.nodes[0]?.activityReason).toBe("budget_exceeded");
     expect(serializedUtf8Bytes(overview)).toBeLessThanOrEqual(OBSERVER_BOUNDS.familySnapshotBytes);
+
+    const active = state("root", "main", {
+      agentRuns: { run: run("running") },
+      appliedEventIds: ["created-root", "run-event"],
+      budget: { limits: {}, tokens: 1_250, costUsd: 0.12, turns: 3, wallTimeMs: 4_000, exceeded: false },
+    });
+    const activeOverview = deriveObserverFamilyOverview({
+      root,
+      routes: new Map([[observerRouteKey(root), routeSnapshot(root, active)]]),
+      edges: [],
+      truncated: false,
+      edgesTruncated: false,
+    });
+    expect(activeOverview.nodes[0]?.latestRun).toMatchObject({
+      id: "run",
+      status: "running",
+      stepCount: 0,
+      currentAction: "awaiting_model",
+    });
+    expect(activeOverview.nodes[0]?.budget).toMatchObject({
+      tokens: 1_250,
+      turns: 3,
+      wallTimeMs: 4_000,
+      exceeded: false,
+    });
   });
 
   test("distinguishes working, idle, attention, ended, and unavailable activity", () => {

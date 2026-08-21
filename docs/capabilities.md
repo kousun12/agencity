@@ -125,7 +125,7 @@ Deletion is fail-closed. `planned`, `blocked`, or `partial` receipts are not pro
 |---|---|---|
 | Source checkout | Supported | Bun 1.3.13 or newer with `bun install --frozen-lockfile`; `bun run dev` enters the product. |
 | Local `bun link` executable | Supported | `bun link` exposes `agencity` from the checkout and is covered by isolated linked-executable acceptance tests. |
-| Linked Observe assets | Supported | Checked-in HTML, JavaScript, and CSS resolve relative to the linked source module rather than the caller's current working directory. A linked black-box case loads all initial assets from another repository; its clean passing rerun remains open in the current verification record. |
+| Linked Observe assets | Supported | Checked-in HTML, JavaScript, and CSS resolve relative to the linked source module rather than the caller's current working directory. The isolated linked black-box case loads all initial assets from another repository and passes. |
 | Package registry release | Unavailable | The package is private and not published. |
 | Standalone binary/download channel | Unavailable | No supported standalone artifact is published or tested. |
 | Production-ready product claim | Unavailable | Passing local runtime tests does not establish hosted operations, hostile-code isolation, external integration availability, or production readiness. |
@@ -138,7 +138,7 @@ Deterministic local tests cover the runtime, protocol, managed product path, and
 |---|---|---|
 | Deterministic repository checks | Supported | `bun run verify`; reports only the checks actually run. |
 | Isolated linked-product acceptance | Supported | `bun run test:acceptance` and `bun run test:acceptance:matrix`. |
-| Observe browser journey | Conditional | After `bunx playwright install chromium`, run `bun run test:acceptance:observe-web`. This opt-in Playwright journey is not part of `bun run verify`; missing Chromium fails with setup guidance, and an unrun journey is unverified. |
+| Observe browser journey | Conditional | After `bunx playwright install chromium`, run `bun run test:acceptance:observe-web`. This opt-in Playwright journey is not part of `bun run verify`; missing Chromium fails with setup guidance, and an unrun journey is unverified. The August 21 foreground CLI/browser/server journey passed against a protocol-compatible managed fixture. |
 | Real OpenAI Responses-compatible provider smoke | Conditional | `AGENCITY_ACCEPTANCE_REAL_PROVIDER=1 OPENAI_API_KEY=... AGENCITY_ACCEPTANCE_REAL_MODEL=... bun run test:acceptance:external`. A custom `OPENAI_BASE_URL` must implement `/v1/responses`; Chat Completions compatibility alone is insufficient. |
 | Official Turso Sync server conformance | Conditional | `TURSO_SYNC_SERVER_BIN=/absolute/path/to/tursodb bun run test:turso-official`. The binary must match the pinned protocol version. |
 | Real Turso Cloud smoke | Conditional | `AGENCITY_TURSO_SMOKE=1 TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=... bun run test:acceptance:matrix` against a disposable database. |

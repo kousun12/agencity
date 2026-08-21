@@ -184,6 +184,10 @@ export function deriveObserverFamilyOverview(
     const parentState = edge ? family.routes.get(observerRouteKey(edge.parent))?.state : null;
     const task = edge && parentState?.tasks[edge.taskId] || null;
     const status = deriveObserverRouteStatus(state, task, edge !== undefined);
+    const run = state ? latestRun(state) : null;
+    const latestStep = run
+      ? [...run.steps].sort((left, right) => right.ordinal - left.ordinal)[0] ?? null
+      : null;
     return {
       route: snapshot.route,
       depth: state?.depth ?? (edge && parentState ? parentState.depth + 1 : null),
@@ -207,6 +211,25 @@ export function deriveObserverFamilyOverview(
         : null,
       sessionStatus: state?.status ?? null,
       ...status,
+      latestRun: run ? {
+        id: run.id,
+        task: boundText(run.task, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes }),
+        status: run.status,
+        stepCount: run.steps.length,
+        currentAction: latestStep?.action?.type ??
+          (["queued", "running"].includes(run.status) ? "awaiting_model" as const : null),
+        reason: run.reason
+          ? boundText(run.reason, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes })
+          : null,
+        deadline: run.deadline ?? null,
+      } : null,
+      budget: state ? {
+        tokens: state.budget.tokens,
+        costUsd: state.budget.costUsd,
+        turns: state.budget.turns,
+        wallTimeMs: state.budget.wallTimeMs,
+        exceeded: state.budget.exceeded,
+      } : null,
       snapshotCursor: snapshot.cursor,
     };
   });
