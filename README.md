@@ -109,7 +109,7 @@ Without `--port`, the operating system selects an ephemeral port. An explicit po
 
 The observer does not initialize a workspace, open its database, start or stop the managed service, recover or wake work, change the remembered product route, call managed mutations, or persist observer state. It passively reports uninitialized, stopped, stale, conflicting, incompatible, connecting, connected, resyncing, unavailable-route, and truncated-family states. While a browser is actively attached, the observer reads the existing revision-4 managed protocol and may keep that service attached; closing the last browser releases its managed reads and streams. Multiple tabs share one process-wide selected root family.
 
-The browser receives bounded read-only projections, lazy detail pages, and a bounded live event rail. It never receives a full `AgentState`, artifact bytes, or the managed-service bearer token. Agent names, tasks, messages, code, logs, and errors are sensitive and are rendered as inert text. See [User guide](./docs/user-guide.md), [Protocol](./docs/protocol.md), and [Security](./docs/security.md).
+The browser receives bounded read-only projections, lazy detail pages, and a bounded live event rail. Structured values and complete JSON objects and arrays are pretty-printed with syntax highlighting built from inert text nodes. It never receives a full `AgentState`, artifact bytes, or the managed-service bearer token. Agent names, tasks, messages, code, logs, and errors are sensitive and remain inert. See [User guide](./docs/user-guide.md), [Protocol](./docs/protocol.md), and [Security](./docs/security.md).
 
 Each session has one immutable-versioned behavioral profile. Inspect or govern the selected route without copying internal IDs:
 

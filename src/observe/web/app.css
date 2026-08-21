@@ -13,6 +13,10 @@
   --warn: #fbbf24;
   --bad: #fb7185;
   --unknown: #c4b5fd;
+  --code-key: #7dd3fc;
+  --code-string: #a7f3d0;
+  --code-number: #fcd34d;
+  --code-literal: #c4b5fd;
 }
 
 * {
@@ -733,6 +737,50 @@ main {
   white-space: pre-wrap;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.72rem;
+}
+
+.json-view {
+  max-width: 100%;
+  overflow: auto;
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(125, 211, 252, 0.14);
+  border-radius: 0.45rem;
+  background: #0b111b;
+  color: #dbe5f3;
+  line-height: 1.55;
+  overflow-wrap: normal;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.json-key {
+  color: var(--code-key);
+}
+
+.json-string {
+  color: var(--code-string);
+}
+
+.json-number {
+  color: var(--code-number);
+}
+
+.json-boolean,
+.json-null {
+  color: var(--code-literal);
+  font-weight: 650;
+}
+
+.current-action .json-view {
+  max-height: 16rem;
+  font-size: 0.78rem;
+}
+
+.activity-details .json-view {
+  max-height: 14rem;
+  margin-top: 0.35rem;
+  font-size: 0.67rem;
 }
 
 .empty-state {

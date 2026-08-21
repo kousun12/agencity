@@ -627,11 +627,13 @@
     view["current-work-elapsed"].textContent = formatDuration(budget?.wallTimeMs || 0);
 
     const semantic = activity ? semanticEvent(activity.kind, false) : null;
-    view["current-work-action"].textContent = progress
+    const currentAction = progress
       ? boundedText(progress.message || humanState(progress.stage), 600)
       : run?.currentAction
         ? actionLabel(run.currentAction)
         : semantic?.label || (node.activity === "idle" ? "Waiting for work." : "Current action unavailable.");
+    view["current-work-action"].replaceChildren();
+    appendFormattedValue(view["current-work-action"], currentAction);
     const notes = [];
     if (node.activityReason) notes.push("Attention: " + humanState(node.activityReason) + ".");
     if (run?.reason) notes.push(run.reason);
@@ -1020,7 +1022,7 @@
       const term = document.createElement("dt");
       term.textContent = fieldLabel(entry[0]);
       const description = document.createElement("dd");
-      description.textContent = formatValue(entry[1], 0);
+      appendFormattedValue(description, entry[1]);
       list.append(term, description);
     }
     if (Object.keys(data).length > 38) {
@@ -1063,29 +1065,109 @@
       .replace(/^./, (character) => character.toUpperCase()), 120);
   }
 
-  function formatValue(value, depth) {
-    if (value === null) return "null";
-    if (value === undefined) return "unavailable";
-    if (typeof value === "string") return boundedText(value);
-    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
-    if (
-      value &&
-      typeof value === "object" &&
-      ["complete", "prefix", "head_tail"].includes(asObject(value).kind)
-    ) {
-      return boundedText(value);
+  function isBoundedText(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const kind = asObject(value).kind;
+    return ["complete", "prefix", "head_tail"].includes(kind);
+  }
+
+  function parsedJsonContainer(value) {
+    if (typeof value !== "string") return null;
+    const source = value.trim();
+    if (!source || !["{", "["].includes(source[0])) return null;
+    try {
+      const parsed = JSON.parse(source);
+      return parsed && typeof parsed === "object" ? { value: parsed } : null;
+    } catch {
+      return null;
     }
-    if (depth >= 2) return "[bounded structured value]";
+  }
+
+  function structuredValue(value) {
+    if (isBoundedText(value)) {
+      return asObject(value).kind === "complete" ? parsedJsonContainer(boundedText(value)) : null;
+    }
+    if (Array.isArray(value)) return { value };
+    if (value && typeof value === "object") return { value };
+    return parsedJsonContainer(value);
+  }
+
+  function normalizedStructuredValue(value, depth) {
+    if (isBoundedText(value)) {
+      const visible = boundedText(value);
+      const parsed = asObject(value).kind === "complete" ? parsedJsonContainer(visible) : null;
+      return parsed ? normalizedStructuredValue(parsed.value, depth) : visible;
+    }
+    if (value === undefined) return "unavailable";
+    if (typeof value === "bigint") return String(value);
+    if (value === null || typeof value !== "object") return value;
+    if (depth >= 6) return "[bounded structured value]";
     if (Array.isArray(value)) {
-      const values = value.slice(0, 16).map((item) => formatValue(item, depth + 1));
-      if (value.length > values.length) values.push("… " + (value.length - values.length) + " more");
-      return boundedText("[\n" + values.join(",\n") + "\n]");
+      const selected = value.slice(0, 16).map((item) => normalizedStructuredValue(item, depth + 1));
+      if (value.length > selected.length) selected.push("… " + (value.length - selected.length) + " more items");
+      return selected;
     }
     const object = asObject(value);
     const entries = Object.entries(object).slice(0, 20);
-    const values = entries.map((entry) => entry[0] + ": " + formatValue(entry[1], depth + 1));
-    if (Object.keys(object).length > entries.length) values.push("… additional fields omitted");
-    return boundedText("{\n" + values.join(",\n") + "\n}");
+    const normalized = {};
+    for (const [key, item] of entries) normalized[key] = normalizedStructuredValue(item, depth + 1);
+    if (Object.keys(object).length > entries.length) normalized["…"] = "additional fields omitted";
+    return normalized;
+  }
+
+  function appendHighlightedJson(parent, value) {
+    let serialized;
+    try {
+      serialized = JSON.stringify(normalizedStructuredValue(value, 0), null, 2);
+    } catch {
+      serialized = "[unserializable value]";
+    }
+    const source = boundedText(serialized ?? "null");
+    const block = document.createElement("pre");
+    block.className = "json-view";
+    const code = document.createElement("code");
+    const tokens = /"(?:\\.|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b/g;
+    let cursor = 0;
+    let match;
+    while ((match = tokens.exec(source)) !== null) {
+      if (match.index > cursor) code.appendChild(document.createTextNode(source.slice(cursor, match.index)));
+      const token = document.createElement("span");
+      const text = match[0];
+      if (text[0] === '"') {
+        token.className = /^\s*:/.test(source.slice(tokens.lastIndex)) ? "json-key" : "json-string";
+      } else if (text === "true" || text === "false") {
+        token.className = "json-boolean";
+      } else if (text === "null") {
+        token.className = "json-null";
+      } else {
+        token.className = "json-number";
+      }
+      token.textContent = text;
+      code.appendChild(token);
+      cursor = tokens.lastIndex;
+    }
+    if (cursor < source.length) code.appendChild(document.createTextNode(source.slice(cursor)));
+    block.appendChild(code);
+    parent.appendChild(block);
+  }
+
+  function appendFormattedValue(parent, value) {
+    const structured = structuredValue(value);
+    if (structured) {
+      appendHighlightedJson(parent, structured.value);
+      return;
+    }
+    if (value === null) {
+      parent.textContent = "null";
+      return;
+    }
+    if (value === undefined) {
+      parent.textContent = "unavailable";
+      return;
+    }
+    parent.textContent = typeof value === "string" || isBoundedText(value)
+      ? boundedText(value)
+      : String(value);
   }
 
   function activityFrom(source, kind) {
@@ -1247,7 +1329,11 @@
       const heading = document.createElement("strong");
       heading.textContent = semantic.label;
       entry.appendChild(heading);
-      if (item.summary) text(entry, item.summary);
+      if (item.summary) {
+        const structured = structuredValue(item.summary);
+        if (structured) appendHighlightedJson(entry, structured.value);
+        else text(entry, item.summary);
+      }
       if (item.producer) text(entry, "Producer: " + item.producer);
       if (item.eventId) text(entry, "Event: " + item.eventId);
       if (item.cursor) text(entry, "Cursor: " + item.cursor);

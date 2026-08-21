@@ -101,6 +101,24 @@ describe("observer browser assets", () => {
     expect(html).not.toContain('class="trust-notice"');
   });
 
+  test("pretty-prints and syntax-highlights structured detail without markup injection", async () => {
+    const javascript = await readAsset("app.js");
+    const css = await readAsset("app.css");
+
+    expect(javascript).toContain("function appendHighlightedJson");
+    expect(javascript).toContain("JSON.stringify(normalizedStructuredValue(value, 0), null, 2)");
+    expect(javascript).toContain('asObject(value).kind === "complete" ? parsedJsonContainer');
+    expect(javascript).toContain('token.className = /^\\s*:/.test');
+    expect(javascript).toContain('token.textContent = text');
+    expect(javascript).toContain('document.createTextNode(source.slice');
+    expect(css).toContain(".json-view");
+    expect(css).toContain(".json-key");
+    expect(css).toContain(".json-string");
+    expect(css).toContain(".json-number");
+    expect(css).toContain(".json-boolean");
+    expect(css).toContain(".json-null");
+  });
+
   test("prioritizes current work and keeps route detail in context", async () => {
     const html = await readAsset("index.html");
     const javascript = await readAsset("app.js");

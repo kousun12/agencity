@@ -202,6 +202,15 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     await page.locator("#detail-list .detail-card").waitFor();
     const detailText = await page.locator("#detail-list").textContent();
     expect(detailText).toContain(HOSTILE_DETAIL_TEXT);
+    expect(await page.locator("#detail-list .json-view").count()).toBeGreaterThan(0);
+    expect(await page.locator("#detail-list .json-key").count()).toBeGreaterThan(0);
+    expect(await page.locator("#detail-list .json-string").count()).toBeGreaterThan(0);
+    const resultJson = page.locator("#detail-list .json-view").filter({ hasText: '"renderedAs"' });
+    expect(await resultJson.count()).toBe(1);
+    expect(await resultJson.textContent()).toContain('\n  "nested": [\n');
+    expect(await resultJson.locator(".json-number").count()).toBeGreaterThan(0);
+    expect(await resultJson.locator(".json-boolean").count()).toBeGreaterThan(0);
+    expect(await resultJson.locator(".json-null").count()).toBeGreaterThan(0);
     expect(await page.locator("#detail-list script").count()).toBe(0);
     expect(await page.locator("#detail-list img").count()).toBe(0);
     expect(await page.locator("#detail-list svg").count()).toBe(0);

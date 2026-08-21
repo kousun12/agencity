@@ -124,7 +124,14 @@ function initialStates(): AgentState[] {
   alpha = reduceAgentState(alpha, started);
   const committed = nextEvent(alpha, "CellCommitted", {
     cellId: "hostile-cell",
-    result: { renderedAs: "text", hostile: HOSTILE_DETAIL_TEXT },
+    result: {
+      renderedAs: "text",
+      hostile: HOSTILE_DETAIL_TEXT,
+      count: 2,
+      complete: true,
+      missing: null,
+      nested: ["first", { active: false }],
+    },
     logs: [HOSTILE_DETAIL_TEXT],
     durationMs: 1,
     exports: [],
