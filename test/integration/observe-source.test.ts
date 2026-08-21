@@ -281,6 +281,37 @@ describe("AgentClient observer source adapter", () => {
     connected.source.close();
   });
 
+  test("accepts the compatible reducer-24 snapshot from a running revision-4 service", async () => {
+    const root = await workspace();
+    const rawToken = Buffer.alloc(32, 8).toString("base64url");
+    const cursor = "00000000000000000001";
+    const retainedState = {
+      ...routeState(cursor),
+      reducerVersion: 24,
+    } as unknown as AgentState;
+    const server = protocolServer({
+      token: rawToken,
+      snapshot: { cursor, state: retainedState },
+    });
+    await manifest(root, {
+      url: `http://127.0.0.1:${server.port}`,
+      bearerToken: rawToken,
+    });
+    const connected = await agentClientObserverSourceFactory.connect({
+      workspaceRoot: root,
+      workspaceId,
+    });
+    expect(connected.kind).toBe("connected");
+    if (connected.kind !== "connected") return;
+    const snapshot = await connected.source.loadRouteSnapshot({
+      sessionId: "root",
+      branchId: "main",
+    });
+    expect(snapshot.state.reducerVersion).toBe(24);
+    expect(snapshot.state.sessionName).toBe("Root");
+    connected.source.close();
+  });
+
   test("rejects malformed managed root rows", async () => {
     const root = await workspace();
     const rawToken = Buffer.alloc(32, 5).toString("base64url");

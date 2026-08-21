@@ -18,6 +18,10 @@ const REQUIRED_PROTOCOL_REVISION = 4;
 const READ_TIMEOUT_MS = 5_000;
 const MAX_ROOT_ROWS = 10_000;
 const MAX_ROOT_NAME_BYTES = 16 * 1024;
+const COMPATIBLE_OBSERVER_REDUCER_VERSIONS = new Set<number>([
+  24,
+  REDUCER_VERSION,
+]);
 
 type ManagedHealth = Awaited<ReturnType<AgentClient["health"]>>;
 
@@ -113,7 +117,7 @@ function validateSnapshot(
     throw new Error("Managed route snapshot is invalid");
   }
   const state = value.state;
-  if (state.reducerVersion !== REDUCER_VERSION ||
+  if (!COMPATIBLE_OBSERVER_REDUCER_VERSIONS.has(Number(state.reducerVersion)) ||
       state.sessionId !== route.sessionId ||
       state.workspaceId !== workspaceId ||
       state.cursor !== value.cursor ||
