@@ -2,77 +2,115 @@
 
 **Status:** Proposed  
 **Date:** August 19, 2026  
+**Corrected:** August 20, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Ergonomic agent-family navigation](./2026-08-07-ergonomic-agent-family-navigation-plan.md) and [Workspace Agents view](./2026-08-08-workspace-agents-view-plan.md)
 
 ## Summary
 
-Agencity Observe is a localhost web interface for watching one active agent family:
+Agencity Observe is a read-only localhost web interface for watching one active agent family:
 
 ```sh
 agencity observe
 ```
 
-It renders durable agents, parent-child delegation, mailbox messages, runs, model actions, TypeScript cells, effects, goals, gates, budgets, and unresolved outcomes as current state and live activity.
+It presents durable agents, parent-child delegation, mailbox lifecycles, runs, model actions, TypeScript cells, effects, goals, gates, budgets, and unresolved outcomes as bounded current state and live activity.
 
-The command starts an independent observer web server. The observer is a disposable client of Agencity's public managed protocol. It does not own the workspace service, open the database, execute agent work, or become part of durable agent identity.
+The foreground `agencity observe` process owns only the observer HTTP server and disposable observer projections. It is a client of bounded, read-only managed-protocol views. It does not initialize an Agencity workspace, start or stop the managed workspace service, open LibSQL, execute work, mutate product selection, or become part of durable agent identity.
 
-The first version is intentionally small:
+The first version provides:
 
-- one workspace and one selected root family at a time;
-- current state plus live updates;
+- one workspace and one process-wide selected initial root family;
+- bounded current state and live updates;
 - read-only behavior;
-- a clean family graph with progressively deeper inspection;
-- no full historical replay, durable observer index, or control actions.
+- a family graph with progressively deeper, lazy inspection;
+- exact cursor provenance for newly observed committed events;
+- item event IDs and enclosing snapshot cursors for retained projected items;
+- no full historical replay, durable observer index, branch-topology view, or control actions.
 
 ## Product decisions
 
 - The audience includes ordinary users, operators, and people viewing a demonstration.
-- One interface serves those audiences through progressive disclosure rather than separate applications.
+- One interface serves those audiences through progressive disclosure.
 - Current state and live activity are required.
-- Full historical replay is deferred before current state or live activity.
-- The interface is observational in the first version.
-- Steering and cancellation may be added later through an explicit privileged control boundary.
-- One observer process follows one active root family at a time.
-- `agencity observe` is the product entrypoint.
-- The observer web server has an independent process and lifecycle.
-- The managed Agencity protocol is the source boundary. Direct LibSQL access is prohibited.
+- Full historical replay is not required for the first version.
+- The interface is observational. Steering and cancellation require a later privileged control boundary.
+- One observer process follows one selected initial root family at a time.
+- Multiple authenticated browser tabs share the process-wide selection. Selecting a family in one tab replaces the family in every tab.
+- `agencity observe` is a foreground product command. It does not spawn an observer child or detach.
+- Omission of `--port` requests an ephemeral port. An explicit `--port` accepts a decimal integer from 1 through 65,535 and fails on a bind conflict rather than selecting another port.
+- The observer uses read-only workspace discovery before ordinary product bootstrap can initialize state or connect the managed service.
+- The managed Agencity protocol is the agent-state source boundary. Direct LibSQL or projection-table access is prohibited.
+- Service manifest and workspace identity files may be observed as owner-only discovery metadata. They are not agent-state read side channels.
+- The implementation adds bounded, read-only managed-protocol observation views. Raw `AgentState` snapshots are not sent to browser JavaScript and are not the family-graph source.
+- A process-local browser session cookie authenticates the observer web API and SSE stream. The managed-service bearer token never enters the browser.
+- Branch-fork topology is deferred. A route node may display its branch name, but version one does not discover or render branch-fork edges.
 
 ## Goals
 
 - Make the structure and activity of one agent family understandable at a glance.
-- Show children appearing as durable delegated work is admitted.
-- Show committed mailbox sends, delivery, acknowledgment, and queued work between family members.
-- Let a user inspect a session route, run, model attempt, cell, effect, goal, gate, budget, and terminal outcome.
+- Show children appearing when durable delegated work is admitted.
+- Show one coherent lifecycle for each committed family message: queued, delivered, delivered to context, acknowledged, or failed.
+- Let a user inspect a route, run, model attempt, cell, effect, task, message, goal, gate, budget, artifact reference, and terminal outcome through bounded pages.
 - Distinguish durable committed truth from provisional streaming progress.
-- Preserve exact session, branch, task, event, run, cell, effect, and cursor provenance in deeper views.
-- Survive observer refresh, observer restart, protocol reconnect, and managed-service restart without inventing or duplicating activity.
+- Preserve exact route and durable identity for projected items.
+- Preserve exact event ID and cursor for committed events observed after attachment.
+- Mark retained item provenance truthfully when only an item event ID and enclosing snapshot cursor are available.
+- Survive browser refresh, protocol reconnect, observer restart, and managed-service replacement without mixing generations, inventing activity, or duplicating committed events.
+- Release every upstream managed-service subscription when the last browser disconnects.
 - Keep the observer replaceable and isolated from runtime ownership.
-- Work through the supported source and linked-executable product entrypoints.
+- Work through the supported source-checkout and linked-executable entrypoints.
 
 ## Non-goals
 
-- Steering, cancellation, message sending, task admission, model changes, or any other Agencity mutation in the first version.
-- Full historical playback or arbitrary cursor scrubbing.
+- Steering, cancellation, message sending, task admission, model changes, or any other Agencity mutation.
+- Full historical playback, arbitrary cursor scrubbing, or recovery of historical item cursors that are absent from current projections.
 - Observing multiple root families or workspaces at once.
+- Per-tab independent family selection.
+- Displaying branch-fork topology.
 - A durable analytics database, event warehouse, or search index.
 - Direct reads from canonical or projection tables.
+- Forwarding full branch snapshots to browser JavaScript.
 - Replacing the terminal TUI.
-- Making the observer a supervisor, service owner, scheduler, recovery process, or keep-alive daemon.
-- Exposing the managed service bearer token to browser JavaScript.
+- Making the observer a supervisor, service owner, scheduler, recovery process, or daemon.
+- Keeping the managed workspace service alive when no browser is attached.
+- Exposing the managed-service bearer token to browser JavaScript.
 - Adding browser-use tools or browser execution to model-generated work.
 - Claiming remote, multi-user, or hostile-code-safe operation.
 
 ## Terms
 
-- **Observer server:** The disposable localhost Bun process started by `agencity observe`.
-- **Observer client:** A browser page connected to the observer server.
+- **Observer process:** The foreground Bun process running `agencity observe`.
+- **Observer server:** The loopback HTTP server hosted by the observer process.
+- **Observer client:** An authenticated browser page connected to the observer server.
+- **Browser attachment:** One active authenticated observer API handler or family SSE stream. A retained session cookie without an active request or stream is not an attachment.
 - **Route:** One exact `{ sessionId, branchId }` pair.
-- **Active family:** One selected root route and the retained descendant routes reachable through durable child tasks.
-- **Family graph:** A derived read-only graph of route nodes and retained task, mailbox, and branch relationships.
-- **Durable activity:** A canonical event with an exact event ID and cursor.
-- **Provisional progress:** Cursorless, process-local effect progress that may be dropped and is never replayed.
-- **Observer projection:** Disposable in-memory state derived from protocol snapshots and streams.
+- **Selected root:** One resumable route whose session is a root session and whose branch is the session's initial branch.
+- **Active family:** The selected root route and retained descendant routes reachable through durable child tasks.
+- **Family graph:** A disposable read-only graph of route nodes, delegation edges, and message lifecycles.
+- **Durable activity:** Metadata for a canonical event with its exact route, event ID, cursor, type, producer, and commit time.
+- **Provisional progress:** Cursorless, process-local effect progress that may be dropped and is never replayed as durable history.
+- **Managed observation view:** A versioned, bounded, read-only managed-protocol response designed for clients that must not load or forward a full `AgentState`.
+- **Observer generation:** A random process-local identifier for one coherent observer state. It changes on family selection, managed-instance replacement, and explicit resync.
+- **Observer sequence:** A process-local monotonically increasing SSE sequence within one observer generation. It supports browser catch-up but never replaces canonical route cursors.
+- **Observer projection:** Disposable in-memory family state derived from bounded managed observation snapshots and streams.
+
+## State and availability model
+
+The browser displays these states without collapsing them into generic unavailability:
+
+- `workspace_uninitialized` — no valid owner-only workspace identity marker exists;
+- `service_stopped` — no managed-service manifest exists;
+- `service_stale` — a manifest exists but no matching live service can be established;
+- `service_conflict` — authenticated identity or execution authority is inconsistent;
+- `service_incompatible` — protocol, capability, or observation-view version is unsupported;
+- `connecting` — the observer is validating one discovered managed instance;
+- `connected` — bounded snapshots and streams belong to one authenticated authoritative instance;
+- `resyncing` — the observer discarded one generation and is rebuilding from fresh snapshots;
+- `route_unavailable` — a retained task references a route that cannot be loaded;
+- `family_truncated` — the 64-route bound stopped discovery before the full descendant closure was loaded.
+
+The observer never deletes stale manifests, repairs authority, starts a service, or opens storage to settle these states.
 
 ## User experience
 
@@ -80,262 +118,554 @@ The first version is intentionally small:
 
 `agencity observe`:
 
-1. resolves the workspace using ordinary product workspace discovery;
-2. starts an observer server on `127.0.0.1`, using an ephemeral port unless `--port` is supplied;
-3. prints the localhost URL;
-4. discovers an existing managed Agencity service without starting, stopping, or taking ownership of it;
-5. keeps serving if the managed service is unavailable and reconnects when it becomes available.
+1. branches in CLI dispatch before `resolveWorkspace()` or `connectManagedService()`;
+2. discovers the workspace root with read-only `observeWorkspace()` semantics;
+3. starts the observer server in the command process on `127.0.0.1`;
+4. generates a 256-bit base64url browser bootstrap token;
+5. prints a URL using the actual bound port and a fragment containing that token;
+6. serves the interface even when the workspace is uninitialized or the managed service is absent;
+7. passively watches the workspace identity marker and managed-service manifest;
+8. establishes authenticated managed-protocol access only while at least one browser is attached.
 
-Stopping the command stops only the observer server. It does not stop sessions, runs, effects, workers, or the managed workspace service.
+Example:
+
+```text
+http://127.0.0.1:43127/#token=<observer-bootstrap-token>
+```
+
+The command does not open a browser automatically. Ctrl-C, SIGINT, or SIGTERM closes browser streams, aborts every upstream request and subscription, stops the observer server, and exits. It does not stop sessions, runs, effects, workers, managed processes, or the managed workspace service.
+
+The command accepts only observer-relevant product options:
+
+- `--workspace` or the compatible `--workspace-root` alias;
+- `--port`;
+- `--help`;
+- `--version`.
+
+Task text, model options, execution configuration, storage overrides, sync configuration, and mutation options are rejected for `observe`. Observer discovery does not reconstruct a managed-service execution configuration and does not compare an observer-derived execution configuration hash.
+
+The existing discovery helpers do not satisfy these requirements: `observeManagedService()` compares an execution configuration hash, and `readServiceManifest()` may create missing metadata directories. The observer uses a strictly read-only manifest reader that never creates directories or files, retains the owner-only and `O_NOFOLLOW` validation patterns, and validates the service through authenticated identity and observation status rather than a configuration hash.
+
+### Browser session
+
+The initial HTML and static assets contain no workspace or agent data.
+
+1. Browser JavaScript reads the bootstrap token from the URL fragment.
+2. It sends the token once in `X-Agencity-Observe-Bootstrap` to `POST /api/session`.
+3. The server compares the token in constant time and returns a random 256-bit process-local session cookie.
+4. The cookie is `HttpOnly`, `SameSite=Strict`, and scoped to `Path=/api`. The `Secure` attribute is omitted for cross-browser loopback-HTTP compatibility.
+5. After a successful exchange, JavaScript removes the fragment with `history.replaceState`.
+6. Browser refresh reuses the HttpOnly session cookie. JavaScript never reads that cookie.
+
+The bootstrap token may establish browser sessions only for the lifetime of the observer process. Observer restart invalidates every browser session and prints a new bootstrap URL.
 
 ### Select one family
 
-The observer reads `GET /product/sessions` and lists resumable root routes.
+The observer requests a paged managed root catalog. A selectable row satisfies all of these conditions:
 
-- If exactly one resumable initial root route exists, it is selected.
-- Otherwise the browser presents a root-family selector.
-- Selection is observer-local and process-local.
-- Selection does not call `POST /product/select` and does not change the route resumed by ordinary `agencity`.
-- Selecting another root replaces the current family projection and subscriptions.
+- `root === true`;
+- `initialBranch === true`;
+- status is neither `failed` nor `archived`.
+
+Behavior:
+
+- If exactly one selectable root exists, the observer selects it.
+- If zero or multiple selectable roots exist, the browser presents a selector.
+- Catalog pages contain at most 100 rows and 256 KiB and report the exact selectable-root count. Root enumeration uses durable session records; only root initial branches are projected to determine status, and non-root branch histories are never loaded.
+- Selection is process-local and shared by authenticated tabs.
+- Selection never calls `POST /product/select` and never changes ordinary `agencity` resume selection.
+- A selection request carries the expected observer generation. A stale request is rejected.
+- Selecting another root aborts the old generation, discards provisional progress, builds a new generation, and broadcasts one projection replacement to all tabs.
 
 ### Main layout
 
 The first interface has three depths:
 
-1. **Overview** — the default family graph, status, task summaries, and live motion.
-2. **Inspect** — details for the selected node, run, message, cell, effect, goal, or gate.
-3. **Events** — exact new committed events observed during this observer connection, including cursor and provenance.
+1. **Overview** — family graph, route activity, task summaries, and live motion.
+2. **Inspect** — lazy bounded pages for the selected node, run, message, cell, effect, task, goal, gate, budget, or artifact reference.
+3. **Events** — exact committed event metadata observed during the current observer process connection.
 
-The default overview does not show raw prompts, code, tool input, tool output, or message bodies. Those values appear only after deliberate inspection.
+The overview does not request raw prompts, source code, effect input, effect output, logs, or message bodies. Those values are fetched only when the user opens the corresponding inspector section.
 
 The primary layout contains:
 
-- a header with workspace, family, managed-service, and stream status;
+- a header with workspace, selected family, managed-service instance, generation, and stream status;
 - a stable parent-to-child family graph;
 - a selected-item inspector;
 - a bounded live-activity rail.
 
 ### Graph semantics
 
-- Each node is one exact session and branch route.
-- A node displays its name, branch when needed, depth, model, task summary, session status, and derived activity.
-- A delegation edge comes from a retained task linking the exact parent and child routes.
-- A message edge comes from retained mailbox events. The observer does not infer communication from assistant text.
-- A branch-fork edge is visually distinct from delegation.
-- Failed, blocked, cancelled, budget-exceeded, unknown, stale, unavailable, and cancellation-pending states remain distinct.
-- Node positions remain stable while the selected family is unchanged.
+- Each node is one exact route.
+- A node displays bounded name, branch name, depth, model, task summary, session status, and runtime-derived family activity.
+- A delegation edge comes from one retained task linking exact parent and child routes.
+- Branch forks are not graph edges in version one.
+- A message edge is keyed by `mailboxMessageId`, not by one event or route.
+- Sent, delivered, context-delivered, acknowledged, and delivery-failed events update one message lifecycle.
+- Every underlying canonical event remains a distinct item in the event rail.
+- Communication is never inferred from assistant text.
+- Failed, blocked, cancelled, budget-exceeded, unknown, stale, unavailable, truncated, and cancellation-pending states remain distinct.
+- Node positions remain stable within one observer generation.
 
-Live animation is presentational. The committed snapshot and event cursors determine state.
+Live animation is presentational. Bounded managed snapshots, exact route cursors, and committed event metadata determine state.
 
-### Inspectors
+### Inspectors and provenance
 
-The node inspector reads the selected route's projected state and exposes:
+The managed observation API exposes these paged sections for one selected route:
 
-- durable identity, parent, root, branch, model, profile summary, and session status;
+- identity, parent, root, branch, model, active profile summary, and session status;
 - active and terminal runs with steps and typed outcomes;
 - model attempts and usage;
 - cells with bounded source, logs, result, and error;
-- effects with executor, operation, origin, attempts, outcome, and uncertainty;
-- tasks and mailbox state;
+- effects with executor, operation, origin, attempt count, outcome, and uncertainty;
+- exact-route tasks and mailbox state;
 - budget limits and consumption;
 - goals, gates, and current evaluations;
-- artifacts as metadata only in the first version.
+- artifact metadata without artifact bytes.
 
-Large or sensitive fields are collapsed by default. Existing bounded and scrubbed protocol values remain authoritative; the observer does not recover omitted bytes through side channels.
+Each detail page:
+
+- contains at most 50 items;
+- is at most 128 KiB serialized;
+- carries a version, route, snapshot cursor, pagination cursor, and truncation state;
+- carries each item's durable ID and event ID when the current projection retains one;
+- does not claim an exact historical event cursor unless that cursor is retained in the projection;
+- represents oversized text with a bounded prefix or head/tail view, original UTF-8 byte count, completeness state, and digest when available;
+- never resolves omitted bytes through a direct database, artifact, file, or history side channel.
+
+The event rail is the exact-cursor view. Retained detail pages are current projections, not historical event reconstructions.
 
 ## Architecture
 
 ```text
 Browser
-  -> observer HTTP/SSE
-  -> observer projection and read-only source interface
-  -> authenticated AgentClient adapter
-  -> managed Agencity HTTP/SSE protocol
-  -> canonical events and deterministic projections
+  -> authenticated observer HTTP/SSE
+  -> bounded observer DTOs and disposable family projection
+  -> narrow read-only observer source
+  -> authenticated AgentClient observation methods
+  -> bounded managed observation snapshots, pages, and one family stream
+  -> canonical events and deterministic runtime projections
 ```
 
-### Process boundary
+### Process and package boundary
 
-The observer server is a separate Bun process launched by the CLI command. The CLI composes workspace discovery, the observer source adapter, and the server, but the observer package does not import or construct:
+The foreground CLI process hosts the observer server directly. There is no observer child process, daemon, detached mode, pid file, or durable observer manifest.
+
+The observer package does not import or construct:
 
 - `Supervisor`;
 - storage or LibSQL adapters;
 - effect executors;
 - the console worker pool;
-- managed-service ownership or shutdown controls.
+- product selection mutation;
+- managed-service startup, shutdown, stale cleanup, or execution configuration;
+- generic protocol request forwarding.
 
-The observer may use public protocol types and pure event-reduction functions. Runtime access occurs only through a narrow read-only source interface implemented with `AgentClient`.
+Only one adapter module may construct `AgentClient`. That adapter implements a narrow read-only interface. Observer server routes and browser DTO builders receive the narrow interface, never an unrestricted `AgentClient`.
 
-### Read-only source
+`check:architecture` enforces:
 
-The observer source initially needs:
+- observer UI and HTTP modules cannot import runtime, storage, LibSQL, executors, or product service ownership;
+- within `src/observe/` only, the observer source adapter may import `AgentClient`; existing CLI, TUI, and product-service imports of `AgentClient` remain valid and unchecked by this rule;
+- the adapter exposes only approved read methods;
+- checked-in web assets exist and resolve relative to `import.meta.url`;
+- observer browser assets contain no managed-service route, bearer-token field, or generic proxy mechanism.
 
-- managed-service availability and status;
-- the product session catalog;
-- branch snapshots;
-- branch committed-event streams and provisional progress;
-- family records, tasks, and bounded mailbox pages when snapshot state is insufficient.
+### Read-only managed observation contract
 
-The source interface contains no generic request method and no mutation method. The browser receives a purpose-built observer API rather than a transparent proxy to the managed protocol.
+The implementation adds versioned, bounded, read-only protocol methods and corresponding `AgentClient` methods:
+
+- service observation identity, capability, and execution-authority status;
+- paged selectable initial-root catalog;
+- route observation summary;
+- paged direct-child task edges;
+- paged exact-route inspector sections;
+- one multiplexed family observation stream that accepts an explicit route set at open and carries route-tagged bounded committed-event metadata and provisional progress.
+
+The family observation stream carries no server-computed projection deltas. The observer refetches bounded inspector sections and route summaries, keyed by the committed event types it observes, only while those sections are requested or visible. One stream connection covers every loaded route; adding a newly discovered route reopens the stream with the expanded route set and the retained per-route cursors.
+
+The service advertises an explicit `observationV1` capability. Admission requires:
+
+- managed-service support;
+- product root-catalog support;
+- snapshot-plus-cursor resume;
+- committed-event deduplication;
+- cursorless progress support;
+- the exact managed observation view version;
+- a supported reducer/projection version.
+
+An unsupported capability or version produces `service_incompatible`.
+
+Managed observation responses are server-side projections. They do not serialize a full `AgentState`. They preserve runtime-derived activity semantics instead of reimplementing those semantics in browser formatting code.
+
+The route mailbox view filters by exact `fromBranchId` or `toBranchId`. A session-wide mailbox page is not an exact-route source. The mailbox projection already stores exact from- and to-branch IDs, so exact-route filtering is a new query without a storage migration.
+
+The paged root catalog applies its filters and limits before loading route projections. It does not call the existing unbounded all-branch catalog path and then truncate the serialized result. The existing `/service/agents` roots listing remains unchanged in version one; the paged root catalog is a separate versioned observation route.
+
+Version one adds no new relational tables. If a later revision adds a bounded-view cache table, it must follow the repository migration and table-classification rules.
+
+### Bounds
+
+The first version applies these limits:
+
+- root catalog page: 100 rows and 256 KiB;
+- direct-child page: 32 edges and 128 KiB;
+- loaded family: 64 routes;
+- concurrent family discovery requests: 4;
+- one managed read timeout: 5 seconds;
+- detail page: 50 items and 128 KiB;
+- observer family snapshot delivered to a browser: 512 KiB;
+- one browser SSE envelope: 64 KiB;
+- browser SSE pending queue: 256 envelopes or 1 MiB, whichever is reached first;
+- live-activity rail: 200 items or 1 MiB;
+- observer replay buffer: 512 envelopes or 2 MiB.
+
+Crossing a page or family bound returns explicit `truncated` metadata. When the 64-route bound stops breadth-first discovery, the total descendant count is unknown unless a managed response already supplied it. The UI says that more routes were not loaded; it does not invent an exact omitted count.
+
+Crossing a stream envelope bound omits the payload, retains event identity and digest metadata, and marks the affected inspector section stale. Crossing a browser queue or replay bound emits `resync_required`, discards provisional progress, and requires a fresh bounded family snapshot.
 
 ### Family discovery
 
 The observer builds one family breadth-first:
 
-1. load the selected root snapshot;
-2. read direct child task references;
-3. load each exact child route;
-4. repeat with a visited-route set;
-5. preserve unavailable referenced children as explicit placeholder nodes.
+1. load the selected bounded root summary;
+2. request one page of direct-child task edges;
+3. enqueue exact child routes in canonical task order;
+4. load at most four routes concurrently;
+5. continue child-page traversal while total loaded routes remain below 64;
+6. preserve referenced but unavailable children as placeholder nodes;
+7. mark the graph truncated when routes or child pages remain.
 
-The first version caps the projection at 64 routes. A larger family is shown as truncated with an exact omitted count when available. The cap is a display and resource bound, not a change to durable family state.
+A visited-route set prevents cycles and duplicate loading. A task edge remains identified by `taskId`. Family discovery does not scan the product branch catalog for forks.
 
-This fan-out avoids adding a runtime-specific visualization endpoint at the start. A general read-only recursive family projection or aggregate stream is considered only after measuring the first implementation.
+### Live updates and generations
 
-### Live updates
+The observer maintains one managed route cursor per loaded route and one observer sequence per generation. One multiplexed family observation stream covers every loaded route.
 
-The observer maintains one snapshot cursor per route and follows the existing snapshot-plus-cursor contract:
+For the managed family observation stream:
 
 - cursors remain decimal strings and are compared as `BigInt`;
-- committed events are applied serially;
-- duplicate or older cursors are ignored;
-- reconnect resumes after the last successfully applied cursor;
-- a replacement snapshot may rebuild the disposable projection;
-- newly created child tasks trigger bounded family discovery.
+- committed events are applied serially per route;
+- duplicate or older route cursors are ignored;
+- provisional progress remains separate from durable state;
+- a committed effect outcome removes matching progress;
+- a newly committed child task schedules bounded family discovery, and newly loaded routes join by reopening the stream with the expanded route set and retained per-route cursors;
+- stale inspector sections are refetched only while requested or visible.
 
-Provisional effect progress is held separately from durable state. It is removed on the matching committed outcome, disconnect, reconnect, or family switch.
+Every asynchronous completion is checked against the current observer generation and managed `instanceId`. Results from an older generation are ignored.
 
-The observer process does not retain a second durable event log. Its live-activity rail is bounded memory and begins with the current observer connection. Full retained state remains inspectable from branch snapshots.
+Managed-service replacement:
 
-### Observer web protocol
+1. aborts the family observation stream and pending reads;
+2. discards provisional progress;
+3. validates the replacement manifest and observation status;
+4. checks required capabilities and versions;
+5. creates a new `AgentClient` inside the source adapter;
+6. loads fresh bounded snapshots;
+7. emits one projection replacement with a new observer generation.
 
-The initial observer server exposes only:
+`AgentClient.watchBranch()` alone is not replacement recovery because it snapshots only once and reconnects to one prior service. The observer lifecycle owns instance replacement.
 
-- static application assets;
+The observer sends an SSE heartbeat comment at least every 15 seconds. A disconnected or slow browser never causes an unbounded queue.
+
+### Browser snapshot and stream race
+
+`GET /api/bootstrap` and `GET /api/family/snapshot` return:
+
+- observer protocol version;
+- observer generation;
+- current observer sequence;
+- managed instance ID when connected;
+- bounded family projection;
+- exact per-route cursor map;
+- truncation and availability state.
+
+The browser opens:
+
+```text
+GET /api/family/stream?generation=<generation>&after=<observer-sequence>
+```
+
+The query carries no credential or managed cursor. The HttpOnly session cookie authenticates the request.
+
+If the requested generation matches and the bounded replay buffer contains every later envelope, the server replays them in observer-sequence order. Otherwise it emits `resync_required` and closes the stream. Browser reconnect obtains a fresh family snapshot before reopening.
+
+Each SSE envelope carries:
+
+- observer protocol version;
+- observer generation;
+- observer sequence;
+- managed instance ID;
+- route when applicable;
+- exact canonical event ID and route cursor for durable event metadata;
+- a typed bounded payload.
+
+Observer sequence supports browser catch-up only. Canonical route cursors remain authoritative for durable activity.
+
+### Activity retention
+
+The observer does not retain a second durable event log.
+
+- The live rail begins with the current observer process.
+- Browser refresh can catch up only within the bounded in-memory replay buffer.
+- Observer restart reconstructs current committed state from fresh managed views.
+- Observer restart resets the live rail and displays a new connection boundary.
+- Observer restart forgets the process-local selection. A sole selectable root is selected again automatically; multiple roots require a new browser-local choice.
+- Activity that occurred while the observer process was absent is reflected in current state but is not invented as replayed live activity.
+
+## Observer web protocol
+
+The observer server exposes only:
+
+- `GET /` and checked-in static assets;
+- `POST /api/session`;
 - `GET /api/bootstrap`;
-- `POST /api/family/select`, which changes only disposable observer selection;
+- `POST /api/family/select`;
 - `GET /api/family/snapshot`;
+- `GET /api/family/detail`;
 - `GET /api/family/stream`.
 
-The family stream multiplexes route snapshots, committed events, progress, availability, and projection replacement into one browser connection. Every envelope identifies its route. Durable envelopes retain the original event ID and cursor; observer-local sequence numbers do not replace canonical cursors.
+Every `/api` response uses the versioned `agencity.observe.v1` envelope. There is no generic proxy, arbitrary path forwarding, mutation passthrough, SQL route, artifact-byte route, or managed-service URL route.
 
-The UI may use native DOM and SVG in the first implementation. No client framework or graph library is required until interaction complexity justifies one.
+`POST /api/family/select` changes only process-local observer selection. It requires the current generation and returns the replacement snapshot.
+
+`GET /api/family/detail` accepts only a closed section enum, exact projected item identity, bounded page limit, and opaque pagination cursor. It cannot accept a managed-protocol path or method.
+
+### Static assets
+
+Version one uses checked-in native browser assets:
+
+- `src/observe/web/index.html`;
+- `src/observe/web/app.js`;
+- `src/observe/web/app.css`.
+
+There is no frontend build step or client framework. Assets are resolved relative to the installed module with `import.meta.url`, never relative to the current working directory. HTML uses external scripts and styles only; no inline executable code is required.
+
+The linked-executable acceptance test loads every initial asset while running from a different repository.
 
 ## Lifecycle and availability
 
-- Starting the observer does not start the managed workspace service.
-- Managed-service absence is a visible `unavailable` state, not a reason to open the database or create an embedded runtime.
-- The observer watches validated service discovery and reconnects when the managed instance changes.
-- A managed-service restart replaces branch subscriptions and rebuilds from fresh snapshots.
-- The observer process remains available while the managed service is stopped.
-- The observer creates no canonical events, profile preferences, workspace selection changes, or durable observer records.
+- Starting the observer does not create `.agencity`, a workspace marker, a database, or a profile preference.
+- Workspace initialization performed later by ordinary Agencity is detected without observer restart.
+- Managed-service absence is `service_stopped`.
+- An invalid, stale, incompatible, unauthenticated, or non-authoritative service is not treated as connected.
+- The observer does not compare the service against an observer-derived execution configuration hash.
+- The managed service provides authenticated read-only observation status that binds workspace ID, instance ID, protocol version, capabilities, and current execution authority.
+- The observer never opens LibSQL to inspect an execution lease.
+- The observer passively watches owner-only marker and manifest files while no browser is attached. Watching uses bounded-interval read-only polling of the exact known paths; it never creates directories or files and never sends an authenticated managed request, because any authenticated request resets the service idle timer.
+- No authenticated managed request or branch stream is kept open while the browser attachment count is zero. A session cookie by itself does not keep the count above zero.
+- On the first attached browser, the observer validates and connects to the currently discovered instance.
+- On the last browser disconnect, the observer immediately aborts family discovery, detail reads, and the upstream family observation stream.
+- While a browser remains attached, a family-stream failure or manifest replacement triggers bounded rediscovery and generation replacement.
+- The observer server remains available while the workspace or managed service is stopped.
+- The observer creates no canonical events, effects, profile preferences, product selection changes, or durable observer records.
 
-An actively open branch SSE stream is an attached managed-service client under current service semantics and may keep that service non-quiescent. The observer server alone opens no branch streams until a browser is actively viewing a family. A non-keeping observer subscription would require a separate managed-service capability and is deferred.
+One browser viewing a family holds one multiplexed managed family observation stream covering up to 64 loaded routes. That stream is an attached managed-service client and may keep the service non-quiescent. The UI reports that fact. Closing the final browser releases the stream and permits ordinary quiescence.
 
 ## Security
 
 The observer remains trusted-local:
 
 - bind only to `127.0.0.1`;
-- reject unexpected `Host` and cross-origin requests;
+- allow only the exact `Host` value `127.0.0.1:<actual-port>`;
+- reject duplicate, malformed, or unexpected `Host`;
 - emit no permissive CORS headers;
-- use a restrictive Content Security Policy;
-- keep the managed-service bearer token only in the observer process;
-- never place that token in browser code, HTML, URLs, storage, logs, or errors;
-- expose only the purpose-built observer routes;
+- require `Sec-Fetch-Site: same-origin` for browser API requests;
+- require the exact observer origin on state-changing requests;
+- use constant-time token and session-secret comparison;
+- keep the managed-service bearer token only in the observer source adapter;
+- never place the managed token in browser code, HTML, URLs, cookies, storage, logs, errors, or child-process data;
+- expose only the closed observer routes;
 - scrub errors before returning them to the browser;
-- avoid caching sensitive API responses;
-- show trusted-local authority and data sensitivity in the interface.
+- use `Cache-Control: no-store, private` and `Pragma: no-cache` for HTML and every API or SSE response;
+- render trusted-local authority and data sensitivity in the interface.
 
-The observer issues its own random, process-local read token. The printed URL carries that token in the fragment, which is not sent in HTTP requests. Browser code uses it only in memory to authenticate observer API requests. This token grants access only to the observer's read-only API and is not the managed-service token.
+Every response emits:
 
-The current managed token still grants broad owner-local authority to the observer process. A protocol-level read-only credential is the preferred later hardening boundary.
+```text
+Content-Security-Policy:
+  default-src 'none';
+  script-src 'self';
+  style-src 'self';
+  connect-src 'self';
+  img-src 'self';
+  base-uri 'none';
+  form-action 'none';
+  frame-ancestors 'none'
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Cross-Origin-Resource-Policy: same-origin
+Referrer-Policy: no-referrer
+```
+
+Static assets may use a content digest ETag, but responses remain `no-store` in version one.
+
+### Untrusted content rendering
+
+Task text, names, message bodies, model data, source, logs, errors, effect values, artifact names, and repository-authored content are untrusted.
+
+The browser:
+
+- creates text with `textContent` or text nodes;
+- does not use `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, or HTML Markdown rendering;
+- treats code and Markdown as text;
+- does not create SVG `foreignObject`;
+- does not assign untrusted SVG event attributes, URLs, styles, or markup;
+- allowlists any future link scheme and target before creating a link;
+- never evaluates agent content as JavaScript, CSS, HTML, or a URL.
+
+Adversarial tests cover HTML tags, SVG event attributes, `javascript:` URLs, bidi controls, CSP-breaking strings, large strings, and token-shaped values.
+
+### Managed credential limitation
+
+The observer source process possesses the existing broad owner-local managed bearer token. The narrow adapter, closed web API, import boundary, and route allowlist reduce accidental exposure but do not turn that token into least privilege.
+
+A protocol-level read-only managed-service credential remains a later hardening boundary.
 
 ## Delivery plan
 
-### 1. Command and independent server
+### 1. CLI admission, foreground server, and assets
 
-- Add `observe` to product CLI parsing and help.
-- Add an observer server module with explicit start and stop.
-- Resolve the workspace and observe service discovery without ensuring or owning the managed service.
-- Serve a minimal status page and read-only bootstrap response.
-- Support an ephemeral port and the existing `--port` option.
+- Add `observe` to product CLI parsing, dispatch, and help, updating both product command registries in `src/cli-args.ts` and `src/cli.ts`.
+- Dispatch `observe` before mutable workspace resolution and managed-service connection, following the existing pre-bootstrap `doctor` dispatch shape.
+- Reject task, model, execution, storage, sync, and mutation options.
+- Validate omission-versus-explicit `--port` behavior and bind conflicts.
+- Host the observer server in the foreground command process.
+- Generate the browser bootstrap token only inside that process.
+- Add signal-safe stop that aborts observer work without stopping Agencity.
+- Add checked-in HTML, JavaScript, and CSS resolved from `import.meta.url`.
 
-### 2. Read-only adapter and projection
+### 2. Read-only discovery and managed observation protocol
 
-- Define the narrow observer source interface.
-- Implement it through managed service discovery and `AgentClient`.
-- Add observer-local root selection.
-- Build the bounded recursive family projection from snapshots and child tasks.
+This step is a separately verifiable milestone. Its protocol and `AgentClient` contracts land with their own tests before observer-package work begins, so the web observer builds on a proven contract.
+
+- Add a strictly read-only manifest reader that never creates directories or files and retains owner-only and `O_NOFOLLOW` validation.
+- Add passive bounded-interval workspace-marker and service-manifest polling.
+- Add authenticated managed observation identity and execution-authority status validated without configuration-hash reconstruction.
+- Add the `observationV1` capability.
+- Add bounded paged initial-root catalog reads that enumerate roots from durable session records and project only root initial branches.
+- Add bounded route summary, direct-child, and exact-route detail contracts.
+- Add the multiplexed family observation stream over an explicit route set with per-route cursors.
+- Extend `AgentClient` with typed read-only observation methods.
+- Ensure managed observation endpoints do not serialize full `AgentState`.
+- Add exact branch filtering to route mailbox observation using the retained from- and to-branch columns; no migration is required.
+
+### 3. Narrow source and disposable family projection
+
+- Define the closed observer source interface.
+- Confine unrestricted `AgentClient` construction to one adapter.
+- Add architecture checks for imports and allowed calls.
+- Build breadth-first family discovery from bounded child pages.
+- Enforce route, byte, concurrency, item, and timeout bounds.
+- Aggregate mailbox events by `mailboxMessageId`.
 - Preserve unavailable and truncated nodes explicitly.
+- Keep historical item-cursor limitations explicit.
 
-### 3. Live family stream
+### 4. Generation-safe live updates
 
-- Subscribe to each loaded route using snapshot-plus-cursor semantics.
-- Multiplex durable events and provisional progress to the browser.
-- Discover newly admitted children.
-- Rebuild cleanly across disconnect, service replacement, and family switch.
+- Open one multiplexed family observation stream covering every loaded route, and reopen it with retained per-route cursors when discovery adds routes.
+- Track one managed cursor per route and one observer sequence per generation.
+- Forward committed metadata, provisional progress, availability, and replacement envelopes; refetch bounded sections instead of consuming server-side deltas.
+- Add bounded replay, heartbeat, slow-client overflow, and `resync_required`.
+- Abort and rebuild atomically across service replacement, family switch, and last-browser disconnect.
+- Ignore every asynchronous completion from an old generation.
 
-### 4. Minimal web interface
+### 5. Authenticated observer web API
 
-- Render the stable family graph with native SVG.
+- Add fragment bootstrap exchange and process-local HttpOnly browser sessions.
+- Remove the fragment after successful exchange.
+- Enforce exact Host, same-origin browser requests, closed routes, no-store responses, and security headers.
+- Add versioned bootstrap, selection, snapshot, detail, and stream envelopes.
+- Prove browser code never receives the managed bearer token.
+
+### 6. Minimal web interface
+
+- Render the stable family graph with safe native DOM and SVG construction.
 - Add Overview, Inspect, and Events depths.
-- Add node, run, cell, effect, task, mailbox, budget, goal, and gate inspectors.
-- Add bounded live activity and truthful connection state.
-- Keep detailed payloads collapsed by default.
+- Fetch sensitive detail only after deliberate inspection.
+- Add node, run, model-attempt, cell, effect, task, mailbox, budget, goal, gate, and artifact-metadata inspectors.
+- Add bounded live activity and truthful connection, truncation, incompatibility, and resync state.
+- Add shared-selection behavior for multiple tabs.
 
-### 5. Verification and documentation
+### 7. Verification and documentation
 
-- Add unit tests for graph derivation, bounds, event deduplication, progress cleanup, and status rendering.
-- Add integration tests for service unavailable, later connection, service restart, child admission, mailbox activity, and observer shutdown.
-- Add an installed black-box test that launches only the linked `agencity observe` executable and verifies the localhost API without internal IDs or direct supervisor access.
-- Verify that observer shutdown leaves managed sessions and service ownership unchanged.
-- Update CLI help, user guide, protocol integration guidance, security documentation, and `AGENTS.md` implementation status when the feature ships.
+- Add unit tests for graph derivation, route and byte bounds, mailbox aggregation, generation rejection, event deduplication, progress cleanup, replay overflow, and status rendering.
+- Add integration tests for uninitialized workspace, stopped service, stale/conflicting/incompatible service, later initialization, later connection, service replacement, child admission, exact-route mailbox activity, browser attachment accounting, quiescence, and observer shutdown.
+- Add adversarial HTTP tests for bootstrap/session auth, token rotation, exact Host, origin and fetch-site rejection, route allowlisting, cache and CSP headers, slow clients, hostile rendered content, and token absence from outputs.
+- Add a source-checkout black-box test for ephemeral port, explicit port, bind conflict, signal shutdown, and no managed-service ownership.
+- Add a linked-executable black-box test from another repository that loads every static asset without internal IDs or direct supervisor access.
+- Add a headless-browser black-box journey covering token exchange, fragment removal, refresh, root selection, graph rendering, child and message live updates, detail inspection, service replacement, and final-browser disconnect.
+- Use Playwright Chromium as a test-only development dependency for the deterministic headless-browser journey. The repository has no existing browser tooling, so this is a new test model: the journey lives in its own script (`test:acceptance:observe-web`), the Chromium version is pinned through the locked Playwright dependency, and setup documentation states the one-time `bunx playwright install chromium` step. The script is a required acceptance gate; when the pinned browser is not installed it fails with that guidance rather than silently skipping.
+- Compare canonical history and executor activity before and after observation to prove that observer use creates no event or effect.
+- Verify that observer shutdown and final-browser disconnect leave managed sessions unchanged and release the upstream family stream and pending reads.
+- Update `README.md`, CLI help, `docs/user-guide.md`, `docs/install.md`, `docs/configuration.md`, `docs/operator-guide.md`, `docs/protocol.md`, `docs/capabilities.md`, `docs/architecture.md`, `docs/security.md`, `docs/README.md`, and `AGENTS.md` when the feature ships.
 
 ## Acceptance criteria
 
 The first version is complete when:
 
-1. `agencity observe` prints a usable loopback URL from a source checkout and linked installation.
-2. The observer remains open and reports unavailable when no managed service exists.
-3. Starting Agencity later causes the observer to connect without restarting the observer.
-4. A user can select one root family without changing Agencity's remembered product route.
-5. Existing descendants appear as exact route nodes with durable task edges.
-6. A newly admitted child appears without refreshing the browser.
-7. A committed family message produces attributable edge activity and inspectable mailbox state.
-8. Runs, cells, effects, goals, gates, budgets, and terminal outcomes are inspectable from projected state.
-9. Provisional progress disappears on outcome or reconnect and is never presented as retained history.
-10. Duplicate stream delivery does not duplicate durable activity.
-11. Managed-service restart rebuilds the same committed family state.
-12. Browser code never receives the managed-service bearer token.
-13. No observer action appends a canonical event or executes an effect.
-14. Stopping the observer does not stop or cancel Agencity work.
+1. `agencity observe` is recognized as a product command before ordinary product bootstrap.
+2. The command prints a usable loopback URL from a source checkout and linked installation.
+3. Omitted `--port` binds an ephemeral port; an explicit valid port is honored; malformed values and bind conflicts fail clearly.
+4. Starting in a fresh repository creates no `.agencity` directory, workspace marker, database, profile preference, or managed-service child.
+5. The browser shows `workspace_uninitialized` until ordinary Agencity initializes the workspace.
+6. Starting Agencity later causes the existing observer process to discover and connect without restart.
+7. A valid service with non-default execution, sync, console, or idle configuration remains observable without configuration-hash reconstruction.
+8. Stale, unauthenticated, incompatible, and non-authoritative services remain distinct and are never used as connected sources.
+9. The root selector contains only resumable initial root routes and does not change Agencity's remembered product route.
+10. Multiple browser tabs share one explicit process-wide family selection without stale selection races.
+11. Existing descendants appear as exact route nodes with durable task edges.
+12. A newly admitted child appears without browser refresh.
+13. More than 64 reachable routes produces truthful truncation without an invented omitted count.
+14. A committed family message produces one attributable message edge lifecycle while each canonical event remains separately visible.
+15. Mailbox detail excludes sibling-branch traffic.
+16. Runs, model attempts, cells, effects, tasks, goals, gates, budgets, artifact metadata, and terminal outcomes are inspectable through bounded lazy pages.
+17. The overview does not receive raw prompts, code, effect payloads, logs, or message bodies before inspection.
+18. Retained inspector items show only provenance the projection actually retains; newly observed committed events show exact event IDs and cursors.
+19. No browser snapshot, page, queue, replay buffer, or stream envelope exceeds its declared bound without typed truncation or resync.
+20. Provisional progress disappears on outcome, disconnect, generation replacement, or resync and is never presented as retained history.
+21. Duplicate or older route events do not duplicate durable activity.
+22. Managed-service replacement discards the old generation and rebuilds the same committed family state from fresh bounded snapshots.
+23. Late work from an old managed instance or family generation cannot change the active projection.
+24. Browser refresh succeeds through the process-local HttpOnly session without leaving the bootstrap token in the URL.
+25. Browser code never receives the managed-service bearer token or process-local session secret.
+26. Hostile Host, cross-site API, invalid session, unknown route, generic proxy, and state-changing observer requests fail closed.
+27. Hostile agent or repository strings render only as inert text.
+28. One slow browser receives bounded resync behavior rather than causing unbounded memory growth.
+29. Closing the final browser aborts the upstream family observation stream and permits normal managed-service quiescence.
+30. Leaving the observer process open without a browser sends no authenticated managed request and does not defer service quiescence.
+31. Observer restart reconstructs current committed state after automatic sole-root selection or a new explicit choice, resets the activity rail, and shows a new connection boundary.
+32. No observer action appends a canonical event, executes an effect, changes a profile preference, or changes product selection.
+33. Ctrl-C or observer process termination stops only the observer and does not stop or cancel Agencity work.
+34. The installed headless-browser journey verifies the actual web interface rather than only the localhost JSON API.
 
 ## Deferred work
 
 - full historical replay and cursor scrubbing;
-- bounded historical event paging and cross-route timeline reconstruction;
+- bounded historical event paging and exact historical cursor lookup for retained projected items;
+- branch-fork topology;
 - multi-family and multi-workspace views;
+- per-tab independent family selection;
 - durable indexing, search, analytics, and exports;
 - artifact-byte viewing;
 - remote observer hosting;
 - shared multi-user authorization;
 - steering, cancellation, and other privileged controls;
 - a protocol-level read-only managed-service credential;
-- an aggregate recursive-family snapshot or stream;
-- observer subscriptions that do not affect managed-service quiescence.
+- an aggregate recursive-family snapshot that returns descendant state in one managed response;
+- observer subscriptions that do not affect managed-service quiescence while a browser is actively attached.
 
 ## Later control boundary
 
-Steering and cancellation do not enter the existing read-only observer API.
+Steering and cancellation do not enter the read-only observer source or web API.
 
 A later control phase must add:
 
 - an explicit capability and credential distinct from observation;
-- clear action confirmation and target identity;
+- clear action confirmation and exact target identity;
 - canonical command receipts and resulting event links;
 - stale-target and lost-connection handling;
 - exact authorization and family-scope enforcement;
-- tests proving that observation alone cannot invoke control routes.
+- tests proving that observation credentials and routes cannot invoke controls.
 
-The visual interface may reserve space for controls, but the first version does not render disabled controls that imply unavailable authority.
+The first version does not render disabled controls that imply unavailable authority.
