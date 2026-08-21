@@ -75,7 +75,7 @@ The service normally exits one hour after becoming quiescent. This is an idle pr
 agencity service shutdown
 ```
 
-Shutdown stops new admission, drains admitted protocol handlers and resident workers, stops schedulers, and cancels owned managed background processes. Process cleanup sends a graceful signal to each owned process group, waits for a bounded grace period, force-stops survivors, commits terminal or unknown outcomes, and confirms that no authenticated owned group remains before discovery reports the service stopped. Shutdown then releases local execution leases and preserves sessions. It does not cancel already-terminal work and does not delete data.
+Shutdown stops new admission, drains admitted protocol handlers and resident workers, stops schedulers, and cancels owned managed background processes. Process cleanup sends a graceful signal to each owned process group, waits for a bounded grace period, force-stops survivors, commits terminal or unknown outcomes, and confirms that no authenticated owned group remains before discovery reports the service stopped. Shutdown then releases local execution leases and preserves sessions. It does not cancel already-terminal work and does not delete data. If the product is reopened while this handoff is in progress, startup waits within its ordinary bounded startup timeout for the authenticated owner to release its execution lease and discovery manifest; it never takes over while the prior lease remains authoritative.
 
 If shutdown cannot prove managed-process cleanup, it fails instead of reporting
 `stopped`. Preserve the workspace database and artifact directory, inspect the

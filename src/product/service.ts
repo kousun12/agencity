@@ -841,7 +841,21 @@ function serviceChildStartupError(stderr: Buffer, exitCode: number | null, signa
 
 /** Discovers a compatible service or securely elects one detached child on demand. */
 export async function connectManagedService(config: ManagedServiceConfiguration, options: { readonly spawn?: boolean; readonly timeoutMs?: number } = {}): Promise<ManagedServiceConnection> {
+  const deadline = Date.now() + (options.timeoutMs ?? 10_000);
   let current = await assessment(config);
+  while (
+    options.spawn !== false &&
+    current.kind === "found" &&
+    current.decision.kind === "conflict" &&
+    current.decision.reason === "lease-held-without-health" &&
+    Date.now() < deadline
+  ) {
+    // A graceful shutdown makes health unavailable before it releases the
+    // durable execution lease and discovery manifest. Wait for that fenced
+    // handoff instead of turning an immediate product reopen into a conflict.
+    await Bun.sleep(25);
+    current = await assessment(config);
+  }
   if (current.kind === "found" && current.decision.kind === "authoritative") {
     return { client: new AgentClient(current.manifest.url, current.manifest.bearerToken), manifest: current.manifest, started: false };
   }
@@ -867,7 +881,6 @@ export async function connectManagedService(config: ManagedServiceConfiguration,
   });
   const childClosed = new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
   child.unref();
-  const deadline = Date.now() + (options.timeoutMs ?? 10_000);
   let lastError: unknown;
   while (Date.now() < deadline) {
     await Bun.sleep(25);

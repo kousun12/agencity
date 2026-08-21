@@ -556,6 +556,21 @@ describe("managed workspace service", () => {
     expect(service.supervisor.executionLeases?.lost).toBe(false);
   });
 
+  test("immediate reconnect waits for a graceful shutdown authority handoff", async () => {
+    const config = await configuration("agencity-managed-shutdown-reconnect-");
+    const service = await opened(config);
+    const client = (await connectManagedService(config, { spawn: false })).client;
+
+    expect(await client.shutdownService()).toEqual({
+      accepted: true,
+      lifecycle: "draining",
+    });
+    const reopened = await connectManagedService(config, { timeoutMs: 5_000 });
+
+    expect(reopened.manifest.instanceId).not.toBe(service.manifest.instanceId);
+    expect((await reopened.client.serviceStatus() as any).lifecycle).toBe("running");
+  });
+
   test("graceful shutdown waits for protocol handlers admitted before draining", async () => {
     const config = await configuration("agencity-managed-handler-drain-");
     const service = await opened(config);
