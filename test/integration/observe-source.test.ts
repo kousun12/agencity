@@ -140,6 +140,14 @@ function protocolServer(input: {
           sessionId: "root",
           branchId: "main",
           name: "Root",
+          sessionTitle: {
+            text: "Root",
+            source: "explicit",
+            verb: null,
+            subject: null,
+            intentSummary: null,
+            sourceMessageCursor: null,
+          },
           status: "idle",
           worker: "idle",
           unresolvedWork: 0,
@@ -220,6 +228,10 @@ describe("AgentClient observer source adapter", () => {
     if (connected.kind !== "connected") return;
     const roots = await connected.source.roots();
     expect(roots).toHaveLength(1);
+    expect(roots[0]?.sessionTitle).toMatchObject({
+      text: "Root",
+      source: "explicit",
+    });
     await expect(connected.source.loadRouteSnapshot({
       sessionId: "root",
       branchId: "main",

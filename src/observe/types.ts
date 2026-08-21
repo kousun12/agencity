@@ -1,4 +1,10 @@
-import type { AgentEvent, AgentRunState, AgentState, SessionStatus } from "../domain/index.ts";
+import type {
+  AgentEvent,
+  AgentRunState,
+  AgentState,
+  SessionStatus,
+  SessionTitlePresentationSource,
+} from "../domain/index.ts";
 
 export const OBSERVER_PROTOCOL = "agencity.observe.v1" as const;
 
@@ -72,12 +78,22 @@ export type ObserverRouteActivityReason =
   | "archived"
   | null;
 
+export interface ObserverSessionTitleDto {
+  readonly text: ObserverBoundedText;
+  readonly source: SessionTitlePresentationSource;
+  readonly verb: ObserverBoundedText | null;
+  readonly subject: ObserverBoundedText | null;
+  readonly intentSummary: ObserverBoundedText | null;
+  readonly sourceMessageCursor: string | null;
+}
+
 export interface ObserverFamilyNodeDto {
   readonly route: ObserverRoute;
   readonly depth: number | null;
   readonly availability: "available" | "route_unavailable";
   readonly unavailableReason: "snapshot_unavailable" | "invalid_snapshot" | null;
   readonly sessionName: ObserverBoundedText | null;
+  readonly sessionTitle: ObserverSessionTitleDto | null;
   readonly branchName: ObserverBoundedText | null;
   readonly model: {
     readonly provider: ObserverBoundedText;

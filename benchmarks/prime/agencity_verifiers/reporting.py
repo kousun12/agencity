@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -273,11 +274,24 @@ def _trace_reward(trace: dict[str, Any]) -> float | None:
         return None
     values: list[float] = []
     for reward in rewards.values():
-        if reward is None:
-            return None
         if not isinstance(reward, dict):
             return None
-        values.append(float(reward.get("score", 0)) * float(reward.get("weight", 1)))
+        score = reward.get("score")
+        weight = reward.get("weight", 1)
+        if (
+            not isinstance(score, (int, float))
+            or isinstance(score, bool)
+            or not isinstance(weight, (int, float))
+            or isinstance(weight, bool)
+        ):
+            return None
+        try:
+            value = float(score) * float(weight)
+        except (OverflowError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        values.append(value)
     return sum(values)
 
 

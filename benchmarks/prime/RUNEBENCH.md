@@ -380,25 +380,24 @@ concurrency.
 `attack-xp-30m`, one rollout, and serial execution. Before using it, the
 configured `source_ref` must be a remotely fetchable immutable commit containing
 the controller and managed-process changes in this document. After that commit
-reaches the configured source repository's `main`, synchronize and check every
-benchmark source pin:
+reaches the configured source repository's `main`, run the repository-owned
+canary command:
 
 ```sh
-uv run --locked python scripts/refresh_agencity_source.py
-uv run --locked python scripts/refresh_agencity_source.py --check
+OPENAI_API_KEY=... uv run --locked python scripts/run_runebench_canary.py \
+  --output-dir outputs/runebench-attack-30m-adaptive-luna-xhigh \
+  --refresh-pins
 ```
 
-Then preflight and run the one paid canary:
-
-```sh
-uv run --locked python scripts/preflight_suite.py \
-  configs/runebench-attack-30m-adaptive.toml \
-  --output outputs/runebench-attack-30m-adaptive-selection.json
-
-OPENAI_API_KEY=... uv run --locked eval @ \
-  configs/runebench-attack-30m-adaptive.toml \
-  --output-dir outputs/runebench-attack-30m-adaptive-luna-xhigh
-```
+`--refresh-pins` explicitly updates all Agencity source pins to the latest
+remote `main` and then verifies them. Without that flag, the command checks the
+committed pins without changing files. It requires a new empty output
+directory, retains preflight selection, dry-run, raw evaluation, and summary
+artifacts, and exits nonzero unless the one selected task has an official
+numeric score. A valid official zero and an officially scored agent terminal
+failure satisfy this scoring-completeness check; a `TaskError`, missing trace,
+cleanup or scorer error, duplicate task record, or missing selected task does
+not.
 
 Do not start the 16-skill treatment until this exact canary has valid official
 scorer evidence, confirmed service/process cleanup, and no controller or tracker
@@ -604,6 +603,13 @@ remain in the container, cleanup raises an infrastructure error, and scoring
 does not proceed as though the trainer stopped cleanly. The outer Verifiers
 runtime remains responsible for container teardown.
 
+The pinned Verifiers `0.3.0` `DockerConfig` does not expose Docker's `--init`
+option, so this treatment cannot request a container init/reaper through the
+supported runtime contract. Correct managed-process and controller liveness
+therefore does not depend on PID 1 reaping promptly. Model-free Docker coverage
+uses a deliberately non-reaping PID 1 and retains an orphaned zombie while
+managed-process stop and service shutdown complete.
+
 No Agencity profile, game save, REPL heap, or learned artifact is reused by the
 next scored task.
 
@@ -620,7 +626,9 @@ The `eval` process waits for every selected task to reach a terminal evaluation
 outcome. Results do not need to be extracted from the Agencity REPL or game
 container. After task finalization, Verifiers writes the official reward or
 typed infrastructure failure into `traces.jsonl`; the reporting command below
-turns those records into one bounded summary.
+turns those records into one bounded summary. An official reward entry must
+contain a finite numeric `score`; a missing, boolean, NaN, or infinite score is
+unscored infrastructure evidence and never becomes a valid zero.
 
 Raw traces may contain model text, licensed benchmark content, or private client
 headers. Keep them private and do not commit `outputs/`.

@@ -8,6 +8,7 @@ import {
   AGENT_TOOL_CONTRACT_ID,
   AGENT_TYPED_TOOL_CONTRACT_ID,
   DECLARED_DATA_CONTRACT_ID,
+  DECLARED_DATA_TOOL_NAME,
   MAX_MODEL_FORMAL_RESPONSE_BYTES,
   MAX_MODEL_RESPONSE_BLOCKS,
   MAX_MODEL_SUPPLEMENTAL_TEXT_BYTES,
@@ -314,6 +315,32 @@ export function formalOutputFromRefinementGovernanceDecision(input: {
     callId: input.providerToolCallId,
     name: REFINEMENT_GOVERNANCE_TOOL_NAME,
     value: input.decision,
+    usage: input.usage,
+    warnings: [],
+  });
+}
+
+/** Deterministic provider-fixture helper for a host-declared data contract. */
+export function formalOutputFromDeclaredData(input: {
+  readonly value: JsonValue;
+  readonly dispatch: ModelDispatch;
+  readonly providerToolCallId: string;
+  readonly provider: string;
+  readonly adapter: string;
+  readonly usage: Usage;
+}): ModelEffectOutputV2 {
+  const contract = requiredContract(input.dispatch);
+  if (contract.contractId !== DECLARED_DATA_CONTRACT_ID) {
+    throw new Error("Declared-data output requires its host-pinned response contract");
+  }
+  return acceptedSubmissionOutput({
+    dispatch: input.dispatch,
+    contract,
+    provider: input.provider,
+    adapter: input.adapter,
+    callId: input.providerToolCallId,
+    name: DECLARED_DATA_TOOL_NAME,
+    value: { value: input.value },
     usage: input.usage,
     warnings: [],
   });

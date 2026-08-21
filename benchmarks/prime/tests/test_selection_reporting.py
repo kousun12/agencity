@@ -243,6 +243,26 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(summary["run_provenance"][0]["model"], "openai/example")
         self.assertNotIn("secret", str(summary["run_provenance"]))
 
+    def test_missing_or_nonfinite_official_scores_are_unscored(self) -> None:
+        for name, reward in (
+            ("missing", {"weight": 1.0}),
+            ("nan", {"score": float("nan"), "weight": 1.0}),
+            ("infinite weight", {"score": 0.0, "weight": float("inf")}),
+            ("boolean", {"score": False, "weight": 1.0}),
+        ):
+            with self.subTest(name=name):
+                record = trace("invalid-score", reward=0)
+                record["rewards"] = {"official": reward}
+                summary = summarize_records([
+                    {"errors": [], "traces": [record]},
+                ])
+                self.assertEqual(
+                    summary["counts"]["scorer_or_infrastructure_error"],
+                    1,
+                )
+                self.assertEqual(summary["counts"]["officially_scored"], 0)
+                self.assertIsNone(summary["tasks"][0]["reward"])
+
     def test_infrastructure_error_falls_back_to_safe_task_provenance(self) -> None:
         failed = trace("task-1", reward=None, error_type="TaskError")
         failed["info"].pop("benchmark_provenance")

@@ -353,7 +353,8 @@
       button.type = "button";
       button.className = "root-option";
       button.disabled = !selectable;
-      const name = firstValue(item, ["name", "displayName", "taskSummary", "sessionId"], route.sessionId);
+      const title = asObject(firstValue(item, ["sessionTitle"], {}));
+      const name = firstValue(title, ["text"], firstValue(item, ["name", "displayName", "taskSummary", "sessionId"], route.sessionId));
       const strong = document.createElement("strong");
       strong.textContent = boundedText(name, 180);
       button.appendChild(strong);
@@ -397,6 +398,7 @@
     const route = routeFrom(source);
     if (!route) return null;
     const modelSource = asObject(firstValue(source, ["model"], {}));
+    const titleSource = asObject(firstValue(source, ["sessionTitle"], {}));
     const latestRunSource = asObject(firstValue(source, ["latestRun"], {}));
     const budgetSource = asObject(firstValue(source, ["budget"], {}));
     const model = modelSource.provider || modelSource.model
@@ -404,11 +406,13 @@
       : boundedText(firstValue(source, ["modelId"], "Model unavailable"), 180);
     return {
       route,
-      name: boundedText(firstValue(source, ["sessionName", "name", "displayName", "agentName"], route.sessionId), 180),
+      name: boundedText(firstValue(titleSource, ["text"], firstValue(source, ["sessionName", "name", "displayName", "agentName"], route.sessionId)), 180),
+      titleSource: boundedText(firstValue(titleSource, ["source"], "ordinary_fallback"), 80),
+      titleIntent: boundedText(firstValue(titleSource, ["intentSummary"], ""), 360),
       branchName: boundedText(firstValue(source, ["branchName", "branch"], route.branchId), 180),
       depth: Math.max(0, Math.min(63, Number(firstValue(source, ["depth"], 0)) || 0)),
       model,
-      taskSummary: boundedText(firstValue(source, ["taskSummary", "task", "summary"], ""), 360),
+      taskSummary: boundedText(firstValue(titleSource, ["intentSummary"], firstValue(source, ["taskSummary", "task", "summary"], "")), 360),
       status: boundedText(firstValue(source, ["status", "sessionStatus"], "unknown"), 80),
       activity: boundedText(firstValue(source, ["activity"], "idle"), 80),
       activityReason: boundedText(firstValue(source, ["activityReason"], ""), 120),
@@ -865,7 +869,10 @@
 
   function detailTitle(kind, id, data) {
     const status = boundedText(data.status, 80);
-    if (kind === "identity") return boundedText(data.sessionName, 180) || "Agent identity";
+    if (kind === "identity") {
+      const title = asObject(data.sessionTitle);
+      return boundedText(firstValue(title, ["text"], data.sessionName), 180) || "Agent identity";
+    }
     if (kind === "runs") return boundedText(data.task, 240) || "Agent run";
     if (kind === "model_attempts") return "Model attempt " + boundedText(data.attempt, 20);
     if (kind === "cells") return "TypeScript cell" + (status ? " · " + humanState(status) : "");

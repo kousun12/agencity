@@ -176,6 +176,12 @@ Docker/host reserve with Docker daemon capacity. An unavailable probe or unsafe
 capacity is an error. This memory-only check does not prove CPU, provider quota,
 scoring, or cleanup health.
 
+The exact paid canary should be run through
+`scripts/run_runebench_canary.py`. It checks source pins, preflights and
+dry-runs the selection, retains raw evaluation and report artifacts, and exits
+nonzero when any selected task lacks an official numeric score. Pin refresh to
+the latest remote Agencity `main` is explicit through `--refresh-pins`.
+
 ### Terminal-Bench 2
 
 Catalog: [`manifests/terminal-bench-2-catalog.json`](./manifests/terminal-bench-2-catalog.json)

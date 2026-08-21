@@ -201,7 +201,7 @@ A filesystem or administration failure produces a partial result. Workspace owne
 
 ## Upgrades and migrations
 
-- The current workspace format accepts event schema version 6, reducer version 22, provider input version 2, model dispatch version 2, bounded output version 1, and model effect output version 2.
+- The current workspace format accepts event schema version 6, reducer version 24, provider input version 2, model dispatch version 2, bounded output version 1, and model effect output version 2.
 - This is an explicit pre-release reset boundary. Workspaces containing event schema version 1, 2, 3, 4, or 5 are rejected with reset guidance and are not decoded, upcast, synchronized, projected, or recovered. Profile model-catalog caches may be discarded and rebuilt.
 - Opening incompatible state fails before applying product migrations to its retained rows and reports reset guidance. The runtime does not delete the old database.
 - Before using this revision, back up or move aside each affected workspace's `.agencity` directory. Starting again creates a fresh version-6 workspace whose new sessions include complete initial profiles and provider-input-v2 transcript provenance. The separate profile directory (normally `~/.agencity`) does not need to be reset unless startup reports a profile-specific incompatibility; resetting a workspace removes session-owned agent-profile history but not user/device profile state, and resetting the profile store does not remove workspace agent profiles.

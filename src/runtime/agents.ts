@@ -1,7 +1,7 @@
 import {
   FamilyReachError, NotFoundError, ValidationError, assertJsonValue, assertNoReservedModelDispatchInputFields, canonicalJsonStringify, createAgentInvocationContract, newId, projectEvents,
-  SEALED_TASK_SPECIALIST_PROFILE, agentProfilePin, sameAgentProfileAdmissionMeaning,
-  type AgentInvocationContract, type AgentProfileInput, type AgentProfileVersion, type AgentRunResultReference, type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type ModelConfigurationInput, type NewAgentEvent, type TaskStatus,
+  SEALED_TASK_SPECIALIST_PROFILE, agentProfilePin, resolveSessionTitlePresentation, sameAgentProfileAdmissionMeaning,
+  type AgentInvocationContract, type AgentProfileInput, type AgentProfileVersion, type AgentRunResultReference, type AgentRunState, type AgentState, type BudgetLimits, type EventPayloads, type FamilyRelationship, type JsonValue, type MailboxReceiptStatus, type ModelConfiguration, type ModelConfigurationInput, type NewAgentEvent, type SessionTitlePresentation, type TaskStatus,
 } from "../domain/index.ts";
 import {
   requireRecursiveStorage, type AgentStorage, type MailboxRecord, type SessionRecord, type TaskRecord,
@@ -87,6 +87,7 @@ export type MailboxMessageResult =
     });
 export interface FamilyAgentRecord {
   readonly sessionId: string; readonly branchId: string; readonly name: string | null;
+  readonly sessionTitle?: SessionTitlePresentation | null;
   readonly relationship: FamilyRelationship; readonly depth: number; readonly status: string;
   readonly taskId: string | null; readonly taskStatus: TaskStatus | null;
   readonly task: string | null; readonly model: ModelConfiguration | null; readonly cancellationRequested: boolean;
@@ -698,6 +699,13 @@ export class AgentService {
         sessionId: candidate.sessionId,
         branchId: candidate.branchId,
         name: state?.sessionName ?? null,
+        sessionTitle: state
+          ? resolveSessionTitlePresentation(
+              state,
+              candidate.taskFallback ?? "Unnamed agent",
+              true,
+            )
+          : null,
         relationship: candidate.relationship,
         depth: candidate.session?.depth ?? candidate.depth,
         status: state?.status ?? "unavailable",

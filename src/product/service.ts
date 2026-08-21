@@ -12,7 +12,7 @@ import {
 } from "../console/index.ts";
 import { LibSqlStorage } from "../storage/index.ts";
 import { scrubText } from "../security/index.ts";
-import { ProductCatalog } from "./catalog.ts";
+import { ProductCatalog, type ProductBranchSummary } from "./catalog.ts";
 import { modelEffortPreferenceKey, workspacePreferenceKey, type ResolvedWorkspace } from "./workspace.ts";
 import { formatModel, parseModel } from "./providers.ts";
 import {
@@ -107,14 +107,17 @@ export interface ManagedServiceStatus {
     readonly summary: string;
   }[];
   readonly console: ConsoleExecutionPoolStatus;
-  readonly roots: readonly {
-    readonly sessionId: string;
-    readonly branchId: string;
-    readonly name: string;
-    readonly status: string;
-    readonly worker: "running" | "idle" | "detached";
-    readonly unresolvedWork: number;
-  }[];
+  readonly roots: readonly ManagedServiceRootSummary[];
+}
+
+export interface ManagedServiceRootSummary {
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly name: string;
+  readonly sessionTitle: NonNullable<ProductBranchSummary["sessionTitle"]>;
+  readonly status: string;
+  readonly worker: "running" | "idle" | "detached";
+  readonly unresolvedWork: number;
 }
 
 function normalizedIdleShutdownMs(value: number | undefined): number {
@@ -516,6 +519,7 @@ export class ManagedWorkspaceService {
         sessionId: summary.sessionId,
         branchId: summary.branchId,
         name: summary.sessionName,
+        sessionTitle: summary.sessionTitle!,
         status: summary.status,
         worker: this.#workers.state(summary.sessionId),
         unresolvedWork: summary.unresolvedWork,

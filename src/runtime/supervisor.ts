@@ -112,6 +112,7 @@ import {
   ManagedProcessService,
   managedProcessLogRoot,
 } from "./managed-processes.ts";
+import { SessionTitleService } from "./session-titles.ts";
 
 export interface SupervisorOptions {
   readonly databaseUrl: string;
@@ -433,6 +434,7 @@ export class Supervisor {
   readonly modelSelection: ModelSelectionService;
   readonly modelCatalog: ModelCatalog;
   readonly repositoryInstructions: RepositoryInstructionService;
+  readonly sessionTitles: SessionTitleService;
   readonly workspaceRoot: string;
   readonly restartConsoleAfterCell: boolean;
   readonly consoleRssRecycleThresholdBytes: number;
@@ -505,6 +507,12 @@ export class Supervisor {
     this.specs = new SubagentSpecService(storage, this.agents, userScopeKey);
     this.modelExecutor = modelExecutor;
     this.modelEffectAdmission = new ModelEffectAdmissionService(modelExecutor);
+    this.sessionTitles = new SessionTitleService(
+      storage,
+      outbox,
+      modelExecutor,
+      this.modelEffectAdmission,
+    );
     this.modelCatalog = modelCatalog;
     this.workspaceRoot = workspaceRoot;
     this.repositoryInstructions = new RepositoryInstructionService(workspaceRoot);
@@ -828,6 +836,7 @@ export class Supervisor {
     await this.modelLoop.reconcileRunningSessions(currentBranches);
     await this.goals.recoverIncomplete(currentBranches);
     await this.ai.recoverIncomplete();
+    await this.sessionTitles.recoverIncomplete();
     await this.#recursiveModels.recoverIncomplete();
     await this.refiner.recoverIncomplete();
     await this.refinementGovernance.recoverIncomplete();
@@ -863,6 +872,7 @@ export class Supervisor {
     await settle(() => this.refiner.close());
     await settle(() => this.refinementGovernance.close());
     await settle(() => this.ai.close());
+    await settle(() => this.sessionTitles.close());
     await settle(() => this.#recursiveModels.close());
     await settle(() => this.sync.stop());
     await settle(async () => {
@@ -884,6 +894,7 @@ export class Supervisor {
     await this.refiner.close();
     await this.refinementGovernance.close();
     await this.ai.close();
+    await this.sessionTitles.close();
     await this.#recursiveModels.close();
     await this.outbox.quiesceForDeletion();
     try { return await this.sync.deleteOwnedData(input); }

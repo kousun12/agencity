@@ -64,13 +64,18 @@ import {
   replNamespaceStatusSchema,
   type ReplNamespaceStatus,
 } from "./repl-namespace.ts";
+import {
+  SESSION_TITLE_FIELD_LIMITS,
+  SESSION_TITLE_MAX_WORDS,
+  validateSessionTitleFields,
+} from "./session-title.ts";
 
 export const EVENT_SCHEMA_VERSION = 6 as const;
 export const eventTypes = [
-  "SessionCreated", "AgentProfileVersionCreated", "AgentProfileActivated", "BranchCreated", "SessionNamed", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
+  "SessionCreated", "AgentProfileVersionCreated", "AgentProfileActivated", "BranchCreated", "SessionNamed", "SessionTitleRequested", "SessionTitleResolved", "SessionTitleModeChanged", "BranchNamed", "SessionStatusChanged", "SessionModelChanged", "MessageAppended",
   "CellProposed", "CellStarted", "CellCommitted", "CellFailed", "CellAbandoned",
   "WorkingValueSet", "ArtifactRegistered", "EffectRequested", "EffectAttemptStarted",
-  "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ManagedProcessRegistered", "ManagedProcessStarted",
+  "EffectOutcomeRecorded", "EffectReconciliationRecorded", "ManagedProcessRegistered", "ManagedProcessStarted", "ManagedProcessStopFailed",
   "ContextCompactionRequested", "ContextCompactionFailed",
   "ContextMaterialized", "ModelCallRequested", "ModelOutputChunk",
   "ModelCallCompleted", "ModelCallTerminated", "BudgetDebited", "BudgetExceeded", "RecoveryPerformed",
@@ -135,6 +140,7 @@ export type EffectOrigin =
   | { readonly kind: "cell"; readonly cellId: string }
   | { readonly kind: "model-call"; readonly callId: string }
   | { readonly kind: "ai-generation"; readonly generationId: string }
+  | { readonly kind: "session-title"; readonly requestId: string }
   | { readonly kind: "context-compaction"; readonly compactionId: string }
   | { readonly kind: "goal-gate"; readonly goalId: string; readonly gateId: string; readonly requestId: string }
   | { readonly kind: "skill-invocation"; readonly entryId: string; readonly versionId: string }
@@ -234,6 +240,20 @@ export interface EventPayloads {
   AgentProfileActivated: { profileVersionId: string; expectedActiveProfileVersionId: string; reason: string };
   BranchCreated: { branchId: string; parentBranchId: string; forkCursor: string; name?: string };
   SessionNamed: { name: string };
+  SessionTitleRequested: {
+    requestId: string; sourceMessageEventId: string; sourceMessageCursor: string;
+    sourceMessageEventIds: string[]; mode: "model" | "fallback";
+    effectId?: string; modelDispatch?: ModelDispatch; providerInput?: ProviderInputCandidate;
+    estimatedInputTokens?: number; fallbackReason?: string;
+  };
+  SessionTitleResolved: {
+    requestId: string; sourceMessageEventId: string; sourceMessageCursor: string;
+    sourceMessageEventIds: string[]; sourceBranchId: string; method: "model" | "fallback";
+    title: string; verb: string; subject: string; intentSummary: string;
+    sourceOutcomeEventId?: string; usage?: Usage; warnings?: ModelWarning[];
+    usageSource?: ModelUsageSource; fallbackReason?: string;
+  };
+  SessionTitleModeChanged: { mode: "automatic"; reason: string };
   BranchNamed: { name: string };
   SessionStatusChanged: { status: SessionStatus; reason?: string };
   SessionModelChanged: { previousModel: ModelConfiguration; model: ModelConfiguration; selectedBy: "user" };
@@ -269,6 +289,11 @@ export interface EventPayloads {
   ManagedProcessStarted: {
     processId: string; effectId: string; identityToken: string; pid: number;
     processGroupId: number; startedAt: string;
+  };
+  ManagedProcessStopFailed: {
+    processId: string; effectId: string; attempt: number; reason: string;
+    error: string; processGroupIds: number[]; survivingProcessGroupIds: number[];
+    attemptedAt: string;
   };
   ContextCompactionRequested: {
     compactionId: string; strategy: ContextCompactionStrategy; reason: ContextCompactionReason;
@@ -690,6 +715,7 @@ const effectOriginSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cell"), cellId: id }).strict(),
   z.object({ kind: z.literal("model-call"), callId: id }).strict(),
   z.object({ kind: z.literal("ai-generation"), generationId: id }).strict(),
+  z.object({ kind: z.literal("session-title"), requestId: id }).strict(),
   z.object({ kind: z.literal("context-compaction"), compactionId: id }).strict(),
   z.object({ kind: z.literal("goal-gate"), goalId: id, gateId: id, requestId: id }).strict(),
   z.object({ kind: z.literal("skill-invocation"), entryId: id, versionId: id }).strict(),
@@ -817,6 +843,86 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   AgentProfileActivated: z.object({ profileVersionId: id, expectedActiveProfileVersionId: id, reason: z.string().min(1).max(1024) }).strict(),
   BranchCreated: z.object({ branchId: id, parentBranchId: id, forkCursor: z.string().regex(/^\d+$/), name: z.string().optional() }),
   SessionNamed: z.object({ name: z.string().min(1) }),
+  SessionTitleRequested: z.object({
+    requestId: id,
+    sourceMessageEventId: id,
+    sourceMessageCursor: z.string().regex(/^\d+$/),
+    sourceMessageEventIds: z.array(id).min(1),
+    mode: z.enum(["model", "fallback"]),
+    effectId: id.optional(),
+    modelDispatch: modelDispatchSchema.optional(),
+    providerInput: z.custom<ProviderInputCandidate>((value) => {
+      try { validateProviderInputCandidate(value); return true; } catch { return false; }
+    }).optional(),
+    estimatedInputTokens: z.number().int().nonnegative().optional(),
+    fallbackReason: z.string().min(1).max(1024).optional(),
+  }).strict().superRefine((value, context) => {
+    const modelFields = [
+      value.effectId,
+      value.modelDispatch,
+      value.providerInput,
+      value.estimatedInputTokens,
+    ];
+    if (value.sourceMessageEventIds.at(-1) !== value.sourceMessageEventId ||
+        new Set(value.sourceMessageEventIds).size !== value.sourceMessageEventIds.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Session title source frontier is invalid" });
+    }
+    if (value.mode === "model" &&
+        (modelFields.some((item) => item === undefined) || value.fallbackReason !== undefined)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Model title requests require complete model provenance" });
+    }
+    if (value.mode === "fallback" &&
+        (modelFields.some((item) => item !== undefined) || value.fallbackReason === undefined)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Fallback title requests must omit model provenance and retain a reason" });
+    }
+  }),
+  SessionTitleResolved: z.object({
+    requestId: id,
+    sourceMessageEventId: id,
+    sourceMessageCursor: z.string().regex(/^\d+$/),
+    sourceMessageEventIds: z.array(id).min(1),
+    sourceBranchId: id,
+    method: z.enum(["model", "fallback"]),
+    title: z.string().min(1).max(SESSION_TITLE_FIELD_LIMITS.title),
+    verb: z.string().min(1).max(SESSION_TITLE_FIELD_LIMITS.verb),
+    subject: z.string().min(1).max(SESSION_TITLE_FIELD_LIMITS.subject),
+    intentSummary: z.string().min(1).max(SESSION_TITLE_FIELD_LIMITS.intentSummary),
+    sourceOutcomeEventId: id.optional(),
+    usage: usageSchema.optional(),
+    warnings: z.array(modelWarningSchema).max(8).optional(),
+    usageSource: usageSourceSchema.optional(),
+    fallbackReason: z.string().min(1).max(1024).optional(),
+  }).strict().superRefine((value, context) => {
+    try {
+      const checked = validateSessionTitleFields({
+        verb: value.verb,
+        subject: value.subject,
+        intentSummary: value.intentSummary,
+      });
+      if (checked.title !== value.title ||
+          value.title.trim().split(/\s+/).length > SESSION_TITLE_MAX_WORDS) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "Session title does not match its structured fields" });
+      }
+    } catch (error) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: error instanceof Error ? error.message : "Invalid session title fields" });
+    }
+    if (value.sourceMessageEventIds.at(-1) !== value.sourceMessageEventId ||
+        new Set(value.sourceMessageEventIds).size !== value.sourceMessageEventIds.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Session title result source frontier is invalid" });
+    }
+    if (value.method === "model" &&
+        (value.sourceOutcomeEventId === undefined || value.usage === undefined ||
+          value.usageSource === undefined || value.fallbackReason !== undefined)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Model title results require exact outcome and usage provenance" });
+    }
+    if (value.method === "fallback" && value.fallbackReason === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Fallback title results require a reason" });
+    }
+  }),
+  SessionTitleModeChanged: z.object({
+    mode: z.literal("automatic"),
+    reason: z.string().min(1).max(1024),
+  }).strict(),
   BranchNamed: z.object({ name: z.string().min(1) }),
   SessionStatusChanged: z.object({ status: z.enum(["idle", "running", "stopped", "failed", "archived"]), reason: z.string().optional() }),
   SessionModelChanged: z.object({ previousModel: modelSchema, model: modelSchema, selectedBy: z.literal("user") }).strict(),
@@ -879,6 +985,13 @@ const payloadSchemas: Record<EventType, z.ZodType> = {
   ManagedProcessStarted: z.object({
     processId: id, effectId: id, identityToken: z.string().regex(/^[a-f0-9]{64}$/),
     pid: positiveInteger, processGroupId: positiveInteger, startedAt: dateTime,
+  }).strict(),
+  ManagedProcessStopFailed: z.object({
+    processId: id, effectId: id, attempt: positiveInteger,
+    reason: z.string().min(1).max(16384), error: z.string().min(1).max(16384),
+    processGroupIds: z.array(positiveInteger).max(1024),
+    survivingProcessGroupIds: z.array(positiveInteger).max(1024),
+    attemptedAt: dateTime,
   }).strict(),
   ContextCompactionRequested: z.object({
     compactionId: id, strategy: compactionStrategySchema, reason: compactionReasonSchema,
@@ -1162,6 +1275,18 @@ export function validateNewEvent<T extends EventType>(event: NewAgentEvent<T>): 
         providerInput.provenance.dispatchDigest !== canonicalJsonDigest(modelCall.modelDispatch as unknown as JsonValue) ||
         estimateProviderInputCandidate(providerInput).estimatedTokens !== modelCall.estimatedInputTokens) {
       throw new ValidationError("Model call provider input disagrees with retained dispatch, capacity, or estimate");
+    }
+  }
+  if (event.type === "SessionTitleRequested") {
+    const request = event.payload as unknown as EventPayloads["SessionTitleRequested"];
+    if (request.mode === "model") {
+      const providerInput = validateProviderInputCandidate(request.providerInput!);
+      if (providerInput.provenance.dispatchDigest !==
+            canonicalJsonDigest(request.modelDispatch! as unknown as JsonValue) ||
+          estimateProviderInputCandidate(providerInput).estimatedTokens !==
+            request.estimatedInputTokens) {
+        throw new ValidationError("Session title provider input disagrees with its retained dispatch or estimate");
+      }
     }
   }
   if (event.type === "ContextCompactionRequested") validateCompactionRequestIntegrity(event.payload as unknown as EventPayloads["ContextCompactionRequested"]);

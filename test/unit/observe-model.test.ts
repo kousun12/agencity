@@ -393,7 +393,28 @@ describe("observer projections", () => {
   test("derives bounded overview and explicit attention states", () => {
     const root = { sessionId: "root", branchId: "main" };
     const value = state("root", "main", {
-      sessionName: "<script>".repeat(1_000),
+      sessionName: "Repair checkout retries",
+      sessionTitle: {
+        mode: "automatic",
+        latestRequestedSourceMessageCursor: "7",
+        appliedSourceMessageCursor: "7",
+        requests: {},
+        resolutions: {
+          title: {
+            requestId: "title",
+            sourceMessageEventId: "message-7",
+            sourceMessageCursor: "7",
+            sourceMessageEventIds: ["message-7"],
+            sourceBranchId: "main",
+            method: "model",
+            title: "Repair checkout retries",
+            verb: "Repair",
+            subject: "checkout retries",
+            intentSummary: "Repair checkout retries without changing successful payment behavior.",
+            eventId: "title-event",
+          },
+        },
+      },
       budget: { limits: {}, tokens: 1, costUsd: 0, turns: 1, wallTimeMs: 0, exceeded: true },
     });
     expect(deriveObserverRouteStatus(value)).toEqual({
@@ -440,6 +461,25 @@ describe("observer projections", () => {
       edgesTruncated: false,
     });
     expect(overview.nodes[0]?.activityReason).toBe("budget_exceeded");
+    expect(overview.nodes[0]?.sessionTitle).toMatchObject({
+      source: "model",
+      sourceMessageCursor: "7",
+      text: { kind: "complete", text: "Repair checkout retries" },
+      intentSummary: {
+        kind: "complete",
+        text: "Repair checkout retries without changing successful payment behavior.",
+      },
+    });
+    expect(overview.nodes[0]?.taskSummary).toMatchObject({
+      text: "Repair checkout retries without changing successful payment behavior.",
+    });
+    expect(deriveObserverDetailPage(
+      routeSnapshot(root, value),
+      "identity",
+    ).items[0]?.data.sessionTitle).toMatchObject({
+      source: "model",
+      sourceMessageCursor: "7",
+    });
     expect(serializedUtf8Bytes(overview)).toBeLessThanOrEqual(OBSERVER_BOUNDS.familySnapshotBytes);
 
     const active = state("root", "main", {

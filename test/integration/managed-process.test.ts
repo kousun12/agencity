@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   LibSqlStorage,
@@ -437,6 +437,65 @@ describe("durable managed background processes", () => {
     await supervisor.close();
     expect(processExists(descendantPid)).toBe(false);
   });
+
+  test.skipIf(process.env.AGENCITY_TEST_NON_REAPING_PID1 !== "1")(
+    "treats a zombie-only group as terminal under a non-reaping PID 1",
+    async () => {
+      const { supervisor, sessionId, branchId } = await open(
+        "agencity-managed-process-zombie-group-",
+      );
+      const started = await supervisor.executeCell(
+        sessionId,
+        branchId,
+        `
+          return sdk.processes.start({
+            command: \`python3 -c "import os,time; pid=os.fork(); print('zombie:'+str(pid), flush=True); (time.sleep(0.2), os._exit(0)) if pid == 0 else time.sleep(30)"\`,
+            idempotencyKey: "managed-zombie-group",
+          });
+        `,
+      );
+      const handle = started.result as Record<string, any>;
+      let zombiePid = 0;
+      await waitFor(async () => {
+        const logs = await supervisor.processes.readLogs(
+          sessionId,
+          branchId,
+          handle.processId,
+        ) as Record<string, any>;
+        const stdout = logs.completeness === "inline"
+          ? String(logs.value?.stdout ?? "")
+          : String(logs.preview?.stdout?.head ?? "");
+        zombiePid = Number(stdout.match(/zombie:(\d+)/)?.[1] ?? 0);
+        if (!zombiePid) return false;
+        const stat = await readFile(`/proc/${zombiePid}/stat`, "utf8")
+          .catch(() => "");
+        const close = stat.lastIndexOf(")");
+        return close >= 0 &&
+          stat.slice(close + 2).trim().split(/\s+/)[0] === "Z";
+      }, "managed child zombie", 5_000);
+
+      const stopped = await supervisor.processes.stop(
+        sessionId,
+        branchId,
+        handle.processId,
+        "zombie-only group test",
+      );
+      expect(stopped).toMatchObject({
+        processId: handle.processId,
+        status: "cancelled",
+        error: "zombie-only group test",
+      });
+      const retainedZombie = await readFile(`/proc/${zombiePid}/stat`, "utf8");
+      expect(
+        retainedZombie.slice(retainedZombie.lastIndexOf(")") + 2)
+          .trim().split(/\s+/)[0],
+      ).toBe("Z");
+
+      supervisors.splice(supervisors.indexOf(supervisor), 1);
+      await supervisor.close();
+    },
+    30_000,
+  );
 
   test("restart recovery never retries uncertain running work and records unknown", async () => {
     const temp = await makeTempRuntime(

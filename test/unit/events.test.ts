@@ -136,6 +136,40 @@ describe("canonical event storage", () => {
       {
         sessionId,
         branchId,
+        type: "ManagedProcessStopFailed",
+        producer: "executor",
+        idempotencyKey: "managed-unit-process-stop-failed",
+        payload: {
+          processId: "managed-unit-process",
+          effectId: "managed-unit-effect",
+          attempt: 1,
+          reason: "unit stop",
+          error: "group 42 survived SIGKILL",
+          processGroupIds: [42],
+          survivingProcessGroupIds: [42],
+          attemptedAt: "2026-01-01T00:00:01.500Z",
+        },
+      },
+      {
+        sessionId,
+        branchId,
+        type: "ManagedProcessStopFailed",
+        producer: "executor",
+        idempotencyKey: "managed-unit-process-stop-failed-again",
+        payload: {
+          processId: "managed-unit-process",
+          effectId: "managed-unit-effect",
+          attempt: 2,
+          reason: "unit stop retry",
+          error: "group 42 still survived SIGKILL",
+          processGroupIds: [42],
+          survivingProcessGroupIds: [42],
+          attemptedAt: "2026-01-01T00:00:01.750Z",
+        },
+      },
+      {
+        sessionId,
+        branchId,
         type: "EffectOutcomeRecorded",
         producer: "executor",
         idempotencyKey: "managed-unit-effect-outcome",
@@ -154,6 +188,15 @@ describe("canonical event storage", () => {
       status: "succeeded",
       pid: 42,
       processGroupId: 42,
+      stopFailureCount: 2,
+      stopFailure: {
+        attempt: 2,
+        reason: "unit stop retry",
+        error: "group 42 still survived SIGKILL",
+        processGroupIds: [42],
+        survivingProcessGroupIds: [42],
+        attemptedAt: "2026-01-01T00:00:01.750Z",
+      },
     });
     storage.close();
   });

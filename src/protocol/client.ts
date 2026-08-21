@@ -20,7 +20,7 @@ import type {
 import type { CandidateAllocationRecord, EvaluationObservationRecord, GovernedRefinementRecord, GovernedRefinementRollbackRecord, HarnessRecord, HarnessVersionRecord, MemorySearchOptions, MemorySearchResult, RefinementDecisionRecord, RefinementProposalRecord, RefinementRollbackResult, RollbackGovernedRefinementInput, RollbackRefinementInput, SkillInvocationResult, SkillTestReport, JsonValue } from "../domain/index.ts";
 import type { DataManifestRecord, GoalGateEvaluationRecord, HeartbeatRecord, ScheduleRecord, SyncConflictRecord, TaskRecord, WakeRecord } from "../storage/index.ts";
 import type { DeleteOwnedDataInput, PhysicalDeletionReceipt, ResolveConflictInput, SyncCheckpointResult, SyncCycleResult, SyncPullResult, SyncPushResult, SyncStatusView, SyncTransportStats, WorkspaceAnnouncement } from "../sync/index.ts";
-import type { ProductBranchSummary } from "../product/index.ts";
+import type { ManagedServiceRootSummary, ProductBranchSummary } from "../product/index.ts";
 
 
 const PROTOCOL_STREAM_ITEMS_PER_TURN = 32;
@@ -145,7 +145,7 @@ export class AgentClient {
   }
   serviceStatus(): Promise<unknown> { return this.#json("/service/status"); }
   shutdownService(): Promise<unknown> { return this.#post("/service/shutdown"); }
-  serviceAgents(signal?: AbortSignal): Promise<any[]> {
+  serviceAgents(signal?: AbortSignal): Promise<ManagedServiceRootSummary[]> {
     return this.#json("/service/agents", signal === undefined ? undefined : { signal });
   }
   productSessions(): Promise<ProductBranchSummary[]> { return this.#json("/product/sessions"); }

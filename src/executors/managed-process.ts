@@ -1,4 +1,5 @@
 import { open, mkdir, readFile, rm } from "node:fs/promises";
+import { readFileSync, readdirSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { realpath } from "node:fs/promises";
@@ -48,6 +49,8 @@ interface CaptureSnapshot {
 interface ActiveProcess {
   readonly processId: string;
   readonly effectId: string;
+  readonly sessionId: string;
+  readonly branchId: string;
   readonly identityToken: string;
   readonly pid: number;
   readonly processGroupId: number;
@@ -57,6 +60,8 @@ interface ActiveProcess {
   readonly finished: Promise<void>;
   finish(): void;
   cancellationReason: string | null;
+  stopFailureCount: number;
+  terminationQueue: Promise<void>;
 }
 
 class ManagedStreamCapture {
@@ -209,6 +214,8 @@ export class ManagedProcessExecutor implements EffectExecutor {
     const active: ActiveProcess = {
       processId: input.processId,
       effectId: request.effectId,
+      sessionId: request.sessionId,
+      branchId: request.branchId,
       identityToken: input.identityToken,
       pid: child.pid,
       processGroupId: child.pid,
@@ -218,11 +225,17 @@ export class ManagedProcessExecutor implements EffectExecutor {
       finished,
       finish,
       cancellationReason: null,
+      stopFailureCount: 0,
+      terminationQueue: Promise.resolve(),
     };
     this.#active.set(input.processId, active);
     const abort = () => {
       active.cancellationReason ??= "Managed process cancelled";
-      void this.#terminate(active);
+      void this.#terminate(active).catch(() => {
+        // The failed attempt is retained canonically. The owning stop,
+        // cancellation, recovery, or shutdown path remains responsible for
+        // surfacing unresolved cleanup.
+      });
     };
     context.signal.addEventListener("abort", abort, { once: true });
     try {
@@ -332,9 +345,16 @@ export class ManagedProcessExecutor implements EffectExecutor {
           process.identityToken,
         );
         if (cleanup.found && !cleanup.terminated) {
-          throw new Error(
+          const failure = new Error(
             `Managed process ${process.processId} retained authenticated descendant groups`,
           );
+          await this.#retainStopFailure(
+            process,
+            cleanup.processGroupIds,
+            cleanup.survivingProcessGroupIds,
+            cleanup.error ?? failure.message,
+          );
+          throw failure;
         }
       }),
     );
@@ -407,7 +427,13 @@ export class ManagedProcessExecutor implements EffectExecutor {
   async terminateRecovered(
     processGroupId: number | null,
     identityToken: string,
-  ): Promise<{ found: boolean; terminated: boolean; processGroupIds: number[] }> {
+  ): Promise<{
+    found: boolean;
+    terminated: boolean;
+    processGroupIds: number[];
+    survivingProcessGroupIds: number[];
+    error?: string;
+  }> {
     const candidates = [...new Set([
       ...(processGroupId !== null &&
           groupHasToken(processGroupId, identityToken)
@@ -415,24 +441,89 @@ export class ManagedProcessExecutor implements EffectExecutor {
         : []),
       ...groupsForToken(identityToken),
     ])];
-    for (const group of candidates) {
-      await terminateProcessGroup(group);
-    }
+    const termination = await terminateProcessGroups(candidates);
     return {
       found: candidates.length > 0,
-      terminated: candidates.every((group) => !groupExists(group)),
-      processGroupIds: candidates,
+      terminated: termination.survivingProcessGroupIds.length === 0,
+      processGroupIds: termination.attemptedProcessGroupIds,
+      survivingProcessGroupIds: termination.survivingProcessGroupIds,
+      ...(termination.survivingProcessGroupIds.length
+        ? {
+            error: terminationFailureDetail(
+              termination.failures,
+              termination.survivingProcessGroupIds,
+            ),
+          }
+        : {}),
     };
   }
 
   async #terminate(active: ActiveProcess): Promise<void> {
+    const termination = active.terminationQueue.then(() =>
+      this.#terminateOnce(active));
+    active.terminationQueue = termination.catch(() => {});
+    return termination;
+  }
+
+  async #terminateOnce(active: ActiveProcess): Promise<void> {
     const groups = [...new Set([
       active.processGroupId,
       ...groupsForToken(active.identityToken),
     ])];
-    for (const processGroupId of groups) {
-      await terminateProcessGroup(processGroupId);
+    const termination = await terminateProcessGroups(groups);
+    const survivors = termination.survivingProcessGroupIds;
+    if (survivors.length) {
+      const detail = terminationFailureDetail(termination.failures, survivors);
+      await this.#retainStopFailure(
+        active,
+        termination.attemptedProcessGroupIds,
+        survivors,
+        detail,
+      ).catch(
+        (retentionError) => {
+          throw new AggregateError(
+            [
+              ...termination.failures.map((failure) => failure.error),
+              retentionError,
+            ],
+            `Managed process termination failed and its diagnostics could not be retained: ${detail}`,
+          );
+        },
+      );
+      throw new AggregateError(
+        termination.failures.map((failure) => failure.error),
+        detail,
+      );
     }
+  }
+
+  async #retainStopFailure(
+    active: ActiveProcess,
+    processGroupIds: number[],
+    survivingProcessGroupIds: number[],
+    error: string,
+  ): Promise<void> {
+    const attempt = active.stopFailureCount + 1;
+    await this.storage.appendEvents([{
+      sessionId: active.sessionId,
+      branchId: active.branchId,
+      type: "ManagedProcessStopFailed",
+      producer: "executor",
+      idempotencyKey:
+        `managed-process-stop-failed:${active.processId}:${attempt}`,
+      payload: {
+        processId: active.processId,
+        effectId: active.effectId,
+        attempt,
+        reason: active.cancellationReason ??
+          "Managed process termination requested",
+        error,
+        processGroupIds,
+        survivingProcessGroupIds,
+        attemptedAt: new Date().toISOString(),
+      },
+    } satisfies NewAgentEvent<"ManagedProcessStopFailed">]);
+    active.stopFailureCount = attempt;
   }
 
   async #finalizeOutput(
@@ -616,13 +707,171 @@ function retainedSnapshot(value: string): CaptureSnapshot {
   return preview.value();
 }
 
-function groupExists(processGroupId: number): boolean {
+export type ProcessGroupLiveness =
+  | "absent"
+  | "live"
+  | "zombie_only"
+  | "unknown";
+
+export function classifyProcessGroupLiveness(input: {
+  signal: "absent" | "present" | "unknown";
+  inspectionAvailable: boolean;
+  memberStates: string[];
+}): ProcessGroupLiveness {
+  if (input.signal === "absent") return "absent";
+  if (!input.inspectionAvailable) return "unknown";
+  if (input.memberStates.some((state) =>
+    !state.startsWith("Z") && !state.startsWith("X"))) {
+    return "live";
+  }
+  if (input.memberStates.length) return "zombie_only";
+  return "unknown";
+}
+
+function processGroupLiveness(processGroupId: number): ProcessGroupLiveness {
+  let signal: "absent" | "present" | "unknown";
   try {
     process.kill(-processGroupId, 0);
-    return true;
+    signal = "present";
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "absent";
+    signal = code === "EPERM" ? "present" : "unknown";
   }
+  const snapshot = processSnapshot();
+  const memberStates = snapshot.rows.filter((row) =>
+    row.processGroupId === processGroupId).map((row) => row.state);
+  return classifyProcessGroupLiveness({
+    signal,
+    inspectionAvailable: snapshot.available,
+    memberStates,
+  });
+}
+
+function groupExists(processGroupId: number): boolean {
+  const liveness = processGroupLiveness(processGroupId);
+  return liveness === "live" || liveness === "unknown";
+}
+
+export async function terminateProcessGroups(
+  processGroupIds: number[],
+  options: {
+    terminate?: (processGroupId: number) => Promise<void>;
+    isExecuting?: (processGroupId: number) => boolean;
+  } = {},
+): Promise<{
+  attemptedProcessGroupIds: number[];
+  survivingProcessGroupIds: number[];
+  failures: Array<{ group: number; error: unknown }>;
+}> {
+  const attemptedProcessGroupIds = [...new Set(processGroupIds)];
+  const failures: Array<{ group: number; error: unknown }> = [];
+  const terminate = options.terminate ?? terminateProcessGroup;
+  for (const group of attemptedProcessGroupIds) {
+    try {
+      await terminate(group);
+    } catch (error) {
+      failures.push({ group, error });
+    }
+  }
+  const isExecuting = options.isExecuting ?? groupExists;
+  return {
+    attemptedProcessGroupIds,
+    survivingProcessGroupIds: attemptedProcessGroupIds.filter(isExecuting),
+    failures,
+  };
+}
+
+function terminationFailureDetail(
+  failures: Array<{ group: number; error: unknown }>,
+  survivors: number[],
+): string {
+  const failed = failures.map(({ group, error }) =>
+    `${group}: ${error instanceof Error ? error.message : String(error)}`);
+  return [
+    ...(failed.length ? [`termination errors: ${failed.join("; ")}`] : []),
+    `executing or unconfirmed groups survived: ${survivors.join(", ")}`,
+  ].join("; ").slice(0, 16_384);
+}
+
+interface ProcessRow {
+  readonly pid: number;
+  readonly processGroupId: number;
+  readonly state: string;
+  readonly command: string;
+}
+
+interface ProcessSnapshot {
+  readonly available: boolean;
+  readonly rows: ProcessRow[];
+}
+
+function processRows(): ProcessRow[] {
+  return processSnapshot().rows;
+}
+
+function processSnapshot(): ProcessSnapshot {
+  if (process.platform === "linux") {
+    try {
+      const rows = readdirSync("/proc", { withFileTypes: true })
+        .flatMap((entry) => {
+          if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) return [];
+          const pid = Number(entry.name);
+          try {
+            const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+            const close = stat.lastIndexOf(")");
+            if (close < 0) return [];
+            const fields = stat.slice(close + 2).trim().split(/\s+/);
+            const state = fields[0];
+            const processGroupId = Number(fields[2]);
+            if (!state || !Number.isSafeInteger(processGroupId) ||
+                processGroupId <= 0) return [];
+            const command = readFileSync(`/proc/${pid}/cmdline`)
+              .toString("utf8").replaceAll("\0", " ").trim();
+            return [{ pid, processGroupId, state, command }];
+          } catch {
+            return [];
+          }
+        });
+      return { available: true, rows };
+    } catch {
+      // Fall through to the portable ps projection.
+    }
+  }
+  let ps: ReturnType<typeof Bun.spawnSync>;
+  try {
+    ps = Bun.spawnSync([
+      "ps",
+      "-axo",
+      "pid=,pgid=,state=,command=",
+    ]);
+  } catch {
+    return { available: false, rows: [] };
+  }
+  if (ps.exitCode !== 0 || !ps.stdout) {
+    return { available: false, rows: [] };
+  }
+  return {
+    available: true,
+    rows: ps.stdout.toString().split("\n").flatMap((line) => {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+      if (!match) return [];
+      return [{
+        pid: Number(match[1]),
+        processGroupId: Number(match[2]),
+        state: match[3]!,
+        command: match[4]!,
+      }];
+    }),
+  };
+}
+
+function groupHasToken(processGroupId: number, identityToken: string): boolean {
+  const marker = `${PROCESS_MARKER_PREFIX}${identityToken}`;
+  const rows = processRows().filter((row) =>
+    row.processGroupId === processGroupId);
+  return rows.some((row) => row.command.includes(marker)) ||
+    rows.some((row) => processEnvironmentHasToken(row.pid, identityToken));
 }
 
 async function terminateProcessGroup(processGroupId: number): Promise<void> {
@@ -639,8 +888,9 @@ async function terminateProcessGroup(processGroupId: number): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
   }
   if (!await waitForGroupExit(processGroupId, TERMINATION_GRACE_MS)) {
+    const liveness = processGroupLiveness(processGroupId);
     throw new Error(
-      `Managed process group ${processGroupId} survived SIGKILL`,
+      `Managed process group ${processGroupId} remained ${liveness} after SIGKILL`,
     );
   }
 }
@@ -670,36 +920,6 @@ async function waitForNaturalGroupExit(
   }
 }
 
-function processRows(): Array<{
-  pid: number;
-  processGroupId: number;
-  command: string;
-}> {
-  const ps = Bun.spawnSync([
-    "ps",
-    "-axo",
-    "pid=,pgid=,command=",
-  ]);
-  if (ps.exitCode !== 0) return [];
-  return ps.stdout.toString().split("\n").flatMap((line) => {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
-    if (!match) return [];
-    return [{
-      pid: Number(match[1]),
-      processGroupId: Number(match[2]),
-      command: match[3]!,
-    }];
-  });
-}
-
-function groupHasToken(processGroupId: number, identityToken: string): boolean {
-  const marker = `${PROCESS_MARKER_PREFIX}${identityToken}`;
-  const rows = processRows().filter((row) =>
-    row.processGroupId === processGroupId);
-  return rows.some((row) => row.command.includes(marker)) ||
-    rows.some((row) => processEnvironmentHasToken(row.pid, identityToken));
-}
-
 function groupsForToken(identityToken: string): number[] {
   const marker = `${PROCESS_MARKER_PREFIX}${identityToken}`;
   const rows = processRows();
@@ -718,15 +938,28 @@ function processEnvironmentHasToken(
   pid: number,
   identityToken: string,
 ): boolean {
-  const ps = Bun.spawnSync([
-    "ps",
-    "eww",
-    "-p",
-    String(pid),
-    "-o",
-    "command=",
-  ]);
-  if (ps.exitCode !== 0) return false;
+  if (process.platform === "linux") {
+    try {
+      return readFileSync(`/proc/${pid}/environ`).toString("utf8").split("\0")
+        .includes(`${MANAGED_PROCESS_TOKEN_ENV}=${identityToken}`);
+    } catch {
+      return false;
+    }
+  }
+  let ps: ReturnType<typeof Bun.spawnSync>;
+  try {
+    ps = Bun.spawnSync([
+      "ps",
+      "eww",
+      "-p",
+      String(pid),
+      "-o",
+      "command=",
+    ]);
+  } catch {
+    return false;
+  }
+  if (ps.exitCode !== 0 || !ps.stdout) return false;
   return ps.stdout.toString().includes(
     `${MANAGED_PROCESS_TOKEN_ENV}=${identityToken}`,
   );

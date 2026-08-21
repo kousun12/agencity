@@ -186,6 +186,12 @@ class RuneBenchCatalogTests(unittest.TestCase):
         self.assertNotIn("__RUNEBENCH_SCORED_SKILL__", rendered)
         self.assertIn("sdk.processes.start", REPL_GUIDANCE)
         self.assertIn("sdk.processes.readLogs", REPL_GUIDANCE)
+        self.assertIn(
+            "sdk.processes.start(input: string | { command: string; cwd?: string;",
+            REPL_GUIDANCE,
+        )
+        self.assertIn('idempotencyKey: "runebench-trainer-v1"', REPL_GUIDANCE)
+        self.assertIn('cwd: "/app"', REPL_GUIDANCE)
         self.assertIn("managed process is optional", REPL_GUIDANCE)
         self.assertIn("release the REPL controller", REPL_GUIDANCE)
         self.assertIn("Never use `command &`", REPL_GUIDANCE)
@@ -202,6 +208,7 @@ class RuneBenchCatalogTests(unittest.TestCase):
         self.assertIn('mkdir(LOCK_DIR)', CONTROLLER_SOURCE)
         self.assertIn("RUNEBENCH_CONTROLLER_BUSY", CONTROLLER_SOURCE)
         self.assertIn("processStartTime", CONTROLLER_SOURCE)
+        self.assertIn('!["Z", "X"].includes(identity.state)', CONTROLLER_SOURCE)
         self.assertIn("await this.rs.disconnect()", CONTROLLER_SOURCE)
         self.assertIn("RUNEBENCH_CONTROLLER_DISCONNECT_UNCONFIRMED", CONTROLLER_SOURCE)
         self.assertIn("result?.success !== true", CONTROLLER_SOURCE)

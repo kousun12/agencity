@@ -208,7 +208,7 @@ parent_mark = len(output)
 if child_parent_ready:
     time.sleep(1)
     os.write(fd, b"\x1b[D")
-parent_open = child_parent_ready and pump(8, "Agencity — New session", parent_mark)
+    parent_open = child_parent_ready and pump(8, "Agencity — OpenTUI pseudo-terminal round trip", parent_mark)
 alternate_mark = len(output)
 if parent_open:
     time.sleep(0.3)
@@ -228,11 +228,11 @@ if workspace_roots:
     os.write(fd, b"\x1b[B")
     time.sleep(0.1)
     os.write(fd, b"\x1b[C")
-root_selection = workspace_roots and pump(8, "Agencity — New session", root_selection_mark) and pump(8, "1 agent:", root_selection_mark)
+root_selection = workspace_roots and pump(8, "Agencity — OpenTUI pseudo-terminal round trip", root_selection_mark) and pump(8, "1 agent:", root_selection_mark)
 if ready:
     if root_selection:
         time.sleep(1)
-    os.write(fd, b"/quit\r")
+    os.write(fd, b"\x04")
     pump(4, "workspace service will stop automatically")
 exit_code = wait_exit(5)
 if exit_code is None:

@@ -145,6 +145,14 @@ vercel:openai/gpt-5.6-sol
 
 The model part is the Vercel AI Gateway catalog's canonical `creator/model` ID for every product transport. Direct OpenAI and Anthropic execution remove the matching creator prefix only when calling the native provider API. A direct transport rejects a model owned by another creator.
 
+### Automatic session titles
+
+Each committed task-bearing user input refreshes the session's durable display title in the background. The title input contains only chronological direct client messages, the session's initial delegated task, and parent-to-child family input on that branch. Child results delivered to a parent, sibling traffic, assistant responses, tool output, repository instructions, prompt notes, and files are excluded. The structured result contains a free-form verb, subject, and short intent summary, and the displayed title is limited to six words.
+
+Sessions routed through Vercel AI Gateway use the canonical `openai/gpt-5.6-luna` model ID through Gateway. Direct OpenAI sessions retain that canonical identity but send the native `gpt-5.6-luna` wire ID. Other provider routes use a deterministic verb-first fallback and do not make a title model call. Title effects retain dispatch, input, outcome, usage, and source-message provenance, but do not debit the autonomous run's token, cost, turn, or deadline budget.
+
+Explicit session renaming takes precedence over later automatic results. Background title failures leave a bounded deterministic title and do not delay or fail the agent run.
+
 For new work, selection order is:
 
 1. `--model PROVIDER:MODEL`

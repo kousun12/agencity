@@ -492,6 +492,14 @@ describe("FU-012 retained family messaging", () => {
       expect((roster.result as any).items).toEqual([expect.objectContaining({
         sessionId: handle.sessionId,
         name: "researcher",
+        sessionTitle: {
+          text: "researcher",
+          source: "explicit",
+          verb: null,
+          subject: null,
+          intentSummary: null,
+          sourceMessageCursor: null,
+        },
         relationship: "child",
         task: "wait",
         cancellationRequested: false,
@@ -761,6 +769,7 @@ describe("FU-012 retained family messaging", () => {
         sessionId: "family-missing-session",
         branchId: "family-missing-branch",
         name: null,
+        sessionTitle: null,
         relationship: "child",
         depth: 1,
         status: "unavailable",

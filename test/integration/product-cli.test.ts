@@ -294,7 +294,7 @@ describe("product CLI", () => {
     expect(first.stdout).toContain("Agencity trusted-local TUI");
     const second = await invoke([]);
     expect(second).toMatchObject({ code: 0, stderr: "" });
-    expect(second.stdout).toContain("Session: New session");
+    expect(second.stdout).toContain("Session: Start new session");
   });
 
   test("configured provider run creates named durable work, resumes it, selects, and renames without IDs for normal use", async () => {
@@ -320,9 +320,19 @@ describe("product CLI", () => {
     expect(resumed.stdout).toContain("fixture completed: continue inspection");
 
     const listed = await cli(["sessions", "--workspace", value.workspace, "--json"], { home: value.home });
-    const rows = JSON.parse(listed.stdout) as Array<{ sessionId: string; branchId: string; sessionName: string; taskSummary: string; model: { provider: string; reasoningEffort: string } }>;
+    const rows = JSON.parse(listed.stdout) as Array<{ sessionId: string; branchId: string; sessionName: string; sessionTitle: { source: string; verb: string | null; subject: string | null; intentSummary: string | null }; taskSummary: string; model: { provider: string; reasoningEffort: string } }>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ sessionName: "inspect this repository", taskSummary: "inspect this repository", model: { provider: "openai", reasoningEffort: "high" } });
+    expect(rows[0]).toMatchObject({
+      sessionName: "continue inspection",
+      sessionTitle: {
+        source: "model",
+        verb: "continue",
+        subject: "inspection",
+        intentSummary: "continue inspection",
+      },
+      taskSummary: "inspect this repository",
+      model: { provider: "openai", reasoningEffort: "high" },
+    });
 
     const activeProfile = await cli(["profile", "show", "--workspace", value.workspace, "--json"], { home: value.home });
     expect(activeProfile).toMatchObject({ code: 0, stderr: "" });

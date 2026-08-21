@@ -35,3 +35,4 @@ export * from "./context-compaction.ts";
 export * from "./context-window.ts";
 export * from "./repository-instructions.ts";
 export * from "./managed-processes.ts";
+export * from "./session-titles.ts";

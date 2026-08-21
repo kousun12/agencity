@@ -43,6 +43,11 @@ import {
   validateAgentInvocationResult,
   validateAgentRunResultReference,
 } from "./agent-invocation-contract.ts";
+import {
+  SESSION_TITLE_SYSTEM_INSTRUCTION,
+  isSessionTitleInputMessage,
+  validateSessionTitleFields,
+} from "./session-title.ts";
 
 function withBase(state: AgentState, event: AgentEvent): AgentState {
   return { ...state, cursor: event.cursor, appliedEventIds: [...state.appliedEventIds, event.id] };
@@ -90,6 +95,13 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     if ((parentSessionId === null) !== (parentBranchId === null)) throw new ValidationError("Session ancestry requires both parent IDs");
     return {
       reducerVersion: REDUCER_VERSION, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
+      sessionTitle: {
+        mode: p.sessionName === undefined ? "automatic" : "manual",
+        latestRequestedSourceMessageCursor: null,
+        appliedSourceMessageCursor: null,
+        requests: {},
+        resolutions: {},
+      },
       parentSessionId, parentBranchId, rootSessionId: p.rootSessionId ?? event.sessionId,
       depth: p.depth ?? 0, taskId: p.taskId ?? null,
       agentProfiles: { [p.agentProfile.profileVersionId]: p.agentProfile },
@@ -123,7 +135,166 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       return { ...next, activeAgentProfileVersionId: p.profileVersionId };
     }
     case "BranchCreated": { const p = event.payload as EventPayloads["BranchCreated"]; return { ...next, branch: { id: p.branchId, parentBranchId: p.parentBranchId, forkCursor: p.forkCursor, name: p.name ?? null } }; }
-    case "SessionNamed": return { ...next, sessionName: (event.payload as EventPayloads["SessionNamed"]).name };
+    case "SessionNamed": return {
+      ...next,
+      sessionName: (event.payload as EventPayloads["SessionNamed"]).name,
+      sessionTitle: { ...state.sessionTitle, mode: "manual" },
+    };
+    case "SessionTitleRequested": {
+      const p = event.payload as EventPayloads["SessionTitleRequested"];
+      const expected = state.messages
+        .filter((message) =>
+          isSessionTitleInputMessage(message) &&
+          BigInt(message.eventCursor) <= BigInt(p.sourceMessageCursor))
+        .map((message) => message.eventId);
+      if (!sameStrings(expected, p.sourceMessageEventIds) ||
+          expected.at(-1) !== p.sourceMessageEventId) {
+        throw new ValidationError("Session title request must cite every chronological user message through its exact frontier");
+      }
+      if (p.mode === "model") {
+        const candidate = validateProviderInputCandidate(p.providerInput!);
+        const expectedMessages = [
+          { kind: "text", role: "system", content: SESSION_TITLE_SYSTEM_INSTRUCTION },
+          ...state.messages
+            .filter((message) => p.sourceMessageEventIds.includes(message.eventId))
+            .map((message) => ({ kind: "text", role: "user", content: message.content })),
+        ];
+        if (!Bun.deepEquals(candidate.messages, expectedMessages)) {
+          throw new ValidationError("Session title provider input may contain only its policy and cited user messages");
+        }
+      }
+      const existing = state.sessionTitle.requests[p.requestId];
+      if (existing) throw new InvalidTransitionError("sessionTitleRequest", existing.status, "requested");
+      return {
+        ...next,
+        sessionTitle: {
+          ...state.sessionTitle,
+          latestRequestedSourceMessageCursor:
+            state.sessionTitle.latestRequestedSourceMessageCursor === null ||
+            BigInt(p.sourceMessageCursor) >
+              BigInt(state.sessionTitle.latestRequestedSourceMessageCursor)
+              ? p.sourceMessageCursor
+              : state.sessionTitle.latestRequestedSourceMessageCursor,
+          requests: {
+            ...state.sessionTitle.requests,
+            [p.requestId]: {
+              id: p.requestId,
+              sourceMessageEventId: p.sourceMessageEventId,
+              sourceMessageCursor: p.sourceMessageCursor,
+              sourceMessageEventIds: [...p.sourceMessageEventIds],
+              sourceBranchId: event.branchId,
+              mode: p.mode,
+              ...(p.effectId === undefined ? {} : { effectId: p.effectId }),
+              ...(p.modelDispatch === undefined ? {} : { modelDispatch: p.modelDispatch }),
+              ...(p.providerInput === undefined ? {} : { providerInput: p.providerInput }),
+              status: "requested",
+              eventId: event.id,
+            },
+          },
+        },
+      };
+    }
+    case "SessionTitleResolved": {
+      const p = event.payload as EventPayloads["SessionTitleResolved"];
+      const checked = validateSessionTitleFields({
+        verb: p.verb,
+        subject: p.subject,
+        intentSummary: p.intentSummary,
+      });
+      if (checked.title !== p.title) {
+        throw new ValidationError("Session title result does not match its structured fields");
+      }
+      const request = state.sessionTitle.requests[p.requestId];
+      if (!request && p.sourceBranchId === event.branchId) {
+        throw new ValidationError("Origin-branch session title results require their retained request");
+      }
+      if (request && (request.status !== "requested" ||
+          request.sourceMessageEventId !== p.sourceMessageEventId ||
+          request.sourceMessageCursor !== p.sourceMessageCursor ||
+          request.sourceBranchId !== p.sourceBranchId ||
+          !sameStrings(request.sourceMessageEventIds, p.sourceMessageEventIds))) {
+        throw new InvalidTransitionError("sessionTitleRequest", request.status, "resolved");
+      }
+      if (request?.mode === "model") {
+        const effect = request.effectId === undefined
+          ? undefined
+          : state.effects[request.effectId];
+        if (!effect || !["succeeded", "failed", "cancelled", "unknown"].includes(effect.status) ||
+            p.sourceOutcomeEventId !== effect.eventId) {
+          throw new ValidationError("Session title result must cite its authoritative terminal model effect");
+        }
+        if (p.method === "model") {
+          if (effect.status !== "succeeded" || effect.output === undefined) {
+            throw new ValidationError("Generated session title requires a successful model effect");
+          }
+          const requestedEvent = state.appliedEventIds.includes(request.eventId);
+          if (!requestedEvent || p.usage === undefined || p.usageSource === undefined) {
+            throw new ValidationError("Generated session title requires retained usage provenance");
+          }
+          const output = validateModelEffectOutputV2(effect.output, {
+            responseContract: request.modelDispatch!.responseContract,
+            responseCapability: request.modelDispatch!.responseCapability,
+            configuredProvider: request.modelDispatch!.configuration.provider,
+          });
+          const value = output.result.kind === "tool-submission" &&
+            output.result.submission.input &&
+            typeof output.result.submission.input === "object" &&
+            !Array.isArray(output.result.submission.input)
+            ? output.result.submission.input.value
+            : undefined;
+          if (!Bun.deepEquals(value, {
+            verb: p.verb,
+            subject: p.subject,
+            intentSummary: p.intentSummary,
+          }) || !Bun.deepEquals(output.response.usage, p.usage)) {
+            throw new ValidationError("Generated session title differs from its authoritative model effect");
+          }
+        }
+      }
+      const resolution = {
+        requestId: p.requestId,
+        sourceMessageEventId: p.sourceMessageEventId,
+        sourceMessageCursor: p.sourceMessageCursor,
+        sourceMessageEventIds: [...p.sourceMessageEventIds],
+        sourceBranchId: p.sourceBranchId,
+        method: p.method,
+        title: p.title,
+        verb: p.verb,
+        subject: p.subject,
+        intentSummary: p.intentSummary,
+        eventId: event.id,
+      } as const;
+      const newer = state.sessionTitle.appliedSourceMessageCursor === null ||
+        BigInt(p.sourceMessageCursor) >
+          BigInt(state.sessionTitle.appliedSourceMessageCursor);
+      return {
+        ...next,
+        ...(state.sessionTitle.mode === "automatic" && newer
+          ? { sessionName: p.title }
+          : {}),
+        sessionTitle: {
+          ...state.sessionTitle,
+          ...(state.sessionTitle.mode === "automatic" && newer
+            ? { appliedSourceMessageCursor: p.sourceMessageCursor }
+            : {}),
+          requests: request
+            ? {
+                ...state.sessionTitle.requests,
+                [p.requestId]: { ...request, status: "resolved", eventId: event.id },
+              }
+            : state.sessionTitle.requests,
+          resolutions: {
+            ...state.sessionTitle.resolutions,
+            [p.requestId]: resolution,
+          },
+        },
+      };
+    }
+    case "SessionTitleModeChanged":
+      return {
+        ...next,
+        sessionTitle: { ...state.sessionTitle, mode: "automatic" },
+      };
     case "BranchNamed": return { ...next, branch: { ...state.branch, name: (event.payload as EventPayloads["BranchNamed"]).name } };
     case "SessionStatusChanged": return { ...next, status: (event.payload as EventPayloads["SessionStatusChanged"]).status };
     case "SessionModelChanged": {
@@ -136,7 +307,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
       }
       return { ...next, model: p.model };
     }
-    case "MessageAppended": { const p = event.payload as EventPayloads["MessageAppended"]; return { ...next, messages: [...state.messages, { id: p.messageId, role: p.role, content: p.content, eventId: event.id, eventCursor: event.cursor, schemaVersion: event.schemaVersion, modelCallId: p.modelCallId ?? null, ...(p.mailbox === undefined ? {} : { mailbox: { ...p.mailbox, ...(p.mailbox.artifactIds === undefined ? {} : { artifactIds: [...p.mailbox.artifactIds] }) } }) }] }; }
+    case "MessageAppended": { const p = event.payload as EventPayloads["MessageAppended"]; return { ...next, messages: [...state.messages, { id: p.messageId, role: p.role, content: p.content, eventId: event.id, eventCursor: event.cursor, schemaVersion: event.schemaVersion, modelCallId: p.modelCallId ?? null, producer: event.producer, idempotencyKey: event.idempotencyKey, ...(p.mailbox === undefined ? {} : { mailbox: { ...p.mailbox, ...(p.mailbox.artifactIds === undefined ? {} : { artifactIds: [...p.mailbox.artifactIds] }) } }) }] }; }
     case "CellProposed": { const p = event.payload as EventPayloads["CellProposed"]; if (state.cells[p.cellId]) throw new InvalidTransitionError("cell", state.cells[p.cellId]!.status, "proposed"); const cell: CellState = { id: p.cellId, code: p.code, status: "proposed", attempts: 0, logs: [], logStreams: [], eventId: event.id }; return { ...next, cells: { ...state.cells, [p.cellId]: cell } }; }
     case "CellStarted": { const p = event.payload as EventPayloads["CellStarted"]; const old = state.cells[p.cellId]; if (!old || !["proposed", "running"].includes(old.status) || p.attempt !== old.attempts + 1) throw new InvalidTransitionError("cell", old?.status ?? "missing", "running"); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "running", attempts: p.attempt, eventId: event.id } } }; }
     case "CellCommitted": { const p = event.payload as EventPayloads["CellCommitted"]; const old = state.cells[p.cellId]; if (!old || old.status !== "running") throw new InvalidTransitionError("cell", old?.status ?? "missing", "committed"); assertBoundedOutputs(p.result); return { ...next, cells: { ...state.cells, [p.cellId]: { ...old, status: "committed", result: p.result, logs: p.logs, logStreams: p.logStreams ?? p.logs.map(() => "stdout"), eventId: event.id } } }; }
@@ -294,6 +465,7 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
         processGroupId: null,
         requestedAt: p.requestedAt,
         startedAt: null,
+        stopFailureCount: 0,
         eventId: event.id,
       };
       return {
@@ -328,6 +500,46 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
             pid: p.pid,
             processGroupId: p.processGroupId,
             startedAt: p.startedAt,
+            eventId: event.id,
+          },
+        },
+      };
+    }
+    case "ManagedProcessStopFailed": {
+      const p = event.payload as EventPayloads["ManagedProcessStopFailed"];
+      const process = state.managedProcesses[p.processId];
+      const effect = state.effects[p.effectId];
+      const attemptedGroups = new Set(p.processGroupIds);
+      const survivingGroups = new Set(p.survivingProcessGroupIds);
+      if (!process || process.effectId !== p.effectId ||
+          process.status !== "running" || effect?.status !== "started" ||
+          p.attempt !== process.stopFailureCount + 1 ||
+          attemptedGroups.size !== p.processGroupIds.length ||
+          survivingGroups.size !== p.survivingProcessGroupIds.length ||
+          p.survivingProcessGroupIds.some((group) =>
+            !attemptedGroups.has(group))) {
+        throw new InvalidTransitionError(
+          "managedProcessStop",
+          process?.status ?? "missing",
+          "failed",
+        );
+      }
+      return {
+        ...next,
+        managedProcesses: {
+          ...state.managedProcesses,
+          [p.processId]: {
+            ...process,
+            stopFailureCount: p.attempt,
+            stopFailure: {
+              attempt: p.attempt,
+              reason: p.reason,
+              error: p.error,
+              processGroupIds: [...p.processGroupIds],
+              survivingProcessGroupIds: [...p.survivingProcessGroupIds],
+              attemptedAt: p.attemptedAt,
+              eventId: event.id,
+            },
             eventId: event.id,
           },
         },
@@ -1458,13 +1670,14 @@ function validateModelEffectRelation(
   const callId = typeof input.callId === "string" ? input.callId : undefined;
   const compactionId = typeof input.compactionId === "string" ? input.compactionId : undefined;
   const generationId = typeof input.generationId === "string" ? input.generationId : undefined;
+  const requestId = typeof input.requestId === "string" ? input.requestId : undefined;
   const dispatch = input.modelDispatch;
   const providerInput = input.providerInput;
   if (!dispatch || typeof dispatch !== "object" || Array.isArray(dispatch)) {
     throw new ValidationError("Model effects require a complete immutable model dispatch");
   }
-  if ([callId, compactionId, generationId].filter((value) => value !== undefined).length !== 1) {
-    throw new ValidationError("Model effects must belong to exactly one admitted call, compaction, or AI generation");
+  if ([callId, compactionId, generationId, requestId].filter((value) => value !== undefined).length !== 1) {
+    throw new ValidationError("Model effects must belong to exactly one admitted call, compaction, AI generation, or session-title request");
   }
   if (callId !== undefined) {
     const call = state.modelCalls[callId];
@@ -1484,6 +1697,15 @@ function validateModelEffectRelation(
         !generation.modelDispatch || !Bun.deepEquals(generation.modelDispatch, dispatch) ||
         !generation.providerInput || !Bun.deepEquals(generation.providerInput, providerInput)) {
       throw new ValidationError("Model effect does not agree with its admitted AI generation");
+    }
+    return;
+  }
+  if (requestId !== undefined) {
+    const request = state.sessionTitle.requests[requestId];
+    if (!request || request.effectId !== payload.effectId ||
+        !request.modelDispatch || !Bun.deepEquals(request.modelDispatch, dispatch) ||
+        !request.providerInput || !Bun.deepEquals(request.providerInput, providerInput)) {
+      throw new ValidationError("Model effect does not agree with its admitted session-title request");
     }
     return;
   }
@@ -1512,8 +1734,9 @@ function validateEffectOrigin(
   if (effect.executor === "model" &&
       origin.kind !== "model-call" &&
       origin.kind !== "ai-generation" &&
+      origin.kind !== "session-title" &&
       origin.kind !== "context-compaction") {
-    throw new ValidationError("Model effects require a model-call, AI-generation, or context-compaction origin");
+    throw new ValidationError("Model effects require a model-call, AI-generation, session-title, or context-compaction origin");
   }
   if (effect.executor === "skill" &&
       origin.kind !== "cell" &&
@@ -1557,6 +1780,19 @@ function validateEffectOrigin(
         !generation || generation.effectId !== effect.effectId ||
         inputGenerationId !== origin.generationId) {
       throw new ValidationError("AI-generation effect origin does not agree with its retained generation");
+    }
+    return;
+  }
+  if (origin.kind === "session-title") {
+    const request = state.sessionTitle.requests[origin.requestId];
+    const inputRequestId = effect.input && typeof effect.input === "object" &&
+      !Array.isArray(effect.input) && typeof effect.input.requestId === "string"
+      ? effect.input.requestId
+      : undefined;
+    if (effect.executor !== "model" || effect.operation !== "complete" ||
+        !request || request.effectId !== effect.effectId ||
+        inputRequestId !== origin.requestId) {
+      throw new ValidationError("Session-title effect origin does not agree with its retained request");
     }
     return;
   }
