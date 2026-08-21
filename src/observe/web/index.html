@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Agencity Observe</title>
+    <link rel="stylesheet" href="/app.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-block">
+        <p class="eyebrow">Agencity</p>
+        <h1>Observe</h1>
+      </div>
+      <dl class="connection-grid" aria-label="Observer connection">
+        <div>
+          <dt>Availability</dt>
+          <dd id="connection-state" data-state="connecting">Connecting</dd>
+        </div>
+        <div>
+          <dt>Workspace</dt>
+          <dd id="workspace-name">Waiting</dd>
+        </div>
+        <div>
+          <dt>Family</dt>
+          <dd id="family-name">Not selected</dd>
+        </div>
+        <div>
+          <dt>Service</dt>
+          <dd id="instance-name">Unavailable</dd>
+        </div>
+        <div>
+          <dt>Generation</dt>
+          <dd id="generation-name">—</dd>
+        </div>
+        <div>
+          <dt>Stream</dt>
+          <dd id="stream-state">Disconnected</dd>
+        </div>
+      </dl>
+    </header>
+
+    <aside class="trust-notice">
+      <strong>Trusted local observer.</strong>
+      <span>Agent tasks, model output, logs, and repository data can be sensitive. This page is read-only but is not a security sandbox.</span>
+    </aside>
+
+    <p id="app-status" class="app-status" role="status" aria-live="polite">Starting observer session…</p>
+
+    <section id="root-panel" class="root-panel" hidden>
+      <div>
+        <p class="eyebrow">Select one family</p>
+        <h2>Root agents</h2>
+        <p id="root-count" class="muted"></p>
+      </div>
+      <div id="roots-list" class="roots-list"></div>
+      <div class="pager">
+        <button id="roots-previous" type="button">Previous</button>
+        <span id="roots-page">Page 1</span>
+        <button id="roots-next" type="button">Next</button>
+      </div>
+    </section>
+
+    <main id="observer-main" hidden>
+      <nav class="depth-tabs" aria-label="Observer depth">
+        <button type="button" data-depth="overview" aria-selected="true">Overview</button>
+        <button type="button" data-depth="inspect" aria-selected="false">Inspect</button>
+        <button type="button" data-depth="events" aria-selected="false">Events</button>
+      </nav>
+
+      <section id="overview-panel" class="depth-panel">
+        <div class="overview-grid">
+          <section class="graph-panel" aria-labelledby="graph-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Durable routes</p>
+                <h2 id="graph-title">Family graph</h2>
+              </div>
+              <p id="graph-status" class="state-note"></p>
+            </div>
+            <div id="family-graph" class="family-graph">
+              <svg id="graph-edges" class="graph-edges" aria-hidden="true"></svg>
+              <div id="graph-nodes" class="graph-nodes"></div>
+            </div>
+          </section>
+
+          <aside class="activity-panel" aria-labelledby="activity-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">This connection</p>
+                <h2 id="activity-title">Live activity</h2>
+              </div>
+              <span id="activity-count" class="count-badge">0</span>
+            </div>
+            <ol id="activity-list" class="activity-list"></ol>
+          </aside>
+        </div>
+      </section>
+
+      <section id="inspect-panel" class="depth-panel" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Lazy bounded detail</p>
+            <h2>Inspect route</h2>
+          </div>
+          <p id="selected-route" class="state-note">Select a graph node.</p>
+        </div>
+        <div id="detail-sections" class="detail-sections" aria-label="Detail sections"></div>
+        <p id="detail-state" class="state-note">No detail loaded.</p>
+        <div id="detail-list" class="detail-list"></div>
+        <div id="detail-pager" class="pager" hidden>
+          <button id="detail-more" type="button">Load next page</button>
+        </div>
+      </section>
+
+      <section id="events-panel" class="depth-panel" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Exact observed provenance</p>
+            <h2>Committed events</h2>
+          </div>
+          <span id="events-count" class="count-badge">0</span>
+        </div>
+        <p class="state-note">This bounded rail starts with the current observer process. It is not full historical replay.</p>
+        <ol id="events-list" class="events-list"></ol>
+      </section>
+    </main>
+  </body>
+</html>
