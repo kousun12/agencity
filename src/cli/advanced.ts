@@ -321,6 +321,7 @@ export const CLI_HELP_GROUPS: readonly CliHelpGroup[] = Object.freeze([
       productHelp("agencity skills [list|show|install|propose|test|enable|disable|remove]", "Manage tested workspace and profile skills; local code installation requires an exact digest confirmation."),
       productHelp("agencity context", "Inspect effective context, capacity, and compaction provenance."),
       productHelp("agencity compact [GUIDANCE] [--strategy extractive|summary]", "Compact retained narrative without deleting canonical history."),
+      productHelp("agencity observe [--workspace PATH] [--port PORT]", "Run a foreground read-only localhost observer without starting or changing agent work."),
       productHelp("agencity doctor", "Check providers, recovery, placement, and sync."),
       productHelp("agencity config", "Manage non-secret preferences and credential references."),
     ]),

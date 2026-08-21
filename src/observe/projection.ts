@@ -603,6 +603,7 @@ export function deriveObserverDetailPage(
   options: {
     readonly limit?: number;
     readonly cursor?: string | null;
+    readonly itemId?: string | null;
   } = {},
 ): ObserverDetailPageDto {
   if (!snapshot.state || snapshot.cursor === null) {
@@ -613,7 +614,10 @@ export function deriveObserverDetailPage(
     Math.floor(options.limit ?? OBSERVER_BOUNDS.detailItems),
   ));
   const offset = decodePageCursor(options.cursor, section, snapshot.cursor);
-  const all = detailItems(snapshot, section);
+  const allItems = detailItems(snapshot, section);
+  const all = options.itemId
+    ? allItems.filter(value => value.id === options.itemId)
+    : allItems;
   const selected: ObserverDetailItemDto[] = [];
   let byteLimit = false;
   for (let index = offset; index < all.length && selected.length < limit; index += 1) {

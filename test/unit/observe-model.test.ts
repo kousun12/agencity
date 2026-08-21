@@ -183,6 +183,10 @@ describe("observer bounds", () => {
       cursor: first.pagination.nextCursor,
     });
     expect(second.items[0]?.id).not.toBe(first.items[0]?.id);
+    const exact = deriveObserverDetailPage(routeSnapshot(route, value), "cells", {
+      itemId: "cell-17",
+    });
+    expect(exact.items.map(item => item.id)).toEqual(["cell-17"]);
   });
 
   test("advances past a single detail item that exceeds the page byte bound", () => {

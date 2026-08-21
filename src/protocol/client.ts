@@ -96,8 +96,11 @@ export class AgentClient {
   abortPendingRequests(reason = "Protocol client detached"): void {
     for (const controller of this.#pendingRequests) controller.abort(new DOMException(reason, "AbortError"));
   }
-  health(): Promise<{ ok: boolean; authenticated?: boolean; workspaceId?: string; instanceId?: string; appVersion?: string; protocolMin?: number; protocolMax?: number; configHash?: string }> { return this.#json("/health"); }
-  capabilities(): Promise<ProtocolCapabilities> {
+  health(signal?: AbortSignal): Promise<{ ok: boolean; authenticated?: boolean; ready?: boolean; workspaceId?: string; instanceId?: string; appVersion?: string; protocolMin?: number; protocolMax?: number; configHash?: string }> {
+    return this.#json("/health", signal === undefined ? undefined : { signal });
+  }
+  capabilities(signal?: AbortSignal): Promise<ProtocolCapabilities> {
+    if (signal !== undefined) return this.#json<ProtocolCapabilities>("/capabilities", { signal });
     if (this.#capabilitiesSnapshot === null) {
       const request = this.#json<ProtocolCapabilities>("/capabilities");
       this.#capabilitiesSnapshot = request;
@@ -142,7 +145,9 @@ export class AgentClient {
   }
   serviceStatus(): Promise<unknown> { return this.#json("/service/status"); }
   shutdownService(): Promise<unknown> { return this.#post("/service/shutdown"); }
-  serviceAgents(): Promise<any[]> { return this.#json("/service/agents"); }
+  serviceAgents(signal?: AbortSignal): Promise<any[]> {
+    return this.#json("/service/agents", signal === undefined ? undefined : { signal });
+  }
   productSessions(): Promise<ProductBranchSummary[]> { return this.#json("/product/sessions"); }
   productSelect(target?: string, branchId?: string): Promise<{ sessionId: string; branchId: string }> { return this.#post("/product/select", { ...(target === undefined ? {} : { target }), ...(branchId === undefined ? {} : { branchId }) }); }
   productRename(sessionId: string, branchId: string | undefined, name: string): Promise<unknown> { return this.#post("/product/rename", { sessionId, ...(branchId === undefined ? {} : { branchId }), name }); }
@@ -160,7 +165,12 @@ export class AgentClient {
     const model = await this.#compatibleModel(options.model);
     return this.#post("/sessions", { workspaceId, ...options, ...(model === undefined ? {} : { model }) });
   }
-  snapshot(sessionId: string, branchId: string): Promise<{ cursor: string; state: AgentState }> { return this.#json(`/sessions/${sessionId}/snapshot?branch=${branchId}`); }
+  snapshot(sessionId: string, branchId: string, signal?: AbortSignal): Promise<{ cursor: string; state: AgentState }> {
+    return this.#json(
+      `/sessions/${encodeURIComponent(sessionId)}/snapshot?branch=${encodeURIComponent(branchId)}`,
+      signal === undefined ? undefined : { signal },
+    );
+  }
   agentProfile(sessionId: string, includePrompt = false): Promise<AgentProfileSummary | AgentProfileDetail> { return this.#json(`/sessions/${sessionId}/agent-profile${includePrompt ? "?detail=full" : ""}`); }
   agentProfiles(sessionId: string, options: { readonly includePrompt?: boolean; readonly limit?: number } = {}): Promise<{ activeProfileVersionId: string; items: Array<AgentProfileSummary | AgentProfileDetail> }> {
     const query = new URLSearchParams();
@@ -621,7 +631,7 @@ async function readProtocolStream(
   body: ReadableStream<Uint8Array>,
   onItem: (eventName: string, data: string) => void | Promise<void>,
   signal?: AbortSignal,
-  onComment?: (comment: string) => void | Promise<void>,
+  onComment?: (comment: string) => unknown | Promise<unknown>,
 ): Promise<void> {
   const reader = body.getReader();
   const abort = (): void => { void reader.cancel(signal?.reason).catch(() => {}); };
