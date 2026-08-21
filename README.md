@@ -1,6 +1,6 @@
 # Agencity
 
-Agencity is a terminal-first autonomous agent runtime for work that may outlive a single prompt, process, or context window. Instead of treating an agent as a temporary chat session, it makes tasks, decisions, evidence, tool effects, and subagent relationships durable and inspectable. The model works through a general TypeScript environment, while committed state lives in a local event history that can be recovered after interruption. The result is a foundation for agents that can work longer, resume safely, improve from experience, and remain accountable to the user.
+Agencity is a durable, client-independent runtime for autonomous agents whose work may outlive any single model context, interface, or process. It keeps agent identity, tasks, decisions, effects, evidence, and relationships in an inspectable local event history, while models work through a general TypeScript environment. The terminal is the primary client today, but it does not own the agent: terminal, web, API, and future clients can observe or control the same durable runtime. The result is a foundation for agents that can work longer, resume safely, improve from experience, and remain accountable to the user.
 
 ## Why Agencity
 
