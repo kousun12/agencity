@@ -151,6 +151,15 @@ export interface ConsoleManagedProcessInspection
   readonly processGroupId: number | null;
   readonly requestedAt: string;
   readonly startedAt: string | null;
+  readonly stopFailureCount: number;
+  readonly stopFailure?: {
+    readonly attempt: number;
+    readonly reason: string;
+    readonly error: string;
+    readonly processGroupIds: number[];
+    readonly survivingProcessGroupIds: number[];
+    readonly attemptedAt: string;
+  };
   readonly output?: JsonValue;
   readonly error?: string;
 }

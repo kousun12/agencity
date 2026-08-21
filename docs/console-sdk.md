@@ -324,7 +324,9 @@ return { current, logs, stopped };
 handles. A serialized handle remains usable after console-worker loss because
 the managed workspace service, not the REPL heap, owns the process group.
 Lifecycle states are `queued`, `running`, `succeeded`, `failed`, `cancelled`,
-and `unknown`.
+and `unknown`. The exact start overload is
+`start(input: string | { command: string; cwd?: string; idempotencyKey?: string })`;
+the object form makes durable intent explicit.
 
 Starting a process atomically registers its workspace, session, branch,
 originating cell, optional agent run, command, working directory, and random
@@ -341,10 +343,13 @@ spawn but before a durable outcome is `unknown` and is never retried.
 Run cancellation and graceful service shutdown own process cleanup. Shutdown
 stops admission, signals owned process groups, waits a bounded grace period,
 force-stops survivors, commits terminal or unknown outcomes, and reports
-completion only after no authenticated owned group remains. This is lifecycle
-management, not sandboxing or a CPU, memory, network, or process-count limit.
-Do not use `command &`, `nohup`, or ambient Bun spawning when durable ownership
-is required.
+completion only after no authenticated executing group remains. Linux
+zombie-only groups are terminal. If TERM/KILL cleanup fails, `inspect` and
+`list` expose `stopFailure` with its reason, error, exact attempted and surviving
+process-group IDs, time, and attempt number plus the total `stopFailureCount`
+while the process remains running. This is lifecycle management, not sandboxing
+or a CPU, memory, network, or process-count limit. Do not use `command &`,
+`nohup`, or ambient Bun spawning when durable ownership is required.
 
 ### Repository instructions
 

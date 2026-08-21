@@ -7,6 +7,7 @@ import {
   normalizeReasoningEffort,
   projectEvents,
   reduceAgentState,
+  resolveSessionTitlePresentation,
   type AgentEvent,
   type AgentState,
   type GovernedRefinementRecord,
@@ -166,7 +167,7 @@ export function renderStartupStatus(
     : "unknown";
   return [
     "Agencity trusted-local TUI (protocol-backed terminal client)",
-    `Session: ${state.sessionName ?? "unnamed session"} / ${state.branch.name ?? "unnamed branch"}`,
+    `Session: ${resolveSessionTitlePresentation(state, "Start new session", true).text} / ${state.branch.name ?? "unnamed branch"}`,
     `Model: ${state.model.provider}:${state.model.model} · effort ${state.model.reasoningEffort} (${streaming})`,
     // A missing selected-capability view is absence of facts, not evidence of
     // an unavailable contract, so no state is claimed for it.
@@ -352,7 +353,8 @@ export function parseTerminalRefinementRequest(
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]);
 const FAMILY_REFRESH_EVENT_TYPES = new Set<AgentEvent["type"]>([
   "TaskCreated", "SubagentAdmitted", "TaskStatusChanged", "SubagentCancellationRequested",
-  "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered", "SessionNamed", "SessionStatusChanged",
+  "TaskTerminalNoticeSent", "TaskTerminalNoticeDelivered", "SessionNamed", "SessionTitleResolved",
+  "SessionTitleModeChanged", "SessionStatusChanged",
   "AgentRunRequested",
   "AgentRunCancellationRequested", "AgentRunStatusChanged", "BudgetExceeded",
   "EffectOutcomeRecorded", "EffectReconciliationRecorded",
@@ -490,7 +492,7 @@ export class TerminalUI {
       route: { sessionId, branchId },
       parent: null,
       children: [],
-      ancestry: [snapshot.state.sessionName ?? "Unnamed session"],
+      ancestry: [resolveSessionTitlePresentation(snapshot.state, "Start new session", true).text],
       root: snapshot.state.parentSessionId === null,
       refresh: "refreshing",
       generation: ++this.#familyGeneration,
@@ -1028,6 +1030,10 @@ export class TerminalUI {
         }
         this.#publishDeferred();
         if (FAMILY_REFRESH_EVENT_TYPES.has(event.type)) void this.#refreshFamily();
+        if (this.#workspaceAgents.open &&
+            ["SessionNamed", "SessionTitleResolved", "SessionTitleModeChanged"].includes(event.type)) {
+          void this.refreshWorkspaceAgents();
+        }
         if (REFINEMENT_REFRESH_EVENT_TYPES.has(event.type)) void this.#refreshRefinementReviews();
       },
       onProgress: (progress) => {
@@ -1250,7 +1256,7 @@ export class TerminalUI {
       route: { sessionId, branchId },
       parent: null,
       children: [],
-      ancestry: [snapshot.state.sessionName ?? "Unnamed session"],
+      ancestry: [resolveSessionTitlePresentation(snapshot.state, "Start new session", true).text],
       root: snapshot.state.parentSessionId === null,
       refresh: "refreshing",
       generation: this.#familyGeneration,
@@ -1261,7 +1267,7 @@ export class TerminalUI {
       this.#refreshFamily(true),
       this.#refreshRefinementReviews(),
     ]);
-    const sessionName = snapshot.state.sessionName ?? "unnamed session";
+    const sessionName = resolveSessionTitlePresentation(snapshot.state, "Start new session", true).text;
     const branchName = snapshot.state.branch.name ?? "unnamed branch";
     this.#write(`Switched to ${sessionName}/${branchName}.\n`);
     this.#publish();
@@ -1376,7 +1382,7 @@ export class TerminalUI {
   }
 
   async #resolveAncestry(state: AgentState, directParent: FamilyAgentRecord | null): Promise<string[]> {
-    const labels = [state.sessionName ?? "Unnamed session"];
+    const labels = [resolveSessionTitlePresentation(state, "Start new session", true).text];
     let parentSessionId = state.parentSessionId;
     let parentBranchId = state.parentBranchId;
     const visited = new Set([state.sessionId]);
@@ -1385,7 +1391,7 @@ export class TerminalUI {
       visited.add(parentSessionId);
       try {
         const snapshot = await this.client.snapshot(parentSessionId, parentBranchId);
-        labels.unshift(snapshot.state.sessionName ?? "Unnamed session");
+        labels.unshift(resolveSessionTitlePresentation(snapshot.state, "Start new session", true).text);
         parentSessionId = snapshot.state.parentSessionId;
         parentBranchId = snapshot.state.parentBranchId;
       } catch {
@@ -1530,7 +1536,7 @@ export class TerminalUI {
   #removeSigintHandler():void{if(!this.#sigintHandler)return;process.off("SIGINT",this.#sigintHandler);this.#sigintHandler=null;}
   #activeRun(){return Object.values(this.#liveState?.agentRuns??{}).find((run)=>!TERMINAL_RUN_STATUSES.has(run.status));}
   #requireState():AgentState{if(!this.#viewState)throw new Error("No projected state");return this.#viewState;}
-  #prompt():string{return `${(this.#liveState?.sessionName??"agent").slice(-12)}/${(this.#liveState?.branch.name??"live").slice(-12)}${this.#historicalCursor?`@${this.#historicalCursor}`:""}> `;}
+  #prompt():string{return `${(this.#liveState?resolveSessionTitlePresentation(this.#liveState,"Start new session",true).text:"agent").slice(-12)}/${(this.#liveState?.branch.name??"live").slice(-12)}${this.#historicalCursor?`@${this.#historicalCursor}`:""}> `;}
   async #hiddenCredentialQuestion():Promise<string>{
     if(!this.#readline||!this.#pendingCredentialProvider)throw new Error("Credential prompt is unavailable");
     const hidden=this.#readline as ReadlineInterface&{_writeToOutput?:(value:string)=>void;history?:string[]};

@@ -375,7 +375,7 @@ describe("FU-009 installed no-ID release transcript", () => {
       fixture.environment(),
     );
     expect(mainResume).toMatchObject({ code: 0, stderr: "" });
-    expect(mainResume.stdout).toContain("Session: exercise compact warm REPL namespace / main");
+    expect(mainResume.stdout).toContain("Session: verify isolated fork REPL namespace / main");
     const resumedMainHistory = JSON.parse((await world.command(
       ["history", "current", "--json"],
       fixture.environment(),

@@ -242,6 +242,10 @@ export class StrictActionFixture {
       : [];
     const governance = toolNames.length === 1 &&
       toolNames[0] === "agencity_submit_refinement_governance_decision";
+    const sessionTitle = toolNames.length === 1 &&
+      toolNames[0] === "agencity_submit_object" &&
+      /(?:^|\/)gpt-5\.6-luna$/.test(body.model) &&
+      allMessageText.includes("Maintain a concise title for this session");
     const governanceStep = governance
       ? this.requests.filter(item => item.governanceStep !== null).length + 1
       : null;
@@ -281,9 +285,17 @@ export class StrictActionFixture {
       : this.requests.filter(item =>
           item.task === null &&
           item.governanceStep === null &&
+          !(
+            item.toolNames.length === 1 &&
+            item.toolNames[0] === "agencity_submit_object" &&
+            /(?:^|\/)gpt-5\.6-luna$/.test(item.model) &&
+            item.allMessageText.includes("Maintain a concise title for this session")
+          ) &&
           item.firstUserText === firstUserText
         ).length;
-    const selected = durable
+    const selected = sessionTitle
+      ? titleReply(lastUserText)
+      : durable
       ? this.scripts.get(durable.task)?.[durable.stepOrdinal - 1]
       : governanceStep === null
         ? this.scripts.get(firstUserText)?.[(rawStep ?? 1) - 1]
@@ -537,6 +549,30 @@ function responseUsage(text: string): Record<string, unknown> {
     input_tokens_details: { cached_tokens: 0 },
     output_tokens: Math.ceil(text.length / 4),
     output_tokens_details: { reasoning_tokens: 0 },
+  };
+}
+
+function titleReply(text: string): Record<string, unknown> {
+  const normalized = text.replace(/\s+/g, " ").trim() || "new session";
+  const words = normalized.split(" ");
+  const first = words[0] ?? "";
+  const leading = words.length > 1 && first.length <= 64 &&
+    !/^(?:i|we|my|our|this|that|the|a|an|how|why|what|when|where|who)$/i.test(first);
+  const verb = leading ? first : normalized === "new session" ? "Start" : "Handle";
+  const subject = (leading ? words.slice(1) : words)
+    .slice(0, 6 - verb.split(/\s+/).length)
+    .join(" ")
+    .slice(0, 160)
+    .trim() || "new session";
+  return {
+    name: "agencity_submit_object",
+    input: {
+      value: {
+        verb,
+        subject,
+        intentSummary: normalized.slice(0, 512),
+      },
+    },
   };
 }
 

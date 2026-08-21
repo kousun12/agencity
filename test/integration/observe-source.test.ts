@@ -140,6 +140,14 @@ function protocolServer(input: {
           sessionId: "root",
           branchId: "main",
           name: "Root",
+          sessionTitle: {
+            text: "Root",
+            source: "explicit",
+            verb: null,
+            subject: null,
+            intentSummary: null,
+            sourceMessageCursor: null,
+          },
           status: "idle",
           worker: "idle",
           unresolvedWork: 0,
@@ -220,6 +228,10 @@ describe("AgentClient observer source adapter", () => {
     if (connected.kind !== "connected") return;
     const roots = await connected.source.roots();
     expect(roots).toHaveLength(1);
+    expect(roots[0]?.sessionTitle).toMatchObject({
+      text: "Root",
+      source: "explicit",
+    });
     await expect(connected.source.loadRouteSnapshot({
       sessionId: "root",
       branchId: "main",
@@ -266,6 +278,37 @@ describe("AgentClient observer source adapter", () => {
     });
     expect(snapshot.cursor).toBe(cursor);
     expect(snapshot.state.cursor).toBe(cursor);
+    connected.source.close();
+  });
+
+  test("accepts the compatible reducer-24 snapshot from a running revision-4 service", async () => {
+    const root = await workspace();
+    const rawToken = Buffer.alloc(32, 8).toString("base64url");
+    const cursor = "00000000000000000001";
+    const retainedState = {
+      ...routeState(cursor),
+      reducerVersion: 24,
+    } as unknown as AgentState;
+    const server = protocolServer({
+      token: rawToken,
+      snapshot: { cursor, state: retainedState },
+    });
+    await manifest(root, {
+      url: `http://127.0.0.1:${server.port}`,
+      bearerToken: rawToken,
+    });
+    const connected = await agentClientObserverSourceFactory.connect({
+      workspaceRoot: root,
+      workspaceId,
+    });
+    expect(connected.kind).toBe("connected");
+    if (connected.kind !== "connected") return;
+    const snapshot = await connected.source.loadRouteSnapshot({
+      sessionId: "root",
+      branchId: "main",
+    });
+    expect(Number(snapshot.state.reducerVersion)).toBe(24);
+    expect(snapshot.state.sessionName).toBe("Root");
     connected.source.close();
   });
 

@@ -1,4 +1,8 @@
-import { REDUCER_VERSION, type AgentState } from "../domain/index.ts";
+import {
+  REDUCER_VERSION,
+  type AgentState,
+  type SessionTitlePresentation,
+} from "../domain/index.ts";
 import { AgentClient, type ProtocolCapabilities } from "../protocol/index.ts";
 import { readServiceManifestReadOnly } from "../product/service-discovery.ts";
 import type {
@@ -14,6 +18,10 @@ const REQUIRED_PROTOCOL_REVISION = 4;
 const READ_TIMEOUT_MS = 5_000;
 const MAX_ROOT_ROWS = 10_000;
 const MAX_ROOT_NAME_BYTES = 16 * 1024;
+const COMPATIBLE_OBSERVER_REDUCER_VERSIONS = new Set<number>([
+  24,
+  REDUCER_VERSION,
+]);
 
 type ManagedHealth = Awaited<ReturnType<AgentClient["health"]>>;
 
@@ -83,6 +91,23 @@ function validCursor(value: unknown): value is string {
     Number.isSafeInteger(Number(value));
 }
 
+function validNullableCursor(value: unknown): value is string | null {
+  return value === null || validCursor(value);
+}
+
+function validTitleText(value: unknown): value is string {
+  return typeof value === "string" && Buffer.byteLength(value, "utf8") <= MAX_ROOT_NAME_BYTES;
+}
+
+function validSessionTitlePresentation(value: unknown): value is SessionTitlePresentation {
+  if (!record(value) ||
+      !validTitleText(value.text) ||
+      !["model", "deterministic_fallback", "explicit", "ordinary_fallback"].includes(String(value.source)) ||
+      !validNullableCursor(value.sourceMessageCursor)) return false;
+  return ["verb", "subject", "intentSummary"].every((field) =>
+    value[field] === null || validTitleText(value[field]));
+}
+
 function validateSnapshot(
   route: ObserverRoute,
   workspaceId: string,
@@ -92,14 +117,15 @@ function validateSnapshot(
     throw new Error("Managed route snapshot is invalid");
   }
   const state = value.state;
-  if (state.reducerVersion !== REDUCER_VERSION ||
+  if (!COMPATIBLE_OBSERVER_REDUCER_VERSIONS.has(Number(state.reducerVersion)) ||
       state.sessionId !== route.sessionId ||
       state.workspaceId !== workspaceId ||
       state.cursor !== value.cursor ||
       !record(state.branch) || state.branch.id !== route.branchId ||
       !Array.isArray(state.appliedEventIds) ||
       state.appliedEventIds.some(eventId => typeof eventId !== "string") ||
-      !Array.isArray(state.messages)) {
+      !Array.isArray(state.messages) ||
+      !(state.sessionName === null || state.sessionName === undefined || typeof state.sessionName === "string")) {
     throw new Error("Managed route snapshot identity is invalid");
   }
   for (const field of [
@@ -114,6 +140,14 @@ function validateSnapshot(
   }
   if (!record(state.model) || !record(state.budget)) {
     throw new Error("Managed route snapshot projection is invalid");
+  }
+  if (!record(state.sessionTitle) ||
+      !["automatic", "manual"].includes(String(state.sessionTitle.mode)) ||
+      !validNullableCursor(state.sessionTitle.latestRequestedSourceMessageCursor) ||
+      !validNullableCursor(state.sessionTitle.appliedSourceMessageCursor) ||
+      !record(state.sessionTitle.requests) ||
+      !record(state.sessionTitle.resolutions)) {
+    throw new Error("Managed route snapshot title projection is invalid");
   }
   return { cursor: value.cursor, state: state as unknown as AgentState };
 }
@@ -135,10 +169,11 @@ class AgentClientObserverSource implements ObserverSource {
       if (!value || typeof value !== "object" || Array.isArray(value)) {
         throw new Error("Managed root row is invalid");
       }
-      const row = value as Record<string, unknown>;
+      const row = value as unknown as Record<string, unknown>;
       if (typeof row.sessionId !== "string" || row.sessionId.length < 1 || row.sessionId.length > 256 ||
           typeof row.branchId !== "string" || row.branchId.length < 1 || row.branchId.length > 256 ||
           typeof row.name !== "string" || Buffer.byteLength(row.name, "utf8") > MAX_ROOT_NAME_BYTES ||
+          !(row.sessionTitle === undefined || validSessionTitlePresentation(row.sessionTitle)) ||
           typeof row.status !== "string" ||
           !["idle", "running", "stopped", "failed", "archived"].includes(row.status) ||
           !["running", "idle", "detached"].includes(String(row.worker)) ||
@@ -148,6 +183,14 @@ class AgentClientObserverSource implements ObserverSource {
       return {
         route: { sessionId: row.sessionId, branchId: row.branchId },
         name: row.name,
+        sessionTitle: row.sessionTitle ?? {
+          text: row.name,
+          source: "ordinary_fallback",
+          verb: null,
+          subject: null,
+          intentSummary: null,
+          sourceMessageCursor: null,
+        },
         status: row.status,
         worker: row.worker as ObserverRootRoute["worker"],
         unresolvedWork: Number(row.unresolvedWork),

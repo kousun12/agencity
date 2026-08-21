@@ -12,10 +12,10 @@ import type { JsonValue } from "./json.ts";
 import type { AgentInvocationContract, AgentRunResultReference } from "./agent-invocation-contract.ts";
 import type { ReplNamespaceStatus } from "./repl-namespace.ts";
 
-export const REDUCER_VERSION = 22 as const;
+export const REDUCER_VERSION = 25 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
-export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
+export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly producer?: string; readonly idempotencyKey?: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
 export interface CellState { readonly id: string; readonly code: string; readonly status: "proposed" | "running" | "committed" | "failed" | "abandoned"; readonly attempts: number; readonly result?: JsonValue; readonly logs: string[]; readonly logStreams: CellLogStream[]; readonly error?: string; readonly causalEffectOutcomeEventIds?: string[]; readonly eventId: string; }
 export interface WorkingValueState { readonly name: string; readonly version: number; readonly value: WorkingValue; readonly eventId: string; }
 export interface EffectState { readonly id: string; readonly executor: string; readonly operation: string; readonly input: JsonValue; readonly origin: EffectOrigin; readonly idempotencyKey: string; readonly idempotent: boolean; readonly attempts: number; readonly status: "requested" | "started" | EffectOutcome; readonly output?: JsonValue; readonly error?: string; readonly modelFailure?: ModelEffectFailureCode; readonly eventId: string; }
@@ -27,6 +27,14 @@ export interface ManagedProcessState {
   readonly identityToken: string; readonly status: ManagedProcessStatus;
   readonly pid: number | null; readonly processGroupId: number | null;
   readonly requestedAt: string; readonly startedAt: string | null;
+  readonly stopFailureCount: number;
+  readonly stopFailure?: {
+    readonly attempt: number; readonly reason: string; readonly error: string;
+    readonly processGroupIds: number[];
+    readonly survivingProcessGroupIds: number[];
+    readonly attemptedAt: string;
+    readonly eventId: string;
+  };
   readonly output?: JsonValue; readonly error?: string; readonly eventId: string;
 }
 export interface ModelCallState { readonly id: string; readonly contextId: string; readonly effectId: string; readonly modelDispatch: ModelDispatch; readonly providerInput: ProviderInputCandidate; readonly estimatedInputTokens: number; readonly promptProvenance: InvocationPromptProvenance; readonly attempt: number; readonly retryOfCallId?: string; readonly contextWindow?: ContextCapacityProvenance; readonly chunks: string[]; readonly status: "requested" | EffectOutcome; readonly responseMessageId?: string; readonly result?: ModelCallResult; readonly resultDigest?: string; readonly termination?: ModelCallTermination; readonly usage?: Usage | null; readonly usageSource?: ModelUsageSource; readonly warnings?: ModelWarning[]; readonly budgetDebited?: { readonly tokens: number; readonly costUsd: number; readonly turns: number; readonly wallTimeMs: number; readonly usageSource: ModelUsageSource; readonly eventId: string }; readonly failureCode?: ModelEffectFailureCode; readonly error?: string; readonly eventId: string; }
@@ -87,6 +95,42 @@ export interface AiGenerationState {
   readonly error?: string; readonly requestEventId?: string; readonly resultEventId?: string; readonly eventId: string;
 }
 
+export interface SessionTitleRequestState {
+  readonly id: string;
+  readonly sourceMessageEventId: string;
+  readonly sourceMessageCursor: string;
+  readonly sourceMessageEventIds: readonly string[];
+  readonly sourceBranchId: string;
+  readonly mode: "model" | "fallback";
+  readonly effectId?: string;
+  readonly modelDispatch?: ModelDispatch;
+  readonly providerInput?: ProviderInputCandidate;
+  readonly status: "requested" | "resolved";
+  readonly eventId: string;
+}
+
+export interface SessionTitleResolutionState {
+  readonly requestId: string;
+  readonly sourceMessageEventId: string;
+  readonly sourceMessageCursor: string;
+  readonly sourceMessageEventIds: readonly string[];
+  readonly sourceBranchId: string;
+  readonly method: "model" | "fallback";
+  readonly title: string;
+  readonly verb: string;
+  readonly subject: string;
+  readonly intentSummary: string;
+  readonly eventId: string;
+}
+
+export interface SessionTitleState {
+  readonly mode: "automatic" | "manual";
+  readonly latestRequestedSourceMessageCursor: string | null;
+  readonly appliedSourceMessageCursor: string | null;
+  readonly requests: Record<string, SessionTitleRequestState>;
+  readonly resolutions: Record<string, SessionTitleResolutionState>;
+}
+
 
 export interface UserCorrectionState { readonly id: string; readonly correctedEventIds: string[]; readonly correction: string; readonly eventId: string; }
 export interface RefinementReviewState {
@@ -135,6 +179,7 @@ export interface AgentRunState {
 
 export interface AgentState {
   readonly reducerVersion: typeof REDUCER_VERSION; readonly sessionId: string; readonly workspaceId: string; readonly sessionName?: string | null; readonly branch: BranchState;
+  readonly sessionTitle: SessionTitleState;
   readonly parentSessionId: string | null; readonly parentBranchId: string | null; readonly rootSessionId: string;
   readonly depth: number; readonly taskId: string | null;
   readonly agentProfiles: Record<string, AgentProfileVersion>; readonly activeAgentProfileVersionId: string;

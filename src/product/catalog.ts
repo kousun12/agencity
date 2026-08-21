@@ -1,8 +1,11 @@
 import {
   ValidationError,
+  deterministicSessionTitleFallback,
   projectEvents,
+  resolveSessionTitlePresentation,
   type AgentEvent,
   type ModelConfiguration,
+  type SessionTitlePresentation,
   type SessionStatus,
 } from "../domain/index.ts";
 import type { Supervisor } from "../runtime/index.ts";
@@ -12,6 +15,7 @@ export interface ProductBranchSummary {
   readonly sessionId: string;
   readonly branchId: string;
   readonly sessionName: string;
+  readonly sessionTitle?: SessionTitlePresentation;
   readonly branchName: string;
   readonly model: ModelConfiguration;
   readonly status: SessionStatus;
@@ -41,20 +45,29 @@ export class ProductCatalog {
     });
     const sessionNames = new Map<string, string>();
     for (const { route, events } of inWorkspace) {
+      const state = projectEvents(events);
       const latestName = latestNamed(events, "SessionNamed");
       const created = events.find(event => event.type === "SessionCreated")!;
       const initial = (created.payload as { sessionName?: string }).sessionName;
-      const candidate = latestName ?? initial ?? firstTask(events) ?? `session-${route.sessionId.slice(-6)}`;
+      const candidate = state.sessionName ?? latestName ?? initial ??
+        firstTaskTitle(events) ?? "Start new session";
       const old = sessionNames.get(route.sessionId);
       // A rename on any branch is a session display-name change. The event order
       // is resolved globally below instead of relying on incidental branch order.
       if (!old) sessionNames.set(route.sessionId, candidate);
     }
+    const explicitNames = new Map<string, string>();
     for (const sessionId of new Set(inWorkspace.map(item => item.route.sessionId))) {
       const all = inWorkspace.filter(item => item.route.sessionId === sessionId).flatMap(item => item.events);
       const unique = new Map(all.map(event => [event.id, event]));
       const name = latestNamed([...unique.values()], "SessionNamed");
-      if (name) sessionNames.set(sessionId, name);
+      const manuallyNamed = inWorkspace
+        .filter(item => item.route.sessionId === sessionId)
+        .some(item => projectEvents(item.events).sessionTitle.mode === "manual");
+      if (name && manuallyNamed) {
+        sessionNames.set(sessionId, name);
+        explicitNames.set(sessionId, name);
+      }
     }
     const summaries: ProductBranchSummary[] = [];
     for (const { route, events } of inWorkspace) {
@@ -71,10 +84,23 @@ export class ProductCatalog {
       const unresolvedEffects = Object.values(state.effects).filter(effect => ["requested", "started", "failed", "unknown"].includes(effect.status)).length;
       const unresolvedTasks = Object.values(state.tasks).filter(task => !["completed", "cancelled"].includes(task.status)).length;
       const activeGoals = Object.values(state.goals).filter(goal => ["active", "completion_requested", "blocked"].includes(goal.status)).length;
+      const fallbackName = sessionNames.get(route.sessionId)!;
+      const sessionTitle = explicitNames.has(route.sessionId)
+        ? {
+            text: fallbackName,
+            source: "explicit" as const,
+            verb: null,
+            subject: null,
+            intentSummary: null,
+            sourceMessageCursor: null,
+          }
+        : resolveSessionTitlePresentation(state, fallbackName, true);
+      const sessionName = sessionTitle.text;
       summaries.push({
         sessionId: route.sessionId,
         branchId: route.branchId,
-        sessionName: sessionNames.get(route.sessionId)!,
+        sessionName,
+        sessionTitle,
         branchName,
         model: state.model,
         status: state.status,
@@ -148,6 +174,23 @@ function firstTask(events: readonly AgentEvent[]): string | null {
   if (message) return deriveDisplayName((message.payload as { content: string }).content);
   const childTask = events.find(event => event.type === "TaskCreated");
   return childTask ? deriveDisplayName((childTask.payload as { task: string }).task) : null;
+}
+
+function firstTaskTitle(events: readonly AgentEvent[]): string | null {
+  const message = events.find(event =>
+    event.type === "MessageAppended" &&
+    (event.payload as { role: string }).role === "user");
+  if (message) {
+    return deterministicSessionTitleFallback([
+      (message.payload as { content: string }).content,
+    ]).title;
+  }
+  const childTask = events.find(event => event.type === "TaskCreated");
+  return childTask
+    ? deterministicSessionTitleFallback([
+        (childTask.payload as { task: string }).task,
+      ]).title
+    : null;
 }
 
 function latestNamed(events: readonly AgentEvent[], type: "SessionNamed" | "BranchNamed"): string | undefined {

@@ -161,14 +161,24 @@ type ControllerLease = {
 
 let activeController: RuneBenchController | undefined;
 
-function processStartTime(pid: number): Promise<string> {
+function processIdentity(pid: number): Promise<{
+  state: string;
+  startTime: string;
+}> {
   return readFile(`/proc/${pid}/stat`, "utf8").then((value) => {
     const close = value.lastIndexOf(")");
     const fields = value.slice(close + 2).trim().split(/\s+/);
+    const state = fields[0];
     const startTime = fields[19];
-    if (!startTime) throw new Error(`cannot read process identity for pid ${pid}`);
-    return startTime;
+    if (!state || !startTime) {
+      throw new Error(`cannot read process identity for pid ${pid}`);
+    }
+    return { state, startTime };
   });
+}
+
+function processStartTime(pid: number): Promise<string> {
+  return processIdentity(pid).then((identity) => identity.startTime);
 }
 
 async function claimIsLive(claim: Claim): Promise<boolean> {
@@ -181,7 +191,9 @@ async function claimIsLive(claim: Claim): Promise<boolean> {
     return false;
   }
   try {
-    return (await processStartTime(claim.pid)) === claim.processStartTime;
+    const identity = await processIdentity(claim.pid);
+    return !["Z", "X"].includes(identity.state) &&
+      identity.startTime === claim.processStartTime;
   } catch {
     return false;
   }
@@ -757,6 +769,21 @@ used, write the trainer under `{TRAINER_DIR}`, import `acquireController` and
 calling `sdk.processes.start`, and release the trainer's unique controller in
 `finally`. Retain only the returned JSON handle; inspect or stop it with
 `sdk.processes.inspect`, `sdk.processes.readLogs`, and `sdk.processes.stop`.
+The exact start contract is
+`sdk.processes.start(input: string | {{ command: string; cwd?: string;
+idempotencyKey?: string }})`. Prefer the explicit object form:
+
+```ts
+const trainer = await sdk.processes.start({{
+  command: "/opt/agencity/bin/bun run {TRAINER_DIR}/trainer.ts",
+  cwd: "/app",
+  idempotencyKey: "runebench-trainer-v1",
+}});
+await state.set("runebench.trainer", trainer);
+return trainer;
+```
+
+Reuse an idempotency key only for the same exact command and working directory.
 
 Never use `command &`, `nohup`, `/tmp`, or another unmanaged process. Never
 start a trainer while the REPL controller claim is live. A failed controller

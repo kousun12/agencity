@@ -115,6 +115,30 @@ describe("observer browser assets", () => {
     expect(javascript).toContain("TypeScript action completed");
     expect(javascript).toContain("state.inspectorOpen = true");
     expect(javascript).toContain("new ResizeObserver(scheduleGraphLayout)");
+    expect(javascript).toContain('firstValue(item, ["sessionTitle"]');
+    expect(javascript).toContain('firstValue(source, ["sessionTitle"]');
+    expect(javascript).toContain('firstValue(titleSource, ["intentSummary"]');
     expect(css).toContain("min-height: clamp(32rem, 68vh, 52rem)");
+  });
+
+  test("ships fitted hierarchical graph controls and orthogonal routing", async () => {
+    const html = await readAsset("index.html");
+    const javascript = await readAsset("app.js");
+    const css = await readAsset("app.css");
+
+    expect(html).toContain('id="graph-zoom-out"');
+    expect(html).toContain('id="graph-zoom-fit"');
+    expect(html).toContain('id="graph-zoom-in"');
+    expect(javascript).toContain("function subtreeSpan");
+    expect(javascript).toContain("function fittedGraphZoom");
+    expect(javascript).toContain("function bindGraphPanning");
+    expect(javascript).toContain("function applyGraphPan");
+    expect(javascript).toContain('setPointerCapture(event.pointerId)');
+    expect(javascript).toContain('event.target.closest(".route-node")');
+    expect(javascript).toContain('"A", radius, radius');
+    expect(javascript).not.toContain('"Q", middleX');
+    expect(javascript).not.toContain('" C "');
+    expect(css).toContain("cursor: grabbing");
+    expect(css).toContain("vector-effect: non-scaling-stroke");
   });
 });

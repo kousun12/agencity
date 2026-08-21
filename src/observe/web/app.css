@@ -391,6 +391,31 @@ main {
   text-align: right;
 }
 
+.graph-heading-actions {
+  display: grid;
+  justify-items: end;
+  gap: 0.55rem;
+}
+
+.graph-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.graph-controls button {
+  min-width: 2rem;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.75rem;
+}
+
+.graph-controls span {
+  min-width: 3.25rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
 .count-badge {
   min-width: 2rem;
   border-radius: 999px;
@@ -406,12 +431,29 @@ main {
   flex: 1 1 clamp(32rem, 68vh, 52rem);
   min-height: clamp(32rem, 68vh, 52rem);
   overflow: auto;
+  cursor: grab;
+  touch-action: none;
   border: 1px solid #212a38;
   border-radius: 0.6rem;
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
   background-size: 24px 24px;
+}
+
+.family-graph.panning {
+  cursor: grabbing;
+}
+
+.graph-stage {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.graph-canvas {
+  position: absolute;
+  transform-origin: top left;
 }
 
 .graph-edges,
@@ -429,6 +471,7 @@ main {
   fill: none;
   stroke: #4a5b73;
   stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
 }
 
 .graph-edge.message {
@@ -741,6 +784,10 @@ main {
 
   .section-heading .state-note {
     text-align: left;
+  }
+
+  .graph-heading-actions {
+    justify-items: start;
   }
 
   .detail-card dl {

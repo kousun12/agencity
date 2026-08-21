@@ -1,8 +1,11 @@
-import type {
-  AgentRunState,
-  AgentState,
-  MailboxMessageState,
-  TaskState,
+import {
+  deterministicSessionTitleFallback,
+  resolveSessionTitlePresentation,
+  type SessionTitlePresentation,
+  type AgentRunState,
+  type AgentState,
+  type MailboxMessageState,
+  type TaskState,
 } from "../domain/index.ts";
 import { boundText, boundedJsonText, serializedUtf8Bytes } from "./bounds.ts";
 import { observerRouteKey } from "./discovery.ts";
@@ -21,7 +24,27 @@ import {
   type ObserverRoute,
   type ObserverRouteActivity,
   type ObserverRouteActivityReason,
+  type ObserverSessionTitleDto,
 } from "./types.ts";
+
+function boundedSessionTitle(
+  presentation: SessionTitlePresentation,
+): ObserverSessionTitleDto {
+  return {
+    text: boundText(presentation.text, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes }),
+    source: presentation.source,
+    verb: presentation.verb === null
+      ? null
+      : boundText(presentation.verb, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes }),
+    subject: presentation.subject === null
+      ? null
+      : boundText(presentation.subject, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes }),
+    intentSummary: presentation.intentSummary === null
+      ? null
+      : boundText(presentation.intentSummary, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes }),
+    sourceMessageCursor: presentation.sourceMessageCursor,
+  };
+}
 
 function routeEquals(left: ObserverRoute, right: ObserverRoute): boolean {
   return left.sessionId === right.sessionId && left.branchId === right.branchId;
@@ -185,6 +208,14 @@ export function deriveObserverFamilyOverview(
     const task = edge && parentState?.tasks[edge.taskId] || null;
     const status = deriveObserverRouteStatus(state, task, edge !== undefined);
     const run = state ? latestRun(state) : null;
+    const titleFallback = run?.task ?? edge?.taskSummary ?? "Unnamed session";
+    const title = state
+      ? boundedSessionTitle(resolveSessionTitlePresentation(
+          state,
+          deterministicSessionTitleFallback([titleFallback]).title,
+          true,
+        ))
+      : null;
     const latestStep = run
       ? [...run.steps].sort((left, right) => right.ordinal - left.ordinal)[0] ?? null
       : null;
@@ -196,6 +227,7 @@ export function deriveObserverFamilyOverview(
       sessionName: state?.sessionName
         ? boundText(state.sessionName, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes })
         : null,
+      sessionTitle: title,
       branchName: state?.branch.name
         ? boundText(state.branch.name, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes })
         : null,
@@ -206,9 +238,9 @@ export function deriveObserverFamilyOverview(
           }
         : null,
       taskId: edge?.taskId ?? state?.taskId ?? null,
-      taskSummary: edge
+      taskSummary: title?.intentSummary ?? (edge
         ? boundText(edge.taskSummary, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes })
-        : null,
+        : null),
       sessionStatus: state?.status ?? null,
       ...status,
       latestRun: run ? {
@@ -289,6 +321,9 @@ export function deriveObserverFamilyOverview(
     nodes = nodes.map((node) => ({
       ...node,
       taskSummary: null,
+      sessionTitle: node.sessionTitle
+        ? { ...node.sessionTitle, intentSummary: null }
+        : null,
       latestRun: node.latestRun ? {
         ...node.latestRun,
         task: null,
@@ -300,6 +335,7 @@ export function deriveObserverFamilyOverview(
     nodes = nodes.map((node) => ({
       ...node,
       sessionName: null,
+      sessionTitle: null,
       branchName: null,
       model: null,
     }));
@@ -356,12 +392,18 @@ function detailItems(
   switch (section) {
     case "identity": {
       const profile = state.agentProfiles[state.activeAgentProfileVersionId];
+      const sessionTitle = boundedSessionTitle(resolveSessionTitlePresentation(
+        state,
+        "Unnamed session",
+        true,
+      ));
       return [item("identity", state.sessionId, provenance(cursor, null), {
         sessionId: state.sessionId,
         workspaceId: state.workspaceId,
         sessionName: state.sessionName === undefined || state.sessionName === null
           ? null
           : boundText(state.sessionName),
+        sessionTitle,
         branch: {
           id: state.branch.id,
           name: state.branch.name === null ? null : boundText(state.branch.name),

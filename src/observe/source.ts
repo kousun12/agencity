@@ -1,4 +1,4 @@
-import type { AgentEvent } from "../domain/index.ts";
+import type { AgentEvent, SessionTitlePresentation } from "../domain/index.ts";
 import type {
   ObserverProgressInput,
   ObserverRoute,
@@ -9,6 +9,7 @@ import type {
 export interface ObserverRootRoute {
   readonly route: ObserverRoute;
   readonly name: string;
+  readonly sessionTitle?: SessionTitlePresentation;
   readonly status: string;
   readonly worker: "running" | "idle" | "detached";
   readonly unresolvedWork: number;

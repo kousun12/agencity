@@ -11,6 +11,7 @@ import {
   STANDARD_UNVERIFIED_REASONING_LEVELS,
   ValidationError,
   assertReasoningSelection,
+  deterministicSessionTitleFallback,
   normalizeReasoningEffort,
   type HarnessKind,
   type HarnessScope,
@@ -24,7 +25,6 @@ import {
   chooseManagedModel,
   chooseNewModel,
   defaultProfilePath,
-  deriveDisplayName,
   formatModel,
   modelAvailability,
   providerStatuses,
@@ -197,7 +197,6 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
       try {
         created = await client.createSession(workspace.workspaceId, {
           model,
-          sessionName: task ? deriveDisplayName(task) : `New session ${new Date().toISOString().slice(0, 10)}`,
           branchName: "main",
         });
       } catch (error) {
@@ -232,7 +231,19 @@ async function runProduct(parsed: ParsedCliArgs): Promise<void> {
     const remediation = available ? null : agentTools.reason ??
       `The selected ${summary.model.provider}:${summary.model.model} combination cannot run the fixed agent tool contract.`;
     const opensInteractiveTerminal = interactive && ["product", "new", "resume", "attach"].includes(parsed.command);
-    if (!parsed.flags.has("json") && !opensInteractiveTerminal) printStartup(workspace, summary, agentTools, remediation);
+    if (!parsed.flags.has("json") && !opensInteractiveTerminal) {
+      printStartup(
+        workspace,
+        task && summary.sessionTitle?.source === "ordinary_fallback"
+          ? {
+              ...summary,
+              sessionName: deterministicSessionTitleFallback([task]).title,
+            }
+          : summary,
+        agentTools,
+        remediation,
+      );
+    }
     if (parsed.command === "branch") {
       const [position, ...nameParts] = parsed.positionals;
       if (position !== "head") throw new ValidationError("branch requires `head [NAME]`; low-level point-in-time forks remain under debug branch");

@@ -15,6 +15,7 @@ from agencity_runebench.taskset import (
     RATE_COMMAND_TEMPLATE,
     render_completion_gate_source,
 )
+from scripts.run_runebench_canary import scoring_completeness_error
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -376,6 +377,119 @@ class ExactContainerStartupTests(unittest.TestCase):
             ["bun_console", "finish"],
         )
 
+    def test_non_reaping_pid1_allows_zombie_stop_shutdown_and_scoring_gate(
+        self,
+    ) -> None:
+        daemon = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=30,
+        )
+        if daemon.returncode != 0:
+            self.skipTest("Docker daemon is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "agencity-source.tgz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                bundle.add(ROOT / "package.json", arcname="package.json")
+                bundle.add(ROOT / "bun.lock", arcname="bun.lock")
+                bundle.add(ROOT / "src", arcname="src")
+                bundle.add(ROOT / "test", arcname="test")
+            container = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "-d",
+                    "--rm",
+                    "--platform",
+                    "linux/amd64",
+                    "--entrypoint",
+                    "sleep",
+                    "-v",
+                    f"{archive}:/tmp/agencity-source.tgz:ro",
+                    IMAGE,
+                    "infinity",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            ).stdout.strip()
+            try:
+                install = subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        container,
+                        "sh",
+                        "-c",
+                        (
+                            "apt-get update -qq && "
+                            "apt-get install -y -qq python3 >/tmp/python-install.log && "
+                            "mkdir -p /opt/agencity && "
+                            "tar -xzf /tmp/agencity-source.tgz -C /opt/agencity && "
+                            "cd /opt/agencity && "
+                            "bun install --frozen-lockfile"
+                        ),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                self.assertEqual(
+                    install.returncode,
+                    0,
+                    install.stderr or install.stdout,
+                )
+                completed = subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        "-e",
+                        "AGENCITY_TEST_NON_REAPING_PID1=1",
+                        container,
+                        "sh",
+                        "-c",
+                        (
+                            "cd /opt/agencity && "
+                            "bun test --timeout 30000 "
+                            "--test-name-pattern 'zombie-only group' "
+                            "test/integration/managed-process.test.ts"
+                        ),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+            finally:
+                subprocess.run(
+                    ["docker", "rm", "-f", container],
+                    capture_output=True,
+                    timeout=30,
+                )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stderr or completed.stdout,
+        )
+        self.assertIn("1 pass", completed.stdout + completed.stderr)
+        self.assertIsNone(
+            scoring_completeness_error(
+                {
+                    "selected_ids": ["attack-xp-30m"],
+                },
+                {
+                    "counts": {"officially_scored": 1},
+                    "tasks": [
+                        {
+                            "task_id": "attack-xp-30m",
+                            "outcome": "valid_zero",
+                            "reward": 0.0,
+                        }
+                    ],
+                },
+            )
+        )
+
 
 @unittest.skipUnless(shutil.which("docker"), "Docker is unavailable")
 class ExactRuneBenchTreatmentTests(unittest.TestCase):
@@ -481,6 +595,129 @@ console.log(JSON.stringify({
             ["invalid_result", "invalid_result", "invalid_result"],
         )
         self.assertGreaterEqual(result["elapsedMs"], 1_200)
+
+    def test_controller_retires_a_claim_owned_only_by_an_orphaned_zombie(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "controller.ts").write_text(CONTROLLER_SOURCE, encoding="utf-8")
+            (root / "zombie-claim-test.ts").write_text(
+                """
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { acquireControllerLease } from "/app/agencity-runebench/controller.ts";
+
+const pid = Number(Bun.argv[2]);
+const value = await readFile(`/proc/${pid}/stat`, "utf8");
+const close = value.lastIndexOf(")");
+const fields = value.slice(close + 2).trim().split(/\\s+/);
+if (fields[0] !== "Z" || !fields[19]) {
+  throw new Error(`expected zombie process identity, got ${fields[0] ?? "missing"}`);
+}
+await mkdir("/app/agencity-runebench/controller.lock");
+await writeFile(
+  "/app/agencity-runebench/controller.lock/claim.json",
+  JSON.stringify({
+    schema: "agencity.runebench-controller-claim.v1",
+    owner: "dead-trainer",
+    pid,
+    processStartTime: fields[19],
+    token: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+  }) + "\\n",
+);
+const successor = await acquireControllerLease("successor");
+await successor.release();
+console.log(JSON.stringify({ state: fields[0], successor: true }));
+""",
+                encoding="utf-8",
+            )
+            container = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "-d",
+                    "--rm",
+                    "--platform",
+                    "linux/amd64",
+                    "--entrypoint",
+                    "sleep",
+                    "-v",
+                    f"{root}:/app/agencity-runebench",
+                    RUNEBENCH_IMAGE,
+                    "infinity",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            ).stdout.strip()
+            try:
+                created = subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        container,
+                        "python3",
+                        "-c",
+                        (
+                            "import os,time\n"
+                            "pid=os.fork()\n"
+                            "if pid == 0:\n"
+                            "    time.sleep(0.2)\n"
+                            "    os._exit(0)\n"
+                            "open('/tmp/zombie-pid','w').write(str(pid))\n"
+                            "os._exit(0)\n"
+                        ),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(
+                    created.returncode,
+                    0,
+                    created.stderr or created.stdout,
+                )
+                subprocess.run(
+                    ["docker", "exec", container, "sleep", "1"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=True,
+                )
+                completed = subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        container,
+                        "sh",
+                        "-lc",
+                        (
+                            "/root/.bun/bin/bun "
+                            "/app/agencity-runebench/zombie-claim-test.ts "
+                            '"$(cat /tmp/zombie-pid)"'
+                        ),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+            finally:
+                subprocess.run(
+                    ["docker", "rm", "-f", container],
+                    capture_output=True,
+                    timeout=30,
+                )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stderr or completed.stdout,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout.strip().splitlines()[-1]),
+            {"state": "Z", "successor": True},
+        )
 
     def test_documented_rate_command_reads_active_tracker_file(self) -> None:
         tracker = {

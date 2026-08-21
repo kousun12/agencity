@@ -393,7 +393,28 @@ describe("observer projections", () => {
   test("derives bounded overview and explicit attention states", () => {
     const root = { sessionId: "root", branchId: "main" };
     const value = state("root", "main", {
-      sessionName: "<script>".repeat(1_000),
+      sessionName: "Repair checkout retries",
+      sessionTitle: {
+        mode: "automatic",
+        latestRequestedSourceMessageCursor: "7",
+        appliedSourceMessageCursor: "7",
+        requests: {},
+        resolutions: {
+          title: {
+            requestId: "title",
+            sourceMessageEventId: "message-7",
+            sourceMessageCursor: "7",
+            sourceMessageEventIds: ["message-7"],
+            sourceBranchId: "main",
+            method: "model",
+            title: "Repair checkout retries",
+            verb: "Repair",
+            subject: "checkout retries",
+            intentSummary: "Repair checkout retries without changing successful payment behavior.",
+            eventId: "title-event",
+          },
+        },
+      },
       budget: { limits: {}, tokens: 1, costUsd: 0, turns: 1, wallTimeMs: 0, exceeded: true },
     });
     expect(deriveObserverRouteStatus(value)).toEqual({
@@ -440,6 +461,25 @@ describe("observer projections", () => {
       edgesTruncated: false,
     });
     expect(overview.nodes[0]?.activityReason).toBe("budget_exceeded");
+    expect(overview.nodes[0]?.sessionTitle).toMatchObject({
+      source: "model",
+      sourceMessageCursor: "7",
+      text: { kind: "complete", text: "Repair checkout retries" },
+      intentSummary: {
+        kind: "complete",
+        text: "Repair checkout retries without changing successful payment behavior.",
+      },
+    });
+    expect(overview.nodes[0]?.taskSummary).toMatchObject({
+      text: "Repair checkout retries without changing successful payment behavior.",
+    });
+    expect(deriveObserverDetailPage(
+      routeSnapshot(root, value),
+      "identity",
+    ).items[0]?.data.sessionTitle).toMatchObject({
+      source: "model",
+      sourceMessageCursor: "7",
+    });
     expect(serializedUtf8Bytes(overview)).toBeLessThanOrEqual(OBSERVER_BOUNDS.familySnapshotBytes);
 
     const active = state("root", "main", {
@@ -502,6 +542,56 @@ describe("observer projections", () => {
     expect(terminalOverview.nodes[0]?.latestRun?.currentAction).toBeNull();
   });
 
+  test("derives fallback titles from durable user messages", () => {
+    const root = { sessionId: "root", branchId: "main" };
+    const value = state("root", "main", {
+      messages: [
+        {
+          id: "message-1",
+          role: "user",
+          content: "Inspect the initial state",
+          eventId: "message-event-1",
+          eventCursor: "2",
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          modelCallId: null,
+          producer: "client",
+          idempotencyKey: "message-1",
+        },
+        {
+          id: "message-2",
+          role: "user",
+          content: "Repair the latest state",
+          eventId: "message-event-2",
+          eventCursor: "3",
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          modelCallId: null,
+          producer: "client",
+          idempotencyKey: "message-2",
+        },
+      ],
+      appliedEventIds: ["created-root", "message-event-1", "message-event-2"],
+    });
+    const snapshot = routeSnapshot(root, value);
+    const overview = deriveObserverFamilyOverview({
+      root,
+      routes: new Map([[observerRouteKey(root), snapshot]]),
+      edges: [],
+      truncated: false,
+      edgesTruncated: false,
+    });
+
+    expect(overview.nodes[0]?.sessionTitle).toMatchObject({
+      source: "deterministic_fallback",
+      text: { kind: "complete", text: "Repair the latest state" },
+      intentSummary: { kind: "complete", text: "Repair the latest state" },
+    });
+    expect(deriveObserverDetailPage(snapshot, "identity").items[0]?.data.sessionTitle)
+      .toMatchObject({
+        source: "deterministic_fallback",
+        text: { kind: "complete", text: "Repair the latest state" },
+      });
+  });
+
   test("distinguishes working, idle, attention, ended, and unavailable activity", () => {
     expect(deriveObserverRouteStatus(state("idle", "main"))).toEqual({
       activity: "idle",
@@ -531,7 +621,7 @@ describe("observer projections", () => {
     const route = { sessionId: "root", branchId: "main" };
     const rawCode = "RAW_CODE_SENTINEL";
     const rawEffect = "RAW_EFFECT_SENTINEL";
-    const rawMessage = "RAW_MESSAGE_SENTINEL";
+    const rawMessage = `${"message-content ".repeat(40)}RAW_MESSAGE_SENTINEL`;
     const rawArtifactBytes = "RAW_ARTIFACT_BYTES_SENTINEL";
     const value = state("root", "main", {
       messages: [{

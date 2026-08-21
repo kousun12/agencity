@@ -47,6 +47,15 @@ export interface ManagedProcessInspection extends ManagedProcessHandle {
   readonly processGroupId: number | null;
   readonly requestedAt: string;
   readonly startedAt: string | null;
+  readonly stopFailureCount: number;
+  readonly stopFailure?: {
+    readonly attempt: number;
+    readonly reason: string;
+    readonly error: string;
+    readonly processGroupIds: number[];
+    readonly survivingProcessGroupIds: number[];
+    readonly attemptedAt: string;
+  };
   readonly output?: JsonValue;
   readonly error?: string;
 }
@@ -244,9 +253,10 @@ export class ManagedProcessService {
     target: string | Pick<ManagedProcessHandle, "processId">,
     reason = "Stopped by agent",
   ): Promise<ManagedProcessInspection> {
-    if (typeof reason !== "string" || !reason.trim()) {
+    if (typeof reason !== "string" || !reason.trim() ||
+        reason.length > 16_384) {
       throw new ValidationError(
-        "Managed process stop reason must be non-empty",
+        "Managed process stop reason must be non-empty and at most 16384 characters",
       );
     }
     if (containsBrokeredSecret(reason)) {
@@ -344,8 +354,33 @@ export class ManagedProcessService {
         identityToken,
       );
       if (termination.found && !termination.terminated) {
+        if (process?.status === "running") {
+          const attempt = process.stopFailureCount + 1;
+          await this.storage.appendEvents([{
+            sessionId: record.sessionId,
+            branchId: record.branchId,
+            type: "ManagedProcessStopFailed",
+            producer: "recovery",
+            idempotencyKey:
+              `managed-process-recovery-stop-failed:${processId}:${attempt}`,
+            payload: {
+              processId,
+              effectId: record.effectId,
+              attempt,
+              reason: "Managed process recovery cleanup",
+              error: termination.error ??
+                "Authenticated process groups survived recovery cleanup",
+              processGroupIds: termination.processGroupIds,
+              survivingProcessGroupIds:
+                termination.survivingProcessGroupIds,
+              attemptedAt: new Date().toISOString(),
+            },
+          } satisfies NewAgentEvent<"ManagedProcessStopFailed">]);
+        }
         throw new Error(
-          `Recovered managed process ${processId} could not be terminated`,
+          `Recovered managed process ${processId} could not be terminated${
+            termination.error ? `: ${termination.error}` : ""
+          }`,
         );
       }
       const output = await this.executor.recoveryLogs(processId);
@@ -481,6 +516,21 @@ function inspection(process: ManagedProcessState): ManagedProcessInspection {
     processGroupId: process.processGroupId,
     requestedAt: process.requestedAt,
     startedAt: process.startedAt,
+    stopFailureCount: process.stopFailureCount,
+    ...(process.stopFailure === undefined
+      ? {}
+      : {
+          stopFailure: {
+            attempt: process.stopFailure.attempt,
+            reason: process.stopFailure.reason,
+            error: process.stopFailure.error,
+            processGroupIds: [...process.stopFailure.processGroupIds],
+              survivingProcessGroupIds: [
+                ...process.stopFailure.survivingProcessGroupIds,
+              ],
+            attemptedAt: process.stopFailure.attemptedAt,
+          },
+        }),
     ...(process.output === undefined ? {} : { output: process.output }),
     ...(process.error === undefined ? {} : { error: process.error }),
   };

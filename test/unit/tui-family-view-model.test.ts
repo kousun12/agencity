@@ -63,6 +63,27 @@ describe("terminal family view model", () => {
     expect(rows.find(row => row.sessionId === "unavailable")?.openable).toBe(false);
   });
 
+  test("uses maintained titles and intent summaries for child presentation", () => {
+    const [row] = buildTerminalFamilyChildren([
+      family("legacy-name", "idle", {
+        name: "Stale child name",
+        task: "Initial delegated task",
+        sessionTitle: {
+          text: "Repair checkout retries",
+          source: "model",
+          verb: "Repair",
+          subject: "checkout retries",
+          intentSummary: "Repair checkout retries and preserve existing payment behavior.",
+          sourceMessageCursor: "42",
+        },
+      }),
+    ]);
+    expect(row).toMatchObject({
+      displayName: "Repair checkout retries",
+      task: "Repair checkout retries and preserve existing payment behavior.",
+    });
+  });
+
   test("groups unavailable as attention while retaining ended-only families", () => {
     const summary = buildTerminalFamilySummary(buildTerminalFamilyChildren([
       family("working", "working"),

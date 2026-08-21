@@ -362,7 +362,7 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
 
-The current workspace format accepts only event schema version 6 and reducer version 22. This is an explicit pre-release reset boundary: workspace histories containing schema version 1, 2, 3, 4, or 5 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-6 sessions with complete initial profiles, typed effect origins, managed-process lifecycle records, and exact provider-input-v2 admission; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
+The current workspace format accepts only event schema version 6 and reducer version 25. This is an explicit pre-release reset boundary: workspace histories containing schema version 1, 2, 3, 4, or 5 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-6 sessions with complete initial profiles, typed effect origins, managed-process lifecycle records, and exact provider-input-v2 admission; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

@@ -1,4 +1,12 @@
-import type { AgentRunState, AgentState, CellLogStream, JsonValue, MessageState } from "../domain/index.ts";
+import {
+  resolveSessionTitlePresentation,
+  type AgentRunState,
+  type AgentState,
+  type CellLogStream,
+  type JsonValue,
+  type MessageState,
+  type SessionTitlePresentation,
+} from "../domain/index.ts";
 import type { ProtocolCapabilities } from "../protocol/index.ts";
 import type { ProductBranchSummary } from "../product/index.ts";
 import type {
@@ -178,6 +186,7 @@ export interface TerminalScreenView {
   readonly workspaceId: string;
   readonly workspaceLabel: string;
   readonly sessionName: string;
+  readonly sessionTitle: SessionTitlePresentation;
   readonly branchName: string;
   readonly model: string;
   readonly providerMode: string;
@@ -230,7 +239,7 @@ const FAMILY_REASON_LABELS: Readonly<Record<Exclude<FamilyAgentActivityReason, n
 };
 
 function familyDisplayName(record: FamilyAgentRecord): string {
-  const name = record.name?.replace(/\s+/g, " ").trim();
+  const name = (record.sessionTitle?.text ?? record.name)?.replace(/\s+/g, " ").trim();
   if (name) return oneLine(name, 100);
   const task = record.task?.replace(/\s+/g, " ").trim();
   return task ? oneLine(task, 100) : "Unnamed agent";
@@ -244,7 +253,7 @@ export function buildTerminalFamilyChildren(records: readonly FamilyAgentRecord[
       sessionId: record.sessionId,
       branchId: record.branchId,
       displayName: familyDisplayName(record),
-      task: record.task ?? "No retained task summary",
+      task: record.sessionTitle?.intentSummary ?? record.task ?? "No retained task summary",
       activity: record.activity,
       activityLabel: record.activity,
       activityReason: record.activityReason,
@@ -330,7 +339,7 @@ export function buildTerminalWorkspaceAgentRows(
   const normalizedQuery = normalizedWorkspaceLabel(query);
   return roots
     .map((summary): TerminalWorkspaceAgentRow => {
-      const sessionName = workspaceAgentName(summary.sessionName, "Unnamed agent");
+      const sessionName = workspaceAgentName(summary.sessionTitle?.text ?? summary.sessionName, "Unnamed agent");
       const branchName = workspaceAgentName(summary.branchName, "unnamed branch");
       return {
         key: terminalWorkspaceAgentKey(summary),
@@ -343,7 +352,10 @@ export function buildTerminalWorkspaceAgentRows(
           : sessionName,
         model: scrubText(`${summary.model.provider}:${summary.model.model}`),
         status: summary.status,
-        task: workspaceAgentName(summary.taskSummary ?? "", "No retained task summary"),
+        task: workspaceAgentName(
+          summary.sessionTitle?.intentSummary ?? summary.taskSummary ?? "",
+          "No retained task summary",
+        ),
         unresolvedWork: summary.unresolvedWork,
         activeGoals: summary.activeGoals,
         createdAt: summary.createdAt,
@@ -818,6 +830,7 @@ function runView(state: AgentState, run: AgentRunState, provisionalRunIds: Reado
 
 export function buildTerminalScreen(presentation: TerminalPresentation): TerminalScreenView {
   const { state, capabilities } = presentation;
+  const sessionTitle = resolveSessionTitlePresentation(state, "Start new session", true);
   const provider = capabilities.providers.find(item => item.name === state.model.provider);
   const provisionalRunIds = new Set(presentation.provisionalRunIds);
   const runs = Object.values(state.agentRuns).slice(-12)
@@ -825,8 +838,8 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
   const activeRun = [...runs].reverse().find(run => run.active);
   const familyChildren = buildTerminalFamilyChildren(presentation.family.children);
   const ancestry = presentation.family.ancestry.length
-    ? [...presentation.family.ancestry.slice(0, -1), state.sessionName ?? "Unnamed session"]
-    : [state.sessionName ?? "Unnamed session"];
+    ? [...presentation.family.ancestry.slice(0, -1), sessionTitle.text]
+    : [sessionTitle.text];
   const effects = Object.values(state.effects);
   const unknownEffects = effects.filter(effect => effect.status === "unknown").length;
   const pendingEffects = effects.filter(effect => effect.status === "requested" || effect.status === "started").length;
@@ -841,7 +854,8 @@ export function buildTerminalScreen(presentation: TerminalPresentation): Termina
   return {
     workspaceId: state.workspaceId,
     workspaceLabel: presentation.workspaceLabel,
-    sessionName: state.sessionName ?? "Unnamed session",
+    sessionName: sessionTitle.text,
+    sessionTitle,
     branchName: state.branch.name ?? "unnamed branch",
     model: `${state.model.provider}:${state.model.model} · ${state.model.reasoningEffort}`,
     providerMode: streaming,

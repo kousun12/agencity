@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
-import { Supervisor, TEXT_MODEL_RESPONSE_CONTRACT, projectEvents, type RecursiveResponseAdmission } from "../../src/index.ts";
+import { REDUCER_VERSION, Supervisor, TEXT_MODEL_RESPONSE_CONTRACT, projectEvents, type RecursiveResponseAdmission } from "../../src/index.ts";
 import { makeTempRuntime, removeTempRuntime, type TempRuntime } from "../helpers.ts";
 
 const temps: TempRuntime[] = [];
@@ -19,7 +19,7 @@ describe("Slice 2 projection rebuilds and reducer-versioned snapshots", () => {
       const child = await supervisor.agents.spawn(root.sessionId, root.branchId, "project me");
       const mail = await supervisor.agents.sendMessage(root.sessionId, root.branchId, { toSessionId: child.sessionId, content: "snapshot mailbox" });
       const live = await supervisor.projections.getSnapshot(root.sessionId, root.branchId);
-      expect(live.state.reducerVersion).toBe(22);
+      expect(live.state.reducerVersion).toBe(REDUCER_VERSION);
 
       const staleState = { ...live.state, reducerVersion: 1 } as unknown as Record<string, unknown>;
       delete staleState.tasks;
@@ -33,13 +33,13 @@ describe("Slice 2 projection rebuilds and reducer-versioned snapshots", () => {
       client.close();
 
       const upgraded = await supervisor.projections.getSnapshot(root.sessionId, root.branchId);
-      expect(upgraded.state.reducerVersion).toBe(22);
+      expect(upgraded.state.reducerVersion).toBe(REDUCER_VERSION);
       expect(upgraded.state.tasks[child.taskId]?.task).toBe("project me");
       expect(upgraded.state.mailbox[mail.mailboxMessageId]?.content).toBe("snapshot mailbox");
       expect(upgraded.state.documents).toEqual({});
       const verifyClient = createClient({ url: temp.databaseUrl });
       const row = await verifyClient.execute({ sql: "SELECT reducer_version FROM snapshots WHERE session_id=? AND branch_id=?", args: [root.sessionId, root.branchId] });
-      expect(Number(row.rows[0]?.reducer_version)).toBe(22);
+      expect(Number(row.rows[0]?.reducer_version)).toBe(REDUCER_VERSION);
       verifyClient.close();
     } finally { await supervisor.close(); }
   });

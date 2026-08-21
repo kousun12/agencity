@@ -100,6 +100,40 @@ describe("workspace Agents view model", () => {
     expect(buildTerminalWorkspaceAgentRows(rows, "secret-branch-id")).toHaveLength(0);
   });
 
+  test("uses maintained title text and intent for labels, search, and detail", () => {
+    const rows = buildTerminalWorkspaceAgentRows([
+      summary("maintained", "main", {
+        sessionName: "Stale initial label",
+        taskSummary: "Stale initial task",
+        sessionTitle: {
+          text: "Investigate payment retries",
+          source: "model",
+          verb: "Investigate",
+          subject: "payment retries",
+          intentSummary: "Investigate payment retries and repair the failing integration.",
+          sourceMessageCursor: "9",
+        },
+      }),
+    ]);
+    expect(rows[0]).toMatchObject({
+      displayName: "Investigate payment retries",
+      task: "Investigate payment retries and repair the failing integration.",
+    });
+    expect(buildTerminalWorkspaceAgentRows(
+      [summary("maintained", "main", {
+        sessionTitle: {
+          text: "Investigate payment retries",
+          source: "model",
+          verb: "Investigate",
+          subject: "payment retries",
+          intentSummary: "Repair the failing integration.",
+          sourceMessageCursor: "9",
+        },
+      })],
+      "failing integration",
+    )).toHaveLength(1);
+  });
+
   test("scrubs brokered secrets from rendered and searchable catalog fields", () => {
     const secret = "workspace-catalog-secret-7e31";
     const release = registerBrokeredSecret(secret);
