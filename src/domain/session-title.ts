@@ -91,7 +91,9 @@ export function isSessionTitleInputMessage(message: {
  * older automatic resolution remains in retained state.
  */
 export function resolveSessionTitlePresentation(
-  state: Pick<AgentState, "sessionName" | "sessionTitle" | "messages">,
+  state: Pick<AgentState, "sessionName" | "messages"> & {
+    readonly sessionTitle?: AgentState["sessionTitle"];
+  },
   ordinaryFallback = "Unnamed session",
   deriveFromUserMessages = false,
 ): SessionTitlePresentation {
@@ -101,10 +103,10 @@ export function resolveSessionTitlePresentation(
   const deterministic = deriveFromUserMessages && userMessages.length
     ? deterministicSessionTitleFallback(userMessages)
     : null;
-  const text = state.sessionName ?? deterministic?.title ?? ordinaryFallback;
-  if (state.sessionTitle.mode === "manual") {
+  const sessionTitle = state.sessionTitle;
+  if (sessionTitle?.mode === "manual") {
     return Object.freeze({
-      text,
+      text: state.sessionName ?? ordinaryFallback,
       source: "explicit",
       verb: null,
       subject: null,
@@ -112,14 +114,14 @@ export function resolveSessionTitlePresentation(
       sourceMessageCursor: null,
     });
   }
-  const cursor = state.sessionTitle.appliedSourceMessageCursor;
+  const cursor = sessionTitle?.appliedSourceMessageCursor ?? null;
   const resolution = cursor === null
     ? undefined
-    : Object.values(state.sessionTitle.resolutions)
+    : Object.values(sessionTitle?.resolutions ?? {})
       .find((candidate) => candidate.sourceMessageCursor === cursor);
   if (resolution) {
     return Object.freeze({
-      text,
+      text: resolution.title,
       source: resolution.method === "model" ? "model" : "deterministic_fallback",
       verb: resolution.verb,
       subject: resolution.subject,
@@ -129,7 +131,7 @@ export function resolveSessionTitlePresentation(
   }
   if (deterministic) {
     return Object.freeze({
-      text,
+      text: deterministic.title,
       source: "deterministic_fallback",
       verb: deterministic.verb,
       subject: deterministic.subject,
@@ -138,7 +140,7 @@ export function resolveSessionTitlePresentation(
     });
   }
   return Object.freeze({
-    text,
+    text: state.sessionName ?? ordinaryFallback,
     source: "ordinary_fallback",
     verb: null,
     subject: null,
